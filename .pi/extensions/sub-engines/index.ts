@@ -87,7 +87,6 @@ async function runSubagent(
   task: string,
   persona: string | undefined,
   modelOverride: string | undefined,
-  toolsOverride: string | undefined,
   cwd: string,
   contextText: string | null,
   signal: AbortSignal | undefined,
@@ -107,31 +106,37 @@ async function runSubagent(
     cwd,
   });
 
-  // Wire abort signal
+  // Wire abort signal (store handler for explicit cleanup)
+  let handleAbort: (() => void) | undefined;
   if (signal) {
-    const handleAbort = () => {
+    handleAbort = () => {
       session.abort().catch(() => {});
     };
-    if (signal.aborted) handleAbort();
-    else signal.addEventListener("abort", handleAbort, { once: true });
+    if (signal.aborted) {
+      handleAbort();
+    } else {
+      signal.addEventListener("abort", handleAbort);
+    }
   }
 
-  // Stream output back to parent
+  let unsubscribe: (() => void) | undefined;
   let accumulatedOutput = "";
-  const unsubscribe = session.subscribe((event) => {
-    if (
-      event.type === "message_update" &&
-      event.assistantMessageEvent.type === "text_delta"
-    ) {
-      accumulatedOutput += event.assistantMessageEvent.delta;
-      onUpdate?.({
-        content: [{ type: "text", text: accumulatedOutput }],
-        details: { status: "running" },
-      });
-    }
-  });
 
   try {
+    // Stream output back to parent (inside try so finally always cleans up)
+    unsubscribe = session.subscribe((event) => {
+      if (
+        event.type === "message_update" &&
+        event.assistantMessageEvent.type === "text_delta"
+      ) {
+        accumulatedOutput += event.assistantMessageEvent.delta;
+        onUpdate?.({
+          content: [{ type: "text", text: accumulatedOutput }],
+          details: { status: "running" },
+        });
+      }
+    });
+
     const personaPrefix = persona ? `${persona}\n\n` : "";
     const finalPrompt = contextText
       ? `${personaPrefix}You are a sub-agent receiving the full conversation history below. Use it as context, then fulfill the task.\n\n## Conversation History\n${contextText}\n\n## Your Task\n${task}`
@@ -156,7 +161,7 @@ async function runSubagent(
       }
     }
 
-    // Aggregate usage
+    // Aggregate usage (correct field names from Usage type)
     const usage = {
       input: 0,
       output: 0,
@@ -168,23 +173,34 @@ async function runSubagent(
     for (const msg of messages) {
       if (msg.role === "assistant" && msg.usage) {
         usage.turns++;
-        usage.input += msg.usage.inputTokens ?? msg.usage.input ?? 0;
-        usage.output += msg.usage.outputTokens ?? msg.usage.output ?? 0;
-        usage.cacheRead += msg.usage.cacheReadInputTokens ?? msg.usage.cacheRead ?? 0;
-        usage.cacheWrite += msg.usage.cacheWriteInputTokens ?? msg.usage.cacheWrite ?? 0;
-        usage.cost += msg.usage.cost?.total ?? 0;
+        usage.input += msg.usage.input;
+        usage.output += msg.usage.output;
+        usage.cacheRead += msg.usage.cacheRead;
+        usage.cacheWrite += msg.usage.cacheWrite;
+        usage.cost += msg.usage.cost.total;
       }
     }
 
     return {
       output: finalOutput || "(no output)",
       usage,
-      model: session.model?.id,
+      // Include provider for clarity, e.g. "anthropic/claude-sonnet-4-5"
+      model: session.model ? `${session.model.provider}/${session.model.id}` : undefined,
       isError: !!session.agent.state.errorMessage,
       errorMessage: session.agent.state.errorMessage,
     };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      output: `Sub-agent crashed: ${msg}`,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+      model: undefined,
+      isError: true,
+      errorMessage: msg,
+    };
   } finally {
-    unsubscribe();
+    if (signal && handleAbort) signal.removeEventListener("abort", handleAbort);
+    if (unsubscribe) unsubscribe();
     session.dispose();
   }
 }
@@ -201,11 +217,6 @@ const BaseParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description: "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
-    }),
-  ),
-  tools: Type.Optional(
-    Type.String({
-      description: "Override tools, comma-separated (e.g. 'read,grep,find,ls')",
     }),
   ),
   cwd: Type.Optional(
@@ -251,7 +262,6 @@ export default function (pi: ExtensionAPI) {
         params.task,
         params.persona,
         params.model,
-        params.tools,
         targetCwd,
         conversationText,
         signal,
@@ -298,7 +308,6 @@ export default function (pi: ExtensionAPI) {
         params.task,
         params.persona,
         params.model,
-        params.tools,
         targetCwd,
         null, // no context
         signal,
