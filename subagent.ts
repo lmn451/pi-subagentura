@@ -298,7 +298,7 @@ function renderSubagentCall(
 
 function renderSubagentResult(
   result: AgentToolResult,
-  { isPartial }: { expanded: boolean; isPartial: boolean },
+  { expanded, isPartial }: { expanded: boolean; isPartial: boolean },
   theme: Theme,
   _context: unknown,
 ) {
@@ -314,7 +314,12 @@ function renderSubagentResult(
       text += theme.fg("dim", ` — turn ${status.turn}`);
 
       if (status.activeTool) {
-        const argsStr = JSON.stringify(status.activeTool.args).slice(0, 80);
+        let argsStr = "{…}";
+        try {
+          argsStr = JSON.stringify(status.activeTool.args).slice(0, 80);
+        } catch {
+          /* circular or otherwise unserializable */
+        }
         text += `
   ${theme.fg("muted", "→")} ${theme.fg(
           "toolTitle",
@@ -347,15 +352,26 @@ function renderSubagentResult(
   const text = content?.type === "text" ? content.text : "";
 
   if (result.isError) {
+    if (!expanded) {
+      const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+      return new Text(theme.fg("error", preview), 0, 0);
+    }
     return new Text(theme.fg("error", text), 0, 0);
   }
 
   const usageStr = result.details?.usageSummary as string | undefined;
   if (usageStr) {
     const header = theme.fg("success", "✓ ") + theme.fg("muted", usageStr);
+    if (!expanded) {
+      return new Text(header, 0, 0);
+    }
     return new Text(`${header}\n${text}`, 0, 0);
   }
 
+  if (!expanded) {
+    const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+    return new Text(theme.fg("dim", preview), 0, 0);
+  }
   return new Text(text, 0, 0);
 }
 
