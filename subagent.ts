@@ -16,12 +16,14 @@ import {
   SessionManager,
   type ExtensionAPI,
   type AgentSession,
+  type Theme,
   convertToLlm,
   serializeConversation,
 } from "@mariozechner/pi-coding-agent";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
 import { getModel } from "@mariozechner/pi-ai";
+import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -39,6 +41,13 @@ interface SubagentResult {
   model?: string;
   isError: boolean;
   errorMessage?: string;
+}
+
+interface SubagentLiveStatus {
+  turn: number;
+  activeTool?: { name: string; args: Record<string, unknown> };
+  output: string;
+  usage: SubagentResult["usage"];
 }
 
 function resolveModel(
@@ -87,6 +96,20 @@ function formatUsage(u: SubagentResult["usage"], model?: string): string {
   return parts.join(" ");
 }
 
+function buildLiveUpdate(
+  status: SubagentLiveStatus,
+  model?: string,
+): AgentToolResult {
+  return {
+    content: [{ type: "text", text: status.output }],
+    details: {
+      status: "running",
+      subagentStatus: status,
+      model,
+    },
+  };
+}
+
 async function runSubagent(
   task: string,
   persona: string | undefined,
@@ -101,11 +124,26 @@ async function runSubagent(
   const modelRegistry = ModelRegistry.create(authStorage);
 
   const targetModel = resolveModel(modelOverride, defaultModel);
+  const modelLabel = targetModel
+    ? `${targetModel.provider}/${targetModel.id}`
+    : undefined;
 
   let session: AgentSession | undefined;
   let handleAbort: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
-  let accumulatedOutput = "";
+
+  const liveStatus: SubagentLiveStatus = {
+    turn: 0,
+    output: "",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
+    },
+  };
 
   try {
     session = (
@@ -130,17 +168,34 @@ async function runSubagent(
       }
     }
 
-    // Stream output back to parent (inside try so finally always cleans up)
+    // Stream output and lifecycle events back to parent
     unsubscribe = session.subscribe((event) => {
-      if (
-        event.type === "message_update" &&
-        event.assistantMessageEvent.type === "text_delta"
-      ) {
-        accumulatedOutput += event.assistantMessageEvent.delta;
-        onUpdate?.({
-          content: [{ type: "text", text: accumulatedOutput }],
-          details: { status: "running" },
-        });
+      switch (event.type) {
+        case "turn_start": {
+          liveStatus.turn++;
+          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          break;
+        }
+        case "tool_execution_start": {
+          liveStatus.activeTool = {
+            name: event.toolName,
+            args: event.args as Record<string, unknown>,
+          };
+          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          break;
+        }
+        case "tool_execution_end": {
+          liveStatus.activeTool = undefined;
+          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          break;
+        }
+        case "message_update": {
+          if (event.assistantMessageEvent.type === "text_delta") {
+            liveStatus.output += event.assistantMessageEvent.delta;
+            onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          }
+          break;
+        }
       }
     });
 
@@ -153,7 +208,7 @@ async function runSubagent(
 
     // Extract final assistant output
     const messages = session.agent.state.messages;
-    let finalOutput = accumulatedOutput; // fallback to streamed
+    let finalOutput = liveStatus.output; // fallback to streamed
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === "assistant") {
@@ -220,6 +275,86 @@ async function runSubagent(
     if (unsubscribe) unsubscribe();
     session?.dispose();
   }
+}
+
+// ── Rendering ────────────────────────────────────────────────────────
+
+function renderSubagentCall(
+  args: Record<string, unknown>,
+  theme: Theme,
+  label: string,
+) {
+  const task = String(args.task ?? "");
+  const taskPreview =
+    task.length > 60 ? `${task.slice(0, 57)}…` : task;
+  let text = theme.fg("toolTitle", theme.bold(`${label} `));
+  text += theme.fg("accent", taskPreview);
+  if (args.model) {
+    text += theme.fg("dim", ` @${args.model}`);
+  }
+  return new Text(text, 0, 0);
+}
+
+function renderSubagentResult(
+  result: AgentToolResult,
+  { isPartial }: { expanded: boolean; isPartial: boolean },
+  theme: Theme,
+) {
+  if (isPartial) {
+    const status = result.details?.subagentStatus as
+      | SubagentLiveStatus
+      | undefined;
+    const model = result.details?.model as string | undefined;
+
+    let text = theme.fg("accent", "● ") + theme.fg("toolTitle", "Sub-agent working");
+
+    if (status) {
+      text += theme.fg("dim", ` — turn ${status.turn}`);
+
+      if (status.activeTool) {
+        const argsStr = JSON.stringify(status.activeTool.args).slice(0, 80);
+        text += `
+  ${theme.fg("muted", "→")} ${theme.fg(
+          "toolTitle",
+          status.activeTool.name,
+        )} ${theme.fg("dim", argsStr)}`;
+      }
+
+      const usageStr = formatUsage(status.usage, model);
+      if (usageStr) {
+        text += `
+  ${theme.fg("muted", usageStr)}`;
+      }
+
+      if (status.output) {
+        const preview = status.output
+          .slice(0, 200)
+          .replace(/\s+/g, " ");
+        text += `
+  ${theme.fg("dim", truncateToWidth(preview, 120))}`;
+      }
+    } else {
+      text += theme.fg("dim", "…");
+    }
+
+    return new Text(text, 0, 0);
+  }
+
+  // Final result
+  const content = result.content[0];
+  const text = content?.type === "text" ? content.text : "";
+
+  if (result.isError) {
+    return new Text(theme.fg("error", text), 0, 0);
+  }
+
+  const usageStr = result.details?.usageSummary as string | undefined;
+  if (usageStr) {
+    const header = theme.fg("success", "✓ ") + theme.fg("muted", usageStr);
+    return new Text(`${header}\n${text}`, 0, 0);
+  }
+
+  return new Text(text, 0, 0);
 }
 
 // ── Schema ───────────────────────────────────────────────────────────
@@ -312,6 +447,14 @@ export default function (pi: ExtensionAPI) {
         isError: result.isError,
       };
     },
+
+    renderCall(args, theme) {
+      return renderSubagentCall(args, theme, "subagent");
+    },
+
+    renderResult(result, options, theme) {
+      return renderSubagentResult(result, options, theme);
+    },
   });
 
   // ── Tool 2: isolated, no conversation history ────────────────────
@@ -356,6 +499,14 @@ export default function (pi: ExtensionAPI) {
         },
         isError: result.isError,
       };
+    },
+
+    renderCall(args, theme) {
+      return renderSubagentCall(args, theme, "subagent");
+    },
+
+    renderResult(result, options, theme) {
+      return renderSubagentResult(result, options, theme);
     },
   });
 }
