@@ -2,7 +2,7 @@
  * Sub-Engine Extension - Spawn in-process sub-agents via the SDK
  *
  * Two tools:
- *   - subagent_with_context: Inherits full conversation history + task
+ *   - subagent_with_context: Inherits full conversation history + task + persona
  *   - subagent_isolated: Fresh context window, task + optional persona only
  *
  * Both inherit the current model by default. Persona is an optional argument.
@@ -54,7 +54,13 @@ function resolveModel(
   }
 
   // Bare id — search known providers
-  for (const provider of ["anthropic", "openai", "google", "deepseek", "openrouter"]) {
+  for (const provider of [
+    "anthropic",
+    "openai",
+    "google",
+    "deepseek",
+    "openrouter",
+  ]) {
     const found = getModel(provider, modelId);
     if (found) return found;
   }
@@ -69,10 +75,7 @@ function formatTokens(count: number): string {
   return `${(count / 1000000).toFixed(1)}M`;
 }
 
-function formatUsage(
-  u: SubagentResult["usage"],
-  model?: string,
-): string {
+function formatUsage(u: SubagentResult["usage"], model?: string): string {
   const parts: string[] = [];
   if (u.turns) parts.push(`${u.turns} turn${u.turns > 1 ? "s" : ""}`);
   if (u.input) parts.push(`↑${formatTokens(u.input)}`);
@@ -105,13 +108,15 @@ async function runSubagent(
   let accumulatedOutput = "";
 
   try {
-    session = (await createAgentSession({
-      sessionManager: SessionManager.inMemory(),
-      authStorage,
-      modelRegistry,
-      model: targetModel,
-      cwd,
-    })).session;
+    session = (
+      await createAgentSession({
+        sessionManager: SessionManager.inMemory(),
+        authStorage,
+        modelRegistry,
+        model: targetModel,
+        cwd,
+      })
+    ).session;
 
     // Wire abort signal (store handler for explicit cleanup)
     if (signal) {
@@ -153,7 +158,9 @@ async function runSubagent(
       const msg = messages[i];
       if (msg.role === "assistant") {
         const textParts = msg.content
-          ?.filter((c): c is { type: "text"; text: string } => c.type === "text")
+          ?.filter(
+            (c): c is { type: "text"; text: string } => c.type === "text",
+          )
           .map((c) => c.text)
           .join("\n");
         if (textParts) {
@@ -163,7 +170,6 @@ async function runSubagent(
       }
     }
 
-    // Aggregate usage (correct field names from Usage type)
     const usage = {
       input: 0,
       output: 0,
@@ -187,7 +193,9 @@ async function runSubagent(
       output: finalOutput || "(no output)",
       usage,
       // Include provider for clarity, e.g. "anthropic/claude-sonnet-4-5"
-      model: session.model ? `${session.model.provider}/${session.model.id}` : undefined,
+      model: session.model
+        ? `${session.model.provider}/${session.model.id}`
+        : undefined,
       isError: !!session.agent.state.errorMessage,
       errorMessage: session.agent.state.errorMessage,
     };
@@ -195,7 +203,14 @@ async function runSubagent(
     const msg = err instanceof Error ? err.message : String(err);
     return {
       output: `Sub-agent crashed: ${msg}`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 0,
+      },
       model: undefined,
       isError: true,
       errorMessage: msg,
@@ -213,12 +228,14 @@ const BaseParams = Type.Object({
   task: Type.String({ description: "Task to delegate to the sub-agent" }),
   persona: Type.Optional(
     Type.String({
-      description: "Optional persona / system prompt (e.g. 'You are a senior TypeScript reviewer')",
+      description:
+        "Optional persona / system prompt (e.g. 'You are a senior TypeScript reviewer')",
     }),
   ),
   model: Type.Optional(
     Type.String({
-      description: "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
+      description:
+        "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
     }),
   ),
   cwd: Type.Optional(
@@ -246,12 +263,16 @@ export default function (pi: ExtensionAPI) {
       // Gather conversation history
       const branch = ctx.sessionManager.getBranch();
       const messages = branch
-        .filter((e): e is typeof e & { type: "message" } => e.type === "message")
+        .filter(
+          (e): e is typeof e & { type: "message" } => e.type === "message",
+        )
         .map((e) => e.message);
 
       if (messages.length === 0) {
         return {
-          content: [{ type: "text", text: "No conversation history to inherit." }],
+          content: [
+            { type: "text", text: "No conversation history to inherit." },
+          ],
           details: {},
         };
       }

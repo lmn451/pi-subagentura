@@ -1,0 +1,39 @@
+{
+  "name": "pi-agents",
+  "version": "1.0.0",
+  "description": "Sub-agent engine extension for Pi — spawn in-process sub-agents via the SDK",
+  "main": "subagent.ts",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "subagent",
+    "agent",
+    "multi-agent",
+    "swarm",
+    "crew"
+  ],
+  "license": "MIT",
+  "files": [
+    "subagent.ts",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./subagent.ts"
+    ]
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "typebox": "*"
+  }
+}
