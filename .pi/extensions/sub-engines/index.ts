@@ -15,6 +15,7 @@ import {
   ModelRegistry,
   SessionManager,
   type ExtensionAPI,
+  type AgentSession,
   convertToLlm,
   serializeConversation,
 } from "@mariozechner/pi-coding-agent";
@@ -98,31 +99,32 @@ async function runSubagent(
 
   const targetModel = resolveModel(modelOverride, defaultModel);
 
-  const { session } = await createAgentSession({
-    sessionManager: SessionManager.inMemory(),
-    authStorage,
-    modelRegistry,
-    model: targetModel,
-    cwd,
-  });
-
-  // Wire abort signal (store handler for explicit cleanup)
+  let session: AgentSession | undefined;
   let handleAbort: (() => void) | undefined;
-  if (signal) {
-    handleAbort = () => {
-      session.abort().catch(() => {});
-    };
-    if (signal.aborted) {
-      handleAbort();
-    } else {
-      signal.addEventListener("abort", handleAbort);
-    }
-  }
-
   let unsubscribe: (() => void) | undefined;
   let accumulatedOutput = "";
 
   try {
+    session = (await createAgentSession({
+      sessionManager: SessionManager.inMemory(),
+      authStorage,
+      modelRegistry,
+      model: targetModel,
+      cwd,
+    })).session;
+
+    // Wire abort signal (store handler for explicit cleanup)
+    if (signal) {
+      handleAbort = () => {
+        session!.abort().catch(() => {});
+      };
+      if (signal.aborted) {
+        handleAbort();
+      } else {
+        signal.addEventListener("abort", handleAbort);
+      }
+    }
+
     // Stream output back to parent (inside try so finally always cleans up)
     unsubscribe = session.subscribe((event) => {
       if (
@@ -201,7 +203,7 @@ async function runSubagent(
   } finally {
     if (signal && handleAbort) signal.removeEventListener("abort", handleAbort);
     if (unsubscribe) unsubscribe();
-    session.dispose();
+    session?.dispose();
   }
 }
 
