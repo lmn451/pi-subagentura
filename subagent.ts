@@ -173,6 +173,7 @@ async function runSubagent(
       switch (event.type) {
         case "turn_start": {
           liveStatus.turn++;
+          liveStatus.usage.turns = liveStatus.turn;
           onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
           break;
         }
@@ -299,6 +300,7 @@ function renderSubagentResult(
   result: AgentToolResult,
   { isPartial }: { expanded: boolean; isPartial: boolean },
   theme: Theme,
+  _context: unknown,
 ) {
   if (isPartial) {
     const status = result.details?.subagentStatus as
@@ -449,11 +451,11 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      return renderSubagentCall(args, theme, "subagent");
+      return renderSubagentCall(args, theme, "subagent_with_context");
     },
 
-    renderResult(result, options, theme) {
-      return renderSubagentResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderSubagentResult(result, options, theme, context);
     },
   });
 
@@ -502,11 +504,11 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      return renderSubagentCall(args, theme, "subagent");
+      return renderSubagentCall(args, theme, "subagent_isolated");
     },
 
-    renderResult(result, options, theme) {
-      return renderSubagentResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderSubagentResult(result, options, theme, context);
     },
   });
 }
