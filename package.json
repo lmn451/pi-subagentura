@@ -1,7 +1,7 @@
 {
   "name": "pi-subagentura",
   "version": "1.0.1",
-  "description": "Sub-agent engine extension for Pi — spawn in-process sub-agents via the SDK",
+  "description": "Public Pi package that adds in-process sub-agents via the SDK",
   "main": "subagent.ts",
   "type": "module",
   "keywords": [
@@ -14,9 +14,18 @@
     "crew"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lmn451/pi-subagentura.git"
+  },
+  "homepage": "https://github.com/lmn451/pi-subagentura#readme",
+  "bugs": {
+    "url": "https://github.com/lmn451/pi-subagentura/issues"
+  },
   "files": [
     "subagent.ts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "bun": ">=1.0.0"
