@@ -1,6 +1,6 @@
 {
   "name": "pi-subagentura",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sub-agent engine extension for Pi — spawn in-process sub-agents via the SDK",
   "main": "subagent.ts",
   "type": "module",
@@ -31,7 +31,8 @@
   },
   "dependencies": {},
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
