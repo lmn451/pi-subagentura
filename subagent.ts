@@ -176,6 +176,40 @@ async function runSubagent(
     },
   };
 
+  // Debounce activeTool updates to prevent flickering on fast tool calls.
+  // When a tool executes quickly (< DEBOUNCE_MS), we skip the setActiveTool
+  // render entirely, avoiding a brief height/width expansion that the user
+  // perceives as flickering.
+  const DEBOUNCE_MS = 150;
+  let activeToolTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingActiveTool: SubagentLiveStatus["activeTool"] = undefined;
+
+  function setActiveToolDebounced(tool: SubagentLiveStatus["activeTool"]) {
+    pendingActiveTool = tool;
+    if (activeToolTimer) {
+      clearTimeout(activeToolTimer);
+      activeToolTimer = undefined;
+    }
+    if (tool) {
+      // Starting a tool: wait DEBOUNCE_MS before showing it.
+      // If the tool finishes before the timer fires, clearActiveToolDebounced
+      // will cancel the timer and the activeTool line never appears.
+      activeToolTimer = setTimeout(() => {
+        activeToolTimer = undefined;
+        liveStatus.activeTool = pendingActiveTool;
+        onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+      }, DEBOUNCE_MS);
+    } else {
+      // Clearing: apply immediately (no delay) so the UI stays responsive
+      // when a genuinely long tool finishes. But only if we had an activeTool
+      // that was already committed (not just pending).
+      if (liveStatus.activeTool) {
+        liveStatus.activeTool = undefined;
+        onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+      }
+    }
+  }
+
   // Result variable for finally block (Architect §3.2 restructure)
   let result: SubagentResult;
   let branchSidecarRelPath: string | undefined;
@@ -212,23 +246,29 @@ async function runSubagent(
         case "turn_start": {
           liveStatus.turn++;
           liveStatus.usage.turns = liveStatus.turn;
+          // Reset output on each new turn so the live preview always shows
+          // only the current turn's text, not an accumulation of all turns.
+          liveStatus.output = "";
           onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
           break;
         }
         case "tool_execution_start": {
-          liveStatus.activeTool = {
+          setActiveToolDebounced({
             name: event.toolName,
             args: event.args as Record<string, unknown>,
-          };
-          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          });
           break;
         }
         case "tool_execution_end": {
-          liveStatus.activeTool = undefined;
-          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          setActiveToolDebounced(undefined);
           break;
         }
         case "turn_end": {
+          // Cancel any pending activeTool timer and clear immediately
+          if (activeToolTimer) {
+            clearTimeout(activeToolTimer);
+            activeToolTimer = undefined;
+          }
           liveStatus.activeTool = undefined;
           onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
           break;
@@ -315,6 +355,10 @@ async function runSubagent(
     };
   } finally {
     // Cleanup
+    if (activeToolTimer) {
+      clearTimeout(activeToolTimer);
+      activeToolTimer = undefined;
+    }
     if (signal && handleAbort) signal.removeEventListener("abort", handleAbort);
     if (unsubscribe) unsubscribe();
 

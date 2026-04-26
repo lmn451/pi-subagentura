@@ -31,6 +31,9 @@
     ]
   },
   "dependencies": {},
+  "scripts": {
+    "test": "bun test"
+  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-agent-core": "*",
