@@ -190,6 +190,11 @@ async function runSubagent(
           onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
           break;
         }
+        case "turn_end": {
+          liveStatus.activeTool = undefined;
+          onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
+          break;
+        }
         case "message_update": {
           if (event.assistantMessageEvent.type === "text_delta") {
             liveStatus.output += event.assistantMessageEvent.delta;
@@ -348,8 +353,10 @@ function renderSubagentResult(
   }
 
   // Final result
-  const content = result.content[0];
-  const text = content?.type === "text" ? content.text : "";
+  const text =
+    result.content.find(
+      (c): c is { type: "text"; text: string } => c.type === "text",
+    )?.text ?? "";
 
   if (result.isError) {
     if (!expanded) {
