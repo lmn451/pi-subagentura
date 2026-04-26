@@ -800,11 +800,4 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── Shortcut: Ctrl+B (Task 8) ─────────────────────────────────────
-  pi.registerShortcut("ctrl+b", {
-    description: "View most recent sub-agent branch",
-    handler: async (ctx: any) => {
-      openBranchViewer(ctx, undefined);
-    },
-  });
 }
