@@ -16,7 +16,6 @@
   "license": "MIT",
   "files": [
     "subagent.ts",
-    "branch.ts",
     "README.md"
   ],
   "engines": {

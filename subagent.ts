@@ -7,11 +7,6 @@
  *
  * Both inherit the current model by default. Persona is an optional argument.
  * Runs in the same process — no subprocess overhead, live streaming output.
- *
- * Branch feature:
- *   When `branch: true`, the full subagent transcript is persisted as a
- *   sidecar JSON file and a "↳ branch" indicator is shown in the parent
- *   conversation. Users can view the transcript via `/subagent-view`.
  */
 
 import {
@@ -30,18 +25,6 @@ import type { Model } from "@mariozechner/pi-ai";
 import { getModel } from "@mariozechner/pi-ai";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
-import {
-  TranscriptCapture,
-  persistTranscript,
-  loadTranscript,
-  resolveSidecarPath,
-  findMostRecentBranch,
-  findBranchByToolCallId,
-  formatTranscriptForDisplay,
-  formatTokens as branchFormatTokens,
-  type SubagentTranscript,
-  type BranchMeta,
-} from "./branch.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -58,8 +41,6 @@ interface SubagentResult {
   model?: string;
   isError: boolean;
   errorMessage?: string;
-  transcript?: SubagentTranscript;
-  branchSidecarRelPath?: string;
 }
 
 interface SubagentLiveStatus {
@@ -96,8 +77,12 @@ function resolveModel(
   return defaultModel;
 }
 
-// Re-export from branch.ts for consistency
-const formatTokens = branchFormatTokens;
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000000).toFixed(1)}M`;
+}
 
 function formatUsage(u: SubagentResult["usage"], model?: string): string {
   const parts: string[] = [];
@@ -134,16 +119,7 @@ async function runSubagent(
   signal: AbortSignal | undefined,
   onUpdate: ((partial: AgentToolResult) => void) | undefined,
   defaultModel: Model | undefined,
-  branch: boolean = false,
-  toolCallId: string | undefined = undefined,
-  sessionDir: string | undefined = undefined,
-  sessionId: string | undefined = undefined,
-  sessionFile: string | undefined = undefined,
 ): Promise<SubagentResult> {
-  // Validate branch parameters
-  if (branch && !toolCallId) {
-    throw new Error("branch: true requires toolCallId");
-  }
 
   const authStorage = AuthStorage.create();
   const modelRegistry = ModelRegistry.create(authStorage);
@@ -156,12 +132,6 @@ async function runSubagent(
   let session: AgentSession | undefined;
   let handleAbort: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
-
-  // Branch transcript capture ( Task 4)
-  const capture =
-    branch && toolCallId
-      ? new TranscriptCapture(toolCallId, task, persona, modelLabel)
-      : undefined;
 
   const liveStatus: SubagentLiveStatus = {
     turn: 0,
@@ -210,9 +180,7 @@ async function runSubagent(
     }
   }
 
-  // Result variable for finally block (Architect §3.2 restructure)
   let result: SubagentResult;
-  let branchSidecarRelPath: string | undefined;
 
   try {
     session = (
@@ -239,9 +207,6 @@ async function runSubagent(
 
     // Stream output and lifecycle events back to parent
     unsubscribe = session.subscribe((event) => {
-      // Feed events to branch transcript capture
-      capture?.onEvent(event);
-
       switch (event.type) {
         case "turn_start": {
           liveStatus.turn++;
@@ -354,40 +319,15 @@ async function runSubagent(
       errorMessage: msg,
     };
   } finally {
-    // Cleanup
     if (activeToolTimer) {
       clearTimeout(activeToolTimer);
       activeToolTimer = undefined;
     }
     if (signal && handleAbort) signal.removeEventListener("abort", handleAbort);
     if (unsubscribe) unsubscribe();
-
-    // Finalize branch transcript BEFORE disposal (CI-2)
-    if (capture) {
-      const transcript = capture.finalize(signal?.aborted ?? false);
-      result.transcript = transcript;
-
-      // Persist sidecar (best-effort)
-      if (branch && sessionDir && sessionId && toolCallId) {
-        try {
-          branchSidecarRelPath = await persistTranscript(
-            transcript,
-            sessionDir,
-            sessionId,
-            sessionFile,
-          );
-        } catch {
-          // Best-effort: skip persistence on failure
-          branchSidecarRelPath = undefined;
-        }
-      }
-    }
-
     session?.dispose();
   }
 
-  // Augment result with branch info
-  result.branchSidecarRelPath = branchSidecarRelPath;
   return result;
 }
 
@@ -415,9 +355,6 @@ function renderSubagentResult(
   theme: Theme,
   _context: unknown,
 ) {
-  // Branch indicator (Task 6)
-  const hasBranch = result.details?.hasBranch as boolean | undefined;
-
   if (isPartial) {
     const status = result.details?.subagentStatus as
       | SubagentLiveStatus
@@ -460,7 +397,6 @@ function renderSubagentResult(
       text += theme.fg("dim", "…");
     }
 
-    // No branch indicator during streaming
     return new Text(text, 0, 0);
   }
 
@@ -473,25 +409,15 @@ function renderSubagentResult(
   if (result.isError) {
     if (!expanded) {
       const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
-      let errorText = theme.fg("error", preview);
-      if (hasBranch) {
-        errorText += theme.fg("dim", "  ↳ branch");
-      }
-      return new Text(errorText, 0, 0);
+      return new Text(theme.fg("error", preview), 0, 0);
     }
-    let errorText = theme.fg("error", text);
-    if (hasBranch) {
-      errorText += theme.fg("dim", "  ↳ branch");
-    }
-    return new Text(errorText, 0, 0);
+    return new Text(theme.fg("error", text), 0, 0);
   }
 
   const usageStr = result.details?.usageSummary as string | undefined;
-  const branchHint =
-    hasBranch && !isPartial ? theme.fg("dim", "  ↳ branch") : "";
 
   if (usageStr) {
-    const header = theme.fg("success", "✓ ") + theme.fg("muted", usageStr) + branchHint;
+    const header = theme.fg("success", "✓ ") + theme.fg("muted", usageStr);
     if (!expanded) {
       return new Text(header, 0, 0);
     }
@@ -500,81 +426,9 @@ function renderSubagentResult(
 
   if (!expanded) {
     const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
-    return new Text(theme.fg("dim", preview) + branchHint, 0, 0);
+    return new Text(theme.fg("dim", preview), 0, 0);
   }
-  return new Text(text + (branchHint ? "\n" + branchHint : ""), 0, 0);
-}
-
-// ── Branch Viewer (Task 7) ────────────────────────────────────────────
-
-function openBranchViewer(
-  ctx: any,
-  toolCallIdArg: string | undefined,
-): void {
-  if (!ctx?.hasUI || !ctx?.sessionManager) return;
-
-  const sessionDir = ctx.sessionManager.getSessionDir();
-  const entries = ctx.sessionManager.getBranch();
-
-  // Find the branch metadata
-  let branchMeta: BranchMeta | undefined;
-  if (toolCallIdArg) {
-    branchMeta = findBranchByToolCallId(entries, toolCallIdArg);
-  } else {
-    branchMeta = findMostRecentBranch(entries);
-  }
-
-  if (!branchMeta || !branchMeta.branchSidecarRelPath) {
-    ctx.ui.notify("No subagent branch found", "warning");
-    return;
-  }
-
-  // Resolve relative path to absolute (with traversal check)
-  let absolutePath: string;
-  try {
-    absolutePath = resolveSidecarPath(sessionDir, branchMeta.branchSidecarRelPath);
-  } catch (err) {
-    ctx.ui.notify("Invalid branch path", "error");
-    return;
-  }
-
-  // Load transcript asynchronously
-  loadTranscript(absolutePath)
-    .then((transcript) => {
-      if (!transcript) {
-        ctx.ui.notify("Branch data unavailable", "warning");
-        return;
-      }
-
-      return ctx.ui.custom<string>(
-        (tui: any, theme: any, keybindings: any, done: (result: string) => void) => {
-          const displayText = formatTranscriptForDisplay(transcript, theme);
-
-          class BranchViewer {
-            render() {
-              return new Text(displayText, 0, 0);
-            }
-            handleInput(data: string): { consume?: boolean; data?: string } | undefined {
-              if (keybindings.matches(data, "tui.select.cancel")) {
-                done("closed");
-                return { consume: true };
-              }
-              return undefined;
-            }
-            dispose() {}
-          }
-
-          return new BranchViewer();
-        },
-        { overlay: true },
-      );
-    })
-    .catch((err: any) => {
-      // User cancelled or viewer closed — not an error
-      if (err && err !== "closed") {
-        console.error("[pi-agents] Branch viewer error:", err);
-      }
-    });
+  return new Text(text, 0, 0);
 }
 
 // ── Schema ───────────────────────────────────────────────────────────
@@ -596,13 +450,6 @@ const BaseParams = Type.Object({
   cwd: Type.Optional(
     Type.String({
       description: "Working directory (default: current cwd)",
-    }),
-  ),
-  branch: Type.Optional(
-    Type.Boolean({
-      default: false,
-      description:
-        "If true, persist the full subagent turn-by-turn transcript as a navigable branch.",
     }),
   ),
 });
@@ -643,11 +490,6 @@ export default function (pi: ExtensionAPI) {
       const conversationText = serializeConversation(llmMessages);
 
       const targetCwd = params.cwd ?? ctx.cwd;
-      const wantBranch = params.branch ?? false;
-      const sessionDir = ctx.sessionManager.getSessionDir();
-      const sessionId = ctx.sessionManager.getSessionId();
-      const sessionFile = ctx.sessionManager.getSessionFile();
-
       const result = await runSubagent(
         params.task,
         params.persona,
@@ -657,36 +499,15 @@ export default function (pi: ExtensionAPI) {
         signal,
         onUpdate,
         ctx.model,
-        wantBranch,
-        _toolCallId,
-        sessionDir,
-        sessionId,
-        sessionFile,
       );
 
       const usageStr = formatUsage(result.usage, result.model);
-
-      // Build details with branch metadata (Task 5)
       const details: Record<string, unknown> = {
         contextMessages: messages.length,
         usage: result.usage,
         model: result.model,
         usageSummary: usageStr,
       };
-
-      if (wantBranch) {
-        if (result.branchSidecarRelPath) {
-          details.hasBranch = true;
-          details.branchToolCallId = _toolCallId;
-          details.branchTurnCount = result.transcript?.turns.length ?? 0;
-          details.branchSidecarRelPath = result.branchSidecarRelPath;
-        } else {
-          details.hasBranch = false;
-          details.branchUnavailableReason = sessionFile
-            ? undefined
-            : "in-memory-session";
-        }
-      }
 
       return {
         content: [
@@ -724,10 +545,6 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const targetCwd = params.cwd ?? ctx.cwd;
-      const wantBranch = params.branch ?? false;
-      const sessionDir = ctx.sessionManager.getSessionDir();
-      const sessionId = ctx.sessionManager.getSessionId();
-      const sessionFile = ctx.sessionManager.getSessionFile();
 
       const result = await runSubagent(
         params.task,
@@ -738,35 +555,14 @@ export default function (pi: ExtensionAPI) {
         signal,
         onUpdate,
         ctx.model,
-        wantBranch,
-        _toolCallId,
-        sessionDir,
-        sessionId,
-        sessionFile,
       );
 
       const usageStr = formatUsage(result.usage, result.model);
-
-      // Build details with branch metadata (Task 5)
       const details: Record<string, unknown> = {
         usage: result.usage,
         model: result.model,
         usageSummary: usageStr,
       };
-
-      if (wantBranch) {
-        if (result.branchSidecarRelPath) {
-          details.hasBranch = true;
-          details.branchToolCallId = _toolCallId;
-          details.branchTurnCount = result.transcript?.turns.length ?? 0;
-          details.branchSidecarRelPath = result.branchSidecarRelPath;
-        } else {
-          details.hasBranch = false;
-          details.branchUnavailableReason = sessionFile
-            ? undefined
-            : "in-memory-session";
-        }
-      }
 
       return {
         content: [
@@ -788,15 +584,6 @@ export default function (pi: ExtensionAPI) {
 
     renderResult(result, options, theme, context) {
       return renderSubagentResult(result, options, theme, context);
-    },
-  });
-
-  // ── Command: /subagent-view (Task 7) ───────────────────────────────
-  pi.registerCommand("subagent-view", {
-    description: "View a sub-agent branch transcript. Optionally provide a toolCallId.",
-    handler: async (args: string, ctx: any) => {
-      const toolCallId = args?.trim() || undefined;
-      openBranchViewer(ctx, toolCallId);
     },
   });
 
