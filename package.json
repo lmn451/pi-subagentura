@@ -1,5 +1,5 @@
 {
-  "name": "pi-agents",
+  "name": "pi-subagentura",
   "version": "1.0.0",
   "description": "Sub-agent engine extension for Pi — spawn in-process sub-agents via the SDK",
   "main": "subagent.ts",
