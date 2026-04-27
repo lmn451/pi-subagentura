@@ -14,6 +14,8 @@ The sub-agents run inside the current Pi process, stream live progress back to t
 - Keep tool feedback lightweight with live status updates
 - Avoid subprocess overhead for sub-agent execution
 
+![Sub-agent demo](working.png)
+
 ## Installation
 
 Install globally:
