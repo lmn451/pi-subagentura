@@ -1,5 +1,9 @@
 # pi-subagentura
 
+[![npm](https://img.shields.io/npm/v/pi-subagentura?label=npm)](https://npmjs.com/package/pi-subagentura) [![GitHub](https://img.shields.io/github/v/tag/lmn451/pi-subagentura?label=github)](https://github.com/lmn451/pi-subagentura)
+
+> **Note:** The `docs/` folder is managed by the [`pi-docs`](https://github.com/lmn451/pi-docs) package.
+
 A public [Pi](https://pi.dev) package that adds two in-process sub-agent tools:
 
 - `subagent_with_context` — spawn a sub-agent that inherits the full conversation history
@@ -92,17 +96,6 @@ This repo uses Bun for local development.
 bun install
 bun test
 bun run pack:check
-```
-
-## Release
-
-Publishing is handled by GitHub Actions when you push a `v*` tag that matches `package.json`.
-
-Example:
-
-```bash
-npm version patch
-git push origin master --follow-tags
 ```
 
 ## Contributing
