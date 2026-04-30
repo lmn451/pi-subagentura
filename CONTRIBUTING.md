@@ -6,9 +6,14 @@ Thanks for contributing to `pi-subagentura`.
 
 ```bash
 bun install
+bun run typecheck
 bun test
 bun run pack:check
 ```
+
+## Provider list
+
+`resolveModel()` in `helpers.ts` dynamically queries all providers via `getProviders()` from the Pi SDK — no hardcoded list. When Pi adds new providers, bare model IDs resolve automatically without code changes.
 
 ## Guidelines
 

@@ -41,6 +41,7 @@
   "dependencies": {},
   "scripts": {
     "test": "bun test",
+    "typecheck": "tsc --noEmit",
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {

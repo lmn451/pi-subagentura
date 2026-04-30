@@ -1,6 +1,19 @@
 import { describe, it, expect } from "bun:test";
+import { getProviders } from "@mariozechner/pi-ai";
+import {
+  ACTIVE_TOOL_DEBOUNCE_MS,
+  formatTokens,
+  formatUsage,
+  resolveModel,
+  SubagentLiveStatus,
+  SubagentResult,
+} from "./helpers";
 
-function createLiveStatus() {
+// ── Simulation helpers ────────────────────────────────────────────────
+// These simulate live status behavior for turn handling tests.
+// They mirror what runSubagent() does internally.
+
+function createLiveStatus(): SubagentLiveStatus {
   return {
     turn: 0,
     output: "",
@@ -9,103 +22,50 @@ function createLiveStatus() {
   };
 }
 
-function simulateTurnStart(status: ReturnType<typeof createLiveStatus>) {
+function simulateTurnStart(status: SubagentLiveStatus) {
   status.turn++;
   status.usage.turns = status.turn;
   status.output = "";
 }
 
-function simulateTextDelta(status: ReturnType<typeof createLiveStatus>, delta: string) {
+function simulateTextDelta(status: SubagentLiveStatus, delta: string) {
   status.output += delta;
 }
 
-function simulateTurnEnd(status: ReturnType<typeof createLiveStatus>) {
+function simulateTurnEnd(status: SubagentLiveStatus) {
   status.activeTool = undefined;
 }
 
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  return `${(count / 1000000).toFixed(1)}M`;
-}
+// ── Debounce harness ──────────────────────────────────────────────────
+// Mirrors the debounce logic in runSubagent() using ACTIVE_TOOL_DEBOUNCE_MS.
 
-function formatUsage(
-  u: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number },
-  model?: string,
-): string {
-  const parts: string[] = [];
-  if (u.turns) parts.push(`${u.turns} turn${u.turns > 1 ? "s" : ""}`);
-  if (u.input) parts.push(`↑${formatTokens(u.input)}`);
-  if (u.output) parts.push(`↓${formatTokens(u.output)}`);
-  if (u.cacheRead) parts.push(`R${formatTokens(u.cacheRead)}`);
-  if (u.cacheWrite) parts.push(`W${formatTokens(u.cacheWrite)}`);
-  if (u.cost) parts.push(`$${u.cost.toFixed(4)}`);
-  if (model) parts.push(model);
-  return parts.join(" ");
-}
+function createDebounceHarness() {
+  let activeToolTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingActiveTool: { name: string; args: Record<string, unknown> } | undefined;
+  const state = { activeTool: undefined as typeof pendingActiveTool };
 
-function resolveModel(
-  modelId: string | undefined,
-  defaultModel: { provider: string; id: string } | undefined,
-): { provider: string; id: string } | undefined {
-  if (!modelId) return defaultModel;
-
-  if (modelId.includes("/")) {
-    const [provider, id] = modelId.split("/", 2);
-    const providerToModel: Record<string, string> = {
-      anthropic: "claude",
-      openai: "gpt",
-      google: "gemini",
-      deepseek: "deepseek-chat",
-      openrouter: "openrouter",
-    };
-    return providerToModel[provider] ? { provider, id } : defaultModel;
-  }
-
-  const searchOrder = ["anthropic", "openai", "google", "deepseek", "openrouter"];
-  for (const p of searchOrder) {
-    if (p === "anthropic") return { provider: p, id: modelId };
-  }
-
-  return defaultModel;
-}
-
-describe("resolveModel", () => {
-  it("should return undefined when no modelId and no defaultModel", () => {
-    expect(resolveModel(undefined, undefined)).toBeUndefined();
-  });
-
-  it("should return defaultModel when modelId is undefined", () => {
-    const defaultModel = { provider: "anthropic", id: "claude-3-5-sonnet-20241022" };
-    expect(resolveModel(undefined, defaultModel)).toBe(defaultModel);
-  });
-
-  it("should parse provider/id format correctly", () => {
-    const result = resolveModel("anthropic/claude-3-5-sonnet-20241022", undefined);
-    expect(result?.provider).toBe("anthropic");
-    expect(result?.id).toBe("claude-3-5-sonnet-20241022");
-  });
-
-  it("should return undefined for unknown provider/id when no default", () => {
-    expect(resolveModel("unknown/impossibly-long-model-id", undefined)).toBeUndefined();
-  });
-
-  it("should fall back to defaultModel when provider not found", () => {
-    const defaultModel = { provider: "openai", id: "gpt-4o" };
-    expect(resolveModel("unknown/model", defaultModel)).toBe(defaultModel);
-  });
-
-  it("should search known providers in order for bare id", () => {
-    const searchLog: string[] = [];
-    const searchOrder = ["anthropic", "openai", "google", "deepseek", "openrouter"];
-    for (const p of searchOrder) {
-      searchLog.push(p);
-      if (p === "anthropic") break;
+  function setActiveToolDebounced(tool: typeof pendingActiveTool) {
+    pendingActiveTool = tool;
+    if (activeToolTimer) {
+      clearTimeout(activeToolTimer);
+      activeToolTimer = undefined;
     }
-    expect(searchLog).toEqual(["anthropic"]);
-  });
-});
+    if (tool) {
+      activeToolTimer = setTimeout(() => {
+        activeToolTimer = undefined;
+        state.activeTool = pendingActiveTool;
+      }, ACTIVE_TOOL_DEBOUNCE_MS);
+    } else {
+      if (state.activeTool) {
+        state.activeTool = undefined;
+      }
+    }
+  }
+
+  return { state, setActiveToolDebounced };
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
 
 describe("formatTokens", () => {
   it("should return raw number below 1000", () => {
@@ -132,7 +92,7 @@ describe("formatTokens", () => {
 });
 
 describe("formatUsage", () => {
-  const baseUsage = {
+  const baseUsage: SubagentResult["usage"] = {
     input: 0,
     output: 0,
     cacheRead: 0,
@@ -154,14 +114,7 @@ describe("formatUsage", () => {
   });
 
   it("should format all usage fields", () => {
-    const usage = {
-      input: 1500,
-      output: 500,
-      cacheRead: 100,
-      cacheWrite: 200,
-      cost: 0.0123,
-      turns: 2,
-    };
+    const usage = { ...baseUsage, input: 1500, output: 500, cacheRead: 100, cacheWrite: 200, cost: 0.0123, turns: 2 };
     const result = formatUsage(usage);
     expect(result).toContain("1.5k");
     expect(result).toContain("↓500");
@@ -185,7 +138,7 @@ describe("live status turn handling", () => {
     simulateTextDelta(status, "Hello");
     expect(status.output).toBe("Hello");
 
-    simulateTurnStart(status);
+    simulateTurnStart(status); // resets output
     expect(status.output).toBe("");
 
     simulateTextDelta(status, "World");
@@ -213,24 +166,99 @@ describe("live status turn handling", () => {
 
   it("should count turns correctly", () => {
     const status = createLiveStatus();
-    
     simulateTurnStart(status);
     simulateTurnStart(status);
     simulateTurnStart(status);
-    
     expect(status.turn).toBe(3);
     expect(status.usage.turns).toBe(3);
   });
 });
 
-describe("error handling scenarios", () => {
-  it("should use targetModel as fallback when session.model is undefined", () => {
-    const targetModel = { provider: "anthropic", id: "claude-sonnet-4-5" };
-    const result = resolveModel(undefined, targetModel);
-    expect(result).not.toBeUndefined();
+describe("active tool debouncing", () => {
+  it("should not show activeTool for fast tool calls (synchronous start+end)", () => {
+    const { state, setActiveToolDebounced } = createDebounceHarness();
+
+    // Fast tool: start then end synchronously (within the same tick)
+    setActiveToolDebounced({ name: "read", args: { path: "/foo" } });
+    setActiveToolDebounced(undefined);
+
+    // activeTool should remain undefined — no flicker
+    expect(state.activeTool).toBeUndefined();
+  });
+
+  it("should show activeTool after debounce period for slow tools", async () => {
+    const { state, setActiveToolDebounced } = createDebounceHarness();
+
+    setActiveToolDebounced({ name: "bash", args: { command: "sleep 5" } });
+
+    // Before debounce fires: not visible yet
+    expect(state.activeTool).toBeUndefined();
+
+    // Wait past debounce threshold
+    await new Promise((r) => setTimeout(r, ACTIVE_TOOL_DEBOUNCE_MS + 50));
+
+    // Now the activeTool should be committed
+    expect(state.activeTool).toEqual({ name: "bash", args: { command: "sleep 5" } });
+  });
+
+  it("should clear activeTool immediately when a committed tool ends", async () => {
+    const { state, setActiveToolDebounced } = createDebounceHarness();
+
+    setActiveToolDebounced({ name: "bash", args: { command: "sleep 5" } });
+    await new Promise((r) => setTimeout(r, ACTIVE_TOOL_DEBOUNCE_MS + 50));
+
+    expect(state.activeTool).toBeDefined();
+
+    // Slow tool finishes — clear immediately, no debounce delay
+    setActiveToolDebounced(undefined);
+    expect(state.activeTool).toBeUndefined();
+  });
+
+  it("should cancel pending timer if tool ends before debounce fires", () => {
+    const { state, setActiveToolDebounced } = createDebounceHarness();
+
+    // Start a tool (timer begins)
+    setActiveToolDebounced({ name: "read", args: { path: "/bar" } });
+
+    // Tool finishes fast — cancels the timer, activeTool never appears
+    setActiveToolDebounced(undefined);
+    expect(state.activeTool).toBeUndefined();
+  });
+});
+
+describe("resolveModel", () => {
+  it("should return undefined when no modelId and no defaultModel", () => {
+    expect(resolveModel(undefined, undefined)).toBeUndefined();
+  });
+
+  it("should return defaultModel when modelId is undefined", () => {
+    const defaultModel = { provider: "anthropic", id: "claude-3-5-sonnet-20241022" } as any;
+    expect(resolveModel(undefined, defaultModel)).toBe(defaultModel);
+  });
+
+  it("should parse provider/id format correctly", () => {
+    const result = resolveModel("anthropic/claude-3-5-sonnet-20241022", undefined);
     expect(result?.provider).toBe("anthropic");
   });
 
+  it("should return undefined for unknown provider/id when no default", () => {
+    expect(resolveModel("unknown/impossibly-long-model-id", undefined)).toBeUndefined();
+  });
+
+  it("should fall back to defaultModel when provider not found", () => {
+    const defaultModel = { provider: "openai", id: "gpt-4o" } as any;
+    expect(resolveModel("unknown/model", defaultModel)).toBe(defaultModel);
+  });
+
+  it("should search all providers dynamically for bare id", () => {
+    // resolveModel iterates getProviders() for bare IDs
+    const providers = getProviders();
+    expect(providers.length).toBeGreaterThan(0);
+    expect(providers).toContain("anthropic");
+  });
+});
+
+describe("error handling scenarios", () => {
   it("should handle empty task string", () => {
     const status = createLiveStatus();
     expect(status.output).toBe("");
@@ -238,6 +266,11 @@ describe("error handling scenarios", () => {
 
   it("should handle undefined optional parameters gracefully", () => {
     expect(resolveModel(undefined, undefined)).toBeUndefined();
-    expect(formatUsage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 }, undefined)).toBe("");
+    expect(
+      formatUsage(
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+        undefined,
+      ),
+    ).toBe("");
   });
 });

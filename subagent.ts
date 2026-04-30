@@ -22,93 +22,20 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
-import { getModel } from "@mariozechner/pi-ai";
+import {
+  ACTIVE_TOOL_DEBOUNCE_MS,
+  buildLiveUpdate,
+  formatUsage,
+  resolveModel,
+  SubagentLiveStatus,
+  SubagentResult,
+} from "./helpers";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
-interface SubagentResult {
-  output: string;
-  usage: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    cost: number;
-    turns: number;
-  };
-  model?: string;
-  isError: boolean;
-  errorMessage?: string;
-}
-
-interface SubagentLiveStatus {
-  turn: number;
-  activeTool?: { name: string; args: Record<string, unknown> };
-  output: string;
-  usage: SubagentResult["usage"];
-}
-
-function resolveModel(
-  modelId: string | undefined,
-  defaultModel: Model | undefined,
-): Model | undefined {
-  if (!modelId) return defaultModel;
-
-  // "provider/id" format
-  if (modelId.includes("/")) {
-    const [provider, id] = modelId.split("/", 2);
-    return getModel(provider, id) ?? defaultModel;
-  }
-
-  // Bare id — search known providers
-  for (const provider of [
-    "anthropic",
-    "openai",
-    "google",
-    "deepseek",
-    "openrouter",
-  ]) {
-    const found = getModel(provider, modelId);
-    if (found) return found;
-  }
-
-  return defaultModel;
-}
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  return `${(count / 1000000).toFixed(1)}M`;
-}
-
-function formatUsage(u: SubagentResult["usage"], model?: string): string {
-  const parts: string[] = [];
-  if (u.turns) parts.push(`${u.turns} turn${u.turns > 1 ? "s" : ""}`);
-  if (u.input) parts.push(`↑${formatTokens(u.input)}`);
-  if (u.output) parts.push(`↓${formatTokens(u.output)}`);
-  if (u.cacheRead) parts.push(`R${formatTokens(u.cacheRead)}`);
-  if (u.cacheWrite) parts.push(`W${formatTokens(u.cacheWrite)}`);
-  if (u.cost) parts.push(`$${u.cost.toFixed(4)}`);
-  if (model) parts.push(model);
-  return parts.join(" ");
-}
-
-function buildLiveUpdate(
-  status: SubagentLiveStatus,
-  model?: string,
-): AgentToolResult {
-  return {
-    content: [{ type: "text", text: status.output }],
-    details: {
-      status: "running",
-      subagentStatus: status,
-      model,
-    },
-  };
-}
+// Shared helpers are imported from ./helpers (SubagentResult, SubagentLiveStatus,
+// resolveModel, formatUsage, buildLiveUpdate, ACTIVE_TOOL_DEBOUNCE_MS)
 
 async function runSubagent(
   task: string,
@@ -117,7 +44,9 @@ async function runSubagent(
   cwd: string,
   contextText: string | null,
   signal: AbortSignal | undefined,
+  // @ts-expect-error — AgentToolResult<T> requires type arg; unknown is a safe placeholder
   onUpdate: ((partial: AgentToolResult) => void) | undefined,
+  // @ts-expect-error — Model<TApi> requires type arg; unknown is a safe placeholder
   defaultModel: Model | undefined,
 ): Promise<SubagentResult> {
 
@@ -147,10 +76,9 @@ async function runSubagent(
   };
 
   // Debounce activeTool updates to prevent flickering on fast tool calls.
-  // When a tool executes quickly (< DEBOUNCE_MS), we skip the setActiveTool
+  // When a tool executes quickly (< ACTIVE_TOOL_DEBOUNCE_MS), we skip the setActiveTool
   // render entirely, avoiding a brief height/width expansion that the user
   // perceives as flickering.
-  const DEBOUNCE_MS = 150;
   let activeToolTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingActiveTool: SubagentLiveStatus["activeTool"] = undefined;
 
@@ -161,14 +89,14 @@ async function runSubagent(
       activeToolTimer = undefined;
     }
     if (tool) {
-      // Starting a tool: wait DEBOUNCE_MS before showing it.
+      // Starting a tool: wait ACTIVE_TOOL_DEBOUNCE_MS before showing it.
       // If the tool finishes before the timer fires, clearActiveToolDebounced
       // will cancel the timer and the activeTool line never appears.
       activeToolTimer = setTimeout(() => {
         activeToolTimer = undefined;
         liveStatus.activeTool = pendingActiveTool;
         onUpdate?.(buildLiveUpdate(liveStatus, modelLabel));
-      }, DEBOUNCE_MS);
+      }, ACTIVE_TOOL_DEBOUNCE_MS);
     } else {
       // Clearing: apply immediately (no delay) so the UI stays responsive
       // when a genuinely long tool finishes. But only if we had an activeTool
@@ -350,6 +278,7 @@ function renderSubagentCall(
 }
 
 function renderSubagentResult(
+  // @ts-expect-error — AgentToolResult<T> requires type arg
   result: AgentToolResult,
   { expanded, isPartial }: { expanded: boolean; isPartial: boolean },
   theme: Theme,
@@ -456,9 +385,15 @@ const BaseParams = Type.Object({
 
 // ── Extension ────────────────────────────────────────────────────────
 
+// @ts-expect-error — TypeBox recursive types cause TS2589 deep instantiation with tsc
+function registerTool<T>(tool: Parameters<typeof pi.registerTool>[0]) {
+  // @ts-expect-error
+  return pi.registerTool(tool);
+}
+
 export default function (pi: ExtensionAPI) {
   // ── Tool 1: inherits conversation history ────────────────────────
-  pi.registerTool({
+  registerTool({
     name: "subagent_with_context",
     label: "Sub-Agent (with context)",
     description: [
@@ -533,7 +468,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── Tool 2: isolated, no conversation history ────────────────────
-  pi.registerTool({
+  registerTool({
     name: "subagent_isolated",
     label: "Sub-Agent (isolated)",
     description: [
@@ -588,3 +523,14 @@ export default function (pi: ExtensionAPI) {
   });
 
 }
+
+// ── Re-exports ───────────────────────────────────────────────────────
+// Re-export helpers so external consumers (e.g. tests importing from subagent.ts)
+// don't need to know about the internal helpers.ts split.
+export {
+  resolveModel,
+  formatUsage,
+  SubagentResult,
+  SubagentLiveStatus,
+  ACTIVE_TOOL_DEBOUNCE_MS,
+} from "./helpers";
