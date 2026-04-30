@@ -51,5 +51,8 @@
     "@mariozechner/pi-tui": "*",
     "typebox": "*"
   },
-  "packageManager": "bun@1.3.11"
+  "packageManager": "bun@1.3.11",
+  "devDependencies": {
+    "bun-types": "^1.3.13"
+  }
 }
