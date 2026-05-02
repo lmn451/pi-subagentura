@@ -7,7 +7,7 @@
     "strict": false,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["bun-types"]
+    "types": ["node"]
   },
   "include": ["*.ts"]
 }

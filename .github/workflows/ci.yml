@@ -15,24 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: npm
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Type check
-        run: bun run typecheck
+        run: npm run typecheck
 
       - name: Run tests
-        run: bun run test
+        run: npm test
 
       - name: Verify package can be packed
-        run: bun run pack:check
+        run: npm run pack:check

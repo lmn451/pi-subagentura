@@ -1,6 +1,6 @@
 ---
 title: "Publishing Workflow"
-keywords: [publish, release, npm, version, tag, bun, oidc, trusted publisher]
+keywords: [publish, release, npm, version, tag, node, oidc, trusted publisher]
 ---
 
 # Publishing

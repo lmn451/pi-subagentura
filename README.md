@@ -90,12 +90,12 @@ Best for:
 
 ## Development
 
-This repo uses Bun for local development.
+This repo uses npm for local development.
 
 ```bash
-bun install
-bun test
-bun run pack:check
+npm install
+npm test
+npm run pack:check
 ```
 
 ## Contributing

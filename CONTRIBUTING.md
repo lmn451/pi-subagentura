@@ -5,10 +5,10 @@ Thanks for contributing to `pi-subagentura`.
 ## Local development
 
 ```bash
-bun install
-bun run typecheck
-bun test
-bun run pack:check
+npm install
+npm run typecheck
+npm test
+npm run pack:check
 ```
 
 ## Provider list

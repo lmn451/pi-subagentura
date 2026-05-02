@@ -1,35 +1,35 @@
 ---
 title: "JavaScript Runtime & Package Manager"
-keywords: [bun, package manager, runtime, install, test, build]
+keywords: [npm, node, package manager, install, test, build]
 ---
 
 # JavaScript Runtime & Package Manager
 
-This project uses **Bun** as its JavaScript runtime and package manager.
+This project uses **Node.js** as its JavaScript runtime and **npm** as its package manager.
 
-## Why Bun?
+## Why npm?
 
-- Fast native TypeScript support (no separate tsc step needed)
-- All-in-one runtime, bundler, and test runner
-- Drop-in replacement for Node.js and npm/yarn/pnpm
-- Significantly faster installs and test execution
+- The default package manager that ships with Node.js
+- Widely supported across all CI/CD platforms
+- Deterministic installs via `package-lock.json`
+- No additional runtime or tooling required
 
 ## Common Commands
 
 ```bash
 # Install dependencies
-bun install
+npm install
 
 # Run tests
-bun test
+npm test
 
-# Run tests in watch mode
-bun test --watch
+# Run type checking
+npm run typecheck
 
 # Run a single script
-bun run <script-name>
+npm run <script-name>
 ```
 
 ## Version
 
-This project requires Bun >= 1.3.0. The lockfile (`bun.lock`) ensures reproducible installs.
+This project requires Node.js >= 18.0.0. The lockfile (`package-lock.json`) ensures reproducible installs.

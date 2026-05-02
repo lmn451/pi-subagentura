@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { getProviders } from "@mariozechner/pi-ai";
 import {
   ACTIVE_TOOL_DEBOUNCE_MS,
