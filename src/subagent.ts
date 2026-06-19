@@ -63,27 +63,24 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import {
-  appendEvent,
-  artifactPath,
-  lastEvent,
-  listOutputTurns,
-  readEvents,
-  readOutput,
-  readOutputForTurn,
-  snapshotOutput,
-  type SubagentArtifact,
-  type SubagentEvent,
+	appendEvent,
+	appendInteractiveState,
+	artifactPath,
+	lastEvent,
+	listOutputTurns,
+	readEvents,
+	readOutput,
+	readOutputForTurn,
+	removeInteractiveState,
+	snapshotOutput,
+	type SubagentArtifact,
+	type SubagentEvent,
 } from "./artifact";
+
 import type { Usage } from "./helpers";
 
-import {
-  closeSync,
-  openSync,
-  readdirSync,
-  readSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
@@ -587,23 +584,32 @@ export function pollArtifactChanges(pi: ExtensionAPI): void {
       const cursor = state.lastDeliveredEventTs ?? 0;
       const events = readEvents(art, cursor + 1);
 
-      if (events.length > 0) {
-        let maxTs = cursor;
-        for (const ev of events) {
-          if (ev.ts > maxTs) maxTs = ev.ts;
-          if (!shouldNotify(ev)) continue;
-          // If auto-done already fired for this turn, skip any later explicit `done` events:
-          // they would be duplicates. Errors and cancelled still flow through (the explicit signal is more accurate).
-          if (
-            state.autoDoneForTurnAt !== undefined &&
-            ev.ts >= state.autoDoneForTurnAt &&
-            ev.type === "done"
-          )
-            continue;
-          deliverArtifactNotification(interactivePi, state, ev);
-        }
-        state.lastDeliveredEventTs = maxTs;
-      }
+		if (events.length > 0) {
+			let maxTs = cursor;
+			let deliveredTerminal = false;
+			for (const ev of events) {
+				if (ev.ts > maxTs) maxTs = ev.ts;
+				if (!shouldNotify(ev)) continue;
+				// Track terminal delivery so we can drop the on-disk state entry
+				// AFTER the cursor advances (crash-safe ordering).
+				if (ev.type === "done" || ev.type === "error" || ev.type === "cancelled") {
+					deliveredTerminal = true;
+				}
+				// If auto-done already fired for this turn, skip any later explicit `done` events:
+				// they would be duplicates. Errors and cancelled still flow through (the explicit signal is more accurate).
+				if (state.autoDoneForTurnAt !== undefined && ev.ts >= state.autoDoneForTurnAt && ev.type === "done") continue;
+				deliverArtifactNotification(interactivePi, state, ev);
+			}
+			state.lastDeliveredEventTs = maxTs;
+			// Drop the on-disk entry now that the terminal event is delivered.
+			// Cursor advance above is what makes a crash here re-deliver rather
+			// than drop the event on the next reload.
+			if (deliveredTerminal && state.parentSessionId) {
+				try {
+					removeInteractiveState(state.cwd, state.parentSessionId, state.id);
+				} catch { /* best effort — disk full, permission denied, etc. */ }
+			}
+		}
 
       // Per-turn snapshot: on a NEW `done` event, copy the latest output.md into output-N.md so turn
       // history survives the child overwriting output.md each turn. Runs in every notifyOnComplete mode,
@@ -619,6 +625,8 @@ export function pollArtifactChanges(pi: ExtensionAPI): void {
         snapshotOutput(art, turnNumber);
         state.lastSnapshotEventTs = last.ts;
       }
+
+
 
       // Inject-mode delivery: on a NEW `done` event, push output.md into the parent LLM's next turn.
       // Per-turn (not per-sub-agent) — `lastInjectedEventTs` is compared against the current `done`'s `ts`
@@ -2111,18 +2119,20 @@ export default function (pi: ExtensionAPI) {
       const name = params.name ?? `Subagent: ${taskPreview || "interactive"}`;
       const targetCwd = params.cwd ?? ctx.cwd;
 
-      try {
-        const state = launchInteractiveSubagent({
-          name,
-          task: params.task,
-          persona: params.persona,
-          model: params.model,
-          cwd: targetCwd,
-          contextText,
-          background: params.background, // defaults to true (hidden) inside the helper
-          notifyOnComplete: params.notifyOnComplete ?? "inject",
-          muxPreference: params.mux, // pass through user's mux preference
-        });
+		try {
+			const state = launchInteractiveSubagent({
+				name,
+				task: params.task,
+				persona: params.persona,
+				model: params.model,
+				cwd: targetCwd,
+				contextText,
+				background: params.background, // defaults to true (hidden) inside the helper
+				notifyOnComplete: params.notifyOnComplete ?? "inject",
+				muxPreference: params.mux, // pass through user's mux preference
+				parentSessionId: ctx.sessionManager.getSessionId(),
+			});
+
 
         const displayMode = state.windowName
           ? "background (new window/tab)"
@@ -2810,19 +2820,20 @@ export default function (pi: ExtensionAPI) {
 // Re-export helpers so external consumers (e.g. tests importing from subagent.ts)
 // don't need to know about the internal helpers.ts split.
 export {
-  formatUsage,
-  SubagentResult,
-  SubagentLiveStatus,
-  ACTIVE_TOOL_DEBOUNCE_MS,
-  // ── Async exports ──
-  jobRegistry,
-  MAX_REGISTRY_SIZE,
-  pruneOldestJob,
-  pruneCompletedJobs,
-  scheduleJobCleanup,
-  startSubagentJob,
-  type JobState,
-  type JobStatus,
-  type NotifyOnComplete,
+	formatUsage,
+	SubagentResult,
+	SubagentLiveStatus,
+	ACTIVE_TOOL_DEBOUNCE_MS,
+	// ── Async exports ──
+	jobRegistry,
+	MAX_REGISTRY_SIZE,
+	pruneOldestJob,
+	pruneCompletedJobs,
+	scheduleJobCleanup,
+	startSubagentJob,
+	type JobState,
+	type JobStatus,
+	type NotifyOnComplete,
 } from "./helpers";
 export { interactiveSubagentRegistry } from "./interactive-tmux";
+

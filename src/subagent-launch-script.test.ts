@@ -12,18 +12,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { writeLaunchScript } from "./interactive-tmux";
+
+import { launchInteractiveSubagent, writeLaunchScript } from "./interactive-tmux";
+import { stateFilePath, loadInteractiveStates } from "./artifact";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -157,3 +159,63 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(countEvents(artDir, "cancelled")).toHaveLength(0);
   });
 });
+
+
+
+describe("spawn-time state persistence", () => {
+	let cwd: string;
+	const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
+
+	beforeEach(() => {
+		cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-spawn-persist-"));
+	});
+
+	afterEach(() => {
+		rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("launchInteractiveSubagent with parentSessionId writes the state file", () => {
+		const state = launchInteractiveSubagent({
+			name: "Demo",
+			task: "t",
+			cwd,
+			parentSessionId: SESSION,
+		});
+		expect(existsSync(stateFilePath(cwd, SESSION))).toBe(true);
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);
+		expect(loaded?.states[state.id]?.mux).toBe(state.mux);
+	});
+
+	it("launchInteractiveSubagent without parentSessionId does NOT write the state file", () => {
+		launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+		expect(existsSync(stateFilePath(cwd, SESSION))).toBe(false);
+	});
+
+	it("the persisted entry records windowName, mux, and artifactDir", () => {
+		const state = launchInteractiveSubagent({
+			name: "Demo",
+			task: "t",
+			cwd,
+			parentSessionId: SESSION,
+		});
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		const entry = loaded?.states[state.id];
+		expect(entry?.windowName).toBe(state.windowName);
+		expect(entry?.mux).toBe(state.mux);
+		expect(entry?.artifactDir).toBe(state.artifactDir);
+		expect(entry?.sessionFile).toBe(state.sessionFile);
+	});
+
+	it("the state has parentSessionId populated for terminal cleanup", () => {
+		const state = launchInteractiveSubagent({
+			name: "Demo",
+			task: "t",
+			cwd,
+			parentSessionId: SESSION,
+		});
+		expect(state.parentSessionId).toBe(SESSION);
+		expect(state.cwd).toBe(cwd);
+	});
+});
+

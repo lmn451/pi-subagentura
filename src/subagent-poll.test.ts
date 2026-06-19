@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, artifactPath, writeOutput } from "./artifact";
+import { appendEvent, appendInteractiveState, artifactPath, loadInteractiveStates, removeInteractiveState, writeOutput } from "./artifact";
 import { importFresh } from "./test-utils";
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
@@ -745,4 +745,143 @@ describe("pollArtifactChanges", () => {
       delete (globalThis as any).__piSubagenturaUi;
     });
   });
+});
+
+
+
+
+describe("pollArtifactChanges — terminal cleanup of state.json", () => {
+	const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
+
+	beforeEach(() => {
+		const g = globalThis as any;
+		g.__piSubagenturaInteractiveRegistry?.clear?.();
+		g.__piSubagenturaPiRef = undefined;
+	});
+
+	function makePersistedState(): {
+		id: string;
+		cwd: string;
+		state: import("./interactive-tmux").InteractiveSubagentState;
+	} {
+		const cwd = makeTmp();
+		const id = "id-" + Math.random().toString(36).slice(2, 8);
+		const state: import("./interactive-tmux").InteractiveSubagentState = {
+			id,
+			name: "Test",
+			task: "t",
+			paneId: "%99",
+			sessionFile: "/tmp/sess.jsonl",
+			cwd,
+			startedAt: Date.now(),
+			mux: "tmux",
+			status: "running",
+			attachCommand: "tmux attach -t sess",
+			selectPaneCommand: "tmux select-pane -t '%99'",
+			launchScriptFile: "/tmp/launch.sh",
+			artifactDir: join(cwd, id),
+			parentSessionId: SESSION,
+		};
+		appendInteractiveState(cwd, SESSION, {
+			id,
+			paneId: state.paneId,
+			windowName: state.windowName,
+			mux: state.mux,
+			artifactDir: state.artifactDir,
+			sessionFile: state.sessionFile,
+		});
+		return { id, cwd, state };
+	}
+
+	it("removes the state.json entry after delivering a done event", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const { cwd, id, state } = makePersistedState();
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath(join(state.artifactDir, ".."), id);
+		appendEvent(art, { ts: 1, type: "started", status: "running" });
+		appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+
+		mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		expect(loaded?.states[id]).toBeUndefined();
+	});
+
+	it("removes the state.json entry after delivering an error event", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const { cwd, id, state } = makePersistedState();
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath(join(state.artifactDir, ".."), id);
+		appendEvent(art, { ts: 1, type: "error", status: "error", message: "boom" });
+
+		mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		expect(loaded?.states[id]).toBeUndefined();
+	});
+
+	it("removes the state.json entry after delivering a cancelled event", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const { cwd, id, state } = makePersistedState();
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath(join(state.artifactDir, ".."), id);
+		appendEvent(art, { ts: 1, type: "cancelled", status: "cancelled" });
+
+		mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		expect(loaded?.states[id]).toBeUndefined();
+	});
+
+	it("does NOT remove the state.json entry on tool_activity events (only terminals)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const { cwd, id, state } = makePersistedState();
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath(join(state.artifactDir, ".."), id);
+		appendEvent(art, { ts: 1, type: "tool_activity", status: "running", tool: "bash", summary: "ls" });
+
+		mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+		const loaded = loadInteractiveStates(cwd, SESSION);
+		expect(loaded?.states[id]).toBeDefined();
+	});
+
+	it("does NOT throw if state has no parentSessionId (no-op guard)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const id = "id-" + Math.random().toString(36).slice(2, 8);
+		const state: import("./interactive-tmux").InteractiveSubagentState = {
+			id,
+			name: "Test",
+			task: "t",
+			paneId: "%99",
+			sessionFile: "/tmp/sess.jsonl",
+			cwd: "/tmp",
+			startedAt: Date.now(),
+			mux: "tmux",
+			status: "running",
+			attachCommand: "",
+			selectPaneCommand: "",
+			launchScriptFile: "/tmp/launch.sh",
+			artifactDir: "/tmp/art-" + id,
+		};
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath("/tmp", id);
+		appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
+
+		expect(() => mod.pollArtifactChanges({ sendMessage: vi.fn() } as any)).not.toThrow();
+	});
+
+	it("advances lastDeliveredEventTs before removing the state entry (crash-safe ordering)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const { id, state } = makePersistedState();
+		mod.interactiveSubagentRegistry.set(id, state);
+		const art = artifactPath(join(state.artifactDir, ".."), id);
+		appendEvent(art, { ts: 1, type: "started", status: "running" });
+		appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+
+		mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+		expect(state.lastDeliveredEventTs).toBe(2);
+	});
+
 });
