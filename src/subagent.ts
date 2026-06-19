@@ -66,8 +66,10 @@ import {
 	appendEvent,
 	appendInteractiveState,
 	artifactPath,
+	deleteInteractiveStatesFile,
 	lastEvent,
 	listOutputTurns,
+	loadInteractiveStates,
 	readEvents,
 	readOutput,
 	readOutputForTurn,
@@ -78,6 +80,9 @@ import {
 } from "./artifact";
 
 import type { Usage } from "./helpers";
+
+
+
 
 import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 
@@ -1243,8 +1248,79 @@ export function findArtifactById(id: string): SubagentArtifact | null {
     }
   }
   return null;
+
 }
-/** Sanitize a string by redacting common sensitive patterns (API keys, tokens, JWTs). */
+
+/**
+ * Rehydrate orphan interactive sub-agents from the on-disk state file.
+ *
+ * Reads <cwd>/.pi/subagentura-state-<sessionId>.json, reconstructs each
+ * InteractiveSubagentState, sets its status via the existing
+ * deriveInteractiveSubagentStatus matrix (lastEvent + isPaneAlive), registers
+ * it, and resets runtime cursors so the existing poller backlog-catch-up path
+ * replays any events that landed during downtime.
+ *
+ * Idempotent — skips ids already in the registry. Designed to be called from
+ * the session_start handler. The first poll tick after this returns sees
+ * the rehydrated states and replays any backlog.
+ */
+export function rehydrateInteractiveSubagents(
+	cwd: string,
+	sessionId: string,
+): { total: number; alive: number; terminal: number } {
+	const payload = loadInteractiveStates(cwd, sessionId);
+	if (!payload) return { total: 0, alive: 0, terminal: 0 };
+	let alive = 0;
+	let terminal = 0;
+	for (const entry of Object.values(payload.states) as Array<
+		import("./artifact").InteractiveSubagentPersistedStateV1
+	>) {
+		if (interactiveSubagentRegistry.has(entry.id)) continue;
+		const rehydrated: InteractiveSubagentState = {
+			id: entry.id,
+			// Display fields: placeholders. formatInteractiveState is approximate
+			// after rehydrate; the registry entry is enough to address the pane,
+			// which is all the live ops need.
+			name: entry.id,
+			task: "",
+			paneId: entry.paneId,
+			windowName: entry.windowName,
+			mux: entry.mux,
+			muxSession: entry.muxSession,
+			sessionFile: entry.sessionFile,
+			cwd,
+			startedAt: 0,
+			status: "running",
+			attachCommand: "",
+			selectPaneCommand: "",
+			launchScriptFile: "",
+			artifactDir: entry.artifactDir,
+			notifyOnComplete: entry.notifyOnComplete,
+			parentSessionId: sessionId,
+			// All runtime cursors reset (replay-all semantics).
+			lastDeliveredEventTs: 0,
+			lastDeliveredSessionByte: 0,
+			lastInjectedEventTs: undefined,
+			lastSnapshotEventTs: undefined,
+			injected: undefined,
+			autoDoneForTurnAt: undefined,
+			lastStopReason: undefined,
+			lastStopReasonAt: undefined,
+			lastStopText: undefined,
+		};
+		const art = artifactPath(dirname(entry.artifactDir), basename(entry.artifactDir));
+		const last = lastEvent(art);
+		const paneAlive = isPaneAlive(rehydrated);
+		const next = deriveInteractiveSubagentStatus(last, paneAlive);
+		rehydrated.status = next;
+		if (next === "exited" || next === "cancelled") terminal++;
+		else if (next === "running" || next === "idle") alive++;
+		interactiveSubagentRegistry.set(entry.id, rehydrated);
+	}
+	return { total: Object.keys(payload.states).length, alive, terminal };
+}
+
+
 function sanitizeOutput(text: string): string {
   return text.replace(
     /(sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|-----BEGIN[\s\w]+KEY-----|AKIA[\w]{16}|ghp_[\w]{36}|gho_[\w]{36}|ghu_[\w]{36}|xox[abp]-[\w-]+|AIza[\w-]{35}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g,
@@ -1309,7 +1385,15 @@ export default function (pi: ExtensionAPI) {
   // which is the same pi the poller uses via __piSubagenturaPiRef.
   pi.on("session_start", (_event, ctx) => {
     g2.__piSubagenturaUi = ctx.ui;
+    // NEW: rehydrate orphan interactive sub-agents from the state file so the
+    // parent's view of them survives a :reload / extension restart / parent crash.
+    try {
+      rehydrateInteractiveSubagents(ctx.cwd, ctx.sessionManager.getSessionId());
+    } catch {
+      /* best effort — rehydrate is a recovery path; failures fall back to empty registry */
+    }
   });
+
   pi.on("session_shutdown", () => {
     // Don't null the ui ref here — the poller may still fire one last tick on shutdown,
     // and stale ctx errors are already caught at the call sites.
@@ -2755,8 +2839,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── Session shutdown: abort all jobs, kill tmux panes, stop the poller ─
-  (pi as any).on?.("session_shutdown", () => {
-    const g2 = typeof global !== "undefined" ? global : globalThis;
+  (pi as any).on?.(
+    "session_shutdown",
+    (event: { reason?: string }, ctx: { cwd?: string; sessionManager?: { getSessionId?: () => string } }) => {
+      const g2 = typeof global !== "undefined" ? global : globalThis;
+
 
     // Stop the global poller so it doesn't fire after we're gone. Without
     // clearInterval the handle would keep the event loop alive across restarts.
@@ -2809,12 +2896,31 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }
+      jobRegistry.clear();
+      g2.__piSubagenturaPiRef = undefined;
+      g2.__piSubagenturaInjectCount = 0;
 
-    jobRegistry.clear();
-    g2.__piSubagenturaPiRef = undefined;
-    g2.__piSubagenturaInjectCount = 0;
-  });
+      // NEW: clean-slate the state file on /new and quit. On :reload we KEEP
+      // the file so the next session_start can rehydrate from it. Old panes are
+      // killed by the cancelInteractiveSubagent loop above; this just drops the
+      // in-process bookkeeping.
+      if (
+        (event?.reason === "new" || event?.reason === "quit") &&
+        ctx?.cwd &&
+        ctx?.sessionManager?.getSessionId
+      ) {
+        try {
+          deleteInteractiveStatesFile(ctx.cwd, ctx.sessionManager.getSessionId());
+        } catch {
+          /* best effort */
+        }
+      }
+    },
+  );
 }
+
+
+
 
 // ── Re-exports ───────────────────────────────────────────────────────
 // Re-export helpers so external consumers (e.g. tests importing from subagent.ts)
@@ -2836,4 +2942,6 @@ export {
 	type NotifyOnComplete,
 } from "./helpers";
 export { interactiveSubagentRegistry } from "./interactive-tmux";
+
+
 

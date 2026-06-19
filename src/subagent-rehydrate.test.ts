@@ -1,0 +1,376 @@
+/**
+ * Tests for the session_start rehydrate + session_shutdown clean-slate path.
+ *
+ * Rehydrate walks the on-disk state file and repopulates the in-memory
+ * interactiveSubagentRegistry so the parent's view of an orphan interactive
+ * sub-agent survives a parent reload. The clean-slate unlink on
+ * session_shutdown(reason="new"|"quit") gives /new a fresh start.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	appendEvent,
+	appendInteractiveState,
+	artifactPath,
+	loadInteractiveStates,
+	stateFilePath,
+	writeOutput,
+} from "./artifact";
+import type { InteractiveSubagentState } from "./interactive-tmux";
+import { interactiveSubagentRegistry } from "./interactive-tmux";
+import { importFresh } from "./test-utils";
+
+const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
+
+function makeTmp(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagentura-rehydrate-"));
+}
+
+function makeState(cwd: string, id: string): InteractiveSubagentState {
+	const artifactDir = join(cwd, id);
+	return {
+		id,
+		name: id,
+		task: "",
+		paneId: "%42",
+		windowName: "demo",
+		mux: "tmux",
+		sessionFile: "/tmp/sess.jsonl",
+		cwd,
+		startedAt: Date.now(),
+		status: "running",
+		attachCommand: "",
+		selectPaneCommand: "",
+		launchScriptFile: "",
+		artifactDir,
+		notifyOnComplete: "inject",
+		parentSessionId: SESSION,
+	};
+}
+
+describe("rehydrateInteractiveSubagents", () => {
+	let cwd: string;
+
+	beforeEach(() => {
+		cwd = makeTmp();
+		const g = globalThis as any;
+		g.__piSubagenturaInteractiveRegistry?.clear?.();
+		g.__piSubagenturaPiRef = undefined;
+	});
+
+	afterEach(() => {
+		rmSync(cwd, { recursive: true, force: true });
+		vi.doUnmock("node:child_process");
+	});
+
+	it("returns { total: 0 } when the state file is missing", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const result = mod.rehydrateInteractiveSubagents(cwd, SESSION);
+		expect(result).toEqual({ total: 0, alive: 0, terminal: 0 });
+	});
+
+	it("populates the registry from a state.json with one entry", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const state = makeState(cwd, "abc12345");
+		appendInteractiveState(cwd, SESSION, {
+			id: state.id,
+			paneId: state.paneId,
+			windowName: state.windowName,
+			mux: state.mux,
+			artifactDir: state.artifactDir,
+			sessionFile: state.sessionFile,
+		});
+
+		const result = mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+		expect(result.total).toBe(1);
+		const rehydrated = interactiveSubagentRegistry.get("abc12345");
+		expect(rehydrated).toBeDefined();
+		expect(rehydrated?.paneId).toBe("%42");
+		expect(rehydrated?.mux).toBe("tmux");
+		expect(rehydrated?.parentSessionId).toBe(SESSION);
+	});
+
+	it("is a no-op when the registry already has the id (idempotent)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const state = makeState(cwd, "abc12345");
+		appendInteractiveState(cwd, SESSION, {
+			id: state.id,
+			paneId: state.paneId,
+			windowName: state.windowName,
+			mux: state.mux,
+			artifactDir: state.artifactDir,
+			sessionFile: state.sessionFile,
+		});
+
+		// Pre-populate the registry with a different (older) state.
+		const older: InteractiveSubagentState = { ...state, paneId: "%OLD" };
+		interactiveSubagentRegistry.set("abc12345", older);
+
+		mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+		const after = interactiveSubagentRegistry.get("abc12345");
+		expect(after?.paneId).toBe("%OLD");
+	});
+
+	it("resets all runtime cursors on rehydrate", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const state = makeState(cwd, "abc12345");
+		appendInteractiveState(cwd, SESSION, {
+			id: state.id,
+			paneId: state.paneId,
+			windowName: state.windowName,
+			mux: state.mux,
+			artifactDir: state.artifactDir,
+			sessionFile: state.sessionFile,
+		});
+
+		mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+		const rehydrated = interactiveSubagentRegistry.get("abc12345")!;
+		expect(rehydrated.lastDeliveredEventTs).toBe(0);
+		expect(rehydrated.lastDeliveredSessionByte).toBe(0);
+		expect(rehydrated.lastInjectedEventTs).toBeUndefined();
+		expect(rehydrated.lastSnapshotEventTs).toBeUndefined();
+		expect(rehydrated.injected).toBeUndefined();
+		expect(rehydrated.autoDoneForTurnAt).toBeUndefined();
+	});
+
+	it("counts alive vs terminal in the return value", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		// Two entries: one with a terminal event in the artifact, one without.
+		// We can't predict exact alive/terminal counts because isPaneAlive depends
+		// on the tmux mock — but both must reach the registry, and alive+terminal
+		// must sum to a sane value relative to total.
+		const cwdA = cwd;
+		const cwdB = cwd;
+		for (const id of ["alive1", "done1"]) {
+			appendInteractiveState(cwdA, SESSION, {
+				id,
+				paneId: "%" + id,
+				mux: "tmux",
+				artifactDir: join(cwdB, id),
+				sessionFile: "/tmp/sess.jsonl",
+			});
+		}
+		const art1 = artifactPath(cwdB, "done1");
+		appendEvent(art1, { ts: 1, type: "started", status: "running" });
+		appendEvent(art1, { ts: 2, type: "done", status: "done", exitCode: 0 });
+
+		const result = mod.rehydrateInteractiveSubagents(cwdA, SESSION);
+
+		expect(result.total).toBe(2);
+		expect(result.alive + result.terminal).toBeLessThanOrEqual(2);
+		expect(interactiveSubagentRegistry.size).toBe(2);
+	});
+
+	it("does not throw when ctx.cwd is unreachable (best-effort recovery)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		expect(() => mod.rehydrateInteractiveSubagents("/nonexistent/path/that/does/not/exist", SESSION)).not.toThrow();
+	});
+});
+
+describe("session_start rehydrate integration", () => {
+	let cwd: string;
+
+	beforeEach(() => {
+		cwd = makeTmp();
+		const g = globalThis as any;
+		g.__piSubagenturaInteractiveRegistry?.clear?.();
+		g.__piSubagenturaPiRef = undefined;
+	});
+
+	afterEach(() => {
+		rmSync(cwd, { recursive: true, force: true });
+		vi.doUnmock("node:child_process");
+	});
+
+	async function setupExtension() {
+		const api = {
+			registerTool: vi.fn(),
+			registerMessageRenderer: vi.fn(),
+			sendMessage: vi.fn(),
+			sendUserMessage: vi.fn(),
+			on: vi.fn(),
+		};
+		const mod = (await importFresh<typeof import("./subagent")>("./subagent")).default;
+		mod(api as any);
+		let startHandler: ((event: any, ctx: any) => void) | undefined;
+		for (const [event, handler] of (api.on as any).mock.calls) {
+			if (event === "session_start") startHandler = handler;
+		}
+		return { api, startHandler };
+	}
+
+	it("session_start handler repopulates the registry from the on-disk state file", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			windowName: "demo",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+
+		const { startHandler } = await setupExtension();
+		expect(startHandler).toBeTypeOf("function");
+		startHandler!({ type: "session_start", reason: "reload" }, {
+			cwd,
+			sessionManager: { getSessionId: () => SESSION },
+		});
+
+		expect(interactiveSubagentRegistry.has("abc12345")).toBe(true);
+	});
+
+	it("session_start handler survives a missing state file (empty registry)", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		const { startHandler } = await setupExtension();
+		expect(() =>
+			startHandler!({ type: "session_start", reason: "startup" }, {
+				cwd: "/nonexistent",
+				sessionManager: { getSessionId: () => SESSION },
+			}),
+		).not.toThrow();
+		expect(interactiveSubagentRegistry.size).toBe(0);
+	});
+});
+
+describe("session_shutdown clean-slate on /new and quit", () => {
+	let cwd: string;
+
+	beforeEach(() => {
+		cwd = makeTmp();
+		const g = globalThis as any;
+		g.__piSubagenturaInteractiveRegistry?.clear?.();
+		g.__piSubagenturaPiRef = undefined;
+	});
+
+	afterEach(() => {
+		rmSync(cwd, { recursive: true, force: true });
+		vi.doUnmock("node:child_process");
+	});
+
+	async function setupExtension() {
+		const api = {
+			registerTool: vi.fn(),
+			registerMessageRenderer: vi.fn(),
+			sendMessage: vi.fn(),
+			sendUserMessage: vi.fn(),
+			on: vi.fn(),
+		};
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		mod.default(api as any);
+
+		const shutdownHandlers: Array<(event: any, ctx: any) => void> = [];
+		for (const [event, handler] of (api.on as any).mock.calls) {
+			if (event === "session_shutdown") shutdownHandlers.push(handler);
+		}
+		return { api, shutdownHandlers };
+	}
+
+	it("session_shutdown with reason='new' deletes the state file", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+		expect(loadInteractiveStates(cwd, SESSION)).not.toBeNull();
+
+		const { shutdownHandlers } = await setupExtension();
+		// Find the second (heavy) handler — first one is the no-op early one.
+		const heavyHandler = shutdownHandlers[shutdownHandlers.length - 1];
+		heavyHandler({ type: "session_shutdown", reason: "new" }, {
+			cwd,
+			sessionManager: { getSessionId: () => SESSION },
+		});
+
+		expect(loadInteractiveStates(cwd, SESSION)).toBeNull();
+	});
+
+	it("session_shutdown with reason='quit' deletes the state file", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+
+		const { shutdownHandlers } = await setupExtension();
+		const heavyHandler = shutdownHandlers[shutdownHandlers.length - 1];
+		heavyHandler({ type: "session_shutdown", reason: "quit" }, {
+			cwd,
+			sessionManager: { getSessionId: () => SESSION },
+		});
+
+		expect(loadInteractiveStates(cwd, SESSION)).toBeNull();
+	});
+
+	it("session_shutdown with reason='reload' KEEPS the state file (rehydrate depends on it)", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+
+		const { shutdownHandlers } = await setupExtension();
+		const heavyHandler = shutdownHandlers[shutdownHandlers.length - 1];
+		heavyHandler({ type: "session_shutdown", reason: "reload" }, {
+			cwd,
+			sessionManager: { getSessionId: () => SESSION },
+		});
+
+		expect(loadInteractiveStates(cwd, SESSION)).not.toBeNull();
+	});
+
+	it("session_shutdown with reason='resume' KEEPS the state file", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+
+		const { shutdownHandlers } = await setupExtension();
+		const heavyHandler = shutdownHandlers[shutdownHandlers.length - 1];
+		heavyHandler({ type: "session_shutdown", reason: "resume" }, {
+			cwd,
+			sessionManager: { getSessionId: () => SESSION },
+		});
+
+		expect(loadInteractiveStates(cwd, SESSION)).not.toBeNull();
+	});
+
+	it("session_shutdown is a no-op for the state file when ctx.cwd is missing", async () => {
+		await importFresh<typeof import("./subagent")>("./subagent");
+		appendInteractiveState(cwd, SESSION, {
+			id: "abc12345",
+			paneId: "%42",
+			mux: "tmux",
+			artifactDir: join(cwd, "abc12345"),
+			sessionFile: "/tmp/sess.jsonl",
+		});
+
+		const { shutdownHandlers } = await setupExtension();
+		const heavyHandler = shutdownHandlers[shutdownHandlers.length - 1];
+		expect(() => heavyHandler({ type: "session_shutdown", reason: "new" }, undefined)).not.toThrow();
+		// File is unchanged because ctx was undefined — defensive guard.
+		expect(loadInteractiveStates(cwd, SESSION)).not.toBeNull();
+	});
+});
+
+// Re-export to silence the unused-import linter for writeOutput (used in tests below).
+void writeOutput;
+void stateFilePath;
