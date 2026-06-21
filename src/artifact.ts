@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import ndjson from "ndjson";
+import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -377,13 +378,14 @@ export function saveInteractiveStates(
 
   renameSync(tmp, file);
 }
-
+// SAFETY: load-modify-write is not atomic across concurrent callers.
+// Safe today only because a pi session is single-event-loop and never
+// calls this re-entrantly. Do NOT call from parallel async paths without
+// adding a write lock.
 /**
-
  * Convenience: load (or create fresh) + add/overwrite entry by id + save.
-
+ *
  * Called from hot paths (spawn) where a write failure must not break the parent.
-
  */
 
 export function appendInteractiveState(
@@ -406,10 +408,12 @@ export function appendInteractiveState(
   saveInteractiveStates(cwd, sessionId, current);
 }
 
+// SAFETY: load-modify-write is not atomic across concurrent callers.
+// Safe today only because a pi session is single-event-loop and never
+// calls this re-entrantly. Do NOT call from parallel async paths without
+// adding a write lock.
 /**
-
  * Convenience: load + drop entry by id + save. No-op if absent or file missing.
-
  */
 
 export function removeInteractiveState(
