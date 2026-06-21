@@ -28,14 +28,19 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
-import { appendInteractiveState, artifactPath, lastEvent, type SubagentArtifact, type SubagentEvent } from "./artifact";
 import {
-	getMux,
-	NoMultiplexerAvailableError,
-	type MuxName,
-	type Multiplexer,
+  appendInteractiveState,
+  artifactPath,
+  lastEvent,
+  type SubagentArtifact,
+  type SubagentEvent,
+} from "./artifact";
+import {
+  getMux,
+  NoMultiplexerAvailableError,
+  type MuxName,
+  type Multiplexer,
 } from "./multiplexer";
-
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -232,7 +237,6 @@ export interface InteractiveSubagentState {
   injected?: boolean;
 }
 
-
 declare global {
   var __piSubagenturaInteractiveRegistry:
     | Map<string, InteractiveSubagentState>
@@ -424,33 +428,29 @@ export function writeLaunchScript(
 }
 
 export function launchInteractiveSubagent(params: {
-	name: string;
-	task: string;
-	persona?: string;
-	model?: string;
-	cwd: string;
-	contextText?: string | null;
-	/** Spawn in a detached named window (invisible) instead of a visible split. */
-	background?: boolean;
-	/**
-	 * Notification delivery mode requested by the spawner. "notify" (default)
-	 * emits a UI hint on completion. "inject" also injects output.md as a user
-	 * message so the parent LLM processes it in its next turn.
-	 */
-	notifyOnComplete?: "notify" | "inject";
-	/** Mux preference — passed to getMux(). "auto" (default) = env-var heuristic. */
-	muxPreference?: "auto" | "tmux" | "zellij";
-	/**
-	 * Parent pi session id. Used as the per-session key for the on-disk state file
-	 * so a parent reload can rehydrate the sub-agent. If omitted, persistence is
-	 * skipped (used by tests that don't care about reload).
-	 */
-	parentSessionId?: string;
+  name: string;
+  task: string;
+  persona?: string;
+  model?: string;
+  cwd: string;
+  contextText?: string | null;
+  /** Spawn in a detached named window (invisible) instead of a visible split. */
+  background?: boolean;
+  /**
+   * Notification delivery mode requested by the spawner. "notify" (default)
+   * emits a UI hint on completion. "inject" also injects output.md as a user
+   * message so the parent LLM processes it in its next turn.
+   */
+  notifyOnComplete?: "notify" | "inject";
+  /** Mux preference — passed to getMux(). "auto" (default) = env-var heuristic. */
+  muxPreference?: "auto" | "tmux" | "zellij";
+  /**
+   * Parent pi session id. Used as the per-session key for the on-disk state file
+   * so a parent reload can rehydrate the sub-agent. If omitted, persistence is
+   * skipped (used by tests that don't care about reload).
+   */
+  parentSessionId?: string;
 }): InteractiveSubagentState {
-
-
-
-
   const id = randomBytes(4).toString("hex");
   const cwd = resolve(params.cwd);
   const background = params.background !== false; // default true (hidden)
@@ -462,7 +462,6 @@ export function launchInteractiveSubagent(params: {
 
   mkdirSync(paths.artifactDir, { recursive: true });
   writeFileSync(paths.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
-
 
   // Cap the persona to prevent a misbehaving parent from shipping a huge
   // system prompt to the model on every turn. 64 KiB is well above what any
@@ -593,8 +592,6 @@ export function launchInteractiveSubagent(params: {
   return state;
 }
 
-
-
 /**
  * Resolve the multiplexer that created a given sub-agent state. Uses
  * `state.mux` to dispatch to the right backend via `getMux({ preference:
@@ -617,8 +614,10 @@ export function isPaneAlive(state: InteractiveSubagentState): boolean {
  * Send a command (text + Enter) to a pane, using the mux that created it.
  * Mux-agnostic — replaces `sendCommandToTmuxPane(paneId, command)`.
  */
-export function sendCommandToPane(state: InteractiveSubagentState, command: string): void {
-
+export function sendCommandToPane(
+  state: InteractiveSubagentState,
+  command: string,
+): void {
   const mux = getMuxForState(state);
   mux.sendKeys(state.paneId, command, state.muxSession);
   mux.sendEnter(state.paneId, state.muxSession);

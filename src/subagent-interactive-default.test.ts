@@ -24,17 +24,15 @@ import registerExtension from "./subagent";
 
 /** Minimal ctx for the tool's execute signature. */
 function mockCtx() {
-	return {
-		cwd: "/tmp",
-		ui: { setStatus: vi.fn() },
-		sessionManager: {
-			getBranch: vi.fn().mockReturnValue([]),
-			getSessionId: vi.fn().mockReturnValue("test-session-id"),
-		},
-	};
-
+  return {
+    cwd: "/tmp",
+    ui: { setStatus: vi.fn() },
+    sessionManager: {
+      getBranch: vi.fn().mockReturnValue([]),
+      getSessionId: vi.fn().mockReturnValue("test-session-id"),
+    },
+  };
 }
-
 
 /** Find the subagent_interactive tool def from the registered API. */
 function getInteractiveToolDef(api: {

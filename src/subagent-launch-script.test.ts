@@ -12,19 +12,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { launchInteractiveSubagent, writeLaunchScript } from "./interactive-tmux";
+import {
+  launchInteractiveSubagent,
+  writeLaunchScript,
+} from "./interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "./artifact";
 import { importFresh } from "./test-utils";
 
@@ -161,91 +164,106 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 });
 
-
 // ── Mock tmux exec so launchInteractiveSubagent doesn't create real tmux
 // windows during the test run. The existing launch script tests above run
 // real bash + the wrapper and don't need a tmux mock; the spawn-persistence
 // tests below drive launchInteractiveSubagent directly and would otherwise
 // leave orphan tmux windows behind (test pollution).
 function installTmuxMock() {
-	vi.resetModules();
-	vi.doMock("node:child_process", () => ({
-		execFileSync: (_file: string, args: string[]) => {
-			// new-window / new-session / split-window return a pane id; everything
-			// else is a no-op (display-message would otherwise throw).
-			if (args[0] === "new-window" || args[0] === "split-window" || args[0] === "new-session") {
-				return "%99\n";
-			}
-			if (args[0] === "display-message") {
-				return "sess\t1\t0\n";
-			}
-			return "";
-		},
-	}));
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    execFileSync: (_file: string, args: string[]) => {
+      // new-window / new-session / split-window return a pane id; everything
+      // else is a no-op (display-message would otherwise throw).
+      if (
+        args[0] === "new-window" ||
+        args[0] === "split-window" ||
+        args[0] === "new-session"
+      ) {
+        return "%99\n";
+      }
+      if (args[0] === "display-message") {
+        return "sess\t1\t0\n";
+      }
+      return "";
+    },
+  }));
 }
 
 describe("spawn-time state persistence", () => {
-	let cwd: string;
-	const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
+  let cwd: string;
+  const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
 
-	beforeEach(() => {
-		installTmuxMock();
-		cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-spawn-persist-"));
-		process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
-		process.env.TMUX_PANE = "%1";
-		process.env.HOME = process.env.HOME ?? "/tmp";
-	});
+  beforeEach(() => {
+    installTmuxMock();
+    cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-spawn-persist-"));
+    process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+    process.env.TMUX_PANE = "%1";
+    process.env.HOME = process.env.HOME ?? "/tmp";
+  });
 
-	afterEach(() => {
-		rmSync(cwd, { recursive: true, force: true });
-		vi.doUnmock("node:child_process");
-	});
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+    vi.doUnmock("node:child_process");
+  });
 
-	it("launchInteractiveSubagent with parentSessionId writes the state file", async () => {
-		const { launchInteractiveSubagent } = await importFresh<typeof import("./interactive-tmux")>("./interactive-tmux");
-		const state = launchInteractiveSubagent({
-			name: "Demo",
-			task: "t",
-			cwd,
-			parentSessionId: SESSION,
-		});
-		expect(existsSync(stateFilePath(cwd, SESSION))).toBe(true);
-		const loaded = loadInteractiveStates(cwd, SESSION);
-		expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);
-		expect(loaded?.states[state.id]?.mux).toBe(state.mux);
-	});
+  it("launchInteractiveSubagent with parentSessionId writes the state file", async () => {
+    const { launchInteractiveSubagent } =
+      await importFresh<typeof import("./interactive-tmux")>(
+        "./interactive-tmux",
+      );
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      parentSessionId: SESSION,
+    });
+    expect(existsSync(stateFilePath(cwd, SESSION))).toBe(true);
+    const loaded = loadInteractiveStates(cwd, SESSION);
+    expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);
+    expect(loaded?.states[state.id]?.mux).toBe(state.mux);
+  });
 
-	it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {
-		const { launchInteractiveSubagent } = await importFresh<typeof import("./interactive-tmux")>("./interactive-tmux");
-		launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
-		expect(existsSync(stateFilePath(cwd, SESSION))).toBe(false);
-	});
+  it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {
+    const { launchInteractiveSubagent } =
+      await importFresh<typeof import("./interactive-tmux")>(
+        "./interactive-tmux",
+      );
+    launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+    expect(existsSync(stateFilePath(cwd, SESSION))).toBe(false);
+  });
 
-	it("the persisted entry records windowName, mux, and artifactDir", async () => {
-		const { launchInteractiveSubagent } = await importFresh<typeof import("./interactive-tmux")>("./interactive-tmux");
-		const state = launchInteractiveSubagent({
-			name: "Demo",
-			task: "t",
-			cwd,
-			parentSessionId: SESSION,
-		});
-		const loaded = loadInteractiveStates(cwd, SESSION);
-		const entry = loaded?.states[state.id];
-		expect(entry?.windowName).toBe(state.windowName);
-		expect(entry?.mux).toBe(state.mux);
-		expect(entry?.artifactDir).toBe(state.artifactDir);
-		expect(entry?.sessionFile).toBe(state.sessionFile);
-	});
+  it("the persisted entry records windowName, mux, and artifactDir", async () => {
+    const { launchInteractiveSubagent } =
+      await importFresh<typeof import("./interactive-tmux")>(
+        "./interactive-tmux",
+      );
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      parentSessionId: SESSION,
+    });
+    const loaded = loadInteractiveStates(cwd, SESSION);
+    const entry = loaded?.states[state.id];
+    expect(entry?.windowName).toBe(state.windowName);
+    expect(entry?.mux).toBe(state.mux);
+    expect(entry?.artifactDir).toBe(state.artifactDir);
+    expect(entry?.sessionFile).toBe(state.sessionFile);
+  });
 
-	it("the state has parentSessionId populated for terminal cleanup", async () => {
-		const { launchInteractiveSubagent } = await importFresh<typeof import("./interactive-tmux")>("./interactive-tmux");
-		const state = launchInteractiveSubagent({
-			name: "Demo",
-			task: "t",
-			cwd,
-			parentSessionId: SESSION,
-		});
-		expect(state.parentSessionId).toBe(SESSION);
-		expect(state.cwd).toBe(cwd);
-	});
+  it("the state has parentSessionId populated for terminal cleanup", async () => {
+    const { launchInteractiveSubagent } =
+      await importFresh<typeof import("./interactive-tmux")>(
+        "./interactive-tmux",
+      );
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      parentSessionId: SESSION,
+    });
+    expect(state.parentSessionId).toBe(SESSION);
+    expect(state.cwd).toBe(cwd);
+  });
 });

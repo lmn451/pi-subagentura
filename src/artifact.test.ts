@@ -12,28 +12,27 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	appendEvent,
-	appendInteractiveState,
-	artifactPath,
-	deleteInteractiveStatesFile,
-	ensureArtifactDir,
-	lastEvent,
-	listArtifacts,
-	listOutputTurns,
-	loadInteractiveStates,
-	outputPathForTurn,
-	readEvents,
-	readOutput,
-	readOutputForTurn,
-	removeInteractiveState,
-	saveInteractiveStates,
-	snapshotOutput,
-	stateFilePath,
-	writeOutput,
-	type InteractiveSubagentPersistedStateV1,
-	type SubagentEvent,
+  appendEvent,
+  appendInteractiveState,
+  artifactPath,
+  deleteInteractiveStatesFile,
+  ensureArtifactDir,
+  lastEvent,
+  listArtifacts,
+  listOutputTurns,
+  loadInteractiveStates,
+  outputPathForTurn,
+  readEvents,
+  readOutput,
+  readOutputForTurn,
+  removeInteractiveState,
+  saveInteractiveStates,
+  snapshotOutput,
+  stateFilePath,
+  writeOutput,
+  type InteractiveSubagentPersistedStateV1,
+  type SubagentEvent,
 } from "./artifact";
-
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-artifact-"));
@@ -288,285 +287,230 @@ describe("artifact", () => {
       const art = artifactPath(root, "snap6-nonexistent");
       expect(listOutputTurns(art)).toEqual([]);
     });
+  });
+
+  it("listOutputTurns returns [] when the artifact dir doesn't exist", () => {
+    const art = artifactPath(root, "snap6-nonexistent");
+    expect(listOutputTurns(art)).toEqual([]);
+  });
 });
-
-
-		it("listOutputTurns returns [] when the artifact dir doesn't exist", () => {
-			const art = artifactPath(root, "snap6-nonexistent");
-			expect(listOutputTurns(art)).toEqual([]);
-		});
-	});
-
 
 describe("persisted interactive state helpers", () => {
+  let root: string;
 
-	let root: string;
+  beforeEach(() => {
+    root = makeTmp();
+  });
 
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
 
+  const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
 
-	beforeEach(() => {
+  const SAMPLE: InteractiveSubagentPersistedStateV1 = {
+    id: "abc12345",
 
-		root = makeTmp();
+    paneId: "%42",
 
-	});
+    windowName: "demo",
 
+    mux: "tmux",
 
+    artifactDir: "/tmp/artifacts/abc12345",
 
-	afterEach(() => {
+    sessionFile: "/tmp/session.jsonl",
 
-		rmSync(root, { recursive: true, force: true });
+    notifyOnComplete: "inject",
+  };
 
-	});
+  it("stateFilePath returns <cwd>/.pi/subagentura-state-<sessionId>.json", () => {
+    expect(stateFilePath(root, SESSION)).toBe(
+      join(root, ".pi", `subagentura-state-${SESSION}.json`),
+    );
+  });
 
+  it("saveInteractiveStates + loadInteractiveStates round-trips a state file", () => {
+    saveInteractiveStates(root, SESSION, {
+      schemaVersion: 1,
+      parent: SESSION,
+      states: { abc12345: SAMPLE },
+    });
 
+    const loaded = loadInteractiveStates(root, SESSION);
 
-	const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
+    expect(loaded).toEqual({
+      schemaVersion: 1,
+      parent: SESSION,
+      states: { abc12345: SAMPLE },
+    });
+  });
 
-	const SAMPLE: InteractiveSubagentPersistedStateV1 = {
+  it("loadInteractiveStates returns null when the file is missing", () => {
+    expect(loadInteractiveStates(root, SESSION)).toBeNull();
+  });
 
-		id: "abc12345",
+  it("loadInteractiveStates returns null when the JSON is malformed", () => {
+    const file = stateFilePath(root, SESSION);
 
-		paneId: "%42",
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
 
-		windowName: "demo",
+    writeFileSync(file, "not-json{", { mode: 0o600 });
 
-		mux: "tmux",
+    expect(loadInteractiveStates(root, SESSION)).toBeNull();
+  });
 
-		artifactDir: "/tmp/artifacts/abc12345",
+  it("loadInteractiveStates returns null when schemaVersion is not 1", () => {
+    const file = stateFilePath(root, SESSION);
 
-		sessionFile: "/tmp/session.jsonl",
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
 
-		notifyOnComplete: "inject",
+    writeFileSync(
+      file,
+      JSON.stringify({ schemaVersion: 99, parent: SESSION, states: {} }),
+      { mode: 0o600 },
+    );
 
-	};
+    expect(loadInteractiveStates(root, SESSION)).toBeNull();
+  });
 
+  it("loadInteractiveStates returns empty states when the file exists but has no states key", () => {
+    const file = stateFilePath(root, SESSION);
 
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
 
-	it("stateFilePath returns <cwd>/.pi/subagentura-state-<sessionId>.json", () => {
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, parent: SESSION }), {
+      mode: 0o600,
+    });
 
-		expect(stateFilePath(root, SESSION)).toBe(join(root, ".pi", `subagentura-state-${SESSION}.json`));
+    const loaded = loadInteractiveStates(root, SESSION);
 
-	});
+    expect(loaded).toEqual({ schemaVersion: 1, parent: SESSION, states: {} });
+  });
 
+  it("saveInteractiveStates creates the .pi/ directory if missing (mode 0o700)", () => {
+    expect(existsSync(join(root, ".pi"))).toBe(false);
 
+    saveInteractiveStates(root, SESSION, {
+      schemaVersion: 1,
+      parent: SESSION,
+      states: {},
+    });
 
-	it("saveInteractiveStates + loadInteractiveStates round-trips a state file", () => {
+    expect(existsSync(join(root, ".pi"))).toBe(true);
 
-		saveInteractiveStates(root, SESSION, { schemaVersion: 1, parent: SESSION, states: { abc12345: SAMPLE } });
+    if (process.platform !== "win32") {
+      expect(statSync(join(root, ".pi")).mode & 0o777).toBe(0o700);
+    }
+  });
 
-		const loaded = loadInteractiveStates(root, SESSION);
+  it("saveInteractiveStates writes atomically (no torn writes)", () => {
+    saveInteractiveStates(root, SESSION, {
+      schemaVersion: 1,
+      parent: SESSION,
+      states: { abc12345: SAMPLE },
+    });
 
-		expect(loaded).toEqual({ schemaVersion: 1, parent: SESSION, states: { abc12345: SAMPLE } });
+    expect(existsSync(stateFilePath(root, SESSION) + ".tmp")).toBe(false);
 
-	});
+    expect(existsSync(stateFilePath(root, SESSION))).toBe(true);
+  });
 
+  it("saveInteractiveStates rejects schemaVersion !== 1", () => {
+    expect(() =>
+      saveInteractiveStates(root, SESSION, {
+        schemaVersion: 2 as any,
+        parent: SESSION,
+        states: {},
+      }),
+    ).toThrow(/unsupported schemaVersion/);
+  });
 
+  it("appendInteractiveState adds a new entry to an existing file", () => {
+    saveInteractiveStates(root, SESSION, {
+      schemaVersion: 1,
+      parent: SESSION,
+      states: {},
+    });
 
-	it("loadInteractiveStates returns null when the file is missing", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
-		expect(loadInteractiveStates(root, SESSION)).toBeNull();
+    expect(loadInteractiveStates(root, SESSION)?.states["abc12345"]).toEqual(
+      SAMPLE,
+    );
+  });
 
-	});
+  it("appendInteractiveState creates a fresh file if none exists", () => {
+    expect(existsSync(stateFilePath(root, SESSION))).toBe(false);
 
+    appendInteractiveState(root, SESSION, SAMPLE);
 
+    const loaded = loadInteractiveStates(root, SESSION);
 
-	it("loadInteractiveStates returns null when the JSON is malformed", () => {
+    expect(loaded?.parent).toBe(SESSION);
 
-		const file = stateFilePath(root, SESSION);
+    expect(loaded?.states["abc12345"]).toEqual(SAMPLE);
+  });
 
-		mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+  it("appendInteractiveState overwrites an entry with the same id", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
-		writeFileSync(file, "not-json{", { mode: 0o600 });
+    const updated = { ...SAMPLE, paneId: "%99" };
 
-		expect(loadInteractiveStates(root, SESSION)).toBeNull();
+    appendInteractiveState(root, SESSION, updated);
 
-	});
+    expect(
+      loadInteractiveStates(root, SESSION)?.states["abc12345"]?.paneId,
+    ).toBe("%99");
+  });
 
+  it("removeInteractiveState drops the entry by id", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
+    appendInteractiveState(root, SESSION, { ...SAMPLE, id: "def67890" });
 
-	it("loadInteractiveStates returns null when schemaVersion is not 1", () => {
+    removeInteractiveState(root, SESSION, "abc12345");
 
-		const file = stateFilePath(root, SESSION);
+    const loaded = loadInteractiveStates(root, SESSION);
 
-		mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    expect(loaded?.states["abc12345"]).toBeUndefined();
 
-		writeFileSync(file, JSON.stringify({ schemaVersion: 99, parent: SESSION, states: {} }), { mode: 0o600 });
+    expect(loaded?.states["def67890"]).toBeDefined();
+  });
 
-		expect(loadInteractiveStates(root, SESSION)).toBeNull();
+  it("removeInteractiveState is a no-op when the entry is absent", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
-	});
+    removeInteractiveState(root, SESSION, "nonexistent");
 
+    expect(loadInteractiveStates(root, SESSION)?.states["abc12345"]).toEqual(
+      SAMPLE,
+    );
+  });
 
+  it("removeInteractiveState on a missing file does not throw", () => {
+    expect(() =>
+      removeInteractiveState(root, SESSION, "abc12345"),
+    ).not.toThrow();
+  });
 
-	it("loadInteractiveStates returns empty states when the file exists but has no states key", () => {
+  it("the saved file mode is 0o600 (best-effort on POSIX)", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
-		const file = stateFilePath(root, SESSION);
+    if (process.platform !== "win32") {
+      expect(statSync(stateFilePath(root, SESSION)).mode & 0o777).toBe(0o600);
+    }
+  });
 
-		mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+  it("deleteInteractiveStatesFile removes the file", () => {
+    appendInteractiveState(root, SESSION, SAMPLE);
 
-		writeFileSync(file, JSON.stringify({ schemaVersion: 1, parent: SESSION }), { mode: 0o600 });
+    deleteInteractiveStatesFile(root, SESSION);
 
-		const loaded = loadInteractiveStates(root, SESSION);
+    expect(existsSync(stateFilePath(root, SESSION))).toBe(false);
+  });
 
-		expect(loaded).toEqual({ schemaVersion: 1, parent: SESSION, states: {} });
-
-	});
-
-
-
-	it("saveInteractiveStates creates the .pi/ directory if missing (mode 0o700)", () => {
-
-		expect(existsSync(join(root, ".pi"))).toBe(false);
-
-		saveInteractiveStates(root, SESSION, { schemaVersion: 1, parent: SESSION, states: {} });
-
-		expect(existsSync(join(root, ".pi"))).toBe(true);
-
-		if (process.platform !== "win32") {
-
-			expect(statSync(join(root, ".pi")).mode & 0o777).toBe(0o700);
-
-		}
-
-	});
-
-
-
-	it("saveInteractiveStates writes atomically (no torn writes)", () => {
-
-		saveInteractiveStates(root, SESSION, { schemaVersion: 1, parent: SESSION, states: { abc12345: SAMPLE } });
-
-		expect(existsSync(stateFilePath(root, SESSION) + ".tmp")).toBe(false);
-
-		expect(existsSync(stateFilePath(root, SESSION))).toBe(true);
-
-	});
-
-
-
-	it("saveInteractiveStates rejects schemaVersion !== 1", () => {
-
-		expect(() =>
-
-			saveInteractiveStates(root, SESSION, { schemaVersion: 2 as any, parent: SESSION, states: {} }),
-
-		).toThrow(/unsupported schemaVersion/);
-
-	});
-
-
-
-	it("appendInteractiveState adds a new entry to an existing file", () => {
-
-		saveInteractiveStates(root, SESSION, { schemaVersion: 1, parent: SESSION, states: {} });
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		expect(loadInteractiveStates(root, SESSION)?.states["abc12345"]).toEqual(SAMPLE);
-
-	});
-
-
-
-	it("appendInteractiveState creates a fresh file if none exists", () => {
-
-		expect(existsSync(stateFilePath(root, SESSION))).toBe(false);
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		const loaded = loadInteractiveStates(root, SESSION);
-
-		expect(loaded?.parent).toBe(SESSION);
-
-		expect(loaded?.states["abc12345"]).toEqual(SAMPLE);
-
-	});
-
-
-
-	it("appendInteractiveState overwrites an entry with the same id", () => {
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		const updated = { ...SAMPLE, paneId: "%99" };
-
-		appendInteractiveState(root, SESSION, updated);
-
-		expect(loadInteractiveStates(root, SESSION)?.states["abc12345"]?.paneId).toBe("%99");
-
-	});
-
-
-
-	it("removeInteractiveState drops the entry by id", () => {
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		appendInteractiveState(root, SESSION, { ...SAMPLE, id: "def67890" });
-
-		removeInteractiveState(root, SESSION, "abc12345");
-
-		const loaded = loadInteractiveStates(root, SESSION);
-
-		expect(loaded?.states["abc12345"]).toBeUndefined();
-
-		expect(loaded?.states["def67890"]).toBeDefined();
-
-	});
-
-
-
-	it("removeInteractiveState is a no-op when the entry is absent", () => {
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		removeInteractiveState(root, SESSION, "nonexistent");
-
-		expect(loadInteractiveStates(root, SESSION)?.states["abc12345"]).toEqual(SAMPLE);
-
-	});
-
-
-
-	it("removeInteractiveState on a missing file does not throw", () => {
-
-		expect(() => removeInteractiveState(root, SESSION, "abc12345")).not.toThrow();
-
-	});
-
-
-
-	it("the saved file mode is 0o600 (best-effort on POSIX)", () => {
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		if (process.platform !== "win32") {
-
-			expect(statSync(stateFilePath(root, SESSION)).mode & 0o777).toBe(0o600);
-
-		}
-
-	});
-
-
-
-	it("deleteInteractiveStatesFile removes the file", () => {
-
-		appendInteractiveState(root, SESSION, SAMPLE);
-
-		deleteInteractiveStatesFile(root, SESSION);
-
-		expect(existsSync(stateFilePath(root, SESSION))).toBe(false);
-
-	});
-
-
-
-	it("deleteInteractiveStatesFile is a no-op when the file is absent", () => {
-
-		expect(() => deleteInteractiveStatesFile(root, SESSION)).not.toThrow();
-
-	});
-
+  it("deleteInteractiveStatesFile is a no-op when the file is absent", () => {
+    expect(() => deleteInteractiveStatesFile(root, SESSION)).not.toThrow();
+  });
 });
-

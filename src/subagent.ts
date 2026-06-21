@@ -63,28 +63,32 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import {
-	appendEvent,
-	appendInteractiveState,
-	artifactPath,
-	deleteInteractiveStatesFile,
-	lastEvent,
-	listOutputTurns,
-	loadInteractiveStates,
-	readEvents,
-	readOutput,
-	readOutputForTurn,
-	removeInteractiveState,
-	snapshotOutput,
-	type SubagentArtifact,
-	type SubagentEvent,
+  appendEvent,
+  appendInteractiveState,
+  artifactPath,
+  deleteInteractiveStatesFile,
+  lastEvent,
+  listOutputTurns,
+  loadInteractiveStates,
+  readEvents,
+  readOutput,
+  readOutputForTurn,
+  removeInteractiveState,
+  snapshotOutput,
+  type SubagentArtifact,
+  type SubagentEvent,
 } from "./artifact";
 
 import type { Usage } from "./helpers";
 
-
-
-
-import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -589,32 +593,43 @@ export function pollArtifactChanges(pi: ExtensionAPI): void {
       const cursor = state.lastDeliveredEventTs ?? 0;
       const events = readEvents(art, cursor + 1);
 
-		if (events.length > 0) {
-			let maxTs = cursor;
-			let deliveredTerminal = false;
-			for (const ev of events) {
-				if (ev.ts > maxTs) maxTs = ev.ts;
-				if (!shouldNotify(ev)) continue;
-				// Track terminal delivery so we can drop the on-disk state entry
-				// AFTER the cursor advances (crash-safe ordering).
-				if (ev.type === "done" || ev.type === "error" || ev.type === "cancelled") {
-					deliveredTerminal = true;
-				}
-				// If auto-done already fired for this turn, skip any later explicit `done` events:
-				// they would be duplicates. Errors and cancelled still flow through (the explicit signal is more accurate).
-				if (state.autoDoneForTurnAt !== undefined && ev.ts >= state.autoDoneForTurnAt && ev.type === "done") continue;
-				deliverArtifactNotification(interactivePi, state, ev);
-			}
-			state.lastDeliveredEventTs = maxTs;
-			// Drop the on-disk entry now that the terminal event is delivered.
-			// Cursor advance above is what makes a crash here re-deliver rather
-			// than drop the event on the next reload.
-			if (deliveredTerminal && state.parentSessionId) {
-				try {
-					removeInteractiveState(state.cwd, state.parentSessionId, state.id);
-				} catch { /* best effort — disk full, permission denied, etc. */ }
-			}
-		}
+      if (events.length > 0) {
+        let maxTs = cursor;
+        let deliveredTerminal = false;
+        for (const ev of events) {
+          if (ev.ts > maxTs) maxTs = ev.ts;
+          if (!shouldNotify(ev)) continue;
+          // Track terminal delivery so we can drop the on-disk state entry
+          // AFTER the cursor advances (crash-safe ordering).
+          if (
+            ev.type === "done" ||
+            ev.type === "error" ||
+            ev.type === "cancelled"
+          ) {
+            deliveredTerminal = true;
+          }
+          // If auto-done already fired for this turn, skip any later explicit `done` events:
+          // they would be duplicates. Errors and cancelled still flow through (the explicit signal is more accurate).
+          if (
+            state.autoDoneForTurnAt !== undefined &&
+            ev.ts >= state.autoDoneForTurnAt &&
+            ev.type === "done"
+          )
+            continue;
+          deliverArtifactNotification(interactivePi, state, ev);
+        }
+        state.lastDeliveredEventTs = maxTs;
+        // Drop the on-disk entry now that the terminal event is delivered.
+        // Cursor advance above is what makes a crash here re-deliver rather
+        // than drop the event on the next reload.
+        if (deliveredTerminal && state.parentSessionId) {
+          try {
+            removeInteractiveState(state.cwd, state.parentSessionId, state.id);
+          } catch {
+            /* best effort — disk full, permission denied, etc. */
+          }
+        }
+      }
 
       // Per-turn snapshot: on a NEW `done` event, copy the latest output.md into output-N.md so turn
       // history survives the child overwriting output.md each turn. Runs in every notifyOnComplete mode,
@@ -630,8 +645,6 @@ export function pollArtifactChanges(pi: ExtensionAPI): void {
         snapshotOutput(art, turnNumber);
         state.lastSnapshotEventTs = last.ts;
       }
-
-
 
       // Inject-mode delivery: on a NEW `done` event, push output.md into the parent LLM's next turn.
       // Per-turn (not per-sub-agent) — `lastInjectedEventTs` is compared against the current `done`'s `ts`
@@ -1248,7 +1261,6 @@ export function findArtifactById(id: string): SubagentArtifact | null {
     }
   }
   return null;
-
 }
 
 /**
@@ -1265,70 +1277,72 @@ export function findArtifactById(id: string): SubagentArtifact | null {
  * the rehydrated states and replays any backlog.
  */
 export function rehydrateInteractiveSubagents(
-	cwd: string,
-	sessionId: string,
+  cwd: string,
+  sessionId: string,
 ): { total: number; alive: number; terminal: number } {
-	const payload = loadInteractiveStates(cwd, sessionId);
-	if (!payload) return { total: 0, alive: 0, terminal: 0 };
-	let alive = 0;
-	let terminal = 0;
-	for (const entry of Object.values(payload.states) as Array<
-		import("./artifact").InteractiveSubagentPersistedStateV1
-	>) {
-		if (interactiveSubagentRegistry.has(entry.id)) continue;
-		const rehydrated: InteractiveSubagentState = {
-			id: entry.id,
-			// Display fields: placeholders. formatInteractiveState is approximate
-			// after rehydrate; the registry entry is enough to address the pane,
-			// which is all the live ops need.
-			name: entry.id,
-			task: "",
-			paneId: entry.paneId,
-			windowName: entry.windowName,
-			mux: entry.mux,
-			muxSession: entry.muxSession,
-			sessionFile: entry.sessionFile,
-			cwd,
-			startedAt: 0,
-			status: "running",
-			attachCommand: "",
-			selectPaneCommand: "",
-			launchScriptFile: "",
-			artifactDir: entry.artifactDir,
-			notifyOnComplete: entry.notifyOnComplete,
-			parentSessionId: sessionId,
-			// All runtime cursors reset (replay-all semantics).
-			lastDeliveredEventTs: 0,
-			lastDeliveredSessionByte: 0,
-			lastInjectedEventTs: undefined,
-			lastSnapshotEventTs: undefined,
-			injected: undefined,
-			autoDoneForTurnAt: undefined,
-			lastStopReason: undefined,
-			lastStopReasonAt: undefined,
-			lastStopText: undefined,
-		};
-		const art = artifactPath(dirname(entry.artifactDir), basename(entry.artifactDir));
-		const last = lastEvent(art);
-		const paneAlive = isPaneAlive(rehydrated);
-		const next = deriveInteractiveSubagentStatus(last, paneAlive);
-		rehydrated.status = next;
-		// For inject-mode orphans, set lastInjectedEventTs to the most recent
-		// event's ts so the existing terminal event is NOT re-injected on the
-		// first poll after rehydrate. Without this, every parent reload would
-		// flood the new parent LLM with user messages for orphans from the
-		// previous session. Future follow-up `done` events (higher ts) on the
-		// same orphan will still inject, which is the right behavior.
-		if (entry.notifyOnComplete === "inject" && last) {
-			rehydrated.lastInjectedEventTs = last.ts;
-		}
-		if (next === "exited" || next === "cancelled") terminal++;
-		else if (next === "running" || next === "idle") alive++;
-		interactiveSubagentRegistry.set(entry.id, rehydrated);
-	}
-	return { total: Object.keys(payload.states).length, alive, terminal };
+  const payload = loadInteractiveStates(cwd, sessionId);
+  if (!payload) return { total: 0, alive: 0, terminal: 0 };
+  let alive = 0;
+  let terminal = 0;
+  for (const entry of Object.values(payload.states) as Array<
+    import("./artifact").InteractiveSubagentPersistedStateV1
+  >) {
+    if (interactiveSubagentRegistry.has(entry.id)) continue;
+    const rehydrated: InteractiveSubagentState = {
+      id: entry.id,
+      // Display fields: placeholders. formatInteractiveState is approximate
+      // after rehydrate; the registry entry is enough to address the pane,
+      // which is all the live ops need.
+      name: entry.id,
+      task: "",
+      paneId: entry.paneId,
+      windowName: entry.windowName,
+      mux: entry.mux,
+      muxSession: entry.muxSession,
+      sessionFile: entry.sessionFile,
+      cwd,
+      startedAt: 0,
+      status: "running",
+      attachCommand: "",
+      selectPaneCommand: "",
+      launchScriptFile: "",
+      artifactDir: entry.artifactDir,
+      notifyOnComplete: entry.notifyOnComplete,
+      parentSessionId: sessionId,
+      // All runtime cursors reset (replay-all semantics).
+      lastDeliveredEventTs: 0,
+      lastDeliveredSessionByte: 0,
+      lastInjectedEventTs: undefined,
+      lastSnapshotEventTs: undefined,
+      injected: undefined,
+      autoDoneForTurnAt: undefined,
+      lastStopReason: undefined,
+      lastStopReasonAt: undefined,
+      lastStopText: undefined,
+    };
+    const art = artifactPath(
+      dirname(entry.artifactDir),
+      basename(entry.artifactDir),
+    );
+    const last = lastEvent(art);
+    const paneAlive = isPaneAlive(rehydrated);
+    const next = deriveInteractiveSubagentStatus(last, paneAlive);
+    rehydrated.status = next;
+    // For inject-mode orphans, set lastInjectedEventTs to the most recent
+    // event's ts so the existing terminal event is NOT re-injected on the
+    // first poll after rehydrate. Without this, every parent reload would
+    // flood the new parent LLM with user messages for orphans from the
+    // previous session. Future follow-up `done` events (higher ts) on the
+    // same orphan will still inject, which is the right behavior.
+    if (entry.notifyOnComplete === "inject" && last) {
+      rehydrated.lastInjectedEventTs = last.ts;
+    }
+    if (next === "exited" || next === "cancelled") terminal++;
+    else if (next === "running" || next === "idle") alive++;
+    interactiveSubagentRegistry.set(entry.id, rehydrated);
+  }
+  return { total: Object.keys(payload.states).length, alive, terminal };
 }
-
 
 function sanitizeOutput(text: string): string {
   return text.replace(
@@ -2212,20 +2226,19 @@ export default function (pi: ExtensionAPI) {
       const name = params.name ?? `Subagent: ${taskPreview || "interactive"}`;
       const targetCwd = params.cwd ?? ctx.cwd;
 
-		try {
-			const state = launchInteractiveSubagent({
-				name,
-				task: params.task,
-				persona: params.persona,
-				model: params.model,
-				cwd: targetCwd,
-				contextText,
-				background: params.background, // defaults to true (hidden) inside the helper
-				notifyOnComplete: params.notifyOnComplete ?? "inject",
-				muxPreference: params.mux, // pass through user's mux preference
-				parentSessionId: ctx.sessionManager.getSessionId(),
-			});
-
+      try {
+        const state = launchInteractiveSubagent({
+          name,
+          task: params.task,
+          persona: params.persona,
+          model: params.model,
+          cwd: targetCwd,
+          contextText,
+          background: params.background, // defaults to true (hidden) inside the helper
+          notifyOnComplete: params.notifyOnComplete ?? "inject",
+          muxPreference: params.mux, // pass through user's mux preference
+          parentSessionId: ctx.sessionManager.getSessionId(),
+        });
 
         const displayMode = state.windowName
           ? "background (new window/tab)"
@@ -2850,61 +2863,63 @@ export default function (pi: ExtensionAPI) {
   // ── Session shutdown: abort all jobs, kill tmux panes, stop the poller ─
   (pi as any).on?.(
     "session_shutdown",
-    (event: { reason?: string }, ctx: { cwd?: string; sessionManager?: { getSessionId?: () => string } }) => {
+    (
+      event: { reason?: string },
+      ctx: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
+    ) => {
       const g2 = typeof global !== "undefined" ? global : globalThis;
 
-
-    // Stop the global poller so it doesn't fire after we're gone. Without
-    // clearInterval the handle would keep the event loop alive across restarts.
-    if (g2.__piSubagenturaInteractivePollerHandle) {
-      try {
-        clearInterval(g2.__piSubagenturaInteractivePollerHandle);
-      } catch {
-        /* defensive */
+      // Stop the global poller so it doesn't fire after we're gone. Without
+      // clearInterval the handle would keep the event loop alive across restarts.
+      if (g2.__piSubagenturaInteractivePollerHandle) {
+        try {
+          clearInterval(g2.__piSubagenturaInteractivePollerHandle);
+        } catch {
+          /* defensive */
+        }
+        g2.__piSubagenturaInteractivePollerHandle = undefined;
       }
-      g2.__piSubagenturaInteractivePollerHandle = undefined;
-    }
-    // Snapshot running state objects BEFORE clearing, so we can kill their panes
-    // after the registry is empty. We can't call cancelInteractiveSubagent(id)
-    // after clear() because it looks up state from the registry (line 533 of
-    // interactive-tmux.ts) and returns undefined.
-    const runningStates: InteractiveSubagentState[] = [];
-    for (const state of interactiveSubagentRegistry.values()) {
-      if (state.status === "running") runningStates.push(state);
-    }
+      // Snapshot running state objects BEFORE clearing, so we can kill their panes
+      // after the registry is empty. We can't call cancelInteractiveSubagent(id)
+      // after clear() because it looks up state from the registry (line 533 of
+      // interactive-tmux.ts) and returns undefined.
+      const runningStates: InteractiveSubagentState[] = [];
+      for (const state of interactiveSubagentRegistry.values()) {
+        if (state.status === "running") runningStates.push(state);
+      }
 
-    // Drop in-memory state FIRST. An in-flight poll tick (dequeued from
-    // setInterval before clearInterval ran) finds an empty registry and its
-    // for-loop iterates over zero entries — no work, no notification delivery.
-    // `__piSubagenturaPiRef` is still valid at this point (cleared later), so
-    // the tick proceeds into the loop and finds nothing.
-    try {
-      interactiveSubagentRegistry.clear();
-    } catch {
-      /* best effort */
-    }
-
-    // Kill the panes using the snapshotted states. The poller is already safe
-    // (registry empty). We use cancelInteractiveSubagentByState (not the
-    // id-based variant) because the registry is already cleared.
-    for (const state of runningStates) {
+      // Drop in-memory state FIRST. An in-flight poll tick (dequeued from
+      // setInterval before clearInterval ran) finds an empty registry and its
+      // for-loop iterates over zero entries — no work, no notification delivery.
+      // `__piSubagenturaPiRef` is still valid at this point (cleared later), so
+      // the tick proceeds into the loop and finds nothing.
       try {
-        cancelInteractiveSubagentByState(state);
+        interactiveSubagentRegistry.clear();
       } catch {
         /* best effort */
       }
-    }
 
-    // Abort all running subagent sessions before clearing
-    for (const job of jobRegistry.values()) {
-      if (job.status === "running") {
+      // Kill the panes using the snapshotted states. The poller is already safe
+      // (registry empty). We use cancelInteractiveSubagentByState (not the
+      // id-based variant) because the registry is already cleared.
+      for (const state of runningStates) {
         try {
-          job.session.abort().catch(() => {});
+          cancelInteractiveSubagentByState(state);
         } catch {
-          /* session may already be disposed */
+          /* best effort */
         }
       }
-    }
+
+      // Abort all running subagent sessions before clearing
+      for (const job of jobRegistry.values()) {
+        if (job.status === "running") {
+          try {
+            job.session.abort().catch(() => {});
+          } catch {
+            /* session may already be disposed */
+          }
+        }
+      }
       jobRegistry.clear();
       g2.__piSubagenturaPiRef = undefined;
       g2.__piSubagenturaInjectCount = 0;
@@ -2919,7 +2934,10 @@ export default function (pi: ExtensionAPI) {
         ctx?.sessionManager?.getSessionId
       ) {
         try {
-          deleteInteractiveStatesFile(ctx.cwd, ctx.sessionManager.getSessionId());
+          deleteInteractiveStatesFile(
+            ctx.cwd,
+            ctx.sessionManager.getSessionId(),
+          );
         } catch {
           /* best effort */
         }
@@ -2928,29 +2946,23 @@ export default function (pi: ExtensionAPI) {
   );
 }
 
-
-
-
 // ── Re-exports ───────────────────────────────────────────────────────
 // Re-export helpers so external consumers (e.g. tests importing from subagent.ts)
 // don't need to know about the internal helpers.ts split.
 export {
-	formatUsage,
-	SubagentResult,
-	SubagentLiveStatus,
-	ACTIVE_TOOL_DEBOUNCE_MS,
-	// ── Async exports ──
-	jobRegistry,
-	MAX_REGISTRY_SIZE,
-	pruneOldestJob,
-	pruneCompletedJobs,
-	scheduleJobCleanup,
-	startSubagentJob,
-	type JobState,
-	type JobStatus,
-	type NotifyOnComplete,
+  formatUsage,
+  SubagentResult,
+  SubagentLiveStatus,
+  ACTIVE_TOOL_DEBOUNCE_MS,
+  // ── Async exports ──
+  jobRegistry,
+  MAX_REGISTRY_SIZE,
+  pruneOldestJob,
+  pruneCompletedJobs,
+  scheduleJobCleanup,
+  startSubagentJob,
+  type JobState,
+  type JobStatus,
+  type NotifyOnComplete,
 } from "./helpers";
 export { interactiveSubagentRegistry } from "./interactive-tmux";
-
-
-

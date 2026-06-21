@@ -17,15 +17,15 @@
  */
 
 import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	renameSync,
-	statSync,
-	unlinkSync,
-	writeFileSync,
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import ndjson from "ndjson";
@@ -244,12 +244,7 @@ export function lastEvent(art: SubagentArtifact): SubagentEvent | null {
   return events.length > 0 ? events[events.length - 1] : null;
 }
 
-
-
-
 // ── Persisted interactive state (project-local, per parent session) ───────────
-
-
 
 /**
 
@@ -264,50 +259,38 @@ export function lastEvent(art: SubagentArtifact): SubagentEvent | null {
  */
 
 export interface InteractiveSubagentPersistedStateV1 {
+  id: string;
 
-	id: string;
+  paneId: string;
 
-	paneId: string;
+  windowName?: string;
 
-	windowName?: string;
+  mux: MuxName;
 
-	mux: MuxName;
+  muxSession?: string;
 
-	muxSession?: string;
+  artifactDir: string;
 
-	artifactDir: string;
+  sessionFile: string;
 
-	sessionFile: string;
-
-	notifyOnComplete?: "notify" | "inject";
-
+  notifyOnComplete?: "notify" | "inject";
 }
-
-
 
 export interface InteractiveSubagentStateFile {
+  schemaVersion: 1;
 
-	schemaVersion: 1;
+  /** Parent pi session id; redundant with the filename but kept for verification/debugging. */
 
-	/** Parent pi session id; redundant with the filename but kept for verification/debugging. */
+  parent: string;
 
-	parent: string;
-
-	states: { [id: string]: InteractiveSubagentPersistedStateV1 };
-
+  states: { [id: string]: InteractiveSubagentPersistedStateV1 };
 }
-
-
 
 /** File path for a (cwd, sessionId) pair. Project-local under .pi/. */
 
 export function stateFilePath(cwd: string, sessionId: string): string {
-
-	return join(cwd, ".pi", `subagentura-state-${sessionId}.json`);
-
+  return join(cwd, ".pi", `subagentura-state-${sessionId}.json`);
 }
-
-
 
 /**
 
@@ -320,64 +303,50 @@ export function stateFilePath(cwd: string, sessionId: string): string {
  */
 
 export function loadInteractiveStates(
+  cwd: string,
 
-	cwd: string,
-
-	sessionId: string,
-
+  sessionId: string,
 ): InteractiveSubagentStateFile | null {
+  const file = stateFilePath(cwd, sessionId);
 
-	const file = stateFilePath(cwd, sessionId);
+  let content: string;
 
-	let content: string;
+  try {
+    content = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
 
-	try {
+  let parsed: unknown;
 
-		content = readFileSync(file, "utf8");
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
 
-	} catch {
+  if (!parsed || typeof parsed !== "object") return null;
 
-		return null;
+  const obj = parsed as Record<string, unknown>;
 
-	}
+  if (obj.schemaVersion !== 1) return null;
 
-	let parsed: unknown;
+  if (!obj.states || typeof obj.states !== "object") {
+    return {
+      schemaVersion: 1,
+      parent: String(obj.parent ?? sessionId),
+      states: {},
+    };
+  }
 
-	try {
+  return {
+    schemaVersion: 1,
 
-		parsed = JSON.parse(content);
+    parent: String(obj.parent ?? sessionId),
 
-	} catch {
-
-		return null;
-
-	}
-
-	if (!parsed || typeof parsed !== "object") return null;
-
-	const obj = parsed as Record<string, unknown>;
-
-	if (obj.schemaVersion !== 1) return null;
-
-	if (!obj.states || typeof obj.states !== "object") {
-
-		return { schemaVersion: 1, parent: String(obj.parent ?? sessionId), states: {} };
-
-	}
-
-	return {
-
-		schemaVersion: 1,
-
-		parent: String(obj.parent ?? sessionId),
-
-		states: obj.states as { [id: string]: InteractiveSubagentPersistedStateV1 },
-
-	};
-
+    states: obj.states as { [id: string]: InteractiveSubagentPersistedStateV1 },
+  };
 }
-
-
 
 /**
 
@@ -388,34 +357,26 @@ export function loadInteractiveStates(
  */
 
 export function saveInteractiveStates(
+  cwd: string,
 
-	cwd: string,
+  sessionId: string,
 
-	sessionId: string,
-
-	payload: InteractiveSubagentStateFile,
-
+  payload: InteractiveSubagentStateFile,
 ): void {
+  if (payload.schemaVersion !== 1) {
+    throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
+  }
 
-	if (payload.schemaVersion !== 1) {
+  const file = stateFilePath(cwd, sessionId);
 
-		throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
+  mkdirSync(join(cwd, ".pi"), { recursive: true, mode: 0o700 });
 
-	}
+  const tmp = file + ".tmp";
 
-	const file = stateFilePath(cwd, sessionId);
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
 
-	mkdirSync(join(cwd, ".pi"), { recursive: true, mode: 0o700 });
-
-	const tmp = file + ".tmp";
-
-	writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-
-	renameSync(tmp, file);
-
+  renameSync(tmp, file);
 }
-
-
 
 /**
 
@@ -426,32 +387,24 @@ export function saveInteractiveStates(
  */
 
 export function appendInteractiveState(
+  cwd: string,
 
-	cwd: string,
+  sessionId: string,
 
-	sessionId: string,
-
-	entry: InteractiveSubagentPersistedStateV1,
-
+  entry: InteractiveSubagentPersistedStateV1,
 ): void {
+  const current = loadInteractiveStates(cwd, sessionId) ?? {
+    schemaVersion: 1,
 
-	const current = loadInteractiveStates(cwd, sessionId) ?? {
+    parent: sessionId,
 
-		schemaVersion: 1,
+    states: {},
+  };
 
-		parent: sessionId,
+  current.states[entry.id] = entry;
 
-		states: {},
-
-	};
-
-	current.states[entry.id] = entry;
-
-	saveInteractiveStates(cwd, sessionId, current);
-
+  saveInteractiveStates(cwd, sessionId, current);
 }
-
-
 
 /**
 
@@ -459,21 +412,21 @@ export function appendInteractiveState(
 
  */
 
-export function removeInteractiveState(cwd: string, sessionId: string, id: string): void {
+export function removeInteractiveState(
+  cwd: string,
+  sessionId: string,
+  id: string,
+): void {
+  const current = loadInteractiveStates(cwd, sessionId);
 
-	const current = loadInteractiveStates(cwd, sessionId);
+  if (!current) return;
 
-	if (!current) return;
+  if (!(id in current.states)) return;
 
-	if (!(id in current.states)) return;
+  delete current.states[id];
 
-	delete current.states[id];
-
-	saveInteractiveStates(cwd, sessionId, current);
-
+  saveInteractiveStates(cwd, sessionId, current);
 }
-
-
 
 /**
 
@@ -483,18 +436,13 @@ export function removeInteractiveState(cwd: string, sessionId: string, id: strin
 
  */
 
-export function deleteInteractiveStatesFile(cwd: string, sessionId: string): void {
-
-	try {
-
-		unlinkSync(stateFilePath(cwd, sessionId));
-
-	} catch {
-
-		/* best effort — file may not exist */
-
-	}
-
+export function deleteInteractiveStatesFile(
+  cwd: string,
+  sessionId: string,
+): void {
+  try {
+    unlinkSync(stateFilePath(cwd, sessionId));
+  } catch {
+    /* best effort — file may not exist */
+  }
 }
-
-
