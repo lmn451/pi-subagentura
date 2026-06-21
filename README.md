@@ -164,7 +164,18 @@ Parameters:
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `notifyOnComplete` — `"inject"` (default) or `"notify"`; controls how the parent LLM is woken up on completion. See [Completion notifications: notify vs inject](#completion-notifications-notify-vs-inject) below.
 
-The sub-agent's work is **always** written to the artifact dir as `events.ndjson` (lifecycle log) and `output.md` (clean prose the child writes). The pane is for live monitoring; the artifact is the source of truth. The artifact survives parent restarts, so sub-agents that finish while you're away are picked up on the next poll.
+The sub-agent's work is **always** written to the artifact dir as `events.ndjson` (lifecycle log) and `output.md` (clean prose the child writes). The pane is for live monitoring; the artifact is the source of truth. The artifact survives parent restarts — sub-agents that finish while you're away are picked up on the next poll.
+
+The interactive sub-agent **registry state** also survives parent reloads. When spawned,
+a per-(cwd, sessionId) state file is written to `<cwd>/.pi/subagentura-state-<sessionId>.json`.
+On `:reload` or `:resume`, the `session_start` handler reads this file and rehydrates
+the in-memory registry with the minimum fields needed to address each pane
+(`paneId`, `mux`, `artifactDir`, `sessionFile`). Runtime cursors are reset so the
+poller replays any backlog that accumulated during downtime.
+
+On `:new` or `:quit`, the state file is deleted, giving the next session a clean slate.
+See the [state file gotcha](AGENTS.md#rehydrate-state-file-cwdpisubagentura-state-sessionidjson)
+in AGENTS.md for the crash-safety ordering and inject-mode flood fix.
 
 #### Sub-agent completion protocol
 

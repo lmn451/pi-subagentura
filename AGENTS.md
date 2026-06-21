@@ -8,7 +8,7 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
 - **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 18.
 - **Runtime deps** are minimal: `ndjson`, `is-path-inside`. Pi SDKs are peer dependencies.
-- **Tests** are `vitest` and live next to source as `*.test.ts` (17 test files, ~6500 lines of test code).
+- **Tests** are `vitest` and live next to source as `*.test.ts` (20 test files, ~7000 lines of test code).
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
 ## Build / test / verify
@@ -17,7 +17,7 @@ Always run all of these before committing:
 
 ```bash
 npm run typecheck   # tsc --noEmit, catches TDZ / no-use-before-define
-npm test            # vitest run, 288+ tests
+npm test            # vitest run, 344+ tests
 npm run format:check  # prettier --check .
 npm run pack:check  # npm pack --dry-run, mirrors the publish step
 ```
@@ -39,7 +39,7 @@ The pre-push hook (`simple-git-hooks` → `lint-staged` → `prettier --check`) 
 
 ## Code conventions
 
-- **Follow existing project style.** This codebase uses tabs, double quotes, semicolons, trailing commas, and ~100-char lines (matches prettier defaults). Don't reformat unrelated code.
+- **Follow existing project style.** This codebase uses 2-space indents, double quotes, semicolons, trailing commas, and ~80-char lines (matches prettier defaults with `{}` config). Don't reformat unrelated code.
 - **Functions under ~50 lines** is the soft guideline; the per-tool block in `subagent.ts` and the per-test `it()` blocks run longer when they need to.
 - **Comments only for non-obvious logic** — protocol invariants, the "why" of a guard, the "what this is NOT" of a deliberate limitation. No restating the code.
 - **Declare all variables BEFORE conditional blocks that may return early.** `const`/`let` are hoisted into the TDZ; `if (cond) { return ... }` references before declaration throw at runtime. TypeScript's `no-use-before-define` (strict mode) catches this.
@@ -71,6 +71,44 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 ### The `workflow` tool's determinism story is more limited than the docs imply
 
 `runInNewContext` is not an escape-proof jail. The `Date.now()` / `Math.random()` / argless `new Date()` guards throw when called directly, but a script that goes out of its way to be non-deterministic can reach the real ones via `eval()` / `new Function()`. The script author is the trusted main agent, so this is acceptable — but the docs and source comments must keep saying so, because the day someone un-trusts the author, the only thing standing between them and a non-deterministic workflow is a one-line `codeGeneration: { strings: false }` we have not added yet.
+### Rehydrate state file (`<cwd>/.pi/subagentura-state-<sessionId>.json`)
+
+The interactive sub-agent registry is persisted to a per-(cwd, sessionId) state file on
+`launchInteractiveSubagent`. The file stores the minimum fields needed to rehydrate
+(`paneId`, `mux`, `artifactDir`, `sessionFile`, `notifyOnComplete`). On `session_start` the
+rehydrate function reads the file and reconstructs `InteractiveSubagentState` entries with
+reset runtime cursors (replay-all semantics).
+
+**Crash-safe ordering at both write sites:**
+- **Spawn** — write the state file BEFORE `interactiveSubagentRegistry.set`.
+  A crash between the two is recoverable on next reload.
+  A crash before the write leaves no zombie.
+- **Poll cleanup** — advance `lastDeliveredEventTs` (in-memory) BEFORE
+  `removeInteractiveState` (disk). A crash between them re-delivers rather
+  than drops the event.
+
+**Clean-slate on session_shutdown:**
+- `reason="new"` or `reason="quit"` — deletes the state file so the next
+  session starts fresh.
+- `reason="reload"` or `reason="resume"` — KEEPS the file so the next
+  session_start can rehydrate from it. Orphan panes are still killed by the
+  `cancelInteractiveSubagentByState` loop; only the bookkeeping is preserved.
+
+**Inject-mode flood fix at rehydrate:**
+When `notifyOnComplete="inject"` and the artifact already has a terminal event,
+`lastInjectedEventTs` is set to the latest event's ts so the poller does NOT
+re-inject the existing result into the new parent session on its first tick.
+Future follow-up `done` events (higher ts) still inject normally.
+
+**Edge cases:**
+- If `parentSessionId` is omitted (e.g. programmatic spawns from tests),
+  the file is not written; no rehydrate happens on reload.
+- If the state file is missing on `session_start`, rehydrate is a silent no-op.
+- If a rehydrated entry's pane is dead, `deriveInteractiveSubagentStatus`
+  sets `status="exited"` or `status="unknown"`; registry entry is retained
+  so `list_subagent_artifacts` can still surface it before the next cleanup.
+- The schema is versioned (`schemaVersion: 1`) so future migrations can
+  coexist with older state files on upgrades.
 
 ## Git
 
@@ -99,24 +137,24 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 
 ```
 src/
-  subagent.ts                      # MAIN — tools, poller, auto-done fallback
+  subagent.ts                      # MAIN — tools, poller, auto-done fallback, rehydrate ~3k LOC
   helpers.ts                       # startSubagentJob, resolveModel
-  artifact.ts                      # events.ndjson + output.md protocol
+  artifact.ts                      # events.ndjson + output.md protocol + persisted state helpers
   interactive-tmux.ts              # tmux/zellij pane management
   multiplexer{,-tmux,-zellij}.ts   # mux backend abstraction
   subagent-artifact-cli.ts         # the cli.mjs wrapper
   workflow.ts                      # (feat/workflow-tool) workflow tool
   ndjson.d.ts                      # ambient types for the `ndjson` dep
 
-  *.test.ts                        # 17 test files, ~6.5k lines
+  *.test.ts                        # 20 test files, ~7k lines
   test-utils.ts                    # importFresh helper for module-reset tests
 .github/
   workflows/                       # CI (ci.yml) and publish (publish.yml)
-docs/                              # Managed by the separate pi-docs package; do not edit
-```
+docs/                              # Managed by the separate pi-docs package; do not edit```
+
 
 ## When in doubt
 
 - The existing tests in the same directory are the best documentation of intended behavior.
-- `src/subagent-auto-done.test.ts` and `src/subagent-notify.test.ts` together define the artifact-protocol contract — if you're not sure what `events.ndjson` is supposed to contain, those tests are the spec.
+- `src/subagent-auto-done.test.ts`, `src/subagent-notify.test.ts`, and `src/subagent-rehydrate.test.ts` together define the artifact-protocol contract — if you're not sure what `events.ndjson` is supposed to contain, those tests are the spec.
 - The release flow is in `CONTRIBUTING.md`. The dev loop (typecheck + test + format) is above. If a step seems to be missing from this file, it probably is — add it.
