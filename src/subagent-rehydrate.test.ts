@@ -7,9 +7,9 @@
  * session_shutdown(reason="new"|"quit") gives /new a fresh start.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   appendEvent,
   appendInteractiveState,
@@ -242,6 +242,60 @@ describe("rehydrateInteractiveSubagents", () => {
     mod.rehydrateInteractiveSubagents(cwd, SESSION);
     const rehydrated = interactiveSubagentRegistry.get(id);
     expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
+  });
+
+  it("recovers name from prompt file and startedAt from first event", async () => {
+    const mod = await importFresh<typeof import("./subagent")>("./subagent");
+    const id = "recover-me";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+
+    // Create a prompt file: the label before "-prompt.md" becomes the name
+    writeFileSync(join(artDir, "my-agent-prompt.md"), "task content", {
+      mode: 0o600,
+    });
+
+    // Persist state entry (name not in persisted state — recovered from prompt file)
+    appendInteractiveState(cwd, SESSION, {
+      id,
+      paneId: "%99",
+      mux: "tmux",
+      artifactDir: artDir,
+      sessionFile: "/tmp/sess.jsonl",
+    });
+
+    // Write events: first event's ts becomes startedAt
+    const art = artifactPath(cwd, id);
+    appendEvent(art, { ts: 1000, type: "started", status: "running" });
+    appendEvent(art, { ts: 2000, type: "done", status: "done", exitCode: 0 });
+
+    mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+    const rehydrated = interactiveSubagentRegistry.get(id);
+    expect(rehydrated).toBeDefined();
+    expect(rehydrated?.name).toBe("my-agent"); // from prompt file label
+    expect(rehydrated?.startedAt).toBe(1000); // from first event's ts
+  });
+
+  it("falls back to id for name and 0 for startedAt when artifacts are missing", async () => {
+    const mod = await importFresh<typeof import("./subagent")>("./subagent");
+    const id = "fallback-id";
+
+    // Persist state with no artifact files (dir won't exist)
+    appendInteractiveState(cwd, SESSION, {
+      id,
+      paneId: "%99",
+      mux: "tmux",
+      artifactDir: join(cwd, id),
+      sessionFile: "/tmp/sess.jsonl",
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+    const rehydrated = interactiveSubagentRegistry.get(id);
+    expect(rehydrated).toBeDefined();
+    expect(rehydrated?.name).toBe(id); // falls back to entry.id
+    expect(rehydrated?.startedAt).toBe(0); // falls back to 0
   });
 
   describe("session_start rehydrate integration", () => {

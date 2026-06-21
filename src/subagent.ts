@@ -1288,12 +1288,36 @@ export function rehydrateInteractiveSubagents(
     import("./artifact").InteractiveSubagentPersistedStateV1
   >) {
     if (interactiveSubagentRegistry.has(entry.id)) continue;
+    // ── Recover display fields from on-disk files ──
+    // Recovery is best-effort and must never throw; on missing files we
+    // fall back to placeholder values (entry.id for name, 0 for startedAt).
+    const art = artifactPath(
+      dirname(entry.artifactDir),
+      basename(entry.artifactDir),
+    );
+
+    let recoveredName: string;
+    try {
+      const files = readdirSync(entry.artifactDir);
+      const promptFile = files.find((f) => f.endsWith("-prompt.md"));
+      recoveredName = promptFile
+        ? promptFile.slice(0, -"-prompt.md".length)
+        : entry.id;
+    } catch {
+      recoveredName = entry.id;
+    }
+
+    let startedAt: number;
+    try {
+      const events = readEvents(art);
+      startedAt = events.length > 0 ? events[0].ts : 0;
+    } catch {
+      startedAt = 0;
+    }
+
     const rehydrated: InteractiveSubagentState = {
       id: entry.id,
-      // Display fields: placeholders. formatInteractiveState is approximate
-      // after rehydrate; the registry entry is enough to address the pane,
-      // which is all the live ops need.
-      name: entry.id,
+      name: recoveredName,
       task: "",
       paneId: entry.paneId,
       windowName: entry.windowName,
@@ -1301,7 +1325,7 @@ export function rehydrateInteractiveSubagents(
       muxSession: entry.muxSession,
       sessionFile: entry.sessionFile,
       cwd,
-      startedAt: 0,
+      startedAt,
       status: "running",
       attachCommand: "",
       selectPaneCommand: "",
@@ -1320,10 +1344,6 @@ export function rehydrateInteractiveSubagents(
       lastStopReasonAt: undefined,
       lastStopText: undefined,
     };
-    const art = artifactPath(
-      dirname(entry.artifactDir),
-      basename(entry.artifactDir),
-    );
     const last = lastEvent(art);
     const paneAlive = isPaneAlive(rehydrated);
     const next = deriveInteractiveSubagentStatus(last, paneAlive);
