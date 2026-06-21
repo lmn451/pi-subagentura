@@ -169,8 +169,58 @@ describe("rehydrateInteractiveSubagents", () => {
 	it("does not throw when ctx.cwd is unreachable (best-effort recovery)", async () => {
 		const mod = await importFresh<typeof import("./subagent")>("./subagent");
 		expect(() => mod.rehydrateInteractiveSubagents("/nonexistent/path/that/does/not/exist", SESSION)).not.toThrow();
+		expect(() => mod.rehydrateInteractiveSubagents("/nonexistent/path/that/does/not/exist", SESSION)).not.toThrow();
 	});
-});
+
+	it("inject-mode orphans do NOT re-inject their existing terminal event on the first poll after rehydrate", async () => {
+		// Regression for the inject-flood bug: if the persisted entry had
+		// notifyOnComplete="inject" and the artifact has a done event, the
+		// rehydrated state must set lastInjectedEventTs so the inject path
+		// (subagent.ts:609) skips the existing done event. Without this fix
+		// every parent reload would flood the new parent LLM with user
+		// messages for orphans from the previous session.
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const id = "inject-orphan";
+		const artDir = join(cwd, id);
+		appendInteractiveState(cwd, SESSION, {
+			id,
+			paneId: "%77",
+			mux: "tmux",
+			artifactDir: artDir,
+			sessionFile: "/tmp/sess.jsonl",
+			notifyOnComplete: "inject",
+		});
+		// Add a done event to the artifact (what an orphan-with-completed-work looks like).
+		const art = artifactPath(cwd, id);
+		appendEvent(art, { ts: 1, type: "started", status: "running" });
+		appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+
+		mod.rehydrateInteractiveSubagents(cwd, SESSION);
+
+		const rehydrated = interactiveSubagentRegistry.get(id);
+		expect(rehydrated).toBeDefined();
+		// The cursor must equal the latest event's ts so the inject path's
+		// `state.lastInjectedEventTs !== last.ts` check evaluates to false.
+		expect(rehydrated?.lastInjectedEventTs).toBe(2);
+	});
+
+	it("notify-mode orphans leave lastInjectedEventTs undefined (inject path is irrelevant)", async () => {
+		const mod = await importFresh<typeof import("./subagent")>("./subagent");
+		const id = "notify-orphan";
+		const artDir = join(cwd, id);
+		appendInteractiveState(cwd, SESSION, {
+			id,
+			paneId: "%88",
+			mux: "tmux",
+			artifactDir: artDir,
+			sessionFile: "/tmp/sess.jsonl",
+			notifyOnComplete: "notify",
+		});
+		mod.rehydrateInteractiveSubagents(cwd, SESSION);
+		const rehydrated = interactiveSubagentRegistry.get(id);
+		expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
+	});
+
 
 describe("session_start rehydrate integration", () => {
 	let cwd: string;
@@ -374,3 +424,4 @@ describe("session_shutdown clean-slate on /new and quit", () => {
 // Re-export to silence the unused-import linter for writeOutput (used in tests below).
 void writeOutput;
 void stateFilePath;
+});

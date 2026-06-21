@@ -1313,6 +1313,15 @@ export function rehydrateInteractiveSubagents(
 		const paneAlive = isPaneAlive(rehydrated);
 		const next = deriveInteractiveSubagentStatus(last, paneAlive);
 		rehydrated.status = next;
+		// For inject-mode orphans, set lastInjectedEventTs to the most recent
+		// event's ts so the existing terminal event is NOT re-injected on the
+		// first poll after rehydrate. Without this, every parent reload would
+		// flood the new parent LLM with user messages for orphans from the
+		// previous session. Future follow-up `done` events (higher ts) on the
+		// same orphan will still inject, which is the right behavior.
+		if (entry.notifyOnComplete === "inject" && last) {
+			rehydrated.lastInjectedEventTs = last.ts;
+		}
 		if (next === "exited" || next === "cancelled") terminal++;
 		else if (next === "running" || next === "idle") alive++;
 		interactiveSubagentRegistry.set(entry.id, rehydrated);
