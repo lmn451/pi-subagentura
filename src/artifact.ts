@@ -330,7 +330,12 @@ export function loadInteractiveStates(
 
   const obj = parsed as Record<string, unknown>;
 
-  if (obj.schemaVersion !== 1) return null;
+  if (obj.schemaVersion !== 1) {
+    debugLog("warn", "state-file-unknown-schema", {
+      schemaVersion: obj.schemaVersion as number,
+    });
+    return null;
+  }
 
   if (!obj.states || typeof obj.states !== "object") {
     return {
