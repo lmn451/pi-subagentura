@@ -395,21 +395,48 @@ describe("rehydrateInteractiveSubagents", () => {
       expect(interactiveSubagentRegistry.size).toBe(0);
     });
 
-    it("session_start does NOT rehydrate on startup (fresh pi launch)", async () => {
+    it("session_start does NOT rehydrate on startup when session ID doesn't match", async () => {
       await importFresh<typeof import("./subagent")>("./subagent");
+      // Entry from a different (old) session
       appendInteractiveState(cwd, {
-        id: "from-previous-session",
+        id: "from-old-session",
         paneId: "%42",
         mux: "tmux",
-        artifactDir: join(cwd, "from-previous-session"),
+        artifactDir: join(cwd, "from-old-session"),
         sessionFile: "/tmp/sess.jsonl",
+        parentSessionId: "session-old",
       });
 
       const { startHandler } = await setupExtension();
-      startHandler!({ type: "session_start", reason: "startup" }, { cwd });
+      startHandler!({ type: "session_start", reason: "startup" } as any, {
+        cwd,
+        sessionManager: { getSessionId: () => "session-new" },
+      });
 
-      // Registry should be empty - startup is a different session, not a reload/resume
+      // Registry should be empty - different session, no match
       expect(interactiveSubagentRegistry.size).toBe(0);
+    });
+
+    it("session_start DOES rehydrate on startup when session ID matches (--session / -r)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-same-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-same-session"),
+        sessionFile: "/tmp/sess.jsonl",
+        parentSessionId: "session-mine",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "startup" } as any, {
+        cwd,
+        sessionManager: { getSessionId: () => "session-mine" },
+      });
+
+      // Registry should have the entry - matching session after restart with --session
+      expect(interactiveSubagentRegistry.size).toBe(1);
+      expect(interactiveSubagentRegistry.has("from-same-session")).toBe(true);
     });
 
     it("session_start filters by parentSessionId on reload", async () => {

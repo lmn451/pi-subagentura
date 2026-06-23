@@ -1461,12 +1461,13 @@ export default function (pi: ExtensionAPI) {
   // which is the same pi the poller uses via __piSubagenturaPiRef.
   pi.on("session_start", (event, ctx) => {
     g2.__piSubagenturaUi = ctx.ui;
-    // Rehydrate orphan interactive sub-agents from the state file ONLY on reload/resume.
+    // Rehydrate on startup (resumed session after quit), reload, and resume.
     // The session ID filter ensures only subagents created in this specific session
-    // are rehydrated — not subagents from a different session that survived a quit.
-    // On explicit fresh starts (new, fork) we also skip rehydration.
+    // are rehydrated. On 'new' and 'fork' we skip — those are explicit fresh starts.
     const shouldRehydrate =
-      event.reason === "reload" || event.reason === "resume";
+      event.reason === "startup" ||
+      event.reason === "reload" ||
+      event.reason === "resume";
     if (shouldRehydrate) {
       try {
         rehydrateInteractiveSubagents(
