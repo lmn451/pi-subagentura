@@ -2950,7 +2950,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       const preserveInteractivePanes =
-        event?.reason === "reload" || event?.reason === "resume";
+        event?.reason === "reload" ||
+        event?.reason === "resume" ||
+        event?.reason === "quit";
       if (!preserveInteractivePanes) {
         // Kill the panes using the already-snapshotted states.
         // cancelInteractiveSubagentByState is used (not the id-based variant)
@@ -2976,7 +2978,7 @@ export default function (pi: ExtensionAPI) {
       jobRegistry.clear();
       g2.__piSubagenturaPiRef = undefined;
       g2.__piSubagenturaInjectCount = 0;
-      // Clean-slate the state file on /new. On quit we KEEP the file so the
+      // Clean-slate the state file on /new. On quit/reload/resume we KEEP the file so the
       // next session_start can rehydrate the sub-agents (their panes survive).
       if (event?.reason === "new" && ctx?.cwd) {
         try {
