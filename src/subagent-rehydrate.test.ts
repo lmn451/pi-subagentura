@@ -395,7 +395,7 @@ describe("rehydrateInteractiveSubagents", () => {
       expect(interactiveSubagentRegistry.size).toBe(0);
     });
 
-    it("session_start DOES rehydrate on startup (survived a quit)", async () => {
+    it("session_start does NOT rehydrate on startup (fresh pi launch)", async () => {
       await importFresh<typeof import("./subagent")>("./subagent");
       appendInteractiveState(cwd, {
         id: "from-previous-session",
@@ -408,11 +408,43 @@ describe("rehydrateInteractiveSubagents", () => {
       const { startHandler } = await setupExtension();
       startHandler!({ type: "session_start", reason: "startup" }, { cwd });
 
-      // Registry should have the rehydrated entry - startup after quit preserves subagents
+      // Registry should be empty - startup is a different session, not a reload/resume
+      expect(interactiveSubagentRegistry.size).toBe(0);
+    });
+
+    it("session_start filters by parentSessionId on reload", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      // Entry from a DIFFERENT session
+      appendInteractiveState(cwd, {
+        id: "other-session-agent",
+        paneId: "%99",
+        mux: "tmux",
+        artifactDir: join(cwd, "other-session-agent"),
+        sessionFile: "/tmp/sess.jsonl",
+        parentSessionId: "session-other",
+      });
+      // Entry from THIS session
+      appendInteractiveState(cwd, {
+        id: "this-session-agent",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "this-session-agent"),
+        sessionFile: "/tmp/sess.jsonl",
+        parentSessionId: "session-current",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "reload" } as any, {
+        cwd,
+        sessionManager: { getSessionId: () => "session-current" },
+      });
+
+      // Only the matching entry should be rehydrated
       expect(interactiveSubagentRegistry.size).toBe(1);
-      expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(
-        true,
+      expect(interactiveSubagentRegistry.has("other-session-agent")).toBe(
+        false,
       );
+      expect(interactiveSubagentRegistry.has("this-session-agent")).toBe(true);
     });
 
     it("session_start does NOT rehydrate on new (explicit new session)", async () => {

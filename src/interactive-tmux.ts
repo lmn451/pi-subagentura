@@ -535,6 +535,7 @@ export function launchInteractiveSubagent(params: {
         artifactDir: paths.artifactDir,
         sessionFile: paths.sessionFile,
         notifyOnComplete: params.notifyOnComplete,
+        parentSessionId: params.parentSessionId,
       });
       persistedState = true;
     } catch {

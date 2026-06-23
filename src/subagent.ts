@@ -1294,7 +1294,10 @@ export function findArtifactById(id: string): SubagentArtifact | null {
  * the session_start handler. The first poll tick after this returns sees
  * the rehydrated states and replays any backlog.
  */
-export function rehydrateInteractiveSubagents(cwd: string): {
+export function rehydrateInteractiveSubagents(
+  cwd: string,
+  currentSessionId?: string,
+): {
   total: number;
   alive: number;
   terminal: number;
@@ -1306,6 +1309,9 @@ export function rehydrateInteractiveSubagents(cwd: string): {
   for (const entry of Object.values(payload.states) as Array<
     import("./artifact").InteractiveSubagentPersistedStateV1
   >) {
+    if (entry.parentSessionId && entry.parentSessionId !== currentSessionId) {
+      continue;
+    }
     if (interactiveSubagentRegistry.has(entry.id)) continue;
     // ── Recover display fields from on-disk files ──
     // Recovery is best-effort and must never throw; on missing files we
@@ -1455,16 +1461,18 @@ export default function (pi: ExtensionAPI) {
   // which is the same pi the poller uses via __piSubagenturaPiRef.
   pi.on("session_start", (event, ctx) => {
     g2.__piSubagenturaUi = ctx.ui;
-    // Rehydrate orphan interactive sub-agents on startup (survived a quit), reload, and resume.
-    // On explicit fresh starts (new, fork) we skip rehydration — those sessions want a clean slate.
-    // subagents should not pollute the new session's view.
+    // Rehydrate orphan interactive sub-agents from the state file ONLY on reload/resume.
+    // The session ID filter ensures only subagents created in this specific session
+    // are rehydrated — not subagents from a different session that survived a quit.
+    // On explicit fresh starts (new, fork) we also skip rehydration.
     const shouldRehydrate =
-      event.reason === "startup" ||
-      event.reason === "reload" ||
-      event.reason === "resume";
+      event.reason === "reload" || event.reason === "resume";
     if (shouldRehydrate) {
       try {
-        rehydrateInteractiveSubagents(ctx.cwd);
+        rehydrateInteractiveSubagents(
+          ctx.cwd,
+          ctx.sessionManager?.getSessionId?.(),
+        );
       } catch {
         /* best effort — rehydrate is a recovery path; failures fall back to empty registry */
       }

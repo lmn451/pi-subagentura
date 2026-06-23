@@ -275,6 +275,9 @@ export interface InteractiveSubagentPersistedStateV1 {
   sessionFile: string;
 
   notifyOnComplete?: "notify" | "inject";
+
+  /** Parent pi session id; only rehydrated when the current session matches. */
+  parentSessionId?: string;
 }
 
 export interface InteractiveSubagentStateFile {
