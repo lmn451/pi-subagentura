@@ -72,9 +72,9 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 
 `runInNewContext` is not an escape-proof jail. The `Date.now()` / `Math.random()` / argless `new Date()` guards throw when called directly, but a script that goes out of its way to be non-deterministic can reach the real ones via `eval()` / `new Function()`. The script author is the trusted main agent, so this is acceptable — but the docs and source comments must keep saying so, because the day someone un-trusts the author, the only thing standing between them and a non-deterministic workflow is a one-line `codeGeneration: { strings: false }` we have not added yet.
 
-### Rehydrate state file (`<cwd>/.pi/subagentura-state-<sessionId>.json`)
+### Rehydrate state file (`<cwd>/.pi/subagentura-state.json`)
 
-The interactive sub-agent registry is persisted to a per-(cwd, sessionId) state file on
+The interactive sub-agent registry is persisted to a per-(cwd) state file on
 `launchInteractiveSubagent`. The file stores the minimum fields needed to rehydrate
 (`paneId`, `mux`, `artifactDir`, `sessionFile`, `notifyOnComplete`). On `session_start` the
 rehydrate function reads the file and reconstructs `InteractiveSubagentState` entries with
@@ -89,13 +89,13 @@ reset runtime cursors (replay-all semantics).
   `removeInteractiveState` (disk). A crash between them re-delivers rather
   than drops the event.
 
-**Clean-slate on session_shutdown:**
+**Rehydrate only on reload/resume:**
 
-- `reason="new"` or `reason="quit"` — deletes the state file so the next
-  session starts fresh.
-- `reason="reload"` or `reason="resume"` — KEEPS the file so the next
-  session_start can rehydrate from it. Orphan panes are still killed by the
-  `cancelInteractiveSubagentByState` loop; only the bookkeeping is preserved.
+The `session_start` handler checks `event.reason` and only rehydrates when the
+reason is `"reload"` or `"resume"`. On fresh starts (`"startup"`, `"new"`, `"fork"`),
+the state file is ignored — previous session's subagents should not pollute the new
+session's view. The state file is deleted on `session_shutdown(reason="new")` to give
+the next session a clean slate.
 
 **Inject-mode flood fix at rehydrate:**
 When `notifyOnComplete="inject"` and the artifact already has a terminal event,

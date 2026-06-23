@@ -394,6 +394,97 @@ describe("rehydrateInteractiveSubagents", () => {
       ).not.toThrow();
       expect(interactiveSubagentRegistry.size).toBe(0);
     });
+
+    it("session_start does NOT rehydrate on startup (fresh session)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-previous-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-previous-session"),
+        sessionFile: "/tmp/sess.jsonl",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "startup" }, { cwd });
+
+      // Registry should be empty - fresh sessions don't rehydrate old subagents
+      expect(interactiveSubagentRegistry.size).toBe(0);
+    });
+
+    it("session_start does NOT rehydrate on new (explicit new session)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-previous-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-previous-session"),
+        sessionFile: "/tmp/sess.jsonl",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "new" }, { cwd });
+
+      // Registry should be empty - new sessions don't rehydrate old subagents
+      expect(interactiveSubagentRegistry.size).toBe(0);
+    });
+
+    it("session_start does NOT rehydrate on fork (forked session)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-previous-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-previous-session"),
+        sessionFile: "/tmp/sess.jsonl",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "fork" }, { cwd });
+
+      // Registry should be empty - forked sessions don't rehydrate old subagents
+      expect(interactiveSubagentRegistry.size).toBe(0);
+    });
+
+    it("session_start DOES rehydrate on resume (resumed session)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-previous-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-previous-session"),
+        sessionFile: "/tmp/sess.jsonl",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "resume" }, { cwd });
+
+      // Registry should have the rehydrated entry - resume preserves subagents
+      expect(interactiveSubagentRegistry.size).toBe(1);
+      expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(
+        true,
+      );
+    });
+
+    it("session_start DOES rehydrate on reload (reloaded session)", async () => {
+      await importFresh<typeof import("./subagent")>("./subagent");
+      appendInteractiveState(cwd, {
+        id: "from-previous-session",
+        paneId: "%42",
+        mux: "tmux",
+        artifactDir: join(cwd, "from-previous-session"),
+        sessionFile: "/tmp/sess.jsonl",
+      });
+
+      const { startHandler } = await setupExtension();
+      startHandler!({ type: "session_start", reason: "reload" }, { cwd });
+
+      // Registry should have the rehydrated entry - reload preserves subagents
+      expect(interactiveSubagentRegistry.size).toBe(1);
+      expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(
+        true,
+      );
+    });
   });
 
   describe("session_shutdown clean-slate on /new and quit", () => {

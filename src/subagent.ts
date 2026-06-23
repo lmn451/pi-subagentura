@@ -1453,14 +1453,19 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx.ui for the artifact poller (it runs from a setInterval and has no ctx).
   // The handler is registered on every default-export invocation; the last one wins,
   // which is the same pi the poller uses via __piSubagenturaPiRef.
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     g2.__piSubagenturaUi = ctx.ui;
-    // Rehydrate orphan interactive sub-agents from the state file so the
-    // parent's view of them survives across restarts, :reload, or parent crash.
-    try {
-      rehydrateInteractiveSubagents(ctx.cwd);
-    } catch {
-      /* best effort — rehydrate is a recovery path; failures fall back to empty registry */
+    // Rehydrate orphan interactive sub-agents from the state file ONLY on reload/resume.
+    // On fresh starts (startup, new, fork), we want a clean slate — previous session's
+    // subagents should not pollute the new session's view.
+    const shouldRehydrate =
+      event.reason === "reload" || event.reason === "resume";
+    if (shouldRehydrate) {
+      try {
+        rehydrateInteractiveSubagents(ctx.cwd);
+      } catch {
+        /* best effort — rehydrate is a recovery path; failures fall back to empty registry */
+      }
     }
   });
 
@@ -2973,7 +2978,6 @@ export default function (pi: ExtensionAPI) {
       g2.__piSubagenturaInjectCount = 0;
       // Clean-slate the state file on /new. On quit we KEEP the file so the
       // next session_start can rehydrate the sub-agents (their panes survive).
-      // On reload/resume the file is also kept (existing behaviour).
       if (event?.reason === "new" && ctx?.cwd) {
         try {
           deleteInteractiveStatesFile(ctx.cwd);
