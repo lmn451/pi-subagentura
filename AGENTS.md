@@ -71,6 +71,7 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 ### The `workflow` tool's determinism story is more limited than the docs imply
 
 `runInNewContext` is not an escape-proof jail. The `Date.now()` / `Math.random()` / argless `new Date()` guards throw when called directly, but a script that goes out of its way to be non-deterministic can reach the real ones via `eval()` / `new Function()`. The script author is the trusted main agent, so this is acceptable — but the docs and source comments must keep saying so, because the day someone un-trusts the author, the only thing standing between them and a non-deterministic workflow is a one-line `codeGeneration: { strings: false }` we have not added yet.
+
 ### Rehydrate state file (`<cwd>/.pi/subagentura-state-<sessionId>.json`)
 
 The interactive sub-agent registry is persisted to a per-(cwd, sessionId) state file on
@@ -80,6 +81,7 @@ rehydrate function reads the file and reconstructs `InteractiveSubagentState` en
 reset runtime cursors (replay-all semantics).
 
 **Crash-safe ordering at both write sites:**
+
 - **Spawn** — write the state file BEFORE `interactiveSubagentRegistry.set`.
   A crash between the two is recoverable on next reload.
   A crash before the write leaves no zombie.
@@ -88,6 +90,7 @@ reset runtime cursors (replay-all semantics).
   than drops the event.
 
 **Clean-slate on session_shutdown:**
+
 - `reason="new"` or `reason="quit"` — deletes the state file so the next
   session starts fresh.
 - `reason="reload"` or `reason="resume"` — KEEPS the file so the next
@@ -101,6 +104,7 @@ re-inject the existing result into the new parent session on its first tick.
 Future follow-up `done` events (higher ts) still inject normally.
 
 **Edge cases:**
+
 - If `parentSessionId` is omitted (e.g. programmatic spawns from tests),
   the file is not written; no rehydrate happens on reload.
 - If the state file is missing on `session_start`, rehydrate is a silent no-op.
@@ -135,7 +139,7 @@ Future follow-up `done` events (higher ts) still inject normally.
 
 ## File map at a glance
 
-```
+````
 src/
   subagent.ts                      # MAIN — tools, poller, auto-done fallback, rehydrate ~3k LOC
   helpers.ts                       # startSubagentJob, resolveModel
@@ -158,3 +162,4 @@ docs/                              # Managed by the separate pi-docs package; do
 - The existing tests in the same directory are the best documentation of intended behavior.
 - `src/subagent-auto-done.test.ts`, `src/subagent-notify.test.ts`, and `src/subagent-rehydrate.test.ts` together define the artifact-protocol contract — if you're not sure what `events.ndjson` is supposed to contain, those tests are the spec.
 - The release flow is in `CONTRIBUTING.md`. The dev loop (typecheck + test + format) is above. If a step seems to be missing from this file, it probably is — add it.
+````

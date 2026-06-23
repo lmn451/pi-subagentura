@@ -216,10 +216,10 @@ describe("spawn-time state persistence", () => {
       name: "Demo",
       task: "t",
       cwd,
-      parentSessionId: SESSION,
+      parentSessionId: "pi",
     });
-    expect(existsSync(stateFilePath(cwd, SESSION))).toBe(true);
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    expect(existsSync(stateFilePath(cwd))).toBe(true);
+    const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);
     expect(loaded?.states[state.id]?.mux).toBe(state.mux);
   });
@@ -230,7 +230,7 @@ describe("spawn-time state persistence", () => {
         "./interactive-tmux",
       );
     launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
-    expect(existsSync(stateFilePath(cwd, SESSION))).toBe(false);
+    expect(existsSync(stateFilePath(cwd))).toBe(false);
   });
 
   it("the persisted entry records windowName, mux, and artifactDir", async () => {
@@ -242,9 +242,9 @@ describe("spawn-time state persistence", () => {
       name: "Demo",
       task: "t",
       cwd,
-      parentSessionId: SESSION,
+      parentSessionId: "pi",
     });
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    const loaded = loadInteractiveStates(cwd);
     const entry = loaded?.states[state.id];
     expect(entry?.windowName).toBe(state.windowName);
     expect(entry?.mux).toBe(state.mux);
@@ -261,9 +261,9 @@ describe("spawn-time state persistence", () => {
       name: "Demo",
       task: "t",
       cwd,
-      parentSessionId: SESSION,
+      parentSessionId: "pi",
     });
-    expect(state.parentSessionId).toBe(SESSION);
+    expect(state.parentSessionId).toBe("pi");
     expect(state.cwd).toBe(cwd);
   });
 });

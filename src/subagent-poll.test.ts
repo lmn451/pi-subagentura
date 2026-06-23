@@ -4,7 +4,7 @@
  * events directly to the artifact dir to drive the poller.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,7 +12,6 @@ import {
   appendInteractiveState,
   artifactPath,
   loadInteractiveStates,
-  removeInteractiveState,
   writeOutput,
 } from "./artifact";
 import { importFresh } from "./test-utils";
@@ -784,9 +783,9 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       selectPaneCommand: "tmux select-pane -t '%99'",
       launchScriptFile: "/tmp/launch.sh",
       artifactDir: join(cwd, id),
-      parentSessionId: SESSION,
+      parentSessionId: "pi",
     };
-    appendInteractiveState(cwd, SESSION, {
+    appendInteractiveState(cwd, {
       id,
       paneId: state.paneId,
       windowName: state.windowName,
@@ -797,7 +796,13 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     return { id, cwd, state };
   }
 
-  it("removes the state.json entry after delivering a done event", async () => {
+  it("removes the state.json entry after delivering a done event when the pane is dead", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => {
+        throw new Error("can't find pane: %99");
+      },
+    }));
     const mod = await importFresh<typeof import("./subagent")>("./subagent");
     const { cwd, id, state } = makePersistedState();
     mod.interactiveSubagentRegistry.set(id, state);
@@ -807,10 +812,31 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
 
     mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeUndefined();
   });
 
+  it("keeps the state.json entry after delivering a done event when the pane is alive", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (_file: string, args: string[]) => {
+        if (args[0] === "display-message") return Buffer.from("#99");
+        return "";
+      },
+    }));
+    const mod = await importFresh<typeof import("./subagent")>("./subagent");
+    const { cwd, id, state } = makePersistedState();
+    mod.interactiveSubagentRegistry.set(id, state);
+    const art = artifactPath(join(state.artifactDir, ".."), id);
+    appendEvent(art, { ts: 1, type: "started", status: "running" });
+    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+
+    mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+
+    const loaded = loadInteractiveStates(cwd);
+    expect(loaded?.states[id]).toBeDefined();
+    expect(state.status).toBe("idle");
+  });
   it("removes the state.json entry after delivering an error event", async () => {
     const mod = await importFresh<typeof import("./subagent")>("./subagent");
     const { cwd, id, state } = makePersistedState();
@@ -825,7 +851,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
 
     mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeUndefined();
   });
 
@@ -838,8 +864,31 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
 
     mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeUndefined();
+  });
+
+  it("keeps the state.json entry and cursor when notification delivery fails", async () => {
+    const mod = await importFresh<typeof import("./subagent")>("./subagent");
+    const { cwd, id, state } = makePersistedState();
+    mod.interactiveSubagentRegistry.set(id, state);
+    const art = artifactPath(join(state.artifactDir, ".."), id);
+    appendEvent(art, {
+      ts: 1,
+      type: "error",
+      status: "error",
+      message: "boom",
+    });
+
+    mod.pollArtifactChanges({
+      sendMessage: vi.fn(() => {
+        throw new Error("stale pi");
+      }),
+    } as any);
+
+    const loaded = loadInteractiveStates(cwd);
+    expect(loaded?.states[id]).toBeDefined();
+    expect(state.lastDeliveredEventTs ?? 0).toBe(0);
   });
 
   it("does NOT remove the state.json entry on tool_activity events (only terminals)", async () => {
@@ -857,7 +906,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
 
     mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
-    const loaded = loadInteractiveStates(cwd, SESSION);
+    const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
   });
 

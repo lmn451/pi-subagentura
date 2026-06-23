@@ -25,15 +25,15 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
 import {
   appendInteractiveState,
   artifactPath,
   lastEvent,
-  type SubagentArtifact,
   type SubagentEvent,
+  removeInteractiveState,
 } from "./artifact";
 import {
   getMux,
@@ -521,6 +521,26 @@ export function launchInteractiveSubagent(params: {
     windowName: safeSegment(params.name),
     id,
   });
+  let persistedState = false;
+  // Persist as soon as the pane is addressable. A crash after this point is
+  // recoverable on reload. The catch path below removes it on launch failure.
+  if (params.parentSessionId) {
+    try {
+      appendInteractiveState(params.cwd, {
+        id,
+        paneId,
+        windowName,
+        mux: mux.name,
+        muxSession,
+        artifactDir: paths.artifactDir,
+        sessionFile: paths.sessionFile,
+        notifyOnComplete: params.notifyOnComplete,
+      });
+      persistedState = true;
+    } catch {
+      /* best effort — disk full, permission denied, etc. In-memory still works. */
+    }
+  }
   try {
     const command = buildPiInteractiveCommand({
       sessionFile: paths.sessionFile,
@@ -537,7 +557,14 @@ export function launchInteractiveSubagent(params: {
   } catch (err) {
     // Orphan-pane guard. If writeLaunchScript or sendKeys throws after
     // the pane was created, kill the pane before rethrowing so we don't
-    // leak it into the user's mux server.
+    // leak it into the user's mux server. Also clean up persisted state.
+    if (persistedState && params.parentSessionId) {
+      try {
+        removeInteractiveState(params.cwd, id);
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
     mux.killPane(paneId, muxSession);
     throw err;
   }
@@ -567,27 +594,6 @@ export function launchInteractiveSubagent(params: {
     notifyOnComplete: params.notifyOnComplete,
     parentSessionId: params.parentSessionId,
   };
-  // Persist to the project-local state file BEFORE registering in-memory. Order
-  // matters: a crash between this write and interactiveSubagentRegistry.set is
-  // safe — the next session_start's rehydrate reads the file and rebuilds the
-  // state. A crash before this write leaves no zombie.
-  if (params.parentSessionId) {
-    try {
-      appendInteractiveState(params.cwd, params.parentSessionId, {
-        id,
-        paneId,
-        windowName,
-        mux: mux.name,
-        muxSession,
-        artifactDir: paths.artifactDir,
-        sessionFile: paths.sessionFile,
-        notifyOnComplete: params.notifyOnComplete,
-      });
-    } catch {
-      /* best effort — disk full, permission denied, etc. In-memory still works. */
-    }
-  }
-
   interactiveSubagentRegistry.set(id, state);
   return state;
 }
@@ -623,6 +629,24 @@ export function sendCommandToPane(
   mux.sendEnter(state.paneId, state.muxSession);
 }
 
+/** Rebuild attach/focus commands for a persisted or rehydrated state. */
+export function buildAttachCommandsForState(
+  state: Pick<
+    InteractiveSubagentState,
+    "paneId" | "windowName" | "mux" | "muxSession"
+  >,
+): { attachCommand: string; focusCommand: string } {
+  return getMuxForState(state as InteractiveSubagentState).buildAttachCommands({
+    paneId: state.paneId,
+    windowName: state.windowName,
+    session: state.muxSession,
+  });
+}
+
+/**
+ * Probe a tmux pane. Kept as a thin helper for the existing call sites in
+ * subagent.ts; PR #2 will route through `state.mux` so this becomes mux-agnostic.
+ */
 /**
  * Probe a tmux pane. Kept as a thin helper for the existing call sites in
  * subagent.ts; PR #2 will route through `state.mux` so this becomes mux-agnostic.
