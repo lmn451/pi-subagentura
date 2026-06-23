@@ -89,13 +89,16 @@ reset runtime cursors (replay-all semantics).
   `removeInteractiveState` (disk). A crash between them re-delivers rather
   than drops the event.
 
-**Rehydrate only on reload/resume:**
+**Rehydrate on startup, reload, and resume:**
 
-The `session_start` handler checks `event.reason` and only rehydrates when the
-reason is `"reload"` or `"resume"`. On fresh starts (`"startup"`, `"new"`, `"fork"`),
-the state file is ignored — previous session's subagents should not pollute the new
-session's view. The state file is deleted on `session_shutdown(reason="new")` to give
-the next session a clean slate.
+The `session_start` handler checks `event.reason` and rehydrates when the
+reason is `"startup"`, `"reload"`, or `"resume"`. This means subagents that
+survived a Ctrl+D (quit) will reappear in the registry on the next pi launch.
+On explicit fresh starts (`"new"`, `"fork"`) the state file is ignored — previous
+session's subagents should not pollute the new session's view. The state file is
+deleted on `session_shutdown(reason="new")` to give the next session a clean slate.
+On `session_shutdown(reason="quit")` the panes and state file are preserved so the
+subagents survive a restart.
 
 **Inject-mode flood fix at rehydrate:**
 When `notifyOnComplete="inject"` and the artifact already has a terminal event,

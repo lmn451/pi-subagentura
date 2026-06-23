@@ -395,7 +395,7 @@ describe("rehydrateInteractiveSubagents", () => {
       expect(interactiveSubagentRegistry.size).toBe(0);
     });
 
-    it("session_start does NOT rehydrate on startup (fresh session)", async () => {
+    it("session_start DOES rehydrate on startup (survived a quit)", async () => {
       await importFresh<typeof import("./subagent")>("./subagent");
       appendInteractiveState(cwd, {
         id: "from-previous-session",
@@ -408,8 +408,11 @@ describe("rehydrateInteractiveSubagents", () => {
       const { startHandler } = await setupExtension();
       startHandler!({ type: "session_start", reason: "startup" }, { cwd });
 
-      // Registry should be empty - fresh sessions don't rehydrate old subagents
-      expect(interactiveSubagentRegistry.size).toBe(0);
+      // Registry should have the rehydrated entry - startup after quit preserves subagents
+      expect(interactiveSubagentRegistry.size).toBe(1);
+      expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(
+        true,
+      );
     });
 
     it("session_start does NOT rehydrate on new (explicit new session)", async () => {
