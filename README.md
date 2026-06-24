@@ -166,15 +166,31 @@ Parameters:
 
 The sub-agent's work is **always** written to the artifact dir as `events.ndjson` (lifecycle log) and `output.md` (clean prose the child writes). The pane is for live monitoring; the artifact is the source of truth. The artifact survives parent restarts — sub-agents that finish while you're away are picked up on the next poll.
 
-The interactive sub-agent **registry state** also survives parent reloads. When spawned,
-a per-(cwd, sessionId) state file is written to `<cwd>/.pi/subagentura-state-<sessionId>.json`.
-On `:reload` or `:resume`, the `session_start` handler reads this file and rehydrates
-the in-memory registry with the minimum fields needed to address each pane
-(`paneId`, `mux`, `artifactDir`, `sessionFile`). Runtime cursors are reset so the
-poller replays any backlog that accumulated during downtime.
+The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
+a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
-On `:new` or `:quit`, the state file is deleted, giving the next session a clean slate.
-See the [state file gotcha](AGENTS.md#rehydrate-state-file-cwdpisubagentura-state-sessionidjson)
+The state file and subagent panes are preserved across these actions:
+
+| Action                                            | State file  | Panes      | Rehydrated next start?                   |
+| ------------------------------------------------- | ----------- | ---------- | ---------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept        | Preserved  | ✅ Same session, parentSessionId matches |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept        | Preserved  | ❌ Different session, no match           |
+| **`:reload`**                                     | Kept        | Preserved  | ✅ Same session                          |
+| **`:resume`** (switch to another session)         | Kept        | Preserved  | ✅ If parentSessionId matches            |
+| **`:new`**                                        | **Deleted** | **Killed** | ❌ Clean slate                           |
+| **`:fork`**                                       | **Deleted** | **Killed** | ❌ Clean slate                           |
+
+> **Note:** `:new` deletes the state file. If you do `:new` and then `:resume`
+> back to the session where subagents were spawned, they **will not reappear**
+> — the state file was already deleted. Only `:reload` or a restart with the
+> same session (`--session`/`-r`) preserves the registry.
+
+On `:reload` and `:resume`, the `session_start` handler rehydrates
+the in-memory registry, filtering by `parentSessionId` so only subagents
+that were created in the current session are restored.
+Runtime cursors are reset so the poller replays any backlog.
+
+See the [state file gotcha](AGENTS.md#rehydrate-state-file-cwdpisubagentura-state-json)
 in AGENTS.md for the crash-safety ordering and inject-mode flood fix.
 
 #### Sub-agent completion protocol
