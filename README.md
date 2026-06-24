@@ -175,17 +175,17 @@ The state file and subagent panes are preserved across these actions:
 | ------------------------------------------------- | ----------- | ---------- | ---------------------------------------- |
 | **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept        | Preserved  | ✅ Same session, parentSessionId matches |
 | **Ctrl+D → fresh `pi` (no session)**              | Kept        | Preserved  | ❌ Different session, no match           |
-| **`:reload`**                                     | Kept        | Preserved  | ✅ Same session                          |
-| **`:resume`** (switch to another session)         | Kept        | Preserved  | ✅ If parentSessionId matches            |
-| **`:new`**                                        | **Deleted** | **Killed** | ❌ Clean slate                           |
-| **`:fork`**                                       | **Deleted** | **Killed** | ❌ Clean slate                           |
+| **`/reload`**                                     | Kept        | Preserved  | ✅ Same session                          |
+| **`/resume`** (switch to another session)         | Kept        | Preserved  | ✅ If parentSessionId matches            |
+| **`/new`**                                        | **Deleted** | **Killed** | ❌ Clean slate                           |
+| **`/fork`**                                       | **Deleted** | **Killed** | ❌ Clean slate                           |
 
-> **Note:** `:new` deletes the state file. If you do `:new` and then `:resume`
+> **Note:** `/new` deletes the state file. If you do `/new` and then `/resume`
 > back to the session where subagents were spawned, they **will not reappear**
-> — the state file was already deleted. Only `:reload` or a restart with the
+> — the state file was already deleted. Only `/reload` or a restart with the
 > same session (`--session`/`-r`) preserves the registry.
 
-On `:reload` and `:resume`, the `session_start` handler rehydrates
+On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
 that were created in the current session are restored.
 Runtime cursors are reset so the poller replays any backlog.
