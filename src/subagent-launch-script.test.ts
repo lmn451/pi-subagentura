@@ -200,6 +200,11 @@ describe("spawn-time state persistence", () => {
     process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
     process.env.TMUX_PANE = "%1";
     process.env.HOME = process.env.HOME ?? "/tmp";
+    // Ensure getMux selects tmux, not zellij. The test mock only handles
+    // tmux commands; if ZELLIJ_SESSION_NAME is set from the outer environment,
+    // getMux would pick zellij and the mock would not intercept its calls.
+    delete process.env.ZELLIJ;
+    delete process.env.ZELLIJ_SESSION_NAME;
   });
 
   afterEach(() => {

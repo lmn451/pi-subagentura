@@ -137,6 +137,27 @@ export class ZellijMultiplexer implements Multiplexer {
 
     if (useBackground) {
       windowName = opts.windowName ?? safeSegment(opts.name);
+      // Save the current active tab position before creating the new tab,
+      // so we can switch back afterwards. zellij's new-tab always focuses
+      // the new tab; we want to leave focus on the parent's tab (matching
+      // tmux's -d flag behavior for detached windows).
+      let previousTabPosition: number | undefined;
+      if (isInZellij) {
+        try {
+          const currentTabInfo = execFileSync(
+            "zellij",
+            [...sessionFlag, "action", "current-tab-info"],
+            { encoding: "utf8", timeout: 3000 },
+          );
+          const positionMatch = currentTabInfo.match(/^position:\s*(\d+)/m);
+          if (positionMatch) {
+            previousTabPosition = parseInt(positionMatch[1], 10);
+          }
+        } catch {
+          // Best effort — if we can't get the current tab, we'll still
+          // create the new tab, just won't restore focus.
+        }
+      }
       execFileSync(
         "zellij",
         [...sessionFlag, "action", "new-tab", "--name", windowName],
@@ -145,6 +166,23 @@ export class ZellijMultiplexer implements Multiplexer {
           timeout: 10000,
         },
       );
+      // Restore focus to the previous tab if we saved its position.
+      if (previousTabPosition !== undefined) {
+        try {
+          execFileSync(
+            "zellij",
+            [
+              ...sessionFlag,
+              "action",
+              "go-to-tab",
+              String(previousTabPosition),
+            ],
+            { encoding: "utf8", timeout: 3000 },
+          );
+        } catch {
+          // Best effort — cosmetic only.
+        }
+      }
     } else {
       // Visible split — side-by-side with the focused pane. zellij splits
       // relative to the currently-focused pane; there is no flag to split

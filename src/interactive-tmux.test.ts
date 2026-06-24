@@ -22,6 +22,11 @@ function installMockExec(scenario: (file: string, args: string[]) => string) {
     execFileSync: (_file: string, args: string[]) =>
       scenario("tmux", args as string[]),
   }));
+  // Ensure getMux selects tmux, not zellij. The mock only handles tmux
+  // commands; if ZELLIJ_SESSION_NAME is set from the outer environment,
+  // getMux would pick zellij and the mock would not intercept its calls.
+  delete process.env.ZELLIJ;
+  delete process.env.ZELLIJ_SESSION_NAME;
 }
 
 function makeArgs() {
