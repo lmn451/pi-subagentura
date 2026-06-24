@@ -690,6 +690,12 @@ export function cancelInteractiveSubagent(
   if (mux.isPaneAlive(state.paneId, state.muxSession)) {
     mux.killPane(state.paneId, state.muxSession);
   }
+  // 4. Clean up the persisted state entry so it doesn't litter the state file.
+  try {
+    removeInteractiveState(state.cwd, state.id);
+  } catch {
+    /* best-effort */
+  }
   return state;
 }
 
@@ -734,6 +740,12 @@ export function cancelInteractiveSubagentByState(
     } catch {
       /* best-effort */
     }
+  }
+  // 3. Clean up the persisted state entry so it doesn't litter the state file.
+  try {
+    removeInteractiveState(state.cwd, state.id);
+  } catch {
+    /* best-effort — stale entry is harmless, just clutter */
   }
   // Does NOT update state.status — see JSDoc point 2.
 }
