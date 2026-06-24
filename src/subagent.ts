@@ -1309,7 +1309,7 @@ export function rehydrateInteractiveSubagents(
   for (const entry of Object.values(payload.states) as Array<
     import("./artifact").InteractiveSubagentPersistedStateV1
   >) {
-    if (entry.parentSessionId && entry.parentSessionId !== currentSessionId) {
+    if (currentSessionId && entry.parentSessionId !== currentSessionId) {
       continue;
     }
     if (interactiveSubagentRegistry.has(entry.id)) continue;
