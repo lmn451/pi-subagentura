@@ -222,13 +222,12 @@ describe("rehydrateInteractiveSubagents", () => {
     ).not.toThrow();
   });
 
-  it("inject-mode orphans do NOT re-inject their existing terminal event on the first poll after rehydrate", async () => {
-    // Regression for the inject-flood bug: if the persisted entry had
-    // notifyOnComplete="inject" and the artifact has a done event, the
-    // rehydrated state must set lastInjectedEventTs so the inject path
-    // (subagent.ts:609) skips the existing done event. Without this fix
-    // every parent reload would flood the new parent LLM with user
-    // messages for orphans from the previous session.
+  it("inject-mode orphans DO re-inject their existing terminal event on the first poll after rehydrate", async () => {
+    // Behavior change: we no longer suppress re-injection here. The inject-mode path
+    // fires on every NEW `done` event. On rehydrate, lastInjectedEventTs starts as
+    // undefined, so the first poll will re-inject the latest terminal event. This means
+    // exactly one extra inject per sub-agent on parent reload, which is acceptable —
+    // it's better than silently dropping a result that completed during the reload downtime.
     const mod = await importFresh<typeof import("./subagent")>("./subagent");
     const id = "inject-orphan";
     const artDir = join(cwd, id);
@@ -249,9 +248,8 @@ describe("rehydrateInteractiveSubagents", () => {
 
     const rehydrated = interactiveSubagentRegistry.get(id);
     expect(rehydrated).toBeDefined();
-    // The cursor must equal the latest event's ts so the inject path's
-    // `state.lastInjectedEventTs !== last.ts` check evaluates to false.
-    expect(rehydrated?.lastInjectedEventTs).toBe(2);
+    // lastInjectedEventTs should remain undefined — we no longer suppress re-injection.
+    expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
   });
 
   it("notify-mode orphans leave lastInjectedEventTs undefined (inject path is irrelevant)", async () => {

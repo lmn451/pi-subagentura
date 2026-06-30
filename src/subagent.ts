@@ -1365,7 +1365,7 @@ export function rehydrateInteractiveSubagents(
       launchScriptFile: "",
       artifactDir: entry.artifactDir,
       notifyOnComplete: entry.notifyOnComplete,
-      parentSessionId: "pi",
+      parentSessionId: entry.parentSessionId ?? "pi",
       // All runtime cursors reset (replay-all semantics).
       lastDeliveredEventTs: 0,
       lastDeliveredSessionByte: 0,
@@ -1381,15 +1381,13 @@ export function rehydrateInteractiveSubagents(
     const paneAlive = isPaneAlive(rehydrated);
     const next = deriveInteractiveSubagentStatus(last, paneAlive);
     rehydrated.status = next;
-    // For inject-mode orphans, set lastInjectedEventTs to the most recent
-    // event's ts so the existing terminal event is NOT re-injected on the
-    // first poll after rehydrate. Without this, every parent reload would
-    // flood the new parent LLM with user messages for orphans from the
-    // previous session. Future follow-up `done` events (higher ts) on the
-    // same orphan will still inject, which is the right behavior.
-    if (entry.notifyOnComplete === "inject" && last) {
-      rehydrated.lastInjectedEventTs = last.ts;
-    }
+    // Deliberately do NOT suppress re-injection here. The inject-mode path
+    // fires on every NEW `done` event (line 682, `lastInjectedEventTs !== last.ts`).
+    // On rehydrate, cursors are reset to 0 and lastInjectedEventTs starts as undefined,
+    // so the first poll will re-inject the latest terminal event for inject-mode orphans.
+    // This means exactly one extra inject per sub-agent on parent reload, which is
+    // acceptable — it's better than silently dropping a result that completed during
+    // the reload downtime (the pre-fix behavior).
     if (next === "exited" || next === "cancelled") terminal++;
     else if (next === "running" || next === "idle") alive++;
     interactiveSubagentRegistry.set(entry.id, rehydrated);
@@ -2300,6 +2298,7 @@ export default function (pi: ExtensionAPI) {
           background: params.background, // defaults to true (hidden) inside the helper
           notifyOnComplete: params.notifyOnComplete ?? "inject",
           muxPreference: params.mux, // pass through user's mux preference
+          parentCwd: ctx.cwd,
           parentSessionId: ctx.sessionManager.getSessionId(),
         });
 

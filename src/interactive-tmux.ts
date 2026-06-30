@@ -450,9 +450,15 @@ export function launchInteractiveSubagent(params: {
    * skipped (used by tests that don't care about reload).
    */
   parentSessionId?: string;
+  /**
+   * The parent session's working directory, used for the state file location.
+   * If omitted, falls back to `cwd` (backward-compatible for tests).
+   */
+  parentCwd?: string;
 }): InteractiveSubagentState {
   const id = randomBytes(4).toString("hex");
   const cwd = resolve(params.cwd);
+  const stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
   const background = params.background !== false; // default true (hidden)
   const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
   const prompt = buildInteractivePrompt({
@@ -526,7 +532,7 @@ export function launchInteractiveSubagent(params: {
   // recoverable on reload. The catch path below removes it on launch failure.
   if (params.parentSessionId) {
     try {
-      appendInteractiveState(params.cwd, {
+      appendInteractiveState(stateCwd, {
         id,
         paneId,
         windowName,
@@ -561,7 +567,7 @@ export function launchInteractiveSubagent(params: {
     // leak it into the user's mux server. Also clean up persisted state.
     if (persistedState && params.parentSessionId) {
       try {
-        removeInteractiveState(params.cwd, id);
+        removeInteractiveState(stateCwd, id);
       } catch {
         /* best effort — the pane kill below is the important cleanup */
       }
@@ -584,7 +590,7 @@ export function launchInteractiveSubagent(params: {
     mux: mux.name,
     muxSession,
     sessionFile: paths.sessionFile,
-    cwd,
+    cwd: stateCwd,
     model: params.model,
     startedAt: Date.now(),
     status: "running",
