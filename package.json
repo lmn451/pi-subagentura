@@ -33,6 +33,7 @@
     "src/artifact-poller.ts",
     "src/helpers.ts",
     "src/tools/in-process.ts",
+    "src/tools/interactive.ts",
     "src/interactive-tmux.ts",
     "src/multiplexer.ts",
     "src/multiplexer-tmux.ts",
