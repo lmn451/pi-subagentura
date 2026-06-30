@@ -93,10 +93,33 @@ import {
 
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import ndjson from "ndjson";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import ndjson from "ndjson";
 
+import {
+  BaseParams,
+  StatusParams,
+  ResultParams,
+  CancelParams,
+  InteractiveParams,
+} from "./schemas";
+
+import {
+  renderSubagentCall,
+  renderSubagentResult,
+  formatActivityRow,
+} from "./rendering";
+
+import {
+  getInjectCount,
+  MAX_INJECT,
+  deliverNotification,
+  shouldNotify,
+  deliverArtifactNotification,
+  incrementInjectCount,
+  decrementInjectCount,
+} from "./notifications";
 export type SubagentDetails =
   | { status: "started"; jobId: string; contextMessages: number }
   | { status: "running"; subagentStatus: SubagentLiveStatus; model?: string }
@@ -167,361 +190,6 @@ async function runSubagent(
       errorMessage: msg,
     };
   }
-}
-
-// ── Rendering ────────────────────────────────────────────────────────
-
-function renderSubagentCall(
-  args: Record<string, unknown>,
-  theme: Theme,
-  label: string,
-) {
-  const task = String(args.task ?? "");
-  const taskPreview = task.length > 60 ? `${task.slice(0, 57)}…` : task;
-  let text = theme.fg("toolTitle", theme.bold(`${label} `));
-  text += theme.fg("accent", taskPreview);
-  if (args.model) {
-    text += theme.fg("dim", ` @${args.model}`);
-  }
-  if (args.async) {
-    text += theme.fg("accent", " [async]");
-  }
-  return new Text(text, 0, 0);
-}
-
-function renderSubagentResult(
-  result: AgentToolResult<any> & { isError?: boolean },
-  { expanded, isPartial }: { expanded: boolean; isPartial: boolean },
-  theme: Theme,
-  _context: unknown,
-) {
-  // Async spawn result: show compact "started" display
-  if (result.details?.status === "started") {
-    return renderAsyncSpawn(result.details, theme);
-  }
-
-  if (isPartial) {
-    const runningDetails =
-      result.details?.status === "running" ? result.details : undefined;
-    const status = runningDetails?.subagentStatus;
-    const model = runningDetails?.model;
-
-    let text =
-      theme.fg("accent", "● ") + theme.fg("toolTitle", "Sub-agent working");
-
-    if (status) {
-      text += theme.fg("dim", ` — turn ${status.turn}`);
-
-      if (status.activeTool) {
-        let argsStr = "{…}";
-        try {
-          argsStr = JSON.stringify(status.activeTool.args).slice(0, 80);
-        } catch {
-          /* circular or otherwise unserializable */
-        }
-        text += `
-  ${theme.fg("muted", "→")} ${theme.fg(
-    "toolTitle",
-    status.activeTool.name,
-  )} ${theme.fg("dim", argsStr)}`;
-      }
-
-      const usageStr = formatUsage(status.usage, model);
-      if (usageStr) {
-        text += `
-  ${theme.fg("muted", usageStr)}`;
-      }
-
-      if (status.output) {
-        const preview = status.output.slice(0, 200).replace(/\s+/g, " ");
-        text += `
-  ${theme.fg("dim", truncateToWidth(preview, 120))}`;
-      }
-    } else {
-      text += theme.fg("dim", "…");
-    }
-
-    return new Text(text, 0, 0);
-  }
-
-  // Final result
-  const text =
-    result.content.find(
-      (c): c is { type: "text"; text: string } => c.type === "text",
-    )?.text ?? "";
-
-  if (result.isError) {
-    if (!expanded) {
-      const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
-      return new Text(theme.fg("error", preview), 0, 0);
-    }
-    return new Text(theme.fg("error", text), 0, 0);
-  }
-
-  const usageStr = (result.details as { usageSummary?: string } | undefined)
-    ?.usageSummary;
-
-  if (usageStr) {
-    const header = theme.fg("success", "✓ ") + theme.fg("muted", usageStr);
-    if (!expanded) {
-      return new Text(header, 0, 0);
-    }
-    return new Text(`${header}\n${text}`, 0, 0);
-  }
-
-  if (!expanded) {
-    const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
-    return new Text(theme.fg("dim", preview), 0, 0);
-  }
-  return new Text(text, 0, 0);
-}
-
-/**
- * Render the immediate result of an async subagent spawn.
- * Compact display: "⚡ Sub-agent started — job abc12345"
- */
-function renderAsyncSpawn(
-  details: Extract<SubagentDetails, { status: "started" }>,
-  theme: Theme,
-): Text {
-  const jobId = details.jobId;
-  const text =
-    theme.fg("accent", "⚡ ") +
-    theme.fg("toolTitle", `Sub-agent started — job ${jobId}`) +
-    "\n" +
-    theme.fg("dim", "  Use get_subagent_status to check progress.");
-  return new Text(text, 0, 0);
-}
-
-// ── Schema ───────────────────────────────────────────────────────────
-
-const BaseParams = Type.Object({
-  task: Type.String({ description: "Task to delegate to the sub-agent" }),
-  persona: Type.Optional(
-    Type.String({
-      description:
-        "Optional persona / system prompt (e.g. 'You are a senior TypeScript reviewer')",
-    }),
-  ),
-  model: Type.Optional(
-    Type.String({
-      description:
-        "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
-    }),
-  ),
-  cwd: Type.Optional(
-    Type.String({
-      description: "Working directory (default: current cwd)",
-    }),
-  ),
-  async: Type.Optional(
-    Type.Boolean({
-      description:
-        "Run subagent in background. Returns a jobId immediately instead of blocking. Use get_subagent_status to poll progress and get_subagent_result to retrieve output when ready. The main agent continues execution immediately — it does NOT wait for async sub-agents to complete. Use only if users asks to",
-    }),
-  ),
-  notifyOnComplete: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("notify", {
-          description:
-            "Send a brief summary notification when the sub-agent completes (no turn triggered)",
-        }),
-        Type.Literal("inject", {
-          description:
-            "Inject the full result as a user message when the sub-agent completes (triggers a new turn)",
-        }),
-      ],
-      {
-        description:
-          "When set, automatically deliver completion notification to the main agent. Only valid with async: true.",
-      },
-    ),
-  ),
-  maxAge: Type.Optional(
-    Type.Number({
-      description:
-        "Optional TTL in milliseconds for completed job retention. Jobs persist indefinitely if omitted.",
-    }),
-  ),
-});
-
-const StatusParams = Type.Object({
-  jobId: Type.String({
-    description:
-      "Job ID returned by async subagent_with_context or subagent_isolated spawn",
-  }),
-});
-
-const ResultParams = Type.Object({
-  jobId: Type.String({
-    description:
-      "Job ID returned by async subagent_with_context or subagent_isolated spawn",
-  }),
-});
-
-const CancelParams = Type.Object({
-  jobId: Type.String({
-    description:
-      "Job ID returned by async subagent_with_context or subagent_isolated spawn",
-  }),
-});
-
-const InteractiveParams = Type.Object({
-  name: Type.Optional(
-    Type.String({
-      description:
-        "Display name for the sub-agent session. Defaults to a task preview.",
-    }),
-  ),
-  task: Type.String({
-    description: "Task to start in the interactive sub-agent",
-  }),
-  persona: Type.Optional(
-    Type.String({
-      description:
-        "Optional persona / system prompt appended to the child Pi session",
-    }),
-  ),
-  model: Type.Optional(
-    Type.String({
-      description: "Optional model override for the child Pi process",
-    }),
-  ),
-  cwd: Type.Optional(
-    Type.String({ description: "Working directory for the child Pi process" }),
-  ),
-  includeContext: Type.Optional(
-    Type.Boolean({
-      description:
-        "Include serialized parent conversation in the initial child prompt. Default false to keep the child session small.",
-    }),
-  ),
-  background: Type.Optional(
-    Type.Boolean({
-      description:
-        "Spawn the sub-agent in a detached named window (hidden from your mux layout) instead of a visible horizontal split. Default true. Pass background: false for a side-by-side split you can watch in real time.",
-    }),
-  ),
-  notifyOnComplete: Type.Optional(
-    Type.Union([Type.Literal("notify"), Type.Literal("inject")], {
-      description:
-        'How to surface the sub-agent result on completion. "inject" (default) also injects output.md as a user message so the parent LLM processes it in its next turn. "notify" emits a UI hint only — no LLM turn is triggered. Falls back to a pointer hint if the inject cap is exceeded.',
-    }),
-  ),
-  mux: Type.Optional(
-    Type.Union(
-      [Type.Literal("auto"), Type.Literal("tmux"), Type.Literal("zellij")],
-      {
-        description:
-          'Which multiplexer backend to use. "auto" (default) picks based on environment: zellij if ZELLIJ_SESSION_NAME is set, tmux if TMUX is set, then whichever backend binary is available. "tmux" forces tmux. "zellij" forces zellij.',
-      },
-    ),
-  ),
-});
-
-// ── Extension ────────────────────────────────────────────────────────
-
-// ── Inject cap tracking ─────────────────────────────────────────
-/** Track concurrent inject-mode notifications to prevent conversation explosion */
-export function getInjectCount(): number {
-  const g2 = typeof global !== "undefined" ? global : globalThis;
-  return (g2.__piSubagenturaInjectCount ?? 0) as number;
-}
-function incrementInjectCount(): void {
-  const g2 = typeof global !== "undefined" ? global : globalThis;
-  g2.__piSubagenturaInjectCount =
-    ((g2.__piSubagenturaInjectCount ?? 0) as number) + 1;
-}
-function decrementInjectCount(): void {
-  const g2 = typeof global !== "undefined" ? global : globalThis;
-  g2.__piSubagenturaInjectCount = Math.max(
-    0,
-    ((g2.__piSubagenturaInjectCount ?? 0) as number) - 1,
-  );
-}
-
-/** Max concurrent inject-mode notifications before degrading to notify */
-export const MAX_INJECT = 5;
-
-// ── Notification Delivery ───────────────────────────────────────
-/**
- * Deliver async subagent completion notification.
- * Reads pi from globalThis to survive module reloads.
- */
-function deliverNotification(jobState: JobState, result: SubagentResult): void {
-  const g2 = typeof global !== "undefined" ? global : globalThis;
-  const pi = g2.__piSubagenturaPiRef as ExtensionAPI | undefined;
-  if (!pi) return; // extension not loaded yet
-
-  try {
-    const summary = buildNotifySummary(jobState.id, result);
-
-    if (jobState.notifyOnComplete === "inject") {
-      // Check inject cap
-      if ((getInjectCount() as number) >= MAX_INJECT) {
-        // Degrade to notify mode silently
-        pi.sendMessage!(
-          {
-            customType: "subagent-notify",
-            content: `Inject cap exceeded for job ${jobState.id} — degraded to notify. ${summary}`,
-            display: true,
-            details: { jobId: jobState.id, result, mode: "notify" },
-          },
-          { deliverAs: "followUp" },
-        );
-        return;
-      }
-      incrementInjectCount();
-      try {
-        // Inject full result as user message
-        (pi as any).sendUserMessage?.(
-          result.output || "(sub-agent produced no output)",
-          {
-            deliverAs: "followUp",
-          },
-        );
-        // Also send a summary notification
-        pi.sendMessage!(
-          {
-            customType: "subagent-notify",
-            content: `⚡ Sub-agent **${jobState.id}** completed — result injected above. ${summary}`,
-            display: true,
-            details: { jobId: jobState.id, result, mode: "inject" },
-          },
-          { deliverAs: "followUp" },
-        );
-      } finally {
-        decrementInjectCount();
-      }
-    } else {
-      // notify mode
-      pi.sendMessage!(
-        {
-          customType: "subagent-notify",
-          content: summary,
-          display: true,
-          details: { jobId: jobState.id, result, mode: "notify" },
-        },
-        { deliverAs: "followUp" },
-      );
-    }
-  } catch {
-    // pi may be stale after session replacement
-  }
-
-  jobState.notificationDelivered = true;
-}
-
-// ── Interactive (tmux-backed) artifact poller ───────────────────
-
-/** True when the event should trigger a wakeup notification to the parent. */
-function shouldNotify(event: SubagentEvent): boolean {
-  return (
-    event.type === "done" ||
-    event.type === "error" ||
-    event.type === "cancelled"
-  );
 }
 
 /**
@@ -1121,106 +789,6 @@ function summarizeToolCall(name: string, args: unknown): string | null {
   }
 }
 
-/** Format a single TUI widget row for a running sub-agent. */
-function formatActivityRow(state: InteractiveSubagentState): string {
-  const ago = state.lastActivityAt
-    ? ` (${agoStr(Date.now() - state.lastActivityAt)})`
-    : "";
-  const summary = state.lastToolSummary ?? "starting…";
-  return `▶ ${state.name}: ${summary}${ago}`;
-}
-
-function agoStr(ms: number): string {
-  if (ms < 0) ms = 0;
-  if (ms < 1000) return "just now";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  return `${Math.floor(m / 60)}h ago`;
-}
-
-/** Build the LLM-facing notification content. Pointer paths always; error body inlined. */
-
-function buildArtifactMessage(
-  state: InteractiveSubagentState,
-  event: SubagentEvent,
-): string {
-  const header = `${iconFor(event)} ${state.name} (${state.id}) — ${labelFor(event)}`;
-  const outputPath = join(state.artifactDir, "output.md");
-  const logPath = join(state.artifactDir, "events.ndjson");
-  const pointer = `\nOutput: ${outputPath}\nActivity log: ${logPath}`;
-  let body = "";
-  if (event.type === "error") {
-    body = `\n${sanitizeOutput((event.message ?? "unknown error").slice(0, 500))}`;
-  }
-
-  return `${header}${body}${pointer}`;
-}
-
-/** Send a single pointer-only notification for one artifact event.
- * Returns true if the notification was sent, false on failure (stale pi context). */
-function deliverArtifactNotification(
-  pi: ExtensionAPI,
-  state: InteractiveSubagentState,
-  event: SubagentEvent,
-): boolean {
-  try {
-    pi.sendMessage!(
-      {
-        customType: "subagent-notify",
-        content: buildArtifactMessage(state, event),
-        display: true,
-        details: { subagentId: state.id, event },
-      },
-      { deliverAs: "followUp" },
-    );
-    return true;
-  } catch {
-    // pi may be stale after session replacement
-    return false;
-  }
-}
-
-/** Assert that a value is never (exhaustiveness checker). */
-function assertNever(value: never): never {
-  throw new Error(`Unexpected value: ${value}`);
-}
-
-function iconFor(event: SubagentEvent): string {
-  switch (event.type) {
-    case "started":
-    case "tool_activity":
-      return "▶";
-    case "done":
-      return event.exitCode === 0 ? "✅" : "❌";
-    case "error":
-      return "❌";
-    case "cancelled":
-      return "🚫";
-    default:
-      return assertNever(event);
-  }
-}
-
-function labelFor(event: SubagentEvent): string {
-  switch (event.type) {
-    case "tool_activity":
-      return "activity";
-    case "done":
-      return `done (exit ${event.exitCode ?? "?"})`;
-    case "error":
-      return "error";
-    case "cancelled":
-      return "cancelled";
-    // "started" is intentionally dropped — it would only fire on the very first poll
-    // and the widget row is a better signal than a one-shot message.
-    case "started":
-      return "started";
-    default:
-      return assertNever(event);
-  }
-}
 /**
  * Find an artifact dir for an id that isn't in the current registry. We can't use the
  * registry (it's lost across process restarts) so we ask the file system. We scan the
@@ -1394,59 +962,6 @@ export function rehydrateInteractiveSubagents(
     interactiveSubagentRegistry.set(entry.id, rehydrated);
   }
   return { total: Object.keys(payload.states).length, alive, terminal };
-}
-
-function sanitizeOutput(text: string): string {
-  return text.replace(
-    /(sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|-----BEGIN[\s\w]+KEY-----|AKIA[\w]{16}|ghp_[\w]{36}|gho_[\w]{36}|ghu_[\w]{36}|xox[abp]-[\w-]+|AIza[\w-]{35}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g,
-    "[REDACTED]",
-  );
-}
-
-function buildNotifySummary(jobId: string, result: SubagentResult): string {
-  const status = result.isError ? "❌" : "✅";
-  const msg = result.isError
-    ? result.errorMessage || result.output.slice(0, 200).replace(/\s+/g, " ")
-    : "done";
-
-  const sanitized = sanitizeOutput(msg);
-
-  const usageStr = formatUsage(result.usage);
-  const summary = `${status} Job ${jobId} ${sanitized.slice(0, 300)}`;
-  if (usageStr) {
-    return `${summary} (${usageStr})`;
-  }
-  return summary;
-}
-// ── Notification TUI Renderer ──────────────────────────────────
-function renderSubagentNotify(
-  message: { content?: string; details?: unknown },
-  options: { expanded?: boolean },
-  theme: Theme,
-): Text {
-  const details = message.details as
-    | { mode?: string; result?: SubagentResult }
-    | undefined;
-  const isInject = details?.mode === "inject";
-  const isError = details?.result?.isError;
-  const text = message.content ?? "";
-
-  let line: string;
-  if (!options.expanded) {
-    line = isError ? theme.fg("error", text) : theme.fg("accent", text);
-  } else {
-    const output = sanitizeOutput(
-      (details?.result?.output ?? "").slice(0, 500).replace(/\s+/g, " "),
-    );
-    const header = isInject
-      ? theme.fg("accent", "⚡ Injected Sub-agent Result")
-      : isError
-        ? theme.fg("error", "❌ Sub-agent Failed")
-        : theme.fg("success", "✅ Sub-agent Completed");
-    const body = theme.fg("dim", text);
-    line = `${header}\n${body}\n${output}`;
-  }
-  return new Text(line, 0, 0);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -3025,3 +2540,4 @@ export {
   type NotifyOnComplete,
 } from "./helpers";
 export { interactiveSubagentRegistry } from "./interactive-tmux";
+export { getInjectCount, MAX_INJECT } from "./notifications";

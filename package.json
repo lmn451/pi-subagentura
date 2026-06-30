@@ -26,6 +26,9 @@
   "files": [
     "LICENSE",
     "src/ndjson.d.ts",
+    "src/notifications.ts",
+    "src/rendering.ts",
+    "src/schemas.ts",
     "src/artifact.ts",
     "src/helpers.ts",
     "src/interactive-tmux.ts",
