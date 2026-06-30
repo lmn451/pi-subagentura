@@ -30,6 +30,7 @@
     "src/rendering.ts",
     "src/schemas.ts",
     "src/artifact.ts",
+    "src/artifact-poller.ts",
     "src/helpers.ts",
     "src/interactive-tmux.ts",
     "src/multiplexer.ts",
