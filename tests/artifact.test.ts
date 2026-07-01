@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -319,11 +320,8 @@ describe("artifact", () => {
     }
 
     function setDirMtime(dir: string, mtimeAgoMs: number): void {
-      const t = new Date(Date.now() - mtimeAgoMs);
-      // We can't directly set mtime on Node; use futimes or utimesSync
-      // Instead, control the test via 'now' parameter
-      void dir;
-      void mtimeAgoMs;
+      const time = new Date(Date.now() - mtimeAgoMs);
+      utimesSync(dir, time, time);
     }
 
     it("returns zero when rootDir is empty", () => {
@@ -512,6 +510,59 @@ describe("artifact", () => {
         true,
       );
       expect(existsSync(staleArt.dir)).toBe(false);
+    });
+
+    it("cleans root-level flat artifact dirs alongside nested cwdLabel artifacts", () => {
+      const sessionRoot = join(root, "sessions", "subagentura");
+      const nestedActive = artifactPath(
+        join(sessionRoot, "project-a-123", "artifacts"),
+        "active1",
+      );
+      const nestedOld = artifactPath(
+        join(sessionRoot, "project-b-456", "artifacts"),
+        "old1",
+      );
+      const flatOld = artifactPath(sessionRoot, "flat-old");
+
+      const oldTs = Date.now() - 200_000;
+      for (const art of [nestedActive, nestedOld, flatOld]) {
+        ensureArtifactDir(art);
+        appendEvent(art, {
+          ts: oldTs,
+          type: "started",
+          status: "running",
+        });
+        writeOutput(art, "result");
+        setDirMtime(art.dir, 200_000);
+      }
+
+      const result = cleanupOldArtifacts(sessionRoot, 100_000, {
+        activeIds: new Set(["active1"]),
+        now: Date.now(),
+      });
+
+      expect(result.removed).toBe(2);
+      expect(result.skipped).toBe(1);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(nestedActive.dir)).toBe(true);
+      expect(existsSync(nestedOld.dir)).toBe(false);
+      expect(existsSync(flatOld.dir)).toBe(false);
+    });
+
+    it("does not delete bare cwdLabel dirs without an artifacts child", () => {
+      const sessionRoot = join(root, "sessions", "subagentura");
+      const bareCwdLabel = join(sessionRoot, "project-a-123");
+      mkdirSync(bareCwdLabel, { recursive: true });
+      setDirMtime(bareCwdLabel, 200_000);
+
+      const result = cleanupOldArtifacts(sessionRoot, 100_000, {
+        now: Date.now(),
+      });
+
+      expect(result.removed).toBe(0);
+      expect(result.skipped).toBe(0);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(bareCwdLabel)).toBe(true);
     });
   });
 });

@@ -319,7 +319,8 @@ function discoverArtifactRoots(realRoot: string): string[] {
   try {
     entries = readdirSync(realRoot);
   } catch {
-    return roots.size > 0 ? [...roots] : [realRoot];
+    roots.add(realRoot);
+    return [...roots];
   }
 
   for (const name of entries) {
@@ -336,7 +337,7 @@ function discoverArtifactRoots(realRoot: string): string[] {
     }
   }
 
-  if (roots.size === 0) roots.add(realRoot);
+  roots.add(realRoot);
   return [...roots];
 }
 
@@ -377,6 +378,8 @@ function cleanupArtifactRoot(
         continue;
       }
 
+      // Only directories that actually look like artifact dirs are eligible.
+      if (!hasDirectArtifactFiles(candidate)) continue;
       // Active-ids check.
       if (activeIds?.has(name)) {
         result.skipped++;
