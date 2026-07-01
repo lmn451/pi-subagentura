@@ -275,8 +275,9 @@ export interface CleanupOptions {
 }
 
 /**
- * Delete artifact directories under `rootDir` whose last activity (dir mtime or latest
- * event timestamp) is older than `ttlMs` from now. Skips directories whose id is in
+ * Delete artifact directories under `rootDir`. Supports both a flat
+ * `<root>/<id>` layout and the production nested layout
+ * `<root>/<cwdLabel>/artifacts/<id>`. Skips directories whose id is in
  * `activeIds`. Returns a summary with counts and any errors.
  *
  * ## Path safety
@@ -296,6 +297,117 @@ export interface CleanupOptions {
  *   2. The directory's mtime (`statSync(dir).mtimeMs`) is >= `now - ttlMs`.
  *   3. The artifact's events.ndjson has at least one event whose `ts` is >= `now - ttlMs`.
  */
+function hasDirectArtifactFiles(dir: string): boolean {
+  return (
+    existsSync(join(dir, "events.ndjson")) || existsSync(join(dir, "output.md"))
+  );
+}
+
+function discoverArtifactRoots(realRoot: string): string[] {
+  const roots = new Set<string>();
+  const nestedRoot = join(realRoot, "artifacts");
+  try {
+    const nestedStat = statSync(nestedRoot);
+    if (nestedStat.isDirectory() && !hasDirectArtifactFiles(nestedRoot)) {
+      roots.add(realpathSync(nestedRoot));
+    }
+  } catch {
+    /* no direct artifacts child */
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(realRoot);
+  } catch {
+    return roots.size > 0 ? [...roots] : [realRoot];
+  }
+
+  for (const name of entries) {
+    if (name === "artifacts") continue;
+    const candidate = join(realRoot, name);
+    try {
+      const st = statSync(candidate);
+      if (!st.isDirectory()) continue;
+      const childArtifactsRoot = join(candidate, "artifacts");
+      if (!statSync(childArtifactsRoot).isDirectory()) continue;
+      roots.add(realpathSync(childArtifactsRoot));
+    } catch {
+      /* ignore unreadable / missing entries */
+    }
+  }
+
+  if (roots.size === 0) roots.add(realRoot);
+  return [...roots];
+}
+
+function cleanupArtifactRoot(
+  artifactRoot: string,
+  realRoot: string,
+  cutoff: number,
+  activeIds: Set<string> | undefined,
+  result: CleanupResult,
+  options?: CleanupOptions,
+): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(artifactRoot);
+  } catch (err) {
+    result.errors.push(`cannot read artifactRoot ${artifactRoot}: ${err}`);
+    return;
+  }
+
+  for (const name of entries) {
+    const candidate = join(artifactRoot, name);
+    try {
+      const st = statSync(candidate);
+      if (!st.isDirectory()) continue;
+
+      // Path-traversal check: resolve realpath and verify it is inside rootDir.
+      let realCandidate: string;
+      try {
+        realCandidate = realpathSync(candidate);
+      } catch {
+        result.errors.push(`cannot resolve ${name} — skipping`);
+        continue;
+      }
+      if (!isPathInside(realCandidate, realRoot)) {
+        result.errors.push(
+          `path traversal blocked: ${name} resolves outside rootDir`,
+        );
+        continue;
+      }
+
+      // Active-ids check.
+      if (activeIds?.has(name)) {
+        result.skipped++;
+        continue;
+      }
+
+      // TTL check: dir mtime.
+      if (st.mtimeMs >= cutoff) {
+        result.skipped++;
+        continue;
+      }
+
+      // TTL check: latest event ts in events.ndjson.
+      const art = artifactPath(artifactRoot, name);
+      const last = lastEvent(art);
+      if (last && last.ts >= cutoff) {
+        result.skipped++;
+        continue;
+      }
+
+      // Past all checks — delete (or dry-run report).
+      if (!options?.dryRun) {
+        rmSync(candidate, { recursive: true, force: true });
+      }
+      result.removed++;
+    } catch (err) {
+      result.errors.push(`error processing ${name}: ${err}`);
+    }
+  }
+}
+
 export function cleanupOldArtifacts(
   rootDir: string,
   ttlMs: number,
@@ -331,63 +443,16 @@ export function cleanupOldArtifacts(
     return result;
   }
 
-  let entries: string[];
-  try {
-    entries = readdirSync(realRoot);
-  } catch (err) {
-    result.errors.push(`cannot read rootDir: ${err}`);
-    return result;
-  }
-
-  for (const name of entries) {
-    const candidate = join(realRoot, name);
-    try {
-      const st = statSync(candidate);
-      if (!st.isDirectory()) continue;
-
-      // Path-traversal check: resolve realpath and verify it is inside rootDir.
-      let realCandidate: string;
-      try {
-        realCandidate = realpathSync(candidate);
-      } catch {
-        result.errors.push(`cannot resolve ${name} — skipping`);
-        continue;
-      }
-      if (!isPathInside(realCandidate, realRoot)) {
-        result.errors.push(
-          `path traversal blocked: ${name} resolves outside rootDir`,
-        );
-        continue;
-      }
-
-      // Active-ids check.
-      if (activeIds?.has(name)) {
-        result.skipped++;
-        continue;
-      }
-
-      // TTL check: dir mtime.
-      if (st.mtimeMs >= cutoff) {
-        result.skipped++;
-        continue;
-      }
-
-      // TTL check: latest event ts in events.ndjson.
-      const art = artifactPath(realRoot, name);
-      const last = lastEvent(art);
-      if (last && last.ts >= cutoff) {
-        result.skipped++;
-        continue;
-      }
-
-      // Past all checks — delete (or dry-run report).
-      if (!options?.dryRun) {
-        rmSync(candidate, { recursive: true, force: true });
-      }
-      result.removed++;
-    } catch (err) {
-      result.errors.push(`error processing ${name}: ${err}`);
-    }
+  const artifactRoots = discoverArtifactRoots(realRoot);
+  for (const artifactRoot of artifactRoots) {
+    cleanupArtifactRoot(
+      artifactRoot,
+      realRoot,
+      cutoff,
+      activeIds,
+      result,
+      options,
+    );
   }
 
   return result;

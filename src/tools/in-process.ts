@@ -937,9 +937,10 @@ function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
       rootDir: Type.Optional(
         Type.String({
           description: [
-            "Artifact root directory to scan. Defaults to the session's artifacts parent:",
-            "$PI_CODING_AGENT_SESSION_DIR/subagentura/<cwdLabel>/ (if env var is set) or",
-            "~/.pi/agent/sessions/subagentura/<cwdLabel>/",
+            "Artifact root directory to scan. Defaults to the session root:",
+            "$PI_CODING_AGENT_SESSION_DIR/subagentura/ (if env var is set) or",
+            "~/.pi/agent/sessions/subagentura/.",
+            "The cleanup pass traverses each <cwdLabel>/artifacts subtree.",
           ].join("\n"),
         }),
       ),
@@ -958,8 +959,7 @@ function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
       }
 
       const dryRun = params.dryRun !== false; // default true for safety
-      const defaultTtlMs = 24 * 60 * 60 * 1000; // 24 hours
-      const ttlMs = params.ttlMs ?? defaultTtlMs;
+      const ttlMs = params.ttlMs;
 
       const rootDir =
         params.rootDir ??

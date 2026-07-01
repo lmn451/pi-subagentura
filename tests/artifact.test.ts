@@ -471,6 +471,48 @@ describe("artifact", () => {
       const defaultResult = cleanupOldArtifacts(root, 60_000);
       expect(defaultResult.dryRun).toBe(false);
     });
+
+    it("preserves nested cwdLabel/artifacts layout and active IDs", () => {
+      const sessionRoot = join(root, "sessions", "subagentura");
+      const activeArt = artifactPath(
+        join(sessionRoot, "project-a-123", "artifacts"),
+        "active1",
+      );
+      const staleArt = artifactPath(
+        join(sessionRoot, "project-b-456", "artifacts"),
+        "old1",
+      );
+
+      for (const art of [activeArt, staleArt]) {
+        ensureArtifactDir(art);
+        appendEvent(art, {
+          ts: Date.now(),
+          type: "started",
+          status: "running",
+        });
+        writeOutput(art, "result");
+      }
+
+      const futureNow = Date.now() + 1_000_000;
+      const result = cleanupOldArtifacts(sessionRoot, 100_000, {
+        activeIds: new Set(["active1"]),
+        now: futureNow,
+      });
+
+      expect(result.removed).toBe(1);
+      expect(result.skipped).toBe(1);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(join(sessionRoot, "project-a-123"))).toBe(true);
+      expect(existsSync(join(sessionRoot, "project-a-123", "artifacts"))).toBe(
+        true,
+      );
+      expect(existsSync(activeArt.dir)).toBe(true);
+      expect(existsSync(join(sessionRoot, "project-b-456"))).toBe(true);
+      expect(existsSync(join(sessionRoot, "project-b-456", "artifacts"))).toBe(
+        true,
+      );
+      expect(existsSync(staleArt.dir)).toBe(false);
+    });
   });
 });
 
