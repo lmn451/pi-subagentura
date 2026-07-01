@@ -22,15 +22,21 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import isPathInside from "is-path-inside";
 import ndjson from "ndjson";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
+
+/** Current schema version for the interactive state file. */
+const CURRENT_STATE_SCHEMA_VERSION = 1;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -245,7 +251,147 @@ export function lastEvent(art: SubagentArtifact): SubagentEvent | null {
   return events.length > 0 ? events[events.length - 1] : null;
 }
 
-// ── Persisted interactive state (project-local, per parent session) ───────────
+// ── Cleanup / TTL ───────────────────────────────────────────────────
+
+export interface CleanupResult {
+  removed: number;
+  /** Number of directories that matched the TTL but were skipped (active or recent). */
+  skipped: number;
+  /** Non-fatal error messages encountered during cleanup. */
+  errors: string[];
+  dryRun: boolean;
+}
+
+export interface CleanupOptions {
+  /**
+   * Set of sub-agent IDs that are currently tracked/active in the registry.
+   * Directories matching these IDs are always preserved regardless of age.
+   */
+  activeIds?: Set<string>;
+  /** If true, report what would be deleted without actually deleting. */
+  dryRun?: boolean;
+  /** Override "now" for testing (unix-ms timestamp). Defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Delete artifact directories under `rootDir` whose last activity (dir mtime or latest
+ * event timestamp) is older than `ttlMs` from now. Skips directories whose id is in
+ * `activeIds`. Returns a summary with counts and any errors.
+ *
+ * ## Path safety
+ *
+ * - If `rootDir` does not exist, returns a zero-summary (not an error).
+ * - The root itself is validated: it must not be `/`, empty, or a path that resolves
+ *   to `/`.
+ * - Every child directory is resolved via `realpathSync` and checked with
+ *   `is-path-inside` before any deletion, preventing symlink-escape attacks.
+ * - Entries that fail the containment check are reported as errors but the loop
+ *   continues (best-effort).
+ *
+ * ## TTL semantics
+ *
+ * An artifact dir is considered "recent" (skipped) if ANY of these holds:
+ *   1. Its id is in `activeIds`.
+ *   2. The directory's mtime (`statSync(dir).mtimeMs`) is >= `now - ttlMs`.
+ *   3. The artifact's events.ndjson has at least one event whose `ts` is >= `now - ttlMs`.
+ */
+export function cleanupOldArtifacts(
+  rootDir: string,
+  ttlMs: number,
+  options?: CleanupOptions,
+): CleanupResult {
+  const result: CleanupResult = {
+    removed: 0,
+    skipped: 0,
+    errors: [],
+    dryRun: !!options?.dryRun,
+  };
+  const now = options?.now ?? Date.now();
+  const cutoff = now - ttlMs;
+  const activeIds = options?.activeIds;
+
+  // Validate rootDir: must exist, must not be empty, must not resolve to /.
+  if (!rootDir || rootDir.length === 0) {
+    result.errors.push("rootDir is empty");
+    return result;
+  }
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(rootDir);
+    if (realRoot === "/") {
+      result.errors.push("rootDir resolves to filesystem root (/)");
+      return result;
+    }
+    // If the path doesn't exist, return a zero-summary (no error — it's empty, nothing to clean).
+  } catch (err) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code === "ENOENT") return result;
+    result.errors.push(`cannot resolve rootDir: ${err}`);
+    return result;
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(realRoot);
+  } catch (err) {
+    result.errors.push(`cannot read rootDir: ${err}`);
+    return result;
+  }
+
+  for (const name of entries) {
+    const candidate = join(realRoot, name);
+    try {
+      const st = statSync(candidate);
+      if (!st.isDirectory()) continue;
+
+      // Path-traversal check: resolve realpath and verify it is inside rootDir.
+      let realCandidate: string;
+      try {
+        realCandidate = realpathSync(candidate);
+      } catch {
+        result.errors.push(`cannot resolve ${name} — skipping`);
+        continue;
+      }
+      if (!isPathInside(realCandidate, realRoot)) {
+        result.errors.push(
+          `path traversal blocked: ${name} resolves outside rootDir`,
+        );
+        continue;
+      }
+
+      // Active-ids check.
+      if (activeIds?.has(name)) {
+        result.skipped++;
+        continue;
+      }
+
+      // TTL check: dir mtime.
+      if (st.mtimeMs >= cutoff) {
+        result.skipped++;
+        continue;
+      }
+
+      // TTL check: latest event ts in events.ndjson.
+      const art = artifactPath(realRoot, name);
+      const last = lastEvent(art);
+      if (last && last.ts >= cutoff) {
+        result.skipped++;
+        continue;
+      }
+
+      // Past all checks — delete (or dry-run report).
+      if (!options?.dryRun) {
+        rmSync(candidate, { recursive: true, force: true });
+      }
+      result.removed++;
+    } catch (err) {
+      result.errors.push(`error processing ${name}: ${err}`);
+    }
+  }
+
+  return result;
+}
 
 /**
 
@@ -295,19 +441,18 @@ export interface InteractiveSubagentStateFile {
 export function stateFilePath(cwd: string): string {
   return join(cwd, ".pi", "subagentura-state.json");
 }
+
 /**
  * Read the state file. Returns null on missing file, malformed
- * JSON, or schemaVersion mismatch. Never throws — defensive readers for untrusted input
+ * JSON, or unsupported schemaVersion. Never throws — defensive readers for untrusted input
  * (the file could be hand-edited or partial from a crash mid-rename).
  */
-
 export function loadInteractiveStates(
   cwd: string,
 ): InteractiveSubagentStateFile | null {
   const file = stateFilePath(cwd);
 
   let content: string;
-
   try {
     content = readFileSync(file, "utf8");
   } catch {
@@ -315,7 +460,6 @@ export function loadInteractiveStates(
   }
 
   let parsed: unknown;
-
   try {
     parsed = JSON.parse(content);
   } catch {
@@ -325,29 +469,65 @@ export function loadInteractiveStates(
   if (!parsed || typeof parsed !== "object") return null;
 
   const obj = parsed as Record<string, unknown>;
+  return migrateStatePayload(obj);
+}
 
-  if (obj.schemaVersion !== 1) {
-    debugLog("warn", "state-file-unknown-schema", {
-      schemaVersion: obj.schemaVersion as number,
-    });
-    return null;
-  }
+/**
+ * Migrate a parsed (and validated-to-be-an-object) state file payload
+ * from any known older schema version to the current version.
+ *
+ * Returns the migrated payload on success, or null if the version is
+ * unknown / unsupported (i.e. a future version this code does not
+ * know how to migrate from).
+ */
+function migrateStatePayload(
+  obj: Record<string, unknown>,
+): InteractiveSubagentStateFile | null {
+  const version = obj.schemaVersion;
+  const rawStates = obj.states;
 
-  if (!obj.states || typeof obj.states !== "object") {
+  // Helper: produce a valid states object from an untrusted value.
+  const asStates = (
+    v: unknown,
+  ): { [id: string]: InteractiveSubagentPersistedStateV1 } =>
+    v && typeof v === "object"
+      ? (v as { [id: string]: InteractiveSubagentPersistedStateV1 })
+      : {};
+
+  // No schema version → assume oldest known (v1 format).
+  if (version === undefined || version === null) {
+    debugLog("warn", "state-file-missing-schema", {});
     return {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent: String(obj.parent ?? "pi"),
-      states: {},
+      states: asStates(rawStates),
     };
   }
 
-  return {
-    schemaVersion: 1,
+  // Known version → return validated shape.
+  if (version === 1) {
+    return {
+      schemaVersion: 1,
+      parent: String(obj.parent ?? "pi"),
+      states: asStates(rawStates),
+    };
+  }
 
-    parent: String(obj.parent ?? "pi"),
+  // Negative or zero — treat as an old version, migrate to current.
+  if (typeof version === "number" && version < 1) {
+    debugLog("warn", "state-file-old-schema", { schemaVersion: version });
+    return {
+      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+      parent: String(obj.parent ?? "pi"),
+      states: asStates(rawStates),
+    };
+  }
 
-    states: obj.states as { [id: string]: InteractiveSubagentPersistedStateV1 },
-  };
+  // Future / unknown — cannot migrate safely.
+  debugLog("error", "state-file-unsupported-schema", {
+    schemaVersion: version as number,
+  });
+  return null;
 }
 /**
  * Atomically write the state file. Creates .pi/ if needed.
@@ -357,10 +537,9 @@ export function saveInteractiveStates(
   cwd: string,
   payload: InteractiveSubagentStateFile,
 ): void {
-  if (payload.schemaVersion !== 1) {
+  if (payload.schemaVersion !== CURRENT_STATE_SCHEMA_VERSION) {
     throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
   }
-
   const file = stateFilePath(cwd);
 
   mkdirSync(join(cwd, ".pi"), { recursive: true, mode: 0o700 });

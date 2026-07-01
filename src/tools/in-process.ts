@@ -8,7 +8,10 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { FOOTER_KEY } from "../artifact-poller";
+import { cleanupOldArtifacts, type CleanupResult } from "../artifact";
 import {
   buildLiveUpdate,
   debugLog,
@@ -24,6 +27,7 @@ import {
   type Usage,
 } from "../helpers";
 import { deliverNotification } from "../notifications";
+import { interactiveSubagentRegistry } from "../interactive-tmux";
 import { renderSubagentCall, renderSubagentResult } from "../rendering";
 import {
   BaseParams,
@@ -911,6 +915,125 @@ function registerPruneSubagentJobsTool(pi: ExtensionAPI): void {
   });
 }
 
+function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "cleanup_subagent_artifacts",
+    label: "Cleanup Subagent Artifacts",
+    description: [
+      "Delete old interactive sub-agent artifact directories past a TTL threshold.",
+      "Preserves directories whose sub-agent is still tracked in the live registry",
+      "or whose last activity (dir mtime or latest event timestamp) is within the TTL window.",
+      "",
+      "Path-safety: validates every directory is inside the artifact root and blocks",
+      "path-traversal attempts. Dry-run mode reports what would be deleted without",
+      "actually deleting.",
+    ].join("\n"),
+    parameters: Type.Object({
+      ttlMs: Type.Number({
+        description:
+          "Age threshold in milliseconds. Directories with no activity more recent than this are candidates for deletion.",
+        minimum: 60_000,
+      }),
+      rootDir: Type.Optional(
+        Type.String({
+          description: [
+            "Artifact root directory to scan. Defaults to the session's artifacts parent:",
+            "$PI_CODING_AGENT_SESSION_DIR/subagentura/<cwdLabel>/ (if env var is set) or",
+            "~/.pi/agent/sessions/subagentura/<cwdLabel>/",
+          ].join("\n"),
+        }),
+      ),
+      dryRun: Type.Optional(
+        Type.Boolean({
+          description:
+            "If true, report what would be deleted without actually deleting. Defaults to true for safety.",
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params): Promise<any> {
+      const activeIds = new Set<string>();
+      for (const state of interactiveSubagentRegistry.values()) {
+        activeIds.add(state.id);
+      }
+
+      const dryRun = params.dryRun !== false; // default true for safety
+      const defaultTtlMs = 24 * 60 * 60 * 1000; // 24 hours
+      const ttlMs = params.ttlMs ?? defaultTtlMs;
+
+      const rootDir =
+        params.rootDir ??
+        (() => {
+          const sessionDir =
+            process.env.PI_CODING_AGENT_SESSION_DIR ??
+            join(homedir(), ".pi", "agent", "sessions");
+          return join(sessionDir, "subagentura");
+        })();
+
+      const result: CleanupResult = cleanupOldArtifacts(rootDir, ttlMs, {
+        activeIds,
+        dryRun,
+      });
+
+      const lines = [
+        `Cleanup ${dryRun ? "(dry run) " : ""}— ${result.removed} removed, ${result.skipped} skipped, ${result.errors.length} errors`,
+      ];
+      for (const err of result.errors) {
+        lines.push(`  error: ${err}`);
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { ...result },
+      };
+    },
+
+    renderCall(_args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("cleanup_subagent_artifacts")),
+        0,
+        0,
+      );
+    },
+
+    renderResult(result, _options, theme, _context) {
+      const details = result.details as Partial<CleanupResult> | undefined;
+      const removed = details?.removed ?? 0;
+      const skipped = details?.skipped ?? 0;
+      const errors = details?.errors?.length ?? 0;
+      const dryRun = details?.dryRun ?? false;
+      if (dryRun) {
+        return new Text(
+          removed > 0 || errors > 0
+            ? theme.fg(
+                "warning",
+                `~ Cleanup: ${removed} would be removed, ${skipped} skipped, ${errors} errors`,
+              )
+            : theme.fg(
+                "dim",
+                `~ No old artifacts found (${skipped} active/skipped)`,
+              ),
+          0,
+          0,
+        );
+      }
+      return new Text(
+        removed > 0
+          ? theme.fg(
+              "success",
+              `✓ Cleaned ${removed} artifact dirs, ${skipped} skipped, ${errors} errors`,
+            )
+          : theme.fg(
+              "dim",
+              `No old artifacts to clean (${skipped} active/skipped)`,
+            ),
+        0,
+        0,
+      );
+    },
+  });
+}
+
 export function registerInProcessSubagentTools(pi: ExtensionAPI): void {
   registerSubagentWithContextTool(pi);
   registerSubagentIsolatedTool(pi);
@@ -922,4 +1045,5 @@ export function registerInProcessSubagentTools(pi: ExtensionAPI): void {
 export function registerInProcessMaintenanceTools(pi: ExtensionAPI): void {
   registerListAvailableModelsTool(pi);
   registerPruneSubagentJobsTool(pi);
+  registerCleanupArtifactsTool(pi);
 }

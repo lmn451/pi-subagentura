@@ -8,7 +8,7 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
 - **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 18.
 - **Runtime deps** are minimal: `ndjson`, `is-path-inside`. Pi SDKs are peer dependencies.
-- **Tests** are `vitest` and live next to source as `*.test.ts` (20 test files, ~7000 lines of test code).
+- **Tests** are `vitest` and live in `tests/` as `*.test.ts` (27 test files, ~12k lines of test code).
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
 ## Build / test / verify
@@ -26,21 +26,29 @@ The pre-push hook (`simple-git-hooks` → `lint-staged` → `prettier --check`) 
 
 ## Source layout (the 30-second tour)
 
-| File                           | Purpose                                                                                                                                                                             |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/subagent.ts`              | **Main entry.** ~2.5k LOC. All tool registration, the auto-done fallback, the per-turn snapshot logic, the interactive sub-agent poller. Most of the project's behavior lives here. |
-| `src/helpers.ts`               | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `findSubagentArtifact` for the `read_subagent_artifact` tool.                                           |
-| `src/artifact.ts`              | The on-disk artifact protocol: `events.ndjson`, `output.md`, `output-N.md` snapshots, atomic writes via `*.tmp` + `renameSync`.                                                     |
-| `src/interactive-tmux.ts`      | Spawns `pi --session ...` in a tmux pane; provides `send_interactive_subagent_message` and the follow-up-turn machinery.                                                            |
-| `src/multiplexer*.ts`          | Pluggable multiplexer backend. tmux and zellij. The registry lets us detect the host's available backend at runtime.                                                                |
-| `src/subagent-artifact-cli.ts` | The tiny `cli.mjs` wrapper that the child shells out to. The protocol is: write `output.md`, then call `cli.mjs done N`.                                                            |
-| `src/workflow.ts`              | The `workflow` tool (v1, on `feat/workflow-tool` branch — see "Known quirks" below).                                                                                                |
-| `src/test-utils.ts`            | `importFresh` helper used by tests that need to reset module-level state (interactive sub-agent registry, mux mock, etc.).                                                          |
+| File                           | Purpose                                                                                                                                                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/subagent.ts`              | **Entrypoint/barrel.** ~100 LOC. Default export registers all tool groups and session handlers; re-exports internals for test access.                                                                             |
+| `src/tools/in-process.ts`      | `subagent_with_context`, `subagent_isolated`, async job management tools (`get_subagent_status`, `get_subagent_result`, `cancel_subagent`, `prune_subagent_jobs`), and `list_available_models`.                   |
+| `src/tools/interactive.ts`     | Interactive sub-agent tools (`subagent_interactive`, `get_interactive_subagent_status`, `cancel_interactive_subagent`, `send_interactive_subagent_message`, `list_subagent_artifacts`, `read_subagent_artifact`). |
+| `src/session-handlers.ts`      | `session_start`/`session_shutdown` handlers; poller interval setup/teardown on extension load/reload/shutdown.                                                                                                    |
+| `src/artifact-poller.ts`       | Per-tick artifact walk, session-JSONL tail-reading, `tool_activity` event appending, auto-done fallback, and notification delivery.                                                                               |
+| `src/rehydrate.ts`             | Reconstruct `InteractiveSubagentState` from on-disk state file on session start/reload/resume. Idempotent; resets cursors for backlog replay.                                                                     |
+| `src/helpers.ts`               | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `formatUsage`, job registry and cleanup.                                                                                              |
+| `src/artifact.ts`              | On-disk artifact protocol: `events.ndjson`, `output.md`, `output-N.md` snapshots, atomic writes via `*.tmp` + `renameSync`, state file helpers.                                                                   |
+| `src/interactive-tmux.ts`      | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
+| `src/multiplexer*.ts`          | Pluggable multiplexer interface + tmux and zellij backends. Registry auto-detects available backend at runtime.                                                                                                   |
+| `src/subagent-artifact-cli.ts` | Tiny `cli.mjs` wrapper called by the child: `cli.mjs done N` / `cli.mjs error "msg"`.                                                                                                                             |
+| `src/notifications.ts`         | Notification delivery (notify/inject), `MAX_INJECT` concurrent cap, inject-count tracking.                                                                                                                        |
+| `src/rendering.ts`             | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
+| `src/schemas.ts`               | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
+| `src/workflow.ts`              | The `workflow` tool (v1, on `feat/workflow-tool` branch — see "Known quirks" below).                                                                                                                              |
+| `src/test-utils.ts`            | `importFresh` helper used by tests to reset module-level state (interactive sub-agent registry, mux mock, etc.).                                                                                                  |
 
 ## Code conventions
 
 - **Follow existing project style.** This codebase uses 2-space indents, double quotes, semicolons, trailing commas, and ~80-char lines (matches prettier defaults with `{}` config). Don't reformat unrelated code.
-- **Functions under ~50 lines** is the soft guideline; the per-tool block in `subagent.ts` and the per-test `it()` blocks run longer when they need to.
+- **Functions under ~50 lines** is the soft guideline; the per-tool blocks in `src/tools/in-process.ts` and `src/tools/interactive.ts`, and the per-test `it()` blocks run longer when they need to.
 - **Comments only for non-obvious logic** — protocol invariants, the "why" of a guard, the "what this is NOT" of a deliberate limitation. No restating the code.
 - **Declare all variables BEFORE conditional blocks that may return early.** `const`/`let` are hoisted into the TDZ; `if (cond) { return ... }` references before declaration throw at runtime. TypeScript's `no-use-before-define` (strict mode) catches this.
 - **Errors must be explicit.** No silent `catch {}`. If you must swallow, comment why. `try { ... } catch { /* reason */ }` is the pattern.
@@ -50,13 +58,13 @@ The pre-push hook (`simple-git-hooks` → `lint-staged` → `prettier --check`) 
 
 These are non-obvious behaviors that have bitten people. Read them before touching the relevant code.
 
-### The auto-done-fallback (`src/subagent.ts` → `maybeAutoDone`)
+### The auto-done-fallback (`src/artifact-poller.ts` → `maybeAutoDone`)
 
 The `auto-done-fallback` synthesizes a completion event when a child ends a turn with `stopReason: "stop"` but never calls `cli.mjs done` (a common LLM failure mode). It is **time-bounded** by `AUTO_DONE_DEBOUNCE_MS` (10s default).
 
 **The guard is `readEvents(art).some(ev => isTerminal(ev))`, NOT `lastEvent(art)`.** This was a real bug: `tailReadSessionLog` runs immediately before the fallback and can append `tool_activity` rows to `events.ndjson` _after_ the child's explicit `done`. `lastEvent` would then return a `tool_activity` and the guard would miss, causing a double-notify. See commit `01cd745` for the postmortem and the regression test. **Do not "simplify" this back to `lastEvent()`.**
 
-### `lastDeliveredEventTs` is the only poller cursor
+### `lastDeliveredEventTs` is the only poller cursor (`src/artifact-poller.ts`)
 
 Every notification delivery advances `state.lastDeliveredEventTs` to the highest `ev.ts` it delivered. The next poll calls `readEvents(art, cursor + 1)`. **Never read events without going through this cursor** — you will re-deliver notifications and double-fire.
 
@@ -123,7 +131,7 @@ Future follow-up `done` events (higher ts) still inject normally.
 - **One concern per commit.** Bug fixes and the tests that prove them go in the same commit. A doc clarification of a previous fix is a separate commit.
 - **Never force-push to `master`.** Feature branches are disposable; the trunk is not.
 - **Branch naming**: `feat/<short-desc>`, `fix/<short-desc>`, `chore/<short-desc>`. No ticket numbers unless the repo uses them (it doesn't, yet).
-- **Releases**: bump version with `npm version patch|minor|major`, push `--follow-tags`. The `publish.yml` workflow uses OIDC trusted publishing — no `NPM_TOKEN` secret exists or should exist.
+- **Releases**: see [CONTRIBUTING.md](./CONTRIBUTING.md#release-flow) for the full release flow and version/tag collision recovery. The `publish.yml` workflow uses OIDC trusted publishing — no `NPM_TOKEN` secret exists or should exist.
 
 ## Workflow
 
@@ -142,27 +150,36 @@ Future follow-up `done` events (higher ts) still inject normally.
 
 ## File map at a glance
 
-````
+```
 src/
-  subagent.ts                      # MAIN — tools, poller, auto-done fallback, rehydrate ~3k LOC
-  helpers.ts                       # startSubagentJob, resolveModel
-  artifact.ts                      # events.ndjson + output.md protocol + persisted state helpers
-  interactive-tmux.ts              # tmux/zellij pane management
-  multiplexer{,-tmux,-zellij}.ts   # mux backend abstraction
-  subagent-artifact-cli.ts         # the cli.mjs wrapper
-  workflow.ts                      # (feat/workflow-tool) workflow tool
-  ndjson.d.ts                      # ambient types for the `ndjson` dep
+  subagent.ts                      # Entrypoint/barrel — registers tools, re-exports internals
+  tools/
+    in-process.ts                  # subagent_with_context, subagent_isolated, async tools
+    interactive.ts                 # subagent_interactive, get/send/cancel/read/list tools
+  session-handlers.ts              # session_start/shutdown handlers, poller setup
+  artifact-poller.ts               # per-tick artifact walk, auto-done fallback, notifications
+  rehydrate.ts                     # reconstruct InteractiveSubagentState from state file
+  helpers.ts                       # startSubagentJob, resolveModel, job registry
+  artifact.ts                      # events.ndjson + output.md protocol, state file helpers
+  interactive-tmux.ts              # InteractiveSubagentState, registry, mux dispatch
+  multiplexer{,-tmux,-zellij}.ts   # mux backend abstraction (tmux + zellij)
+  subagent-artifact-cli.ts         # cli.mjs wrapper
+  notifications.ts                 # notify/inject delivery, MAX_INJECT cap
+  rendering.ts                     # TUI render helpers
+  schemas.ts                       # TypeBox tool-param schemas
+  workflow.ts                      # workflow tool
+  ndjson.d.ts                      # ambient types for the ndjson dep
 
-  *.test.ts                        # 20 test files, ~7k lines
   test-utils.ts                    # importFresh helper for module-reset tests
+tests/
+  *.test.ts                        # 27 test files, ~12k lines
 .github/
   workflows/                       # CI (ci.yml) and publish (publish.yml)
-docs/                              # Managed by the separate pi-docs package; do not edit```
-
+docs/                              # Managed by the separate pi-docs package; do not edit
+```
 
 ## When in doubt
 
 - The existing tests in the same directory are the best documentation of intended behavior.
-- `src/subagent-auto-done.test.ts`, `src/subagent-notify.test.ts`, and `src/subagent-rehydrate.test.ts` together define the artifact-protocol contract — if you're not sure what `events.ndjson` is supposed to contain, those tests are the spec.
+- `tests/subagent-auto-done.test.ts`, `tests/subagent-notify.test.ts`, `tests/subagent-rehydrate-core.test.ts`, and `tests/subagent-rehydrate-artifacts.test.ts` together define the artifact-protocol contract — if you're not sure what `events.ndjson` is supposed to contain, those tests are the spec.
 - The release flow is in `CONTRIBUTING.md`. The dev loop (typecheck + test + format) is above. If a step seems to be missing from this file, it probably is — add it.
-````

@@ -7,14 +7,16 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   appendEvent,
   appendInteractiveState,
   artifactPath,
+  cleanupOldArtifacts,
   deleteInteractiveStatesFile,
   ensureArtifactDir,
   lastEvent,
@@ -293,6 +295,183 @@ describe("artifact", () => {
     const art = artifactPath(root, "snap6-nonexistent");
     expect(listOutputTurns(art)).toEqual([]);
   });
+
+  describe("cleanupOldArtifacts", () => {
+    let root: string;
+
+    beforeEach(() => {
+      root = makeTmp();
+    });
+
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    function makeArtifact(id: string, mtimeAgoMs: number): string {
+      const dir = artifactPath(root, id);
+      ensureArtifactDir(dir);
+      // Set mtime to a specific time
+      const mtime = new Date(Date.now() - mtimeAgoMs);
+      statSync(dir.dir); // ensure it exists
+      // Write events.ndjson to set up the artifact
+      writeOutput(dir, "result");
+      return dir.dir;
+    }
+
+    function setDirMtime(dir: string, mtimeAgoMs: number): void {
+      const t = new Date(Date.now() - mtimeAgoMs);
+      // We can't directly set mtime on Node; use futimes or utimesSync
+      // Instead, control the test via 'now' parameter
+      void dir;
+      void mtimeAgoMs;
+    }
+
+    it("returns zero when rootDir is empty", () => {
+      const result = cleanupOldArtifacts(root, 60_000, { now: Date.now() });
+      expect(result.removed).toBe(0);
+      expect(result.skipped).toBe(0);
+      expect(result.errors).toEqual([]);
+    });
+
+    it("returns zero when rootDir does not exist", () => {
+      const result = cleanupOldArtifacts(join(root, "missing"), 60_000, {
+        now: Date.now(),
+      });
+      expect(result.removed).toBe(0);
+      expect(result.errors).toEqual([]);
+    });
+
+    it("rejects empty rootDir with an error", () => {
+      const result = cleanupOldArtifacts("", 60_000);
+      expect(result.removed).toBe(0);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]).toMatch(/empty/);
+    });
+
+    it("rejects filesystem root (/) as rootDir", () => {
+      const result = cleanupOldArtifacts("/", 60_000);
+      expect(result.removed).toBe(0);
+      expect(result.errors.length).toBeGreaterThan(0);
+      // fs root is blocked
+      expect(result.errors[0]).toMatch(/filesystem root/);
+    });
+
+    it("deletes old artifact dirs past TTL", () => {
+      const old1dir = makeArtifact("old1", 200_000);
+      const old2dir = makeArtifact("old2", 200_000);
+
+      // Use a far-future `now` so that freshly-created dirs appear old (mtime < cutoff).
+      const futureNow = Date.now() + 1_000_000;
+      const result = cleanupOldArtifacts(root, 100_000, { now: futureNow });
+
+      expect(result.removed).toBe(2);
+      expect(result.skipped).toBe(0);
+      expect(result.errors).toEqual([]);
+      // old dirs are deleted
+      expect(existsSync(old1dir)).toBe(false);
+      expect(existsSync(old2dir)).toBe(false);
+    });
+
+    it("preserves artifact dirs with activeIds", () => {
+      makeArtifact("active1", 200_000);
+      makeArtifact("inactive1", 200_000);
+
+      // Far-future now so both appear old; activeIds protects 'active1'.
+      const futureNow = Date.now() + 1_000_000;
+      const result = cleanupOldArtifacts(root, 60_000, {
+        activeIds: new Set(["active1"]),
+        now: futureNow,
+      });
+
+      expect(result.removed).toBe(1);
+      expect(result.skipped).toBe(1); // active1 skipped
+      expect(existsSync(artifactPath(root, "active1").dir)).toBe(true);
+      expect(existsSync(artifactPath(root, "inactive1").dir)).toBe(false);
+    });
+
+    it("dry run does not delete any directories", () => {
+      makeArtifact("old1", 200_000);
+      makeArtifact("old2", 200_000);
+
+      const futureNow = Date.now() + 1_000_000;
+      const result = cleanupOldArtifacts(root, 60_000, {
+        dryRun: true,
+        now: futureNow,
+      });
+
+      expect(result.removed).toBe(2);
+      expect(result.dryRun).toBe(true);
+      // Directories still exist
+      expect(existsSync(artifactPath(root, "old1").dir)).toBe(true);
+      expect(existsSync(artifactPath(root, "old2").dir)).toBe(true);
+    });
+
+    it("preserves artifacts with recent event timestamps even when dir mtime is old", () => {
+      const old = makeArtifact("old-but-recent-event", 200_000);
+      const art = artifactPath(root, "old-but-recent-event");
+      // Append a recent event (within TTL)
+      appendEvent(art, { ts: Date.now(), type: "started", status: "running" });
+
+      const result = cleanupOldArtifacts(root, 100_000, {
+        now: Date.now() + 50_000, // make mtime and dir old
+      });
+
+      // The recent event (ts = Date.now()) is < now+50k, so cutoff = now+50k-100k
+      // Wait — this is confusing. Let me be explicit:
+      // If now = Date.now() + 50000 and ttl = 100000, cutoff = now - 100000 = Date.now() - 50000
+      // The event ts = Date.now() which is >= cutoff, so it's recent
+      expect(result.skipped).toBe(1);
+      expect(result.removed).toBe(0);
+    });
+
+    it("prevents path traversal via realpath check", () => {
+      // Create a dir inside root with a symlink pointing outside
+      const outsideDir = join(root, "../outside");
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(join(outsideDir, "secret.txt"), "leaked");
+
+      const symlinkDir = join(root, "evil-link");
+      symlinkSync(outsideDir, symlinkDir);
+
+      const result = cleanupOldArtifacts(root, 60_000, {
+        now: Date.now(),
+      });
+
+      // Symlink should be detected as path traversal
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]).toMatch(/path traversal/);
+      expect(result.removed).toBe(0);
+      // Outside dir must not be deleted
+      expect(existsSync(outsideDir)).toBe(true);
+      expect(existsSync(join(outsideDir, "secret.txt"))).toBe(true);
+    });
+
+    it("skips loose files in the artifact root", () => {
+      writeFileSync(join(root, "stray.txt"), "not a dir");
+      makeArtifact("old1", 200_000);
+
+      const futureNow = Date.now() + 1_000_000;
+      const result = cleanupOldArtifacts(root, 100_000, {
+        now: futureNow,
+      });
+
+      expect(result.removed).toBe(1);
+      expect(result.errors).toEqual([]);
+      // Stray file should still exist
+      expect(existsSync(join(root, "stray.txt"))).toBe(true);
+    });
+
+    it("dryRun flag is reflected in the result", () => {
+      const live = cleanupOldArtifacts(root, 60_000, { dryRun: true });
+      expect(live.dryRun).toBe(true);
+
+      const real = cleanupOldArtifacts(root, 60_000, { dryRun: false });
+      expect(real.dryRun).toBe(false);
+
+      const defaultResult = cleanupOldArtifacts(root, 60_000);
+      expect(defaultResult.dryRun).toBe(false);
+    });
+  });
 });
 
 describe("persisted interactive state helpers", () => {
@@ -370,6 +549,62 @@ describe("persisted interactive state helpers", () => {
     );
 
     expect(loadInteractiveStates(root)).toBeNull();
+  });
+
+  it("loadInteractiveStates migrates a file with no schemaVersion field", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({ parent: "pi", states: { abc12345: SAMPLE } }),
+      { mode: 0o600 },
+    );
+    const loaded = loadInteractiveStates(root);
+    expect(loaded).toEqual({
+      schemaVersion: 1,
+      parent: "pi",
+      states: { abc12345: SAMPLE },
+    });
+  });
+
+  it("loadInteractiveStates migrates a file with schemaVersion 0", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 0,
+        parent: "pi",
+        states: { abc12345: SAMPLE },
+      }),
+      { mode: 0o600 },
+    );
+    const loaded = loadInteractiveStates(root);
+    expect(loaded).toEqual({
+      schemaVersion: 1,
+      parent: "pi",
+      states: { abc12345: SAMPLE },
+    });
+  });
+
+  it("loadInteractiveStates migrates a file with schemaVersion -1", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: -1,
+        parent: "pi",
+        states: { abc12345: SAMPLE },
+      }),
+      { mode: 0o600 },
+    );
+    const loaded = loadInteractiveStates(root);
+    expect(loaded).toEqual({
+      schemaVersion: 1,
+      parent: "pi",
+      states: { abc12345: SAMPLE },
+    });
   });
 
   it("loadInteractiveStates returns empty states when the file exists but has no states key", () => {

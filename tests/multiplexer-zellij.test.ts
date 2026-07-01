@@ -445,7 +445,7 @@ describe("multiplexer-zellij", () => {
     expect(cmds.focusCommand).toBe("zellij action focus-pane-id 42");
   });
 
-  it("attachCommand for visible split does NOT use tmux \; chaining (zellij doesn't support it)", async () => {
+  it("attachCommand for visible split does NOT use tmux ; chaining (zellij doesn't support it)", async () => {
     process.env.ZELLIJ = "0";
     process.env.ZELLIJ_SESSION_NAME = "main";
 
@@ -534,4 +534,285 @@ describe("multiplexer-zellij", () => {
     const mux = new ZellijMultiplexer();
     expect(mux.isPaneAlive("42")).toBe(false);
   });
+
+  /* ------------------------------------------------------------------ */
+  /*  plugin_<n> prefix normalization                                    */
+  /* ------------------------------------------------------------------ */
+
+  it("isPaneAlive normalizes plugin_<n> prefix (symmetric with terminal_<n>)", async () => {
+    process.env.ZELLIJ = "0";
+    installMockExec((_f, args) => {
+      if (args.includes("list-panes")) {
+        // list-panes --json returns bare integer ids, never plugin_ prefix
+        return JSON.stringify([{ id: 42 }]);
+      }
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    // plugin_42 should normalize to bare integer 42 for list-panes lookup
+    expect(mux.isPaneAlive("plugin_42")).toBe(true);
+    // Non-existent pane should still return false
+    expect(mux.isPaneAlive("plugin_99")).toBe(false);
+  });
+
+  it("sendKeys normalizes plugin_<n> prefix in pane id", async () => {
+    process.env.ZELLIJ = "0";
+    const calls: string[][] = [];
+    installMockExec((_f, args) => {
+      calls.push(args);
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    mux.sendKeys("plugin_7", "echo hi");
+
+    const wc = calls.find((a) => a.includes("write-chars"));
+    expect(wc).toEqual(expect.arrayContaining(["--pane-id", "7"]));
+    expect(wc).not.toContain("plugin_7");
+  });
+
+  it("sendEnter normalizes plugin_<n> prefix in pane id", async () => {
+    process.env.ZELLIJ = "0";
+    const calls: string[][] = [];
+    installMockExec((_f, args) => {
+      calls.push(args);
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    mux.sendEnter("plugin_7");
+
+    const w = calls.find(
+      (a) => a.includes("write") && !a.includes("write-chars"),
+    );
+    expect(w).toEqual(expect.arrayContaining(["--pane-id", "7"]));
+    expect(w).not.toContain("plugin_7");
+  });
+
+  it("killPane normalizes plugin_<n> prefix in pane id", async () => {
+    process.env.ZELLIJ = "0";
+    const calls: string[][] = [];
+    installMockExec((_f, args) => {
+      calls.push(args);
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    mux.killPane("plugin_7");
+
+    const cp = calls.find((a) => a.includes("close-pane"));
+    expect(cp).toEqual(expect.arrayContaining(["--pane-id", "7"]));
+    expect(cp).not.toContain("plugin_7");
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  createPane — failures                                              */
+  /* ------------------------------------------------------------------ */
+
+  it("createPane throws when no panes are detectable after creation", async () => {
+    process.env.ZELLIJ = "0";
+    process.env.ZELLIJ_SESSION_NAME = "main";
+    installMockExec((_f, args) => {
+      if (args.includes("list-panes") && args.includes("--json")) {
+        // Both before and after return completely empty
+        return JSON.stringify([]);
+      }
+      if (args.includes("new-tab")) return "";
+      if (args.includes("current-tab-info")) return "position: 0\n";
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    expect(() =>
+      mux.createPane({
+        name: "Demo",
+        cwd: "/tmp",
+        background: true,
+      }),
+    ).toThrow(/Failed to determine pane ID/);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  createPane — background with explicit windowName                   */
+  /* ------------------------------------------------------------------ */
+
+  it("createPane background mode passes explicit windowName to new-tab --name", async () => {
+    process.env.ZELLIJ = "0";
+    process.env.ZELLIJ_SESSION_NAME = "main";
+    const calls: string[][] = [];
+    let listCallCount = 0;
+    installMockExec((_f, args) => {
+      calls.push(args);
+      if (args.includes("list-panes") && args.includes("--json")) {
+        listCallCount++;
+        return listCallCount === 1
+          ? JSON.stringify([{ id: 1, tab_position: 0 }])
+          : JSON.stringify([
+              { id: 1, tab_position: 0 },
+              { id: 2, tab_position: 1 },
+            ]);
+      }
+      // Return position for current-tab-info so tab-focus restore is exercised
+      if (args.includes("current-tab-info")) return "position: 0\n";
+      return "";
+    });
+
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+    const result = mux.createPane({
+      name: "Demo",
+      cwd: "/tmp",
+      background: true,
+      windowName: "my-custom-tab",
+    });
+
+    expect(result.windowName).toBe("my-custom-tab");
+    // The new-tab call must carry --name my-custom-tab
+    const nt = calls.find((a) => a.includes("new-tab"));
+    expect(nt).toBeDefined();
+    expect(nt).toContain("--name");
+    expect(nt).toContain("my-custom-tab");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  improved diagnostics on command failure                           */
+/* ------------------------------------------------------------------ */
+
+it("createPane relaxed path throws improved diagnostic on attach failure", async () => {
+  delete process.env.ZELLIJ;
+  delete process.env.ZELLIJ_SESSION_NAME;
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    execFileSync: (_file: string, args: string[]) => {
+      if (args.includes("-lc")) return ""; // commandExists succeeds
+      if (args[0] === "attach" && args.includes("--create-background")) {
+        const err = new Error("Command failed") as Error & {
+          stderr?: Buffer;
+          status?: number;
+        };
+        err.stderr = Buffer.from("no server running");
+        err.status = 1;
+        throw err;
+      }
+      return "";
+    },
+  }));
+  const { ZellijMultiplexer } = await importFresh<
+    typeof import("../src/multiplexer-zellij")
+  >("../src/multiplexer-zellij");
+  const mux = new ZellijMultiplexer();
+  expect(() =>
+    mux.createPane({
+      name: "Test",
+      cwd: "/tmp",
+      background: true,
+      id: "abc12345",
+    }),
+  ).toThrow(
+    /\[zellij\] attach --create-background failed.*exit code 1.*stderr: no server running/,
+  );
+});
+
+it("createPane background throws improved diagnostic on new-tab failure", async () => {
+  process.env.ZELLIJ = "0";
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    execFileSync: (_file: string, args: string[]) => {
+      if (args.includes("-lc")) return ""; // commandExists succeeds
+      if (args.includes("new-tab")) {
+        const err = new Error("Command failed") as Error & {
+          stderr?: Buffer;
+          status?: number;
+        };
+        err.stderr = Buffer.from("cannot create tab: session is read-only");
+        err.status = 1;
+        throw err;
+      }
+      return ""; // list-panes, current-tab-info all return empty
+    },
+  }));
+  const { ZellijMultiplexer } = await importFresh<
+    typeof import("../src/multiplexer-zellij")
+  >("../src/multiplexer-zellij");
+  const mux = new ZellijMultiplexer();
+  expect(() =>
+    mux.createPane({
+      name: "Test",
+      cwd: "/tmp",
+      background: true,
+    }),
+  ).toThrow(
+    /\[zellij\] new-tab failed.*exit code 1.*stderr: cannot create tab/,
+  );
+});
+
+it("sendKeys throws improved diagnostic on write-chars failure", async () => {
+  process.env.ZELLIJ = "0";
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    execFileSync: (_file: string, args: string[]) => {
+      if (args.includes("write-chars")) {
+        const err = new Error("Command failed") as Error & {
+          stderr?: Buffer;
+          status?: number;
+        };
+        err.stderr = Buffer.from("no such pane: 99");
+        err.status = 1;
+        throw err;
+      }
+      return "";
+    },
+  }));
+  const { ZellijMultiplexer } = await importFresh<
+    typeof import("../src/multiplexer-zellij")
+  >("../src/multiplexer-zellij");
+  const mux = new ZellijMultiplexer();
+  expect(() => mux.sendKeys("99", "echo hi")).toThrow(
+    /\[zellij\] write-chars failed.*exit code 1.*stderr: no such pane: 99/,
+  );
+});
+
+it("sendEnter throws improved diagnostic on write 13 failure", async () => {
+  process.env.ZELLIJ = "0";
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    execFileSync: (_file: string, args: string[]) => {
+      if (args.includes("write") && !args.includes("write-chars")) {
+        const err = new Error("Command failed") as Error & {
+          stderr?: Buffer;
+          status?: number;
+        };
+        err.stderr = Buffer.from("pane not found: 99");
+        err.status = 1;
+        throw err;
+      }
+      return "";
+    },
+  }));
+  const { ZellijMultiplexer } = await importFresh<
+    typeof import("../src/multiplexer-zellij")
+  >("../src/multiplexer-zellij");
+  const mux = new ZellijMultiplexer();
+  expect(() => mux.sendEnter("99")).toThrow(
+    /\[zellij\] write 13 failed.*exit code 1.*stderr: pane not found: 99/,
+  );
 });

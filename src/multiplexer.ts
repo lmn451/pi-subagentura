@@ -23,7 +23,7 @@
  *   4. Throw with a setup hint pointing at both backends.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecSyncOptions } from "node:child_process";
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 
@@ -269,4 +269,57 @@ export function commandExists(command: string): boolean {
 /** POSIX-style single-quote escape. Safe for paths, names, and command args. */
 export function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Execute a mux command with improved error diagnostics.
+ *
+ * On failure, re-throws a new `Error` with the mux name, operation context,
+ * and relevant stderr/stdout/exit-status details from the underlying exec
+ * failure. The original error is preserved as `cause`.
+ *
+ * @param muxName   Backend name ("tmux" or "zellij") — identifies the tool in the error.
+ * @param operation Human-readable description (e.g. "new-window", "send-keys").
+ * @param cmd       The command binary (e.g. "tmux", "zellij").
+ * @param args      Command arguments (passed through to execFileSync).
+ * @param options   execFileSync options (e.g. `{ encoding: "utf8", timeout: 5000 }`).
+ * @returns The stdout as a string.
+ */
+export function execMuxOrThrow(
+  muxName: string,
+  operation: string,
+  cmd: string,
+  args: readonly string[],
+  options: ExecSyncOptions,
+): string {
+  try {
+    const result = execFileSync(cmd, args, options);
+    return typeof result === "string" ? result : result.toString();
+  } catch (err) {
+    const execErr = err as Error & {
+      stderr?: Buffer | string;
+      stdout?: Buffer | string;
+      status?: number;
+    };
+    const details: string[] = [];
+    if (execErr.status != null) {
+      details.push(`exit code ${execErr.status}`);
+    }
+    const stderrStr =
+      execErr.stderr != null ? String(execErr.stderr).trim() : "";
+    if (stderrStr) {
+      details.push(`stderr: ${stderrStr}`);
+    }
+    const stdoutStr =
+      execErr.stdout != null ? String(execErr.stdout).trim() : "";
+    if (stdoutStr && stdoutStr.length <= 200) {
+      details.push(`stdout: ${stdoutStr}`);
+    } else if (stdoutStr) {
+      details.push(`stdout: <${stdoutStr.length} bytes>`);
+    }
+    const suffix = details.length > 0 ? ": " + details.join(", ") : "";
+    throw new Error(`[${muxName}] ${operation} failed${suffix}`, {
+      cause: err,
+    });
+  }
 }

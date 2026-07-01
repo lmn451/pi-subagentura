@@ -24,7 +24,7 @@
 
 import { execFileSync } from "node:child_process";
 import type { Multiplexer } from "./multiplexer";
-import { commandExists, shellEscape } from "./multiplexer";
+import { commandExists, execMuxOrThrow, shellEscape } from "./multiplexer";
 
 /**
  * Extract the session name, window index, and pane index of a tmux pane
@@ -36,7 +36,9 @@ function getPaneLocation(paneId: string): {
   window: string;
   pane: string;
 } {
-  const output = execFileSync(
+  const output = execMuxOrThrow(
+    "tmux",
+    "display-message",
     "tmux",
     [
       "display-message",
@@ -121,7 +123,9 @@ export class TmuxMultiplexer implements Multiplexer {
     // `tmux attach -t <session-name>` after the spawn returns.
     if (!process.env.TMUX) {
       const sessionName = `pi-subagent-${opts.id ?? safeSegment(opts.name)}`;
-      const paneId = execFileSync(
+      const paneId = execMuxOrThrow(
+        "tmux",
+        "new-session",
         "tmux",
         [
           "new-session",
@@ -165,7 +169,9 @@ export class TmuxMultiplexer implements Multiplexer {
       // select it. Each background sub-agent gets its own named window
       // so they don't clobber each other in the tmux window list.
       windowName = opts.windowName ?? safeSegment(opts.name);
-      paneId = execFileSync(
+      paneId = execMuxOrThrow(
+        "tmux",
+        "new-window",
         "tmux",
         [
           "new-window",
@@ -197,7 +203,7 @@ export class TmuxMultiplexer implements Multiplexer {
       if (parent) {
         args.splice(4, 0, "-t", parent);
       }
-      paneId = execFileSync("tmux", args, {
+      paneId = execMuxOrThrow("tmux", "split-window", "tmux", args, {
         encoding: "utf8",
         timeout: 10000,
       }).trim();
@@ -235,17 +241,29 @@ export class TmuxMultiplexer implements Multiplexer {
   }
 
   sendKeys(paneId: string, text: string): void {
-    execFileSync("tmux", ["send-keys", "-t", paneId, "-l", text], {
-      encoding: "utf8",
-      timeout: 5000,
-    });
+    execMuxOrThrow(
+      "tmux",
+      "send-keys",
+      "tmux",
+      ["send-keys", "-t", paneId, "-l", text],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+      },
+    );
   }
 
   sendEnter(paneId: string): void {
-    execFileSync("tmux", ["send-keys", "-t", paneId, "Enter"], {
-      encoding: "utf8",
-      timeout: 5000,
-    });
+    execMuxOrThrow(
+      "tmux",
+      "send-keys Enter",
+      "tmux",
+      ["send-keys", "-t", paneId, "Enter"],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+      },
+    );
   }
 
   killPane(paneId: string): void {

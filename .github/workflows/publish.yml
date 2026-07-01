@@ -37,6 +37,9 @@ jobs:
             exit 1
           fi
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Run tests
         run: npm test
       - name: "Verify published tarball is loadable (regression: v2.0.0 missing helpers.ts)"

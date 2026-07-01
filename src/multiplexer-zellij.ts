@@ -29,7 +29,7 @@
 
 import { execFileSync } from "node:child_process";
 import type { Multiplexer } from "./multiplexer";
-import { commandExists, shellEscape } from "./multiplexer";
+import { commandExists, execMuxOrThrow, shellEscape } from "./multiplexer";
 
 /** Sanitize a free-form name into a safe segment for zellij tab/session names. */
 function safeSegment(value: string): string {
@@ -110,10 +110,16 @@ export class ZellijMultiplexer implements Multiplexer {
     if (!isInZellij) {
       // Relaxed path: parent not in zellij. Create a background session.
       session = `pi-subagent-${opts.id ?? safeSegment(opts.name)}`;
-      execFileSync("zellij", ["attach", "--create-background", session], {
-        encoding: "utf8",
-        timeout: 10000,
-      });
+      execMuxOrThrow(
+        "zellij",
+        "attach --create-background",
+        "zellij",
+        ["attach", "--create-background", session],
+        {
+          encoding: "utf8",
+          timeout: 10000,
+        },
+      );
     } else {
       session = process.env.ZELLIJ_SESSION_NAME ?? "";
     }
@@ -158,7 +164,9 @@ export class ZellijMultiplexer implements Multiplexer {
           // create the new tab, just won't restore focus.
         }
       }
-      execFileSync(
+      execMuxOrThrow(
+        "zellij",
+        "new-tab",
         "zellij",
         [...sessionFlag, "action", "new-tab", "--name", windowName],
         {
@@ -190,7 +198,9 @@ export class ZellijMultiplexer implements Multiplexer {
       // `opts.parentPane` is intentionally ignored. No `--close-on-exit`:
       // that flag makes a trailing `<COMMAND>` mandatory, and we want a
       // plain shell pane that outlives the launch script (like tmux's split).
-      execFileSync(
+      execMuxOrThrow(
+        "zellij",
+        "new-pane",
         "zellij",
         [...sessionFlag, "action", "new-pane", "--direction", "right"],
         {
@@ -251,7 +261,9 @@ export class ZellijMultiplexer implements Multiplexer {
    * character. Does NOT submit (no Enter).
    */
   sendKeys(paneId: string, text: string, session?: string): void {
-    execFileSync(
+    execMuxOrThrow(
+      "zellij",
+      "write-chars",
       "zellij",
       [
         ...this.sessionFlag(session),
@@ -269,7 +281,9 @@ export class ZellijMultiplexer implements Multiplexer {
    * Send a single Enter / Return key to the pane (decimal 13 = Enter key).
    */
   sendEnter(paneId: string, session?: string): void {
-    execFileSync(
+    execMuxOrThrow(
+      "zellij",
+      "write 13",
       "zellij",
       [
         ...this.sessionFlag(session),

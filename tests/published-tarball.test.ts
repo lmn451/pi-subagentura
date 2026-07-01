@@ -21,6 +21,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -38,6 +40,11 @@ const PKG = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
   version: string;
   files: string[];
 };
+const NM_SMOKE_DIR = join(
+  REPO,
+  "node_modules",
+  ".pi-subagentura-smoke-" + PKG.version,
+);
 
 interface PackResult {
   tgz: string;
@@ -116,9 +123,15 @@ describe("published tarball", () => {
     const r = pack(work);
     entries = r.entries;
     pkgDir = r.pkgDir;
+    // Copy extracted tarball into node_modules so Vite resolves bare specifiers
+    if (existsSync(NM_SMOKE_DIR))
+      rmSync(NM_SMOKE_DIR, { recursive: true, force: true });
+    cpSync(pkgDir, NM_SMOKE_DIR, { recursive: true });
   });
 
   afterAll(() => {
+    if (existsSync(NM_SMOKE_DIR))
+      rmSync(NM_SMOKE_DIR, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
   });
 
@@ -162,5 +175,57 @@ describe("published tarball", () => {
       failures,
       failures.length === 0 ? "" : `\n${failures.join("\n")}`,
     ).toEqual([]);
+  });
+
+  it("extension entrypoint can be imported like Pi does", async () => {
+    // Pi reads package.json#pi.extensions → ["./src/subagent.ts"],
+    // resolves relative to the package root, and does a dynamic import
+    const pkgJson = JSON.parse(
+      readFileSync(join(NM_SMOKE_DIR, "package.json"), "utf-8"),
+    );
+    const extensions = pkgJson.pi?.extensions;
+    expect(extensions).toBeDefined();
+    expect(Array.isArray(extensions)).toBe(true);
+    expect(extensions!.length).toBeGreaterThan(0);
+    const entrypoint = extensions![0];
+    expect(entrypoint).toBe("./src/subagent.ts");
+
+    // Dynamic import like Pi does — resolves the relative path against the package root
+    const mod = await import(join(NM_SMOKE_DIR, entrypoint));
+
+    // Default export is the extension registration function
+    expect(typeof mod.default).toBe("function");
+
+    // Key named exports that Pi references
+    expect(typeof mod.formatUsage).toBe("function");
+    expect(mod.jobRegistry).toBeDefined();
+  });
+
+  describe("package.json `files` array", () => {
+    it("includes every local import of every shipped .ts file (static check)", () => {
+      const tsFiles = PKG.files.filter((f) => f.endsWith(".ts"));
+      const failures: string[] = [];
+      for (const f of tsFiles) {
+        const source = readFileSync(join(REPO, f), "utf8");
+        for (const mod of localImports(source)) {
+          if (!resolvesInFiles(mod)) {
+            failures.push(
+              `${f} imports './${mod}' but 'src/${mod}.ts' (or 'src/${mod}/index.ts') is not in package.json 'files'`,
+            );
+          }
+        }
+      }
+      expect(
+        failures,
+        failures.length === 0 ? "" : `\n${failures.join("\n")}`,
+      ).toEqual([]);
+    });
+
+    function resolvesInFiles(mod: string): boolean {
+      return (
+        PKG.files.includes(`src/${mod}.ts`) ||
+        PKG.files.includes(`src/${mod}/index.ts`)
+      );
+    }
   });
 });
