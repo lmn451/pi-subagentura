@@ -23,12 +23,14 @@
  */
 
 import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
   PaneLiveness,
   PaneRef,
+  SyncPaneLiveness,
 } from "./multiplexer";
 import {
   boundCaptureOutput,
@@ -104,6 +106,78 @@ function parsePaneListing(output: string): ReadonlySet<string> {
     throw new Error("Malformed tmux pane listing");
   }
   return new Set(paneIds);
+}
+interface ExecFileTextResult {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+interface ExecFileTextOptions {
+  readonly encoding: "utf8";
+  readonly timeout: number;
+  readonly maxBuffer: number;
+  readonly killSignal: "SIGKILL";
+}
+
+function execFileText(
+  command: string,
+  args: readonly string[],
+  options: ExecFileTextOptions,
+  callback: (error: Error | null, result: ExecFileTextResult) => void,
+): void {
+  execFile(command, args, options, (error, stdout, stderr) => {
+    const result = { stdout, stderr };
+    if (error) {
+      Object.assign(error, result);
+    }
+    callback(error, result);
+  });
+}
+
+const execFileAsync = promisify(execFileText);
+
+function classifyTmuxProbeError(error: unknown): PaneLiveness {
+  const detail =
+    error instanceof Error
+      ? `${
+          typeof error === "object" &&
+          error !== null &&
+          "stderr" in error &&
+          typeof error.stderr === "string"
+            ? error.stderr
+            : ""
+        }\n${error.message}`
+      : "";
+  if (
+    /(?:can't find|no such) (?:pane|window|session)|(?:pane|session) not found|no current target/i.test(
+      detail,
+    )
+  ) {
+    return { kind: "dead" };
+  }
+
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? error.code
+      : undefined;
+  const killed =
+    typeof error === "object" && error !== null && "killed" in error
+      ? error.killed === true
+      : false;
+  if (
+    code === "ENOENT" ||
+    code === "ETIMEDOUT" ||
+    killed ||
+    /no server running|failed to connect to server|server exited unexpectedly/i.test(
+      detail,
+    )
+  ) {
+    return {
+      kind: "unavailable",
+      reason: "tmux liveness probe unavailable",
+    };
+  }
+  return { kind: "unknown", reason: "tmux liveness probe failed" };
 }
 
 export class TmuxMultiplexer implements Multiplexer {
@@ -338,7 +412,7 @@ export class TmuxMultiplexer implements Multiplexer {
     return { paneId, windowName, session };
   }
 
-  getPaneLiveness(paneId: string): PaneLiveness {
+  getPaneLiveness(paneId: string): SyncPaneLiveness {
     if (!/^%\d+$/.test(paneId)) return "unknown";
     try {
       const output = execFileSync(
@@ -356,30 +430,36 @@ export class TmuxMultiplexer implements Multiplexer {
     }
   }
 
-  getPaneLivenessAsync(paneId: string): Promise<PaneLiveness> {
-    if (!/^%\d+$/.test(paneId)) return Promise.resolve("unknown");
-    return new Promise((resolve) => {
-      try {
-        execFile(
-          "tmux",
-          withTmuxSocket(["list-panes", "-a", "-F", "#{pane_id}"]),
-          { encoding: "utf8", timeout: 5000 },
-          (error, stdout) => {
-            if (error) {
-              resolve("unknown");
-              return;
-            }
-            try {
-              resolve(parsePaneListing(stdout).has(paneId) ? "alive" : "dead");
-            } catch {
-              resolve("unknown");
-            }
-          },
-        );
-      } catch {
-        resolve("unknown");
-      }
-    });
+  isPaneAlive(paneId: string): boolean {
+    return this.getPaneLiveness(paneId) === "alive";
+  }
+
+  async observePane(paneId: string, _session?: string): Promise<PaneLiveness> {
+    if (!/^%\d+$/.test(paneId)) {
+      return { kind: "unknown", reason: "invalid tmux pane id" };
+    }
+    try {
+      const { stdout } = await execFileAsync(
+        "tmux",
+        withTmuxSocket(["display-message", "-p", "-t", paneId, "#{pane_id}"]),
+        {
+          encoding: "utf8",
+          timeout: 5000,
+          maxBuffer: 64 * 1024,
+          killSignal: "SIGKILL",
+        },
+      );
+      const observedPaneId = stdout.trim();
+      if (observedPaneId.length === 0) return { kind: "dead" };
+      return observedPaneId === paneId
+        ? { kind: "alive" }
+        : {
+            kind: "unknown",
+            reason: "tmux returned mismatched pane data",
+          };
+    } catch (error: unknown) {
+      return classifyTmuxProbeError(error);
+    }
   }
 
   sendKeys(paneId: string, text: string): void {

@@ -65,22 +65,19 @@ describe("session-log tail-read", () => {
     g.__piSubagenturaInteractiveRegistry?.clear?.();
     g.__piSubagenturaPiRef = undefined;
     g.__piSubagenturaUi = undefined;
-    // Force `isTmuxPaneAlive` to return true so the poller's status-decision does not flip our
-    // sub-agent to "unknown" (which would skip it on subsequent polls). The test does not have a
-    // live tmux server, and host tmux behaviour varies — some versions exit 0 for unknown panes,
-    // some exit 1, and on a machine without tmux at all `execFileSync` throws. Mocking here keeps the
-    // suite hermetic and matches the pattern in subagent-poll.test.ts.
+    // The poller uses the asynchronous observePane contract. Return the pane
+    // id exactly as tmux does so the synthetic %99 pane is observed alive.
     vi.doMock("node:child_process", () => ({
       execFileSync: (_file: string, args: string[]) => {
-        if (args[0] === "display-message") return Buffer.from("#99");
+        if (args[0] === "display-message") return Buffer.from("%99");
         return "";
       },
       execFile: (
         _file: string,
         _args: string[],
         _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, "#99"),
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => callback(null, "%99", ""),
     }));
   });
 

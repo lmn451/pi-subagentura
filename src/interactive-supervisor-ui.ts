@@ -10,6 +10,8 @@ import type { JobState } from "./helpers";
 import {
   cancelInteractiveSubagent,
   interactiveSubagentRegistry,
+  interactiveStatusForState,
+  isInteractiveStateActive,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import type { WorkflowJobState } from "./workflow-jobs";
@@ -558,12 +560,13 @@ export function formatSupervisorSummary(
   state: InteractiveSubagentState,
   now: number,
 ): string {
-  const icon = statusIcon(state.status);
-  const elapsed = formatElapsed(now - state.startedAt);
+  const status = interactiveStatusForState(state);
+  const icon = statusIcon(status);
+  const elapsed = formatElapsed(Math.max(0, now - state.startedAt));
   const activity = compactText(
     state.lastToolSummary ?? state.lastToolName ?? "no activity yet",
   );
-  return `${icon} ${state.status} ${compactText(state.name)} (${state.id.slice(0, 8)}) · ${state.mux} · ${elapsed} · ${activity}`;
+  return `${icon} ${status} ${compactText(state.name)} (${state.id.slice(0, 8)}) · ${state.mux} · ${elapsed} · ${activity}`;
 }
 
 function supervisorStates(): InteractiveSubagentState[] {
@@ -588,10 +591,7 @@ function supervisorItems(): AsyncSupervisorItem[] {
     kind: "interactive",
     state,
     depth: 0,
-    actionable:
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown",
+    actionable: isInteractiveStateActive(state),
   }));
 }
 
@@ -617,11 +617,7 @@ function supervisorItemIsActive(item: AsyncSupervisorItem): boolean {
   if (!item.actionable) return false;
   if (item.kind === "in-process") return item.job.status === "running";
   if (item.kind === "workflow") return item.job.status === "running";
-  return (
-    item.state.status === "running" ||
-    item.state.status === "idle" ||
-    item.state.status === "unknown"
-  );
+  return isInteractiveStateActive(item.state);
 }
 
 function formatAsyncSupervisorSummary(

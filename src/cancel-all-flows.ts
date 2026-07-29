@@ -17,6 +17,7 @@ import {
 import {
   cancelInteractiveSubagent,
   interactiveSubagentRegistry,
+  interactiveStatusForState,
 } from "./interactive-tmux";
 import {
   normalizeCancelledWorkflowState,
@@ -62,7 +63,8 @@ export async function cancelAllFlows(
     (state) => parentSessionBelongsToOwner(state.parentSessionId, owner),
   );
   for (const state of interactiveStates) {
-    if (state.status !== "running" && state.status !== "unknown") continue;
+    const status = interactiveStatusForState(state);
+    if (status !== "running" && status !== "unknown") continue;
     state.cancellationSnapshot = snapshotInteractiveContext({
       kind: "interactive",
       id: state.id,
@@ -131,7 +133,8 @@ export async function cancelAllFlows(
 
   // 3. Kill active interactive agents; preserve confirmed-idle ones
   for (const state of interactiveStates) {
-    if (state.status === "running" || state.status === "unknown") {
+    const status = interactiveStatusForState(state);
+    if (status === "running" || status === "unknown") {
       try {
         const cancelled = cancelInteractiveSubagent(state.id);
         if (cancelled) {
@@ -143,7 +146,7 @@ export async function cancelAllFlows(
       } catch {
         /* best effort */
       }
-    } else if (state.status === "idle") {
+    } else if (status === "idle") {
       // Idle panes consume no tokens — preserve them
       result.interactivePreserved++;
     }

@@ -45,6 +45,7 @@ import {
   type PersistedDeliveryIntent,
   type PersistedLifecycleFold,
   removeInteractiveState,
+  updateInteractiveState,
 } from "./artifact";
 import { acknowledgeDeliveryWithoutDispatch, deliveryIdFor } from "./delivery";
 import {
@@ -54,7 +55,6 @@ import {
   NoMultiplexerAvailableError,
   type MuxName,
   type Multiplexer,
-  type PaneLiveness,
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
@@ -74,6 +74,16 @@ import {
   resolveLineageStorePathsSync,
   writeLineageManifestAtomicSync,
 } from "./interactive-lineage";
+import {
+  initialInteractiveMachineState,
+  projectInteractiveStatus,
+  transitionInteractiveMachine,
+  type InteractiveMachineEvent,
+  type InteractiveMachineState,
+  type InteractiveMachineTransition,
+  type InteractiveProjectedStatus,
+  type PaneLiveness,
+} from "./interactive-state";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -145,8 +155,7 @@ The child-only Pi lifecycle hook is a crash-safety fallback, not permission to o
  * - "exited"   — child pi process is actually gone (pane dead, or it called `error`); terminal
  * - "unknown"  — can't determine (rare; pane dead but no recorded event)
  */
-export type InteractiveSubagentStatus =
-  "running" | "idle" | "cancelled" | "exited" | "unknown";
+export type InteractiveSubagentStatus = InteractiveProjectedStatus;
 
 export interface InteractiveSubagentState {
   id: string;
@@ -184,11 +193,10 @@ export interface InteractiveSubagentState {
   model?: string;
   startedAt: number;
   /**
-   * Lifecycle status. Transition triggers:
-   * - spawn sets "running" (interactive-tmux.ts setup)
-   * - cli.mjs done / error event in events.ndjson sets "exited" or "cancelled"
-   * - a user message after "exited" revives it to "running" for follow-up turns
-   * - cancel_interactive_subagent tool sets "cancelled"
+   * Compatibility projection of the machine kernel. Spawn begins running;
+   * durable completion events become idle while the pane is alive, parent
+   * cancellation becomes cancelled, and confirmed process exit becomes exited.
+   * Follow-up turn records clear only turn-completion state.
    */
   status: InteractiveSubagentStatus;
   /** Receipt for the latest parent cancellation snapshot. */
@@ -262,6 +270,152 @@ if (!globalThis.__piSubagenturaInteractiveRegistry) {
 
 export const interactiveSubagentRegistry =
   globalThis.__piSubagenturaInteractiveRegistry!;
+
+const interactiveMachineStates = new WeakMap<
+  InteractiveSubagentState,
+  InteractiveMachineState
+>();
+
+function paneLivenessFromCompatibilityStatus(
+  status: InteractiveSubagentStatus,
+): PaneLiveness {
+  switch (status) {
+    case "running":
+    case "idle":
+      return { kind: "alive" };
+    case "exited":
+      return { kind: "dead" };
+    case "cancelled":
+    case "unknown":
+      return { kind: "unknown" };
+    default:
+      return assertNever(status);
+  }
+}
+
+function lifecycleForCompatibilityInitialization(
+  state: InteractiveSubagentState,
+): Readonly<PersistedLifecycleFold> {
+  const lifecycle = state.lifecycle ?? {};
+  const hasLifecycleDecision =
+    lifecycle.currentTurnId !== undefined ||
+    lifecycle.completionTurnId !== undefined ||
+    lifecycle.completionOutcome !== undefined ||
+    lifecycle.completionSource !== undefined ||
+    lifecycle.completionExitCode !== undefined ||
+    lifecycle.processStatus !== undefined ||
+    lifecycle.processExitCode !== undefined ||
+    lifecycle.parentCancelled !== undefined ||
+    lifecycle.legacyTerminal !== undefined;
+  if (hasLifecycleDecision) return lifecycle;
+
+  // One-time migration for registry objects created before the machine kernel.
+  // Once cached below, compatibility status is never consulted again.
+  switch (state.status) {
+    case "running":
+    case "unknown":
+      return lifecycle;
+    case "idle":
+      return { ...lifecycle, legacyTerminal: "done" };
+    case "cancelled":
+      return { ...lifecycle, parentCancelled: true };
+    case "exited":
+      return {
+        ...lifecycle,
+        processStatus: "error",
+        ...(state.exitCode === undefined
+          ? {}
+          : { processExitCode: state.exitCode }),
+      };
+    default:
+      return assertNever(state.status);
+  }
+}
+
+export function initializeInteractiveStateMachine(
+  state: InteractiveSubagentState,
+  pane: PaneLiveness = paneLivenessFromCompatibilityStatus(state.status),
+): InteractiveMachineState {
+  const machine = initialInteractiveMachineState({
+    lifecycle: lifecycleForCompatibilityInitialization(state),
+    pane,
+  });
+  interactiveMachineStates.set(state, machine);
+  state.lifecycle = { ...machine.lifecycle };
+  state.status = projectInteractiveStatus(machine);
+  return machine;
+}
+
+export function getInteractiveMachineState(
+  state: InteractiveSubagentState,
+): InteractiveMachineState {
+  return (
+    interactiveMachineStates.get(state) ??
+    initializeInteractiveStateMachine(state)
+  );
+}
+
+export function advanceInteractiveState(
+  state: InteractiveSubagentState,
+  event: InteractiveMachineEvent,
+): InteractiveMachineTransition {
+  const transition = transitionInteractiveMachine(
+    getInteractiveMachineState(state),
+    event,
+  );
+  if (
+    event.type === "pane_observed" &&
+    transition.state.pane.kind === "dead" &&
+    state.parentSessionId
+  ) {
+    updateInteractiveState(state.cwd, state.id, (entry) => {
+      entry.paneDeathConfirmed = true;
+    });
+  }
+  switch (transition.kind) {
+    case "applied": {
+      interactiveMachineStates.set(state, transition.state);
+      state.lifecycle = { ...transition.state.lifecycle };
+      state.status = projectInteractiveStatus(transition.state);
+      const exitCode =
+        transition.state.lifecycle.processExitCode ??
+        transition.state.lifecycle.completionExitCode;
+      if (state.status === "exited" && exitCode !== undefined) {
+        state.exitCode = exitCode;
+      }
+      return transition;
+    }
+    case "unchanged":
+    case "stale":
+    case "invalid":
+      return transition;
+    default:
+      return assertNever(transition);
+  }
+}
+
+export function interactiveStatusForState(
+  state: InteractiveSubagentState,
+): InteractiveSubagentStatus {
+  return projectInteractiveStatus(getInteractiveMachineState(state));
+}
+
+export function isInteractiveStateActive(
+  state: InteractiveSubagentState,
+): boolean {
+  const status = interactiveStatusForState(state);
+  switch (status) {
+    case "running":
+    case "idle":
+      return true;
+    case "unknown":
+    case "cancelled":
+    case "exited":
+      return false;
+    default:
+      return assertNever(status);
+  }
+}
 
 /**
  * True iff a tmux server is running and the parent is attached to one of its
@@ -514,7 +668,7 @@ export function launchInteractiveSubagent(params: {
       // active/non-dead count; unknown panes conservatively consume capacity.
       activeCount = pruneTerminalLineageNodesSync(
         lineageStore.nodesDir,
-        (manifest) => getLineagePaneLiveness(manifest) === "dead",
+        (manifest) => getLineagePaneLiveness(manifest).kind === "dead",
       ).active;
     }
     if (activeCount >= maxNodes) {
@@ -735,6 +889,7 @@ export function launchInteractiveSubagent(params: {
     pendingDeliveries: [],
     deliveryReceipts: [],
   };
+  initializeInteractiveStateMachine(state, { kind: "alive" });
   interactiveSubagentRegistry.set(id, state);
   return state;
 }
@@ -777,48 +932,73 @@ export function showInteractiveSubagentNativeViewer(
   return getMuxForState(state).showNativeViewer(state.name, content);
 }
 
-/** Probe pane liveness using the mux that created it. */
-export function getInteractivePaneLiveness(
+/**
+ * Synchronous recovery preflight. A false compatibility probe is inconclusive
+ * because the legacy boolean API also returns false for transport failures.
+ * The recurring async observer performs authoritative dead classification.
+ */
+export function inspectInteractivePaneForRehydrate(
   state: InteractiveSubagentState,
 ): PaneLiveness {
-  return getMuxForState(state).getPaneLiveness(state.paneId, state.muxSession);
+  try {
+    const mux = getMuxForState(state);
+    if (!mux.isAvailable()) {
+      return { kind: "unavailable", reason: `${state.mux} is unavailable` };
+    }
+    return mux.isPaneAlive(state.paneId, state.muxSession)
+      ? { kind: "alive" }
+      : {
+          kind: "unknown",
+          reason: "synchronous pane probe could not confirm liveness",
+        };
+  } catch (error) {
+    return {
+      kind: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
-/** Preserve active state unless the backend explicitly confirms pane death. */
-export function isPaneAlive(state: InteractiveSubagentState): boolean {
-  return getInteractivePaneLiveness(state) !== "dead";
-}
-
-/** Probe pane liveness without blocking the parent event loop. */
-export function getInteractivePaneLivenessAsync(
+/** Observe pane liveness without blocking the parent event loop. */
+export function observeInteractivePane(
   state: InteractiveSubagentState,
 ): Promise<PaneLiveness> {
-  return getMuxForState(state).getPaneLivenessAsync(
-    state.paneId,
-    state.muxSession,
-  );
+  return getMuxForState(state).observePane(state.paneId, state.muxSession);
 }
 
-/** Preserve active state unless the async backend explicitly confirms death. */
-export async function isPaneAliveAsync(
-  state: InteractiveSubagentState,
-): Promise<boolean> {
-  return (await getInteractivePaneLivenessAsync(state)) !== "dead";
-}
-
-/** Probe the pane recorded in a lineage manifest. */
+/**
+ * Inspect the pane recorded in a lineage manifest without collapsing transport
+ * failure into confirmed death. Lineage pruning is synchronous because launch
+ * admission is synchronous, so it uses the mux tri-state compatibility probe;
+ * live owner reconciliation still uses the typed asynchronous observer.
+ */
 export function getLineagePaneLiveness(
   manifest: LineageManifest,
 ): PaneLiveness {
   const backend = manifest.pane.backend;
-  if (backend !== "tmux" && backend !== "zellij") return "unknown";
+  if (backend !== "tmux" && backend !== "zellij") {
+    return { kind: "unavailable", reason: `unsupported mux ${backend}` };
+  }
   try {
-    return getMux({ preference: backend }).getPaneLiveness(
+    const liveness = getMux({ preference: backend }).getPaneLiveness(
       manifest.pane.paneId,
       manifest.pane.muxSession,
     );
-  } catch {
-    return "unknown";
+    switch (liveness) {
+      case "alive":
+        return { kind: "alive" };
+      case "dead":
+        return { kind: "dead" };
+      case "unknown":
+        return { kind: "unknown" };
+      default:
+        return assertNever(liveness);
+    }
+  } catch (error) {
+    return {
+      kind: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -886,7 +1066,7 @@ export function buildAttachCommandsForState(
  * subagent.ts; PR #2 will route through `state.mux` so this becomes mux-agnostic.
  */
 export function isTmuxPaneAlive(paneId: string): boolean {
-  return new TmuxMultiplexer().getPaneLiveness(paneId) === "alive";
+  return new TmuxMultiplexer().isPaneAlive(paneId);
 }
 
 /**
@@ -928,13 +1108,15 @@ export function cancelInteractiveSubagent(
   }
   appendCancellation(state);
 
-  // 2. Update the registry. The poller still processes the durable cancellation.
-  state.status = "cancelled";
+  // 2. Advance the registry projection. The durable artifact remains authoritative.
+  advanceInteractiveState(state, { type: "parent_cancelled" });
 
-  // 3. Kill the pane via the backend that created it. The wrapper's EXIT trap fires and records the event.
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    mux.killPane(state.paneId, state.muxSession);
+  // 3. Kill without a blocking liveness preflight. Pane teardown is idempotent
+  // from the lifecycle's perspective; the async observer confirms death.
+  try {
+    getMuxForState(state).killPane(state.paneId, state.muxSession);
+  } catch {
+    /* best effort; the poller continues reconciling durable artifacts */
   }
   return state;
 }
@@ -1008,10 +1190,11 @@ export function cancelInteractiveDescendantByState(
     /* best effort; the owner will reconcile the durable pane state */
   }
   appendCancellation(state, false);
-  state.status = "cancelled";
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    mux.killPane(state.paneId, state.muxSession);
+  advanceInteractiveState(state, { type: "parent_cancelled" });
+  try {
+    getMuxForState(state).killPane(state.paneId, state.muxSession);
+  } catch {
+    /* best effort; the owner reconciles durable artifacts */
   }
   return state;
 }
@@ -1028,9 +1211,8 @@ export function cancelInteractiveDescendantByState(
  *      handler clears the registry BEFORE killing panes (to prevent the
  *      in-flight poll tick race), so `cancelInteractiveSubagent(id)` would
  *      early-return `undefined` and the pane-kill would be skipped.
- *   2. NO `state.status = "cancelled"` update: the state object is a snapshot
- *      detached from the registry; mutating it would have no observable
- *      effect (the registry is already cleared, no future poll will see it).
+ *   2. State advancement is still routed through the lifecycle kernel, even
+ *      though this snapshot has already been detached from the registry.
  *   3. `mux.killPane` wrapped in try/catch: a synchronous `execFileSync` failure
  *      (e.g. tmux already exited, session torn down) must not abort the
  *      shutdown loop over remaining running states. The original function
@@ -1061,145 +1243,80 @@ export function cancelInteractiveSubagentByState(
     /* best-effort */
   }
   appendCancellation(state);
+  advanceInteractiveState(state, { type: "parent_cancelled" });
 
-  // Explicit cancellation is destructive by request: unless absence is
-  // confirmed, attempt the kill even when the listing probe is unavailable.
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    try {
-      mux.killPane(state.paneId, state.muxSession);
-    } catch {
-      /* best-effort */
-    }
+  // 2. Kill without a blocking liveness preflight.
+  try {
+    getMuxForState(state).killPane(state.paneId, state.muxSession);
+  } catch {
+    /* best-effort */
   }
-  // Does NOT update state.status — see JSDoc point 2.
+  // The detached snapshot is advanced for consistent cancellation semantics.
 }
 
 /**
- * Pure status-decision matrix used by both `pruneDeadInteractiveSubagents` (here) and the
- * artifact poller in `subagent.ts`. Pulled out so the rules are testable without a live tmux.
- *
- * Semantics: a `done` event means "this turn is finished" — the child's REPL stays open and the
- * child is ready for a follow-up prompt. Only `error` / pane-dead / `cancelled` are terminal.
+ * Compatibility status projection retained for existing callers and tests.
+ * A v2 completion ends one turn, so done/error is idle while the pane lives;
+ * legacy error and confirmed process exit remain terminal.
  */
 export function deriveInteractiveSubagentStatus(
   lastEvent: SubagentEvent | null,
   paneAlive: boolean,
 ): InteractiveSubagentStatus {
-  if (!lastEvent) return paneAlive ? "running" : "unknown";
-  switch (lastEvent.type) {
-    case "process_exited":
-      return lastEvent.status === "cancelled" ? "cancelled" : "exited";
-    case "completion":
-      if (lastEvent.outcome === "cancelled") return "cancelled";
-      return paneAlive ? "idle" : "exited";
-    case "cancelled":
-      return "cancelled";
-    case "error":
-      // child declared it unrecoverable; terminal
-      return "exited";
-    case "done":
-      return paneAlive ? "idle" : "exited";
-    case "started":
-    case "tool_activity":
-    case "turn_started":
-      // Non-terminal activity events: still running if pane is alive.
-      return paneAlive ? "running" : "unknown";
-    default:
-      return assertNever(lastEvent);
+  let machine = initialInteractiveMachineState({
+    pane: { kind: paneAlive ? "alive" : "dead" },
+  });
+  if (lastEvent) {
+    const transition = transitionInteractiveMachine(machine, {
+      type: "artifact",
+      event: lastEvent,
+    });
+    if (transition.kind === "applied") machine = transition.state;
   }
+  return projectInteractiveStatus(machine);
 }
 
 export function deriveInteractiveSubagentStatusFromEvents(
   events: SubagentEvent[],
   paneAlive: boolean,
 ): InteractiveSubagentStatus {
-  const lifecycle: PersistedLifecycleFold = {};
-  for (const event of events) foldInteractiveLifecycle(lifecycle, event);
-  return deriveInteractiveSubagentStatusFromLifecycle(lifecycle, paneAlive);
+  let machine = initialInteractiveMachineState({
+    pane: { kind: paneAlive ? "alive" : "dead" },
+  });
+  for (const event of events) {
+    const transition = transitionInteractiveMachine(machine, {
+      type: "artifact",
+      event,
+    });
+    if (transition.kind === "applied") machine = transition.state;
+  }
+  return projectInteractiveStatus(machine);
 }
 
 export function foldInteractiveLifecycle(
   lifecycle: PersistedLifecycleFold,
   event: SubagentEvent,
 ): void {
-  lifecycle.startedAt ??= event.ts;
-  switch (event.type) {
-    case "process_exited": {
-      lifecycle.processStatus = event.status;
-      lifecycle.processExitCode = event.exitCode;
-      return;
-    }
-    case "turn_started": {
-      lifecycle.currentTurnId = event.turnId;
-      lifecycle.completionTurnId = undefined;
-      lifecycle.completionOutcome = undefined;
-      lifecycle.completionSource = undefined;
-      lifecycle.completionExitCode = undefined;
-      lifecycle.legacyTerminal = undefined;
-      return;
-    }
-    case "completion": {
-      if (event.outcome === "cancelled" && event.source === "parent") {
-        lifecycle.parentCancelled = true;
-      }
-      if (
-        !lifecycle.currentTurnId ||
-        event.turnId === lifecycle.currentTurnId
-      ) {
-        lifecycle.completionTurnId = event.turnId;
-        lifecycle.completionOutcome = event.outcome;
-        lifecycle.completionSource = event.source;
-        lifecycle.completionExitCode = event.exitCode;
-      }
-      return;
-    }
-    case "started": {
-      lifecycle.legacyTerminal = undefined;
-      return;
-    }
-    case "done":
-    case "error":
-    case "cancelled": {
-      lifecycle.legacyTerminal = event.status;
-      lifecycle.completionExitCode =
-        "exitCode" in event ? event.exitCode : undefined;
-      return;
-    }
-    case "tool_activity":
-      // Activity events do not affect lifecycle state.
-      return;
-    default:
-      return assertNever(event);
-  }
+  const machine = initialInteractiveMachineState({ lifecycle });
+  const transition = transitionInteractiveMachine(machine, {
+    type: "artifact",
+    event,
+  });
+  if (transition.kind !== "applied") return;
+  Object.assign(lifecycle, transition.state.lifecycle);
 }
 
 export function deriveInteractiveSubagentStatusFromLifecycle(
   lifecycle: PersistedLifecycleFold,
   paneState: boolean | PaneLiveness,
 ): InteractiveSubagentStatus {
-  const paneLiveness: PaneLiveness =
-    typeof paneState === "boolean" ? (paneState ? "alive" : "dead") : paneState;
-  if (lifecycle.parentCancelled) return "cancelled";
-  if (lifecycle.processStatus) {
-    return lifecycle.processStatus === "cancelled" ? "cancelled" : "exited";
-  }
-  if (lifecycle.completionOutcome) {
-    if (lifecycle.completionOutcome === "cancelled") return "cancelled";
-    if (paneLiveness === "alive") return "idle";
-    return paneLiveness === "dead" ? "exited" : "unknown";
-  }
-  if (lifecycle.legacyTerminal) {
-    if (lifecycle.legacyTerminal === "cancelled") return "cancelled";
-    if (lifecycle.legacyTerminal === "error") return "exited";
-    if (paneLiveness === "alive") return "idle";
-    return paneLiveness === "dead" ? "exited" : "unknown";
-  }
-  if (paneLiveness === "alive") return "running";
-  if (paneLiveness === "unknown") return "unknown";
-  // Keep the legacy boolean helper's no-event result stable; tri-state
-  // consumers can distinguish confirmed death and transition to exited.
-  return typeof paneState === "boolean" ? "unknown" : "exited";
+  const pane: PaneLiveness =
+    typeof paneState === "boolean"
+      ? { kind: paneState ? "alive" : "dead" }
+      : paneState;
+  return projectInteractiveStatus(
+    initialInteractiveMachineState({ lifecycle, pane }),
+  );
 }
 
 /**
@@ -1212,30 +1329,59 @@ export function deriveInteractiveSubagentStatusFromLifecycle(
  * `send_interactive_subagent_message` will accept more prompts. Only when
  * the pane is actually gone (or the child called `error`) is the sub-agent
  * terminal.
- *
- * Edge case: if the pane is dead and no `done` event was recorded (mux died
- * before the launch trap could write it), fall back to the session-file
- * existence check — same heuristic as before.
+ * Liveness probing is asynchronous so native mux subprocesses never block the
+ * parent event loop. Revision fences discard results from older observations.
  */
-export function pruneDeadInteractiveSubagents(): void {
-  for (const state of interactiveSubagentRegistry.values()) {
+export async function pruneDeadInteractiveSubagents(): Promise<void> {
+  const pending = [...interactiveSubagentRegistry.values()]
+    .filter((state) => {
+      const status = interactiveStatusForState(state);
+      return status !== "cancelled" && status !== "exited";
+    })
+    .map((state) => {
+      const started = advanceInteractiveState(state, {
+        type: "pane_observation_started",
+      });
+      return {
+        state,
+        revision:
+          started.kind === "applied"
+            ? started.state.observationRevision
+            : getInteractiveMachineState(state).observationRevision,
+      } as const;
+    });
+  const observations = await Promise.all(
+    pending.map(async ({ state, revision }) => {
+      try {
+        return {
+          state,
+          revision,
+          liveness: await observeInteractivePane(state),
+        } as const;
+      } catch (error) {
+        return {
+          state,
+          revision,
+          liveness: {
+            kind: "unknown",
+            reason: error instanceof Error ? error.message : String(error),
+          } as const,
+        } as const;
+      }
+    }),
+  );
+  for (const observation of observations) {
     if (
-      state.status !== "running" &&
-      state.status !== "idle" &&
-      state.status !== "unknown"
+      interactiveSubagentRegistry.get(observation.state.id) !==
+      observation.state
     ) {
       continue;
     }
-    const paneLiveness = getInteractivePaneLiveness(state);
-    const next = deriveInteractiveSubagentStatusFromLifecycle(
-      state.lifecycle ?? {},
-      paneLiveness,
-    );
-    if (next === state.status) continue;
-    state.status = next;
-    const exitCode =
-      state.lifecycle?.processExitCode ?? state.lifecycle?.completionExitCode;
-    if (next === "exited" && exitCode !== undefined) state.exitCode = exitCode;
+    advanceInteractiveState(observation.state, {
+      type: "pane_observed",
+      revision: observation.revision,
+      liveness: observation.liveness,
+    });
   }
 }
 
@@ -1245,7 +1391,7 @@ export function formatInteractiveState(
   const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
   const taskPreview = state.task.replace(/\s+/g, " ").slice(0, 80);
   const lines: string[] = [
-    `${state.name} (${state.id}) — ${state.status}, ${elapsed}s`,
+    `${state.name} (${state.id}) — ${interactiveStatusForState(state)}, ${elapsed}s`,
     `Task: ${taskPreview}${state.task.length > 80 ? "…" : ""}`,
     `Mux: ${state.mux}`,
     `Pane: ${state.paneId}`,

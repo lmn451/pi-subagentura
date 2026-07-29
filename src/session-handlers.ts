@@ -14,6 +14,7 @@ import { snapshotInProcessSession } from "./cancellation-snapshots";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
   cancelInteractiveSubagentByState,
+  interactiveStatusForState,
   interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -29,6 +30,13 @@ import {
   type SessionContextRef,
 } from "./session-context";
 import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
+
+function shouldTerminateInteractiveState(
+  state: InteractiveSubagentState,
+): boolean {
+  const status = interactiveStatusForState(state);
+  return status !== "cancelled" && status !== "exited";
+}
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -137,11 +145,7 @@ function discardPreSessionPollerState(
       continue;
     }
     interactiveSubagentRegistry.delete(state.id);
-    if (
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown"
-    ) {
+    if (shouldTerminateInteractiveState(state)) {
       try {
         cancelInteractiveSubagentByState(state);
       } catch {
@@ -367,9 +371,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
           interactiveSubagentRegistry.delete(state.id);
           if (
             !preserveInteractivePanes &&
-            (state.status === "running" ||
-              state.status === "idle" ||
-              state.status === "unknown")
+            shouldTerminateInteractiveState(state)
           ) {
             try {
               cancelInteractiveSubagentByState(state);
@@ -408,13 +410,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
       // kill their panes; reload/resume/quit leave them for rehydration.
       const runningStates: InteractiveSubagentState[] = [];
       for (const state of interactiveSubagentRegistry.values()) {
-        if (
-          state.status === "running" ||
-          state.status === "idle" ||
-          state.status === "unknown"
-        ) {
-          runningStates.push(state);
-        }
+        if (shouldTerminateInteractiveState(state)) runningStates.push(state);
       }
 
       // Drop in-memory state FIRST. An in-flight poll tick (dequeued from

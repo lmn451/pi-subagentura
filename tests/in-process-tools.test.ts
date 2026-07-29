@@ -9,6 +9,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  InteractiveSubagentState,
+  InteractiveSubagentStatus,
+} from "../src/interactive-tmux";
 
 // ── Hoisted mock variables (available before vi.mock runs) ───────────
 
@@ -60,12 +64,23 @@ vi.mock("../src/notifications", async (importOriginal) => {
 // interactive-tmux.ts has a TypeScript syntax that esbuild (vitest's transformer)
 // cannot parse (line 613). We mock it so vitest never loads the source.
 vi.mock("../src/interactive-tmux", () => {
-  const fakeRegistry = new Map<string, any>();
+  const fakeRegistry = new Map<string, InteractiveSubagentState>();
+  const interactiveStatusForState = (
+    state: InteractiveSubagentState,
+  ): InteractiveSubagentStatus => state.status;
+  const isInteractiveStateActive = (
+    state: InteractiveSubagentState,
+  ): boolean => {
+    const status = interactiveStatusForState(state);
+    return status === "running" || status === "idle";
+  };
+
   return {
     interactiveSubagentRegistry: fakeRegistry,
-    isTmuxAvailable: () => false,
+    interactiveStatusForState,
+    isInteractiveStateActive,
+    isTmuxAvailable: (): boolean => false,
     default: {},
-    // The specific shape doesn't matter — only the import needs to resolve.
   };
 });
 

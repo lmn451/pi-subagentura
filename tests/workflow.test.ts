@@ -30,6 +30,7 @@ import {
 } from "../src/workflow";
 import { withOrchestrationContext } from "../src/orchestration-context";
 import type { SubagentResult } from "../src/helpers";
+import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import {
   appendCompletionEvent,
   appendEvent,
@@ -113,8 +114,23 @@ function echoRunner(): WorkflowAgentRunner {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-function fakeState(dir: string) {
-  return { id: "abcd1234", artifactDir: dir, model: "test/model" } as any;
+function fakeState(dir: string): InteractiveSubagentState {
+  return {
+    id: "abcd1234",
+    name: "workflow-test-agent",
+    task: "test workflow",
+    paneId: "%99",
+    mux: "tmux",
+    sessionFile: join(dir, "session.jsonl"),
+    cwd: dir,
+    model: "test/model",
+    startedAt: Date.now(),
+    status: "running",
+    attachCommand: "tmux attach",
+    selectPaneCommand: "tmux select-pane -t '%99'",
+    launchScriptFile: join(dir, "launch.sh"),
+    artifactDir: dir,
+  };
 }
 
 describe("parseWorkflow", () => {

@@ -59,6 +59,7 @@
     "src/tools/in-process.ts",
     "src/tools/interactive.ts",
     "src/interactive-tmux.ts",
+    "src/interactive-state.ts",
     "src/interactive-supervisor-registration.ts",
     "src/interactive-supervisor-ui.ts",
     "src/interactive-lineage.ts",

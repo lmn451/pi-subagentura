@@ -19,9 +19,10 @@ import {
 import { reconcileDeliveryReceipts } from "./delivery";
 import {
   buildAttachCommandsForState,
-  deriveInteractiveSubagentStatusFromLifecycle,
+  initializeInteractiveStateMachine,
   interactiveSubagentRegistry,
-  isPaneAlive,
+  interactiveStatusForState,
+  inspectInteractivePaneForRehydrate,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 
@@ -117,15 +118,19 @@ export function rehydrateInteractiveSubagents(
       lastStopText: undefined,
     };
 
-    const paneAlive = isPaneAlive(rehydrated);
-    const next = deriveInteractiveSubagentStatusFromLifecycle(
-      rehydrated.lifecycle ?? {},
-      paneAlive,
+    initializeInteractiveStateMachine(
+      rehydrated,
+      entry.paneDeathConfirmed
+        ? { kind: "dead" }
+        : inspectInteractivePaneForRehydrate(rehydrated),
     );
-    rehydrated.status = next;
     reconcileDeliveryReceipts(rehydrated, sessionEntries);
-    if (next === "exited" || next === "cancelled") terminal++;
-    else if (next === "running" || next === "idle") alive++;
+    const status = interactiveStatusForState(rehydrated);
+    if (status === "exited" || status === "cancelled") {
+      terminal++;
+    } else if (status === "running" || status === "idle") {
+      alive++;
+    }
     interactiveSubagentRegistry.set(entry.id, rehydrated);
   }
 

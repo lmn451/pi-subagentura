@@ -133,7 +133,7 @@ describe("session_shutdown handler", () => {
     workflowJobRegistry.clear();
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
 
     // Stub the global timers. setInterval returns a fake handle with a
@@ -498,7 +498,7 @@ describe("session_shutdown handler", () => {
     interactiveTmux.interactiveSubagentRegistry.set(running.id, running);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
 
     const ui = {

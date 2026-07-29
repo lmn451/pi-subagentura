@@ -568,7 +568,7 @@ describe("session handler lifecycle callbacks", () => {
     interactiveSubagentRegistry.set(parentState.id, parentState);
     interactiveSubagentRegistry.set(childState.id, childState);
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
 
     await vi.advanceTimersByTimeAsync(5000);

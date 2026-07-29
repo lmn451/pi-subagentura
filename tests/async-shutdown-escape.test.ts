@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  InteractiveSubagentState,
+  InteractiveSubagentStatus,
+} from "../src/interactive-tmux";
 
 const { mockStartSubagentJob, createStartGate } = vi.hoisted(() => ({
   mockStartSubagentJob: vi.fn(),
@@ -14,12 +18,26 @@ vi.mock("../src/helpers", async (importOriginal) => {
   return { ...actual, startSubagentJob: mockStartSubagentJob };
 });
 
-vi.mock("../src/interactive-tmux", () => ({
-  interactiveSubagentRegistry: new Map(),
-  isTmuxAvailable: () => false,
-  cancelInteractiveSubagent: vi.fn(),
-  cancelInteractiveSubagentByState: vi.fn(),
-}));
+vi.mock("../src/interactive-tmux", () => {
+  const interactiveStatusForState = (
+    state: InteractiveSubagentState,
+  ): InteractiveSubagentStatus => state.status;
+  const isInteractiveStateActive = (
+    state: InteractiveSubagentState,
+  ): boolean => {
+    const status = interactiveStatusForState(state);
+    return status === "running" || status === "idle";
+  };
+
+  return {
+    interactiveSubagentRegistry: new Map<string, InteractiveSubagentState>(),
+    interactiveStatusForState,
+    isInteractiveStateActive,
+    isTmuxAvailable: (): boolean => false,
+    cancelInteractiveSubagent: vi.fn(),
+    cancelInteractiveSubagentByState: vi.fn(),
+  };
+});
 
 import { jobRegistry } from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";

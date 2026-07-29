@@ -71,7 +71,7 @@ async function setup(mode: "notify" | "inject", triggerTurn: boolean) {
   pi.sendMessage = sendMessage;
   __setTmuxMultiplexer({
     getPaneLiveness: () => "alive",
-    getPaneLivenessAsync: async () => "alive",
+    observePane: async () => ({ kind: "alive" }),
   } as any);
   const art = artifactPath(repoRoot, "session-harness");
   const state: any = {
@@ -441,7 +441,7 @@ describe("Pi session delivery integration", () => {
     };
     interactiveSubagentRegistry.set(state.id, state);
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
       getPaneLiveness: () => "alive",
     } as any);
     writeOutput(art, "immutable artifact result");

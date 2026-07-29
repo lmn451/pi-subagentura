@@ -29,12 +29,14 @@
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
   PaneLiveness,
   PaneRef,
+  SyncPaneLiveness,
 } from "./multiplexer";
 import {
   boundCaptureOutput,
@@ -57,36 +59,62 @@ function normalizePaneId(raw: string): string {
   return raw.trim().replace(/^(?:terminal_|plugin_)/, "");
 }
 
+type ZellijPaneTarget =
+  | { readonly kind: "terminal"; readonly paneId: string }
+  | { readonly kind: "plugin"; readonly paneId: string };
+
 interface ZellijPaneRow {
   readonly id: number | string;
   readonly is_plugin?: boolean;
   readonly exited?: boolean;
 }
 
+function parseZellijPaneTarget(raw: string): ZellijPaneTarget | undefined {
+  const match = /^(?:(terminal|plugin)_)?(0|[1-9]\d*)$/.exec(raw.trim());
+  if (!match) return undefined;
+  return {
+    kind: match[1] === "plugin" ? "plugin" : "terminal",
+    paneId: match[2],
+  };
+}
+
+function isCanonicalZellijPaneId(value: unknown): value is string | number {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  return typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value);
+}
+
+class ZellijPaneListingError extends Error {}
+
 function parsePaneListing(output: string): ZellijPaneRow[] {
   const parsed: unknown = JSON.parse(output);
   if (!Array.isArray(parsed)) {
-    throw new Error("Malformed zellij pane listing");
+    throw new ZellijPaneListingError("zellij returned malformed pane data");
   }
+  const rows: ZellijPaneRow[] = [];
+  const seenTargets = new Set<string>();
   for (const row of parsed) {
-    if (row === null || typeof row !== "object") {
-      throw new Error("Malformed zellij pane listing row");
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new ZellijPaneListingError("zellij returned malformed pane data");
     }
     const pane = row as Record<string, unknown>;
-    const validId =
-      (typeof pane.id === "number" &&
-        Number.isInteger(pane.id) &&
-        pane.id >= 0) ||
-      (typeof pane.id === "string" && /^\d+$/.test(pane.id));
     if (
-      !validId ||
+      !isCanonicalZellijPaneId(pane.id) ||
       (pane.is_plugin !== undefined && typeof pane.is_plugin !== "boolean") ||
       (pane.exited !== undefined && typeof pane.exited !== "boolean")
     ) {
-      throw new Error("Malformed zellij pane listing row");
+      throw new ZellijPaneListingError("zellij returned malformed pane data");
     }
+    const targetKind = pane.is_plugin === true ? "plugin" : "terminal";
+    const targetKey = `${targetKind}:${String(pane.id)}`;
+    if (seenTargets.has(targetKey)) {
+      throw new ZellijPaneListingError("zellij returned duplicate pane data");
+    }
+    seenTargets.add(targetKey);
+    rows.push(pane as unknown as ZellijPaneRow);
   }
-  return parsed as ZellijPaneRow[];
+  return rows;
 }
 
 class BoundedByteTail {
@@ -142,6 +170,83 @@ class BoundedByteTail {
       this.#storage.subarray(0, this.#length - first.length),
     ]);
   }
+}
+
+interface ExecFileTextResult {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+interface ExecFileTextOptions {
+  readonly encoding: "utf8";
+  readonly timeout: number;
+  readonly maxBuffer: number;
+  readonly killSignal: "SIGKILL";
+}
+
+function execFileText(
+  command: string,
+  args: readonly string[],
+  options: ExecFileTextOptions,
+  callback: (error: Error | null, result: ExecFileTextResult) => void,
+): void {
+  execFile(command, args, options, (error, stdout, stderr) => {
+    const result = { stdout, stderr };
+    if (error) {
+      Object.assign(error, result);
+    }
+    callback(error, result);
+  });
+}
+
+const execFileAsync = promisify(execFileText);
+
+function classifyZellijProbeError(
+  error: unknown,
+  hasExplicitSession: boolean,
+): PaneLiveness {
+  const detail =
+    error instanceof Error
+      ? `${
+          typeof error === "object" &&
+          error !== null &&
+          "stderr" in error &&
+          typeof error.stderr === "string"
+            ? error.stderr
+            : ""
+        }\n${error.message}`
+      : "";
+  if (
+    hasExplicitSession &&
+    /session (?:[^\n]+ )?(?:not found|does not exist)|no session named|no active zellij session/i.test(
+      detail,
+    )
+  ) {
+    return { kind: "dead" };
+  }
+
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? error.code
+      : undefined;
+  const killed =
+    typeof error === "object" && error !== null && "killed" in error
+      ? error.killed === true
+      : false;
+  if (
+    code === "ENOENT" ||
+    code === "ETIMEDOUT" ||
+    killed ||
+    /connection refused|failed to connect|could not connect|no active zellij session|zellij server.*(?:unavailable|not running)/i.test(
+      detail,
+    )
+  ) {
+    return {
+      kind: "unavailable",
+      reason: "zellij liveness probe unavailable",
+    };
+  }
+  return { kind: "unknown", reason: "zellij liveness probe failed" };
 }
 
 export class ZellijMultiplexer implements Multiplexer {
@@ -360,31 +465,25 @@ export class ZellijMultiplexer implements Multiplexer {
   }
 
   /**
-   * Match a `list-panes --json` row against a pane id we hold.
-   *
-   * Plugin panes MUST be excluded, not merely deprioritized: zellij numbers
-   * `terminal_N` and `plugin_N` in SEPARATE namespaces, and `normalizePaneId`
-   * strips the prefix, so the two collapse onto the same integer. Verified
-   * against zellij 0.44.3 — a fresh session lists a `zellij:link` plugin pane
-   * with `id: 0` alongside the shell's terminal pane, also `id: 0`. Matching on
-   * the bare integer therefore reported a closed sub-agent pane as still alive
-   * (the plugin pane kept answering for it), which would make the artifact
-   * poller believe a finished child was running forever. Our pane is always a
-   * terminal pane: `createPane` only ever selects `!is_plugin`.
+   * Match a validated `list-panes --json` row against a namespace-preserving
+   * target. Zellij assigns the same numeric ids independently to terminal and
+   * plugin panes, so matching the integer alone can keep a dead terminal alive.
    */
-  private paneRowMatches(pane: ZellijPaneRow, target: string): boolean {
+  private paneRowMatches(
+    pane: ZellijPaneRow,
+    target: ZellijPaneTarget,
+  ): boolean {
+    const paneKind = pane.is_plugin === true ? "plugin" : "terminal";
     return (
-      !pane.is_plugin && String(pane.id) === target && pane.exited !== true
+      paneKind === target.kind &&
+      String(pane.id) === target.paneId &&
+      pane.exited !== true
     );
   }
 
-  /**
-   * Probe pane liveness from a complete backend pane listing. Backend and parse
-   * failures are `unknown`, distinct from a successful listing without the pane.
-   */
-  getPaneLiveness(paneId: string, session?: string): PaneLiveness {
-    const target = normalizePaneId(paneId);
-    if (!/^\d+$/.test(target)) return "unknown";
+  getPaneLiveness(paneId: string, session?: string): SyncPaneLiveness {
+    const target = parseZellijPaneTarget(paneId);
+    if (!target) return "unknown";
     try {
       const output = execFileSync(
         "zellij",
@@ -401,40 +500,41 @@ export class ZellijMultiplexer implements Multiplexer {
     }
   }
 
-  getPaneLivenessAsync(
-    paneId: string,
-    session?: string,
-  ): Promise<PaneLiveness> {
-    const target = normalizePaneId(paneId);
-    if (!/^\d+$/.test(target)) return Promise.resolve("unknown");
-    return new Promise((resolve) => {
-      try {
-        execFile(
-          "zellij",
-          [...this.sessionFlag(session), "action", "list-panes", "--json"],
-          { encoding: "utf8", timeout: 5000 },
-          (error, stdout) => {
-            if (error) {
-              resolve("unknown");
-              return;
-            }
-            try {
-              resolve(
-                parsePaneListing(stdout).some((pane) =>
-                  this.paneRowMatches(pane, target),
-                )
-                  ? "alive"
-                  : "dead",
-              );
-            } catch {
-              resolve("unknown");
-            }
-          },
-        );
-      } catch {
-        resolve("unknown");
+  isPaneAlive(paneId: string, session?: string): boolean {
+    return this.getPaneLiveness(paneId, session) === "alive";
+  }
+
+  async observePane(paneId: string, session?: string): Promise<PaneLiveness> {
+    const target = parseZellijPaneTarget(paneId);
+    if (!target) {
+      return { kind: "unknown", reason: "invalid zellij pane id" };
+    }
+    try {
+      const { stdout } = await execFileAsync(
+        "zellij",
+        [...this.sessionFlag(session), "action", "list-panes", "--json"],
+        {
+          encoding: "utf8",
+          timeout: 5000,
+          maxBuffer: 64 * 1024,
+          killSignal: "SIGKILL",
+        },
+      );
+      const panes = parsePaneListing(stdout);
+      const matched = panes.find((pane) => this.paneRowMatches(pane, target));
+      return matched ? { kind: "alive" } : { kind: "dead" };
+    } catch (error: unknown) {
+      if (error instanceof ZellijPaneListingError) {
+        return { kind: "unknown", reason: error.message };
       }
-    });
+      if (error instanceof SyntaxError) {
+        return {
+          kind: "unknown",
+          reason: "zellij returned malformed pane data",
+        };
+      }
+      return classifyZellijProbeError(error, session !== undefined);
+    }
   }
 
   /**

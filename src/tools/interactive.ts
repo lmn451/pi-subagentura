@@ -25,6 +25,8 @@ import {
   cancelInteractiveSubagent,
   formatInteractiveState,
   interactiveSubagentRegistry,
+  interactiveStatusForState,
+  isInteractiveStateActive,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
@@ -273,7 +275,7 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI): void {
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
-      pruneDeadInteractiveSubagents();
+      await pruneDeadInteractiveSubagents();
       updateRunningSubagentFooter(ctx.ui);
       const states = params.jobId
         ? [interactiveSubagentRegistry.get(params.jobId)].filter(
@@ -463,18 +465,18 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      // Accept both "running" (mid-turn) and "idle" (REPL open, between turns) — that's the whole
-      // point of follow-up support. Mid-turn sends are safe: tmux send-keys just queues keystrokes
-      // in the REPL input buffer, which submits when the current turn finishes.
-      if (state.status !== "running" && state.status !== "idle") {
+      // Accept both running and idle states. The compatibility status comes
+      // from the lifecycle kernel rather than an independently mutable field.
+      const status = interactiveStatusForState(state);
+      if (!isInteractiveStateActive(state)) {
         return {
           content: [
             {
               type: "text",
-              text: `Interactive sub-agent ${params.id} is ${state.status}; follow-up messages can only be sent to running or idle sub-agents. Spawn a new one if needed.`,
+              text: `Interactive sub-agent ${params.id} is ${status}; follow-up messages can only be sent to running or idle sub-agents. Spawn a new one if needed.`,
             },
           ],
-          details: { id: params.id, status: state.status },
+          details: { id: params.id, status },
           isError: true,
         };
       }
@@ -705,7 +707,7 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<any> {
-      pruneDeadInteractiveSubagents();
+      await pruneDeadInteractiveSubagents();
       updateRunningSubagentFooter(ctx.ui);
       const states = [...interactiveSubagentRegistry.values()];
       const summary = states.map((s) => {

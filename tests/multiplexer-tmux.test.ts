@@ -534,10 +534,10 @@ describe("multiplexer-tmux", () => {
   });
 
   /* ------------------------------------------------------------------ */
-  /*  getPaneLiveness                                                   */
+  /*  pane liveness                                                      */
   /* ------------------------------------------------------------------ */
 
-  it("returns alive when a successful pane listing contains the pane", async () => {
+  it("reports a pane present in a complete synchronous listing as alive", async () => {
     installMockExec((args) => {
       if (args[0] === "list-panes") return "%1\n%42\n";
       return "";
@@ -545,10 +545,10 @@ describe("multiplexer-tmux", () => {
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    expect(new TmuxMultiplexer().getPaneLiveness("%42")).toBe("alive");
+    expect(new TmuxMultiplexer().isPaneAlive("%42")).toBe(true);
   });
 
-  it("returns dead when a successful pane listing omits the pane", async () => {
+  it("returns false when a synchronous listing omits the pane", async () => {
     installMockExec((args) => {
       if (args[0] === "list-panes") return "%1\n%2\n";
       return "";
@@ -556,50 +556,34 @@ describe("multiplexer-tmux", () => {
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    expect(new TmuxMultiplexer().getPaneLiveness("%99")).toBe("dead");
+    expect(new TmuxMultiplexer().isPaneAlive("%99")).toBe(false);
   });
 
-  it("returns unknown when sync or async pane listing fails", async () => {
+  it("returns false when a synchronous listing fails or is malformed", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => {
         throw new Error("server unavailable");
       },
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout: string) => void,
-      ) => callback(new Error("server unavailable"), ""),
     }));
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    const mux = new TmuxMultiplexer();
-    expect(mux.getPaneLiveness("%99")).toBe("unknown");
-    await expect(mux.getPaneLivenessAsync("%99")).resolves.toBe("unknown");
-  });
+    expect(new TmuxMultiplexer().isPaneAlive("%99")).toBe(false);
 
-  it("returns unknown for malformed pane-listing output", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => "not-a-pane\n",
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout: string) => void,
-      ) => callback(null, "not-a-pane\n"),
     }));
-    const { TmuxMultiplexer } = await importFresh<
+    const malformedModule = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    const mux = new TmuxMultiplexer();
-    expect(mux.getPaneLiveness("%42")).toBe("unknown");
-    await expect(mux.getPaneLivenessAsync("%42")).resolves.toBe("unknown");
+    expect(new malformedModule.TmuxMultiplexer().isPaneAlive("%42")).toBe(
+      false,
+    );
   });
 
-  it("getPaneLivenessAsync lists panes without using execFileSync", async () => {
+  it("observePane uses execFile rather than execFileSync", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => {
@@ -610,20 +594,20 @@ describe("multiplexer-tmux", () => {
         _args: string[],
         _options: object,
         callback: (error: Error | null, stdout: string) => void,
-      ) => callback(null, "%1\n%42\n"),
+      ) => callback(null, "%42\n"),
     }));
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    await expect(
-      new TmuxMultiplexer().getPaneLivenessAsync("%42"),
-    ).resolves.toBe("alive");
+    await expect(new TmuxMultiplexer().observePane("%42")).resolves.toEqual({
+      kind: "alive",
+    });
   });
 
-  it("treats a successful blank listing as dead", async () => {
+  it("observePane treats successful blank output as confirmed dead", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
-      execFileSync: () => "\n",
+      execFileSync: () => "",
       execFile: (
         _file: string,
         _args: string[],
@@ -634,13 +618,81 @@ describe("multiplexer-tmux", () => {
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    const mux = new TmuxMultiplexer();
-
-    expect(mux.getPaneLiveness("%99")).toBe("dead");
-    await expect(mux.getPaneLivenessAsync("%99")).resolves.toBe("dead");
+    await expect(new TmuxMultiplexer().observePane("%99")).resolves.toEqual({
+      kind: "dead",
+    });
   });
 
-  it("lists all panes with stable pane-id output", async () => {
+  it("observePane distinguishes backend unavailability from confirmed death", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => "",
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: NodeJS.ErrnoException | null, stdout: string) => void,
+      ) => {
+        const error = new Error("spawn tmux ENOENT") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        callback(error, "");
+      },
+    }));
+    const { TmuxMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+
+    const unavailable = await new TmuxMultiplexer().observePane("%42");
+    expect(unavailable.kind).toBe("unavailable");
+    if (unavailable.kind !== "unavailable") return;
+    expect(unavailable.reason).toBeTypeOf("string");
+  });
+
+  it("observePane reports invalid, mismatched, and unclassified results as unknown", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => "",
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => callback(null, "%7\n"),
+    }));
+    const { TmuxMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+    await expect(
+      new TmuxMultiplexer().observePane("42"),
+    ).resolves.toMatchObject({
+      kind: "unknown",
+    });
+    await expect(
+      new TmuxMultiplexer().observePane("%42"),
+    ).resolves.toMatchObject({
+      kind: "unknown",
+    });
+
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => "",
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => callback(new Error("backend refused request"), ""),
+    }));
+    const failedModule = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+    const unknown = await new failedModule.TmuxMultiplexer().observePane("%42");
+    expect(unknown.kind).toBe("unknown");
+    if (unknown.kind !== "unknown") return;
+    expect(unknown.reason).toBeTypeOf("string");
+  });
+
+  it("lists all panes with stable pane-id output for the synchronous probe", async () => {
     const calls: string[][] = [];
     installMockExec((args) => {
       calls.push(args);
@@ -650,7 +702,7 @@ describe("multiplexer-tmux", () => {
     const { TmuxMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-tmux")
     >("../src/multiplexer-tmux");
-    new TmuxMultiplexer().getPaneLiveness("%42");
+    new TmuxMultiplexer().isPaneAlive("%42");
 
     expect(calls.find((args) => args[0] === "list-panes")).toEqual([
       "list-panes",

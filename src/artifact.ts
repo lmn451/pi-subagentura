@@ -1310,6 +1310,8 @@ export interface InteractiveSubagentPersistedStateV2 extends InteractiveSubagent
   deliveryReceipts: string[];
   legacyCutoverOffset?: number;
   lifecycle?: PersistedLifecycleFold;
+  /** Once true, this mux pane identity cannot become live again. */
+  paneDeathConfirmed?: true;
 }
 
 export interface InteractiveSubagentStateFile {
@@ -1592,6 +1594,9 @@ function migrateStatePayload(
         pendingDeliveries,
         deliveryReceipts,
         legacyCutoverOffset: cursor(entry.legacyCutoverOffset, cutoverOffset),
+        ...(entry.paneDeathConfirmed === true
+          ? { paneDeathConfirmed: true as const }
+          : {}),
         ...(lifecycle ? { lifecycle } : {}),
       };
     }
