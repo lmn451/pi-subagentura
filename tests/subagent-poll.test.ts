@@ -312,6 +312,64 @@ describe("pollArtifactChanges", () => {
     );
   });
 
+  it("shows workflow children on the owning session's widget and footer", async () => {
+    // Workflow children are launched without a parentSessionId, so scoping either
+    // surface on (ui identity + parentSessionId) makes them structurally
+    // unrepresentable: visible in the supervisor, missing from the widget, and
+    // undercounted in the footer. Ownership must come from supervisorOwner.
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const uiA = { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() };
+    const uiB = { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() };
+    const ownerA = { id: 601, generation: 1 };
+    const ownerB = { id: 602, generation: 1 };
+    registerSessionContext({
+      ...ownerA,
+      pi: { sendMessage: vi.fn() } as any,
+      ui: uiA as any,
+      sessionManager: { getSessionId: () => "session-a" },
+    });
+    registerSessionContext({
+      ...ownerB,
+      pi: { sendMessage: vi.fn() } as any,
+      ui: uiB as any,
+      sessionManager: { getSessionId: () => "session-b" },
+    });
+
+    const child = makeState();
+    child.state.name = "wf-child";
+    child.state.supervisorOwner = ownerA;
+    child.state.workflowId = "wf-1";
+    child.state.completionOwner = "workflow";
+    child.state.parentSessionId = undefined;
+    mod.interactiveSubagentRegistry.set(child.id, child.state);
+
+    // A sibling session's plain agent must be neither listed nor counted for A.
+    const sibling = makeState();
+    sibling.state.name = "sibling";
+    sibling.state.parentSessionId = "session-b";
+    mod.interactiveSubagentRegistry.set(sibling.id, sibling.state);
+
+    multiplexer.__setTmuxMultiplexer({
+      isPaneAliveAsync: async () => true,
+    } as any);
+
+    await mod.pollArtifactChanges({} as any, ownerA);
+
+    const rows = uiA.setWidget.mock.calls
+      .filter(([key]) => key === "subagentura-activity")
+      .at(-1)?.[1] as string[] | undefined;
+    expect(rows).toEqual(
+      expect.arrayContaining([expect.stringContaining("wf-child")]),
+    );
+    expect(rows).toHaveLength(1);
+    expect(uiA.setStatus).toHaveBeenCalledWith(
+      "subagentura-running",
+      "⚡ 1 sub-agent active",
+    );
+  });
+
   it("keeps activity rows isolated between distinct UIs", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");

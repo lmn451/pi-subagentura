@@ -79,7 +79,7 @@ type InProcessSubagentDetails =
   | { status: "cancelled" | "not_found"; jobId?: string };
 
 function updateRunningFooter(ctx: RunningFooterContext): void {
-  updateRunningSubagentFooter(ctx.ui);
+  updateRunningSubagentFooter(ctx.ui, getActiveSessionContextToken());
 }
 
 const ZERO_USAGE: Usage = {
@@ -206,38 +206,51 @@ function settleAsyncJob(
   jobId: string,
   jobState: JobState,
   result: SubagentResult,
-  ctx: RunningFooterContext,
+  ctx: RunningFooterContext | undefined,
 ): void {
   if (jobState.status === "cancelled") return;
   if (result.cancelled) {
     jobState.status = "cancelled";
     jobState.result = result;
     scheduleJobCleanup(jobId, true);
-    updateRunningFooter(ctx);
+    if (ctx) updateRunningFooter(ctx);
     return;
   }
   jobState.status = result.isError ? "error" : "done";
   jobState.result = result;
   scheduleJobCleanup(jobId, false, jobState.maxAge);
 
+  // A workflow aggregate consumes its children's results itself; the child must
+  // never independently notify or inject into the parent session.
   const shouldDeliver =
+    jobState.completionOwner !== "workflow" &&
     jobState.notifyOnComplete &&
     !jobState.notificationDelivered &&
     !jobState.resultRetrieved &&
     (jobState.activeResultWaits ?? 0) === 0;
   if (shouldDeliver) {
     deliverNotification(jobState, result);
-  } else if (jobState.notifyOnComplete && !jobState.notificationDelivered) {
+  } else if (
+    jobState.completionOwner !== "workflow" &&
+    jobState.notifyOnComplete &&
+    !jobState.notificationDelivered
+  ) {
     notifyInProcessCompletionWithoutDelivery(jobState, result);
   }
 
-  updateRunningFooter(ctx);
+  if (ctx) updateRunningFooter(ctx);
 }
 
-function attachAsyncJobSettlement(
+/**
+ * Write the terminal status/result onto an async job when its promise settles.
+ *
+ * `ctx` is optional so non-tool spawn paths (workflow children) can reuse the
+ * same settlement without owning a footer surface — the poller repaints anyway.
+ */
+export function attachAsyncJobSettlement(
   jobId: string,
   jobState: JobState,
-  ctx: RunningFooterContext,
+  ctx?: RunningFooterContext,
 ): void {
   const settledPromise = jobState.promise.catch(createAsyncJobErrorResult);
   jobState.promise = settledPromise;

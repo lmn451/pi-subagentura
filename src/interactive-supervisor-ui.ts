@@ -642,7 +642,10 @@ function formatAsyncSupervisorSummary(
     const phase = job.snapshot.currentPhase
       ? ` · phase: ${job.snapshot.currentPhase}`
       : "";
-    return `[workflow] ${statusIcon(job.status)} ${job.status} ${job.name} (${job.id}) · ${elapsed} · ${job.snapshot.agentsSpawned} agents · ${job.snapshot.runningCount ?? 0} running${phase}`;
+    // A blocking sync workflow is holding the parent turn open — worth telling
+    // apart from a background one before the user reaches for the cancel key.
+    const label = job.executionMode === "sync" ? "workflow:sync" : "workflow";
+    return `[${label}] ${statusIcon(job.status)} ${job.status} ${job.name} (${job.id}) · ${elapsed} · ${job.snapshot.agentsSpawned} agents · ${job.snapshot.runningCount ?? 0} running${phase}`;
   }
   const source = item.origin?.source ?? "registry";
   return `[${source}] ${formatSupervisorSummary(item.state, now)}`;

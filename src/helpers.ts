@@ -205,6 +205,10 @@ export interface JobState {
   parentJobId?: string;
   /** Orchestration depth of this job. Root parent's direct children are 1. */
   depth?: number;
+  /** Workflow owner for live supervisor presentation. */
+  workflowId?: string;
+  /** Workflow-managed jobs never independently notify the parent. */
+  completionOwner?: "standalone" | "workflow";
   /** Recorded when a cancel path fires, for observability and result shaping. */
   cancellation?: CancellationInfo & { at: number };
 }

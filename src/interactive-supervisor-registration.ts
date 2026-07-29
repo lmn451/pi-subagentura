@@ -5,7 +5,9 @@ import {
   compareByStartedAt,
   INTERACTIVE_SUPERVISOR_SHORTCUT,
   type AsyncSupervisorItem,
+  type InProcessSupervisorItem,
   type InteractiveSupervisorItem,
+  type WorkflowSupervisorItem,
   showInteractiveSupervisor,
 } from "./interactive-supervisor-ui";
 import {
@@ -43,9 +45,10 @@ import {
   normalizeCancelledWorkflowState,
   workflowJobsForOwner,
 } from "./workflow-jobs";
-import type {
-  ActiveSessionContextToken,
-  SessionContextRef,
+import {
+  interactiveStateBelongsToOwner,
+  type ActiveSessionContextToken,
+  type SessionContextRef,
 } from "./session-context";
 
 const SUPERVISOR_CAPTURE_MAX_BYTES = 16 * 1024;
@@ -72,15 +75,16 @@ function isInteractiveStateActionable(
 
 export function directSupervisorItems(
   sessionId?: string,
+  owner?: ActiveSessionContextToken,
 ): InteractiveSupervisorItem[] {
   return [...interactiveSubagentRegistry.values()]
-    .filter(
-      (state) => sessionId === undefined || state.parentSessionId === sessionId,
-    )
+    .filter((state) => interactiveStateBelongsToOwner(state, owner, sessionId))
     .sort(compareByStartedAt)
     .map((state) => ({
       kind: "interactive",
       state,
+      // Workflow indentation is decided by buildAsyncSupervisorItems, which is the
+      // only place that knows whether the owning workflow row is actually present.
       depth: 0,
       actionable: isInteractiveStateActionable(state),
       origin: {
@@ -98,13 +102,7 @@ export function buildAsyncSupervisorItems(
     .filter((job) => inProcessJobBelongsToOwner(job, owner))
     .sort(compareByStartedAt);
   const visibleJobs = new Map(processJobs.map((job) => [job.id, job]));
-  const processItems: AsyncSupervisorItem[] = processJobs.map((job) => ({
-    kind: "in-process",
-    job,
-    depth: inProcessSupervisorDepth(job, visibleJobs),
-    actionable: job.status === "running",
-  }));
-  const workflowItems: AsyncSupervisorItem[] = workflowJobsForOwner(owner)
+  const workflowItems: WorkflowSupervisorItem[] = workflowJobsForOwner(owner)
     .sort(compareByStartedAt)
     .map((job) => ({
       kind: "workflow",
@@ -112,10 +110,104 @@ export function buildAsyncSupervisorItems(
       depth: 0,
       actionable: job.status === "running",
     }));
-  const normalizedInteractive: AsyncSupervisorItem[] = interactiveItems.map(
-    (item) => ({ ...item, kind: "interactive" }),
+  const workflowIds = new Set(workflowItems.map((item) => item.job.id));
+  /**
+   * Only a child whose workflow row is present may be indented. Teardown deletes
+   * the workflow job synchronously while its children take a microtask or more to
+   * unwind, and during that window an indented row would render under no parent.
+   */
+  const inVisibleWorkflow = (
+    workflowId: string | undefined,
+  ): workflowId is string =>
+    workflowId !== undefined && workflowIds.has(workflowId);
+  const processItems: InProcessSupervisorItem[] = processJobs.map((job) => ({
+    kind: "in-process",
+    job,
+    depth: inVisibleWorkflow(job.workflowId)
+      ? 1
+      : inProcessSupervisorDepth(job, visibleJobs),
+    actionable: job.status === "running",
+    reasons: job.status === "running" ? undefined : [job.status],
+  }));
+  const normalizedInteractive: InteractiveSupervisorItem[] =
+    interactiveItems.map((item) => ({
+      ...item,
+      kind: "interactive",
+      depth: item.state.workflowId
+        ? inVisibleWorkflow(item.state.workflowId)
+          ? Math.max(1, item.depth)
+          : 0
+        : item.depth,
+    }));
+  const processByWorkflow = new Map<string, GroupableSupervisorItem[]>();
+  const interactiveByWorkflow = new Map<string, GroupableSupervisorItem[]>();
+  const standalone: GroupableSupervisorItem[] = [];
+  for (const item of processItems) {
+    const workflowId = item.job.workflowId;
+    if (inVisibleWorkflow(workflowId))
+      addWorkflowChild(processByWorkflow, workflowId, item);
+    else standalone.push(item);
+  }
+  for (const item of normalizedInteractive) {
+    const workflowId = item.state.workflowId;
+    if (inVisibleWorkflow(workflowId))
+      addWorkflowChild(interactiveByWorkflow, workflowId, item);
+    else standalone.push(item);
+  }
+  const grouped: AsyncSupervisorItem[] = [];
+  for (const root of workflowItems) {
+    grouped.push(root);
+    const children = [
+      ...(processByWorkflow.get(root.job.id) ?? []),
+      ...(interactiveByWorkflow.get(root.job.id) ?? []),
+    ].sort(compareSupervisorItems);
+    grouped.push(...children);
+  }
+  standalone.sort(compareSupervisorItems);
+  return [...grouped, ...standalone];
+}
+
+/** Items that can sit under a workflow root; workflow rows are always roots. */
+type GroupableSupervisorItem =
+  InProcessSupervisorItem | InteractiveSupervisorItem;
+
+function addWorkflowChild(
+  groups: Map<string, GroupableSupervisorItem[]>,
+  workflowId: string,
+  item: GroupableSupervisorItem,
+): void {
+  const children = groups.get(workflowId) ?? [];
+  children.push(item);
+  groups.set(workflowId, children);
+}
+
+/**
+ * Order in-process rows before interactive rows, then by age — the same relative
+ * order the supervisor listed before workflow grouping existed, when the return
+ * value was `[...processItems, ...workflowItems, ...normalizedInteractive]`.
+ */
+function compareSupervisorItems(
+  left: GroupableSupervisorItem,
+  right: GroupableSupervisorItem,
+): number {
+  const isInteractive = (
+    item: GroupableSupervisorItem,
+  ): item is InteractiveSupervisorItem => item.kind !== "in-process";
+  const kindRank = (item: GroupableSupervisorItem): number =>
+    item.kind === "in-process" ? 0 : 1;
+  const leftStartedAt = isInteractive(left)
+    ? left.state.startedAt
+    : left.job.startedAt;
+  const rightStartedAt = isInteractive(right)
+    ? right.state.startedAt
+    : right.job.startedAt;
+  const leftId = isInteractive(left) ? left.state.id : left.job.id;
+  const rightId = isInteractive(right) ? right.state.id : right.job.id;
+  return (
+    kindRank(left) - kindRank(right) ||
+    leftStartedAt - rightStartedAt ||
+    leftId.localeCompare(rightId)
   );
-  return [...processItems, ...workflowItems, ...normalizedInteractive];
 }
 
 function inProcessSupervisorDepth(
@@ -211,6 +303,7 @@ function parseStartedAt(value: string): number {
 
 async function loadSupervisorProjection(
   sessionId: string | undefined,
+  owner: ActiveSessionContextToken | undefined,
 ): Promise<SupervisorProjection | undefined> {
   const rootId = process.env.PI_SUBAGENTURA_ROOT_ID ?? sessionId;
   if (!rootId) return undefined;
@@ -282,8 +375,7 @@ async function loadSupervisorProjection(
     ];
   });
   for (const state of interactiveSubagentRegistry.values()) {
-    if (sessionId !== undefined && state.parentSessionId !== sessionId)
-      continue;
+    if (!interactiveStateBelongsToOwner(state, owner, sessionId)) continue;
     if (!seen.has(state.id)) {
       items.push({
         state,
@@ -358,16 +450,17 @@ export function registerInteractiveSupervisor(
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const activeOwner = owner();
     let refreshError: string | undefined;
-    let projection = await loadSupervisorProjection(sessionId).catch(
-      (error: unknown) => {
-        refreshError = errorMessage(error);
-        return undefined;
-      },
-    );
+    let projection = await loadSupervisorProjection(
+      sessionId,
+      activeOwner,
+    ).catch((error: unknown) => {
+      refreshError = errorMessage(error);
+      return undefined;
+    });
     await showInteractiveSupervisor(ctx.ui, {
       items: () =>
         buildAsyncSupervisorItems(
-          projection?.items ?? directSupervisorItems(sessionId),
+          projection?.items ?? directSupervisorItems(sessionId, activeOwner),
           activeOwner,
         ),
       status: () => supervisorStatusLines(projection, refreshError),
@@ -375,7 +468,7 @@ export function registerInteractiveSupervisor(
         // A swallowed failure used to freeze the snapshot indefinitely with no
         // indication; the error now reaches the overlay footer.
         try {
-          projection = await loadSupervisorProjection(sessionId);
+          projection = await loadSupervisorProjection(sessionId, activeOwner);
           refreshError = undefined;
         } catch (error) {
           refreshError = errorMessage(error);
@@ -415,7 +508,7 @@ export function registerInteractiveSupervisor(
       },
       cancelInProcess: (job) => {
         if (!cancelInProcessFromSupervisor(job, sessionId)) return false;
-        updateRunningSubagentFooter(ctx.ui);
+        updateRunningSubagentFooter(ctx.ui, owner());
         return true;
       },
       cancelWorkflow: (job) => {
@@ -428,7 +521,7 @@ export function registerInteractiveSupervisor(
       cancel: (id) => {
         const direct = cancelInteractiveSubagent(id);
         if (direct) {
-          updateRunningSubagentFooter(ctx.ui);
+          updateRunningSubagentFooter(ctx.ui, owner());
           return direct;
         }
         const item = projection?.items.find(
@@ -436,7 +529,7 @@ export function registerInteractiveSupervisor(
         );
         if (!item?.actionable) return undefined;
         cancelInteractiveDescendantByState(item.state);
-        updateRunningSubagentFooter(ctx.ui);
+        updateRunningSubagentFooter(ctx.ui, owner());
         return item.state;
       },
       cancelSubtree: async (state) => {
@@ -459,7 +552,7 @@ export function registerInteractiveSupervisor(
         if (!confirmed) return;
         if (!snapshotRoot) {
           cancelInteractiveSubagent(state.id);
-          updateRunningSubagentFooter(ctx.ui);
+          updateRunningSubagentFooter(ctx.ui, owner());
           return;
         }
         const result = await cancelLineageSubtreeBestEffort(snapshotRoot, {
@@ -486,7 +579,7 @@ export function registerInteractiveSupervisor(
             }
           },
         });
-        updateRunningSubagentFooter(ctx.ui);
+        updateRunningSubagentFooter(ctx.ui, owner());
         ctx.ui.notify(
           formatSubtreeCancellation(result),
           result.failed.length > 0 ||

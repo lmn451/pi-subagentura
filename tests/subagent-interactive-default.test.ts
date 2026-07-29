@@ -101,9 +101,21 @@ describe("subagent_interactive tool lifecycle", () => {
     return _api;
   }
 
+  /** Bind ui + sessionManager onto the registered session context. */
+  function startSession(ctx: ReturnType<typeof mockCtx>): void {
+    const handler = (api.on as any).mock.calls.find(
+      ([event]: [string]) => event === "session_start",
+    )?.[1] as Function;
+    handler({ reason: "new" }, ctx);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     interactiveSubagentRegistry.clear();
+    const g = globalThis as any;
+    const stack = g.__piSubagenturaSessionContextStack;
+    if (Array.isArray(stack)) stack.length = 0;
+    g.__piSubagenturaInteractivePollerHandle = undefined;
     api = setupExtension() as any;
     mockLaunchInteractiveSubagent.mockReset();
     mockCancelInteractiveSubagent.mockReset();
@@ -116,6 +128,13 @@ describe("subagent_interactive tool lifecycle", () => {
 
   afterEach(() => {
     interactiveSubagentRegistry.clear();
+    const g = globalThis as any;
+    if (g.__piSubagenturaInteractivePollerHandle) {
+      clearInterval(g.__piSubagenturaInteractivePollerHandle);
+      g.__piSubagenturaInteractivePollerHandle = undefined;
+    }
+    const stack = g.__piSubagenturaSessionContextStack;
+    if (Array.isArray(stack)) stack.length = 0;
     vi.clearAllMocks();
     if (savedTmux === undefined) delete process.env.TMUX;
     else process.env.TMUX = savedTmux;
@@ -284,7 +303,11 @@ describe("subagent_interactive tool lifecycle", () => {
   it("updates the running footer immediately after launch", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();
-    const state = mockInteractiveState();
+    startSession(ctx);
+    const state = {
+      ...mockInteractiveState(),
+      parentSessionId: "test-session-id",
+    };
     mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
       interactiveSubagentRegistry.set(state.id, state as any);
       return state;
@@ -301,6 +324,70 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith(
       "subagentura-running",
       "⚡ 1 sub-agent active",
+    );
+  });
+
+  it("counts only this session's agents once the session context is bound", async () => {
+    // The reachable production path: the tool passes the raw active token and
+    // updateRunningSubagentFooter owns the scoping decision.
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    startSession(ctx);
+    const mine = {
+      ...mockInteractiveState(),
+      parentSessionId: "test-session-id",
+    };
+    const foreign = {
+      ...mockInteractiveState(),
+      id: "def67890",
+      parentSessionId: "another-session-id",
+    };
+    interactiveSubagentRegistry.set(foreign.id, foreign as any);
+    mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
+      interactiveSubagentRegistry.set(mine.id, mine as any);
+      return mine;
+    });
+
+    await toolDef.execute(
+      "call-footer-scoped",
+      { task: "research X" },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(
+      "subagentura-running",
+      "⚡ 1 sub-agent active",
+    );
+  });
+
+  it("reports no agents when the active session context is already stale", async () => {
+    // A stale token must read as "this session owns nothing", never fall back to
+    // a cross-session global count.
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    startSession(ctx);
+    const foreign = {
+      ...mockInteractiveState(),
+      id: "def67890",
+      parentSessionId: "another-session-id",
+    };
+    interactiveSubagentRegistry.set(foreign.id, foreign as any);
+    const stack = (globalThis as any).__piSubagenturaSessionContextStack ?? [];
+    for (const context of stack) context.generation += 1;
+
+    await toolDef.execute(
+      "call-footer-stale",
+      { task: "research X" },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(
+      "subagentura-running",
+      undefined,
     );
   });
 

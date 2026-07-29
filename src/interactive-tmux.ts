@@ -23,6 +23,7 @@
  * of the codebase compiles unchanged.
  */
 
+import type { ActiveSessionContextToken } from "./session-context";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { randomBytes } from "node:crypto";
 import {
@@ -181,6 +182,12 @@ export interface InteractiveSubagentState {
    * session_start. Optional for tests that don't care about reload semantics.
    */
   parentSessionId?: string;
+  /** Live supervisor owner; intentionally not persisted for workflow children. */
+  supervisorOwner?: ActiveSessionContextToken;
+  /** Workflow that owns this child, when completion is aggregated by the workflow. */
+  workflowId?: string;
+  /** Completion is delivered standalone or consumed by a workflow aggregate. */
+  completionOwner?: "standalone" | "workflow";
   model?: string;
   startedAt: number;
   /**
@@ -451,6 +458,12 @@ export function launchInteractiveSubagent(params: {
    * skipped (used by tests that don't care about reload).
    */
   parentSessionId?: string;
+  /** Live supervisor owner independent of persistence and delivery policy. */
+  supervisorOwner?: ActiveSessionContextToken;
+  /** Workflow owner for grouping and cancellation. */
+  workflowId?: string;
+  /** Workflow-managed completions are consumed by the workflow runner. */
+  completionOwner?: "standalone" | "workflow";
   /**
    * The parent session's working directory, used for the state file location.
    * If omitted, falls back to `cwd` (backward-compatible for tests).
@@ -731,6 +744,9 @@ export function launchInteractiveSubagent(params: {
     notifyOnComplete: params.notifyOnComplete ?? "inject",
     triggerTurnOnComplete: params.triggerTurnOnComplete,
     parentSessionId: params.parentSessionId,
+    supervisorOwner: params.supervisorOwner,
+    workflowId: params.workflowId,
+    completionOwner: params.completionOwner,
     eventByteCursor: 0,
     pendingDeliveries: [],
     deliveryReceipts: [],
@@ -937,6 +953,33 @@ export function cancelInteractiveSubagent(
     mux.killPane(state.paneId, state.muxSession);
   }
   return state;
+}
+
+/**
+ * Close a workflow-managed child after its result has been aggregated.
+ *
+ * Deregistration is unconditional, even when pane teardown fails. A workflow child
+ * is in-memory only and its completion is consumed by the workflow runner, so a
+ * retained entry would strand a permanently "running" supervisor row that no poll
+ * tick can ever finish — and whose only user affordance (the supervisor's cancel
+ * key) would write a false `.cancelled` marker. Returns the pane-cleanup error
+ * message, if any, so the caller can surface a leaked pane to the user.
+ */
+export function disposeWorkflowInteractiveSubagent(
+  state: InteractiveSubagentState,
+): string | undefined {
+  if (interactiveSubagentRegistry.get(state.id) === state) {
+    interactiveSubagentRegistry.delete(state.id);
+  }
+  try {
+    const mux = getMuxForState(state);
+    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+      mux.killPane(state.paneId, state.muxSession);
+    }
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 function appendCancellation(

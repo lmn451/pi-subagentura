@@ -17,6 +17,7 @@ import {
 } from "../src/interactive-lineage";
 import {
   cancelInteractiveDescendantByState,
+  disposeWorkflowInteractiveSubagent,
   interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
@@ -134,5 +135,83 @@ describe("recursive interactive children", () => {
       '"outcome":"cancelled"',
     );
     expect(killPane).toHaveBeenCalledWith("%42", "recursive-test");
+  });
+
+  it("disposes a completed workflow child without recording cancellation", () => {
+    const artifactDir = join(tempDir(), "workflow-artifact");
+    mkdirSync(artifactDir, { recursive: true });
+    const killPane = vi.fn();
+    __setTmuxMultiplexer({
+      getPaneLiveness: vi.fn(() => "alive"),
+      killPane,
+    } as never);
+    const state: InteractiveSubagentState = {
+      id: "workflow-child",
+      name: "workflow-child",
+      task: "managed work",
+      paneId: "%43",
+      mux: "tmux",
+      muxSession: "workflow-test",
+      sessionFile: "/sessions/workflow-child.jsonl",
+      cwd: "/workspace/workflow-child",
+      supervisorOwner: { id: 7, generation: 2 },
+      workflowId: "wf-test",
+      completionOwner: "workflow",
+      startedAt: Date.now(),
+      status: "idle",
+      attachCommand: "attach",
+      selectPaneCommand: "focus",
+      launchScriptFile: "/launch/workflow-child.sh",
+      artifactDir,
+    };
+    interactiveSubagentRegistry.set(state.id, state);
+
+    expect(disposeWorkflowInteractiveSubagent(state)).toBeUndefined();
+
+    expect(interactiveSubagentRegistry.has(state.id)).toBe(false);
+    expect(killPane).toHaveBeenCalledWith("%43", "workflow-test");
+    expect(existsSync(join(artifactDir, ".cancelled"))).toBe(false);
+    expect(existsSync(join(artifactDir, "events.ndjson"))).toBe(false);
+  });
+
+  it("deregisters a workflow child even when pane teardown fails", () => {
+    const artifactDir = join(tempDir(), "workflow-artifact-kill-fails");
+    mkdirSync(artifactDir, { recursive: true });
+    const killPane = vi.fn(() => {
+      throw new Error("mux unavailable");
+    });
+    __setTmuxMultiplexer({
+      getPaneLiveness: vi.fn(() => "alive"),
+      killPane,
+    } as never);
+    const state: InteractiveSubagentState = {
+      id: "workflow-child-kill-fails",
+      name: "workflow-child",
+      task: "managed work",
+      paneId: "%44",
+      mux: "tmux",
+      muxSession: "workflow-test",
+      sessionFile: "/sessions/workflow-child.jsonl",
+      cwd: "/workspace/workflow-child",
+      supervisorOwner: { id: 7, generation: 2 },
+      workflowId: "wf-test",
+      completionOwner: "workflow",
+      startedAt: Date.now(),
+      status: "idle",
+      attachCommand: "attach",
+      selectPaneCommand: "focus",
+      launchScriptFile: "/launch/workflow-child.sh",
+      artifactDir,
+    };
+    interactiveSubagentRegistry.set(state.id, state);
+
+    // A retained entry would strand a permanently "running" supervisor row that
+    // nothing can ever finish, and whose only affordance writes a false
+    // `.cancelled` marker. The leaked pane is reported to the caller instead.
+    expect(disposeWorkflowInteractiveSubagent(state)).toBe("mux unavailable");
+
+    expect(interactiveSubagentRegistry.has(state.id)).toBe(false);
+    expect(killPane).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(artifactDir, ".cancelled"))).toBe(false);
   });
 });

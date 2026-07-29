@@ -23,7 +23,7 @@ import {
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
 import {
-  parentSessionBelongsToOwner,
+  interactiveStateBelongsToOwner,
   resolveLiveSessionContext,
   type ActiveSessionContextToken,
 } from "./session-context";
@@ -334,7 +334,8 @@ export function flushDeliveries(
     content: string;
   }> = [];
   for (const state of g.__piSubagenturaInteractiveRegistry?.values?.() ?? []) {
-    if (!parentSessionBelongsToOwner(state.parentSessionId, owner)) continue;
+    if (!interactiveStateBelongsToOwner(state, owner)) continue;
+    if (state.completionOwner === "workflow") continue;
     for (const intent of state.pendingDeliveries ?? []) {
       if (intent.state === "dispatchAttempted") continue;
       llm.push({ state, intent, content: formatIntent(intent, owner) });
@@ -445,7 +446,7 @@ export function reconcileAllDeliveryReceipts(
     : g.__piSubagenturaSessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
   for (const state of g.__piSubagenturaInteractiveRegistry?.values?.() ?? []) {
-    if (!parentSessionBelongsToOwner(state.parentSessionId, owner)) continue;
+    if (!interactiveStateBelongsToOwner(state, owner)) continue;
     reconcileDeliveryReceipts(state, entries);
   }
 }

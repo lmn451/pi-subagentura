@@ -178,6 +178,9 @@ describe("interactive-tmux", () => {
     expect(statSync(join(state.artifactDir, "cli.mjs")).mode & 0o777).toBe(
       0o700,
     );
+
+    // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
+    expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
 
   it("writes a lineage manifest before exposure and propagates child identity", async () => {

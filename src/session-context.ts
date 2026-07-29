@@ -190,3 +190,23 @@ export function parentSessionBelongsToOwner(
   const ownerSessionId = sessionIdForContextToken(owner);
   return ownerSessionId !== undefined && parentSessionId === ownerSessionId;
 }
+
+export interface InteractiveSupervisorOwnerState {
+  parentSessionId?: string;
+  supervisorOwner?: ActiveSessionContextToken;
+}
+
+export function interactiveStateBelongsToOwner(
+  state: InteractiveSupervisorOwnerState,
+  owner: ActiveSessionContextToken | undefined,
+  sessionId?: string,
+): boolean {
+  if (state.supervisorOwner) {
+    return owner
+      ? state.supervisorOwner.id === owner.id &&
+          state.supervisorOwner.generation === owner.generation
+      : sessionId === undefined;
+  }
+  if (owner) return parentSessionBelongsToOwner(state.parentSessionId, owner);
+  return sessionId === undefined || state.parentSessionId === sessionId;
+}

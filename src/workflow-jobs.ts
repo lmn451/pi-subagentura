@@ -13,6 +13,7 @@ import {
   type WorkflowAgentRecord,
   type WorkflowProgress,
   type WorkflowRunResult,
+  type WorkflowRunResultWithUsage,
   type WorkflowUsage,
   MAX_WORKFLOW_AGENT_RECORDS,
   zeroWorkflowUsage,
@@ -26,8 +27,14 @@ export interface WorkflowJobState {
   id: string;
   name: string;
   status: WorkflowJobStatus;
+  executionMode?: "async" | "sync";
   startedAt: number;
-  promise: Promise<WorkflowRunResult>;
+  /**
+   * Settles with the runner's own result shape, where `usage` is always present.
+   * Widening to {@link WorkflowRunResult} here would force every consumer to
+   * tolerate a usage-less summary that `runWorkflow` never produces.
+   */
+  promise: Promise<WorkflowRunResultWithUsage>;
   abort: AbortController;
   snapshot: {
     agentsSpawned: number;
@@ -159,20 +166,38 @@ async function runTrackedWorkflowAgent(
   }
 }
 
-/** Start a workflow running in the background. Returns the job id immediately. */
+export type StartWorkflowJobOptions = Omit<
+  RunWorkflowOptions,
+  "signal" | "onProgress" | "onCancellationSnapshot"
+> &
+  Pick<RunWorkflowOptions, "signal" | "onProgress">;
+
+/**
+ * Start a workflow running in the background. Returns the job id immediately.
+ *
+ * `opts` may be a builder so callers that need the job id while constructing the
+ * options (e.g. to tag spawned children with their owning `workflowId`) receive it
+ * before `runWorkflow` can invoke `runAgent`.
+ */
 export function startWorkflowJob(
   name: string,
   script: string,
-  opts: Omit<
-    RunWorkflowOptions,
-    "signal" | "onProgress" | "onCancellationSnapshot"
-  >,
+  optsOrBuilder:
+    StartWorkflowJobOptions | ((workflowId: string) => StartWorkflowJobOptions),
   startedAt?: number,
   onComplete?: (job: WorkflowJobState) => boolean | void,
   owner: ActiveSessionContextToken | undefined = getActiveSessionContextToken(),
+  executionMode: "async" | "sync" = "async",
 ): WorkflowJobState {
   const parentSessionOwner = owner;
-  while (workflowJobRegistry.size >= MAX_WORKFLOW_JOBS) {
+  // A blocking sync workflow ran unconditionally before it was tracked here.
+  // Subjecting it to the cap would turn an always-succeeding call into a new
+  // user-visible failure, so sync jobs are exempt — they are also removed from
+  // the registry as soon as they settle, so they cannot accumulate.
+  while (
+    executionMode === "async" &&
+    workflowJobRegistry.size >= MAX_WORKFLOW_JOBS
+  ) {
     // Evict the oldest terminal job; if none, throw — the caller must cancel one first.
     let evicted = false;
     for (const [id, st] of workflowJobRegistry) {
@@ -194,13 +219,20 @@ export function startWorkflowJob(
   }
 
   const id = `wf_${randomBytes(5).toString("hex")}`;
+  const opts =
+    typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
   const abort = new AbortController();
+  const externalSignal = opts.signal;
+  const forwardAbort = () => abort.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abort.abort(externalSignal.reason);
+  else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
   const state: WorkflowJobState = {
     id,
     name,
     status: "running",
+    executionMode,
     startedAt: startedAt ?? Date.now(),
-    promise: undefined as unknown as Promise<WorkflowRunResult>,
+    promise: undefined as unknown as Promise<WorkflowRunResultWithUsage>,
     abort,
     snapshot: {
       agentsSpawned: 0,
@@ -243,6 +275,7 @@ export function startWorkflowJob(
       if (p.kind === "agent_start" || p.kind === "agent_done") {
         recordWorkflowAgentProgress(state.snapshot, p);
       }
+      opts.onProgress?.(p);
     },
     onCancellationSnapshot: (receipt) => {
       (state.cancellationSnapshots ??= []).push(receipt);
@@ -262,6 +295,15 @@ export function startWorkflowJob(
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
       invokeCompletionHook(state);
       throw err;
+    })
+    .finally(() => {
+      externalSignal?.removeEventListener("abort", forwardAbort);
+      // A sync workflow returns its result inline. Retaining the terminal job
+      // would let get_workflow_result re-serve that result and would leave a dead
+      // `done` row in the supervisor for work the caller already collected.
+      if (executionMode === "sync" && workflowJobRegistry.get(id) === state) {
+        workflowJobRegistry.delete(id);
+      }
     });
   // Don't crash the process on an unobserved rejection before get_workflow_result is called.
   state.promise.catch(() => {});

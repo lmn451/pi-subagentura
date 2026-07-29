@@ -529,6 +529,19 @@ describe("session handler lifecycle callbacks", () => {
     expect(globalState.__piSubagenturaInteractivePollerHandle).toBeDefined();
   });
 
+  it("does not fall back to global footer counts for a stale owner", () => {
+    const ui = { setStatus: vi.fn() };
+    jobRegistry.set("foreign-job", {
+      id: "foreign-job",
+      status: "running",
+      session: { abort: vi.fn() },
+    } as any);
+
+    updateRunningSubagentFooter(ui as any, { id: 999, generation: 1 });
+
+    expect(ui.setStatus).toHaveBeenCalledWith("subagentura-running", undefined);
+  });
+
   it("polls every live owner from the single global interval", async () => {
     const parent = registerHandlers();
     const child = registerHandlers();

@@ -393,6 +393,56 @@ describe("artifact protocol v2 delivery", () => {
     ]);
   });
 
+  it("does not independently deliver workflow-owned completions", async () => {
+    const art = makeArtifact();
+    const state = makeState(art.dir);
+    state.completionOwner = "workflow";
+    state.notifyOnComplete = "inject";
+    state.eventByteCursor = 0;
+    interactiveSubagentRegistry.set(state.id, state);
+    (globalThis as any).__piSubagenturaInteractiveRegistry =
+      interactiveSubagentRegistry;
+    __setTmuxMultiplexer({
+      isPaneAlive: () => true,
+      isPaneAliveAsync: async () => true,
+    } as any);
+    appendDeterministicTurn(art, 1, "workflow-owned result");
+    const sendMessage = vi.fn();
+    await pollArtifactChanges({ sendMessage } as any);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(state.pendingDeliveries).toEqual([]);
+    expect(state.eventByteCursor).toBeGreaterThan(0);
+  });
+
+  it("polls workflow-owned children under their live supervisor owner", async () => {
+    const art = makeArtifact();
+    const owner = { id: 411, generation: 1 };
+    const sendMessage = vi.fn();
+    registerSessionContext({
+      ...owner,
+      pi: { sendMessage } as any,
+      sessionManager: { getSessionId: () => "workflow-parent" },
+    });
+    const state = {
+      ...makeState(art.dir),
+      parentSessionId: undefined,
+      supervisorOwner: owner,
+      completionOwner: "standalone" as const,
+      eventByteCursor: 0,
+    };
+    (globalThis as any).__piSubagenturaInteractiveRegistry =
+      interactiveSubagentRegistry;
+    interactiveSubagentRegistry.set(state.id, state);
+    __setTmuxMultiplexer({
+      isPaneAlive: () => true,
+      isPaneAliveAsync: async () => true,
+    } as any);
+    appendDeterministicTurn(art, 1, "owner-visible result");
+    await pollArtifactChanges({ sendMessage } as any, owner);
+    expect(state.eventByteCursor).toBeGreaterThan(0);
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
   it("queues an explicit omission message for oversized completion output", async () => {
     const art = makeArtifact();
     const state = makeState(art.dir);

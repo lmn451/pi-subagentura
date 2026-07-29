@@ -1909,6 +1909,7 @@ describe("registerWorkflowTool", () => {
     expect(wf.promptSnippet).toContain("decomposable multi-agent work");
     const guidance = wf.promptGuidelines.join("\n");
     expect(guidance).toContain("raw JavaScript");
+    expect(guidance).toContain("Omit async");
     expect(guidance).toContain("top-level");
     expect(guidance).not.toContain("first statement");
     expect(guidance).toContain("immutable cwd");
@@ -1948,6 +1949,147 @@ describe("registerWorkflowTool", () => {
 
     expect(result.details.status).toBe("done");
     expect(result.content[0].text).toContain("/tmp/tool-context");
+  });
+
+  it("tracks an explicit synchronous workflow while it is running", async () => {
+    const tools: any[] = [];
+    const pi = {
+      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerCommand: vi.fn(),
+    };
+    registerWorkflowTool(pi as any);
+    const workflowTool = tools.find((tool) => tool.name === "workflow")!;
+    const execution = workflowTool.execute(
+      "",
+      {
+        script:
+          `export const meta = { name: "sync-visible", description: "d" };\n` +
+          `return "done";`,
+        async: false,
+      },
+      undefined,
+      undefined,
+      { cwd: "/tmp/tool-context", modelRegistry: {} },
+    );
+    const job = [...workflowJobRegistry.values()].at(-1)!;
+    expect(job).toBeDefined();
+    expect(job.executionMode).toBe("sync");
+    expect(job.status).toBe("running");
+    expect(job.name).toBe("sync-visible");
+    const result = await execution;
+    expect(result.details.status).toBe("done");
+
+    // A sync workflow already returned its result inline. Retaining the terminal
+    // job would let get_workflow_result re-serve it and would leave a dead `done`
+    // row in the supervisor for work the caller has already collected.
+    expect(workflowJobRegistry.has(job.id)).toBe(false);
+    const reserved = await tools
+      .find((tool) => tool.name === "get_workflow_result")!
+      .execute("", { workflowId: job.id }, undefined, undefined, {
+        cwd: "/tmp/tool-context",
+      });
+    expect(reserved.isError).toBe(true);
+  });
+
+  it("runs a blocking synchronous workflow even at the async job cap", async () => {
+    // Routing sync through startWorkflowJob must not hand a previously
+    // always-succeeding blocking call a brand-new user-visible failure mode.
+    const filled: string[] = [];
+    try {
+      for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
+        const id = `sync-cap-filler-${index}`;
+        workflowJobRegistry.set(id, {
+          id,
+          name: id,
+          status: "running",
+          startedAt: Date.now(),
+          promise: undefined as any,
+          abort: new AbortController(),
+          snapshot: {
+            agentsSpawned: 0,
+            errorCount: 0,
+            tokensSpent: 0,
+            phases: [],
+          },
+        } as any);
+        filled.push(id);
+      }
+      const script =
+        `export const meta = { name: "sync-at-cap", description: "d" };\n` +
+        `return "done";`;
+
+      expect(() =>
+        startWorkflowJob("async-at-cap", script, { runAgent: echoRunner() }),
+      ).toThrow(/workflow jobs already running/);
+
+      const job = startWorkflowJob(
+        "sync-at-cap",
+        script,
+        { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        undefined,
+        "sync",
+      );
+      await expect(job.promise).resolves.toMatchObject({ result: "done" });
+      expect(workflowJobRegistry.has(job.id)).toBe(false);
+    } finally {
+      for (const id of filled) workflowJobRegistry.delete(id);
+    }
+  });
+
+  it("keeps workflows asynchronous when async is omitted", async () => {
+    const tools: any[] = [];
+    const pi = {
+      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerCommand: vi.fn(),
+    };
+    registerWorkflowTool(pi as any);
+    const workflowTool = tools.find((tool) => tool.name === "workflow")!;
+    const started = await workflowTool.execute(
+      "",
+      {
+        script:
+          `export const meta = { name: "async-default", description: "d" };\n` +
+          `return "done";`,
+      },
+      undefined,
+      undefined,
+      { cwd: "/tmp/tool-context", modelRegistry: {} },
+    );
+    const job = workflowJobRegistry.get(started.details.workflowId)!;
+    expect(started.details.status).toBe("started");
+    expect(job.executionMode).toBe("async");
+    await job.promise;
+  });
+
+  it("cancels a tracked synchronous workflow through its signal", async () => {
+    const controller = new AbortController();
+    const job = startWorkflowJob(
+      "sync-cancel",
+      `export const meta = { name: "sync-cancel", description: "d" };\n` +
+        `return await agent("wait");`,
+      {
+        signal: controller.signal,
+        runAgent: ({ signal }) =>
+          new Promise<SubagentResult>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => reject(new Error("agent aborted")),
+              { once: true },
+            );
+          }),
+      },
+      undefined,
+      undefined,
+      undefined,
+      "sync",
+    );
+    controller.abort("test cancellation");
+    await expect(job.promise).rejects.toThrow("Workflow aborted.");
+    expect(job.executionMode).toBe("sync");
+    expect(job.status).toBe("cancelled");
+    expect(job.completionNotification).toBeUndefined();
   });
 
   it("rejects workflow execution from in-process orchestration contexts", async () => {

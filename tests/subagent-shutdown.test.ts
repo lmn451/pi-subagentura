@@ -351,6 +351,35 @@ describe("session_shutdown handler", () => {
     },
   );
 
+  it.each(["reload", "resume", "quit"])(
+    "still kills workflow-owned panes for preserving reason %s",
+    (reason) => {
+      // Workflow children are in-memory only: their workflowId, supervisorOwner
+      // and pending result live nowhere on disk, so rehydrate can never revive
+      // them. Preserving their panes would leak an orphan the user has no handle
+      // on, while a standalone pane is still rehydratable.
+      const workflowChild = makeState("wf-child", "running");
+      workflowChild.completionOwner = "workflow";
+      workflowChild.workflowId = "wf-1";
+      const standalone = makeState("standalone", "running");
+      interactiveTmux.interactiveSubagentRegistry.set(
+        workflowChild.id,
+        workflowChild,
+      );
+      interactiveTmux.interactiveSubagentRegistry.set(
+        standalone.id,
+        standalone,
+      );
+
+      const { shutdownHandler } = setupExtension();
+      shutdownHandler!({ reason });
+
+      expect(cancelByStateSpy).toHaveBeenCalledTimes(1);
+      expect(cancelByStateSpy).toHaveBeenCalledWith(workflowChild);
+      expect(interactiveTmux.interactiveSubagentRegistry.size).toBe(0);
+    },
+  );
+
   it("clears interactiveSubagentRegistry in session_shutdown", () => {
     // Pre-populate with both running and non-running states. The cancel
     // loop is mocked, so it does NOT remove entries — the explicit

@@ -433,8 +433,8 @@ describe("interactive supervisor", () => {
     );
 
     expect(items.map((item) => item.kind)).toEqual([
-      "in-process",
       "workflow",
+      "in-process",
       "interactive",
     ]);
     expect(
@@ -459,6 +459,192 @@ describe("interactive supervisor", () => {
         ownerSessionId: "owned-parent-session",
       },
     });
+  });
+
+  it("groups workflow children after their matching workflow root", () => {
+    const owner = { id: 7, generation: 2 };
+    const workflowA = workflowJob("wf-a", {
+      name: "alpha",
+      parentSessionOwner: owner,
+      startedAt: 10,
+    });
+    const workflowB = workflowJob("wf-b", {
+      name: "beta",
+      parentSessionOwner: owner,
+      startedAt: 20,
+    });
+    workflowJobRegistry.set(workflowA.id, workflowA);
+    workflowJobRegistry.set(workflowB.id, workflowB);
+
+    const processA = inProcessJob("process-a", {
+      startedAt: 11,
+      workflowId: workflowA.id,
+      deliveryOwner: {
+        pi: {} as never,
+        sessionContextId: owner.id,
+        sessionContextGeneration: owner.generation,
+      },
+    });
+    const processB = inProcessJob("process-b", {
+      startedAt: 21,
+      workflowId: workflowB.id,
+      deliveryOwner: {
+        pi: {} as never,
+        sessionContextId: owner.id,
+        sessionContextGeneration: owner.generation,
+      },
+    });
+    const standalone = inProcessJob("standalone", {
+      startedAt: 100,
+      deliveryOwner: {
+        pi: {} as never,
+        sessionContextId: owner.id,
+        sessionContextGeneration: owner.generation,
+      },
+    });
+    jobRegistry.set(processA.id, processA);
+    jobRegistry.set(processB.id, processB);
+    jobRegistry.set(standalone.id, standalone);
+
+    const interactiveA = state("interactive-a", {
+      startedAt: 12,
+      workflowId: workflowA.id,
+      supervisorOwner: owner,
+    });
+    const interactiveB = state("interactive-b", {
+      startedAt: 22,
+      workflowId: workflowB.id,
+      supervisorOwner: owner,
+    });
+    const standaloneInteractive = state("standalone-interactive", {
+      startedAt: 101,
+      supervisorOwner: owner,
+    });
+    for (const item of [interactiveA, interactiveB, standaloneInteractive]) {
+      interactiveSubagentRegistry.set(item.id, item);
+    }
+
+    const items = buildAsyncSupervisorItems(
+      directSupervisorItems(undefined, owner),
+      owner,
+    );
+    expect(
+      items.map((item) =>
+        item.kind === "workflow"
+          ? item.job.id
+          : item.kind === "in-process"
+            ? item.job.id
+            : item.state.id,
+      ),
+    ).toEqual([
+      "wf-a",
+      "process-a",
+      "interactive-a",
+      "wf-b",
+      "process-b",
+      "interactive-b",
+      "standalone",
+      "standalone-interactive",
+    ]);
+  });
+
+  it("shows owner-scoped workflow interactive children", () => {
+    const owner = { id: 7, generation: 2 };
+    const workflow = workflowJob("owned-workflow", {
+      parentSessionOwner: owner,
+    });
+    workflowJobRegistry.set(workflow.id, workflow);
+    const child = state("workflow-child", {
+      supervisorOwner: owner,
+      workflowId: workflow.id,
+      completionOwner: "workflow",
+    });
+    interactiveSubagentRegistry.set(child.id, child);
+    const items = buildAsyncSupervisorItems(
+      directSupervisorItems(undefined, owner),
+      owner,
+    );
+    const visibleChild = items.find(
+      (item) => item.kind === "interactive" && item.state.id === child.id,
+    );
+    expect(visibleChild).toMatchObject({
+      kind: "interactive",
+      depth: 1,
+      actionable: true,
+    });
+    expect(child.parentSessionId).toBeUndefined();
+  });
+
+  it("flattens orphaned workflow children whose workflow row is gone", () => {
+    const owner = { id: 7, generation: 2 };
+    // cleanupWorkflowJobsForOwner deletes the workflow job synchronously while its
+    // children take a microtask or more to unwind. During that window the children
+    // have no parent row above them and must not render indented.
+    const orphanInteractive = state("orphan-interactive", {
+      supervisorOwner: owner,
+      workflowId: "wf-already-gone",
+      completionOwner: "workflow",
+    });
+    interactiveSubagentRegistry.set(orphanInteractive.id, orphanInteractive);
+    const orphanProcess = inProcessJob("orphan-process", {
+      workflowId: "wf-already-gone",
+      completionOwner: "workflow",
+      deliveryOwner: {
+        pi: {} as never,
+        sessionContextId: owner.id,
+        sessionContextGeneration: owner.generation,
+      },
+    });
+    jobRegistry.set(orphanProcess.id, orphanProcess);
+
+    const items = buildAsyncSupervisorItems(
+      directSupervisorItems(undefined, owner),
+      owner,
+    );
+
+    expect(
+      items.map((item) => [
+        item.kind === "in-process" || item.kind === "workflow"
+          ? item.job.id
+          : item.state.id,
+        item.depth,
+      ]),
+    ).toEqual([
+      ["orphan-process", 0],
+      ["orphan-interactive", 0],
+    ]);
+  });
+
+  it("keeps in-process rows ahead of interactive rows within a group", () => {
+    // Grouping moved workflow roots to the front of the list, but the relative
+    // order of non-workflow rows is unchanged from the pre-grouping return value
+    // `[...processItems, ...workflowItems, ...normalizedInteractive]`: in-process
+    // first, then interactive, each by ascending startedAt.
+    const owner = { id: 7, generation: 2 };
+    const youngProcess = inProcessJob("process-young", {
+      startedAt: 500,
+      deliveryOwner: {
+        pi: {} as never,
+        sessionContextId: owner.id,
+        sessionContextGeneration: owner.generation,
+      },
+    });
+    jobRegistry.set(youngProcess.id, youngProcess);
+    const oldInteractive = state("interactive-old", {
+      startedAt: 1,
+      supervisorOwner: owner,
+    });
+    interactiveSubagentRegistry.set(oldInteractive.id, oldInteractive);
+
+    const items = buildAsyncSupervisorItems(
+      directSupervisorItems(undefined, owner),
+      owner,
+    );
+
+    expect(items.map((item) => item.kind)).toEqual([
+      "in-process",
+      "interactive",
+    ]);
   });
 
   it("navigates, expands, refreshes, and closes without cancelling", () => {
@@ -1459,6 +1645,17 @@ describe("interactive supervisor", () => {
     } as never);
 
     const { confirm, notify } = await harness.open((component) => {
+      for (let index = 0; index < 3; index++) component.handleInput("k");
+      for (let index = 0; index < 3; index++) {
+        const selected = component
+          .render(200)
+          .find((line) => line.includes("▶"));
+        if (selected?.includes("agent-parent")) break;
+        component.handleInput("j");
+      }
+      expect(
+        component.render(200).find((line) => line.includes("▶")),
+      ).toContain("agent-parent");
       component.handleInput("X");
     });
 

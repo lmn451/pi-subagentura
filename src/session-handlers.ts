@@ -22,6 +22,7 @@ import {
   advanceSessionContextGeneration,
   createSessionContextRef,
   getSessionContextStack,
+  interactiveStateBelongsToOwner,
   registerSessionContext,
   removeSessionContext,
   setActiveSessionRefs,
@@ -320,8 +321,11 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
         );
         const ownedStates = [...interactiveSubagentRegistry.values()].filter(
           (state) =>
-            state.parentSessionId !== undefined &&
-            ownedSessionIds.has(state.parentSessionId),
+            shutdownOwners.some((owner) =>
+              interactiveStateBelongsToOwner(state, owner.token),
+            ) ||
+            (state.parentSessionId !== undefined &&
+              ownedSessionIds.has(state.parentSessionId)),
         );
         const ownedJobs = shutdownOwners.flatMap((owner) =>
           [...jobRegistry.entries()]
@@ -366,7 +370,8 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
         for (const state of ownedStates) {
           interactiveSubagentRegistry.delete(state.id);
           if (
-            !preserveInteractivePanes &&
+            (!preserveInteractivePanes ||
+              state.completionOwner === "workflow") &&
             (state.status === "running" ||
               state.status === "idle" ||
               state.status === "unknown")
@@ -431,16 +436,15 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
         event?.reason === "reload" ||
         event?.reason === "resume" ||
         event?.reason === "quit";
-      if (!preserveInteractivePanes) {
-        // Kill the panes using the already-snapshotted states.
-        // cancelInteractiveSubagentByState is used (not the id-based variant)
-        // because the registry was already cleared above.
-        for (const state of runningStates) {
-          try {
-            cancelInteractiveSubagentByState(state);
-          } catch {
-            /* best effort */
-          }
+      // Workflow children are in-memory only and must not survive a parent
+      // reload/quit even when standalone interactive panes are preserved.
+      for (const state of runningStates) {
+        if (preserveInteractivePanes && state.completionOwner !== "workflow")
+          continue;
+        try {
+          cancelInteractiveSubagentByState(state);
+        } catch {
+          /* best effort */
         }
       }
 

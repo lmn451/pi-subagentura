@@ -36,7 +36,7 @@ import {
 } from "./interactive-tmux";
 import { shouldNotify } from "./notifications";
 import { deliveryIdFor, enqueueDelivery, flushDeliveries } from "./delivery";
-import { debugLog, jobRegistry } from "./helpers";
+import { debugLog, inProcessJobBelongsToOwner, jobRegistry } from "./helpers";
 import { coarseElapsedMs, formatActivityRow } from "./rendering";
 import { formatWorkflowUsage } from "./workflow-core";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
@@ -48,13 +48,10 @@ import {
   workflowJobBelongsToOwner,
   workflowJobRegistry,
 } from "./workflow-jobs";
-import type {
-  ActiveSessionContextToken,
-  SessionContextRef,
-} from "./session-context";
 import {
   getSessionContextStack,
-  parentSessionBelongsToOwner,
+  interactiveStateBelongsToOwner,
+  type ActiveSessionContextToken,
   resolveLiveSessionContext,
 } from "./session-context";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
@@ -77,15 +74,49 @@ const footerStatusesByUi = new WeakMap<
   Map<string, string | undefined>
 >();
 
-function getRunningSubagentCount(): number {
+/**
+ * Owners whose sub-agents belong on the surfaces bound to `ui`.
+ *
+ * The footer and the activity widget are keyed per-ui, and nested sessions share
+ * one `ExtensionUIContext`. Repainting a shared surface from a single owner's
+ * point of view would erase its sibling context's rows (and undercount its
+ * agents) on every other poll tick, so both surfaces project the union over every
+ * live context bound to this ui. `[undefined]` means "unscoped": count everything.
+ */
+function ownersPaintingInto(
+  ui: StatusUi,
+  owner: ActiveSessionContextToken | undefined,
+): (ActiveSessionContextToken | undefined)[] {
+  if (!owner) return [undefined];
+  const bound = getSessionContextStack()
+    .filter((context) => context.ui === ui)
+    .map((context) => ({ id: context.id, generation: context.generation }));
+  // A ui the context stack does not know (e.g. a tool ctx captured before
+  // session_start bound it) can only speak for the owner that was handed in.
+  return bound.length > 0 ? bound : [owner];
+}
+
+function belongsToAnyOwner(
+  state: InteractiveSubagentState,
+  owners: (ActiveSessionContextToken | undefined)[],
+): boolean {
+  return owners.some((owner) => interactiveStateBelongsToOwner(state, owner));
+}
+
+function getRunningSubagentCount(
+  owners: (ActiveSessionContextToken | undefined)[],
+): number {
   const inProcessCount = [...jobRegistry.values()].filter(
-    (job) => job.status === "running",
+    (job) =>
+      job.status === "running" &&
+      owners.some((owner) => inProcessJobBelongsToOwner(job, owner)),
   ).length;
   const interactiveCount = [...interactiveSubagentRegistry.values()].filter(
     (state) =>
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown",
+      (state.status === "running" ||
+        state.status === "idle" ||
+        state.status === "unknown") &&
+      belongsToAnyOwner(state, owners),
   ).length;
   return inProcessCount + interactiveCount;
 }
@@ -110,8 +141,27 @@ function updateFooterStatus(
   }
 }
 
-export function updateRunningSubagentFooter(ui: StatusUi): void {
-  const runningCount = getRunningSubagentCount();
+/**
+ * Repaint the "N sub-agents active" footer, scoped to `owner` when supplied.
+ *
+ * Liveness is decided here rather than at the call sites: callers pass the raw
+ * active token, so a token whose lifecycle already ended reads as "this session
+ * owns nothing" (count 0) instead of silently falling back to a cross-session
+ * global count.
+ */
+export function updateRunningSubagentFooter(
+  ui: StatusUi,
+  owner?: ActiveSessionContextToken,
+): void {
+  const ownerContext = resolveLiveSessionContext(owner);
+  // A live context that has not bound its sessionManager yet (pre-session_start)
+  // cannot map any parentSessionId back to itself, so scoping would report 0 for
+  // agents it really owns. Stay unscoped until the binding exists.
+  const scopedOwner = ownerContext?.sessionManager ? owner : undefined;
+  const runningCount =
+    owner !== undefined && !ownerContext
+      ? 0
+      : getRunningSubagentCount(ownersPaintingInto(ui, scopedOwner));
   const statusText =
     runningCount > 0
       ? `⚡ ${runningCount} sub-agent${runningCount > 1 ? "s" : ""} active`
@@ -155,42 +205,30 @@ function updateWidgetRows(
   }
 }
 
-/** Project current live rows after owner-scoped liveness processing completes. */
+/**
+ * Project current live rows after owner-scoped liveness processing completes.
+ *
+ * Ownership is answered by exactly one predicate — `interactiveStateBelongsToOwner`
+ * — shared with the poller's own state filter, the footer count, delivery, and the
+ * supervisor. The previous ui-identity + `parentSessionId` check was a second,
+ * weaker ownership key that workflow children (which deliberately carry no
+ * `parentSessionId`) could never satisfy, so they were invisible here.
+ */
 function projectActivityWidgetRows(
   ui: ExtensionUIContext | undefined,
   owner: ActiveSessionContextToken | undefined,
   now: number,
 ): string[] {
   if (!ui) return [];
-  const contexts = getSessionContextStack();
+  const owners = ownersPaintingInto(ui, owner);
   const states = [...interactiveSubagentRegistry.values()].filter(
     (state) =>
       (state.status === "running" ||
         state.status === "idle" ||
         state.status === "unknown") &&
-      stateBelongsToUi(state, ui, owner, contexts),
+      belongsToAnyOwner(state, owners),
   );
   return states.map((state) => formatActivityRow(state, now));
-}
-
-function stateBelongsToUi(
-  state: InteractiveSubagentState,
-  ui: ExtensionUIContext,
-  owner: ActiveSessionContextToken | undefined,
-  contexts: SessionContextRef[],
-): boolean {
-  if (!owner) return true;
-  return contexts.some((context) => {
-    if (context.ui !== ui) return false;
-    let sessionId: string | undefined;
-    try {
-      sessionId = context.sessionManager?.getSessionId?.();
-    } catch {
-      /* A stale session manager cannot establish widget ownership. */
-      return false;
-    }
-    return sessionId !== undefined && state.parentSessionId === sessionId;
-  });
 }
 
 /** Derive delivery status from an already narrowed completion event. */
@@ -268,7 +306,7 @@ async function runPollArtifactChanges(
     if (!interactivePi) return;
 
     const states = [...interactiveSubagentRegistry.values()].filter((state) =>
-      parentSessionBelongsToOwner(state.parentSessionId, owner),
+      interactiveStateBelongsToOwner(state, owner),
     );
     const liveness = await Promise.all(
       states.map(async (state) => {
@@ -320,6 +358,7 @@ async function runPollArtifactChanges(
         if ("version" in ev && ev.version === 2 && ev.type === "turn_started") {
           state.activeTurnId = ev.turnId;
         }
+        if (state.completionOwner === "workflow") continue;
         if (!shouldNotify(ev) || !isCompletionEvent(ev)) continue;
         const v2 = ev.type === "completion" ? ev : undefined;
         const mode = state.notifyOnComplete ?? "inject";
@@ -353,6 +392,7 @@ async function runPollArtifactChanges(
         });
       }
       for (const issue of batch.issues) {
+        if (state.completionOwner === "workflow") continue;
         const mode = state.notifyOnComplete ?? "inject";
         const triggerTurn =
           mode === "inject"
@@ -443,7 +483,7 @@ async function runPollArtifactChanges(
 
     // Paint footer + widget. Both are TUI surfaces that never reach the LLM.
     if (ui) {
-      updateRunningSubagentFooter(ui);
+      updateRunningSubagentFooter(ui, owner);
       updateWidgetRows(ui, WIDGET_KEY, widgetRows);
       // Workflow TUI footer + widget: show running async workflows.
       try {
