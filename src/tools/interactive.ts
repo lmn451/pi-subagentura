@@ -339,8 +339,8 @@ export function registerInteractiveSubagentTools(
       return {
         content: [{ type: "text", text: sections.join("\n\n---\n\n") }],
         details: {
-          count: states.length,
-          subagents: states.map((state) => ({ ...state })),
+          count: visibleStates.length,
+          subagents: visibleStates.map((state) => ({ ...state })),
         },
       };
     },
@@ -788,7 +788,7 @@ export function registerInteractiveSubagentTools(
       const states = [...interactiveSubagentRegistry.values()].filter((s) =>
         stateMatchesToolContext(s),
       );
-      const summary = visibleStates.map((s) => {
+      const summary = states.map((s) => {
         const art = getArtifactForState(s);
         const last = lastEvent(art);
         return {
