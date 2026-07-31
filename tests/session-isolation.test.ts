@@ -29,9 +29,7 @@ import {
   registerInProcessMaintenanceTools,
 } from "../src/tools/in-process";
 
-const SUCCESS_RESULT: import("../src/helpers").SubagentResult & {
-  isError: false;
-} = {
+const SUCCESS_RESULT = {
   output: "ok",
   usage: {
     input: 1,
@@ -42,8 +40,7 @@ const SUCCESS_RESULT: import("../src/helpers").SubagentResult & {
     turns: 1,
   },
   model: "test/model",
-  isError: false,
-  errorMessage: "",
+  isError: false as false,
 };
 
 describe("session isolation", () => {
