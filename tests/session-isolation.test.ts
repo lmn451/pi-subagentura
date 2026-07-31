@@ -31,7 +31,14 @@ import {
 
 const SUCCESS_RESULT = {
   output: "ok",
-  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
+  usage: {
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0,
+    turns: 1,
+  },
   model: "test/model",
   isError: false,
   errorMessage: "",
@@ -93,7 +100,9 @@ describe("session isolation", () => {
 
   afterEach(() => {
     cleanGlobals();
-    try { rmSync(root, { recursive: true, force: true }); } catch {}
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {}
   });
 
   /** Directly test ownership: create contexts, spawn jobs, verify isolation. */
@@ -112,10 +121,26 @@ describe("session isolation", () => {
     registerInProcessMaintenanceTools(piB as any, ctxB);
 
     // Fire session_start for both
-    const startA = piA.on.mock.calls.find(([e]: any[]) => e === "session_start")?.[1];
-    startA?.({ reason: "startup" }, { ...mockCtx(), sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] } });
-    const startB = piB.on.mock.calls.find(([e]: any[]) => e === "session_start")?.[1];
-    startB?.({ reason: "startup" }, { ...mockCtx(), sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] } });
+    const startA = piA.on.mock.calls.find(
+      ([e]: any[]) => e === "session_start",
+    )?.[1];
+    startA?.(
+      { reason: "startup" },
+      {
+        ...mockCtx(),
+        sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] },
+      },
+    );
+    const startB = piB.on.mock.calls.find(
+      ([e]: any[]) => e === "session_start",
+    )?.[1];
+    startB?.(
+      { reason: "startup" },
+      {
+        ...mockCtx(),
+        sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] },
+      },
+    );
 
     return { piA, piB, ctxA, ctxB };
   }
@@ -154,8 +179,14 @@ describe("session isolation", () => {
     jobRegistry.set("job-B", jobB);
 
     // A's owner token resolves from A's context
-    const ownerA: ActiveSessionContextToken = { id: ctxA.id, generation: ctxA.generation };
-    const ownerB: ActiveSessionContextToken = { id: ctxB.id, generation: ctxB.generation };
+    const ownerA: ActiveSessionContextToken = {
+      id: ctxA.id,
+      generation: ctxA.generation,
+    };
+    const ownerB: ActiveSessionContextToken = {
+      id: ctxB.id,
+      generation: ctxB.generation,
+    };
 
     expect(inProcessJobBelongsToOwner(jobA, ownerA)).toBe(true);
     expect(inProcessJobBelongsToOwner(jobA, ownerB)).toBe(false);
@@ -169,8 +200,12 @@ describe("session isolation", () => {
     const { piA, piB, ctxA } = registerTwoSessions();
 
     // Find tool defs from mock registrations
-    const statusDefA = piA.registerTool.mock.calls.find(([t]: any[]) => t.name === "get_subagent_status")?.[0];
-    const statusDefB = piB.registerTool.mock.calls.find(([t]: any[]) => t.name === "get_subagent_status")?.[0];
+    const statusDefA = piA.registerTool.mock.calls.find(
+      ([t]: any[]) => t.name === "get_subagent_status",
+    )?.[0];
+    const statusDefB = piB.registerTool.mock.calls.find(
+      ([t]: any[]) => t.name === "get_subagent_status",
+    )?.[0];
 
     expect(statusDefA).toBeDefined();
     expect(statusDefB).toBeDefined();
@@ -193,42 +228,82 @@ describe("session isolation", () => {
     } as any;
     jobRegistry.set("tool-job-A", jobA);
 
-    const ctx = { ...mockCtx(), sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] } };
+    const ctx = {
+      ...mockCtx(),
+      sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] },
+    };
 
     // B's tool should NOT see A's job
-    const fromB = await statusDefB.execute("b-lookup", { jobId: "tool-job-A" }, undefined, undefined, ctx);
+    const fromB = await statusDefB.execute(
+      "b-lookup",
+      { jobId: "tool-job-A" },
+      undefined,
+      undefined,
+      ctx,
+    );
     expect(fromB.details.status).toBe("not_found");
 
     // A's tool SHOULD see its own job
-    const fromA = await statusDefA.execute("a-lookup", { jobId: "tool-job-A" }, undefined, undefined, { ...ctx, sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] } });
+    const fromA = await statusDefA.execute(
+      "a-lookup",
+      { jobId: "tool-job-A" },
+      undefined,
+      undefined,
+      {
+        ...ctx,
+        sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] },
+      },
+    );
     expect(fromA.details.status).toBe("done");
   });
 
   it("prune_subagent_jobs only removes visible jobs", async () => {
     const { piA, piB, ctxA, ctxB } = registerTwoSessions();
 
-    const pruneDefB = piB.registerTool.mock.calls.find(([t]: any[]) => t.name === "prune_subagent_jobs")?.[0];
+    const pruneDefB = piB.registerTool.mock.calls.find(
+      ([t]: any[]) => t.name === "prune_subagent_jobs",
+    )?.[0];
     expect(pruneDefB).toBeDefined();
 
     const jobA = {
-      id: "prune-A", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
-      deliveryOwner: { sessionContextId: ctxA.id, sessionContextGeneration: ctxA.generation, pi: piA, sessionId: "sess-A" },
+      id: "prune-A",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
+      deliveryOwner: {
+        sessionContextId: ctxA.id,
+        sessionContextGeneration: ctxA.generation,
+        pi: piA,
+        sessionId: "sess-A",
+      },
     } as any;
     const jobB = {
-      id: "prune-B", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
-      deliveryOwner: { sessionContextId: ctxB.id, sessionContextGeneration: ctxB.generation, pi: piB, sessionId: "sess-B" },
+      id: "prune-B",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
+      deliveryOwner: {
+        sessionContextId: ctxB.id,
+        sessionContextGeneration: ctxB.generation,
+        pi: piB,
+        sessionId: "sess-B",
+      },
     } as any;
     jobRegistry.set("prune-A", jobA);
     jobRegistry.set("prune-B", jobB);
 
     await pruneDefB.execute();
 
-    expect(jobRegistry.has("prune-A")).toBe(true);   // A's job survives
-    expect(jobRegistry.has("prune-B")).toBe(false);  // B's own job pruned
+    expect(jobRegistry.has("prune-A")).toBe(true); // A's job survives
+    expect(jobRegistry.has("prune-B")).toBe(false); // B's own job pruned
   });
 
   // ── Delivery routing ─────────────────────────────────────────────────
@@ -237,9 +312,14 @@ describe("session isolation", () => {
     const { piA, piB, ctxA } = registerTwoSessions();
 
     const jobA = {
-      id: "delivery-job", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
+      id: "delivery-job",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
       deliveryOwner: {
         sessionContextId: ctxA.id,
         sessionContextGeneration: ctxA.generation,
@@ -265,25 +345,48 @@ describe("session isolation", () => {
     const { piA, piB, ctxA, ctxB } = registerTwoSessions();
 
     const jobA = {
-      id: "sd-A", status: "running",
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: new Promise(() => {}),
-      deliveryOwner: { sessionContextId: ctxA.id, sessionContextGeneration: ctxA.generation, pi: piA, sessionId: "sess-A" },
+      id: "sd-A",
+      status: "running",
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: new Promise(() => {}),
+      deliveryOwner: {
+        sessionContextId: ctxA.id,
+        sessionContextGeneration: ctxA.generation,
+        pi: piA,
+        sessionId: "sess-A",
+      },
       abort: new AbortController(),
     } as any;
     const jobB = {
-      id: "sd-B", status: "running",
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: new Promise(() => {}),
-      deliveryOwner: { sessionContextId: ctxB.id, sessionContextGeneration: ctxB.generation, pi: piA, sessionId: "sess-B" },
+      id: "sd-B",
+      status: "running",
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: new Promise(() => {}),
+      deliveryOwner: {
+        sessionContextId: ctxB.id,
+        sessionContextGeneration: ctxB.generation,
+        pi: piA,
+        sessionId: "sess-B",
+      },
       abort: new AbortController(),
     } as any;
     jobRegistry.set("sd-A", jobA);
     jobRegistry.set("sd-B", jobB);
 
     // A is root (registered first). When root shuts down, all contexts die.
-    const shutdownA = [...piA.on.mock.calls].reverse().find(([e]: any[]) => e === "session_shutdown")?.[1];
-    shutdownA?.({ reason: "new" }, { cwd: root, sessionManager: { getSessionId: () => "sess-A" } });
+    const shutdownA = [...piA.on.mock.calls]
+      .reverse()
+      .find(([e]: any[]) => e === "session_shutdown")?.[1];
+    shutdownA?.(
+      { reason: "new" },
+      { cwd: root, sessionManager: { getSessionId: () => "sess-A" } },
+    );
 
     // Root shutdown clears all jobs
     expect(jobRegistry.has("sd-A")).toBe(false);
@@ -294,25 +397,48 @@ describe("session isolation", () => {
     const { piB, ctxA, ctxB } = registerTwoSessions();
 
     const jobA = {
-      id: "sd2-A", status: "running",
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: new Promise(() => {}),
-      deliveryOwner: { sessionContextId: ctxA.id, sessionContextGeneration: ctxA.generation, pi: piB, sessionId: "sess-A" },
+      id: "sd2-A",
+      status: "running",
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: new Promise(() => {}),
+      deliveryOwner: {
+        sessionContextId: ctxA.id,
+        sessionContextGeneration: ctxA.generation,
+        pi: piB,
+        sessionId: "sess-A",
+      },
       abort: new AbortController(),
     } as any;
     const jobB = {
-      id: "sd2-B", status: "running",
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: new Promise(() => {}),
-      deliveryOwner: { sessionContextId: ctxB.id, sessionContextGeneration: ctxB.generation, pi: piB, sessionId: "sess-B" },
+      id: "sd2-B",
+      status: "running",
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: new Promise(() => {}),
+      deliveryOwner: {
+        sessionContextId: ctxB.id,
+        sessionContextGeneration: ctxB.generation,
+        pi: piB,
+        sessionId: "sess-B",
+      },
       abort: new AbortController(),
     } as any;
     jobRegistry.set("sd2-A", jobA);
     jobRegistry.set("sd2-B", jobB);
 
     // B is a nested descendant. Shutdown of B must NOT evict A's job.
-    const shutdownB = [...piB.on.mock.calls].reverse().find(([e]: any[]) => e === "session_shutdown")?.[1];
-    shutdownB?.({ reason: "new" }, { cwd: root, sessionManager: { getSessionId: () => "sess-B" } });
+    const shutdownB = [...piB.on.mock.calls]
+      .reverse()
+      .find(([e]: any[]) => e === "session_shutdown")?.[1];
+    shutdownB?.(
+      { reason: "new" },
+      { cwd: root, sessionManager: { getSessionId: () => "sess-B" } },
+    );
 
     expect(jobRegistry.has("sd2-A")).toBe(true);
     expect(jobRegistry.has("sd2-B")).toBe(false);
@@ -324,14 +450,26 @@ describe("session isolation", () => {
     const { piA, piB, ctxA } = registerTwoSessions();
 
     // Fire agent_start for B (B is streaming)
-    const agentStartB = piB.on.mock.calls.find(([e]: any[]) => e === "agent_start")?.[1];
+    const agentStartB = piB.on.mock.calls.find(
+      ([e]: any[]) => e === "agent_start",
+    )?.[1];
     agentStartB?.();
 
     const jobA = {
-      id: "stream-job", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
-      deliveryOwner: { sessionContextId: ctxA.id, sessionContextGeneration: ctxA.generation, pi: piA, sessionId: "sess-A" },
+      id: "stream-job",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
+      deliveryOwner: {
+        sessionContextId: ctxA.id,
+        sessionContextGeneration: ctxA.generation,
+        pi: piA,
+        sessionId: "sess-A",
+      },
       notifyOnComplete: "notify",
       triggerTurnOnComplete: false,
       notificationDelivered: false,
@@ -356,17 +494,45 @@ describe("session isolation", () => {
     const ctxA = registerSessionHandlers(piA as any);
     registerInProcessSubagentTools(piA as any, ctxA);
 
-    const startB = piB.on.mock.calls.find(([e]: any[]) => e === "session_start")?.[1];
-    startB?.({ reason: "startup" }, { ...mockCtx(), sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] } });
-    const startA = piA.on.mock.calls.find(([e]: any[]) => e === "session_start")?.[1];
-    startA?.({ reason: "startup" }, { ...mockCtx(), sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] } });
+    const startB = piB.on.mock.calls.find(
+      ([e]: any[]) => e === "session_start",
+    )?.[1];
+    startB?.(
+      { reason: "startup" },
+      {
+        ...mockCtx(),
+        sessionManager: { getSessionId: () => "sess-B", getEntries: () => [] },
+      },
+    );
+    const startA = piA.on.mock.calls.find(
+      ([e]: any[]) => e === "session_start",
+    )?.[1];
+    startA?.(
+      { reason: "startup" },
+      {
+        ...mockCtx(),
+        sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] },
+      },
+    );
 
     const jobA = {
-      id: "order-job", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
-      deliveryOwner: { sessionContextId: ctxA.id, sessionContextGeneration: ctxA.generation, pi: piA, sessionId: "sess-A" },
-      notifyOnComplete: "inject", triggerTurnOnComplete: true, notificationDelivered: false,
+      id: "order-job",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
+      deliveryOwner: {
+        sessionContextId: ctxA.id,
+        sessionContextGeneration: ctxA.generation,
+        pi: piA,
+        sessionId: "sess-A",
+      },
+      notifyOnComplete: "inject",
+      triggerTurnOnComplete: true,
+      notificationDelivered: false,
     } as any;
     jobRegistry.set("order-job", jobA);
 
@@ -387,31 +553,56 @@ describe("session isolation", () => {
     const ctx = registerSessionHandlers(piA as any);
     registerInProcessSubagentTools(piA as any, ctx);
 
-    const startA = piA.on.mock.calls.find(([e]: any[]) => e === "session_start")?.[1];
-    startA?.({ reason: "startup" }, { ...mockCtx(), sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] } });
+    const startA = piA.on.mock.calls.find(
+      ([e]: any[]) => e === "session_start",
+    )?.[1];
+    startA?.(
+      { reason: "startup" },
+      {
+        ...mockCtx(),
+        sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] },
+      },
+    );
 
-    const statusDef = piA.registerTool.mock.calls.find(([t]: any[]) => t.name === "get_subagent_status")?.[0];
+    const statusDef = piA.registerTool.mock.calls.find(
+      ([t]: any[]) => t.name === "get_subagent_status",
+    )?.[0];
     expect(statusDef).toBeDefined();
 
     // Simulate reload: advance context generation
     const ctxStack = getSessionContextStack();
-    const activeCtx = ctxStack.find(c => c.id === ctx.id)!;
+    const activeCtx = ctxStack.find((c) => c.id === ctx.id)!;
     activeCtx.generation++;
-    (globalThis as any).__piSubagenturaActiveSessionContextGeneration = activeCtx.generation;
+    (globalThis as any).__piSubagenturaActiveSessionContextGeneration =
+      activeCtx.generation;
 
     // Spawn a job in the new generation
     const job = {
-      id: "gen-job", status: "done", result: { ...SUCCESS_RESULT },
-      liveStatus: { turn: 0, output: "" }, session: { abort: vi.fn() },
-      startedAt: Date.now(), cwd: process.cwd(), promise: Promise.resolve(SUCCESS_RESULT),
-      deliveryOwner: { sessionContextId: ctx.id, sessionContextGeneration: activeCtx.generation, pi: piA, sessionId: "sess-A" },
+      id: "gen-job",
+      status: "done",
+      result: { ...SUCCESS_RESULT },
+      liveStatus: { turn: 0, output: "" },
+      session: { abort: vi.fn() },
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+      promise: Promise.resolve(SUCCESS_RESULT),
+      deliveryOwner: {
+        sessionContextId: ctx.id,
+        sessionContextGeneration: activeCtx.generation,
+        pi: piA,
+        sessionId: "sess-A",
+      },
     } as any;
     jobRegistry.set("gen-job", job);
 
     // Tool (captured at gen 0) should still access the job (resolveOwnerToken
     // resolves the LIVE generation)
-    const ctx2 = { ...mockCtx(), sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] } };
-    return statusDef.execute("gen-lookup", { jobId: "gen-job" }, undefined, undefined, ctx2)
+    const ctx2 = {
+      ...mockCtx(),
+      sessionManager: { getSessionId: () => "sess-A", getEntries: () => [] },
+    };
+    return statusDef
+      .execute("gen-lookup", { jobId: "gen-job" }, undefined, undefined, ctx2)
       .then((r: any) => {
         expect(r.details.status).toBe("done");
       });

@@ -524,9 +524,10 @@ export function notifyInProcessCompletionWithoutDelivery(
   ]);
 }
 
-function requestInProcessDeliveryFlush(
-  ownerToken?: { id: number; generation: number },
-): void {
+function requestInProcessDeliveryFlush(ownerToken?: {
+  id: number;
+  generation: number;
+}): void {
   const g = globalThis as any;
   const streaming = resolveStreamingFlag(ownerToken);
   if (!streaming) {
@@ -541,9 +542,10 @@ function requestInProcessDeliveryFlush(
   });
 }
 
-export function flushInProcessDeliveries(
-  ownerToken?: { id: number; generation: number },
-): void {
+export function flushInProcessDeliveries(ownerToken?: {
+  id: number;
+  generation: number;
+}): void {
   const g = globalThis as any;
   const queue = pendingJobDeliveries();
   // Filter: remove items with unresolvable targets.  Items that belong

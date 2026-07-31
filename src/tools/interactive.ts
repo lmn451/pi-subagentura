@@ -37,7 +37,12 @@ import {
   formatCompletionDeliveryBehavior,
 } from "../notifications";
 import { InteractiveParams } from "../schemas";
-import { interactiveStateBelongsToOwner, ownerlessEntitiesVisible, resolveLiveSessionContext, resolveOwnerToken } from "../session-context";
+import {
+  interactiveStateBelongsToOwner,
+  ownerlessEntitiesVisible,
+  resolveLiveSessionContext,
+  resolveOwnerToken,
+} from "../session-context";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import { getActiveSessionContextToken } from "../session-context";
 
@@ -114,7 +119,10 @@ function getArtifactForState(
   return artifactPath(dirname(state.artifactDir), basename(state.artifactDir));
 }
 
-export function registerInteractiveSubagentTools(pi: ExtensionAPI, sessionContext?: { id: number; generation: number }): void {
+export function registerInteractiveSubagentTools(
+  pi: ExtensionAPI,
+  sessionContext?: { id: number; generation: number },
+): void {
   const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   /**
    * Check whether an interactive state is visible through the tool
@@ -122,9 +130,10 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI, sessionContex
    * captured at registration time) is resolved at call time to pick up
    * the live generation.
    */
-  function stateMatchesToolContext(
-    state: { parentSessionId?: string; supervisorOwner?: { id: number } },
-  ): boolean {
+  function stateMatchesToolContext(state: {
+    parentSessionId?: string;
+    supervisorOwner?: { id: number };
+  }): boolean {
     const owner = resolveOwnerToken(toolToken);
     if (!owner) return ownerlessEntitiesVisible(); // fail closed when context is dead or legacy
     // Supervisor-owned states compare by id only (not generation) so
@@ -354,7 +363,12 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI, sessionContex
       const existing = interactiveSubagentRegistry.get(params.jobId);
       if (existing && !stateMatchesToolContext(existing)) {
         return {
-          content: [{ type: "text", text: `Interactive sub-agent ${params.jobId} exists but was created by a different session.` }],
+          content: [
+            {
+              type: "text",
+              text: `Interactive sub-agent ${params.jobId} exists but was created by a different session.`,
+            },
+          ],
           details: { jobId: params.jobId, status: "not_found" },
           isError: true,
         };
@@ -660,9 +674,10 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI, sessionContex
       // If state is in-memory but belongs to another session, don't use
       // getArtifactForState (it exposes internal info). Fall through to
       // disk-based findArtifactById for cross-session artifact access.
-      const art = state && stateMatchesToolContext(state)
-        ? getArtifactForState(state)
-        : findArtifactById(params.id);
+      const art =
+        state && stateMatchesToolContext(state)
+          ? getArtifactForState(state)
+          : findArtifactById(params.id);
       if (!art) {
         return {
           content: [
@@ -770,7 +785,9 @@ export function registerInteractiveSubagentTools(pi: ExtensionAPI, sessionContex
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<any> {
       pruneDeadInteractiveSubagents();
       updateRunningSubagentFooter(ctx.ui, getActiveSessionContextToken());
-      const states = [...interactiveSubagentRegistry.values()].filter((s) => stateMatchesToolContext(s));
+      const states = [...interactiveSubagentRegistry.values()].filter((s) =>
+        stateMatchesToolContext(s),
+      );
       const summary = states.map((s) => {
         const art = getArtifactForState(s);
         const last = lastEvent(art);

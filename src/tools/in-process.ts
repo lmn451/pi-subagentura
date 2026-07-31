@@ -739,7 +739,10 @@ function registerSubagentIsolatedTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerGetSubagentStatusTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
+function registerGetSubagentStatusTool(
+  pi: ExtensionAPI,
+  toolToken?: { id: number },
+): void {
   pi.registerTool({
     name: "get_subagent_status",
     label: "Get Subagent Status",
@@ -819,7 +822,10 @@ function registerGetSubagentStatusTool(pi: ExtensionAPI, toolToken?: { id: numbe
   });
 }
 
-function registerGetSubagentResultTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
+function registerGetSubagentResultTool(
+  pi: ExtensionAPI,
+  toolToken?: { id: number },
+): void {
   pi.registerTool({
     name: "get_subagent_result",
     label: "Get Subagent Result",
@@ -1020,7 +1026,10 @@ function registerGetSubagentResultTool(pi: ExtensionAPI, toolToken?: { id: numbe
   });
 }
 
-function registerCancelSubagentTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
+function registerCancelSubagentTool(
+  pi: ExtensionAPI,
+  toolToken?: { id: number },
+): void {
   pi.registerTool({
     name: "cancel_subagent",
     label: "Cancel Subagent",
@@ -1230,7 +1239,10 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerPruneSubagentJobsTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
+function registerPruneSubagentJobsTool(
+  pi: ExtensionAPI,
+  toolToken?: { id: number },
+): void {
   pi.registerTool({
     name: "prune_subagent_jobs",
     label: "Prune Subagent Jobs",
@@ -1410,7 +1422,10 @@ function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
   });
 }
 
-export function registerInProcessSubagentTools(pi: ExtensionAPI, sessionContext?: { id: number; generation: number }): void {
+export function registerInProcessSubagentTools(
+  pi: ExtensionAPI,
+  sessionContext?: { id: number; generation: number },
+): void {
   const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   registerSubagentWithContextTool(pi);
   registerSubagentIsolatedTool(pi);
@@ -1419,9 +1434,10 @@ export function registerInProcessSubagentTools(pi: ExtensionAPI, sessionContext?
   registerCancelSubagentTool(pi, toolToken);
 }
 
-
-
-export function registerInProcessMaintenanceTools(pi: ExtensionAPI, sessionContext?: { id: number; generation: number }): void {
+export function registerInProcessMaintenanceTools(
+  pi: ExtensionAPI,
+  sessionContext?: { id: number; generation: number },
+): void {
   const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   registerListAvailableModelsTool(pi);
   registerPruneSubagentJobsTool(pi, toolToken);
