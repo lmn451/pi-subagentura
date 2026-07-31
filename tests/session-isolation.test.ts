@@ -29,7 +29,9 @@ import {
   registerInProcessMaintenanceTools,
 } from "../src/tools/in-process";
 
-const SUCCESS_RESULT: import("../src/helpers").SubagentResult & { isError: false } = {
+const SUCCESS_RESULT: import("../src/helpers").SubagentResult & {
+  isError: false;
+} = {
   output: "ok",
   usage: {
     input: 1,
