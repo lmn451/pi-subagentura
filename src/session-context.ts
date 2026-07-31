@@ -163,7 +163,8 @@ export function resolveStreamingFlag(
   const g = globalThis as any;
   const globalStreaming = Boolean(g.__piSubagenturaParentStreaming);
   return ownerToken
-    ? (resolveLiveSessionContext(ownerToken)?.parentStreaming ?? false)
+    ? (resolveLiveSessionContext(ownerToken)?.parentStreaming ?? false) ||
+        globalStreaming
     : globalStreaming;
 }
 
