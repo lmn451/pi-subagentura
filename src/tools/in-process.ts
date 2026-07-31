@@ -1440,7 +1440,7 @@ function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
 
 export function registerInProcessSubagentTools(
   pi: ExtensionAPI,
-sessionContext?: { id: number; generation: number },
+  sessionContext?: { id: number; generation: number },
 ): void {
   const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   registerSubagentWithContextTool(pi, sessionContext as any);

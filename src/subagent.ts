@@ -119,7 +119,7 @@ export default function (pi: ExtensionAPI) {
   registerInteractiveSupervisor(pi, sessionContext);
   registerWorkflowTool(pi, sessionContext);
   registerInProcessSubagentTools(pi, sessionContext);
-registerInProcessMaintenanceTools(pi, sessionContext);
+  registerInProcessMaintenanceTools(pi, sessionContext);
   // ── Cancel-all-flows shortcut and command ──────────────────────
   registerCancelAllFlows(pi, sessionContext);
 }
