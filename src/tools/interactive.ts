@@ -788,7 +788,7 @@ export function registerInteractiveSubagentTools(
       const states = [...interactiveSubagentRegistry.values()].filter((s) =>
         stateMatchesToolContext(s),
       );
-      const summary = states.map((s) => {
+      const summary = visibleStates.map((s) => {
         const art = getArtifactForState(s);
         const last = lastEvent(art);
         return {
@@ -819,7 +819,11 @@ export function registerInteractiveSubagentTools(
       });
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        details: { count: summary.length, subagents: summary },
+        details: {
+          count: summary.length,
+          subagents: summary,
+          totalTracked: [...interactiveSubagentRegistry.values()].length,
+        },
       };
     },
   });

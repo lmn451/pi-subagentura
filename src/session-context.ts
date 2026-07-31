@@ -153,11 +153,9 @@ export function resolveOwnerToken(
  * field is checked.  The process-global flag is kept as a fallback for
  * legacy code paths that set it directly.
  *
- * TODO(lmn451): Remove the `|| globalStreaming` fallback when no test
- *       writes `__piSubagenturaParentStreaming` directly outside
- *       `session-handlers.ts`.  Search for the global to confirm before
- *       deleting this line and the deprecated mirror assignments in
- *       `session-handlers.ts` (L:agent_start, L:agent_settled).
+ * The `|| globalStreaming` fallback is kept for the legacy (no-ownerToken)
+ *       path only.  When an owner token IS provided, the per-context flag
+ *       alone determines streaming state.
  */
 export function resolveStreamingFlag(
   ownerToken?: ActiveSessionContextToken,
@@ -165,8 +163,7 @@ export function resolveStreamingFlag(
   const g = globalThis as any;
   const globalStreaming = Boolean(g.__piSubagenturaParentStreaming);
   return ownerToken
-    ? (resolveLiveSessionContext(ownerToken)?.parentStreaming ?? false) ||
-        globalStreaming
+    ? (resolveLiveSessionContext(ownerToken)?.parentStreaming ?? false)
     : globalStreaming;
 }
 

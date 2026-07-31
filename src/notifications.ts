@@ -567,8 +567,14 @@ export function flushInProcessDeliveries(ownerToken?: {
 
   // Per-owner streaming: resolved through context + global fallback.
   const streaming = resolveStreamingFlag(ownerToken);
+  // Scope selection to items matching our owner (foreign items are
+  // in the queue but must not be selected or delivered through our pi).
+  const ownerQueue = ownerToken
+    ? queue.filter((p) => ownerSessionContextMatches(p, ownerToken))
+    : queue;
   const deliveryOwner =
-    (streaming ? queue.find(pendingTriggersTurn) : undefined) ?? queue[0];
+    (streaming ? ownerQueue.find(pendingTriggersTurn) : undefined) ??
+    ownerQueue[0];
   const target = resolvePendingDeliveryTarget(deliveryOwner);
   if (!target) return;
 
@@ -581,7 +587,7 @@ export function flushInProcessDeliveries(ownerToken?: {
   }> = [];
   let bytes = 0;
   const runningJobsCount = runningInProcessJobCount();
-  for (const pending of queue) {
+  for (const pending of ownerQueue) {
     if (!sameDeliveryOwner(pending, deliveryOwner)) continue;
     if (pending.kind === "overflow") {
       let content =
