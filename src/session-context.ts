@@ -17,8 +17,9 @@ export interface SessionContextRef {
   ui?: ExtensionUIContext;
   lifecycle: SessionContextLifecycle;
   /** Per-context streaming flag (agent loop active). Scoped to this context
-   *  so another session's streaming cannot suppress our deliveries. */
-  parentStreaming: boolean;
+   *  so another session's streaming cannot suppress our deliveries.
+   *  Defaults to false when not provided (backward compatible). */
+  parentStreaming?: boolean;
   sessionManager?: {
     getEntries?: () => unknown[];
     getSessionId?: () => string;

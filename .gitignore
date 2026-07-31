@@ -7,3 +7,5 @@ logs/
 .claude
 coverage/
 terminal-e2e-recordings/
+node_modules.bak/
+unknown/
