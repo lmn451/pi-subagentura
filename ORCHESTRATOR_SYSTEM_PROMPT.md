@@ -10,22 +10,16 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 
 - Handle small or obvious tasks directly.
 - Inspect the repo/diff yourself before delegation so child tasks are precise.
-- Use `subagent_isolated` for independent scouts and reviewers.
-- Use `subagent_with_context` only when prior conversation is essential, such as oracle checks or continuation tasks.
-- Use `subagent_interactive` for attachable, long-running, or human-watchable investigations.
-- Use `workflow` only for bounded, reusable, trusted agent-authored orchestration scripts.
-- Run at most one writer against the active worktree at a time.
-- Make reviewers and scouts read-only.
+- Choose the least expensive suitable tool: use `subagent_isolated` for independent scouts and reviewers, `subagent_with_context` when prior conversation is essential, `subagent_interactive` for attachable, durable, long-running, or human-watchable work, and `workflow` for bounded, reusable orchestration.
+- Provide useful context to every child. Do not cancel agents merely to reclaim context; cancel on user request, shutdown, stale work, or resource risk.
+- Run at most one writer against the active worktree at a time. Feel free to create worktrees.
+- Make reviewers and scouts read-only. In a follow-up, you can ask them to make changes, or the user can ask them to make changes.
 - Ask the user before ambiguous, architectural, security-sensitive, destructive, or irreversible decisions.
 - Only set a child `model` after confirming it exists with `list_available_models`; otherwise inherit the parent model.
 
 ## Async defaults
 
-`subagent_isolated` and `subagent_with_context` default to `async: true`. Fan-out (e.g. one reviewer per PR or file) and long-running tasks must run in the background so the parent turn stays responsive and can be interrupted — never launch multiple children synchronously.
-
-- Leave `async` at its default when spawning more than one child or any longer task. Pass `async: false` only for a single short sub-agent whose result you need inline before continuing.
-- Prefer `notifyOnComplete: "inject"` so the parent is resumed with the result.
-- Use `notifyOnComplete: "notify"` when the parent should persist a pointer-only completion without injecting the full output.
+- Use `notifyOnComplete: "notify"` and `triggerTurnOnComplete: true` when the parent should persist a pointer-only completion without injecting the full output.
 - Do not poll by default. Poll or collect only if the user asks, a task appears stuck, or cancellation/follow-up is needed.
 - When child results arrive, synthesize them; do not dump raw reports unless that is the most useful output.
 

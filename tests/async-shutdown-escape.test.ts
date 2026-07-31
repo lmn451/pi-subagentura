@@ -24,6 +24,10 @@ vi.mock("../src/interactive-tmux", () => ({
 import { jobRegistry } from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { registerSessionHandlers } from "../src/session-handlers";
+import {
+  getActiveSessionContextToken,
+  type SessionContextRef,
+} from "../src/session-context";
 
 function fakeCtx(withContext: boolean) {
   return {
@@ -46,13 +50,12 @@ function fakeCtx(withContext: boolean) {
   } as any;
 }
 
-function setupTools() {
+function setupTools(pi: any, owner?: SessionContextRef) {
   const tools: Record<string, any> = {};
-  registerInProcessSubagentTools({
-    registerTool: (tool: any) => {
-      tools[tool.name] = tool;
-    },
-  } as any);
+  pi.registerTool = (tool: any) => {
+    tools[tool.name] = tool;
+  };
+  registerInProcessSubagentTools(pi, owner);
   return tools;
 }
 
@@ -83,9 +86,9 @@ describe("async spawn shutdown handoff", () => {
     async (toolName, params) => {
       const gate = createStartGate();
       mockStartSubagentJob.mockReturnValue(gate.promise);
-      const tools = setupTools();
       const pi = { on: vi.fn(), sendMessage: vi.fn() } as any;
-      registerSessionHandlers(pi);
+      const parentContext = registerSessionHandlers(pi);
+      const tools = setupTools(pi, parentContext);
       const ctx = fakeCtx(toolName === "subagent_with_context");
       const sessionStart = pi.on.mock.calls.find(
         ([name]: [string]) => name === "session_start",
@@ -143,6 +146,72 @@ describe("async spawn shutdown handoff", () => {
     },
   );
 
+  it("starts a parent-owned isolated spawn when a different unstarted context is globally active", async () => {
+    const gate = createStartGate();
+    mockStartSubagentJob.mockReturnValue(gate.promise);
+    const ctx = fakeCtx(false);
+    const parentPi = { on: vi.fn(), sendMessage: vi.fn() } as any;
+    const parentContext = registerSessionHandlers(parentPi);
+    parentContext.lifecycle = "started";
+    parentContext.ui = ctx.ui;
+    parentContext.sessionManager = ctx.sessionManager;
+    const tools = setupTools(parentPi, parentContext);
+
+    const otherPi = { on: vi.fn(), sendMessage: vi.fn() } as any;
+    const otherContext = registerSessionHandlers(otherPi);
+    expect(otherContext.lifecycle).toBe("registered");
+
+    expect(getActiveSessionContextToken()).toEqual({
+      id: otherContext.id,
+      generation: otherContext.generation,
+    });
+    const spawn = tools.subagent_isolated.execute(
+      "call",
+      { task: "parent-owned spawn", async: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    await Promise.resolve();
+    expect(mockStartSubagentJob).toHaveBeenCalledOnce();
+    expect(parentContext.lifecycle).toBe("started");
+
+    const sessionAbort = vi.fn();
+    const start = vi.fn();
+    const disposeBeforeStart = vi.fn();
+    gate.resolve({
+      jobId: "parent-owned-job",
+      jobPromise: new Promise(() => {}),
+      session: { abort: sessionAbort },
+      start,
+      disposeBeforeStart,
+      liveStatus: {
+        turn: 0,
+        output: "",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turns: 0,
+        },
+      },
+      modelLabel: "test/model",
+    });
+
+    const result = await spawn;
+    expect(result.details.status).toBe("started");
+    expect(jobRegistry.has("parent-owned-job")).toBe(true);
+    expect(jobRegistry.get("parent-owned-job")?.deliveryOwner).toMatchObject({
+      sessionContextId: parentContext.id,
+      sessionContextGeneration: parentContext.generation,
+    });
+    expect(start).toHaveBeenCalledOnce();
+    expect(disposeBeforeStart).not.toHaveBeenCalled();
+    expect(sessionAbort).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["subagent_isolated", { task: "nested spawn", async: true }],
     ["subagent_with_context", { task: "nested spawn", async: true }],
@@ -151,13 +220,13 @@ describe("async spawn shutdown handoff", () => {
     async (toolName, params) => {
       const gate = createStartGate();
       mockStartSubagentJob.mockReturnValue(gate.promise);
-      const tools = setupTools();
       const parentPi = { on: vi.fn(), sendMessage: vi.fn() } as any;
       const ctx = fakeCtx(toolName === "subagent_with_context");
       const parentContext = registerSessionHandlers(parentPi);
       parentContext.lifecycle = "started";
       parentContext.ui = ctx.ui;
       parentContext.sessionManager = ctx.sessionManager;
+      const tools = setupTools(parentPi, parentContext);
 
       const spawn = tools[toolName].execute(
         "call",
