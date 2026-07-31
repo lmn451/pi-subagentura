@@ -14,6 +14,7 @@ import { isCompletionEvent, type SubagentEvent } from "./artifact";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import {
   getActiveSessionContextToken,
+  resolveStreamingFlag,
   resolveLiveSessionContext,
   type ActiveSessionContextToken,
 } from "./session-context";
@@ -149,6 +150,17 @@ function sameDeliveryOwner(
     if (left.ownerSessionId !== right.ownerSessionId) return false;
   }
   return left.ownerPi === right.ownerPi;
+}
+
+function ownerSessionContextMatches(
+  pending: PendingJobDelivery,
+  token: { id: number; generation: number } | undefined,
+): boolean {
+  if (!token) return true;
+  return (
+    pending.ownerSessionContextId === token.id &&
+    pending.ownerSessionContextGeneration === token.generation
+  );
 }
 
 interface PendingDeliveryTarget {
@@ -465,7 +477,7 @@ export function deliverNotification(
       if (!discardOldestOverflow(queue)) break;
     }
   }
-  requestInProcessDeliveryFlush();
+  requestInProcessDeliveryFlush(ownerSessionContext);
 }
 
 /** Show completion UI when explicit result retrieval suppresses LLM delivery. */
@@ -512,33 +524,47 @@ export function notifyInProcessCompletionWithoutDelivery(
   ]);
 }
 
-function requestInProcessDeliveryFlush(): void {
+function requestInProcessDeliveryFlush(
+  ownerToken?: { id: number; generation: number },
+): void {
   const g = globalThis as any;
-  if (!g.__piSubagenturaParentStreaming) {
-    flushInProcessDeliveries();
+  const streaming = resolveStreamingFlag(ownerToken);
+  if (!streaming) {
+    flushInProcessDeliveries(ownerToken);
     return;
   }
   if (g.__piSubagenturaInProcessFlushScheduled) return;
   g.__piSubagenturaInProcessFlushScheduled = true;
   queueMicrotask(() => {
     g.__piSubagenturaInProcessFlushScheduled = false;
-    flushInProcessDeliveries();
+    flushInProcessDeliveries(ownerToken);
   });
 }
 
-export function flushInProcessDeliveries(): void {
+export function flushInProcessDeliveries(
+  ownerToken?: { id: number; generation: number },
+): void {
   const g = globalThis as any;
   const queue = pendingJobDeliveries();
+  // Filter: remove items with unresolvable targets.  Items that belong
+  // to a different owner are SKIPPED (not removed) — they stay in the
+  // shared queue for their own session's flush.
   for (let index = 0; index < queue.length;) {
-    if (resolvePendingDeliveryTarget(queue[index])) {
-      index++;
-    } else {
-      queue.splice(index, 1);
+    const pending = queue[index];
+    if (!resolvePendingDeliveryTarget(pending)) {
+      queue.splice(index, 1); // unresolvable target — remove
+      continue;
     }
+    if (ownerToken && !ownerSessionContextMatches(pending, ownerToken)) {
+      index++; // other session's delivery — skip, don't remove
+      continue;
+    }
+    index++;
   }
   if (queue.length === 0) return;
 
-  const streaming = Boolean(g.__piSubagenturaParentStreaming);
+  // Per-owner streaming: resolved through context + global fallback.
+  const streaming = resolveStreamingFlag(ownerToken);
   const deliveryOwner =
     (streaming ? queue.find(pendingTriggersTurn) : undefined) ?? queue[0];
   const target = resolvePendingDeliveryTarget(deliveryOwner);

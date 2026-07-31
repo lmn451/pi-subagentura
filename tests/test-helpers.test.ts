@@ -541,16 +541,18 @@ describe("registry size cap", () => {
     expect(jobRegistry.has(job1.id)).toBe(true);
   });
 
-  it("pruneCompletedJobs removes all completed and error jobs", () => {
+  it("pruneCompletedJobs is a deprecated no-op (replaced by per-owner iteration)", () => {
     const job1 = createMockJobState({ status: "done" });
     const job2 = createMockJobState({ status: "error" });
     const job3 = createMockJobState({ status: "running" });
     jobRegistry.set(job1.id, job1);
     jobRegistry.set(job2.id, job2);
     jobRegistry.set(job3.id, job3);
-    expect(pruneCompletedJobs()).toBe(2);
-    expect(jobRegistry.has(job1.id)).toBe(false);
-    expect(jobRegistry.has(job2.id)).toBe(false);
+    // pruneCompletedJobs is intentionally a no-op — the owner-filtered
+    // inline loop in prune_subagent_jobs replaces it.
+    expect(pruneCompletedJobs()).toBe(0);
+    expect(jobRegistry.has(job1.id)).toBe(true);
+    expect(jobRegistry.has(job2.id)).toBe(true);
     expect(jobRegistry.has(job3.id)).toBe(true);
   });
 

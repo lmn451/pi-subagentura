@@ -20,6 +20,8 @@ import {
   buildLiveUpdate,
   debugLog,
   formatUsage,
+  inProcessJobBelongsToOwner,
+  jobVisibleToTool,
   jobRegistry,
   pruneCompletedJobs,
   scheduleJobCleanup,
@@ -737,7 +739,7 @@ function registerSubagentIsolatedTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerGetSubagentStatusTool(pi: ExtensionAPI): void {
+function registerGetSubagentStatusTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
   pi.registerTool({
     name: "get_subagent_status",
     label: "Get Subagent Status",
@@ -754,14 +756,12 @@ function registerGetSubagentStatusTool(pi: ExtensionAPI): void {
 
       const job = jobRegistry.get(params.jobId);
 
-      if (!job) {
+      if (!job || !jobVisibleToTool(job, toolToken)) {
+        const msg = !job
+          ? `Job ${params.jobId} not found. It may have been cancelled.`
+          : `Job ${params.jobId} exists but was created by a different session and is not visible here.`;
         return {
-          content: [
-            {
-              type: "text",
-              text: `Job ${params.jobId} not found. It may have been cancelled.`,
-            },
-          ],
+          content: [{ type: "text", text: msg }],
           details: { jobId: params.jobId, status: "not_found" },
           isError: true,
         };
@@ -819,7 +819,7 @@ function registerGetSubagentStatusTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerGetSubagentResultTool(pi: ExtensionAPI): void {
+function registerGetSubagentResultTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
   pi.registerTool({
     name: "get_subagent_result",
     label: "Get Subagent Result",
@@ -839,15 +839,13 @@ function registerGetSubagentResultTool(pi: ExtensionAPI): void {
         jobId: params.jobId,
       });
 
-      if (!job) {
+      if (!job || !jobVisibleToTool(job, toolToken)) {
+        const msg = !job
+          ? `Job ${params.jobId} not found. It may have been cancelled.`
+          : `Job ${params.jobId} exists but was created by a different session and is not visible here.`;
         return {
-          content: [
-            {
-              type: "text",
-              text: `Job ${params.jobId} not found. It may have been cancelled.`,
-            },
-          ],
-          details: { jobId: params.jobId },
+          content: [{ type: "text", text: msg }],
+          details: { jobId: params.jobId, status: "not_found" },
           isError: true,
         };
       }
@@ -1022,7 +1020,7 @@ function registerGetSubagentResultTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerCancelSubagentTool(pi: ExtensionAPI): void {
+function registerCancelSubagentTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
   pi.registerTool({
     name: "cancel_subagent",
     label: "Cancel Subagent",
@@ -1037,10 +1035,13 @@ function registerCancelSubagentTool(pi: ExtensionAPI): void {
         jobId: params.jobId,
       });
 
-      if (!job) {
+      if (!job || !jobVisibleToTool(job, toolToken)) {
+        const msg = !job
+          ? `Job ${params.jobId} not found.`
+          : `Job ${params.jobId} exists but was created by a different session and cannot be cancelled from here.`;
         return {
-          content: [{ type: "text", text: `Job ${params.jobId} not found.` }],
-          details: { jobId: params.jobId },
+          content: [{ type: "text", text: msg }],
+          details: { jobId: params.jobId, status: "not_found" },
           isError: true,
         };
       }
@@ -1229,7 +1230,7 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
   });
 }
 
-function registerPruneSubagentJobsTool(pi: ExtensionAPI): void {
+function registerPruneSubagentJobsTool(pi: ExtensionAPI, toolToken?: { id: number }): void {
   pi.registerTool({
     name: "prune_subagent_jobs",
     label: "Prune Subagent Jobs",
@@ -1246,7 +1247,14 @@ function registerPruneSubagentJobsTool(pi: ExtensionAPI): void {
         toolName: "prune_subagent_jobs",
       });
 
-      const removed = pruneCompletedJobs();
+      let removed = 0;
+      for (const [jobId, job] of jobRegistry) {
+        if (!jobVisibleToTool(job, toolToken)) continue;
+        if (job.status === "done" || job.status === "error") {
+          jobRegistry.delete(jobId);
+          removed++;
+        }
+      }
       const after = jobRegistry.size;
 
       return {
@@ -1402,17 +1410,21 @@ function registerCleanupArtifactsTool(pi: ExtensionAPI): void {
   });
 }
 
-export function registerInProcessSubagentTools(pi: ExtensionAPI): void {
+export function registerInProcessSubagentTools(pi: ExtensionAPI, sessionContext?: { id: number; generation: number }): void {
+  const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   registerSubagentWithContextTool(pi);
   registerSubagentIsolatedTool(pi);
-  registerGetSubagentStatusTool(pi);
-  registerGetSubagentResultTool(pi);
-  registerCancelSubagentTool(pi);
+  registerGetSubagentStatusTool(pi, toolToken);
+  registerGetSubagentResultTool(pi, toolToken);
+  registerCancelSubagentTool(pi, toolToken);
 }
 
-export function registerInProcessMaintenanceTools(pi: ExtensionAPI): void {
+
+
+export function registerInProcessMaintenanceTools(pi: ExtensionAPI, sessionContext?: { id: number; generation: number }): void {
+  const toolToken = sessionContext ? { id: sessionContext.id } : undefined;
   registerListAvailableModelsTool(pi);
-  registerPruneSubagentJobsTool(pi);
+  registerPruneSubagentJobsTool(pi, toolToken);
   registerCleanupArtifactsTool(pi);
 }
 

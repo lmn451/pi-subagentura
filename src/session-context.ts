@@ -16,6 +16,9 @@ export interface SessionContextRef {
   pi: ExtensionAPI;
   ui?: ExtensionUIContext;
   lifecycle: SessionContextLifecycle;
+  /** Per-context streaming flag (agent loop active). Scoped to this context
+   *  so another session's streaming cannot suppress our deliveries. */
+  parentStreaming: boolean;
   sessionManager?: {
     getEntries?: () => unknown[];
     getSessionId?: () => string;
@@ -64,6 +67,7 @@ export function createSessionContextRef(pi: ExtensionAPI): SessionContextRef {
     generation: 0,
     lifecycle: "registered",
     pi,
+    parentStreaming: false,
   };
 }
 
@@ -110,6 +114,59 @@ export function advanceSessionContextGeneration(contextId: number): number {
     g.__piSubagenturaActiveSessionContextGeneration = context.generation;
   }
   return context.generation;
+}
+
+/**
+ * Fail closed for owner-less legacy entities when multiple live sessions
+ * exist. When only one started context is alive, legacy entities remain
+ * visible to preserve single-session pi CLI behaviour.
+ */
+export function ownerlessEntitiesVisible(): boolean {
+  const started = getSessionContextStack().filter(
+    (ctx) => ctx.lifecycle === "started",
+  );
+  return started.length <= 1;
+}
+
+/**
+ * Resolve a toolToken (id-only, captured at registration) into a full
+ * ActiveSessionContextToken with the live generation.
+ *
+ * Returns undefined when the owning context is no longer live.
+ */
+export function resolveOwnerToken(
+  toolToken: { id: number } | undefined,
+): ActiveSessionContextToken | undefined {
+  if (!toolToken) return undefined;
+  const ctx = getSessionContextStack().find(
+    (entry) => entry.id === toolToken.id,
+  );
+  if (!ctx || ctx.lifecycle !== "started") return undefined;
+  return { id: ctx.id, generation: ctx.generation };
+}
+
+/**
+ * Resolve the per-context streaming flag for the given owner token.
+ *
+ * When `ownerToken` is provided the owner context's `parentStreaming`
+ * field is checked.  The process-global flag is kept as a fallback for
+ * legacy code paths that set it directly.
+ *
+ * TODO(lmn451): Remove the `|| globalStreaming` fallback when no test
+ *       writes `__piSubagenturaParentStreaming` directly outside
+ *       `session-handlers.ts`.  Search for the global to confirm before
+ *       deleting this line and the deprecated mirror assignments in
+ *       `session-handlers.ts` (L:agent_start, L:agent_settled).
+ */
+export function resolveStreamingFlag(
+  ownerToken?: ActiveSessionContextToken,
+): boolean {
+  const g = globalThis as any;
+  const globalStreaming = Boolean(g.__piSubagenturaParentStreaming);
+  return ownerToken
+    ? (resolveLiveSessionContext(ownerToken)?.parentStreaming ?? false) ||
+        globalStreaming
+    : globalStreaming;
 }
 
 export function setActiveSessionRefs(context?: SessionContextRef): void {

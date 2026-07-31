@@ -25,6 +25,7 @@ import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
 import {
   interactiveStateBelongsToOwner,
   resolveLiveSessionContext,
+  resolveStreamingFlag,
   type ActiveSessionContextToken,
 } from "./session-context";
 import { inProcessJobBelongsToOwner } from "./helpers";
@@ -353,7 +354,8 @@ export function flushDeliveries(
     bytes += separatorBytes + itemBytes;
   }
   const triggersTurn = selected.some(({ intent }) => intent.triggerTurn);
-  if (g.__piSubagenturaParentStreaming && !triggersTurn) return;
+  const scopeStreaming = resolveStreamingFlag(owner);
+  if (scopeStreaming && !triggersTurn) return;
   const deliveryIds = selected.map(({ intent }) => intent.deliveryId);
   try {
     pi.sendMessage(

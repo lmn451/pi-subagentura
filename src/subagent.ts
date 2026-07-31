@@ -115,11 +115,11 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionContext = registerSessionHandlers(pi);
-  registerInteractiveSubagentTools(pi);
+  registerInteractiveSubagentTools(pi, sessionContext);
   registerInteractiveSupervisor(pi, sessionContext);
   registerWorkflowTool(pi, sessionContext);
-  registerInProcessSubagentTools(pi);
-  registerInProcessMaintenanceTools(pi);
+  registerInProcessSubagentTools(pi, sessionContext);
+  registerInProcessMaintenanceTools(pi, sessionContext);
   // ── Cancel-all-flows shortcut and command ──────────────────────
   registerCancelAllFlows(pi, sessionContext);
 }

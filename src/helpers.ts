@@ -34,6 +34,7 @@ import {
   createWorkflowStructuredOutputTool,
   type WorkflowStructuredOutputCapture,
 } from "./workflow-structured-output";
+import { ownerlessEntitiesVisible, resolveOwnerToken } from "./session-context";
 import {
   snapshotInProcessSession,
   type CancellationSnapshotReceipt,
@@ -244,14 +245,47 @@ if (!g.__piSubagenturaRegistry) {
 
 export const jobRegistry = g.__piSubagenturaRegistry as Map<string, JobState>;
 
+/**
+ * Check whether a job is visible through a tool registered in the given
+ * session context.  Called from tool execute handlers with a `toolToken`
+ * captured at tool-registration time (id only) and resolved through
+ * `resolveOwnerToken()` at execution time.
+ *
+ * - `toolToken` is `undefined` when the extension was registered without
+ *   a session context (legacy / CLI).  Such tools see all jobs.
+ * - Otherwise only jobs whose `deliveryOwner` matches the resolved
+ *   `{id, generation}` token are visible.
+ */
+export function jobVisibleToTool(
+  job: JobState,
+  toolToken: { id: number } | undefined,
+): boolean {
+  const owner = resolveOwnerToken(toolToken);
+  // Resolve the owning session context.  Three paths:
+  //  1. owner resolved → strict {id, generation} check
+  //  2. toolToken provided but context dead (shutdown / lifecycle ended)
+  //     → fail closed: the shutdown handler has cleaned up owned jobs;
+  //        anything left should not be reachable through a dead tool.
+  //  3. toolToken undefined (legacy CLI, no session context)
+  //     → ownerlessEntitiesVisible(): fail closed with multiple sessions,
+  //        visible with single-session (CLI compatibility).
+  return owner
+    ? inProcessJobBelongsToOwner(job, owner)
+    : ownerlessEntitiesVisible();
+}
+
 export function inProcessJobBelongsToOwner(
   job: JobState,
-  owner: { id: number; generation: number } | undefined,
+  owner: { id: number; generation?: number } | undefined,
 ): boolean {
+  // Legacy (no owner): keep pre-fix behaviour for internal paths.
+  // Tool-level access controls use ownerlessEntitiesVisible() explicitly
+  // to fail closed when multiple sessions are live.
   if (!owner) return true;
   return (
     job.deliveryOwner?.sessionContextId === owner.id &&
-    job.deliveryOwner?.sessionContextGeneration === owner.generation
+    (owner.generation === undefined ||
+      job.deliveryOwner?.sessionContextGeneration === owner.generation)
   );
 }
 
@@ -291,15 +325,12 @@ export function pruneOldestJob(): boolean {
 }
 
 /** Remove all completed and error jobs from the registry. Returns count removed. */
+/** Replaced by per-owner iteration in prune_subagent_jobs tool. */
 export function pruneCompletedJobs(): number {
-  let removed = 0;
-  for (const [jobId, job] of jobRegistry) {
-    if (job.status === "done" || job.status === "error") {
-      jobRegistry.delete(jobId);
-      removed++;
-    }
-  }
-  return removed;
+  // Intentionally removed — always use the owner-filtered version in
+  // prune_subagent_jobs.  This export stays for API compatibility and
+  // will be removed in a future major version.
+  return 0;
 }
 
 /**

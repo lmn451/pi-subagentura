@@ -194,15 +194,21 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionContextRef {
   g2.__piSubagenturaParentStreaming = false;
 
   pi.on("agent_start", () => {
+    sessionContext.parentStreaming = true;
+    // Mirror for legacy delivery paths that still read the global flag.
     g2.__piSubagenturaParentStreaming = true;
   });
   pi.on("agent_settled", () => {
+    sessionContext.parentStreaming = false;
     g2.__piSubagenturaParentStreaming = false;
     flushDeliveries(pi, sessionContext.ui, {
       id: sessionContext.id,
       generation: sessionContext.generation,
     });
-    flushInProcessDeliveries();
+    flushInProcessDeliveries({
+      id: sessionContext.id,
+      generation: sessionContext.generation,
+    });
   });
 
   // Capture ctx.ui for the artifact poller (it runs from a setInterval and has no ctx).
