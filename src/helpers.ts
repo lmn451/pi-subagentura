@@ -755,6 +755,8 @@ export interface StartSubagentJobParams {
   parentModelRegistry?: ModelRegistry;
   /** Optional JSON Schema delivered via a workflow structured-output tool in in-process mode. */
   workflowStructuredOutputSchema?: unknown;
+  /** Restrict the child to the structured-output custom tool. */
+  structuredOutputOnly?: boolean;
   onCancellationSnapshot?: (receipt: CancellationSnapshotReceipt) => void;
   cancellationSource?: CancellationSnapshotSource;
   /** Thinking/reasoning level. Pass through to createAgentSession. */
@@ -809,6 +811,7 @@ export async function startSubagentJob(
     defaultModel,
     parentModelRegistry,
     workflowStructuredOutputSchema,
+    structuredOutputOnly,
     onCancellationSnapshot,
     cancellationSource,
     thinkingLevel,
@@ -816,6 +819,11 @@ export async function startSubagentJob(
     rootSessionId,
     owner,
   } = params;
+  if (structuredOutputOnly && workflowStructuredOutputSchema === undefined) {
+    throw new Error(
+      "structuredOutputOnly requires workflowStructuredOutputSchema",
+    );
+  }
 
   // Enforce the cap within this exact scope; peer sessions never evict each other.
   while (inProcessJobsForOwner(owner).size >= MAX_REGISTRY_SIZE) {
@@ -922,6 +930,9 @@ export async function startSubagentJob(
     model: targetModel,
     cwd,
     ...(thinkingLevel ? { thinkingLevel } : {}),
+    ...(structuredOutputOnly && workflowStructuredOutputTool
+      ? { tools: [workflowStructuredOutputTool.name] }
+      : {}),
     ...(workflowStructuredOutputTool
       ? { customTools: [workflowStructuredOutputTool] }
       : {}),

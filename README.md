@@ -86,6 +86,39 @@ manual in this preview: inspect the interrupted run, then use the fenced
 `/workflow-resume` command. Process isolation, parallel phases, automatic
 resume, durable JavaScript, and completion delivery are not supported yet.
 
+### Automatic durable routing preview
+
+Natural-request routing is opt-in and defaults to `off`:
+
+```bash
+pi --workflow-eager preferred
+```
+
+`preferred` routes only requests that show multiple independent work slices or
+phased continuation. `always` routes other actionable requests too, but still
+suppresses questions, social conversation, one-command operations, plan-only
+requests, workflow-management commands, child contexts, replies to a pending
+parent question, and requests while another workflow is active.
+
+On Pi hosts with input interception, an eligible request is handled before the
+parent model can perform direct work. A bounded in-process planner gets at most
+one correction, the resulting sequential plan is validated, and the durable
+controller commits and starts it in the same input turn. Planner model usage is
+additional workflow-routing usage. Invalid plans, unavailable storage, and
+authority failures surface their exact cause and do not invoke the legacy
+`/workflow <task>` path.
+
+If a host cannot register input interception, the extension uses the
+minimum-capability model-policy lane instead. It instructs the parent to make a
+durable declarative `workflow` call, observes up to two such calls, and emits
+`routing_unconfirmed` after settlement when no call was observed. This fallback
+is never reported as host-enforced.
+
+Use `/workflow-plan create <task>` to invoke the same host-owned planner and
+controller path explicitly. Eager and command-created plans retain the durable
+preview restrictions above: sequential phases, in-process tasks, manual
+recovery, and no durable completion notification.
+
 Workflow scripts are trusted agent-authored JavaScript. The VM improves
 determinism but is not a security boundary, so never run untrusted JavaScript.
 Non-durable background workflow jobs are scoped to the current parent session
@@ -121,6 +154,7 @@ These commands are intended for people at the Pi prompt.
 | `/workflow-status`  | List workflow jobs and their live or terminal status              |
 | `/workflow-tree`    | Open the specialized workflow progress tree                       |
 | `/workflow-resume`  | Resume an interrupted durable plan with current authority fences  |
+| `/workflow-plan`    | Create and start a host-owned durable plan from a task            |
 | `/subagents`        | Supervise all async work (`Ctrl+Alt+A`)                           |
 | `/delete-workflow`  | Delete a saved workflow by name or picker                         |
 | `/cancel-all-flows` | Cancel active jobs, workflows, and running interactive sub-agents |

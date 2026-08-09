@@ -79,6 +79,10 @@ import {
   DurableWorkflowProjectionRepository,
   type WorkflowProjection,
 } from "./workflow-projection-repository";
+import type {
+  WorkflowRoutingHost,
+  WorkflowRoutingStartResult,
+} from "./workflow-routing-runtime";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -116,6 +120,7 @@ const workflowPlanParameterSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+const MAX_EAGER_WORKFLOW_TASK_BYTES = 262_144;
 
 function workflowNotFoundMessage(workflowId: string): string {
   return (
@@ -233,7 +238,7 @@ export function formatWorkflowNotificationSummary(
 export function registerWorkflowTool(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
-): void {
+): WorkflowRoutingHost {
   debugLog("info", "workflow_registered", {});
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
@@ -317,6 +322,7 @@ export function registerWorkflowTool(
       label,
       schema,
       thinkingLevel,
+      structuredOutputOnly,
       onProgress,
       onCancellationSnapshot,
     }) => {
@@ -336,6 +342,9 @@ export function registerWorkflowTool(
           onProgress?.({ kind: "log", message: msg, label, liveUsage });
         }
       };
+      if (structuredOutputOnly && isolation !== "in-process") {
+        throw new Error("structured-output-only agents must run in-process");
+      }
 
       const tryProcess = isolation !== "in-process";
       if (tryProcess) {
@@ -422,6 +431,7 @@ export function registerWorkflowTool(
         cancellationSource: "workflow",
         thinkingLevel,
         owner: childOwner,
+        structuredOutputOnly,
         ...(isolation === "in-process" && schema !== undefined
           ? { workflowStructuredOutputSchema: schema }
           : {}),
@@ -631,7 +641,7 @@ export function registerWorkflowTool(
     };
   }
 
-  pi.registerTool({
+  const workflowToolDefinition = {
     name: "workflow",
     label: "Workflow",
     description: [
@@ -1280,7 +1290,8 @@ export function registerWorkflowTool(
         };
       }
     },
-  });
+  };
+  pi.registerTool(workflowToolDefinition);
 
   // ── get_workflow_status ──
   pi.registerTool({
@@ -2597,4 +2608,124 @@ export function registerWorkflowTool(
     const h = Math.floor(m / 60);
     return `${h}h ${m % 60}m`;
   }
+
+  async function hasActiveWorkflow(): Promise<boolean> {
+    if (workflowJobsForOwner(owner()).some((job) => job.status === "running")) {
+      return true;
+    }
+    return (await listDurableWorkflowProjections()).some(
+      (projection) => projection.terminal === undefined,
+    );
+  }
+
+  return {
+    hasActiveWorkflow,
+    planAndStart: async (task, ctx, signal) => {
+      const planner = makeRunAgent(ctx, createDurableWorkflowRunId(), owner());
+      const plan = await buildEagerWorkflowPlan(planner, task, signal);
+      const result = await workflowToolDefinition.execute(
+        "workflow-routing",
+        { plan, durable: true },
+        signal,
+        undefined,
+        ctx,
+      );
+      if (result.isError) {
+        const details = result.details as { error?: unknown } | undefined;
+        throw new Error(
+          typeof details?.error === "string"
+            ? details.error
+            : "durable workflow plan did not start",
+        );
+      }
+      return routingStartResult(result.details);
+    },
+  };
+
+  function routingStartResult(details: unknown): WorkflowRoutingStartResult {
+    if (!details || typeof details !== "object") {
+      throw new Error("durable workflow start returned no details");
+    }
+    const value = details as Record<string, unknown>;
+    const requiredStrings = ["workflowId", "name"] as const;
+    const requiredNumbers = [
+      "revision",
+      "runEpoch",
+      "ownerGeneration",
+      "leaseEpoch",
+    ] as const;
+    for (const key of requiredStrings) {
+      if (typeof value[key] !== "string") {
+        throw new Error(`durable workflow start returned invalid ${key}`);
+      }
+    }
+    for (const key of requiredNumbers) {
+      if (!Number.isSafeInteger(value[key])) {
+        throw new Error(`durable workflow start returned invalid ${key}`);
+      }
+    }
+    return {
+      status: "started",
+      workflowId: value.workflowId as string,
+      name: value.name as string,
+      revision: value.revision as number,
+      runEpoch: value.runEpoch as number,
+      ownerGeneration: value.ownerGeneration as number,
+      leaseEpoch: value.leaseEpoch as number,
+    };
+  }
+}
+
+export async function buildEagerWorkflowPlan(
+  planner: WorkflowAgentRunner,
+  task: string,
+  signal?: AbortSignal,
+): Promise<WorkflowPlan> {
+  if (!task.trim()) throw new Error("workflow planner task must be nonempty");
+  if (Buffer.byteLength(task, "utf8") > MAX_EAGER_WORKFLOW_TASK_BYTES) {
+    throw new Error(
+      `workflow planner task exceeds ${MAX_EAGER_WORKFLOW_TASK_BYTES} bytes`,
+    );
+  }
+  let priorError: string | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const correction =
+      priorError === undefined
+        ? ""
+        : `\nThe prior plan was rejected: ${priorError}\nCorrect that exact error.`;
+    const result = await planner({
+      prompt: [
+        "Turn the parent request below into a bounded durable workflow plan.",
+        "Call structured_output exactly once with a schemaVersion 1 plan.",
+        "Use stable identifier IDs, sequential phases, and only in-process tasks.",
+        "Create multiple tasks only where work is independently agent-worthy.",
+        "Each task prompt must be self-contained. Do not perform the work.",
+        correction,
+        "",
+        "Parent request:",
+        task,
+      ].join("\n"),
+      isolation: "in-process",
+      label: "workflow planner",
+      schema: workflowPlanParameterSchema,
+      structuredOutputOnly: true,
+      signal,
+    });
+    try {
+      if (result.isError) {
+        throw new Error(result.errorMessage || result.output);
+      }
+      const capture = result.workflowStructuredOutput;
+      if (!capture?.called) {
+        throw new Error("workflow planner did not call structured_output");
+      }
+      validateWorkflowPlan(capture.value);
+      return capture.value;
+    } catch (error) {
+      priorError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new Error(
+    `workflow planner failed after one correction attempt: ${priorError}`,
+  );
 }

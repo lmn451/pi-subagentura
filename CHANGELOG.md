@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Non-durable declarative workflow plans with ordered sequential phases, stable task IDs, in-process execution, and the existing async status, result, cancellation, and tree surfaces.
 - Opt-in sequential durable plan preview with owner-fenced recovery, explicit trusted resume, committed-result replay, and cold status, result, cancellation, and tree queries.
+- Opt-in `workflow-eager=preferred|always` routing with same-turn host-enforced durable plan creation, an honest `routing_unconfirmed` policy fallback, mandatory suppression rules, and `/workflow-plan create`.
 
 ## [3.3.0] - 2026-08-05
 

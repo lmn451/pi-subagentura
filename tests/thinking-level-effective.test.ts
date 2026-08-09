@@ -102,6 +102,24 @@ describe("startSubagentJob effective thinking level", () => {
     expect(result.thinkingLevel).toBeUndefined();
   });
 
+  it("allows only structured output for schema-only children", async () => {
+    const session = createSession("medium");
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    const prepared = await startSubagentJob({
+      ...params(),
+      workflowStructuredOutputSchema: { type: "object" },
+      structuredOutputOnly: true,
+    });
+    expect(mockBuildSessionOptions.mock.calls[0][1]).toMatchObject({
+      tools: ["structured_output"],
+      customTools: [expect.objectContaining({ name: "structured_output" })],
+    });
+
+    prepared.disposeBeforeStart();
+    await prepared.jobPromise;
+  });
+
   it("disposes a prepared session without starting its prompt", async () => {
     const session = createSession("medium");
     mockCreateAgentSession.mockResolvedValue({ session });

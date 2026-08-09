@@ -106,6 +106,23 @@ describe("extension registration", () => {
     });
   });
 
+  it("registers opt-in eager routing only for the parent runtime", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    expect(api.registerFlag).toHaveBeenCalledWith("workflow-eager", {
+      description: "Route eligible parent requests to durable workflow plans",
+      type: "string",
+      default: "off",
+    });
+    expect(api.on).toHaveBeenCalledWith("input", expect.any(Function));
+    expect(api.registerCommand).toHaveBeenCalledWith(
+      "workflow-plan",
+      expect.any(Object),
+    );
+  });
+
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestrator"),
@@ -174,6 +191,10 @@ describe("extension registration", () => {
     expect(api.registerShortcut).toHaveBeenCalledWith(
       "ctrl+alt+a",
       expect.any(Object),
+    );
+    expect(api.registerFlag).not.toHaveBeenCalledWith(
+      "workflow-eager",
+      expect.anything(),
     );
     expect(api.on.mock.calls.map(([event]) => event)).toEqual(
       expect.arrayContaining([

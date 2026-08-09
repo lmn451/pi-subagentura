@@ -42,6 +42,7 @@ import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
+import { registerWorkflowRouting } from "./workflow-routing-runtime";
 /** @internal Session-rehydration helper used by session-handlers.ts */
 export { rehydrateInteractiveSubagents } from "./rehydrate";
 /**
@@ -107,6 +108,11 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
+  pi.registerFlag("workflow-eager", {
+    description: "Route eligible parent requests to durable workflow plans",
+    type: "string",
+    default: "off",
+  });
   pi.on("before_agent_start", (event) => {
     if (pi.getFlag("orchestrator") !== true) return;
     return {
@@ -117,7 +123,8 @@ export default function (pi: ExtensionAPI) {
   const sessionScope = registerSessionHandlers(pi);
   registerInteractiveSubagentTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);
-  registerWorkflowTool(pi, sessionScope);
+  const workflowRoutingHost = registerWorkflowTool(pi, sessionScope);
+  registerWorkflowRouting(pi, workflowRoutingHost);
   registerInProcessSubagentTools(pi, sessionScope);
   registerInProcessMaintenanceTools(pi, sessionScope);
   // ── Cancel-all-flows shortcut and command ──────────────────────

@@ -294,6 +294,8 @@ export type WorkflowAgentRunner = (req: {
   isolation?: string;
   label?: string;
   schema?: unknown;
+  /** Disable built-in read/write/shell tools for schema-only planner calls. */
+  structuredOutputOnly?: boolean;
   /** Thinking/reasoning for the sub-agent. */
   thinkingLevel?: ThinkingLevel;
   /**
