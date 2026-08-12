@@ -38,10 +38,13 @@ import {
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerSessionHandlers } from "./session-handlers";
+import { workflowContinuityForPi } from "./session-scope";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
+import { parseWorkflowEagerMode } from "./workflow-routing";
+import { formatWorkflowContinuity } from "./workflow-continuity";
 /** @internal Session-rehydration helper used by session-handlers.ts */
 export { rehydrateInteractiveSubagents } from "./rehydrate";
 /**
@@ -84,6 +87,19 @@ const ORCHESTRATOR_SYSTEM_PROMPT = readFileSync(
   "utf8",
 ).trim();
 
+const WORKFLOW_EAGER_PROMPT = (mode: "preferred" | "always") =>
+  `
+Automatic durable workflow routing is enabled in ${mode} mode. For an eligible
+complex parent request, use the host-owned declarative workflow path in the
+same turn: construct a bounded phased plan, validate it, and call
+start_durable_workflow. Do not use legacy /workflow as a fallback. Keep pure
+questions, social conversation, one-command requests, plan-only requests,
+workflow-management commands, child contexts, and active-workflow continuations
+on the direct or existing-workflow path. If an eligible request does not result
+in a workflow call, routing is unconfirmed and must not be described as
+host-enforced.
+`.trim();
+
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENTURA_CHILD === "1") {
     registerChildProtocol(pi);
@@ -107,10 +123,25 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
+  pi.registerFlag("workflow-eager", {
+    description: "Route eligible complex requests to durable workflows",
+    type: "string",
+    default: "off",
+  });
   pi.on("before_agent_start", (event) => {
-    if (pi.getFlag("orchestrator") !== true) return;
+    const additions: string[] = [];
+    const continuity = workflowContinuityForPi(pi);
+    if (continuity) additions.push(formatWorkflowContinuity(continuity));
+    if (pi.getFlag("orchestrator") === true) {
+      additions.push(ORCHESTRATOR_SYSTEM_PROMPT);
+    }
+    const eagerMode = parseWorkflowEagerMode(pi.getFlag("workflow-eager"));
+    if (eagerMode !== "off") {
+      additions.push(WORKFLOW_EAGER_PROMPT(eagerMode));
+    }
+    if (additions.length === 0) return;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_SYSTEM_PROMPT}`,
+      systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}`,
     };
   });
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);

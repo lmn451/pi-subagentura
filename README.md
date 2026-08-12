@@ -77,20 +77,19 @@ available, the runtime falls back to in-process execution. Intermediate agent
 results stay in workflow variables outside the parent model context, and only
 the workflow's final result returns to the parent.
 
-The `workflow` tool also accepts bounded declarative `plan` objects with
-ordered sequential phases and stable task IDs. Plans run in-process and use
-the same async status, result, cancellation, and tree surfaces as script
-workflows. With `durable: true`, the plan and committed task outcomes survive
-same-host, same-real-cwd, same-Pi-session parent replacement. Recovery remains
-manual in this preview: inspect the interrupted run, then use the fenced
-`/workflow-resume` command. Process isolation, parallel phases, automatic
-resume, durable JavaScript, and completion delivery are not supported yet.
+Workflow scripts are trusted agent-authored JavaScript. The VM improves determinism but is not a security boundary, so never run untrusted JavaScript.
 
-Workflow scripts are trusted agent-authored JavaScript. The VM improves
-determinism but is not a security boundary, so never run untrusted JavaScript.
-Non-durable background workflow jobs are scoped to the current parent session
-and are cancelled by reload, resume, quit, or a new session. Attachable
-interactive sub-agents use durable artifacts and can survive those boundaries.
+For this PR, the foundation contract is declarative durability with trusted-command
+resume and explicit authority. Durable process tasks now persist a claim-bound
+launch intent before dispatch, propagate the exact launch identity to the child,
+and publish dispatch evidence only after exact child-start evidence is persisted.
+Pane adoption after coordinator restart, dead-child accounting, durable JavaScript
+replay, and exactly-once notification claims remain deferred; see
+[`docs/pr84-x-boundaries.md`](./docs/pr84-x-boundaries.md).
+
+Background workflow jobs are scoped to the current parent session and are
+cancelled by reload, resume, quit, or a new session. Attachable interactive
+sub-agents use durable artifacts and can survive those boundaries.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
@@ -113,45 +112,58 @@ See the [workflow guide](./docs/workflows.md) and
 
 These commands are intended for people at the Pi prompt.
 
-| Command             | Purpose                                                           |
-| ------------------- | ----------------------------------------------------------------- |
-| `/workflow`         | Create, save, and run a reusable workflow from a task             |
-| `/workflows`        | Select and run a saved workflow                                   |
-| `/list-workflows`   | Alias for `/workflows`                                            |
-| `/workflow-status`  | List workflow jobs and their live or terminal status              |
-| `/workflow-tree`    | Open the specialized workflow progress tree                       |
-| `/workflow-resume`  | Resume an interrupted durable plan with current authority fences  |
-| `/subagents`        | Supervise all async work (`Ctrl+Alt+A`)                           |
-| `/delete-workflow`  | Delete a saved workflow by name or picker                         |
-| `/cancel-all-flows` | Cancel active jobs, workflows, and running interactive sub-agents |
+| Command                 | Purpose                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `/workflow`             | Create, save, and run a reusable workflow from a task                                                  |
+| `/workflows`            | Select and run a saved workflow                                                                        |
+| `/list-workflows`       | Alias for `/workflows`                                                                                 |
+| `/workflow-status`      | List workflow jobs and their live or terminal status                                                   |
+| `/workflow-resume`      | Resume a durable workflow with a fenced operator authority envelope                                    |
+| `/workflow-cancel`      | Request authoritative cancellation with a fenced operator authority envelope                           |
+| `/workflow-plan`        | Create or view a durable workflow projection and revision; use `create <task>` for host-owned creation |
+| `/workflow-plan-append` | Append a future task with an owner/session/lease authority envelope and revision fence                 |
+| `/workflow-plan-mutate` | Block, unblock, or skip future work with an owner/session/lease authority envelope                     |
+| `/workflow-plan-edit`   | Apply a fenced durable plan edit with an owner/session/lease authority envelope                        |
+| `/workflow-plan-export` | Export a durable workflow projection as JSON                                                           |
+| `/workflow-approval`    | Approve or reject a pending durable workflow request                                                   |
+| `/workflow-budget`      | Pause or resume a durable workflow budget gate                                                         |
+| `/workflow-retention`   | Prune old terminal durable workflow runs                                                               |
+| `/workflow-route`       | Evaluate opt-in complex-task workflow routing                                                          |
+| `/workflow-tree`        | Open the specialized workflow progress tree                                                            |
+| `/subagents`            | Supervise all async work (`Ctrl+Alt+A`)                                                                |
+| `/delete-workflow`      | Delete a saved workflow by name or picker                                                              |
+| `/cancel-all-flows`     | Cancel active jobs, workflows, and running interactive sub-agents                                      |
 
 ## Agent-facing tools
 
-The extension registers 21 public tools for parent agents.
+The extension registers 24 public tools for parent agents.
 
-| Tool                                | Purpose                                                              |
-| ----------------------------------- | -------------------------------------------------------------------- |
-| `workflow`                          | Run a trusted script, saved workflow, or sequential declarative plan |
-| `save_workflow`                     | Validate and save a reusable workflow                                |
-| `list_workflows`                    | List saved workflows                                                 |
-| `delete_workflow`                   | Delete a saved workflow                                              |
-| `get_workflow_status`               | Inspect a background workflow                                        |
-| `get_workflow_result`               | Wait for and return a workflow result                                |
-| `cancel_workflow`                   | Cancel a background workflow                                         |
-| `subagent_with_context`             | Delegate with the parent conversation                                |
-| `subagent_isolated`                 | Delegate with a fresh context                                        |
-| `get_subagent_status`               | Inspect an async in-process job                                      |
-| `get_subagent_result`               | Retrieve current or final async job output                           |
-| `cancel_subagent`                   | Cancel an async job                                                  |
-| `prune_subagent_jobs`               | Remove completed and failed jobs                                     |
-| `list_available_models`             | List configured model identifiers                                    |
-| `subagent_interactive`              | Launch an attachable Pi session in tmux/Zellij                       |
-| `get_interactive_subagent_status`   | Inspect attachable child sessions                                    |
-| `cancel_interactive_subagent`       | Kill an attachable child pane                                        |
-| `send_interactive_subagent_message` | Send a follow-up while preserving child context                      |
-| `list_subagent_artifacts`           | List durable interactive-agent artifacts                             |
-| `read_subagent_artifact`            | Read lifecycle events and output snapshots                           |
-| `cleanup_subagent_artifacts`        | Remove expired artifact directories and stale registry entries       |
+| Tool                                | Purpose                                                        |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `workflow`                          | Run a trusted workflow script or saved workflow                |
+| `save_workflow`                     | Validate and save a reusable workflow                          |
+| `list_workflows`                    | List saved workflows                                           |
+| `delete_workflow`                   | Delete a saved workflow                                        |
+| `get_workflow_status`               | Inspect a background workflow                                  |
+| `get_workflow_result`               | Wait for and return a workflow result                          |
+| `cancel_workflow`                   | Cancel a background workflow                                   |
+| `get_durable_workflow_status`       | Inspect a durable workflow projection                          |
+| `get_durable_workflow_result`       | Retrieve a persisted terminal durable workflow result          |
+| `start_durable_workflow`            | Validate and start an owner-bound durable plan                 |
+| `subagent_with_context`             | Delegate with the parent conversation                          |
+| `subagent_isolated`                 | Delegate with a fresh context                                  |
+| `get_subagent_status`               | Inspect an async in-process job                                |
+| `get_subagent_result`               | Retrieve current or final async job output                     |
+| `cancel_subagent`                   | Cancel an async job                                            |
+| `prune_subagent_jobs`               | Remove completed and failed jobs                               |
+| `list_available_models`             | List configured model identifiers                              |
+| `subagent_interactive`              | Launch an attachable Pi session in tmux/Zellij                 |
+| `get_interactive_subagent_status`   | Inspect attachable child sessions                              |
+| `cancel_interactive_subagent`       | Kill an attachable child pane                                  |
+| `send_interactive_subagent_message` | Send a follow-up while preserving child context                |
+| `list_subagent_artifacts`           | List durable interactive-agent artifacts                       |
+| `read_subagent_artifact`            | Read lifecycle events and output snapshots                     |
+| `cleanup_subagent_artifacts`        | Remove expired artifact directories and stale registry entries |
 
 ## How it compares with other Pi sub-agent extensions
 

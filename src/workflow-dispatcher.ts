@@ -1,138 +1,109 @@
-import {
-  defaultConcurrency,
-  defaultProcessConcurrency,
-  type WorkflowAgentRunner,
-} from "./workflow-core";
-
-type WorkflowAgentRequest = Parameters<WorkflowAgentRunner>[0];
-type WorkflowAgentResult = Awaited<ReturnType<WorkflowAgentRunner>>;
-
-export interface WorkflowDispatcherOptions {
-  inProcessCapacity?: number;
-  processCapacity?: number;
+export interface WorkflowSessionDispatcherOptions {
+  maxConcurrent?: number;
+  max?: number;
 }
 
-export interface WorkflowDispatcher {
-  run(
-    request: WorkflowAgentRequest,
-    runner: WorkflowAgentRunner,
-  ): Promise<WorkflowAgentResult>;
-}
-
-interface Waiter {
-  signal?: AbortSignal;
-  queued: boolean;
-  resolve: (release: () => void) => void;
-  reject: (reason: unknown) => void;
-  onAbort?: () => void;
-}
-
-interface Lane {
-  capacity: number;
+export interface WorkflowSessionDispatcherSnapshot {
   active: number;
-  queue: Waiter[];
+  queued: number;
+  max: number;
 }
 
-/** Shared raw-backend capacity for every job from one tool registration. */
-export function createWorkflowDispatcher(
-  options: WorkflowDispatcherOptions = {},
-): WorkflowDispatcher {
-  const inProcess = createLane(
-    options.inProcessCapacity ?? defaultConcurrency(),
-    "in-process",
-  );
-  const process = createLane(
-    options.processCapacity ?? defaultProcessConcurrency(),
-    "process",
-  );
-
-  return {
-    async run(request, runner) {
-      const lane = request.isolation === "in-process" ? inProcess : process;
-      const release = await acquire(lane, request.signal);
-      try {
-        throwIfAborted(request.signal);
-        return await runner(request);
-      } finally {
-        release();
-      }
-    },
-  };
+interface QueueEntry<T> {
+  work: () => Promise<T> | T;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+  signal?: AbortSignal;
+  abortListener?: () => void;
 }
 
-function createLane(capacity: number, name: string): Lane {
-  if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new Error(`${name} workflow capacity must be a positive integer`);
+/** FIFO session-wide capacity for in-process durable task execution. */
+export class WorkflowSessionDispatcher {
+  private readonly maxConcurrent: number;
+  private readonly queue: QueueEntry<unknown>[] = [];
+  private activeCount = 0;
+
+  public constructor(options: WorkflowSessionDispatcherOptions | number = {}) {
+    const max =
+      typeof options === "number"
+        ? options
+        : (options.maxConcurrent ?? options.max ?? 4);
+    if (!Number.isSafeInteger(max) || max <= 0)
+      throw new Error("Workflow dispatcher concurrency must be positive");
+    this.maxConcurrent = max;
   }
-  return {
-    capacity,
-    active: 0,
-    queue: [],
-  };
-}
 
-function acquire(lane: Lane, signal?: AbortSignal): Promise<() => void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const waiter: Waiter = {
-      signal,
-      queued: true,
-      resolve,
-      reject,
+  public snapshot(): WorkflowSessionDispatcherSnapshot {
+    return {
+      active: this.activeCount,
+      queued: this.queue.length,
+      max: this.maxConcurrent,
     };
-    if (signal) {
-      waiter.onAbort = () => {
-        if (!waiter.queued) return;
-        waiter.queued = false;
-        const index = lane.queue.indexOf(waiter);
-        if (index >= 0) lane.queue.splice(index, 1);
-        reject(abortReason(signal));
+  }
+
+  public getSnapshot(): WorkflowSessionDispatcherSnapshot {
+    return this.snapshot();
+  }
+
+  public run<T>(work: () => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) return Promise.reject(signal.reason ?? abortError());
+    return new Promise<T>((resolve, reject) => {
+      const entry: QueueEntry<T> = { work, resolve, reject, signal };
+      const abortListener = (): void => {
+        const index = this.queue.indexOf(entry as QueueEntry<unknown>);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        entry.abortListener = undefined;
+        reject(signal?.reason ?? abortError());
+        this.drain();
       };
-      signal.addEventListener("abort", waiter.onAbort, { once: true });
-    }
-    lane.queue.push(waiter);
-    pump(lane);
-  });
-}
-
-function pump(lane: Lane): void {
-  while (lane.active < lane.capacity) {
-    const waiter = lane.queue.shift();
-    if (!waiter) return;
-    if (!waiter.queued) continue;
-    waiter.queued = false;
-    if (waiter.signal && waiter.onAbort) {
-      waiter.signal.removeEventListener("abort", waiter.onAbort);
-    }
-    if (waiter.signal?.aborted) {
-      waiter.reject(abortReason(waiter.signal));
-      continue;
-    }
-
-    lane.active++;
-    if (waiter.signal?.aborted) {
-      releaseLane(lane);
-      waiter.reject(abortReason(waiter.signal));
-      continue;
-    }
-    let released = false;
-    waiter.resolve(() => {
-      if (released) return;
-      released = true;
-      releaseLane(lane);
+      entry.abortListener = abortListener;
+      signal?.addEventListener("abort", abortListener, { once: true });
+      this.queue.push(entry as QueueEntry<unknown>);
+      this.drain();
     });
   }
+
+  public acquire<T>(
+    work: () => Promise<T> | T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.run(work, signal);
+  }
+
+  public withSlot<T>(
+    work: () => Promise<T> | T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.run(work, signal);
+  }
+
+  private drain(): void {
+    while (this.activeCount < this.maxConcurrent && this.queue.length > 0) {
+      const entry = this.queue.shift();
+      if (!entry) return;
+      if (entry.signal?.aborted) {
+        entry.abortListener = undefined;
+        entry.reject(entry.signal.reason ?? abortError());
+        continue;
+      }
+      if (entry.abortListener && entry.signal)
+        entry.signal.removeEventListener("abort", entry.abortListener);
+      entry.abortListener = undefined;
+      this.activeCount++;
+      Promise.resolve()
+        .then(entry.work)
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          this.activeCount--;
+          this.drain();
+        });
+    }
+  }
 }
 
-function releaseLane(lane: Lane): void {
-  lane.active--;
-  pump(lane);
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error("Workflow agent cancelled");
+function abortError(): Error {
+  const error = new Error("Workflow task cancelled");
+  error.name = "AbortError";
+  return error;
 }

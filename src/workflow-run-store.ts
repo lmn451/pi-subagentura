@@ -1,43 +1,29 @@
-import { constants as fsConstants, type Stats } from "node:fs";
+import { mkdir, lstat, open, readdir, rename, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  rm,
-  type FileHandle,
-} from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
-import {
-  decodeDurableValue,
-  encodeDurableValue,
-  toDurableValue,
-  type DurableValue,
-} from "./workflow-durable-value";
-import { WorkflowNamespaceLease } from "./workflow-lease";
-import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
-import {
-  validateWorkflowRunId,
-  type WorkflowAppendReceipt,
-  type WorkflowEventEnvelope,
-  type WorkflowOutcomeBlobRef,
-  type WorkflowOwnerIdentity,
-  type WorkflowRunLaunch,
+import { dirname, join } from "node:path";
+import type {
+  WorkflowAppendReceipt,
+  WorkflowEventEnvelope,
+  WorkflowOwnerIdentity,
+  WorkflowRunLaunch,
 } from "./workflow-run-types";
+import { validateWorkflowRunId } from "./workflow-run-types";
+import { WorkflowNamespaceLease } from "./workflow-lease";
+import { toDurableValue } from "./workflow-durable-value";
+import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
 
 export type WorkflowConditionalAppendResult =
   | { status: "appended"; receipt: WorkflowAppendReceipt }
-  | {
-      status: "conflict";
-      actualLastEventOrdinal: number;
-      actualRunEpoch: number;
-    };
+  | { status: "conflict"; actualLastEventOrdinal: number };
 
 export interface WorkflowRunStoreOptions {
   rootDir: string;
   owner: WorkflowOwnerIdentity;
+  maxEventBytes?: number;
+  maxRunBytes?: number;
+  maxRuns?: number;
+  maxOwnerBytes?: number;
 }
 
 export interface WorkflowRunRecord {
@@ -51,13 +37,6 @@ export interface WorkflowRunEventLog {
   readonly tornTailBytes: number;
 }
 
-export interface WorkflowRunCreationReceipt {
-  readonly launch: WorkflowRunLaunch;
-  readonly initialEvent: WorkflowEventEnvelope<
-    "run_created",
-    { plan: WorkflowPlan }
-  >;
-}
 export interface WorkflowRunCreationEvent<P = unknown> {
   type: "run_created";
   payload: P;
@@ -65,7 +44,7 @@ export interface WorkflowRunCreationEvent<P = unknown> {
 }
 
 export class WorkflowRunCorruptionError extends Error {
-  public readonly code = "WORKFLOW_RUN_CORRUPT" as const;
+  public readonly code = "WORKFLOW_RUN_CORRUPT";
 
   public constructor(
     public readonly runId: string,
@@ -77,7 +56,7 @@ export class WorkflowRunCorruptionError extends Error {
 }
 
 export class WorkflowRunStorageError extends Error {
-  public readonly code = "ENOSPC" as const;
+  public readonly code: "ENOSPC";
 
   public constructor(
     public readonly runId: string,
@@ -85,33 +64,57 @@ export class WorkflowRunStorageError extends Error {
   ) {
     super(`Durable workflow run ${runId} could not be persisted`, { cause });
     this.name = "WorkflowRunStorageError";
+    this.code = "ENOSPC";
   }
 }
 
-export class WorkflowRunAuthorityError extends Error {
-  public readonly code = "WORKFLOW_RUN_AUTHORITY" as const;
+export class WorkflowRunQuotaError extends Error {
+  public readonly code = "QUOTA" as const;
 
-  public constructor(message: string) {
-    super(message);
-    this.name = "WorkflowRunAuthorityError";
+  public constructor(
+    public readonly runId: string,
+    public readonly quota: "event" | "run byte" | "owner byte" | "run count",
+  ) {
+    super(`Durable workflow ${quota} quota exceeded for ${runId}`);
+    this.name = "WorkflowRunQuotaError";
   }
 }
+
+function safePart(value: string, label: string): string {
+  if (
+    !value ||
+    value.length > 200 ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value === "." ||
+    value === ".."
+  ) {
+    throw new Error(`Invalid workflow ${label}`);
+  }
+  return value;
+}
+
+const CREATION_PREFIX = ".creating-";
+const CREATION_STALE_AFTER_MS = 5 * 60_000;
+const CREATION_NAME_PATTERN =
+  /^\.creating-(.+)-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const TOMBSTONE_PREFIX = ".tombstone-";
+const MAX_CREATION_PLAN_BYTES = 512 * 1024;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EVENT_KEYS = new Set([
+  "schemaVersion",
+  "eventId",
+  "eventOrdinal",
+  "runId",
+  "runEpoch",
+  "type",
+  "payload",
+]);
 
 interface FileIdentity {
   dev: number;
   ino: number;
-}
-
-interface OpenDirectory {
-  file: FileHandle;
-  identity: FileIdentity;
-}
-
-interface OpenRunAuthority {
-  runsDirectory: OpenDirectory;
-  runDirectory: OpenDirectory;
-  runsPath: string;
-  runPath: string;
 }
 
 interface ParsedJournal {
@@ -122,689 +125,47 @@ interface ParsedJournal {
 
 interface ReadRunResult {
   record: WorkflowRunRecord;
-  completeBytes: number;
   tornTailBytes: number;
+  completeBytes: number;
 }
 
-const CREATION_PREFIX = ".creating-";
-const WRITING_PREFIX = ".writing-";
-const RUN_EVENT_TYPE = /^[a-z][a-z0-9_]{0,63}$/;
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SAFE_OWNER_PATH_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const MAX_EVENT_BYTES = 512 * 1024;
-const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
-const MAX_LAUNCH_BYTES = 64 * 1024;
-const MAX_OUTCOME_BYTES = 256 * 1024;
-
-/** Owner-scoped, lease-fenced authoritative NDJSON run store. */
 export class WorkflowRunStore {
   private static readonly leases = new Map<string, WorkflowNamespaceLease>();
   private static readonly locks = new Map<string, Promise<void>>();
   private readonly root: string;
-  private revoked = false;
+  private readonly leaseKey: string;
 
   public static async releaseAllLeases(owner?: {
     ownerId: string;
     leaseToken: string;
   }): Promise<void> {
-    for (const [key, lease] of [...WorkflowRunStore.leases]) {
-      if (owner && !lease.belongsTo(owner.ownerId, owner.leaseToken)) continue;
+    const leaseEntries = [...WorkflowRunStore.leases.entries()];
+    const entries =
+      owner === undefined
+        ? leaseEntries
+        : leaseEntries.filter(([, lease]) =>
+            lease.belongsTo(owner.ownerId, owner.leaseToken),
+          );
+    for (const [key, lease] of entries) {
       await lease.release();
-      if (WorkflowRunStore.leases.get(key) === lease) {
+      if (WorkflowRunStore.leases.get(key) === lease)
         WorkflowRunStore.leases.delete(key);
-      }
     }
   }
 
-  public constructor(private readonly options: WorkflowRunStoreOptions) {
-    if (!options.rootDir || Buffer.byteLength(options.rootDir, "utf8") > 4096) {
-      throw new Error("Invalid workflow store root directory");
-    }
-    validateOwnerRecord(options.owner);
-    this.root = workflowRunStoreRoot(options.rootDir, options.owner);
-  }
-
-  public async getLeaseEpoch(): Promise<number> {
-    return (await this.assertNamespaceLease()).leaseEpoch;
-  }
-
-  /**
-   * Permanently prevent this store instance from using namespace authority.
-   *
-   * Revocation is intentionally separate from lease release so lifecycle
-   * shutdown can drain all users before relinquishing the filesystem lease.
-   */
-  public async revoke(): Promise<void> {
-    this.revoked = true;
-    await this.withLock(async () => undefined);
-  }
-  public async release(): Promise<void> {
-    const lease = WorkflowRunStore.leases.get(this.root);
-    if (
-      !lease ||
-      !lease.belongsTo(
-        this.options.owner.ownerId,
-        this.options.owner.leaseToken,
-      )
-    ) {
-      return;
-    }
-    await lease.release();
-    if (WorkflowRunStore.leases.get(this.root) === lease) {
-      WorkflowRunStore.leases.delete(this.root);
-    }
-  }
-
-  /** Atomically publish launch.json and a synced run_created journal prefix. */
-  public async createRunWithInitialEvent<P>(
-    input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
-    initialEvent: WorkflowRunCreationEvent<P>,
-  ): Promise<WorkflowRunCreationReceipt> {
-    const normalized = normalizeLaunchInput(input);
-    validateWorkflowRunId(normalized.runId);
-    assertSameLiveOwner(normalized.owner, this.options.owner);
-    const creation = normalizeCreationEvent(initialEvent);
-    if (normalized.planRevision !== creation.plan.schemaVersion) {
-      throw new Error("Workflow launch revision does not match persisted plan");
-    }
-    const planDigest = createHash("sha256")
-      .update(encodeDurableValue(creation.plan), "utf8")
-      .digest("hex");
-    if (normalized.planDigest && normalized.planDigest !== planDigest) {
-      throw new Error(
-        "Workflow launch plan digest does not match persisted plan",
-      );
-    }
-    return this.withLock(async () => {
-      this.assertNotRevoked();
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        const runEpoch = creation.runEpoch ?? lease.leaseEpoch;
-        if (runEpoch !== lease.leaseEpoch) {
-          throw new WorkflowRunAuthorityError(
-            `Workflow creation epoch ${runEpoch} does not match lease epoch ${lease.leaseEpoch}`,
-          );
-        }
-        const launch: WorkflowRunLaunch = {
-          schemaVersion: 1,
-          runId: normalized.runId,
-          planRevision: normalized.planRevision,
-          resumePolicy: "manual",
-          owner: normalized.owner,
-          createdAt: Date.now(),
-          planDigest,
-        };
-        validateLaunchRecord(launch, launch.runId);
-        const firstEvent: WorkflowEventEnvelope<
-          "run_created",
-          { plan: WorkflowPlan }
-        > = {
-          schemaVersion: 1,
-          eventId: randomUUID(),
-          eventOrdinal: 0,
-          runId: launch.runId,
-          runEpoch,
-          type: "run_created",
-          payload: { plan: creation.plan },
-        };
-        const launchBytes = Buffer.from(`${JSON.stringify(launch)}\n`, "utf8");
-        const eventBytes = serializeEvent(firstEvent);
-        if (launchBytes.length > MAX_LAUNCH_BYTES) {
-          throw new Error("Workflow launch exceeds its storage bound");
-        }
-
-        await this.ensureStorageDirectories();
-        const runsPath = this.runsDir();
-        const runsDirectory = await openVerifiedDirectory(runsPath);
-        const finalDir = this.runDir(launch.runId);
-        const stagingDir = join(
-          runsPath,
-          `${CREATION_PREFIX}${launch.runId}-${randomUUID()}`,
-        );
-        let staging: OpenDirectory | undefined;
-        try {
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          if (await pathExists(finalDir)) {
-            throw new Error(`Workflow run already exists: ${launch.runId}`);
-          }
-          await mkdir(stagingDir, { mode: 0o700 });
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          staging = await openVerifiedDirectory(stagingDir);
-          const outputsDirectory = await openOrCreateDirectory(
-            staging,
-            stagingDir,
-            join(stagingDir, "outputs"),
-          );
-          await outputsDirectory.file.close();
-          await writeSyncedFile(join(stagingDir, "launch.json"), launchBytes);
-          await assertDirectoryDescriptorAndTarget(
-            staging.file,
-            stagingDir,
-            staging.identity,
-          );
-          await writeSyncedFile(join(stagingDir, "events.ndjson"), eventBytes);
-          await staging.file.sync();
-          await assertDirectoryDescriptorAndTarget(
-            staging.file,
-            stagingDir,
-            staging.identity,
-          );
-          await lease.assertHeld();
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          if (await pathExists(finalDir)) {
-            throw new Error(`Workflow run already exists: ${launch.runId}`);
-          }
-          await rename(stagingDir, finalDir);
-          await assertDirectoryDescriptorAndTarget(
-            staging.file,
-            finalDir,
-            staging.identity,
-          );
-          await runsDirectory.file.sync();
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          await assertRegularFile(join(finalDir, "launch.json"));
-          await assertRegularFile(join(finalDir, "events.ndjson"));
-          await assertRegularDirectory(join(finalDir, "outputs"));
-          await assertDirectoryDescriptorAndTarget(
-            staging.file,
-            finalDir,
-            staging.identity,
-          );
-          await lease.assertHeld();
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
-            throw new WorkflowRunStorageError(launch.runId, error);
-          }
-          // Unpublished .creating-* directories remain quarantined. They are
-          // never enumerated or treated as authoritative runs.
-          throw error;
-        } finally {
-          await staging?.file.close();
-          await runsDirectory.file.close();
-        }
-        return { launch, initialEvent: firstEvent };
-      });
-    });
-  }
-
-  public async append<T extends string, P>(
-    runId: string,
-    type: T,
-    payload: P,
-    runEpoch?: number,
-    expectedLastEventOrdinal?: number,
-  ): Promise<WorkflowAppendReceipt> {
-    validateWorkflowRunId(runId);
-    if (!RUN_EVENT_TYPE.test(type) || type === "run_created") {
-      throw new Error("Invalid workflow event type");
-    }
-    try {
-      return await this.withLock(async () => {
-        const lease = await this.assertNamespaceLease();
-        return lease.withAuthority(async () => {
-          const authority = await this.openRunAuthority(runId);
-          const { runPath, runDirectory: directory } = authority;
-          try {
-            const launch = await this.readLaunchFromDirectory(runId, authority);
-            assertSameDurableOwner(launch.owner, this.options.owner);
-            const eventPath = join(runPath, "events.ndjson");
-            await assertDirectoryDescriptorAndTarget(
-              directory.file,
-              runPath,
-              directory.identity,
-            );
-            const file = await openVerifiedFile(
-              eventPath,
-              fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
-            );
-            await assertDirectoryDescriptorAndTarget(
-              directory.file,
-              runPath,
-              directory.identity,
-            );
-            try {
-              const bytes = await readBoundedFile(
-                file,
-                eventPath,
-                MAX_JOURNAL_BYTES,
-              );
-              const parsed = parseJournal(runId, bytes);
-              assertCreationMatchesLaunch(launch, parsed.events[0]!);
-              assertJournalEpochOwned(runId, parsed.events, lease.leaseEpoch);
-              const actualOrdinal = parsed.events.length - 1;
-              const currentEpoch = lastRunEpoch(parsed.events);
-              if (
-                expectedLastEventOrdinal !== undefined &&
-                expectedLastEventOrdinal !== actualOrdinal
-              ) {
-                throw new WorkflowConditionalAppendConflict(
-                  actualOrdinal,
-                  currentEpoch,
-                );
-              }
-              const nextEpoch = runEpoch ?? lease.leaseEpoch;
-              if (
-                !Number.isSafeInteger(nextEpoch) ||
-                nextEpoch < lease.leaseEpoch
-              ) {
-                throw new WorkflowRunAuthorityError(
-                  `Cannot append stale run epoch ${nextEpoch}; held lease epoch is ${lease.leaseEpoch}`,
-                );
-              }
-              if (nextEpoch !== lease.leaseEpoch) {
-                throw new WorkflowRunAuthorityError(
-                  `Workflow run epoch ${nextEpoch} is not owned by lease epoch ${lease.leaseEpoch}`,
-                );
-              }
-              const envelope: WorkflowEventEnvelope<T, DurableValue> = {
-                schemaVersion: 1,
-                eventId: randomUUID(),
-                eventOrdinal: parsed.events.length,
-                runId,
-                runEpoch: nextEpoch,
-                type,
-                payload: toDurableValue(payload),
-              };
-              const line = serializeEvent(envelope);
-              if (parsed.completeBytes + line.length > MAX_JOURNAL_BYTES) {
-                throw new Error("Workflow journal exceeds its storage bound");
-              }
-
-              await this.revalidateRunAuthority(
-                lease,
-                authority,
-                runId,
-                launch,
-                file,
-                eventPath,
-              );
-              if (parsed.tornTailBytes > 0) {
-                await file.truncate(parsed.completeBytes);
-                await file.sync();
-                await this.revalidateRunAuthority(
-                  lease,
-                  authority,
-                  runId,
-                  launch,
-                  file,
-                  eventPath,
-                );
-              }
-              try {
-                await writeFully(file, line, parsed.completeBytes);
-                await file.sync();
-              } catch (error) {
-                try {
-                  await assertDescriptorAndTarget(file, eventPath);
-                  await file.truncate(parsed.completeBytes);
-                  await file.sync();
-                } catch (rollbackError) {
-                  throw new Error(
-                    "Failed to roll back workflow journal suffix",
-                    {
-                      cause: new AggregateError([error, rollbackError]),
-                    },
-                  );
-                }
-                throw error;
-              }
-              await this.revalidateRunAuthority(
-                lease,
-                authority,
-                runId,
-                launch,
-                file,
-                eventPath,
-              );
-              return {
-                eventId: envelope.eventId,
-                runId,
-                startByte: parsed.completeBytes,
-                endByte: parsed.completeBytes + line.length,
-                eventOrdinal: envelope.eventOrdinal,
-                runEpoch: envelope.runEpoch,
-              };
-            } finally {
-              await file.close();
-            }
-          } finally {
-            await this.closeRunAuthority(authority);
-          }
-        });
-      });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
-        throw new WorkflowRunStorageError(runId, error);
-      }
-      throw error;
-    }
-  }
-
-  public async appendIfCurrent<T extends string, P>(
-    runId: string,
-    expectedLastEventOrdinal: number,
-    type: T,
-    payload: P,
-    runEpoch?: number,
-  ): Promise<WorkflowConditionalAppendResult> {
-    if (
-      !Number.isSafeInteger(expectedLastEventOrdinal) ||
-      expectedLastEventOrdinal < 0
-    ) {
-      throw new Error("Invalid expected workflow event ordinal");
-    }
-    try {
-      return {
-        status: "appended",
-        receipt: await this.append(
-          runId,
-          type,
-          payload,
-          runEpoch,
-          expectedLastEventOrdinal,
-        ),
-      };
-    } catch (error) {
-      if (error instanceof WorkflowConditionalAppendConflict) {
-        return {
-          status: "conflict",
-          actualLastEventOrdinal: error.actualLastEventOrdinal,
-          actualRunEpoch: error.actualRunEpoch,
-        };
-      }
-      throw error;
-    }
-  }
-
-  /** Persist a canonical, content-addressed outcome before its settlement event. */
-  public async writeOutcomeBlob(
-    runId: string,
-    value: unknown,
-  ): Promise<WorkflowOutcomeBlobRef> {
-    validateWorkflowRunId(runId);
-    const canonical = toDurableValue(value);
-    const bytes = Buffer.from(encodeDurableValue(canonical), "utf8");
-    if (bytes.length > MAX_OUTCOME_BYTES) {
-      throw new Error("Workflow outcome exceeds its storage bound");
-    }
-    const ref: WorkflowOutcomeBlobRef = {
-      schemaVersion: 1,
-      digest: createHash("sha256").update(bytes).digest("hex"),
-      bytes: bytes.length,
-    };
-    this.assertNotRevoked();
-    return this.withLock(async () => {
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        const authority = await this.openRunAuthority(runId);
-        const { runPath, runDirectory } = authority;
-        try {
-          const launch = await this.readLaunchFromDirectory(runId, authority);
-          assertSameDurableOwner(launch.owner, this.options.owner);
-          const outputsPath = join(runPath, "outputs");
-          await this.assertOpenRunAuthority(authority);
-          const outputsDirectory = await openVerifiedDirectory(outputsPath);
-          try {
-            await this.assertOpenRunAuthority(authority);
-            const finalPath = join(outputsPath, `${ref.digest}.json`);
-            await assertDirectoryDescriptorAndTarget(
-              outputsDirectory.file,
-              outputsPath,
-              outputsDirectory.identity,
-            );
-            if (await pathExists(finalPath)) {
-              await readOutcomeAtPath(runId, finalPath, ref);
-              await assertDirectoryDescriptorAndTarget(
-                outputsDirectory.file,
-                outputsPath,
-                outputsDirectory.identity,
-              );
-              await this.assertOpenRunAuthority(authority);
-              await lease.assertHeld();
-              return ref;
-            }
-            const stagingPath = join(
-              outputsPath,
-              `${WRITING_PREFIX}${randomUUID()}`,
-            );
-            await writeSyncedFile(stagingPath, bytes);
-            await assertDirectoryDescriptorAndTarget(
-              outputsDirectory.file,
-              outputsPath,
-              outputsDirectory.identity,
-            );
-            const staging = await openVerifiedFile(
-              stagingPath,
-              fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-            );
-            try {
-              await lease.assertHeld();
-              await assertDirectoryDescriptorAndTarget(
-                outputsDirectory.file,
-                outputsPath,
-                outputsDirectory.identity,
-              );
-              if (await pathExists(finalPath)) {
-                await readOutcomeAtPath(runId, finalPath, ref);
-                await assertDescriptorAndTarget(staging, stagingPath);
-                await rm(stagingPath, { force: false });
-                await outputsDirectory.file.sync();
-              } else {
-                await rename(stagingPath, finalPath);
-                await assertDescriptorAndTarget(staging, finalPath);
-                await outputsDirectory.file.sync();
-              }
-              await assertDirectoryDescriptorAndTarget(
-                outputsDirectory.file,
-                outputsPath,
-                outputsDirectory.identity,
-              );
-              await this.assertOpenRunAuthority(authority);
-              await lease.assertHeld();
-              return ref;
-            } finally {
-              await staging.close();
-            }
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
-              throw new WorkflowRunStorageError(runId, error);
-            }
-            throw error;
-          } finally {
-            await outputsDirectory.file.close();
-          }
-        } finally {
-          await this.closeRunAuthority(authority);
-        }
-      });
-    });
-  }
-
-  public async readOutcomeBlob(
-    runId: string,
-    ref: WorkflowOutcomeBlobRef,
-  ): Promise<DurableValue> {
-    validateWorkflowRunId(runId);
-    const normalized = normalizeOutcomeRef(ref);
-    this.assertNotRevoked();
-    return this.withLock(async () => {
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        let authority: OpenRunAuthority | undefined;
-        let outputsDirectory: OpenDirectory | undefined;
-        try {
-          authority = await this.openRunAuthority(runId);
-          const { runPath } = authority;
-          const launch = await this.readLaunchFromDirectory(runId, authority);
-          assertSameDurableOwner(launch.owner, this.options.owner);
-          const outputsPath = join(runPath, "outputs");
-          outputsDirectory = await openVerifiedDirectory(outputsPath);
-          await this.assertOpenRunAuthority(authority);
-          await assertDirectoryDescriptorAndTarget(
-            outputsDirectory.file,
-            outputsPath,
-            outputsDirectory.identity,
-          );
-          const value = await readOutcomeAtPath(
-            runId,
-            join(outputsPath, `${normalized.digest}.json`),
-            normalized,
-          );
-          await assertDirectoryDescriptorAndTarget(
-            outputsDirectory.file,
-            outputsPath,
-            outputsDirectory.identity,
-          );
-          await this.assertOpenRunAuthority(authority);
-          await lease.assertHeld();
-          return value;
-        } catch (error) {
-          if (error instanceof WorkflowRunAuthorityError) throw error;
-          if (error instanceof WorkflowRunCorruptionError) throw error;
-          throw new WorkflowRunCorruptionError(runId, error);
-        } finally {
-          try {
-            await outputsDirectory?.file.close();
-          } finally {
-            if (authority) await this.closeRunAuthority(authority);
-          }
-        }
-      });
-    });
-  }
-
-  public async readRun(runId: string): Promise<WorkflowRunRecord> {
-    validateWorkflowRunId(runId);
-    this.assertNotRevoked();
-    return this.withLock(async () => {
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        try {
-          return (await this.readRunUnderAuthority(runId, lease)).record;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
-          if (
-            error instanceof WorkflowRunCorruptionError ||
-            error instanceof WorkflowRunAuthorityError
-          ) {
-            throw error;
-          }
-          throw new WorkflowRunCorruptionError(runId, error);
-        }
-      });
-    });
-  }
-
-  public async readEventLog(runId: string): Promise<WorkflowRunEventLog> {
-    validateWorkflowRunId(runId);
-    this.assertNotRevoked();
-    return this.withLock(async () => {
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        try {
-          const result = await this.readRunUnderAuthority(runId, lease);
-          return {
-            events: result.record.events,
-            completeBytes: result.completeBytes,
-            tornTailBytes: result.tornTailBytes,
-          };
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
-          if (
-            error instanceof WorkflowRunCorruptionError ||
-            error instanceof WorkflowRunAuthorityError
-          ) {
-            throw error;
-          }
-          throw new WorkflowRunCorruptionError(runId, error);
-        }
-      });
-    });
-  }
-
-  public async listRunIds(): Promise<readonly string[]> {
-    this.assertNotRevoked();
-    return this.withLock(async () => {
-      const lease = await this.assertNamespaceLease();
-      return lease.withAuthority(async () => {
-        const runsPath = this.runsDir();
-        let runsDirectory: OpenDirectory;
-        try {
-          runsDirectory = await openVerifiedDirectory(runsPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-          throw error;
-        }
-        try {
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          const entries = await readdir(runsPath, { withFileTypes: true });
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          const runIds: string[] = [];
-          for (const entry of entries) {
-            try {
-              validateWorkflowRunId(entry.name);
-            } catch {
-              continue;
-            }
-            if (!entry.isDirectory()) {
-              throw new WorkflowRunCorruptionError(
-                entry.name,
-                new Error(
-                  `Workflow run path is not a directory: ${join(runsPath, entry.name)}`,
-                ),
-              );
-            }
-            const runPath = join(runsPath, entry.name);
-            const runDirectory = await openVerifiedDirectory(runPath);
-            await runDirectory.file.close();
-            runIds.push(entry.name);
-          }
-          await assertDirectoryDescriptorAndTarget(
-            runsDirectory.file,
-            runsPath,
-            runsDirectory.identity,
-          );
-          await lease.assertHeld();
-          return runIds.sort();
-        } finally {
-          await runsDirectory.file.close();
-        }
-      });
-    });
+  constructor(private readonly options: WorkflowRunStoreOptions) {
+    this.root = join(
+      options.rootDir,
+      safePart(options.owner.projectKey, "project key"),
+      safePart(options.owner.piSessionId, "session id"),
+    );
+    this.leaseKey = this.root;
   }
 
   private async assertNamespaceLease(): Promise<WorkflowNamespaceLease> {
-    this.assertNotRevoked();
-    await this.ensureOwnerDirectories();
-    let lease = WorkflowRunStore.leases.get(this.root);
+    let lease = WorkflowRunStore.leases.get(this.leaseKey);
     if (lease && !lease.isHeld) {
-      WorkflowRunStore.leases.delete(this.root);
+      WorkflowRunStore.leases.delete(this.leaseKey);
       lease = undefined;
     }
     if (
@@ -814,9 +175,7 @@ export class WorkflowRunStore {
         this.options.owner.leaseToken,
       )
     ) {
-      throw new WorkflowRunAuthorityError(
-        "Workflow namespace lease is held by a different owner",
-      );
+      throw new Error("Workflow namespace lease is held by a different owner");
     }
     if (!lease) {
       lease = new WorkflowNamespaceLease({
@@ -825,433 +184,841 @@ export class WorkflowRunStore {
         ownerId: this.options.owner.ownerId,
         leaseToken: this.options.owner.leaseToken,
         processId: process.pid,
+        processStartTime: Math.floor(Date.now() - process.uptime() * 1000),
       });
-      WorkflowRunStore.leases.set(this.root, lease);
+      WorkflowRunStore.leases.set(this.leaseKey, lease);
     }
     if (!lease.isHeld) await lease.acquire();
     await lease.assertHeld();
     return lease;
   }
 
-  private async openRunAuthority(runId: string): Promise<OpenRunAuthority> {
-    const runsPath = this.runsDir();
-    const runPath = this.runDir(runId);
-    const runsDirectory = await openVerifiedDirectory(runsPath);
-    let runDirectory: OpenDirectory | undefined;
+  public async getLeaseEpoch(): Promise<number> {
+    const held = WorkflowRunStore.leases.get(this.leaseKey);
+    if (
+      held?.isHeld &&
+      held.belongsTo(this.options.owner.ownerId, this.options.owner.leaseToken)
+    )
+      return held.leaseEpoch;
+    const lease = await this.assertNamespaceLease();
+    return lease.leaseEpoch;
+  }
+
+  public async release(): Promise<void> {
+    const lease = WorkflowRunStore.leases.get(this.leaseKey);
+    if (
+      !lease ||
+      !lease.belongsTo(
+        this.options.owner.ownerId,
+        this.options.owner.leaseToken,
+      )
+    )
+      return;
+    await lease.release();
+    if (WorkflowRunStore.leases.get(this.leaseKey) === lease)
+      WorkflowRunStore.leases.delete(this.leaseKey);
+  }
+
+  private async assertRegularFile(path: string): Promise<void> {
+    const info = await lstat(path);
+    assertRegularFileStats(path, info);
+  }
+
+  private async assertRegularDirectory(path: string): Promise<void> {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.nlink < 1)
+      throw new Error(`Workflow storage path is not a directory: ${path}`);
+  }
+
+  async createRun(
+    input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
+  ): Promise<WorkflowRunLaunch> {
+    return this.withLock(input.runId, async () => {
+      const lease = await this.assertNamespaceLease();
+      return lease.withAuthority(() => this.createRunInternal(input));
+    });
+  }
+
+  /**
+   * Publish a new run only after launch.json and its initial journal prefix are
+   * fully written and synced in a private directory.
+   */
+  async createRunWithInitialEvent<P>(
+    input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
+    initialEvent: WorkflowRunCreationEvent<P>,
+  ): Promise<WorkflowRunLaunch> {
+    return this.withLock(input.runId, async () => {
+      const lease = await this.assertNamespaceLease();
+      return lease.withAuthority(() =>
+        this.createRunInternal(input, initialEvent),
+      );
+    });
+  }
+
+  private async createRunInternal<P>(
+    input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
+    initialEvent?: WorkflowRunCreationEvent<P>,
+  ): Promise<WorkflowRunLaunch> {
+    await this.assertNamespaceLease();
+    validateWorkflowRunId(input.runId);
+    assertSameOwner(input.owner, this.options.owner);
+    validateLaunchInput(input);
+    if (
+      this.options.maxRuns !== undefined &&
+      (!Number.isSafeInteger(this.options.maxRuns) || this.options.maxRuns <= 0)
+    ) {
+      throw new Error("Invalid workflow run count quota");
+    }
+    if (
+      this.options.maxRuns !== undefined &&
+      (await this.listRunIds()).length >= this.options.maxRuns
+    ) {
+      throw new WorkflowRunQuotaError(input.runId, "run count");
+    }
+    const launch: WorkflowRunLaunch = {
+      ...input,
+      schemaVersion: 1,
+      createdAt: Date.now(),
+    };
+    const runsDir = this.runsDir();
+    const dir = this.runDir(launch.runId);
+    const tombstone = this.tombstoneDir(launch.runId);
+    const tempDir = join(
+      runsDir,
+      `${CREATION_PREFIX}${launch.runId}-${randomUUID()}`,
+    );
+    let published = false;
     try {
-      await assertDirectoryDescriptorAndTarget(
-        runsDirectory.file,
-        runsPath,
-        runsDirectory.identity,
+      await this.ensureStorageDirectories();
+      if (await pathExists(dir))
+        throw new Error(`Workflow run already exists: ${launch.runId}`);
+      if (await pathExists(tombstone))
+        throw new Error(
+          `Workflow run has a pending retention tombstone: ${launch.runId}`,
+        );
+      await mkdir(tempDir, { mode: 0o700 });
+      await this.assertRegularDirectory(tempDir);
+      await writeSyncedFile(
+        join(tempDir, "launch.json"),
+        `${JSON.stringify(launch)}\n`,
+        0o600,
       );
-      runDirectory = await openVerifiedDirectory(runPath);
-      await assertDirectoryDescriptorAndTarget(
-        runsDirectory.file,
-        runsPath,
-        runsDirectory.identity,
-      );
-      return { runsDirectory, runDirectory, runsPath, runPath };
+      const creationPayload =
+        initialEvent === undefined
+          ? undefined
+          : normalizeCreationPayload(initialEvent);
+      const eventBytes =
+        initialEvent === undefined
+          ? Buffer.alloc(0)
+          : serializeEvent(
+              {
+                schemaVersion: 1,
+                eventId: randomUUID(),
+                eventOrdinal: 0,
+                runId: launch.runId,
+                runEpoch: initialEvent.runEpoch ?? 0,
+                type: initialEvent.type,
+                payload: creationPayload,
+              },
+              launch.runId,
+            );
+      if (initialEvent !== undefined) {
+        assertQuota(this.options.maxEventBytes, "event");
+        assertQuota(this.options.maxRunBytes, "run byte");
+        if (
+          this.options.maxEventBytes !== undefined &&
+          eventBytes.length > this.options.maxEventBytes
+        )
+          throw new WorkflowRunQuotaError(launch.runId, "event");
+        if (
+          this.options.maxRunBytes !== undefined &&
+          eventBytes.length > this.options.maxRunBytes
+        )
+          throw new WorkflowRunQuotaError(launch.runId, "run byte");
+        assertQuota(this.options.maxOwnerBytes, "owner byte");
+        if (this.options.maxOwnerBytes !== undefined) {
+          let ownerBytes = 0;
+          for (const existingRunId of await this.listRunIds()) {
+            ownerBytes += (
+              await this.readEventBytes(this.runDir(existingRunId))
+            ).length;
+          }
+          if (ownerBytes + eventBytes.length > this.options.maxOwnerBytes)
+            throw new WorkflowRunQuotaError(launch.runId, "owner byte");
+        }
+      }
+      await writeSyncedFile(join(tempDir, "events.ndjson"), eventBytes, 0o600);
+      await syncDirectory(tempDir);
+      await this.assertNamespaceLease();
+      await this.assertRegularDirectory(runsDir);
+      if (await pathExists(dir))
+        throw new Error(`Workflow run already exists: ${launch.runId}`);
+      if (await pathExists(tombstone))
+        throw new Error(
+          `Workflow run has a pending retention tombstone: ${launch.runId}`,
+        );
+      await rename(tempDir, dir);
+      published = true;
+      await syncDirectory(runsDir);
+      await this.assertRegularDirectory(dir);
+      await this.assertRegularFile(join(dir, "launch.json"));
+      await this.assertRegularFile(join(dir, "events.ndjson"));
     } catch (error) {
-      await runDirectory?.file.close();
-      await runsDirectory.file.close();
+      if (!published) await removeCreationDirectory(tempDir, error);
+      if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
+        throw new WorkflowRunStorageError(launch.runId, error);
+      }
+      throw error;
+    }
+    return launch;
+  }
+
+  async append<T extends string, P>(
+    runId: string,
+    type: T,
+    payload: P,
+    runEpoch?: number,
+    expectedLastEventOrdinal?: number,
+  ): Promise<WorkflowAppendReceipt> {
+    validateWorkflowRunId(runId);
+    return this.withLock(runId, async () => {
+      const lease = await this.assertNamespaceLease();
+      return lease.withAuthority(async () => {
+        const dir = this.runDir(runId);
+        const launch = await this.readLaunch(runId, dir);
+        assertSameOwner(launch.owner, this.options.owner);
+        const path = join(dir, "events.ndjson");
+        const file = await this.openVerifiedFile(
+          path,
+          fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+          0o600,
+        );
+        try {
+          const before = await file.readFile();
+          const parsed = parseJournal(runId, before);
+          const actualLastEventOrdinal = parsed.events.length - 1;
+          if (
+            expectedLastEventOrdinal !== undefined &&
+            expectedLastEventOrdinal !== actualLastEventOrdinal
+          ) {
+            throw new WorkflowConditionalAppendConflict(actualLastEventOrdinal);
+          }
+          const currentEpoch = lastRunEpoch(parsed.events);
+          const nextRunEpoch = runEpoch ?? currentEpoch;
+          if (nextRunEpoch < currentEpoch) {
+            throw new Error(
+              `Cannot append stale run epoch ${nextRunEpoch}; current epoch is ${currentEpoch}`,
+            );
+          }
+          const line = serializeEvent(
+            {
+              schemaVersion: 1,
+              eventId: randomUUID(),
+              eventOrdinal: parsed.events.length,
+              runId,
+              runEpoch: nextRunEpoch,
+              type,
+              payload,
+            },
+            runId,
+          );
+          const maxEventBytes = this.options.maxEventBytes;
+          const maxRunBytes = this.options.maxRunBytes;
+          const lineBytes = line.length;
+          if (
+            maxRunBytes !== undefined &&
+            (!Number.isSafeInteger(maxRunBytes) || maxRunBytes <= 0)
+          ) {
+            throw new Error("Invalid workflow run byte quota");
+          }
+          if (
+            maxEventBytes !== undefined &&
+            (!Number.isSafeInteger(maxEventBytes) ||
+              maxEventBytes <= 0 ||
+              parsed.completeBytes + lineBytes > maxEventBytes)
+          ) {
+            throw new WorkflowRunQuotaError(runId, "event");
+          }
+          if (
+            maxRunBytes !== undefined &&
+            parsed.completeBytes + lineBytes > maxRunBytes
+          ) {
+            throw new WorkflowRunQuotaError(runId, "run byte");
+          }
+          const maxOwnerBytes = this.options.maxOwnerBytes;
+          if (
+            maxOwnerBytes !== undefined &&
+            (!Number.isSafeInteger(maxOwnerBytes) || maxOwnerBytes <= 0)
+          ) {
+            throw new Error("Invalid workflow owner byte quota");
+          }
+          if (maxOwnerBytes !== undefined) {
+            let ownerBytes = 0;
+            for (const existingRunId of await this.listRunIds()) {
+              ownerBytes += await this.readEventBytes(
+                this.runDir(existingRunId),
+              ).then((bytes) => bytes.length);
+            }
+            if (ownerBytes + lineBytes > maxOwnerBytes) {
+              throw new WorkflowRunQuotaError(runId, "owner byte");
+            }
+          }
+          await this.assertNamespaceLease();
+          await this.assertLaunchUnchanged(runId, dir, launch);
+          await this.assertOpenFileTarget(file, path);
+          if (parsed.tornTailBytes > 0) {
+            await file.truncate(parsed.completeBytes);
+            await file.sync();
+            await this.assertNamespaceLease();
+            await this.assertLaunchUnchanged(runId, dir, launch);
+            await this.assertOpenFileTarget(file, path);
+          }
+          await this.assertNamespaceLease();
+          await this.assertLaunchUnchanged(runId, dir, launch);
+          await this.assertOpenFileTarget(file, path);
+          try {
+            await writeFully(file, line, parsed.completeBytes);
+            await file.sync();
+          } catch (error) {
+            try {
+              await this.assertOpenFileTarget(file, path);
+              await file.truncate(parsed.completeBytes);
+              await file.sync();
+              await this.assertOpenFileTarget(file, path);
+            } catch (rollbackError) {
+              throw new Error("Failed to roll back workflow journal suffix", {
+                cause: new AggregateError([error, rollbackError]),
+              });
+            }
+            throw error;
+          }
+          await this.assertOpenFileTarget(file, path);
+          return {
+            eventId: JSON.parse(line.toString("utf8")).eventId as string,
+            runId,
+            startByte: parsed.completeBytes,
+            endByte: parsed.completeBytes + lineBytes,
+            eventOrdinal: parsed.events.length,
+          };
+        } finally {
+          await file.close();
+        }
+      });
+    }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
+        throw new WorkflowRunStorageError(runId, error);
+      }
+      throw error;
+    });
+  }
+
+  async appendIfCurrent<T extends string, P>(
+    runId: string,
+    expectedLastEventOrdinal: number,
+    type: T,
+    payload: P,
+    runEpoch?: number,
+  ): Promise<WorkflowConditionalAppendResult> {
+    try {
+      const receipt = await this.append(
+        runId,
+        type,
+        payload,
+        runEpoch,
+        expectedLastEventOrdinal,
+      );
+      return { status: "appended", receipt };
+    } catch (error) {
+      if (error instanceof WorkflowConditionalAppendConflict)
+        return {
+          status: "conflict",
+          actualLastEventOrdinal: error.actualLastEventOrdinal,
+        };
       throw error;
     }
   }
 
-  private async assertOpenRunAuthority(
-    authority: OpenRunAuthority,
-  ): Promise<void> {
-    await assertDirectoryDescriptorAndTarget(
-      authority.runsDirectory.file,
-      authority.runsPath,
-      authority.runsDirectory.identity,
-    );
-    await assertDirectoryDescriptorAndTarget(
-      authority.runDirectory.file,
-      authority.runPath,
-      authority.runDirectory.identity,
-    );
-    await assertDirectoryDescriptorAndTarget(
-      authority.runsDirectory.file,
-      authority.runsPath,
-      authority.runsDirectory.identity,
-    );
-  }
-
-  private async closeRunAuthority(authority: OpenRunAuthority): Promise<void> {
-    try {
-      await authority.runDirectory.file.close();
-    } finally {
-      await authority.runsDirectory.file.close();
-    }
-  }
-
-  private async readRunUnderAuthority(
-    runId: string,
-    lease: WorkflowNamespaceLease,
-  ): Promise<ReadRunResult> {
-    const authority = await this.openRunAuthority(runId);
-    try {
-      const launch = await this.readLaunchFromDirectory(runId, authority);
-      assertSameDurableOwner(launch.owner, this.options.owner);
-      const eventPath = join(authority.runPath, "events.ndjson");
-      await this.assertOpenRunAuthority(authority);
-      const file = await openVerifiedFile(
-        eventPath,
-        fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
-      );
-      try {
-        await this.assertOpenRunAuthority(authority);
-        const parsed = parseJournal(
-          runId,
-          await readBoundedFile(file, eventPath, MAX_JOURNAL_BYTES),
-        );
-        assertCreationMatchesLaunch(launch, parsed.events[0]!);
-        assertJournalEpochOwned(runId, parsed.events, lease.leaseEpoch);
-        const result: ReadRunResult = {
-          record: { launch, events: parsed.events },
-          completeBytes: parsed.completeBytes,
-          tornTailBytes: parsed.tornTailBytes,
-        };
-        if (parsed.tornTailBytes > 0) {
-          await this.revalidateRunAuthority(
-            lease,
-            authority,
-            runId,
-            launch,
-            file,
-            eventPath,
-          );
-          await file.truncate(parsed.completeBytes);
-          await file.sync();
+  async readRun(runId: string): Promise<WorkflowRunRecord> {
+    validateWorkflowRunId(runId);
+    return this.withLock(runId, async () => {
+      const lease = await this.assertNamespaceLease();
+      return lease.withAuthority(async () => {
+        try {
+          return (await this.readRunUnderLock(runId, true)).record;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+          if (error instanceof WorkflowRunCorruptionError) throw error;
+          if (isOwnershipError(error)) throw error;
+          throw new WorkflowRunCorruptionError(runId, error);
         }
-        await this.revalidateRunAuthority(
-          lease,
-          authority,
-          runId,
-          launch,
-          file,
-          eventPath,
-        );
-        return result;
-      } finally {
-        await file.close();
+      });
+    });
+  }
+
+  async listRunIds(): Promise<readonly string[]> {
+    const runsDir = this.runsDir();
+    let entries;
+    try {
+      entries = await readdir(runsDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((runId) => {
+        try {
+          validateWorkflowRunId(runId);
+          return true;
+        } catch {
+          /* Temporary and tombstone directories are never authoritative runs. */
+          return false;
+        }
+      })
+      .sort();
+  }
+
+  async pruneTerminalRuns(options: {
+    olderThanMs: number;
+    maxRuns?: number;
+  }): Promise<readonly string[]> {
+    const lease = await this.assertNamespaceLease();
+    return lease.withAuthority(async () => {
+      if (
+        !Number.isSafeInteger(options.olderThanMs) ||
+        options.olderThanMs < 0
+      ) {
+        throw new Error("Invalid workflow retention age");
       }
-    } finally {
-      await this.closeRunAuthority(authority);
-    }
+      if (
+        options.maxRuns !== undefined &&
+        (!Number.isSafeInteger(options.maxRuns) || options.maxRuns < 0)
+      ) {
+        throw new Error("Invalid workflow retention limit");
+      }
+      const recovered = await this.recoverTombstones();
+      const cutoff = Date.now() - options.olderThanMs;
+      const candidates: Array<{ runId: string; createdAt: number }> = [];
+      for (const runId of await this.listRunIds()) {
+        const candidate = await this.withLock(runId, async () => {
+          await this.assertNamespaceLease();
+          try {
+            const { record } = await this.readRunUnderLock(runId, true);
+            if (
+              record.launch.createdAt > cutoff ||
+              !isRetentionEligible(record)
+            )
+              return undefined;
+            return { runId, createdAt: record.launch.createdAt };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT")
+              return undefined;
+            throw error;
+          }
+        });
+        if (candidate) candidates.push(candidate);
+      }
+      candidates.sort((left, right) => left.createdAt - right.createdAt);
+      const selected =
+        options.maxRuns === undefined
+          ? candidates
+          : candidates.slice(0, options.maxRuns);
+      const pruned = new Set(recovered);
+      for (const candidate of selected) {
+        const deleted = await this.withLock(candidate.runId, async () => {
+          await this.assertNamespaceLease();
+          const dir = this.runDir(candidate.runId);
+          const directory = await this.openVerifiedDirectory(dir);
+          try {
+            const { record } = await this.readRunUnderLock(
+              candidate.runId,
+              true,
+            );
+            if (
+              record.launch.createdAt > cutoff ||
+              !isRetentionEligible(record)
+            )
+              return false;
+            const tombstone = this.tombstoneDir(candidate.runId);
+            if (await pathExists(tombstone)) {
+              if (await pathExists(dir))
+                throw new Error(
+                  `Workflow retention tombstone conflicts with live run: ${candidate.runId}`,
+                );
+              await this.deleteTombstone(tombstone);
+              return true;
+            }
+            await this.assertNamespaceLease();
+            if (await pathExists(tombstone))
+              throw new Error(
+                `Workflow retention tombstone appeared for ${candidate.runId}`,
+              );
+            await rename(dir, tombstone);
+            await assertDirectoryDescriptorAndTarget(
+              directory.file,
+              tombstone,
+              directory.identity,
+            );
+            await syncDirectory(this.runsDir());
+            await this.assertNamespaceLease();
+            await this.deleteVerifiedDirectory(
+              tombstone,
+              directory.file,
+              directory.identity,
+              ".deleting-",
+            );
+            return true;
+          } finally {
+            await directory.file.close();
+          }
+        });
+        if (deleted) pruned.add(candidate.runId);
+      }
+      return [...pruned].sort();
+    });
   }
 
-  private async revalidateRunAuthority(
-    lease: WorkflowNamespaceLease,
-    authority: OpenRunAuthority,
-    runId: string,
-    launch: WorkflowRunLaunch,
-    eventFile: FileHandle,
-    eventPath: string,
-  ): Promise<void> {
-    await lease.assertHeld();
-    await this.assertOpenRunAuthority(authority);
-    const current = await this.readLaunchFromDirectory(runId, authority);
-    if (JSON.stringify(current) !== JSON.stringify(launch)) {
-      throw new WorkflowRunAuthorityError(
-        "Workflow run launch authority changed",
+  async readEventLog(runId: string): Promise<WorkflowRunEventLog> {
+    validateWorkflowRunId(runId);
+    return this.withLock(runId, async () => {
+      const lease = await this.assertNamespaceLease();
+      return lease.withAuthority(async () => {
+        try {
+          const result = await this.readRunUnderLock(runId, true);
+          return {
+            events: result.record.events,
+            completeBytes: result.completeBytes,
+            tornTailBytes: result.tornTailBytes,
+          };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+          if (error instanceof WorkflowRunCorruptionError) throw error;
+          if (isOwnershipError(error)) throw error;
+          throw new WorkflowRunCorruptionError(runId, error);
+        }
+      });
+    });
+  }
+
+  private async recoverTombstones(): Promise<string[]> {
+    const runsDir = this.runsDir();
+    let entries;
+    try {
+      entries = await readdir(runsDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const recovered: string[] = [];
+    for (const entry of entries) {
+      if (!entry.name.startsWith(TOMBSTONE_PREFIX)) continue;
+      const runId = entry.name.slice(TOMBSTONE_PREFIX.length);
+      validateWorkflowRunId(runId);
+      const deleted = await this.withLock(runId, async () => {
+        await this.assertNamespaceLease();
+        const tombstone = this.tombstoneDir(runId);
+        if (!(await pathExists(tombstone))) return false;
+        if (await pathExists(this.runDir(runId)))
+          throw new Error(
+            `Workflow retention tombstone conflicts with live run: ${runId}`,
+          );
+        const { record } = await this.readRunAtDir(runId, tombstone, true);
+        if (!isRetentionEligible(record)) return false;
+        await this.deleteTombstone(tombstone);
+        return true;
+      });
+      if (deleted) recovered.push(runId);
+    }
+    return recovered;
+  }
+
+  private async deleteTombstone(tombstone: string): Promise<void> {
+    await this.assertNamespaceLease();
+    const directory = await this.openVerifiedDirectory(tombstone);
+    try {
+      await this.deleteVerifiedDirectory(
+        tombstone,
+        directory.file,
+        directory.identity,
+        ".deleting-",
       );
+    } finally {
+      await directory.file.close();
     }
-    await assertDescriptorAndTarget(eventFile, eventPath);
-    await this.assertOpenRunAuthority(authority);
-    await lease.assertHeld();
   }
 
-  private async readLaunchFromDirectory(
+  private async readRunUnderLock(
     runId: string,
-    authority: OpenRunAuthority,
-  ): Promise<WorkflowRunLaunch> {
-    await this.assertOpenRunAuthority(authority);
-    const path = join(authority.runPath, "launch.json");
-    const file = await openVerifiedFile(
+    repairTornTail: boolean,
+  ): Promise<ReadRunResult> {
+    return this.readRunAtDir(runId, this.runDir(runId), repairTornTail);
+  }
+
+  private async readRunAtDir(
+    runId: string,
+    dir: string,
+    repairTornTail: boolean,
+  ): Promise<ReadRunResult> {
+    await this.assertRegularDirectory(dir);
+    const launch = await this.readLaunch(runId, dir);
+    const path = join(dir, "events.ndjson");
+    const file = await this.openVerifiedFile(
       path,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      repairTornTail
+        ? fsConstants.O_RDWR | fsConstants.O_NOFOLLOW
+        : fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      0o600,
     );
     try {
-      const bytes = await readBoundedFile(file, path, MAX_LAUNCH_BYTES);
-      const parsed = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-      ) as unknown;
-      validateLaunchRecord(parsed, runId);
-      await this.assertOpenRunAuthority(authority);
-      return parsed;
+      const bytes = await file.readFile();
+      await this.assertOpenFileTarget(file, path);
+      const parsed = parseJournal(runId, bytes);
+      if (parsed.tornTailBytes > 0 && repairTornTail) {
+        await this.assertNamespaceLease();
+        await this.assertLaunchUnchanged(runId, dir, launch);
+        await this.assertOpenFileTarget(file, path);
+        await file.truncate(parsed.completeBytes);
+        await file.sync();
+        await this.assertNamespaceLease();
+        await this.assertLaunchUnchanged(runId, dir, launch);
+        await this.assertOpenFileTarget(file, path);
+      }
+      return {
+        record: { launch, events: parsed.events },
+        tornTailBytes: parsed.tornTailBytes,
+        completeBytes: parsed.completeBytes,
+      };
     } finally {
       await file.close();
     }
   }
 
-  private async ensureOwnerDirectories(): Promise<void> {
-    await mkdir(this.options.rootDir, { recursive: true, mode: 0o700 });
-    const configuredRoot = await openVerifiedDirectory(this.options.rootDir);
+  private async readLaunch(
+    runId: string,
+    dir: string,
+  ): Promise<WorkflowRunLaunch> {
+    await this.assertRegularDirectory(dir);
+    const path = join(dir, "launch.json");
+    const file = await this.openVerifiedFile(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
     try {
-      const projectDir = join(
-        this.options.rootDir,
-        this.options.owner.projectKey,
-      );
-      const project = await openOrCreateDirectory(
-        configuredRoot,
-        this.options.rootDir,
-        projectDir,
-      );
+      let parsed: unknown;
       try {
-        const ownerDirectory = await openOrCreateDirectory(
-          project,
-          projectDir,
-          this.root,
-        );
-        await ownerDirectory.file.close();
-      } finally {
-        await project.file.close();
+        const bytes = await file.readFile();
+        await this.assertOpenFileTarget(file, path);
+        parsed = JSON.parse(decodeUtf8(bytes));
+      } catch (error) {
+        throw new WorkflowRunCorruptionError(runId, error);
       }
+      validateLaunchRecord(parsed, runId);
+      const launch = parsed as WorkflowRunLaunch;
+      assertSameOwner(launch.owner, this.options.owner);
+      return launch;
     } finally {
-      await configuredRoot.file.close();
+      await file.close();
     }
   }
 
-  private async ensureStorageDirectories(): Promise<void> {
-    await this.ensureOwnerDirectories();
-    const ownerDirectory = await openVerifiedDirectory(this.root);
+  private async assertLaunchUnchanged(
+    runId: string,
+    dir: string,
+    expected: WorkflowRunLaunch,
+  ): Promise<void> {
+    const current = await this.readLaunch(runId, dir);
+    if (JSON.stringify(current) !== JSON.stringify(expected))
+      throw new Error("Workflow run launch authority changed");
+  }
+
+  private async readEventBytes(dir: string): Promise<Buffer> {
+    await this.assertRegularDirectory(dir);
+    const path = join(dir, "events.ndjson");
+    const file = await this.openVerifiedFile(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
     try {
-      const runsDirectory = await openOrCreateDirectory(
-        ownerDirectory,
-        this.root,
-        this.runsDir(),
-      );
-      await runsDirectory.file.close();
+      const bytes = await file.readFile();
+      await this.assertOpenFileTarget(file, path);
+      return bytes;
     } finally {
-      await ownerDirectory.file.close();
+      await file.close();
     }
+  }
+
+  private async openVerifiedDirectory(path: string) {
+    const before = await lstat(path);
+    assertRegularDirectoryStats(path, before);
+    const identity = fileIdentity(before);
+    let file;
+    try {
+      file = await open(
+        path,
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+      );
+      await assertDirectoryDescriptorAndTarget(file, path, identity);
+      return { file, identity };
+    } catch (error) {
+      if (file) {
+        try {
+          await file.close();
+        } catch (closeError) {
+          throw new Error(
+            "Failed to close rejected workflow storage directory",
+            {
+              cause: closeError,
+            },
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async deleteVerifiedDirectory(
+    path: string,
+    file: Awaited<ReturnType<typeof open>>,
+    identity: FileIdentity,
+    stagingPrefix: string,
+  ): Promise<void> {
+    await this.assertNamespaceLease();
+    await assertDirectoryDescriptorAndTarget(file, path, identity);
+    const staging = join(this.runsDir(), `${stagingPrefix}${randomUUID()}`);
+    await rename(path, staging);
+    await assertDirectoryDescriptorAndTarget(file, staging, identity);
+    await rm(staging, { recursive: true, force: false });
+    await syncDirectory(this.runsDir());
+  }
+
+  private async openVerifiedFile(path: string, flags: number, mode: number) {
+    const before = await lstat(path);
+    assertRegularFileStats(path, before);
+    const expected = fileIdentity(before);
+    let file;
+    try {
+      file = await open(path, flags, mode);
+      await assertDescriptorAndTarget(file, path, expected);
+      return file;
+    } catch (error) {
+      if (file) {
+        try {
+          await file.close();
+        } catch (closeError) {
+          throw new Error("Failed to close rejected workflow storage file", {
+            cause: closeError,
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async assertOpenFileTarget(
+    file: Awaited<ReturnType<typeof open>>,
+    path: string,
+  ): Promise<void> {
+    await assertDescriptorAndTarget(file, path);
   }
 
   private runsDir(): string {
     return join(this.root, "runs");
   }
 
-  private runDir(runId: string): string {
-    validateWorkflowRunId(runId);
-    return join(this.runsDir(), runId);
+  private tombstoneDir(runId: string): string {
+    return join(this.runsDir(), `${TOMBSTONE_PREFIX}${runId}`);
   }
 
-  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
-    const prior = WorkflowRunStore.locks.get(this.root) ?? Promise.resolve();
+  private runDir(runId: string): string {
+    return join(this.runsDir(), safePart(runId, "run id"));
+  }
+
+  private async ensureStorageDirectories(): Promise<void> {
+    await mkdir(dirname(this.root), { recursive: true, mode: 0o700 });
+    await this.assertRegularDirectory(dirname(this.root));
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    await this.assertRegularDirectory(this.root);
+    await syncDirectory(dirname(this.root));
+    await mkdir(this.runsDir(), { recursive: true, mode: 0o700 });
+    await this.assertRegularDirectory(this.runsDir());
+    await syncDirectory(this.root);
+    await this.recoverCreationDirectories();
+  }
+
+  private async recoverCreationDirectories(): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(this.runsDir(), { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const cutoff = Date.now() - CREATION_STALE_AFTER_MS;
+    for (const entry of entries) {
+      if (!entry.name.startsWith(CREATION_PREFIX)) continue;
+      const match = CREATION_NAME_PATTERN.exec(entry.name);
+      if (!match) continue;
+      try {
+        validateWorkflowRunId(match[1]);
+      } catch {
+        continue;
+      }
+      const path = join(this.runsDir(), entry.name);
+      if (!entry.isDirectory()) continue;
+      const directory = await this.openVerifiedDirectory(path);
+      try {
+        const info = await directory.file.stat();
+        if (!Number.isFinite(info.mtimeMs) || info.mtimeMs > cutoff) continue;
+        await this.deleteVerifiedDirectory(
+          path,
+          directory.file,
+          directory.identity,
+          ".stale-",
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      } finally {
+        await directory.file.close();
+      }
+    }
+  }
+
+  private async withLock<T>(
+    _runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Namespace lease interlocks are filesystem-wide and non-reentrant. Keep
+    // same-session run operations serialized in-process so cross-run
+    // coordinators cannot race lease checks between per-run locks.
+    const lockKey = this.root;
+    const prior = WorkflowRunStore.locks.get(lockKey) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    WorkflowRunStore.locks.set(this.root, current);
+    WorkflowRunStore.locks.set(lockKey, current);
     await prior;
     try {
       return await operation();
     } finally {
       release();
-      if (WorkflowRunStore.locks.get(this.root) === current) {
-        WorkflowRunStore.locks.delete(this.root);
-      }
-    }
-  }
-  private assertNotRevoked(): void {
-    if (this.revoked) {
-      throw new WorkflowRunAuthorityError(
-        "Workflow run store authority has been revoked",
-      );
+      if (WorkflowRunStore.locks.get(lockKey) === current)
+        WorkflowRunStore.locks.delete(lockKey);
     }
   }
 }
 
 class WorkflowConditionalAppendConflict extends Error {
-  public constructor(
-    public readonly actualLastEventOrdinal: number,
-    public readonly actualRunEpoch: number,
-  ) {
+  public constructor(public readonly actualLastEventOrdinal: number) {
     super("Workflow journal revision conflict");
   }
 }
 
-function normalizeLaunchInput(
-  input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
-): Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt"> {
-  const record = requireRecord(toDurableValue(input), "workflow launch");
-  assertExactKeys(
-    record,
-    ["runId", "planRevision", "resumePolicy", "owner"],
-    ["planDigest"],
-    "workflow launch",
-  );
-  if (typeof record.runId !== "string")
-    throw new Error("Invalid workflow run ID");
-  validateWorkflowRunId(record.runId);
-  if (
-    !Number.isSafeInteger(record.planRevision) ||
-    (record.planRevision as number) < 0
-  ) {
-    throw new Error("Invalid workflow plan revision");
-  }
-  if (record.resumePolicy !== "manual") {
-    throw new Error("Durable workflow preview requires manual resume policy");
-  }
-  validateOwnerRecord(record.owner);
-  if (
-    record.planDigest !== undefined &&
-    (typeof record.planDigest !== "string" ||
-      !SHA256_PATTERN.test(record.planDigest))
-  ) {
-    throw new Error("Invalid workflow plan digest");
-  }
-  return record as unknown as Omit<
-    WorkflowRunLaunch,
-    "schemaVersion" | "createdAt"
-  >;
-}
-
-function normalizeCreationEvent(input: WorkflowRunCreationEvent<unknown>): {
-  plan: WorkflowPlan;
-  runEpoch?: number;
-} {
-  const record = requireRecord(
-    toDurableValue(input),
-    "workflow creation event",
-  );
-  assertExactKeys(
-    record,
-    ["type", "payload"],
-    ["runEpoch"],
-    "workflow creation event",
-  );
-  if (record.type !== "run_created") {
-    throw new Error("The initial workflow event must be run_created");
-  }
-  if (
-    record.runEpoch !== undefined &&
-    (!Number.isSafeInteger(record.runEpoch) || (record.runEpoch as number) < 1)
-  ) {
-    throw new Error("Invalid initial workflow run epoch");
-  }
-  const payload = requireRecord(record.payload, "run_created payload");
-  assertExactKeys(payload, ["plan"], [], "run_created payload");
-  validateWorkflowPlan(payload.plan);
-  return {
-    plan: payload.plan,
-    ...(record.runEpoch === undefined
-      ? {}
-      : { runEpoch: record.runEpoch as number }),
-  };
-}
-
-function normalizeOutcomeRef(
-  ref: WorkflowOutcomeBlobRef,
-): WorkflowOutcomeBlobRef {
-  const record = requireRecord(
-    toDurableValue(ref),
-    "workflow outcome reference",
-  );
-  assertExactKeys(
-    record,
-    ["schemaVersion", "digest", "bytes"],
-    [],
-    "workflow outcome reference",
-  );
-  if (
-    record.schemaVersion !== 1 ||
-    typeof record.digest !== "string" ||
-    !SHA256_PATTERN.test(record.digest) ||
-    !Number.isSafeInteger(record.bytes) ||
-    (record.bytes as number) <= 0 ||
-    (record.bytes as number) > MAX_OUTCOME_BYTES
-  ) {
-    throw new Error("Invalid workflow outcome reference");
-  }
-  return record as unknown as WorkflowOutcomeBlobRef;
-}
-
-function validateLaunchRecord(
-  value: unknown,
-  runId: string,
-): asserts value is WorkflowRunLaunch {
-  const record = requireRecord(value, "workflow launch record");
-  assertExactKeys(
-    record,
-    [
-      "schemaVersion",
-      "runId",
-      "planRevision",
-      "resumePolicy",
-      "owner",
-      "createdAt",
-      "planDigest",
-    ],
-    [],
-    "workflow launch record",
-  );
-  if (
-    record.schemaVersion !== 1 ||
-    record.runId !== runId ||
-    !Number.isSafeInteger(record.planRevision) ||
-    (record.planRevision as number) < 0 ||
-    record.resumePolicy !== "manual" ||
-    !Number.isSafeInteger(record.createdAt) ||
-    (record.createdAt as number) < 0 ||
-    typeof record.planDigest !== "string" ||
-    !SHA256_PATTERN.test(record.planDigest)
-  ) {
-    throw new Error("Invalid workflow launch record");
-  }
-  validateWorkflowRunId(runId);
-  validateOwnerRecord(record.owner);
-}
-
-function validateOwnerRecord(
-  value: unknown,
-): asserts value is WorkflowOwnerIdentity {
-  const owner = requireRecord(value, "workflow owner");
-  assertExactKeys(
-    owner,
-    [
-      "projectKey",
-      "cwd",
-      "piSessionId",
-      "ownerId",
-      "ownerGeneration",
-      "leaseToken",
-    ],
-    [],
-    "workflow owner",
-  );
-  if (
-    typeof owner.projectKey !== "string" ||
-    !SAFE_OWNER_PATH_KEY.test(owner.projectKey) ||
-    typeof owner.piSessionId !== "string" ||
-    !SAFE_OWNER_PATH_KEY.test(owner.piSessionId) ||
-    typeof owner.cwd !== "string" ||
-    !isAbsolute(owner.cwd) ||
-    Buffer.byteLength(owner.cwd, "utf8") > 4096
-  ) {
-    throw new Error("Invalid workflow owner durable identity");
-  }
-  for (const key of ["ownerId", "leaseToken"] as const) {
-    const field = owner[key];
-    if (
-      typeof field !== "string" ||
-      field.length === 0 ||
-      Buffer.byteLength(field, "utf8") > 256
-    ) {
-      throw new Error(`Invalid workflow owner ${key}`);
-    }
-  }
-  if (
-    !Number.isSafeInteger(owner.ownerGeneration) ||
-    (owner.ownerGeneration as number) < 0
-  ) {
-    throw new Error("Invalid workflow owner generation");
-  }
-}
-
-function assertSameLiveOwner(
+function assertSameOwner(
   left: WorkflowOwnerIdentity,
   right: WorkflowOwnerIdentity,
 ): void {
@@ -1263,73 +1030,342 @@ function assertSameLiveOwner(
     left.ownerGeneration !== right.ownerGeneration ||
     left.leaseToken !== right.leaseToken
   ) {
-    throw new WorkflowRunAuthorityError(
-      "Workflow run belongs to a different owner or session.",
-    );
+    throw new Error("Workflow run belongs to a different owner or session.");
   }
 }
 
-function assertSameDurableOwner(
-  left: WorkflowOwnerIdentity,
-  right: WorkflowOwnerIdentity,
+function assertQuota(
+  value: number | undefined,
+  quota: "event" | "run byte" | "owner byte",
+): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0))
+    throw new Error(`Invalid workflow ${quota} quota`);
+}
+
+function validateLaunchInput(
+  input: Omit<WorkflowRunLaunch, "schemaVersion" | "createdAt">,
 ): void {
   if (
-    left.projectKey !== right.projectKey ||
-    left.cwd !== right.cwd ||
-    left.piSessionId !== right.piSessionId
+    !Number.isSafeInteger(input.planRevision) ||
+    input.planRevision < 0 ||
+    !["manual", "on-session-start"].includes(input.resumePolicy)
   ) {
-    throw new WorkflowRunAuthorityError(
-      "Workflow run belongs to a different durable namespace.",
-    );
+    throw new Error("Invalid workflow run launch");
   }
+  if (input.planDigest !== undefined && typeof input.planDigest !== "string")
+    throw new Error("Invalid workflow run plan digest");
 }
 
-function assertCreationMatchesLaunch(
-  launch: WorkflowRunLaunch,
-  event: WorkflowEventEnvelope,
-): void {
-  const payload = requireRecord(event.payload, "run_created payload");
-  const plan = payload.plan;
+function validateLaunchRecord(value: unknown, runId: string): void {
+  if (!isRecord(value)) throw new Error("Launch record is not an object");
+  if (value.schemaVersion !== 1 || value.runId !== runId)
+    throw new Error("Launch record schema or run ID mismatch");
+  validateWorkflowRunId(value.runId as string);
+  if (
+    !Number.isSafeInteger(value.planRevision) ||
+    (value.planRevision as number) < 0 ||
+    !["manual", "on-session-start"].includes(value.resumePolicy as string) ||
+    !Number.isSafeInteger(value.createdAt) ||
+    (value.createdAt as number) < 0 ||
+    (value.planDigest !== undefined && typeof value.planDigest !== "string")
+  ) {
+    throw new Error("Invalid launch record");
+  }
+  validateOwnerRecord(value.owner);
+  const allowed = new Set([
+    "schemaVersion",
+    "runId",
+    "planRevision",
+    "resumePolicy",
+    "owner",
+    "createdAt",
+    "planDigest",
+  ]);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`Unknown launch field: ${key}`);
+}
+
+function validateOwnerRecord(
+  value: unknown,
+): asserts value is WorkflowOwnerIdentity {
+  if (!isRecord(value)) throw new Error("Launch owner is not an object");
+  for (const key of [
+    "projectKey",
+    "cwd",
+    "piSessionId",
+    "ownerId",
+    "leaseToken",
+  ]) {
+    if (
+      typeof value[key] !== "string" ||
+      value[key].length === 0 ||
+      value[key].length > 500
+    )
+      throw new Error(`Invalid launch owner ${key}`);
+  }
+  if (
+    !Number.isSafeInteger(value.ownerGeneration) ||
+    (value.ownerGeneration as number) < 0
+  )
+    throw new Error("Invalid launch owner generation");
+  const allowed = new Set([
+    "projectKey",
+    "cwd",
+    "piSessionId",
+    "ownerId",
+    "ownerGeneration",
+    "leaseToken",
+  ]);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key))
+      throw new Error(`Unknown launch owner field: ${key}`);
+}
+
+function normalizeCreationPayload(
+  initialEvent: WorkflowRunCreationEvent<unknown>,
+): { plan: WorkflowPlan } {
+  if (initialEvent.type !== "run_created")
+    throw new Error("The initial workflow event must be run_created");
+  const payload = requirePlainRecord(initialEvent.payload, "creation payload");
+  assertExactKeys(payload, ["plan"], "creation payload");
+  const plan = normalizeCreationPlan(
+    readDataProperty(payload, "plan", "creation payload"),
+  );
+  const encoded = JSON.stringify({ plan });
+  if (
+    encoded === undefined ||
+    Buffer.byteLength(encoded, "utf8") > MAX_CREATION_PLAN_BYTES
+  )
+    throw new Error("Workflow creation plan exceeds the durable size limit");
+  return { plan };
+}
+
+function normalizeCreationPlan(value: unknown): WorkflowPlan {
+  const source = requirePlainRecord(value, "workflow plan");
+  assertExactKeys(source, ["schemaVersion", "name", "phases"], "workflow plan");
+  const schemaVersion = readDataProperty(source, "schemaVersion", "plan");
+  const name = readDataProperty(source, "name", "plan");
+  const phases = readDataProperty(source, "phases", "plan");
+  if (schemaVersion !== 1 || typeof name !== "string" || !Array.isArray(phases))
+    throw new Error("Invalid workflow plan definition");
+
+  const normalizedPhases: WorkflowPlan["phases"] = phases.map(
+    (phase, phaseIndex) => {
+      const sourcePhase = requirePlainRecord(
+        phase,
+        `workflow phase ${phaseIndex}`,
+      );
+      assertExactKeys(sourcePhase, ["id", "mode", "tasks"], "workflow phase");
+      const id = readDataProperty(sourcePhase, "id", "phase");
+      const mode = readDataProperty(sourcePhase, "mode", "phase");
+      const tasks = readDataProperty(sourcePhase, "tasks", "phase");
+      if (
+        typeof id !== "string" ||
+        (mode !== "sequential" && mode !== "parallel") ||
+        !Array.isArray(tasks)
+      )
+        throw new Error("Invalid workflow phase definition");
+      return {
+        id,
+        mode: mode as "sequential" | "parallel",
+        tasks: tasks.map((task, taskIndex) => {
+          const sourceTask = requirePlainRecord(
+            task,
+            `workflow task ${phaseIndex}.${taskIndex}`,
+          );
+          assertAllowedKeys(
+            sourceTask,
+            ["id", "prompt", "label", "isolation", "input", "approval"],
+            "workflow task",
+          );
+          const taskId = readDataProperty(sourceTask, "id", "task");
+          const prompt = readDataProperty(sourceTask, "prompt", "task");
+          const label = readOptionalDataProperty(sourceTask, "label", "task");
+          const isolation = readOptionalDataProperty(
+            sourceTask,
+            "isolation",
+            "task",
+          );
+          const input = readOptionalDataProperty(sourceTask, "input", "task");
+          const approval = readOptionalDataProperty(
+            sourceTask,
+            "approval",
+            "task",
+          );
+          if (typeof taskId !== "string" || typeof prompt !== "string")
+            throw new Error("Invalid workflow task definition");
+          if (Buffer.byteLength(prompt, "utf8") > 64 * 1024)
+            throw new Error(
+              "Workflow task prompt exceeds the durable size limit",
+            );
+          if (label !== undefined && typeof label !== "string")
+            throw new Error("Invalid workflow task label");
+          if (
+            label !== undefined &&
+            Buffer.byteLength(label, "utf8") > 8 * 1024
+          )
+            throw new Error(
+              "Workflow task label exceeds the durable size limit",
+            );
+          if (
+            isolation !== undefined &&
+            isolation !== "in-process" &&
+            isolation !== "process"
+          )
+            throw new Error("Invalid workflow task isolation");
+          const normalizedInput =
+            input === undefined ? undefined : toDurableValue(input);
+          const normalizedApproval = normalizeTaskApproval(approval);
+          return {
+            id: taskId,
+            prompt,
+            ...(label === undefined ? {} : { label }),
+            ...(isolation === undefined
+              ? {}
+              : { isolation: "in-process" as const }),
+            ...(normalizedInput === undefined
+              ? {}
+              : { input: normalizedInput }),
+            ...(normalizedApproval === undefined
+              ? {}
+              : { approval: normalizedApproval }),
+          };
+        }),
+      };
+    },
+  );
+  const plan = { schemaVersion: 1 as const, name, phases: normalizedPhases };
   validateWorkflowPlan(plan);
-  const digest = createHash("sha256")
-    .update(encodeDurableValue(plan), "utf8")
-    .digest("hex");
+  return plan;
+}
+
+function normalizeTaskApproval(
+  value: unknown,
+): { policyHash: string; denial: "stop" | "skip" } | undefined {
+  if (value === undefined) return undefined;
+  const source = requirePlainRecord(value, "workflow task approval");
+  assertExactKeys(source, ["policyHash", "denial"], "workflow task approval");
+  const policyHash = readDataProperty(source, "policyHash", "approval");
+  const denial = readDataProperty(source, "denial", "approval");
   if (
-    plan.schemaVersion !== launch.planRevision ||
-    digest !== launch.planDigest
+    typeof policyHash !== "string" ||
+    !policyHash.trim() ||
+    Buffer.byteLength(policyHash, "utf8") > 4 * 1024 ||
+    (denial !== "stop" && denial !== "skip")
   ) {
-    throw new Error("Workflow launch does not match its run_created plan");
+    throw new Error("Invalid workflow task approval");
   }
+  return { policyHash, denial };
+}
+
+function requirePlainRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (!isPlainRecord(value)) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function assertExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  const keys = [
+    ...Object.getOwnPropertyNames(value),
+    ...Object.getOwnPropertySymbols(value).map(String),
+  ];
+  if (
+    keys.some((key) => !allowedKeys.has(key)) ||
+    keys.length !== allowed.length
+  )
+    throw new Error(`Invalid ${label} fields`);
+}
+
+function assertAllowedKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  const keys = [
+    ...Object.getOwnPropertyNames(value),
+    ...Object.getOwnPropertySymbols(value).map(String),
+  ];
+  if (keys.some((key) => !allowedKeys.has(key)))
+    throw new Error(`Invalid ${label} fields`);
+}
+
+function readOptionalDataProperty(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor) return undefined;
+  if (!("value" in descriptor))
+    throw new Error(`Invalid ${label} field: ${key}`);
+  return descriptor.value;
+}
+
+function readDataProperty(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !("value" in descriptor))
+    throw new Error(`Invalid ${label} field: ${key}`);
+  return descriptor.value;
+}
+
+function decodeUtf8(bytes: Buffer): string {
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }
 
 function parseJournal(runId: string, bytes: Buffer): ParsedJournal {
-  assertPhysicalEventLineBounds(bytes);
-  const lastNewline = bytes.lastIndexOf(0x0a);
-  const completeBytes = lastNewline < 0 ? 0 : lastNewline + 1;
+  const completeBytes = bytes.lastIndexOf(0x0a) + 1;
   const tornTailBytes = bytes.length - completeBytes;
   const events: WorkflowEventEnvelope[] = [];
+  const eventIds = new Set<string>();
+  let offset = 0;
   let priorEpoch = 0;
-  if (completeBytes > 0) {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(
-      bytes.subarray(0, completeBytes),
-    );
-    const lines = text.split("\n");
-    lines.pop();
-    for (let ordinal = 0; ordinal < lines.length; ordinal++) {
-      if (!lines[ordinal]) {
-        throw new Error("Workflow journal contains an empty complete line");
-      }
-      const event = JSON.parse(lines[ordinal]) as unknown;
-      validateEventRecord(event, runId, ordinal);
-      if (event.runEpoch < priorEpoch) {
-        throw new Error("Workflow journal run epoch regressed");
-      }
-      priorEpoch = event.runEpoch;
-      events.push(event);
-    }
+  if (
+    tornTailBytes > 0 &&
+    new TextDecoder("utf-8").decode(bytes.subarray(completeBytes)).trim()
+      .length === 0
+  ) {
+    throw new Error("Blank workflow journal record");
   }
-  if (events.length === 0 || events[0].type !== "run_created") {
-    throw new Error("Workflow journal has no committed run_created event");
+  while (offset < completeBytes) {
+    const newline = bytes.indexOf(0x0a, offset);
+    if (newline < 0) throw new Error("Journal line boundary disappeared");
+    const raw = bytes.subarray(offset, newline);
+    if (raw.length === 0) throw new Error("Blank workflow journal record");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decodeUtf8(raw));
+    } catch (error) {
+      throw new Error("Malformed workflow journal record", { cause: error });
+    }
+    validateEventRecord(parsed, runId, events.length);
+    const event = parsed as WorkflowEventEnvelope;
+    if (eventIds.has(event.eventId))
+      throw new Error(`Duplicate workflow event ID: ${event.eventId}`);
+    if (event.runEpoch < priorEpoch)
+      throw new Error("Workflow journal run epoch moved backwards");
+    priorEpoch = event.runEpoch;
+    eventIds.add(event.eventId);
+    events.push(event);
+    offset = newline + 1;
   }
   return { events, completeBytes, tornTailBytes };
 }
@@ -1337,427 +1373,226 @@ function parseJournal(runId: string, bytes: Buffer): ParsedJournal {
 function validateEventRecord(
   value: unknown,
   runId: string,
-  ordinal: number,
-): asserts value is WorkflowEventEnvelope {
-  const event = requireRecord(value, "workflow event");
-  assertExactKeys(
-    event,
-    [
-      "schemaVersion",
-      "eventId",
-      "eventOrdinal",
-      "runId",
-      "runEpoch",
-      "type",
-      "payload",
-    ],
-    [],
-    "workflow event",
-  );
+  expectedOrdinal: number,
+): void {
+  if (!isRecord(value))
+    throw new Error("Workflow journal record is not an object");
+  for (const key of Object.keys(value))
+    if (!EVENT_KEYS.has(key)) throw new Error(`Unknown journal field: ${key}`);
   if (
-    event.schemaVersion !== 1 ||
-    typeof event.eventId !== "string" ||
-    !UUID_PATTERN.test(event.eventId) ||
-    event.eventOrdinal !== ordinal ||
-    event.runId !== runId ||
-    !Number.isSafeInteger(event.runEpoch) ||
-    (event.runEpoch as number) < 1 ||
-    typeof event.type !== "string" ||
-    !RUN_EVENT_TYPE.test(event.type) ||
-    (ordinal === 0) !== (event.type === "run_created")
+    value.schemaVersion !== 1 ||
+    typeof value.eventId !== "string" ||
+    !UUID_PATTERN.test(value.eventId) ||
+    value.runId !== runId ||
+    !Number.isSafeInteger(value.eventOrdinal) ||
+    value.eventOrdinal !== expectedOrdinal ||
+    !Number.isSafeInteger(value.runEpoch) ||
+    (value.runEpoch as number) < 0 ||
+    typeof value.type !== "string" ||
+    value.type.length === 0 ||
+    value.type.length > 200 ||
+    !Object.prototype.hasOwnProperty.call(value, "payload")
   ) {
-    throw new Error(`Invalid workflow event at ordinal ${ordinal}`);
-  }
-  const canonicalPayload = toDurableValue(event.payload);
-  if (JSON.stringify(canonicalPayload) !== JSON.stringify(event.payload)) {
-    throw new Error("Workflow event payload is not canonical");
-  }
-  if (event.type === "run_created") {
-    const payload = requireRecord(event.payload, "run_created payload");
-    assertExactKeys(payload, ["plan"], [], "run_created payload");
-    validateWorkflowPlan(payload.plan);
+    throw new Error("Invalid workflow journal record schema");
   }
 }
 
-function serializeEvent(event: WorkflowEventEnvelope): Buffer {
-  const bytes = Buffer.from(
-    `${JSON.stringify({
-      schemaVersion: 1,
-      eventId: event.eventId,
-      eventOrdinal: event.eventOrdinal,
-      runId: event.runId,
-      runEpoch: event.runEpoch,
-      type: event.type,
-      payload: toDurableValue(event.payload),
-    })}\n`,
-    "utf8",
-  );
-  if (bytes.length > MAX_EVENT_BYTES) {
-    throw new Error("Workflow event exceeds its storage bound");
-  }
-  return bytes;
+function serializeEvent(event: WorkflowEventEnvelope, runId: string): Buffer {
+  if (event.payload === undefined)
+    throw new Error(`Workflow event for ${runId} is missing a payload`);
+  validateEventRecord(event, runId, event.eventOrdinal ?? -1);
+  const encoded = JSON.stringify(event);
+  if (encoded === undefined)
+    throw new Error(`Workflow event for ${runId} is not JSON serializable`);
+  return Buffer.from(`${encoded}\n`, "utf8");
 }
 
 function lastRunEpoch(events: readonly WorkflowEventEnvelope[]): number {
   return events.at(-1)?.runEpoch ?? 0;
 }
 
-function assertJournalEpochOwned(
-  runId: string,
-  events: readonly WorkflowEventEnvelope[],
-  leaseEpoch: number,
-): void {
-  const journalEpoch = lastRunEpoch(events);
-  if (journalEpoch > leaseEpoch) {
-    throw new WorkflowRunCorruptionError(
-      runId,
-      new WorkflowRunAuthorityError(
-        `Workflow journal epoch ${journalEpoch} exceeds held lease epoch ${leaseEpoch}`,
-      ),
-    );
-  }
-}
-
-function assertPhysicalEventLineBounds(bytes: Buffer): void {
-  let lineBytes = 0;
-  for (const byte of bytes) {
-    lineBytes++;
-    if (lineBytes > MAX_EVENT_BYTES) {
-      throw new Error(
-        "Workflow journal contains an oversized physical event line",
-      );
-    }
-    if (byte === 0x0a) lineBytes = 0;
-  }
-}
-
-function requireRecord(
-  value: unknown,
-  label: string,
-): Record<string, DurableValue> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new Error(`${label} must be a plain object`);
-  }
-  return value as Record<string, DurableValue>;
-}
-
-function assertExactKeys(
-  value: Record<string, DurableValue>,
-  required: readonly string[],
-  optional: readonly string[],
-  label: string,
-): void {
-  const allowed: Record<string, true> = {};
-  for (const key of required) {
-    allowed[key] = true;
-    if (!Object.hasOwn(value, key))
-      throw new Error(`${label} is missing ${key}`);
-  }
-  for (const key of optional) allowed[key] = true;
-  for (const key of Object.keys(value)) {
-    if (!allowed[key]) throw new Error(`${label} has unknown field ${key}`);
-  }
-}
-
-async function readOutcomeAtPath(
-  runId: string,
-  path: string,
-  ref: WorkflowOutcomeBlobRef,
-): Promise<DurableValue> {
-  const file = await openVerifiedFile(
-    path,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+function isRetentionEligible(record: WorkflowRunRecord): boolean {
+  const terminal = terminalState(record.events);
+  if (!terminal) return false;
+  const expectedDeliveryId = terminalDeliveryId(record.launch.runId);
+  const terminalMarkerOrdinal = record.events.reduce(
+    (latest, event, ordinal) =>
+      event.type === "run_terminal" || event.type === "run_cancelled"
+        ? ordinal
+        : latest,
+    terminal.ordinal,
   );
-  try {
-    const bytes = await readBoundedFile(file, path, MAX_OUTCOME_BYTES);
-    if (bytes.length !== ref.bytes) {
-      throw new WorkflowRunCorruptionError(
-        runId,
-        new Error("Workflow outcome size does not match its reference"),
-      );
-    }
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (digest !== ref.digest) {
-      throw new WorkflowRunCorruptionError(
-        runId,
-        new Error("Workflow outcome digest does not match its reference"),
-      );
-    }
-    try {
-      const encoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      const value = decodeDurableValue(encoded);
-      if (encodeDurableValue(value) !== encoded) {
-        throw new Error("Workflow outcome blob is not canonically encoded");
-      }
-      return value;
-    } catch (error) {
-      throw new WorkflowRunCorruptionError(runId, error);
-    }
-  } finally {
-    await file.close();
-  }
-}
-
-async function readBoundedFile(
-  file: FileHandle,
-  path: string,
-  maxBytes: number,
-): Promise<Buffer> {
-  const before = await file.stat();
-  assertRegularFileStats(path, before);
-  if (before.size < 0 || before.size > maxBytes) {
-    throw new Error("Workflow storage file exceeds its bounded size");
-  }
-  const identity = fileIdentity(before);
-  const chunks: Buffer[] = [];
-  let position = 0;
-  while (position <= maxBytes) {
-    const requested = Math.min(64 * 1024, maxBytes + 1 - position);
-    const chunk = Buffer.allocUnsafe(requested);
-    const { bytesRead } = await file.read(chunk, 0, requested, position);
-    if (
-      !Number.isSafeInteger(bytesRead) ||
-      bytesRead < 0 ||
-      bytesRead > requested
-    ) {
-      throw new Error("Workflow storage returned an invalid read length");
-    }
-    if (bytesRead === 0) break;
-    chunks.push(chunk.subarray(0, bytesRead));
-    position += bytesRead;
-    if (position > maxBytes) {
-      throw new Error("Workflow storage file exceeds its bounded size");
-    }
-  }
-  const after = await file.stat();
-  assertRegularFileStats(path, after);
+  const postTerminal = record.events.slice(terminalMarkerOrdinal + 1);
+  const receipt = postTerminal.at(-1);
   if (
-    !sameFileIdentity(identity, fileIdentity(after)) ||
-    before.size !== after.size ||
-    after.size !== position ||
-    before.mtimeMs !== after.mtimeMs ||
-    before.ctimeMs !== after.ctimeMs
-  ) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage file changed while being read: ${path}`,
-    );
-  }
-  await assertDescriptorAndTarget(file, path, identity);
-  if (chunks.length === 0) return Buffer.alloc(0);
-  if (chunks.length === 1) return chunks[0]!;
-  return Buffer.concat(chunks, position);
+    !receipt ||
+    receipt.type !== "delivery_receipt" ||
+    !isRecord(receipt.payload) ||
+    receipt.payload.deliveryId !== expectedDeliveryId
+  )
+    return false;
+  const prefix = postTerminal.slice(0, -1);
+  if (
+    !prefix.some((event) => event.type === "delivery_intent") ||
+    !prefix.some((event) => event.type === "delivery_dispatched")
+  )
+    return false;
+  return prefix.every((event) =>
+    ["delivery_intent", "delivery_dispatched", "delivery_receipt"].includes(
+      event.type,
+    ),
+  );
 }
 
-async function writeSyncedFile(path: string, bytes: Buffer): Promise<void> {
+function terminalState(
+  events: readonly WorkflowEventEnvelope[],
+): { status: "done" | "error" | "cancelled"; ordinal: number } | undefined {
+  for (const [ordinal, event] of events.entries()) {
+    if (event.type === "run_cancelled") return { status: "cancelled", ordinal };
+    if (event.type !== "run_result" && event.type !== "run_terminal") continue;
+    const payload = isRecord(event.payload) ? event.payload : undefined;
+    const result = payload?.result ?? payload;
+    if (!isRecord(result)) return undefined;
+    const status = result.status;
+    if (status === "done" || status === "error" || status === "cancelled")
+      return { status, ordinal };
+    return undefined;
+  }
+  return undefined;
+}
+
+function isOwnershipError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("different owner or session")
+  );
+}
+
+function terminalDeliveryId(runId: string): string {
+  return createHash("sha256")
+    .update(`workflow:${runId}:terminal`)
+    .digest("hex");
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertRegularDirectoryStats(
+  path: string,
+  info: { isDirectory(): boolean; nlink: number },
+): void {
+  if (!info.isDirectory() || info.nlink < 1)
+    throw new Error(`Workflow storage path is not a directory: ${path}`);
+}
+
+function assertRegularFileStats(
+  path: string,
+  info: { isFile(): boolean; nlink: number },
+): void {
+  if (!info.isFile() || info.nlink !== 1)
+    throw new Error(`Workflow storage path is not regular: ${path}`);
+}
+
+function fileIdentity(info: { dev: number; ino: number }): FileIdentity {
+  return { dev: info.dev, ino: info.ino };
+}
+
+async function assertDirectoryDescriptorAndTarget(
+  file: Awaited<ReturnType<typeof open>>,
+  path: string,
+  expected: FileIdentity,
+): Promise<void> {
+  const descriptor = await file.stat();
+  assertRegularDirectoryStats(path, descriptor);
+  const target = await lstat(path);
+  assertRegularDirectoryStats(path, target);
+  const descriptorIdentity = fileIdentity(descriptor);
+  const targetIdentity = fileIdentity(target);
+  if (
+    expected.dev !== descriptorIdentity.dev ||
+    expected.ino !== descriptorIdentity.ino ||
+    descriptorIdentity.dev !== targetIdentity.dev ||
+    descriptorIdentity.ino !== targetIdentity.ino
+  )
+    throw new Error(`Workflow storage descriptor changed: ${path}`);
+}
+
+async function assertDescriptorAndTarget(
+  file: Awaited<ReturnType<typeof open>>,
+  path: string,
+  expected?: FileIdentity,
+): Promise<void> {
+  const descriptor = await file.stat();
+  assertRegularFileStats(path, descriptor);
+  const target = await lstat(path);
+  assertRegularFileStats(path, target);
+  const descriptorIdentity = fileIdentity(descriptor);
+  if (
+    expected &&
+    (descriptorIdentity.dev !== expected.dev ||
+      descriptorIdentity.ino !== expected.ino)
+  )
+    throw new Error(`Workflow storage descriptor changed: ${path}`);
+  const targetIdentity = fileIdentity(target);
+  if (
+    descriptorIdentity.dev !== targetIdentity.dev ||
+    descriptorIdentity.ino !== targetIdentity.ino
+  )
+    throw new Error(`Workflow storage target changed: ${path}`);
+}
+
+async function writeSyncedFile(
+  path: string,
+  content: string | Buffer,
+  mode: number,
+): Promise<void> {
   const file = await open(
     path,
     fsConstants.O_WRONLY |
       fsConstants.O_CREAT |
       fsConstants.O_EXCL |
       fsConstants.O_NOFOLLOW,
-    0o600,
+    mode,
   );
   try {
-    const stats = await file.stat();
-    assertRegularFileStats(path, stats);
-    const identity = fileIdentity(stats);
+    const bytes = typeof content === "string" ? Buffer.from(content) : content;
     await writeFully(file, bytes, 0);
     await file.sync();
-    await assertDescriptorAndTarget(file, path, identity);
   } finally {
     await file.close();
   }
 }
 
 async function writeFully(
-  file: FileHandle,
+  file: Awaited<ReturnType<typeof open>>,
   bytes: Buffer,
   position: number,
 ): Promise<void> {
-  let offset = 0;
-  while (offset < bytes.length) {
-    const { bytesWritten } = await file.write(
+  let written = 0;
+  while (written < bytes.length) {
+    const result = await file.write(
       bytes,
-      offset,
-      bytes.length - offset,
-      position + offset,
+      written,
+      bytes.length - written,
+      position + written,
     );
-    if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0) {
-      throw new Error("Workflow storage short write");
-    }
-    offset += bytesWritten;
+    if (!Number.isSafeInteger(result.bytesWritten) || result.bytesWritten <= 0)
+      throw new Error("Workflow journal short write");
+    written += result.bytesWritten;
   }
 }
 
-async function openVerifiedFile(path: string, flags: number) {
-  const before = await lstat(path);
-  assertRegularFileStats(path, before);
-  const identity = fileIdentity(before);
-  let file: FileHandle | undefined;
-  try {
-    file = await open(path, flags, 0o600);
-    await assertDescriptorAndTarget(file, path, identity);
-    return file;
-  } catch (error) {
-    await file?.close();
-    throw error;
-  }
-}
-
-async function openVerifiedDirectory(path: string): Promise<OpenDirectory> {
-  const before = await lstat(path);
-  assertRegularDirectoryStats(path, before);
-  const identity = fileIdentity(before);
-  let file: FileHandle | undefined;
-  try {
-    file = await open(
-      path,
-      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-    );
-    await assertDirectoryDescriptorAndTarget(file, path, identity);
-    return { file, identity };
-  } catch (error) {
-    await file?.close();
-    throw error;
-  }
-}
-
-async function openOrCreateDirectory(
-  parent: OpenDirectory,
-  parentPath: string,
-  path: string,
-): Promise<OpenDirectory> {
-  await assertDirectoryDescriptorAndTarget(
-    parent.file,
-    parentPath,
-    parent.identity,
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(
+    path,
+    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
   );
-  let created = false;
   try {
-    await mkdir(path, { mode: 0o700 });
-    created = true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    await directory.sync();
+  } finally {
+    await directory.close();
   }
-  const directory = await openVerifiedDirectory(path);
-  try {
-    await assertDirectoryDescriptorAndTarget(
-      parent.file,
-      parentPath,
-      parent.identity,
-    );
-    if (created) await parent.file.sync();
-    await assertDirectoryDescriptorAndTarget(
-      parent.file,
-      parentPath,
-      parent.identity,
-    );
-    return directory;
-  } catch (error) {
-    await directory.file.close();
-    throw error;
-  }
-}
-
-async function assertRegularFile(path: string): Promise<void> {
-  assertRegularFileStats(path, await lstat(path));
-}
-
-function assertRegularFileStats(path: string, stats: Stats): void {
-  if (!stats.isFile() || stats.nlink !== 1) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage authority is not a regular single-link file: ${path}`,
-    );
-  }
-  assertEffectiveOwner(path, stats);
-  if ((stats.mode & 0o077) !== 0) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage file grants group or other access: ${path}`,
-    );
-  }
-}
-
-async function assertRegularDirectory(path: string): Promise<void> {
-  assertRegularDirectoryStats(path, await lstat(path));
-}
-
-function assertRegularDirectoryStats(path: string, stats: Stats): void {
-  if (!stats.isDirectory()) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage authority is not a directory: ${path}`,
-    );
-  }
-  assertEffectiveOwner(path, stats);
-  if ((stats.mode & 0o077) !== 0) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage directory grants group or other access: ${path}`,
-    );
-  }
-}
-
-function assertEffectiveOwner(path: string, stats: Stats): void {
-  if (
-    typeof process.geteuid === "function" &&
-    stats.uid !== process.geteuid()
-  ) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage authority has an unexpected owner: ${path}`,
-    );
-  }
-}
-
-async function assertDescriptorAndTarget(
-  file: FileHandle,
-  path: string,
-  expected?: FileIdentity,
-): Promise<void> {
-  const descriptor = await file.stat();
-  const target = await lstat(path);
-  assertRegularFileStats(path, descriptor);
-  assertRegularFileStats(path, target);
-  const opened = fileIdentity(descriptor);
-  const actual = fileIdentity(target);
-  if (
-    (expected && !sameFileIdentity(expected, actual)) ||
-    !sameFileIdentity(opened, actual)
-  ) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage file authority changed: ${path}`,
-    );
-  }
-}
-
-async function assertDirectoryDescriptorAndTarget(
-  file: FileHandle,
-  path: string,
-  expected: FileIdentity,
-): Promise<void> {
-  const descriptor = await file.stat();
-  const target = await lstat(path);
-  assertRegularDirectoryStats(path, descriptor);
-  assertRegularDirectoryStats(path, target);
-  const opened = fileIdentity(descriptor);
-  const actual = fileIdentity(target);
-  if (
-    !sameFileIdentity(expected, actual) ||
-    !sameFileIdentity(opened, actual)
-  ) {
-    throw new WorkflowRunAuthorityError(
-      `Workflow storage directory authority changed: ${path}`,
-    );
-  }
-}
-
-function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function fileIdentity(stats: Pick<Stats, "dev" | "ino">): FileIdentity {
-  return { dev: stats.dev, ino: stats.ino };
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -1770,15 +1605,28 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function removeCreationDirectory(
+  path: string,
+  originalError: unknown,
+): Promise<void> {
+  try {
+    await rm(path, { recursive: true, force: true });
+  } catch (cleanupError) {
+    throw new Error("Failed to remove unpublished workflow run directory", {
+      cause: new AggregateError([originalError, cleanupError]),
+    });
+  }
+}
+
 export function workflowRunStoreRoot(
   rootDir: string,
   owner: WorkflowOwnerIdentity,
 ): string {
-  if (!isAbsolute(rootDir) || Buffer.byteLength(rootDir, "utf8") > 4096) {
-    throw new Error("Invalid workflow store root directory");
-  }
-  validateOwnerRecord(owner);
-  return join(rootDir, owner.projectKey, owner.piSessionId);
+  return join(
+    rootDir,
+    safePart(owner.projectKey, "project key"),
+    safePart(owner.piSessionId, "session id"),
+  );
 }
 
 export function workflowRunPath(
@@ -1787,5 +1635,12 @@ export function workflowRunPath(
   runId: string,
 ): string {
   validateWorkflowRunId(runId);
-  return join(workflowRunStoreRoot(rootDir, owner), "runs", runId);
+  return dirname(
+    join(
+      workflowRunStoreRoot(rootDir, owner),
+      "runs",
+      safePart(runId, "run id"),
+      "events.ndjson",
+    ),
+  );
 }

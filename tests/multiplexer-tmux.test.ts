@@ -677,13 +677,12 @@ describe("multiplexer-tmux", () => {
     new TmuxMultiplexer().sendKeys("%42", "echo hello");
 
     const sk = calls.find((a) => a[0] === "send-keys");
-    expect(sk).toEqual(["send-keys", "-t", "%42", "-l", "--", "echo hello"]);
+    expect(sk).toEqual(["send-keys", "-t", "%42", "-l", "echo hello"]);
   });
 
-  it("sendKeys terminates flags with -- so leading-dash text is not parsed as a flag", async () => {
-    // Real tmux: `send-keys -t %42 -l "-n hi"` fails with
-    // `command send-keys: unknown flag -n` (exit 1). Follow-up text is
-    // user/model controlled, so the terminator must always be present.
+  it("sendKeys makes leading-dash text safe without a GNU -- terminator", async () => {
+    // tmux treats `--` as a literal key, so the first `-` is sent separately
+    // to terminate option parsing before the remainder of the text.
     process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
     const calls: string[][] = [];
     installMockExec((args) => {
@@ -696,7 +695,7 @@ describe("multiplexer-tmux", () => {
     new TmuxMultiplexer().sendKeys("%42", "-n not-a-flag");
 
     const sk = calls.find((a) => a[0] === "send-keys")!;
-    expect(sk[sk.indexOf("-n not-a-flag") - 1]).toBe("--");
+    expect(sk).toEqual(["send-keys", "-t", "%42", "-l", "-", "n not-a-flag"]);
   });
 
   it("sendKeys sends text with newlines verbatim", async () => {

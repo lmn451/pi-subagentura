@@ -9,6 +9,7 @@ import {
   writeOutput,
   type SubagentEventV2,
 } from "./artifact";
+import { persistWorkflowProcessChildStartedEvidenceSync } from "./workflow-process-handshake";
 
 interface ActiveTurn {
   turnId: string;
@@ -35,6 +36,40 @@ function writeActiveTurn(turn: ActiveTurn, art = getArtifact()): void {
   const tmp = file + ".tmp";
   writeFileSync(tmp, JSON.stringify(turn), { mode: 0o600 });
   renameSync(tmp, file);
+}
+
+function persistWorkflowChildStart(art: ReturnType<typeof getArtifact>): void {
+  const launchMarker = process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER;
+  const nonce = process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_NONCE;
+  const attemptId = process.env.PI_SUBAGENTURA_WORKFLOW_ATTEMPT_ID;
+  const epochValue = process.env.PI_SUBAGENTURA_WORKFLOW_EPOCH;
+  if (
+    launchMarker === undefined &&
+    nonce === undefined &&
+    attemptId === undefined &&
+    epochValue === undefined
+  ) {
+    return;
+  }
+  const epoch = epochValue === undefined ? undefined : Number(epochValue);
+  if (
+    typeof launchMarker !== "string" ||
+    typeof nonce !== "string" ||
+    typeof attemptId !== "string" ||
+    typeof epoch !== "number" ||
+    !Number.isSafeInteger(epoch) ||
+    epoch < 1
+  ) {
+    throw new Error(
+      "Invalid workflow process launch identity in child environment",
+    );
+  }
+  persistWorkflowProcessChildStartedEvidenceSync(art.dir, {
+    launchMarker,
+    nonce,
+    attemptId,
+    epoch,
+  });
 }
 
 export function readActiveTurn(art = getArtifact()): ActiveTurn | null {
@@ -88,6 +123,7 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
+  persistWorkflowChildStart(art);
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,

@@ -33,6 +33,7 @@ import {
 } from "./session-scope";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   existsSync,
   mkdirSync,
@@ -72,6 +73,7 @@ import {
   type CancellationSnapshotReceipt,
   type CancellationSnapshotSource,
 } from "./cancellation-snapshots";
+import type { WorkflowProcessLaunchIntent } from "./workflow-process-handshake";
 import {
   countLineageManifestsSync,
   DEFAULT_MAX_DEPTH,
@@ -397,6 +399,7 @@ export function buildPiInteractiveCommand(params: {
   name: string;
   promptFile: string;
   systemPromptFile?: string;
+  extensionPath?: string;
   model?: string;
   cwd: string;
   thinkingLevel?: ThinkingLevel;
@@ -417,6 +420,9 @@ export function buildPiInteractiveCommand(params: {
   }
   if (params.systemPromptFile) {
     parts.push("--append-system-prompt", escape(params.systemPromptFile));
+  }
+  if (params.extensionPath) {
+    parts.push("--extension", escape(params.extensionPath));
   }
   parts.push(escape(`@${params.promptFile}`));
   return `cd ${escape(params.cwd)} && ${parts.join(" ")}`;
@@ -515,6 +521,8 @@ export function launchInteractiveSubagent(params: {
   parentCwd?: string;
   /** Thinking/reasoning level for the child Pi process. */
   thinkingLevel?: ThinkingLevel;
+  /** Durable process launch identity propagated into the child environment. */
+  workflowProcessLaunchIntent?: WorkflowProcessLaunchIntent;
 }): InteractiveSubagentState {
   // 8 bytes, not 4: at 32 bits a birthday collision inside one tree is not
   // remote, and the duplicate-id path only degrades gracefully — it does not
@@ -730,17 +738,32 @@ export function launchInteractiveSubagent(params: {
       name: params.name,
       promptFile: paths.promptFile,
       systemPromptFile,
+      extensionPath: fileURLToPath(new URL("./subagent.ts", import.meta.url)),
       model: params.model,
       cwd,
       thinkingLevel: params.thinkingLevel,
     });
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
+      PATH: process.env.PATH ?? "",
       ...(rootId ? { PI_SUBAGENTURA_ROOT_ID: rootId } : {}),
       ...(rootId ? { PI_SUBAGENTURA_LINEAGE_SESSION_ROOT: sessionRoot } : {}),
       PI_SUBAGENTURA_AGENT_ID: id,
       PI_SUBAGENTURA_DEPTH: String(nextDepth),
       PI_SUBAGENTURA_MAX_DEPTH: String(effectiveMaxDepth),
       PI_SUBAGENTURA_MAX_NODES: String(maxNodes),
+      ...(params.workflowProcessLaunchIntent
+        ? {
+            PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER:
+              params.workflowProcessLaunchIntent.launchMarker,
+            PI_SUBAGENTURA_WORKFLOW_LAUNCH_NONCE:
+              params.workflowProcessLaunchIntent.nonce,
+            PI_SUBAGENTURA_WORKFLOW_ATTEMPT_ID:
+              params.workflowProcessLaunchIntent.attemptId,
+            PI_SUBAGENTURA_WORKFLOW_EPOCH: String(
+              params.workflowProcessLaunchIntent.epoch,
+            ),
+          }
+        : {}),
     });
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
     mux.sendKeys(

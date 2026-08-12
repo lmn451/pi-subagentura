@@ -1,84 +1,44 @@
-import {
-  addWorkflowUsage,
-  zeroWorkflowUsage,
-  type WorkflowUsage,
-} from "./workflow-core";
-import {
-  WorkflowRunCorruptionError,
-  WorkflowRunStore,
-} from "./workflow-run-store";
 import type {
   WorkflowEventEnvelope,
-  WorkflowOutcomeBlobRef,
-  WorkflowOwnerIdentity,
   WorkflowRunLaunch,
   WorkflowRunStatus,
   WorkflowTerminalResult,
+  WorkflowDeliveryIntent,
+  WorkflowDeliveryClaim,
+  WorkflowApprovalRequest,
+  WorkflowApprovalDecision,
+  WorkflowCancellationRequest,
 } from "./workflow-run-types";
+import {
+  verifyMutationPayload,
+  type WorkflowTaskClaim,
+} from "./workflow-mutation";
 
-export interface WorkflowTaskClaim {
-  runId: string;
-  taskId: string;
-  operationId: string;
-  attempt: number;
-  runEpoch: number;
-  ownerId: string;
-  ownerGeneration: number;
-  leaseEpoch: number;
-  token: string;
-}
-
-export interface WorkflowProjectionAttempt {
-  attempt: number;
-  status: "running" | "interrupted" | "settled";
-  claim: WorkflowTaskClaim;
-  settlementEventId?: string;
-  outcomeRef?: WorkflowOutcomeBlobRef;
-  outcome?: "succeeded" | "failed";
-  result?: unknown;
-  error?: string;
-  usage?: WorkflowAttemptUsage;
-  usageProvenance?: "exact" | "lower_bound";
-}
-
-export interface WorkflowProjectionOperation {
-  operationId: string;
-  taskId: string;
-  phaseId: string;
-  requestDigest: string;
-  status:
-    "prepared" | "running" | "interrupted" | "attempt_settled" | "settled";
-  attempt: number;
-  attempts: Record<number, WorkflowProjectionAttempt>;
-  settledAttempt?: number;
-}
+export type { WorkflowTaskClaim } from "./workflow-mutation";
 
 export interface WorkflowProjectionTask {
   id: string;
-  status: "pending" | "running" | "interrupted" | "succeeded" | "failed";
+  status:
+    "pending" | "blocked" | "running" | "succeeded" | "failed" | "skipped";
   attempt: number;
-  phaseId: string;
-  prompt: string;
+  phaseId?: string;
+  prompt?: string;
   label?: string;
-  operationId?: string;
+  approval?: { policyHash: string; denial: "stop" | "skip" };
   result?: unknown;
   error?: string;
   claim?: WorkflowTaskClaim;
 }
-
-export interface WorkflowLiveProgress {
-  runEpoch: number;
-  ownerGeneration: number;
-  leaseToken: string;
-  leaseEpoch: number;
-  status?: Extract<WorkflowRunStatus, "created" | "running" | "interrupted">;
-  currentPhase?: string;
-  tasks?: Readonly<
-    Record<
-      string,
-      { status: "pending" | "running" | "interrupted"; attempt?: number }
-    >
-  >;
+export interface WorkflowProjectionBlockers {
+  budget?: { reason?: string };
+  approval?: {
+    requestId?: string;
+    reason?: string;
+    source: "approval";
+  };
+  runtime?: { reason: string };
+  tasks: Record<string, { reason?: string }>;
+  claims: Record<string, WorkflowTaskClaim>;
 }
 
 export interface WorkflowProjection {
@@ -87,38 +47,32 @@ export interface WorkflowProjection {
   owner: WorkflowRunLaunch["owner"];
   status: WorkflowRunStatus;
   revision: number;
-  resumeRevision: number;
-  runEpoch: number;
   currentPhase?: string;
   tasks: Record<string, WorkflowProjectionTask>;
-  operations: Record<string, WorkflowProjectionOperation>;
+  blockers: WorkflowProjectionBlockers;
   terminal?: WorkflowTerminalResult;
-  usage: WorkflowUsage;
+  usage: { input: number; output: number };
   usageLowerBound?: boolean;
-  cancellation?: { requestId: string };
   lastEventOrdinal: number;
+  delivery?: WorkflowDeliveryIntent;
+  cancellation?: WorkflowCancellationRequest;
+  approval?: {
+    request: WorkflowApprovalRequest;
+    status: "pending" | "approved" | "rejected";
+    decision?: WorkflowApprovalDecision;
+  };
+  runBlock?: { reason: string; source: "approval" | "runtime" };
+  mutationHash?: string;
 }
 
+/** Read-only authority used by status, result, and tree projections. */
 export interface WorkflowProjectionRepository {
   get(runId: string): Promise<WorkflowProjection | undefined>;
   list(): Promise<readonly WorkflowProjection[]>;
 }
 
-export interface DurableWorkflowProjectionRepositoryOptions {
-  /** Reserved for the controller between its own creation commit and executor start. */
-  preserveCreated?: boolean;
-  getLiveProgress?: (
-    runId: string,
-  ) =>
-    | WorkflowLiveProgress
-    | undefined
-    | Promise<WorkflowLiveProgress | undefined>;
-}
+type Event = WorkflowEventEnvelope<string, any>;
 
-type Event = WorkflowEventEnvelope<string, unknown>;
-type WorkflowAttemptUsage = NonNullable<Parameters<typeof addWorkflowUsage>[1]>;
-
-/** Fold the authoritative journal. An unfinished cold prefix is interrupted. */
 export function projectWorkflowRun(
   launch: WorkflowRunLaunch,
   events: readonly Event[],
@@ -129,496 +83,412 @@ export function projectWorkflowRun(
     owner: launch.owner,
     status: "created",
     revision: 0,
-    resumeRevision: 0,
-    runEpoch: 0,
     tasks: Object.create(null) as Record<string, WorkflowProjectionTask>,
-    operations: Object.create(null) as Record<
-      string,
-      WorkflowProjectionOperation
-    >,
-    usage: zeroWorkflowUsage(),
+    blockers: { tasks: {}, claims: {} },
+    usage: { input: 0, output: 0 },
     lastEventOrdinal: -1,
   };
+
   const appliedEventIds = new Set<string>();
-  const accountedOperations = new Set<string>();
+  const usageKeys = new Set<string>();
+  let mutationHash = "";
 
-  for (const event of events) {
-    projection.lastEventOrdinal = Math.max(
-      projection.lastEventOrdinal,
-      event.eventOrdinal,
-    );
+  for (const [ordinal, event] of events.entries()) {
     if (appliedEventIds.has(event.eventId)) continue;
+    const baseRevision = projection.revision;
+    const baseOrdinal = projection.lastEventOrdinal;
+    projection.lastEventOrdinal = ordinal;
+    if (isMutationEvent(event.type)) {
+      const verification = verifyMutationPayload(
+        event,
+        launch.owner,
+        baseRevision,
+        baseOrdinal,
+        mutationHash,
+      );
+      if (!verification.valid) continue;
+      const payload = event.payload;
+      if (isRecord(payload) && typeof payload.mutationHash === "string") {
+        mutationHash = verification.hash;
+        projection.mutationHash = verification.hash;
+      }
+    }
     appliedEventIds.add(event.eventId);
-    if (event.runId !== launch.runId || event.runEpoch < projection.runEpoch) {
-      continue;
-    }
-    if (event.runEpoch > projection.runEpoch) {
-      projection.runEpoch = event.runEpoch;
-    }
     projection.revision++;
-    applyEvent(projection, event, accountedOperations);
+    applyEvent(projection, event, usageKeys);
   }
-
-  if (!projection.terminal && !isTerminalStatus(projection.status)) {
-    let unfinished = false;
-    for (const operation of Object.values(projection.operations)) {
-      if (operation.status === "settled") continue;
-      unfinished = true;
-      const task = projection.tasks[operation.taskId];
-      const attempt = operation.attempts[operation.attempt];
-      if (attempt?.status === "running") {
-        attempt.status = "interrupted";
-        attempt.usageProvenance = "lower_bound";
-        projection.usageLowerBound = true;
-      }
-      if (task && task.status !== "succeeded" && task.status !== "failed") {
-        task.status = "interrupted";
-        delete task.claim;
-      }
-    }
-    if (projection.status === "running" || unfinished) {
-      projection.status = "interrupted";
-    }
-  }
-
+  projection.tasks = Object.fromEntries(
+    Object.entries(projection.tasks).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
   return projection;
 }
 
-/** Owner-scoped durable read authority with an optional same-epoch live overlay. */
-export class DurableWorkflowProjectionRepository implements WorkflowProjectionRepository {
-  public constructor(
-    private readonly store: WorkflowRunStore,
-    private readonly owner: WorkflowOwnerIdentity,
-    private readonly options: DurableWorkflowProjectionRepositoryOptions = {},
-  ) {}
-
-  public async get(runId: string): Promise<WorkflowProjection | undefined> {
-    try {
-      const record = await this.store.readRun(runId);
-      assertSameOwner(record.launch.owner, this.owner);
-      const projection = projectWorkflowRun(record.launch, record.events);
-      await hydrateOutcomeBlobs(this.store, projection);
-      const leaseEpoch = await this.store.getLeaseEpoch();
-      if (
-        !projection.terminal &&
-        projection.status === "created" &&
-        !this.options.preserveCreated
-      ) {
-        projection.status = "interrupted";
-      }
-      const live = await this.options.getLiveProgress?.(runId);
-      return live?.runEpoch === projection.runEpoch &&
-        live.ownerGeneration === this.owner.ownerGeneration &&
-        live.leaseToken === this.owner.leaseToken &&
-        live.leaseEpoch === leaseEpoch &&
-        projection.runEpoch === leaseEpoch
-        ? overlayLiveProgress(projection, live)
-        : projection;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
-      throw error;
-    }
-  }
-
-  public async list(): Promise<readonly WorkflowProjection[]> {
-    const projections: WorkflowProjection[] = [];
-    for (const runId of await this.store.listRunIds()) {
-      const projection = await this.get(runId);
-      if (projection) projections.push(projection);
-    }
-    return projections;
-  }
-}
-
-async function hydrateOutcomeBlobs(
-  store: WorkflowRunStore,
-  projection: WorkflowProjection,
-): Promise<void> {
-  for (const operation of Object.values(projection.operations)) {
-    for (const attempt of Object.values(operation.attempts)) {
-      if (!attempt.outcomeRef) continue;
-      const value = await store.readOutcomeBlob(
-        projection.runId,
-        attempt.outcomeRef,
-      );
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        throw new WorkflowRunCorruptionError(
-          projection.runId,
-          new Error("Workflow outcome blob is not an object"),
-        );
-      }
-      if (value.status === "succeeded" && "result" in value) {
-        attempt.outcome = "succeeded";
-        attempt.result = value.result;
-      } else if (
-        value.status === "failed" &&
-        "error" in value &&
-        typeof value.error === "string"
-      ) {
-        attempt.outcome = "failed";
-        attempt.error = value.error;
-      } else {
-        throw new WorkflowRunCorruptionError(
-          projection.runId,
-          new Error("Workflow outcome blob has an invalid settlement"),
-        );
-      }
-    }
-
-    if (
-      operation.status !== "settled" ||
-      operation.settledAttempt === undefined
-    ) {
-      continue;
-    }
-    const settled = operation.attempts[operation.settledAttempt];
-    const task = projection.tasks[operation.taskId];
-    if (!settled?.outcome || !task) {
-      throw new WorkflowRunCorruptionError(
-        projection.runId,
-        new Error("Workflow operation references an unresolved outcome"),
-      );
-    }
-    if (settled.outcome === "succeeded") {
-      task.status = "succeeded";
-      task.result = settled.result;
-      delete task.error;
-    } else {
-      task.status = "failed";
-      task.error = settled.error ?? "Task failed";
-      delete task.result;
-    }
-  }
+function isMutationEvent(type: string): boolean {
+  return [
+    "task_blocked",
+    "task_unblocked",
+    "task_skipped",
+    "task_appended",
+  ].includes(type);
 }
 
 function applyEvent(
   projection: WorkflowProjection,
   event: Event,
-  accountedOperations: Set<string>,
+  usageKeys: Set<string>,
 ): void {
-  const payload = recordPayload(event.payload);
-  if (projection.terminal && !isTerminalFollowup(event.type)) return;
-
+  const payload = event.payload ?? {};
+  // A task failure moves the projection to `error` before the coordinator
+  // appends the richer terminal result. Keep that follow-up event applicable,
+  // otherwise failed runs lose their durable error envelope during recovery.
+  if (
+    isTerminal(projection.status) &&
+    event.type !== "run_result" &&
+    event.type !== "run_terminal" &&
+    event.type !== "delivery_intent" &&
+    event.type !== "delivery_dispatched" &&
+    event.type !== "delivery_receipt" &&
+    event.type !== "run_cancelled"
+  )
+    return;
   switch (event.type) {
-    case "run_created": {
-      const plan = recordPayload(payload.plan);
-      const phases = Array.isArray(plan.phases) ? plan.phases : [];
-      for (const phaseValue of phases) {
-        const phase = recordPayload(phaseValue);
-        const phaseId = stringValue(phase.id);
-        const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
-        for (const taskValue of tasks) {
-          const task = recordPayload(taskValue);
-          const id = stringValue(task.id);
-          const prompt = stringValue(task.prompt);
-          if (!id || projection.tasks[id]) continue;
+    case "run_created":
+      projection.status = "created";
+      for (const task of creationTasks(payload)) {
+        const id = String(task.id);
+        if (!projection.tasks[id]) {
           projection.tasks[id] = {
             id,
             status: "pending",
             attempt: 0,
-            phaseId,
-            prompt,
-            ...(typeof task.label === "string" ? { label: task.label } : {}),
+            phaseId: String(task.phaseId),
+            prompt: String(task.prompt),
+            ...(task.label === undefined ? {} : { label: String(task.label) }),
+            ...(isApprovalGate(task.approval)
+              ? { approval: task.approval }
+              : {}),
           };
         }
       }
-      projection.status = "created";
       break;
-    }
     case "run_started":
       projection.status = "running";
+      delete projection.blockers.runtime;
+      refreshStatus(projection);
       break;
-    case "run_resume_requested": {
-      const resumeRevision = integerValue(payload.resumeRevision);
-      if (resumeRevision !== projection.resumeRevision + 1) break;
-      projection.resumeRevision = resumeRevision;
-      projection.status = "running";
-      for (const operation of Object.values(projection.operations)) {
-        if (
-          operation.status !== "running" &&
-          operation.status !== "interrupted"
-        ) {
-          continue;
-        }
-        const attempt = operation.attempts[operation.attempt];
-        if (attempt?.status === "running") {
-          attempt.status = "interrupted";
-          attempt.usageProvenance = "lower_bound";
-          projection.usageLowerBound = true;
-        }
-        operation.status = "prepared";
-        const task = projection.tasks[operation.taskId];
-        if (task && task.status !== "succeeded" && task.status !== "failed") {
-          task.status = "pending";
-          delete task.claim;
-        }
-      }
-      break;
-    }
-    case "operation_prepared": {
-      const taskId = stringValue(payload.taskId);
-      const operationId = stringValue(payload.operationId);
-      const phaseId = stringValue(payload.phaseId);
-      const requestDigest = stringValue(payload.requestDigest);
-      const task = projection.tasks[taskId];
-      if (!task || !operationId || projection.operations[operationId]) break;
-      projection.operations[operationId] = {
-        operationId,
-        taskId,
-        phaseId,
-        requestDigest,
-        status: "prepared",
-        attempt: 0,
-        attempts: Object.create(null) as Record<
-          number,
-          WorkflowProjectionAttempt
-        >,
+    case "run_awaiting_budget":
+      projection.blockers.budget = {
+        ...(payload.reason === undefined
+          ? {}
+          : { reason: String(payload.reason) }),
       };
-      task.operationId = operationId;
-      projection.currentPhase = phaseId;
-      projection.status = "running";
+      projection.status = "awaiting_budget";
+      break;
+    case "run_budget_resumed":
+      delete projection.blockers.budget;
+      refreshStatus(projection);
+      break;
+    case "approval_requested": {
+      const request = payload.request as WorkflowApprovalRequest;
+      projection.approval = { request, status: "pending" };
+      projection.blockers.approval = {
+        requestId: String(request.requestId),
+        source: "approval",
+      };
+      if (!isTerminal(projection.status)) projection.status = "blocked";
       break;
     }
-    case "attempt_started": {
-      const taskId = stringValue(payload.taskId);
-      const operationId = stringValue(payload.operationId);
-      const attemptNumber = integerValue(payload.attempt);
-      const operation = projection.operations[operationId];
-      const task = projection.tasks[taskId];
-      const claim = parseClaim(
-        payload.claim,
-        projection.runId,
-        taskId,
-        operationId,
-        attemptNumber,
-        event.runEpoch,
-      );
-      if (
-        !operation ||
-        operation.taskId !== taskId ||
-        !task ||
-        operation.status === "settled" ||
-        !claim ||
-        attemptNumber <= operation.attempt
-      ) {
-        break;
+    case "approval_decided":
+      if (!projection.approval) return;
+      projection.approval.status = payload.status;
+      projection.approval.decision = payload as WorkflowApprovalDecision;
+      if (payload.status === "rejected") {
+        if (projection.approval.request.denial === "skip") {
+          delete projection.blockers.approval;
+          refreshStatus(projection);
+          break;
+        }
+        projection.blockers.approval = {
+          requestId: projection.approval.request.requestId,
+          source: "approval",
+          ...(payload.reason === undefined
+            ? {}
+            : { reason: String(payload.reason) }),
+        };
+        projection.status = "blocked";
+      } else {
+        delete projection.blockers.approval;
+        refreshStatus(projection);
       }
-      operation.attempt = attemptNumber;
-      operation.status = "running";
-      operation.attempts[attemptNumber] = {
-        attempt: attemptNumber,
+      break;
+    case "run_cancel_requested":
+      if (!projection.cancellation) {
+        projection.cancellation = payload as WorkflowCancellationRequest;
+      }
+      break;
+    case "task_started": {
+      const id = String(payload.taskId);
+      const previous = projection.tasks[id];
+      const attempt = Number(payload.attempt ?? (previous?.attempt ?? 0) + 1);
+      const parsedClaim =
+        payload.claim === undefined
+          ? undefined
+          : parseClaim(payload.claim, projection.runId, id, attempt);
+      if (payload.claim !== undefined && !parsedClaim) return;
+      if (previous && isTerminalTask(previous.status)) return;
+      if (previous?.status === "blocked") return;
+      if (previous && attempt < previous.attempt) return;
+      if (
+        previous?.claim &&
+        attempt === previous.attempt &&
+        (!parsedClaim || !sameClaim(previous.claim, parsedClaim))
+      )
+        return;
+      projection.tasks[id] = {
+        id,
         status: "running",
-        claim,
+        attempt,
+        ...definitionFields(previous),
+        ...(parsedClaim === undefined ? {} : { claim: parsedClaim }),
       };
-      task.status = "running";
-      task.attempt = attemptNumber;
-      task.claim = claim;
-      projection.currentPhase = operation.phaseId;
+      if (parsedClaim) projection.blockers.claims[id] = parsedClaim;
+      else delete projection.blockers.claims[id];
       projection.status = "running";
+      projection.currentPhase = payload.phaseId ?? projection.currentPhase;
       break;
     }
-    case "attempt_interrupted": {
-      const operationId = stringValue(payload.operationId);
-      const attemptNumber = integerValue(payload.attempt);
-      const operation = projection.operations[operationId];
-      const attempt = operation?.attempts[attemptNumber];
-      const task = operation ? projection.tasks[operation.taskId] : undefined;
-      if (
-        !operation ||
-        operation.status !== "running" ||
-        !attempt ||
-        attempt.status !== "running" ||
-        !task ||
-        !sameClaim(attempt.claim, payload.claim)
-      ) {
-        break;
+    case "task_succeeded":
+    case "task_done": {
+      const id = String(payload.taskId);
+      const previous = projection.tasks[id];
+      const attempt = Number(payload.attempt ?? previous?.attempt ?? 1);
+      if (previous && attempt < previous.attempt) return;
+      if (previous?.status === "succeeded") return;
+      if (!settlementMatches(previous, payload.claim, attempt)) return;
+      projection.tasks[id] = {
+        id,
+        status: "succeeded",
+        attempt,
+        ...definitionFields(previous),
+        ...(payload.result === undefined ? {} : { result: payload.result }),
+      };
+      delete projection.blockers.claims[id];
+      break;
+    }
+    case "task_failed": {
+      const id = String(payload.taskId);
+      const previous = projection.tasks[id];
+      const attempt = Number(payload.attempt ?? previous?.attempt ?? 1);
+      if (previous && attempt < previous.attempt) return;
+      if (previous && isTerminalTask(previous.status)) return;
+      if (!settlementMatches(previous, payload.claim, attempt)) return;
+      projection.tasks[id] = {
+        id,
+        status: "failed",
+        attempt,
+        ...definitionFields(previous),
+        error: String(payload.error ?? payload.message ?? "Task failed"),
+      };
+      delete projection.blockers.claims[id];
+      projection.status = "error";
+      break;
+    }
+    case "task_blocked":
+    case "task_unblocked":
+    case "task_skipped": {
+      const id = String(payload.taskId);
+      const previous = projection.tasks[id];
+      if (previous && isTerminalTask(previous.status)) return;
+      const status =
+        event.type === "task_blocked"
+          ? "blocked"
+          : event.type === "task_skipped"
+            ? "skipped"
+            : "pending";
+      projection.tasks[id] = {
+        id,
+        status,
+        attempt: previous?.attempt ?? 0,
+        ...definitionFields(previous),
+      };
+      delete projection.blockers.claims[id];
+      if (event.type === "task_blocked") {
+        projection.blockers.tasks[id] = {
+          ...(payload.reason === undefined
+            ? {}
+            : { reason: String(payload.reason) }),
+        };
+        projection.status = "blocked";
+      } else {
+        delete projection.blockers.tasks[id];
+        refreshStatus(projection);
       }
-      const usage = parseUsage(payload.usage);
-      attempt.status = "interrupted";
-      attempt.usage = usage;
-      attempt.usageProvenance = "lower_bound";
-      operation.status = "interrupted";
-      if (task.status !== "succeeded" && task.status !== "failed") {
-        task.status = "interrupted";
-        delete task.claim;
-      }
-      projection.usage = addWorkflowUsage(projection.usage, usage);
+      break;
+    }
+    case "task_appended": {
+      const id = String(payload.taskId);
+      if (projection.tasks[id]) return;
+      projection.tasks[id] = {
+        id,
+        status: "pending",
+        attempt: 0,
+        phaseId: String(payload.phaseId),
+        prompt: String(payload.prompt),
+        ...(payload.label === undefined
+          ? {}
+          : { label: String(payload.label) }),
+      };
+      break;
+    }
+    case "usage_observed": {
+      const taskId = payload.taskId;
+      const attempt = payload.attempt;
+      const task =
+        taskId === undefined ? undefined : projection.tasks[String(taskId)];
+      if (payload.claim !== undefined) {
+        const parsedClaim =
+          task === undefined ||
+          !task.claim ||
+          !sameClaim(task.claim, payload.claim)
+            ? undefined
+            : parseClaim(
+                payload.claim,
+                projection.runId,
+                String(taskId),
+                Number(attempt),
+              );
+        if (!parsedClaim) return;
+      } else if (task?.claim) return;
+      const key =
+        taskId === undefined || attempt === undefined
+          ? event.eventId
+          : `${String(taskId)}:${String(attempt)}`;
+      if (usageKeys.has(key)) return;
+      usageKeys.add(key);
+      projection.usage.input += finite(payload.input);
+      projection.usage.output += finite(payload.output);
+      break;
+    }
+    case "run_interrupted":
+      projection.status = "interrupted";
       projection.usageLowerBound = true;
+      for (const [id, task] of Object.entries(projection.tasks)) {
+        if (!task.claim) continue;
+        const { claim: _claim, ...withoutClaim } = task;
+        projection.tasks[id] = withoutClaim;
+        delete projection.blockers.claims[id];
+      }
       break;
-    }
-    case "attempt_settled": {
-      const operationId = stringValue(payload.operationId);
-      const attemptNumber = integerValue(payload.attempt);
-      const operation = projection.operations[operationId];
-      const attempt = operation?.attempts[attemptNumber];
-      if (
-        !operation ||
-        operation.status === "settled" ||
-        !attempt ||
-        attempt.status !== "running" ||
-        !sameClaim(attempt.claim, payload.claim)
-      ) {
-        break;
-      }
-      const outcomeRef = parseOutcomeRef(payload.outcomeRef);
-      if (!outcomeRef) {
-        throw new WorkflowRunCorruptionError(
-          projection.runId,
-          new Error(
-            "Workflow attempt settlement has an invalid outcome reference",
-          ),
-        );
-      }
-      const usage = parseUsage(payload.usage);
-      attempt.status = "settled";
-      attempt.settlementEventId = event.eventId;
-      attempt.outcomeRef = outcomeRef;
-      attempt.usage = usage;
-      attempt.usageProvenance = "exact";
-      operation.status = "attempt_settled";
-      break;
-    }
-    case "operation_settled": {
-      const operationId = stringValue(payload.operationId);
-      const attemptNumber = integerValue(payload.attempt);
-      const operation = projection.operations[operationId];
-      const attempt = operation?.attempts[attemptNumber];
-      const task = operation ? projection.tasks[operation.taskId] : undefined;
-      if (
-        !operation ||
-        operation.status === "settled" ||
-        !attempt ||
-        attempt.status !== "settled" ||
-        !task ||
-        !sameClaim(attempt.claim, payload.claim) ||
-        stringValue(payload.attemptSettlementEventId) !==
-          attempt.settlementEventId
-      ) {
-        break;
-      }
-      operation.status = "settled";
-      operation.settledAttempt = attemptNumber;
-      delete task.claim;
-      if (!accountedOperations.has(operationId)) {
-        accountedOperations.add(operationId);
-        projection.usage = addWorkflowUsage(projection.usage, attempt.usage);
-      }
-      // The repository applies the validated immutable outcome after the pure
-      // event fold. The journal never trusts unreferenced output bytes.
-      break;
-    }
-    case "run_cancel_requested": {
-      const requestId = stringValue(payload.requestId);
-      if (requestId && !projection.cancellation) {
-        projection.cancellation = { requestId };
+    case "run_blocked": {
+      const source = payload.source === "approval" ? "approval" : "runtime";
+      const reason = String(payload.reason ?? "Workflow blocked");
+      projection.status = "blocked";
+      projection.runBlock = { reason, source };
+      if (source === "approval") {
+        projection.blockers.approval = {
+          ...(projection.approval?.request.requestId === undefined
+            ? {}
+            : { requestId: projection.approval.request.requestId }),
+          source: "approval",
+          reason,
+        };
+      } else {
+        projection.blockers.runtime = { reason };
       }
       break;
     }
     case "run_cancelled":
       if (!projection.terminal) {
-        for (const operation of Object.values(projection.operations)) {
-          const attempt = operation.attempts[operation.attempt];
-          const task = projection.tasks[operation.taskId];
-          if (
-            operation.status === "attempt_settled" &&
-            attempt?.status === "settled"
-          ) {
-            operation.status = "settled";
-            operation.settledAttempt = attempt.attempt;
-            if (task) delete task.claim;
-            if (!accountedOperations.has(operation.operationId)) {
-              accountedOperations.add(operation.operationId);
-              projection.usage = addWorkflowUsage(
-                projection.usage,
-                attempt.usage,
-              );
-            }
-            continue;
-          }
-          if (operation.status !== "running") continue;
-          if (attempt?.status === "running") {
-            attempt.status = "interrupted";
-            attempt.usageProvenance = "lower_bound";
-            projection.usageLowerBound = true;
-          }
-          operation.status = "interrupted";
-          if (task && task.status === "running") {
-            task.status = "interrupted";
-            delete task.claim;
-          }
-        }
-        for (const task of Object.values(projection.tasks)) {
-          if (task.status !== "running") continue;
-          const operation = task.operationId
-            ? projection.operations[task.operationId]
-            : undefined;
-          if (operation?.status === "settled") continue;
-          task.status = "interrupted";
-          delete task.claim;
-          projection.usageLowerBound = true;
-        }
         projection.status = "cancelled";
         projection.terminal = { status: "cancelled" };
       }
+      projection.blockers.claims = {};
       break;
     case "run_result":
     case "run_terminal": {
-      if (projection.terminal) break;
-      const candidate = recordPayload(payload.result ?? payload);
-      if (!isTerminalResult(candidate)) break;
-      projection.terminal = candidate;
-      projection.status = candidate.status;
+      // Terminal state is append-only. A late or stale terminal event must not
+      // replace the result already committed by the coordinator.
+      if (projection.terminal) return;
+      const terminal = (payload.result ?? payload) as WorkflowTerminalResult;
+      projection.terminal = terminal;
+      projection.status = terminal.status;
+      projection.blockers.claims = {};
       break;
     }
+    case "delivery_intent":
+      if (!projection.delivery) {
+        projection.delivery = {
+          deliveryId: String(payload.deliveryId),
+          kind: "terminal",
+          status: "pending",
+          message: String(payload.message ?? ""),
+        };
+      }
+      break;
+    case "delivery_dispatched":
+      if (
+        projection.delivery?.deliveryId === String(payload.deliveryId) &&
+        projection.delivery.status !== "delivered"
+      ) {
+        projection.delivery.status = "dispatched";
+        const claim = parseDeliveryClaim(payload);
+        if (claim) projection.delivery.claim = claim;
+      }
+      break;
+    case "delivery_receipt":
+      if (projection.delivery?.deliveryId === String(payload.deliveryId))
+        projection.delivery.status = "delivered";
+      break;
   }
 }
 
-function overlayLiveProgress(
-  projection: WorkflowProjection,
-  live: WorkflowLiveProgress,
-): WorkflowProjection {
-  if (projection.terminal) return projection;
-  const tasks = { ...projection.tasks };
-  for (const [taskId, progress] of Object.entries(live.tasks ?? {})) {
-    const task = tasks[taskId];
-    if (!task || task.status === "succeeded" || task.status === "failed")
-      continue;
-    tasks[taskId] = {
-      ...task,
-      status: progress.status,
-      ...(progress.attempt === undefined ? {} : { attempt: progress.attempt }),
-    };
+function creationTasks(
+  payload: Record<string, any>,
+): readonly Record<string, any>[] {
+  if (payload.plan && Array.isArray(payload.plan.phases)) {
+    return payload.plan.phases.flatMap((phase: Record<string, any>) =>
+      (Array.isArray(phase.tasks) ? phase.tasks : []).map(
+        (task: Record<string, any>) => ({
+          id: task.id,
+          phaseId: phase.id,
+          prompt: task.prompt,
+          ...(task.label === undefined ? {} : { label: task.label }),
+          ...(isApprovalGate(task.approval) ? { approval: task.approval } : {}),
+        }),
+      ),
+    );
   }
-  return {
-    ...projection,
-    tasks,
-    ...(live.status === undefined ? {} : { status: live.status }),
-    ...(live.currentPhase === undefined
-      ? {}
-      : { currentPhase: live.currentPhase }),
-  };
+  return Array.isArray(payload.tasks) ? payload.tasks : [];
 }
 
-function parseOutcomeRef(value: unknown): WorkflowOutcomeBlobRef | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
+function isApprovalGate(
+  value: unknown,
+): value is { policyHash: string; denial: "stop" | "skip" } {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.policyHash === "string" &&
+    value.policyHash.length > 0 &&
+    (value.denial === "stop" || value.denial === "skip")
+  );
+}
+
+function parseDeliveryClaim(value: unknown): WorkflowDeliveryClaim | undefined {
+  if (!isRecord(value)) return undefined;
   if (
-    !("schemaVersion" in value) ||
-    value.schemaVersion !== 1 ||
-    !("digest" in value) ||
-    typeof value.digest !== "string" ||
-    !/^[0-9a-f]{64}$/.test(value.digest) ||
-    !("bytes" in value) ||
-    !Number.isSafeInteger(value.bytes) ||
-    (value.bytes as number) <= 0
-  ) {
+    typeof value.ownerId !== "string" ||
+    value.ownerId.length === 0 ||
+    !Number.isSafeInteger(value.ownerGeneration) ||
+    value.ownerGeneration < 0 ||
+    !Number.isSafeInteger(value.leaseEpoch) ||
+    value.leaseEpoch < 0
+  )
     return undefined;
-  }
   return {
-    schemaVersion: 1,
-    digest: value.digest,
-    bytes: value.bytes as number,
+    ownerId: value.ownerId,
+    ownerGeneration: value.ownerGeneration,
+    leaseEpoch: value.leaseEpoch,
   };
 }
 
@@ -626,126 +496,73 @@ function parseClaim(
   value: unknown,
   runId: string,
   taskId: string,
-  operationId: string,
   attempt: number,
-  runEpoch: number,
 ): WorkflowTaskClaim | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const candidate = value as Record<string, unknown>;
+  if (!isRecord(value)) return undefined;
   if (
-    candidate.runId !== runId ||
-    candidate.taskId !== taskId ||
-    candidate.operationId !== operationId ||
-    candidate.attempt !== attempt ||
-    candidate.runEpoch !== runEpoch ||
-    typeof candidate.ownerId !== "string" ||
-    !Number.isSafeInteger(candidate.ownerGeneration) ||
-    (candidate.ownerGeneration as number) < 0 ||
-    !Number.isSafeInteger(candidate.leaseEpoch) ||
-    (candidate.leaseEpoch as number) < 0 ||
-    typeof candidate.token !== "string" ||
-    candidate.token.length === 0
-  ) {
+    value.runId !== runId ||
+    value.taskId !== taskId ||
+    value.attempt !== attempt ||
+    typeof value.ownerId !== "string" ||
+    !Number.isSafeInteger(value.ownerGeneration) ||
+    value.ownerGeneration < 0 ||
+    !Number.isSafeInteger(value.leaseEpoch) ||
+    value.leaseEpoch < 0 ||
+    typeof value.token !== "string" ||
+    value.token.length === 0
+  )
     return undefined;
-  }
-  return candidate as unknown as WorkflowTaskClaim;
+  return value as unknown as WorkflowTaskClaim;
+}
+
+function settlementMatches(
+  previous: WorkflowProjectionTask | undefined,
+  candidate: unknown,
+  attempt: number,
+): boolean {
+  if (!previous?.claim) return candidate === undefined;
+  const parsed = parseClaim(
+    candidate,
+    previous.claim.runId,
+    previous.claim.taskId,
+    attempt,
+  );
+  return parsed !== undefined && sameClaim(previous.claim, parsed);
 }
 
 function sameClaim(left: WorkflowTaskClaim, right: unknown): boolean {
-  if (right === null || typeof right !== "object" || Array.isArray(right)) {
-    return false;
-  }
-  const candidate = right as Record<string, unknown>;
+  if (!isRecord(right)) return false;
   return (
-    left.runId === candidate.runId &&
-    left.taskId === candidate.taskId &&
-    left.operationId === candidate.operationId &&
-    left.attempt === candidate.attempt &&
-    left.runEpoch === candidate.runEpoch &&
-    left.ownerId === candidate.ownerId &&
-    left.ownerGeneration === candidate.ownerGeneration &&
-    left.leaseEpoch === candidate.leaseEpoch &&
-    left.token === candidate.token
+    left.runId === right.runId &&
+    left.taskId === right.taskId &&
+    left.attempt === right.attempt &&
+    left.ownerId === right.ownerId &&
+    left.ownerGeneration === right.ownerGeneration &&
+    left.leaseEpoch === right.leaseEpoch &&
+    left.token === right.token
   );
 }
 
-function parseUsage(value: unknown): WorkflowAttemptUsage {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      cost: 0,
-      turns: 0,
-    };
+function refreshStatus(projection: WorkflowProjection): void {
+  if (isTerminal(projection.status)) return;
+  if (projection.blockers.budget) {
+    projection.status = "awaiting_budget";
+    return;
   }
-  const usage = value as Record<string, unknown>;
-  return {
-    input: finite(usage.input),
-    output: finite(usage.output),
-    cacheRead: finite(usage.cacheRead),
-    cacheWrite: finite(usage.cacheWrite),
-    cost: decimalCost(usage.cost),
-    turns: finite(usage.turns),
-    ...(usage.costSource === "provider" ||
-    usage.costSource === "estimated" ||
-    usage.costSource === "unavailable" ||
-    usage.costSource === "mixed"
-      ? { costSource: usage.costSource }
-      : {}),
-  };
-}
-
-function assertSameOwner(
-  left: WorkflowOwnerIdentity,
-  right: WorkflowOwnerIdentity,
-): void {
   if (
-    left.projectKey !== right.projectKey ||
-    left.piSessionId !== right.piSessionId
+    projection.blockers.runtime ||
+    Object.keys(projection.blockers.tasks).length > 0
   ) {
-    throw new Error("Workflow run belongs to a different durable namespace");
+    projection.status = "blocked";
+    return;
   }
-}
-
-function isTerminalResult(value: unknown): value is WorkflowTerminalResult {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.status === "done" ||
-    candidate.status === "error" ||
-    candidate.status === "cancelled"
-  );
-}
-
-function isTerminalStatus(status: WorkflowRunStatus): boolean {
-  return status === "done" || status === "error" || status === "cancelled";
-}
-
-function isTerminalFollowup(type: string): boolean {
-  return (
-    type === "run_result" || type === "run_terminal" || type === "run_cancelled"
-  );
-}
-
-function recordPayload(value: unknown): Record<string, unknown> {
-  // Journal payloads have already crossed the store's canonical-value boundary.
-  return (value ?? {}) as Record<string, unknown>;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function integerValue(value: unknown): number {
-  return Number.isSafeInteger(value) && (value as number) >= 0
-    ? (value as number)
-    : -1;
+  if (projection.status === "blocked" && projection.blockers.approval) return;
+  if (
+    ["blocked", "awaiting_budget", "interrupted", "created"].includes(
+      projection.status,
+    )
+  )
+    projection.status = "running";
 }
 
 function finite(value: unknown): number {
@@ -754,15 +571,27 @@ function finite(value: unknown): number {
     : 0;
 }
 
-function decimalCost(value: unknown): number {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 64 ||
-    value.trim() !== value
-  ) {
-    return 0;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+function definitionFields(
+  previous: WorkflowProjectionTask | undefined,
+): Pick<WorkflowProjectionTask, "phaseId" | "prompt" | "label" | "approval"> {
+  return {
+    ...(previous?.phaseId === undefined ? {} : { phaseId: previous.phaseId }),
+    ...(previous?.prompt === undefined ? {} : { prompt: previous.prompt }),
+    ...(previous?.label === undefined ? {} : { label: previous.label }),
+    ...(previous?.approval === undefined
+      ? {}
+      : { approval: previous.approval }),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTerminal(status: WorkflowRunStatus): boolean {
+  return status === "done" || status === "error" || status === "cancelled";
+}
+
+function isTerminalTask(status: WorkflowProjectionTask["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "skipped";
 }

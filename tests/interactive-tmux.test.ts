@@ -1125,8 +1125,8 @@ describe("interactive-tmux", () => {
 
       const launchScript = readFileSync(state.launchScriptFile, "utf8");
       expect(launchScript).toContain("--append-system-prompt");
-      // Filename should appear (shell-escaped) in the launch script.
-      expect(launchScript).toMatch(/wire-system\.md/);
+      expect(launchScript).toContain("--extension");
+      expect(launchScript).toContain("/src/subagent.ts");
     });
   });
 

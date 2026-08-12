@@ -1,0 +1,43 @@
+# PR #84 frozen acceptance evidence
+
+Status: **merge-ready for F01–F20**. X01–X06 have a separate boundary matrix in
+`docs/pr84-x-boundaries.md`; this status does not claim those boundaries closed.
+This matrix is the authoritative snapshot for the current `PR_BASE..PR_HEAD`
+worktree. A green targeted suite is not treated as
+closure when the frozen requirement calls for a crash, child-process, packed,
+or production command lane.
+
+| ID  | Current status | Evidence currently present                                                                                                                                                                                                                                                 | Missing before closure |
+| --- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| F01 | PASS           | `workflow-storage-crash-restart.test.ts`: launch/event write+fsync faults, private/parent directory publication faults, caller-return crash, restart recovery, quota preservation, and no-dispatch assertions                                                              | —                      |
+| F02 | PASS           | `workflow-owner-restart.test.ts`: reconstructed session owner resumes a persisted run, replays the interrupted task, and rejects a foreign owner after restart                                                                                                             | —                      |
+| F03 | PASS           | `workflow-concurrency.test.ts`: “F03 lets exactly one of two same-owner stores win a CAS append”; production `appendIfCurrent` path                                                                                                                                        | —                      |
+| F04 | PASS           | `workflow-lease-cross-process.test.ts`: initial takeover, stale-child release after replacement, immediate child-process restart, and reused-PID/different-start-identity fencing                                                                                          | —                      |
+| F05 | PASS           | `workflow-storage-revalidation.test.ts`: lexical, symlink, hardlink, non-regular, append lease-loss, prune lease-loss, and prune substitution matrix                                                                                                                       | —                      |
+| F06 | PASS           | `workflow-storage-crash-restart.test.ts` and storage foundation tests: write/fsync faults, quota prefix preservation, rollback after event fsync failure, corruption rejection, restart prefix recovery, and no dispatch                                                   | —                      |
+| F07 | PASS           | `workflow-interleavings.test.ts`: block/append, settlement, and finalization races with one-winner assertions                                                                                                                                                              | —                      |
+| F08 | PASS           | `workflow-acceptance-authority.integration.test.ts`: 40 persisted task × approval × budget × cancellation permutations with blocker projections and cancellation outcomes                                                                                                  | —                      |
+| F09 | PASS           | `workflow-acceptance-authority.integration.test.ts`: registered mutation routing, tampered/missing hash replay, stale authority rejection, and journal-preservation assertions                                                                                             | —                      |
+| F10 | PASS           | `workflow-stop-on-failure.test.ts`: admission closure, sibling drain, and deterministic plan-order terminal failure selection                                                                                                                                              | —                      |
+| F11 | PASS           | `workflow-accounting-recovery.test.ts`: interrupted usage lower-bound provenance, `run_interrupted`, and attempt-2 replay accounting                                                                                                                                       | —                      |
+| F12 | PASS           | `workflow-cancellation-prefix.test.ts` and `workflow-cancellation-reissue.test.ts`: request/result/marker/intent/dispatch/receipt and no-request-ID repair prefixes with idempotent recovery                                                                               | —                      |
+| F13 | PASS           | `workflow-acceptance-delivery-retention.integration.test.ts`: matching Pi entries, deterministic IDs, retry suppression, crash reclaim, recovered shared-broker delivery, and stale settlement fencing                                                                     | —                      |
+| F14 | PASS           | `workflow-acceptance-delivery-retention.integration.test.ts`: blocked, interrupted, undelivered, and delivered retention interleavings under the registered lock plus foreign-owner rejection                                                                              | —                      |
+| F15 | PASS           | `workflow-acceptance-authority.integration.test.ts`: registered exact approval/resume envelopes, idempotency, persisted receipts, and reload behavior                                                                                                                      | —                      |
+| F16 | PASS           | `workflow-acceptance-lifecycle-compatibility.test.ts`: real Pi startup, prompt, reload, shutdown, session-scope transition, and bounded continuity audit                                                                                                                   | —                      |
+| F17 | PASS           | `workflow-acceptance-authority.integration.test.ts`: registered durable reload/refresh data, stale edit rejection before mutation, and export verification                                                                                                                 | —                      |
+| F18 | PASS           | `workflow-acceptance-lifecycle-compatibility.test.ts`: registered legacy script/name calls, durable JavaScript rejection, and a real durable process task with claim-bound intent, exact child-start identity, and dispatch evidence published after the runner callback   | —                      |
+| F19 | PASS           | Parent-side `typecheck`, `format:check`, `pack:check`, `coverage:check`; full `npm test` 90 files/1630 tests; tmux 10/10; Pi delivery 24/24; zellij v0.44.3 13/13; exact PR-head CI from `.github/workflows/ci.yml` passed both `Test (Pi latest)` and `Test (Pi 0.80.6)`. | —                      |
+| F20 | PASS           | `workflow-acceptance-lifecycle-compatibility.test.ts`: non-mutating audit of `todo.md`, `qa.md`, README, frozen status, deferred X01–X06 boundaries, and public-language claims                                                                                            | —                      |
+
+X-boundary status: X01 has a proven partial slice (durable process-task
+admission, claim-bound launch intent, exact child-start identity, and
+post-callback dispatch evidence); pane adoption, reattachment, and recovery
+remain deferred. X02–X06 remain explicitly deferred. See
+`docs/pr84-x-boundaries.md` for the evidence and non-claims. This worktree does
+not claim `openat2`-class containment against a malicious same-user
+parent-directory rename race.
+
+Required final verdict: every F01–F20 must become `PASS` with named permanent
+evidence. `PARTIAL`, inferred helper existence, or targeted-only evidence is not
+merge-ready.

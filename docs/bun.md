@@ -32,4 +32,5 @@ npm run <script-name>
 
 ## Version
 
-This project requires Node.js >= 18.0.0. The lockfile (`package-lock.json`) ensures reproducible installs.
+This project requires Node.js >= 26.0.0. CI tracks the current Node.js 26.x
+release, while the lockfile (`package-lock.json`) ensures reproducible installs.

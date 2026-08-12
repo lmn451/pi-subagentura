@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
 
 const BASE_INTERACTIVE_TOOL_NAMES = [
   "cancel_interactive_subagent",
@@ -28,10 +29,13 @@ const IN_PROCESS_TOOL_NAMES = [
 const WORKFLOW_TOOL_NAMES = [
   "cancel_workflow",
   "delete_workflow",
+  "get_durable_workflow_result",
+  "get_durable_workflow_status",
   "get_workflow_result",
   "get_workflow_status",
   "list_workflows",
   "save_workflow",
+  "start_durable_workflow",
   "workflow",
 ].sort();
 
@@ -61,6 +65,7 @@ describe("extension registration", () => {
     delete process.env.PI_SUBAGENTURA_CHILD;
   });
   afterEach(() => {
+    clearSessionScopes();
     if (previousChild === undefined) {
       delete process.env.PI_SUBAGENTURA_CHILD;
     } else {
@@ -106,6 +111,18 @@ describe("extension registration", () => {
     });
   });
 
+  it("registers the --workflow-eager routing flag", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    expect(api.registerFlag).toHaveBeenCalledWith("workflow-eager", {
+      description: "Route eligible complex requests to durable workflows",
+      type: "string",
+      default: "off",
+    });
+  });
+
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestrator"),
@@ -120,6 +137,72 @@ describe("extension registration", () => {
 
     expect(result.systemPrompt).toContain("# Orchestrator System Prompt");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+  });
+
+  it("injects the durable routing policy when eager mode is enabled", async () => {
+    const api = mockApi({
+      getFlag: vi.fn((name: string) =>
+        name === "workflow-eager" ? "preferred" : false,
+      ),
+    });
+
+    registerExtension(api as any);
+
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
+
+    expect(result.systemPrompt).toContain(
+      "Automatic durable workflow routing is enabled in preferred mode",
+    );
+    expect(result.systemPrompt).toContain("routing is unconfirmed");
+  });
+
+  it("injects continuity only from the live session scope belonging to this Pi", async () => {
+    const api = mockApi();
+    registerSessionScope({
+      id: 701,
+      generation: 1,
+      lifecycle: "started",
+      pi: api as any,
+      durableWorkflowContinuity: {
+        runId: "scoped-run",
+        revision: 3,
+        status: "running",
+        phase: "build",
+        phaseMode: "sequential",
+        tasks: [{ id: "task", status: "running" }],
+        pendingCount: 0,
+        blockedCount: 0,
+        approvalPendingCount: 0,
+        awaitingBudget: false,
+      },
+    });
+    registerSessionScope({
+      id: 702,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      durableWorkflowContinuity: {
+        runId: "peer-run",
+        revision: 1,
+        status: "running",
+        tasks: [],
+        pendingCount: 0,
+        blockedCount: 0,
+        approvalPendingCount: 0,
+        awaitingBudget: false,
+      },
+    });
+
+    registerExtension(api as any);
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
+    expect(result.systemPrompt).toContain("run=scoped-run revision=3");
+    expect(result.systemPrompt).not.toContain("peer-run");
   });
 
   it("registers a minimal interactive runtime in child mode", () => {

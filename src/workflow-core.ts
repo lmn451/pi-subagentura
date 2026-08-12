@@ -10,6 +10,10 @@ import {
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { normalizeUsage, type SubagentResult, type Usage } from "./helpers";
+import type {
+  WorkflowProcessLaunchDispatch,
+  WorkflowProcessLaunchIntent,
+} from "./workflow-process-handshake";
 
 // ── Limits ───────────────────────────────────────────────────────────
 export const MAX_TOTAL_AGENTS = 1000;
@@ -304,6 +308,12 @@ export type WorkflowAgentRunner = (req: {
   onCancellationSnapshot?: (
     receipt: import("./cancellation-snapshots").CancellationSnapshotReceipt,
   ) => void;
+  /** Durable process identity created before process dispatch. */
+  processLaunchIntent?: WorkflowProcessLaunchIntent;
+  /** Commits the physical process dispatch only after the child was launched. */
+  onProcessLaunchDispatched?: (
+    dispatch: WorkflowProcessLaunchDispatch,
+  ) => Promise<void>;
 }) => Promise<SubagentResult>;
 
 export interface WorkflowMeta {

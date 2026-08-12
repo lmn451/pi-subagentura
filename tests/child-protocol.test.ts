@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { artifactPath, readEvents } from "../src/artifact";
@@ -23,14 +23,52 @@ describe("child protocol lifecycle", () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagentura-child-protocol-"));
     artifactDir = join(root, "child");
     process.env.ARTIFACT_DIR = artifactDir;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_NONCE;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_ATTEMPT_ID;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_EPOCH;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.ARTIFACT_DIR;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_NONCE;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_ATTEMPT_ID;
+    delete process.env.PI_SUBAGENTURA_WORKFLOW_EPOCH;
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("records exact workflow child-start identity before registering handlers", () => {
+    process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER = "wf-launch-marker";
+    process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_NONCE = "nonce-1";
+    process.env.PI_SUBAGENTURA_WORKFLOW_ATTEMPT_ID = "attempt-1";
+    process.env.PI_SUBAGENTURA_WORKFLOW_EPOCH = "7";
+
+    registerHandlers();
+
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactDir, "process-child-started.json"), "utf8"),
+      ),
+    ).toEqual({
+      schemaVersion: 1,
+      launchMarker: "wf-launch-marker",
+      nonce: "nonce-1",
+      attemptId: "attempt-1",
+      epoch: 7,
+    });
+  });
+
+  it("rejects partial workflow child identity before registering handlers", () => {
+    process.env.PI_SUBAGENTURA_WORKFLOW_LAUNCH_MARKER = "wf-launch-marker";
+    expect(() => registerHandlers()).toThrow(
+      "Invalid workflow process launch identity",
+    );
+    expect(existsSync(join(artifactDir, "process-child-started.json"))).toBe(
+      false,
+    );
+  });
   it("binds persisted turns and records activity plus settled completion", () => {
     const handlers = registerHandlers();
     let entries: any[] = [];

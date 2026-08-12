@@ -52,6 +52,7 @@
     "src/artifact.ts",
     "src/artifact-poller.ts",
     "src/child-protocol.ts",
+    "src/workflow-process-handshake.ts",
     "src/delivery.ts",
     "src/helpers.ts",
     "src/orchestration-context.ts",
@@ -87,13 +88,17 @@
     "src/workflow-plan.ts",
     "src/workflow-plan-state.ts",
     "src/workflow-plan-runner.ts",
-    "src/workflow-plan-ui.ts",
     "src/workflow-run-types.ts",
-    "src/workflow-lease.ts",
     "src/workflow-run-store.ts",
+    "src/workflow-lease.ts",
     "src/workflow-recovery.ts",
+    "src/workflow-routing.ts",
+    "src/workflow-continuity.ts",
     "src/workflow-projection-repository.ts",
     "src/workflow-durable-plan-runner.ts",
+    "src/workflow-durable-delivery.ts",
+    "src/workflow-dispatcher.ts",
+    "src/workflow-mutation.ts",
     "src/workflow-owner.ts",
     "src/workflow-tool.ts",
     "src/abortable-wait.ts",
@@ -102,7 +107,7 @@
     "src/cancellation-snapshots.ts"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=26.0.0"
   },
   "publishConfig": {
     "access": "public"

@@ -5,10 +5,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createHash, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import {
   deleteInteractiveStatesFile,
   removeInteractiveState,
@@ -40,19 +38,17 @@ import {
   removeSessionScope,
   sessionOwner,
   setDurableWorkflowOwner,
-  setDurableWorkflowRootDir,
   setLegacyActiveSessionRefs,
   type SessionOwnerToken,
   type SessionScope,
+  releaseDurableWorkflowAuthority,
 } from "./session-scope";
 import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
 import {
-  createWorkflowOwnerIdentity,
   durableWorkflowControllerForSession,
   durableWorkflowStoreForSession,
+  workflowOwnerFromSessionContext,
 } from "./workflow-owner";
-import type { WorkflowOwnerIdentity } from "./workflow-run-types";
-import { DurableWorkflowProjectionRepository } from "./workflow-projection-repository";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -178,6 +174,26 @@ async function revokeAndReleaseDurableWorkflowAuthoritySafely(
   }
 }
 
+async function reconcileDurableWorkflowDeliveries(
+  scope: SessionScope,
+  cwd: string,
+): Promise<void> {
+  const controller = durableWorkflowControllerForSession(cwd, scope);
+  const store = durableWorkflowStoreForSession(cwd, scope);
+  if (!controller || !store) return;
+  const entries = scope.sessionManager?.getEntries?.() ?? [];
+  for (const runId of await store.listRunIds()) {
+    try {
+      await controller.reconcileDelivery(runId, entries);
+    } catch (error) {
+      console.error(
+        `[subagentura] durable workflow delivery reconciliation failed for ${runId}`,
+        error,
+      );
+    }
+  }
+}
+
 function snapshotOwnedJobs(
   scope: SessionScope,
   sessionId: string | undefined,
@@ -271,6 +287,24 @@ function cleanupScopeGeneration(
   return durableJobsDrained;
 }
 
+async function releaseDurableWorkflowAuthorityWithRetry(
+  scope: SessionScope,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await releaseDurableWorkflowAuthority(scope);
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        console.error(
+          "[subagentura] durable workflow authority release failed during shutdown",
+          error,
+        );
+      }
+    }
+  }
+}
+
 export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
   const scope = createSessionScope(pi);
   const globalState = getGlobalState() as any;
@@ -333,6 +367,31 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
     scope.lifecycle = "started";
     scope.ui = ctx.ui;
     scope.sessionManager = ctx.sessionManager;
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (sessionId) {
+      const ownerId = `session-${createHash("sha256").update(sessionId).digest("hex")}`;
+      const preservedOwnerGeneration =
+        scope.durableWorkflowOwner?.piSessionId === sessionId &&
+        scope.durableWorkflowOwner.cwd === ctx.cwd
+          ? scope.durableWorkflowOwner.ownerGeneration
+          : 0;
+      const leaseToken = createHash("sha256")
+        .update(`${ctx.cwd}\0${sessionId}`)
+        .digest("hex");
+      setDurableWorkflowOwner(
+        scope,
+        workflowOwnerFromSessionContext({
+          projectKey: basename(ctx.cwd) || "project",
+          cwd: ctx.cwd,
+          sessionId,
+          ownerId,
+          generation: preservedOwnerGeneration,
+          leaseToken,
+        }),
+      );
+    } else {
+      setDurableWorkflowOwner(scope, undefined);
+    }
     scope.parentStreaming = false;
     if (durableContext) {
       setDurableWorkflowRootDir(scope, durableContext.rootDir);
@@ -372,6 +431,8 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
         );
       }
     }
+    void reconcileDurableWorkflowDeliveries(scope, ctx.cwd);
+    ensureInteractivePoller(globalState);
   });
 
   (pi as any).on?.(
@@ -386,12 +447,8 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       const durableStore = scope.durableWorkflowStore;
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
-      const durableJobsDrained = cleanupScopeGeneration(
-        scope,
-        owner,
-        event,
-        ctx,
-      );
+      cleanupScopeGeneration(scope, owner, event, ctx);
+      const releasePromise = releaseDurableWorkflowAuthorityWithRetry(scope);
       scope.parentStreaming = false;
       scope.lifecycle = "shutdown";
       advanceSessionScopeGeneration(scope.id);
@@ -418,9 +475,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
           }
         }
       }
-
-      await durableJobsDrained;
-      await revokeAndReleaseDurableWorkflowAuthoritySafely(scope, durableStore);
+      await releasePromise;
     },
   );
 

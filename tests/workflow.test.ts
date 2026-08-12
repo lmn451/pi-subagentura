@@ -2502,7 +2502,7 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers 6 tools with the Pi SDK", () => {
+  it("registers workflow tools with the Pi SDK", () => {
     const tools: Array<{ name: string }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -2511,8 +2511,11 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
     registerWorkflowTool(pi as any);
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(10);
     expect(tools.map((t) => t.name)).toEqual([
+      "get_durable_workflow_status",
+      "get_durable_workflow_result",
+      "start_durable_workflow",
       "workflow",
       "get_workflow_status",
       "get_workflow_result",
@@ -2542,258 +2545,61 @@ describe("registerWorkflowTool", () => {
       "list-workflows",
       "workflow-status",
       "workflow-resume",
+      "workflow-cancel",
+      "workflow-approval",
+      "workflow-plan",
+      "workflow-plan-append",
+      "workflow-plan-mutate",
+      "workflow-plan-edit",
+      "workflow-plan-export",
+      "workflow-budget",
+      "workflow-retention",
+      "workflow-route",
       "workflow-tree",
       "delete-workflow",
     ]);
   });
 
-  it("routes durable plans and management through the session controller after the live job is lost", async () => {
-    const root = realpathSync.native(
-      mkdtempSync(join(tmpdir(), "wf-durable-tool-")),
-    );
-    const owner = {
-      projectKey: "a".repeat(64),
-      cwd: root,
-      piSessionId: "b".repeat(64),
-      ownerId: "session-owner",
-      ownerGeneration: 77,
-      leaseToken: "c".repeat(64),
-    };
-    const usage = {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      cost: 0,
-      turns: 0,
-      totalTokens: 0,
-      costUsd: 0,
-    };
-    let current!: WorkflowProjection;
-    const neverSettles = new Promise<WorkflowProjection>(() => {});
-    const controller = {
-      create: vi.fn(async ({ runId }: { runId: string }) => {
-        const created: WorkflowProjection = {
-          runId,
-          planRevision: 1,
-          owner,
-          status: "created",
-          revision: 1,
-          resumeRevision: 0,
-          runEpoch: 9,
-          tasks: {},
-          operations: {},
-          usage,
-          lastEventOrdinal: 1,
-        };
-        current = {
-          ...created,
-          owner: {
-            ...owner,
-            ownerId: "prior-owner",
-            ownerGeneration: 12,
-            leaseToken: "prior-lease",
-          },
-          status: "interrupted",
-          revision: 4,
-          tasks: {
-            "task-a": {
-              id: "task-a",
-              status: "interrupted",
-              attempt: 1,
-              phaseId: "phase-a",
-              prompt: "first task",
-            },
-          },
-        };
-        return { projection: created, completion: neverSettles };
-      }),
-      getStatus: vi.fn(async () => current),
-      resume: vi.fn(async () => current),
-      cancel: vi.fn(async () => {
-        current = {
-          ...current,
-          status: "cancelled",
-          revision: current.revision + 1,
-          terminal: { status: "cancelled" },
-        };
-        return current;
-      }),
-    };
-    const store = { getLeaseEpoch: vi.fn(async () => 9) };
-    const tools: Array<{ name: string; execute: Function }> = [];
+  it("keeps durable control operator-only and removes model resume input", async () => {
+    const tools: any[] = [];
     const commands: Array<{ name: string; handler: Function }> = [];
     const pi = {
-      registerTool: vi.fn((definition: { name: string; execute: Function }) =>
-        tools.push(definition),
-      ),
+      registerTool: vi.fn((definition: any) => tools.push(definition)),
       registerFlag: vi.fn(),
-      registerCommand: vi.fn(
-        (name: string, definition: { handler: Function }) =>
-          commands.push({ name, ...definition }),
+      registerCommand: vi.fn((name: string, definition: any) =>
+        commands.push({ name, handler: definition.handler }),
       ),
-      on: vi.fn(),
       sendUserMessage: vi.fn(),
+      on: vi.fn(),
     };
-    const scope = registerSessionScope({
-      id: 910_077,
-      generation: 1,
-      pi: pi as unknown as Parameters<typeof registerWorkflowTool>[0],
-      lifecycle: "started",
-      durableWorkflowRootDir: root,
-      durableWorkflowOwner: owner,
-      durableWorkflowStore: store as unknown as WorkflowRunStore,
-      durableWorkflowController:
-        controller as unknown as DurableWorkflowController,
-    });
-    try {
-      registerWorkflowTool(
-        pi as unknown as Parameters<typeof registerWorkflowTool>[0],
-        scope,
-      );
-      const workflow = tools.find((tool) => tool.name === "workflow")!;
-      const started = await workflow.execute(
-        "",
-        { plan: previewPlan("durable-tool"), durable: true, async: true },
-        undefined,
-        undefined,
-        { cwd: root },
-      );
-      expect(started.details.status).toBe("started");
-      expect(started.details).toMatchObject({
-        runEpoch: 9,
-        leaseEpoch: 9,
-        ownerGeneration: 77,
-      });
-      expect(store.getLeaseEpoch).not.toHaveBeenCalled();
-      const runId = started.details.workflowId;
-      const live = durableWorkflowLiveJobRegistry.get(runId)!;
-      durableWorkflowLiveJobRegistry.delete(runId);
 
-      const status = await tools
-        .find((tool) => tool.name === "get_workflow_status")!
-        .execute("", { workflowId: runId });
-      expect(status.details).toMatchObject({
-        status: "interrupted",
-        workflowId: runId,
-        durable: true,
-        ownerGeneration: 77,
-        leaseEpoch: 9,
-      });
-      const result = await tools
-        .find((tool) => tool.name === "get_workflow_result")!
-        .execute("", { workflowId: runId });
-      expect(result.details.status).toBe("interrupted");
+    registerWorkflowTool(pi as any);
 
-      const resume = commands.find(
-        (command) => command.name === "workflow-resume",
-      )!;
-      await resume.handler(`${runId} 4 77 9`, {
-        cwd: root,
-        ui: { notify: vi.fn() },
-      });
-      expect(controller.resume).toHaveBeenCalledOnce();
-      expect(tools.some((tool) => tool.name.includes("resume"))).toBe(false);
-
-      const cancel = tools.find((tool) => tool.name === "cancel_workflow")!;
-      const interruptedProjection = current;
-      durableWorkflowLiveJobRegistry.set(runId, live);
-      const liveAbort = vi.spyOn(live.abort, "abort");
-
-      const wrongCwd = await cancel.execute(
-        "",
-        { workflowId: runId },
-        undefined,
-        undefined,
-        { cwd: tmpdir() },
-      );
-      expect(wrongCwd.details.error).toContain("cwd");
-      expect(controller.cancel).not.toHaveBeenCalled();
-      expect(liveAbort).not.toHaveBeenCalled();
-
-      controller.getStatus.mockImplementationOnce(async () => {
-        scope.generation++;
-        return current;
-      });
-      const staleGeneration = await cancel.execute(
-        "",
-        { workflowId: runId },
-        undefined,
-        undefined,
-        { cwd: root },
-      );
-      expect(staleGeneration.details.error).toContain("generation");
-      expect(controller.cancel).not.toHaveBeenCalled();
-      expect(liveAbort).not.toHaveBeenCalled();
-      scope.generation = 1;
-
-      controller.cancel.mockImplementationOnce(async () => {
-        current = {
-          ...current,
-          status: "done",
-          terminal: { status: "done", result: "won terminal race" },
-        };
-        return current;
-      });
-      const terminalRace = await cancel.execute(
-        "",
-        { workflowId: runId },
-        undefined,
-        undefined,
-        { cwd: root },
-      );
-      expect(terminalRace.details).toMatchObject({
-        status: "done",
-        cancelled: false,
-      });
-      expect(terminalRace.content[0].text).toContain("nothing was cancelled");
-      expect(liveAbort).not.toHaveBeenCalled();
-
-      current = interruptedProjection;
-      durableWorkflowLiveJobRegistry.delete(runId);
-      const firstCancel = await cancel.execute(
-        "",
-        { workflowId: runId },
-        undefined,
-        undefined,
-        { cwd: root },
-      );
-      const secondCancel = await cancel.execute(
-        "",
-        { workflowId: runId },
-        undefined,
-        undefined,
-        { cwd: root },
-      );
-      expect(firstCancel.details.status).toBe("cancelled");
-      expect(secondCancel.details.status).toBe("cancelled");
-
-      current = interruptedProjection;
-      const tree = commands.find(
-        (command) => command.name === "workflow-tree",
-      )!;
-      const callsBeforeWrongTree = controller.cancel.mock.calls.length;
-      await tree.handler("", {
-        cwd: tmpdir(),
-        ui: {
-          notify: vi.fn(),
-          custom: vi.fn(async () => ({ kind: "cancel", workflowId: runId })),
-        },
-      });
-      expect(controller.cancel).toHaveBeenCalledTimes(callsBeforeWrongTree);
-      await tree.handler("", {
-        cwd: root,
-        ui: {
-          notify: vi.fn(),
-          custom: vi.fn(async () => ({ kind: "cancel", workflowId: runId })),
-        },
-      });
-      expect(controller.cancel).toHaveBeenCalledTimes(callsBeforeWrongTree + 1);
-    } finally {
-      durableWorkflowLiveJobRegistry.clear();
-      removeSessionScope(scope.id);
-      rmSync(root, { recursive: true, force: true });
-    }
+    const durableStart = tools.find(
+      (tool) => tool.name === "start_durable_workflow",
+    );
+    expect(durableStart.parameters.properties.resume).toBeUndefined();
+    expect(tools.map((tool) => tool.name)).not.toContain(
+      "durable_workflow_cancel",
+    );
+    expect(tools.map((tool) => tool.name)).not.toContain(
+      "durable_workflow_approve",
+    );
+    expect(commands.map((command) => command.name)).toEqual(
+      expect.arrayContaining([
+        "workflow-resume",
+        "workflow-cancel",
+        "workflow-approval",
+      ]),
+    );
+    const cancel = commands.find(
+      (command) => command.name === "workflow-cancel",
+    );
+    const ctx = { ui: { notify: vi.fn() } };
+    await cancel?.handler("run-id", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Durable workflow commands are available only in the live parent session.",
+    );
   });
 
   it("/workflow queues a prompt to create, save, and run a workflow", async () => {
