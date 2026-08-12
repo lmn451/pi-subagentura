@@ -4,6 +4,8 @@ import {
   type WorkflowProgress,
 } from "./workflow-core";
 import { assertNever } from "./artifact";
+import type { WorkflowPlanState } from "./workflow-plan-state";
+import type { WorkflowProjection } from "./workflow-projection-repository";
 
 // ── Workflow progress renderer ───────────────────────────────────────
 export function renderProgress(p: WorkflowProgress): string {
@@ -35,4 +37,37 @@ export function renderProgress(p: WorkflowProgress): string {
     default:
       return assertNever(p);
   }
+}
+
+/** Render declarative preview state without requiring a legacy script job. */
+export function renderWorkflowPlanProgress(state: WorkflowPlanState): string {
+  const tasks = Object.values(state.tasks);
+  const running = tasks.filter((task) => task === "running").length;
+  const failed = tasks.filter((task) => task === "failed").length;
+  const done = tasks.filter((task) => task === "succeeded").length;
+  return [
+    `● workflow plan — ${state.plan.name} [${state.status}]`,
+    `${done}/${tasks.length} complete`,
+    ...(running > 0 ? [`${running} running`] : []),
+    ...(failed > 0 ? [`${failed} failed`] : []),
+    ...(state.currentPhase ? [`phase: ${state.currentPhase}`] : []),
+  ].join(" · ");
+}
+
+/** Render durable projection state for status/tree/controller surfaces. */
+export function renderDurableWorkflowProjection(
+  projection: WorkflowProjection,
+): string {
+  const tasks = Object.values(projection.tasks);
+  const running = tasks.filter((task) => task.status === "running").length;
+  const failed = tasks.filter((task) => task.status === "failed").length;
+  const usage = projection.usage.input + projection.usage.output;
+  return [
+    `● durable workflow — ${projection.runId} [${projection.status}]`,
+    `${tasks.length} task(s)`,
+    ...(running > 0 ? [`${running} running`] : []),
+    ...(failed > 0 ? [`${failed} failed`] : []),
+    ...(usage > 0 ? [`${usage} observed token(s)`] : []),
+    ...(projection.currentPhase ? [`phase: ${projection.currentPhase}`] : []),
+  ].join(" · ");
 }

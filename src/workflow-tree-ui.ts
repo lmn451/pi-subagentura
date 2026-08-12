@@ -3,6 +3,7 @@ import {
   getWorkflowCompletionPresentation,
   workflowJobsForOwner,
   type WorkflowJobState,
+  type WorkflowJobStatus,
 } from "./workflow-jobs";
 import {
   formatWorkflowUsage,
@@ -14,6 +15,7 @@ import { formatWorkflowPlanRows } from "./workflow-plan-ui";
 import type { WorkflowPlanState } from "./workflow-plan-state";
 import type { SessionOwnerToken } from "./session-scope";
 import type { WorkflowProjection } from "./workflow-projection-repository";
+import type { WorkflowRunStatus } from "./workflow-run-types";
 
 const MAX_WORKFLOW_TREE_AGENT_ROWS = 20;
 
@@ -32,11 +34,28 @@ interface WorkflowTreeOptions {
   durableProjections?: readonly WorkflowProjection[];
   requestRender?: () => void;
   notify?: (message: string) => void;
+  durableRuns?: readonly WorkflowProjection[];
+  cancelDurable?: (
+    workflowId: string,
+  ) => Promise<WorkflowProjection | undefined>;
 }
 
+interface DurableWorkflowTreeJob {
+  durable: true;
+  id: string;
+  name: string;
+  status: WorkflowJobStatus;
+  durableStatus: WorkflowRunStatus;
+  startedAt: number;
+  abort: AbortController;
+  snapshot: WorkflowJobState["snapshot"];
+  projection: WorkflowProjection;
+  error?: string;
+}
+type WorkflowTreeJob = WorkflowJobState | DurableWorkflowTreeJob;
+
 interface WorkflowRow {
-  job?: WorkflowJobState;
-  projection?: WorkflowProjection;
+  job: WorkflowTreeJob;
   depth: number;
   text: string;
   selectable: boolean;
@@ -91,10 +110,7 @@ export class WorkflowTreeComponent {
   }
 
   handleInput(data: string): void {
-    const jobs = selectableWorkflows(
-      this.opts.owner,
-      this.opts.durableProjections,
-    );
+    const jobs = selectableJobs(this.opts.owner, this.opts.durableRuns);
     if (data === "q" || data === "\x1b") {
       this.opts.done({ kind: "close" });
       return;
@@ -139,30 +155,15 @@ export class WorkflowTreeComponent {
 
   private rows(): WorkflowRow[] {
     const rows: WorkflowRow[] = [];
-    for (const item of selectableWorkflows(
-      this.opts.owner,
-      this.opts.durableProjections,
-    )) {
-      const isExpanded = this.expanded.has(item.id);
-      if (item.kind === "live") {
-        rows.push({
-          job: item.job,
-          depth: 0,
-          selectable: true,
-          text: `${isExpanded ? "▾" : "▸"} ${formatWorkflowSummary(item.job)}`,
-        });
-        if (isExpanded) rows.push(...formatWorkflowDetails(item.job));
-      } else {
-        rows.push({
-          projection: item.projection,
-          depth: 0,
-          selectable: true,
-          text: `${isExpanded ? "▾" : "▸"} ${formatDurableWorkflowSummary(item.projection)}`,
-        });
-        if (isExpanded) {
-          rows.push(...formatDurableWorkflowDetails(item.projection));
-        }
-      }
+    for (const job of selectableJobs(this.opts.owner, this.opts.durableRuns)) {
+      const isExpanded = this.expanded.has(job.id);
+      rows.push({
+        job,
+        depth: 0,
+        selectable: true,
+        text: `${isExpanded ? "▾" : "▸"} ${formatWorkflowSummary(job)}`,
+      });
+      if (isExpanded) rows.push(...formatWorkflowDetails(job));
     }
     return rows;
   }
@@ -173,26 +174,49 @@ export class WorkflowTreeComponent {
     this.changed();
   }
 
-  private cancel(item: WorkflowTreeSelection): void {
-    if (item.kind === "durable") {
-      if (item.projection.terminal) {
-        this.opts.notify?.(
-          `Workflow ${item.id} is ${item.projection.terminal.status}; nothing to cancel.`,
-        );
-        return;
-      }
-      this.opts.notify?.(`Cancelling durable workflow ${item.id}.`);
-      this.opts.done({ kind: "cancel", workflowId: item.id });
-      return;
-    }
-    const job = item.job;
+  private cancel(job: WorkflowTreeJob): void {
     if (job.status !== "running") {
       this.opts.notify?.(
-        `Workflow ${job.id} is ${job.status}; nothing to cancel.`,
+        `Workflow ${job.id} is ${
+          isDurableTreeJob(job) ? job.durableStatus : job.status
+        }; nothing to cancel.`,
       );
       return;
     }
-    this.opts.notify?.(`Cancelling workflow ${job.id}.`);
+    if (isDurableTreeJob(job)) {
+      if (!this.opts.cancelDurable) {
+        this.opts.notify?.(
+          `Durable workflow ${job.id} cannot be cancelled here.`,
+        );
+        return;
+      }
+      void this.opts
+        .cancelDurable(job.id)
+        .then((projection) => {
+          if (projection) {
+            job.projection = projection;
+            job.durableStatus = projection.status;
+            job.status = durableJobStatus(projection.status);
+          }
+          this.opts.notify?.(`Durable workflow ${job.id} cancelled.`);
+          this.changed();
+          this.opts.done({ kind: "cancel", workflowId: job.id });
+        })
+        .catch((error: unknown) => {
+          this.opts.notify?.(
+            `Unable to cancel durable workflow ${job.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          this.changed();
+        });
+      return;
+    }
+    job.abort.abort();
+    job.status = "cancelled";
+    normalizeCancelledWorkflowState(job);
+    this.opts.notify?.(`Cancelled workflow ${job.id}.`);
+    this.changed();
     this.opts.done({ kind: "cancel", workflowId: job.id });
   }
 
@@ -202,16 +226,24 @@ export class WorkflowTreeComponent {
   }
 }
 
+export interface WorkflowTreeDataOptions {
+  listDurable?: () => Promise<readonly WorkflowProjection[]>;
+  cancelDurable?: (
+    workflowId: string,
+  ) => Promise<WorkflowProjection | undefined>;
+}
+
 export async function showWorkflowTree(
   ui: ExtensionUIContext,
   owner?: SessionOwnerToken,
-  durableProjections: readonly WorkflowProjection[] = [],
+  data?: WorkflowTreeDataOptions,
 ): Promise<WorkflowTreeAction> {
   const custom = (ui as any).custom;
   if (typeof custom !== "function") {
     ui.notify("Workflow tree UI is not available in this Pi session.");
     return { kind: "close" };
   }
+  const durableRuns = (await data?.listDurable?.()) ?? [];
   return custom.call(
     ui,
     (
@@ -223,7 +255,8 @@ export async function showWorkflowTree(
       new WorkflowTreeComponent({
         done,
         owner,
-        durableProjections,
+        durableRuns,
+        cancelDurable: data?.cancelDurable,
         requestRender: () => tui.requestRender?.(),
         notify: (message) => ui.notify(message),
       }),
@@ -238,39 +271,89 @@ export async function showWorkflowTree(
   );
 }
 
-function selectableWorkflows(
+function selectableJobs(
   owner?: SessionOwnerToken,
-  durableProjections: readonly WorkflowProjection[] = [],
-): WorkflowTreeSelection[] {
-  const live = workflowJobsForOwner(owner);
-  const liveIds = new Set(live.map((job) => job.id));
-  return [
-    ...live.map((job): WorkflowTreeSelection => ({
-      kind: "live",
-      id: job.id,
-      job,
-    })),
-    ...durableProjections
-      .filter((projection) => !liveIds.has(projection.runId))
-      .map((projection): WorkflowTreeSelection => ({
-        kind: "durable",
-        id: projection.runId,
-        projection,
-      })),
-  ];
+  durableRuns: readonly WorkflowProjection[] = [],
+): WorkflowTreeJob[] {
+  const durableById = new Map(
+    durableRuns.map((projection) => [projection.runId, projection]),
+  );
+  const live = workflowJobsForOwner(owner).filter(
+    (job) => !durableById.has(job.id),
+  );
+  // Durable rows replace stale live rows with the same ID, so terminal state
+  // remains authoritative after registry loss or a delayed Promise settlement.
+  return [...live, ...durableRuns.map(createDurableTreeJob)];
 }
-function formatWorkflowSummary(job: WorkflowJobState): string {
+
+function isDurableTreeJob(job: WorkflowTreeJob): job is DurableWorkflowTreeJob {
+  return "durable" in job && job.durable === true;
+}
+
+function durableJobStatus(status: WorkflowRunStatus): WorkflowJobStatus {
+  if (status === "done") return "done";
+  if (status === "error") return "error";
+  if (status === "cancelled") return "cancelled";
+  return "running";
+}
+
+function createDurableTreeJob(
+  projection: WorkflowProjection,
+): DurableWorkflowTreeJob {
+  const tasks = Object.values(projection.tasks);
+  const runningCount = tasks.filter((task) => task.status === "running").length;
+  const errorCount = tasks.filter((task) => task.status === "failed").length;
+  return {
+    durable: true,
+    id: projection.runId,
+    name: projection.runId,
+    status: durableJobStatus(projection.status),
+    durableStatus: projection.status,
+    startedAt: 0,
+    abort: new AbortController(),
+    snapshot: {
+      agentsSpawned: tasks.filter(
+        (task) =>
+          task.status === "running" ||
+          task.status === "succeeded" ||
+          task.status === "failed",
+      ).length,
+      errorCount,
+      tokensSpent: projection.usage.output,
+      phases: projection.currentPhase ? [projection.currentPhase] : [],
+      currentPhase: projection.currentPhase,
+      runningCount,
+      usage: undefined,
+      agentRecords: [],
+      agentRecordsOmitted: 0,
+    },
+    projection,
+    error:
+      projection.terminal?.error?.message ??
+      (errorCount > 0 ? "one or more durable tasks failed" : undefined),
+  };
+}
+
+function formatWorkflowSummary(job: WorkflowTreeJob): string {
   const s = job.snapshot;
-  const planState = (s as WorkflowSnapshotWithPlanState).planState;
-  const errorCount = job.result?.errorCount ?? s.errorCount;
+  const errorCount = isDurableTreeJob(job)
+    ? job.projection.terminal?.error
+      ? 1
+      : Object.values(job.projection.tasks).filter(
+          (task) => task.status === "failed",
+        ).length
+    : (job.result?.errorCount ?? s.errorCount);
   const presentation = getWorkflowCompletionPresentation(
     job.status,
     errorCount,
   );
   const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
+  const statusLabel = isDurableTreeJob(job)
+    ? job.durableStatus
+    : presentation.label;
   const parts = [
     `${statusPrefix}${job.name} (${job.id})`,
-    `[${presentation.label}]`,
+    `[${statusLabel}]`,
     `${s.agentsSpawned} agent${s.agentsSpawned === 1 ? "" : "s"}`,
     `${s.runningCount ?? 0} running`,
   ];
@@ -284,108 +367,41 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
   return parts.join(" · ");
 }
 
-function formatDurableWorkflowSummary(projection: WorkflowProjection): string {
-  const tasks = Object.values(projection.tasks);
-  const running = tasks.filter((task) => task.status === "running").length;
-  const errors = tasks.filter((task) => task.status === "failed").length;
-  const marker =
-    projection.status === "done"
-      ? "✓ "
-      : projection.status === "error"
-        ? "✗ "
-        : projection.status === "cancelled"
-          ? "⊘ "
-          : projection.status === "interrupted"
-            ? "‼ "
-            : "";
-  const parts = [
-    `${marker}durable (${projection.runId})`,
-    `[${projection.status}]`,
-    `${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
-    `${running} running`,
-  ];
-  if (errors > 0) parts.push(`${errors} errors`);
-  const usage = presentWorkflowUsage(projection.usage);
-  if (usage) parts.push(formatWorkflowUsage(usage));
-  if (projection.currentPhase) {
-    parts.push(`phase: ${projection.currentPhase}`);
-  }
-  return parts.join(" · ");
-}
-
-function formatDurableWorkflowDetails(
-  projection: WorkflowProjection,
-): WorkflowRow[] {
+function formatWorkflowDetails(job: WorkflowTreeJob): WorkflowRow[] {
   const rows: WorkflowRow[] = [];
-  const usage = presentWorkflowUsage(projection.usage);
-  if (usage) {
-    for (const field of formatWorkflowUsageFields(usage)) {
+  if (isDurableTreeJob(job)) {
+    rows.push({
+      job,
+      depth: 1,
+      selectable: false,
+      text: `Durable status: ${job.projection.status} (revision ${job.projection.revision})`,
+    });
+    rows.push({
+      job,
+      depth: 1,
+      selectable: false,
+      text: `Phase: ${job.projection.currentPhase ?? "none"}`,
+    });
+    for (const task of Object.values(job.projection.tasks)) {
       rows.push({
-        projection,
+        job,
         depth: 1,
         selectable: false,
-        text: field,
+        text: `Task ${task.id}: ${task.status}${
+          task.attempt > 0 ? ` (attempt ${task.attempt})` : ""
+        }`,
       });
     }
-  }
-  let previousPhase: string | undefined;
-  for (const task of Object.values(projection.tasks)) {
-    if (task.phaseId !== previousPhase) {
-      previousPhase = task.phaseId;
+    if (job.projection.terminal) {
       rows.push({
-        projection,
+        job,
         depth: 1,
         selectable: false,
-        text: `◆ phase: ${task.phaseId}`,
+        text: `Terminal: ${JSON.stringify(job.projection.terminal)}`,
       });
     }
-    const marker =
-      task.status === "succeeded"
-        ? "✓"
-        : task.status === "failed"
-          ? "✗"
-          : task.status === "running"
-            ? "→"
-            : task.status === "interrupted"
-              ? "‼"
-              : "○";
-    const error = task.error ? ` — ${task.error}` : "";
-    rows.push({
-      projection,
-      depth: 2,
-      selectable: false,
-      text: `${marker} ${task.status} ${task.label ?? task.id} (attempt ${task.attempt})${error}`,
-    });
+    return rows;
   }
-  if (projection.usageLowerBound) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: "Usage is a committed lower bound after interruption.",
-    });
-  }
-  if (projection.terminal?.error) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: `error: ${projection.terminal.error.message}`,
-    });
-  }
-  if (rows.length === 0) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: "No durable task events yet.",
-    });
-  }
-  return rows;
-}
-
-function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
-  const rows: WorkflowRow[] = [];
   const usage = presentWorkflowUsage(job.snapshot.usage);
   if (usage) {
     for (const field of formatWorkflowUsageFields(usage, {

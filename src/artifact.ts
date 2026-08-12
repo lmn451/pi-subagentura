@@ -1445,6 +1445,7 @@ function migrateStatePayload(
         candidate >= 0
           ? candidate
           : fallback;
+      const legacyCursor = cursor(entry.legacyCutoverOffset, cutoverOffset);
       const pendingDeliveries = Array.isArray(entry.pendingDeliveries)
         ? entry.pendingDeliveries
             .flatMap((intent): PersistedDeliveryIntent[] => {
@@ -1594,8 +1595,14 @@ function migrateStatePayload(
         ...(typeof entry.parentSessionId === "string"
           ? { parentSessionId: entry.parentSessionId }
           : {}),
-        eventByteCursor: cursor(entry.eventByteCursor, cutoverOffset),
-        sessionByteCursor: cursor(entry.sessionByteCursor, 0),
+        eventByteCursor: legacy
+          ? Object.hasOwn(entry, "eventByteCursor")
+            ? cursor(entry.eventByteCursor, legacyCursor)
+            : legacyCursor
+          : cursor(entry.eventByteCursor, cutoverOffset),
+        sessionByteCursor: legacy
+          ? cursor(entry.sessionByteCursor, 0)
+          : cursor(entry.sessionByteCursor, 0),
         ...(entry.sessionPartialLineStart === null
           ? { sessionPartialLineStart: null }
           : typeof entry.sessionPartialLineStart === "number"
@@ -1611,7 +1618,7 @@ function migrateStatePayload(
           : {}),
         pendingDeliveries,
         deliveryReceipts,
-        legacyCutoverOffset: cursor(entry.legacyCutoverOffset, cutoverOffset),
+        legacyCutoverOffset: legacyCursor,
         ...(lifecycle ? { lifecycle } : {}),
       };
     }

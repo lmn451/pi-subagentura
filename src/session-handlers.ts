@@ -5,10 +5,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createHash, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import {
   deleteInteractiveStatesFile,
   removeInteractiveState,
@@ -23,7 +21,15 @@ import {
   clearInProcessDeliveries,
   flushInProcessDeliveries,
 } from "./notifications";
-import { removeInProcessJob } from "./helpers";
+import {
+  registerInProcessJob,
+  removeInProcessJob,
+  startSubagentJob,
+  type JobState,
+  type StartSubagentJobResult,
+  type SubagentResult,
+} from "./helpers";
+import { attachAsyncJobSettlement } from "./tools/in-process";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
@@ -40,19 +46,17 @@ import {
   removeSessionScope,
   sessionOwner,
   setDurableWorkflowOwner,
-  setDurableWorkflowRootDir,
   setLegacyActiveSessionRefs,
   type SessionOwnerToken,
   type SessionScope,
+  releaseDurableWorkflowAuthority,
 } from "./session-scope";
 import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
 import {
-  createWorkflowOwnerIdentity,
   durableWorkflowControllerForSession,
   durableWorkflowStoreForSession,
+  workflowOwnerFromSessionContext,
 } from "./workflow-owner";
-import type { WorkflowOwnerIdentity } from "./workflow-run-types";
-import { DurableWorkflowProjectionRepository } from "./workflow-projection-repository";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -178,6 +182,120 @@ async function revokeAndReleaseDurableWorkflowAuthoritySafely(
   }
 }
 
+type RecoveryAgentContext = Pick<
+  ExtensionContext,
+  "cwd" | "model" | "modelRegistry"
+>;
+
+async function runRecoveryAgent(
+  scope: SessionScope,
+  ctx: RecoveryAgentContext,
+  input: {
+    prompt: string;
+    isolation: "in-process";
+    label: string;
+    signal?: AbortSignal;
+  },
+): Promise<SubagentResult> {
+  if (input.isolation !== "in-process")
+    throw new Error(
+      "Auto-resumed durable workflows require in-process agents.",
+    );
+
+  const owner = sessionOwner(scope);
+  const abort = new AbortController();
+  const forwardAbort = () => {
+    try {
+      abort.abort(input.signal?.reason);
+    } catch {
+      /* already aborted */
+    }
+  };
+  if (input.signal?.aborted) forwardAbort();
+  else input.signal?.addEventListener("abort", forwardAbort, { once: true });
+
+  let prepared: StartSubagentJobResult;
+  try {
+    prepared = await startSubagentJob({
+      task: input.prompt,
+      persona: undefined,
+      modelOverride: undefined,
+      cwd: ctx.cwd,
+      contextText: null,
+      signal: abort.signal,
+      onUpdate: undefined,
+      defaultModel: ctx.model,
+      parentModelRegistry: ctx.modelRegistry,
+      cancellationSource: "workflow",
+      owner,
+    });
+  } catch (error) {
+    input.signal?.removeEventListener("abort", forwardAbort);
+    throw error;
+  }
+
+  if (scope.lifecycle !== "started") {
+    input.signal?.removeEventListener("abort", forwardAbort);
+    abort.abort(new Error("Workflow agent cancelled: parent session ended."));
+    prepared.disposeBeforeStart();
+    throw new Error("Workflow agent cancelled: parent session ended.");
+  }
+
+  const job: JobState = {
+    id: prepared.jobId,
+    status: "running",
+    liveStatus: prepared.liveStatus,
+    session: prepared.session,
+    startedAt: Date.now(),
+    cwd: ctx.cwd,
+    promise: prepared.jobPromise,
+    modelLabel: prepared.modelLabel,
+    thinkingLevel: prepared.thinkingLevel,
+    abort,
+    workflowId: input.label,
+    completionOwner: "workflow",
+    deliveryOwner: {
+      pi: scope.pi,
+      sessionScopeId: owner.id,
+      sessionScopeGeneration: owner.generation,
+    },
+  };
+  if (!registerInProcessJob(job, owner)) {
+    input.signal?.removeEventListener("abort", forwardAbort);
+    abort.abort(new Error("Workflow agent cancelled: parent session ended."));
+    prepared.disposeBeforeStart();
+    throw new Error("Workflow agent cancelled: parent session ended.");
+  }
+  attachAsyncJobSettlement(job.id, job);
+  prepared.start();
+  try {
+    return await prepared.jobPromise;
+  } finally {
+    input.signal?.removeEventListener("abort", forwardAbort);
+    removeInProcessJob(job.id, owner);
+  }
+}
+
+async function reconcileDurableWorkflowDeliveries(
+  scope: SessionScope,
+  cwd: string,
+): Promise<void> {
+  const controller = durableWorkflowControllerForSession(cwd, scope);
+  const store = durableWorkflowStoreForSession(cwd, scope);
+  if (!controller || !store) return;
+  const entries = scope.sessionManager?.getEntries?.() ?? [];
+  for (const runId of await store.listRunIds()) {
+    try {
+      await controller.reconcileDelivery(runId, entries);
+    } catch (error) {
+      console.error(
+        `[subagentura] durable workflow delivery reconciliation failed for ${runId}`,
+        error,
+      );
+    }
+  }
+}
+
 function snapshotOwnedJobs(
   scope: SessionScope,
   sessionId: string | undefined,
@@ -271,6 +389,24 @@ function cleanupScopeGeneration(
   return durableJobsDrained;
 }
 
+async function releaseDurableWorkflowAuthorityWithRetry(
+  scope: SessionScope,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await releaseDurableWorkflowAuthority(scope);
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        console.error(
+          "[subagentura] durable workflow authority release failed during shutdown",
+          error,
+        );
+      }
+    }
+  }
+}
+
 export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
   const scope = createSessionScope(pi);
   const globalState = getGlobalState() as any;
@@ -292,20 +428,22 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
   });
 
   pi.on("session_start", async (event, ctx) => {
-    let durableContext: DurableWorkflowSessionContext | undefined;
-    let previousDurableStore: SessionScope["durableWorkflowStore"];
-    let previousDurableJobsDrained: Promise<void> | undefined;
-    try {
-      durableContext = durableWorkflowSessionContext(
-        scope,
-        ctx.cwd,
-        ctx.sessionManager?.getSessionId?.(),
-      );
-    } catch (error) {
-      console.error(
-        "[subagentura] durable workflow ownership is unavailable",
-        error,
-      );
+    const previousDurableOwner = scope.durableWorkflowOwner;
+    if (scope.lifecycle === "started") {
+      const previousOwner = sessionOwner(scope);
+      closeActiveInteractiveSupervisor(previousOwner);
+      clearSessionParsers(previousOwner);
+      if (
+        previousDurableOwner &&
+        activeDurableExecutionRegistry.list(previousDurableOwner).length > 0
+      ) {
+        await drainActiveDurableExecutions(
+          previousDurableOwner,
+          "session_shutdown",
+        );
+      }
+      cleanupScopeGeneration(scope, previousOwner, event, ctx);
+      scope.lifecycle = "shutdown";
     }
 
     if (scope.lifecycle === "started") {
@@ -333,6 +471,32 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
     scope.lifecycle = "started";
     scope.ui = ctx.ui;
     scope.sessionManager = ctx.sessionManager;
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    let durableOwner: WorkflowOwnerIdentity | undefined;
+    if (sessionId) {
+      const ownerId = `session-${createHash("sha256").update(sessionId).digest("hex")}`;
+      const preservedOwnerGeneration =
+        scope.durableWorkflowOwner?.piSessionId === sessionId &&
+        scope.durableWorkflowOwner.cwd === ctx.cwd
+          ? scope.durableWorkflowOwner.ownerGeneration
+          : 0;
+      const leaseToken = createHash("sha256")
+        .update(`${ctx.cwd}\0${sessionId}`)
+        .digest("hex");
+      setDurableWorkflowOwner(
+        scope,
+        workflowOwnerFromSessionContext({
+          projectKey: basename(ctx.cwd) || "project",
+          cwd: ctx.cwd,
+          sessionId,
+          ownerId,
+          generation: preservedOwnerGeneration,
+          leaseToken,
+        }),
+      );
+    } else {
+      setDurableWorkflowOwner(scope, undefined);
+    }
     scope.parentStreaming = false;
     if (durableContext) {
       setDurableWorkflowRootDir(scope, durableContext.rootDir);
@@ -372,6 +536,45 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
         );
       }
     }
+    void reconcileDurableWorkflowDeliveries(scope, ctx.cwd);
+    ensureInteractivePoller(globalState);
+    const recoveryReason = event.reason;
+    if (
+      durableOwner &&
+      (recoveryReason === "startup" ||
+        recoveryReason === "reload" ||
+        recoveryReason === "resume")
+    ) {
+      let autoResumeFailed = false;
+      try {
+        await recoverWorkflowRunsAtStartup({
+          store: new WorkflowRunStore({
+            rootDir: durableOwner.cwd,
+            owner: durableOwner,
+          }),
+          owner: durableOwner,
+          reason: recoveryReason,
+          onAutoResume: async (projection, plan) => {
+            autoResumeFailed = true;
+            if (!plan) {
+              throw new Error(
+                `Cannot auto-resume workflow ${projection.runId}: plan definition is unavailable.`,
+              );
+            }
+            await runDurableWorkflowForSession(durableOwner.cwd, scope, {
+              runId: projection.runId,
+              plan,
+              resume: true,
+              runAgent: (input) => runRecoveryAgent(scope, ctx, input),
+            });
+            autoResumeFailed = false;
+          },
+        });
+      } catch (error) {
+        if (autoResumeFailed) throw error;
+        /* startup recovery is fail-closed; lifecycle setup still completes */
+      }
+    }
   });
 
   (pi as any).on?.(
@@ -383,15 +586,17 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       if (scope.lifecycle !== "started") return;
 
       const owner = sessionOwner(scope);
-      const durableStore = scope.durableWorkflowStore;
+      const durableOwner = scope.durableWorkflowOwner;
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
-      const durableJobsDrained = cleanupScopeGeneration(
-        scope,
-        owner,
-        event,
-        ctx,
-      );
+      if (
+        durableOwner &&
+        activeDurableExecutionRegistry.list(durableOwner).length > 0
+      ) {
+        await drainActiveDurableExecutions(durableOwner, "session_shutdown");
+      }
+      cleanupScopeGeneration(scope, owner, event, ctx);
+      const releasePromise = releaseDurableWorkflowAuthorityWithRetry(scope);
       scope.parentStreaming = false;
       scope.lifecycle = "shutdown";
       advanceSessionScopeGeneration(scope.id);
@@ -418,9 +623,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
           }
         }
       }
-
-      await durableJobsDrained;
-      await revokeAndReleaseDurableWorkflowAuthoritySafely(scope, durableStore);
+      await releasePromise;
     },
   );
 

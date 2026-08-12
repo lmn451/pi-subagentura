@@ -1,8 +1,21 @@
-import { isAbsolute } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { WorkflowOwnerIdentity } from "./workflow-run-types";
 import { WorkflowRunStore } from "./workflow-run-store";
-import { DurableWorkflowController } from "./workflow-durable-plan-runner";
+import {
+  DurableWorkflowController,
+  runDurableWorkflowPlan,
+  type DurableWorkflowPlanOptions,
+} from "./workflow-durable-plan-runner";
+import type {
+  DurableWorkflowDeliveryMessage,
+  WorkflowDeliveryTransport,
+} from "./workflow-durable-delivery";
+import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
 import type { SessionScope } from "./session-scope";
+import { WorkflowSessionDispatcher } from "./workflow-dispatcher";
+import { workflowContinuitySnapshot } from "./workflow-continuity";
+import type { WorkflowProjection } from "./workflow-projection-repository";
 
 export interface WorkflowOwnerIdentityInput {
   projectKey: string;
@@ -13,34 +26,39 @@ export interface WorkflowOwnerIdentityInput {
   leaseToken: string;
 }
 
-const SAFE_PATH_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+/** Resolve a portable project namespace from the canonical real cwd. */
+export function canonicalWorkflowProjectKey(cwd: string): string {
+  if (!cwd || cwd.length > 500) throw new Error("Invalid workflow cwd");
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(cwd);
+  } catch (error) {
+    throw new Error("Workflow cwd cannot be canonicalized", { cause: error });
+  }
+  return createHash("sha256").update(canonical).digest("hex");
+}
 
-/** Construct and validate the durable lookup identity and live owner fence. */
+/** Stable session owner IDs survive process restart; a namespace salt is used
+ * only by explicit new/fork lifecycle boundaries. */
+export function workflowSessionOwnerId(
+  sessionId: string,
+  namespaceSalt = "",
+): string {
+  if (!sessionId || sessionId.length > 200) {
+    throw new Error("Invalid workflow session ID");
+  }
+  return `session-${createHash("sha256")
+    .update(`${sessionId}\0${namespaceSalt}`)
+    .digest("hex")}`;
+}
+
+/** Construct the complete durable owner fence from host-provided identity. */
 export function createWorkflowOwnerIdentity(
   input: WorkflowOwnerIdentityInput,
 ): WorkflowOwnerIdentity {
-  if (!SAFE_PATH_KEY.test(input.projectKey)) {
-    throw new Error("Invalid workflow owner projectKey");
-  }
-  if (!SAFE_PATH_KEY.test(input.piSessionId)) {
-    throw new Error("Invalid workflow owner piSessionId");
-  }
-  if (
-    !isAbsolute(input.cwd) ||
-    input.cwd.length === 0 ||
-    Buffer.byteLength(input.cwd, "utf8") > 4096
-  ) {
-    throw new Error("Invalid workflow owner cwd");
-  }
-  for (const [label, value] of [
-    ["ownerId", input.ownerId],
-    ["leaseToken", input.leaseToken],
-  ] as const) {
-    if (
-      typeof value !== "string" ||
-      value.length === 0 ||
-      Buffer.byteLength(value, "utf8") > 256
-    ) {
+  for (const [label, value] of Object.entries(input)) {
+    if (label === "ownerGeneration") continue;
+    if (typeof value !== "string" || value.length === 0 || value.length > 200) {
       throw new Error(`Invalid workflow owner ${label}`);
     }
   }
@@ -50,22 +68,14 @@ export function createWorkflowOwnerIdentity(
   ) {
     throw new Error("Invalid workflow owner generation");
   }
-  return {
-    projectKey: input.projectKey,
-    cwd: input.cwd,
-    piSessionId: input.piSessionId,
-    ownerId: input.ownerId,
-    ownerGeneration: input.ownerGeneration,
-    leaseToken: input.leaseToken,
-  };
+  return { ...input };
 }
 
-/** Create an owner-scoped store rooted at the caller-selected v1 base path. */
 export function createWorkflowRunStore(
   rootDir: string,
   input: WorkflowOwnerIdentityInput,
 ): WorkflowRunStore {
-  if (!isAbsolute(rootDir) || Buffer.byteLength(rootDir, "utf8") > 4096) {
+  if (!rootDir || rootDir.length > 500) {
     throw new Error("Invalid workflow store root directory");
   }
   return new WorkflowRunStore({
@@ -74,51 +84,241 @@ export function createWorkflowRunStore(
   });
 }
 
-function sessionWorkflowRunStore(
+export function createDurableWorkflowController(
+  rootDir: string,
+  input: WorkflowOwnerIdentityInput,
+): DurableWorkflowController {
+  const owner = createWorkflowOwnerIdentity(input);
+  return new DurableWorkflowController({
+    store: new WorkflowRunStore({ rootDir, owner }),
+    owner,
+  });
+}
+
+export function durableWorkflowDispatcherForSession(
+  scope: SessionScope,
+  maxConcurrent?: number,
+): WorkflowSessionDispatcher {
+  if (!scope.durableWorkflowDispatcher) {
+    scope.durableWorkflowDispatcher = new WorkflowSessionDispatcher({
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+    });
+  }
+  return scope.durableWorkflowDispatcher;
+}
+
+function sessionScopeDurableStore(
+  rootDir: string,
   scope: SessionScope,
 ): WorkflowRunStore | undefined {
-  if (
-    scope.lifecycle !== "started" ||
-    !scope.durableWorkflowRootDir ||
-    !scope.durableWorkflowOwner
-  ) {
-    return undefined;
-  }
-  if (
-    !isAbsolute(scope.durableWorkflowRootDir) ||
-    scope.durableWorkflowRootDir.includes("\0") ||
-    Buffer.byteLength(scope.durableWorkflowRootDir, "utf8") > 4096
-  ) {
-    throw new Error("Invalid workflow store root directory");
-  }
+  const owner = scope.durableWorkflowOwner;
+  if (!owner) return undefined;
   if (!scope.durableWorkflowStore) {
-    scope.durableWorkflowStore = new WorkflowRunStore({
-      rootDir: scope.durableWorkflowRootDir,
-      owner: scope.durableWorkflowOwner,
-    });
+    scope.durableWorkflowStore = new WorkflowRunStore({ rootDir, owner });
   }
   return scope.durableWorkflowStore;
 }
 
-export function durableWorkflowStoreForSession(
-  scope: SessionScope,
-): WorkflowRunStore | undefined {
-  return sessionWorkflowRunStore(scope);
-}
-
 export function durableWorkflowControllerForSession(
+  rootDir: string,
   scope: SessionScope,
 ): DurableWorkflowController | undefined {
-  if (scope.lifecycle !== "started" || !scope.durableWorkflowOwner) {
-    return undefined;
-  }
+  const owner = scope.durableWorkflowOwner;
+  if (!owner) return undefined;
   if (!scope.durableWorkflowController) {
-    const store = sessionWorkflowRunStore(scope);
+    const store = sessionScopeDurableStore(rootDir, scope);
     if (!store) return undefined;
     scope.durableWorkflowController = new DurableWorkflowController({
       store,
-      owner: scope.durableWorkflowOwner,
+      owner,
+      deliveryTransport: sessionWorkflowDeliveryTransport(scope),
     });
   }
   return scope.durableWorkflowController;
+}
+
+function sessionWorkflowDeliveryTransport(
+  scope: SessionScope,
+): WorkflowDeliveryTransport {
+  return {
+    send: async (
+      delivery: DurableWorkflowDeliveryMessage,
+      idempotencyKey: string,
+    ): Promise<void> => {
+      const sendMessage = scope.pi.sendMessage;
+      if (typeof sendMessage !== "function") {
+        throw new Error("Parent-session workflow delivery is unavailable.");
+      }
+      await Promise.resolve(
+        sendMessage.call(
+          scope.pi,
+          {
+            customType: "workflow-notify",
+            content: delivery.message,
+            display: true,
+            details: {
+              workflowId: delivery.runId,
+              status: delivery.status,
+              durable: true,
+              deliveryId: delivery.deliveryId,
+              idempotencyKey,
+            },
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        ),
+      );
+    },
+    getPersistedEntries: () => scope.sessionManager?.getEntries?.() ?? [],
+  };
+}
+
+export async function dispatchTerminalDeliveryForSession(
+  rootDir: string,
+  scope: SessionScope,
+  projection: WorkflowProjection,
+): Promise<WorkflowProjection> {
+  if (
+    !projection.terminal ||
+    !projection.delivery ||
+    projection.delivery.status === "delivered"
+  ) {
+    return projection;
+  }
+  const controller = durableWorkflowControllerForSession(rootDir, scope);
+  if (!controller) return projection;
+  return (
+    (await controller.dispatchDelivery(
+      projection.runId,
+      projection.delivery.deliveryId,
+    )) ?? projection
+  );
+}
+
+export function durableWorkflowStoreForSession(
+  rootDir: string,
+  scope: SessionScope,
+): WorkflowRunStore | undefined {
+  return sessionScopeDurableStore(rootDir, scope);
+}
+
+export function runDurableWorkflowForSession(
+  rootDir: string,
+  scope: SessionScope,
+  options: Omit<DurableWorkflowPlanOptions, "store" | "owner">,
+): Promise<Awaited<ReturnType<typeof runDurableWorkflowPlan>>> {
+  const owner = scope.durableWorkflowOwner;
+  if (!owner) throw new Error("Durable workflow storage is unavailable.");
+  const store = sessionScopeDurableStore(rootDir, scope);
+  if (!store) throw new Error("Durable workflow storage is unavailable.");
+  const onProjection = (projection: WorkflowProjection): void => {
+    scope.durableWorkflowContinuity = workflowContinuitySnapshot(
+      projection,
+      options.plan,
+    );
+    options.onProjection?.(projection);
+  };
+  return runDurableWorkflowPlan({
+    ...options,
+    onProjection,
+    store,
+    owner,
+    dispatcher: durableWorkflowDispatcherForSession(scope),
+  }).then(async (projection) => {
+    try {
+      return await dispatchTerminalDeliveryForSession(
+        rootDir,
+        scope,
+        projection,
+      );
+    } catch {
+      return projection;
+    }
+  });
+}
+
+export interface DurableWorkflowResumeOptions {
+  runId: string;
+  runAgent: DurableWorkflowPlanOptions["runAgent"];
+  signal?: AbortSignal;
+  onProjection?: DurableWorkflowPlanOptions["onProjection"];
+}
+
+/** Resume a run using only the declarative plan persisted in run_created. */
+export async function resumeDurableWorkflowForSession(
+  rootDir: string,
+  scope: SessionScope,
+  options: DurableWorkflowResumeOptions,
+): Promise<Awaited<ReturnType<typeof runDurableWorkflowPlan>>> {
+  const owner = scope.durableWorkflowOwner;
+  if (!owner) throw new Error("Durable workflow storage is unavailable.");
+  const store = sessionScopeDurableStore(rootDir, scope);
+  if (!store) throw new Error("Durable workflow storage is unavailable.");
+  const record = await store.readRun(options.runId);
+  const created = record.events.find((event) => event.type === "run_created");
+  const payload = created?.payload;
+  if (!payload || typeof payload !== "object" || !("plan" in payload)) {
+    throw new Error("Durable workflow run has no persisted declarative plan.");
+  }
+  const plan = (payload as { plan?: unknown }).plan;
+  validateWorkflowPlan(plan as WorkflowPlan);
+  const onProjection = (projection: WorkflowProjection): void => {
+    scope.durableWorkflowContinuity = workflowContinuitySnapshot(
+      projection,
+      plan as WorkflowPlan,
+    );
+    options.onProjection?.(projection);
+  };
+  return runDurableWorkflowPlan({
+    runId: options.runId,
+    plan: plan as WorkflowPlan,
+    runAgent: options.runAgent,
+    signal: options.signal,
+    onProjection,
+    resume: true,
+    store,
+    owner,
+    dispatcher: durableWorkflowDispatcherForSession(scope),
+  }).then(async (projection) => {
+    try {
+      return await dispatchTerminalDeliveryForSession(
+        rootDir,
+        scope,
+        projection,
+      );
+    } catch {
+      return projection;
+    }
+  });
+}
+
+export const resumeDurableWorkflowFromPersistedPlan =
+  resumeDurableWorkflowForSession;
+
+export function workflowOwnerFromSessionContext(input: {
+  projectKey: string;
+  cwd: string;
+  sessionId: string;
+  ownerId: string;
+  generation: number;
+  leaseToken: string;
+}): WorkflowOwnerIdentity {
+  return createWorkflowOwnerIdentity({
+    projectKey: input.projectKey,
+    cwd: input.cwd,
+    piSessionId: input.sessionId,
+    ownerId: input.ownerId,
+    ownerGeneration: input.generation,
+    leaseToken: input.leaseToken,
+  });
+}
+
+/** Create a fresh unpredictable live lease token at each lifecycle boundary. */
+export function workflowLeaseToken(
+  cwd: string,
+  sessionId: string,
+  generation: number,
+): string {
+  return createHash("sha256")
+    .update(`${cwd}\0${sessionId}\0${generation}\0${randomUUID()}`)
+    .digest("hex");
 }

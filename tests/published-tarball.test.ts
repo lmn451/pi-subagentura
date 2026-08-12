@@ -40,6 +40,7 @@ const PKG = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
   files: string[];
   exports: Record<string, unknown>;
   dependencies?: Record<string, string>;
+  engines?: { node?: string };
   peerDependencies?: Record<string, string>;
 };
 const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs", ".js"];
@@ -180,6 +181,33 @@ function packageFileDeclarationMatches(
   return entries.some((entry) => entry.startsWith(`${directory}/`));
 }
 
+function repositorySourceFiles(directory: string, prefix: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const relativePath = join(prefix, entry.name);
+    if (entry.isDirectory()) {
+      return repositorySourceFiles(join(directory, entry.name), relativePath);
+    }
+    return isSourceFile(relativePath) ? [relativePath] : [];
+  });
+}
+
+function localReadmeLinks(readme: string): string[] {
+  const links: string[] = [];
+  const markdownLink = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^)]*["'])?\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = markdownLink.exec(readme)) !== null) {
+    const target = match[1];
+    if (
+      target.startsWith("./") &&
+      !target.startsWith("//") &&
+      !target.includes("://")
+    ) {
+      links.push(target.slice(2).split(/[?#]/, 1)[0]);
+    }
+  }
+  return links;
+}
+
 describe("published tarball", () => {
   const work = mkdtempSync(join(tmpdir(), "pi-subagentura-pubtest-"));
   let entries: string[] = [];
@@ -211,6 +239,62 @@ describe("published tarball", () => {
     expect(
       missing,
       `tarball is missing files declared in package.json: ${missing.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("retains the Node 18 and minimum Pi SDK compatibility contract", () => {
+    const packedPackage = JSON.parse(
+      readFileSync(join(pkgDir, "package.json"), "utf8"),
+    );
+    expect(PKG.engines?.node).toBe(">=18.0.0");
+    expect(packedPackage.engines?.node).toBe(">=18.0.0");
+    for (const peer of [
+      "@earendil-works/pi-agent-core",
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-coding-agent",
+      "@earendil-works/pi-tui",
+    ]) {
+      expect(PKG.peerDependencies?.[peer]).toBe(">=0.80.6");
+      expect(packedPackage.peerDependencies?.[peer]).toBe(">=0.80.6");
+    }
+  });
+
+  it("declares and packs every source runtime module and public type", () => {
+    const sourceFiles = repositorySourceFiles(join(REPO, "src"), "src");
+    const undeclared = sourceFiles.filter(
+      (file) =>
+        !PKG.files.some((declaration) =>
+          packageFileDeclarationMatches(declaration, [file]),
+        ),
+    );
+    const missing = sourceFiles.filter((file) => !entries.includes(file));
+    expect(
+      undeclared,
+      `source files missing from package.json files: ${undeclared.join(", ")}`,
+    ).toEqual([]);
+    expect(
+      missing,
+      `source files missing from packed tarball: ${missing.join(", ")}`,
+    ).toEqual([]);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        "src/workflow-run-types.ts",
+        "src/workflow-replay.ts",
+        "src/workflow-process-handshake.ts",
+        "src/workflow-routing-runtime.ts",
+        "types/workflow.d.ts",
+      ]),
+    );
+  });
+
+  it("ships every repository-local README link", () => {
+    const packedReadme = readFileSync(join(pkgDir, "README.md"), "utf8");
+    const missing = localReadmeLinks(packedReadme).filter(
+      (link) => !entries.includes(link),
+    );
+    expect(
+      missing,
+      `README references files omitted from the tarball: ${missing.join(", ")}`,
     ).toEqual([]);
   });
 

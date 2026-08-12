@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test:
-    name: Test (Pi ${{ matrix.pi-version }})
+    name: Test (Node ${{ matrix.node-version }}, Pi ${{ matrix.pi-version }})
     runs-on: ubuntu-latest
     # Per-test bounds exist, but nothing the runner enforces bounds vitest worker
     # shutdown or a wedged tmux server; without this a hang burns the 360 min
@@ -21,8 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        node-version: ["24"]
         pi-version: ["0.80.6", "latest"]
-
+    # Pi SDK 0.80.6 currently requires Node >=22.19; the package's Node 18
+    # install/entrypoint contract is guarded by the package-node18 job below.
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -30,8 +32,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 24
-          cache: npm
+          node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
         run: npm ci
@@ -126,3 +127,49 @@ jobs:
 
       - name: Verify package can be packed
         run: npm run pack:check
+  package-node18:
+    name: Package install/entrypoint (Node 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 18
+
+      - name: Pack package
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      - name: Install packed package with engine-strict
+        env:
+          npm_config_engine_strict: "true"
+        run: |
+          set -euo pipefail
+          consumer="$RUNNER_TEMP/pi-subagentura-node18-consumer"
+          mkdir -p "$consumer"
+          printf '{"name":"packed-consumer","private":true}\n' > "$consumer/package.json"
+          tgz="$(find "$RUNNER_TEMP" -maxdepth 1 -name 'pi-subagentura-*.tgz' -print -quit)"
+          test -n "$tgz"
+          npm install --prefix "$consumer" --omit=dev --ignore-scripts --legacy-peer-deps "$tgz"
+
+      - name: Verify packed entrypoint contract
+        working-directory: ${{ runner.temp }}/pi-subagentura-node18-consumer
+        run: |
+          node --input-type=module <<'NODE'
+          import { access, readFile } from "node:fs/promises";
+
+          const packageRoot = new URL("./node_modules/pi-subagentura/", import.meta.url);
+          const packageJson = JSON.parse(
+            await readFile(new URL("./package.json", packageRoot), "utf8"),
+          );
+          if (packageJson.engines?.node !== ">=18.0.0") {
+            throw new Error(`unexpected package engine: ${packageJson.engines?.node}`);
+          }
+          if (packageJson.exports?.["."] !== "./src/subagent.ts") {
+            throw new Error("package root export does not point at src/subagent.ts");
+          }
+          await access(new URL("./src/subagent.ts", packageRoot));
+          NODE

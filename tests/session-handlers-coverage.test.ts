@@ -14,10 +14,13 @@ import {
 } from "../src/interactive-tmux";
 import { registerSessionHandlers } from "../src/session-handlers";
 import {
-  durableWorkflowLiveJobRegistry,
-  registerDurableWorkflowLiveJob,
-  workflowJobRegistry,
-} from "../src/workflow-jobs";
+  activeDurableExecutionRegistry,
+  type ActiveDurableWorkflowExecution,
+} from "../src/workflow-durable-plan-runner";
+import type { WorkflowProjection } from "../src/workflow-projection-repository";
+import type { WorkflowPlan } from "../src/workflow-plan";
+import { WorkflowRunStore } from "../src/workflow-run-store";
+import { workflowJobRegistry } from "../src/workflow-jobs";
 import { appendEvent, artifactPath } from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import { updateRunningSubagentFooter } from "../src/artifact-poller";
@@ -49,7 +52,7 @@ function registerHandlers(): HandlerRegistration {
   return { handlers, pi, sessionScope };
 }
 
-function startSession(
+async function startSession(
   registration: HandlerRegistration,
   root: string,
   sessionId: string,
@@ -60,7 +63,25 @@ function startSession(
     getEntries: () => [],
   };
   const ctx = { cwd: root, ui, sessionManager };
-  registration.handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+  await registration.handlers.get("session_start")![0](
+    { reason: "startup" },
+    ctx,
+  );
+  return ctx;
+}
+
+function restartSession(
+  registration: HandlerRegistration,
+  root: string,
+  sessionId: string,
+) {
+  const sessionManager = {
+    getSessionId: () => sessionId,
+    getEntries: () => [],
+  };
+  const ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() };
+  const ctx = { cwd: root, ui, sessionManager };
+  registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
   return ctx;
 }
 
@@ -168,9 +189,9 @@ describe("session handler lifecycle callbacks", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("tracks streaming and flush lifecycle state on the exact scope", () => {
+  it("tracks streaming and flush lifecycle state on the exact scope", async () => {
     const registration = registerHandlers();
-    const ctx = startSession(registration, root, "session-a");
+    const ctx = await startSession(registration, root, "session-a");
     const { sessionScope: scope, handlers } = registration;
 
     handlers.get("agent_start")![0]();
@@ -183,7 +204,7 @@ describe("session handler lifecycle callbacks", () => {
 
     const { abort } = ownedJob(scope, "job-a");
     const workflow = ownedWorkflow(scope, "workflow-a");
-    handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+    await handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
 
     expect(abort).toHaveBeenCalledOnce();
     expect(workflow.abort.signal.aborted).toBe(true);
@@ -193,6 +214,116 @@ describe("session handler lifecycle callbacks", () => {
     expect(workflowJobRegistry.size).toBe(0);
     expect(getSessionScopes()).toEqual([]);
     expect((globalThis as any).__piSubagenturaPiRef).toBeUndefined();
+  });
+  it("fences durable owners with the live generation and rotates lifecycle tokens", async () => {
+    const registration = registerHandlers();
+    const ctx = await startSession(registration, root, "session-a");
+    const first = registration.sessionScope.durableWorkflowOwner;
+    expect(first?.ownerGeneration).toBe(registration.sessionScope.generation);
+    expect(first).toBeDefined();
+
+    await registration.handlers.get("session_start")![0](
+      { reason: "reload" },
+      ctx,
+    );
+    const reloaded = registration.sessionScope.durableWorkflowOwner;
+    expect(reloaded?.ownerGeneration).toBe(
+      registration.sessionScope.generation,
+    );
+    expect(reloaded?.ownerId).toBe(first?.ownerId);
+    expect(reloaded?.leaseToken).not.toBe(first?.leaseToken);
+
+    await registration.handlers.get("session_start")![0](
+      { reason: "new" },
+      ctx,
+    );
+
+    expect(registration.sessionScope.durableWorkflowOwner?.ownerId).not.toBe(
+      reloaded?.ownerId,
+    );
+  });
+  it("drains active durable execution before a replacement owner recovers", async () => {
+    const registration = registerHandlers();
+    const ctx = await startSession(registration, root, "session-a");
+    const owner = registration.sessionScope.durableWorkflowOwner;
+    expect(owner).toBeDefined();
+
+    let resolveExecution!: (projection: WorkflowProjection) => void;
+    const closeAdmission = vi.fn();
+    const providerDrain = vi.fn().mockResolvedValue(undefined);
+    const execution: ActiveDurableWorkflowExecution = {
+      runId: "active",
+      owner: owner!,
+      abortController: new AbortController(),
+      promise: new Promise<WorkflowProjection>((resolve) => {
+        resolveExecution = resolve;
+      }),
+      dispatcherSlot: {
+        closeAdmission,
+        drain: providerDrain,
+      },
+    };
+    activeDurableExecutionRegistry.register(execution);
+
+    const replacement = registration.handlers.get("session_start")![0](
+      { reason: "reload" },
+      ctx,
+    );
+    await Promise.resolve();
+    expect(closeAdmission).toHaveBeenCalledOnce();
+    expect(providerDrain).toHaveBeenCalledOnce();
+    expect(registration.sessionScope.generation).toBe(1);
+
+    resolveExecution({} as WorkflowProjection);
+    await replacement;
+    expect(registration.sessionScope.generation).toBe(2);
+    expect(
+      registration.sessionScope.durableWorkflowOwner?.ownerGeneration,
+    ).toBe(2);
+    activeDurableExecutionRegistry.unregister(execution);
+  });
+  it("auto-resumes the persisted plan once using the session cwd", async () => {
+    const registration = registerHandlers();
+    const ctx = await startSession(registration, root, "session-a");
+    const initialOwner = registration.sessionScope.durableWorkflowOwner;
+    expect(initialOwner).toBeDefined();
+
+    const plan: WorkflowPlan = {
+      schemaVersion: 1,
+      name: "empty-auto-resume",
+      phases: [{ id: "phase", mode: "sequential", tasks: [] }],
+    };
+    const store = new WorkflowRunStore({
+      rootDir: root,
+      owner: initialOwner!,
+    });
+    await store.createRun({
+      runId: "auto-once",
+      planRevision: 1,
+      plan,
+      resumePolicy: "on-session-start",
+      owner: initialOwner!,
+    });
+    await store.append("auto-once", "run_created", { tasks: [] });
+    await store.append("auto-once", "run_started", {});
+
+    await registration.handlers.get("session_start")![0](
+      { reason: "reload" },
+      ctx,
+    );
+
+    const replacementOwner = registration.sessionScope.durableWorkflowOwner;
+    const recovered = new WorkflowRunStore({
+      rootDir: root,
+      owner: replacementOwner!,
+    });
+    const events = (await recovered.readRun("auto-once")).events;
+    expect(events.filter((event) => event.type === "run_started")).toHaveLength(
+      2,
+    );
+    expect(
+      events.filter((event) => event.type === "run_terminal"),
+    ).toHaveLength(1);
   });
 
   it("drains delayed durable abort completion before revoking and releasing replacement authority", async () => {
@@ -265,8 +396,8 @@ describe("session handler lifecycle callbacks", () => {
     async (_label, first) => {
       const a = registerHandlers();
       const b = registerHandlers();
-      const aCtx = startSession(a, root, "session-a");
-      const bCtx = startSession(b, root, "session-b");
+      const aCtx = await startSession(a, root, "session-a");
+      const bCtx = await startSession(b, root, "session-b");
       const aJob = ownedJob(a.sessionScope, "job-a");
       const bJob = ownedJob(b.sessionScope, "job-b");
       const aWorkflow = ownedWorkflow(a.sessionScope, "workflow-a");
@@ -328,8 +459,8 @@ describe("session handler lifecycle callbacks", () => {
   it("a second session_start cleans only that scope's prior generation", async () => {
     const a = registerHandlers();
     const b = registerHandlers();
-    startSession(a, root, "session-a");
-    const bCtx = startSession(b, root, "session-b");
+    await startSession(a, root, "session-a");
+    const bCtx = await startSession(b, root, "session-b");
     const aOwner = sessionOwner(a.sessionScope);
     const bGeneration = b.sessionScope.generation;
     const aJob = ownedJob(a.sessionScope, "job-a");
@@ -370,6 +501,31 @@ describe("session handler lifecycle callbacks", () => {
     expect(getSessionScopes()).toEqual([a.sessionScope, b.sessionScope]);
   });
 
+  it("keeps durable ownerGeneration stable across session reload", () => {
+    const registration = registerHandlers();
+    const initial = startSession(registration, root, "session-a");
+    const initialOwnerGeneration =
+      registration.sessionScope.durableWorkflowOwner?.ownerGeneration;
+    const initialScopeGeneration = registration.sessionScope.generation;
+
+    restartSession(registration, root, "session-a");
+
+    expect(registration.sessionScope.generation).toBe(
+      initialScopeGeneration + 1,
+    );
+    expect(
+      registration.sessionScope.durableWorkflowOwner?.ownerGeneration,
+    ).toBe(initialOwnerGeneration);
+
+    const stillStarted = registration.sessionScope.lifecycle;
+    expect(stillStarted).toBe("started");
+    registration.handlers.get("session_shutdown")![0](
+      { reason: "quit" },
+      initial,
+    );
+    expect(registration.sessionScope.lifecycle).toBe("shutdown");
+  });
+
   it("clears a stopped scope's contribution from a shared UI", () => {
     const sharedUi = {
       setStatus: vi.fn(),
@@ -378,8 +534,8 @@ describe("session handler lifecycle callbacks", () => {
     };
     const a = registerHandlers();
     const b = registerHandlers();
-    const aCtx = startSession(a, root, "session-a", sharedUi);
-    startSession(b, root, "session-b", sharedUi);
+    const aCtx = await startSession(a, root, "session-a", sharedUi);
+    await startSession(b, root, "session-b", sharedUi);
     ownedJob(a.sessionScope, "job-a");
 
     updateRunningSubagentFooter(sharedUi, sessionOwner(a.sessionScope));
@@ -388,7 +544,7 @@ describe("session handler lifecycle callbacks", () => {
       "⚡ 1 sub-agent active",
     );
 
-    a.handlers.get("session_shutdown")![0]({ reason: "quit" }, aCtx);
+    await a.handlers.get("session_shutdown")![0]({ reason: "quit" }, aCtx);
 
     expect(sharedUi.setStatus).toHaveBeenCalledWith(
       "subagentura-running",
@@ -396,10 +552,10 @@ describe("session handler lifecycle callbacks", () => {
     );
   });
 
-  it("does not let a stale generation clear the current footer", () => {
+  it("does not let a stale generation clear the current footer", async () => {
     const ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() };
     const registration = registerHandlers();
-    startSession(registration, root, "session-a", ui);
+    await startSession(registration, root, "session-a", ui);
     const staleOwner = sessionOwner(registration.sessionScope);
     ownedJob(registration.sessionScope, "old-job");
     updateRunningSubagentFooter(ui, staleOwner);
@@ -420,8 +576,8 @@ describe("session handler lifecycle callbacks", () => {
   it("polls every started scope from one shared interval", async () => {
     const a = registerHandlers();
     const b = registerHandlers();
-    startSession(a, root, "session-a");
-    startSession(b, root, "session-b");
+    await startSession(a, root, "session-a");
+    await startSession(b, root, "session-b");
     const makeState = (
       scope: SessionScope,
       id: string,
@@ -454,5 +610,25 @@ describe("session handler lifecycle callbacks", () => {
 
     expect(aState.eventByteCursor).toBeGreaterThan(0);
     expect(bState.eventByteCursor).toBeGreaterThan(0);
+  });
+
+  it("awaits and retries durable authority release on the production shutdown path", async () => {
+    const registration = registerHandlers();
+    const ctx = startSession(registration, root, "session-a");
+    const release = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient release failure"))
+      .mockResolvedValueOnce(undefined);
+    registration.sessionScope.durableWorkflowStore = { release } as any;
+    registration.sessionScope.durableWorkflowController = {} as any;
+
+    const shutdown = registration.handlers.get("session_shutdown")![0];
+    const result = shutdown({ reason: "quit" }, ctx);
+
+    expect(result).toBeInstanceOf(Promise);
+    await result;
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(registration.sessionScope.durableWorkflowStore).toBeUndefined();
+    expect(registration.sessionScope.durableWorkflowController).toBeUndefined();
   });
 });

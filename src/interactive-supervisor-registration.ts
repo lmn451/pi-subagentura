@@ -44,7 +44,14 @@ import { updateRunningSubagentFooter } from "./artifact-poller";
 import {
   normalizeCancelledWorkflowState,
   workflowJobsForOwner,
+  type WorkflowJobState,
 } from "./workflow-jobs";
+import { formatWorkflowUsage, zeroWorkflowUsage } from "./workflow-core";
+import type { WorkflowProjection } from "./workflow-projection-repository";
+import {
+  durableWorkflowControllerForSession,
+  durableWorkflowStoreForSession,
+} from "./workflow-owner";
 import {
   interactiveStateBelongsToOwner,
   ownerlessEntitiesVisible,
@@ -58,6 +65,26 @@ const SUPERVISOR_CAPTURE_MAX_LINES = 200;
 
 const EMPTY_INTERACTIVE_STATES: ReadonlyMap<string, InteractiveSubagentState> =
   new Map();
+
+function durableWorkflowRootForScope(
+  scope: SessionScope | undefined,
+): string | undefined {
+  return scope?.durableWorkflowOwner?.cwd;
+}
+
+function durableControllerForScope(scope?: SessionScope) {
+  const root = durableWorkflowRootForScope(scope);
+  return root && scope
+    ? durableWorkflowControllerForSession(root, scope)
+    : undefined;
+}
+
+function durableStoreForScope(scope?: SessionScope) {
+  const root = durableWorkflowRootForScope(scope);
+  return root && scope
+    ? durableWorkflowStoreForSession(root, scope)
+    : undefined;
+}
 
 function supervisorInteractiveStates(
   owner: SessionOwnerToken | undefined,
@@ -112,17 +139,79 @@ export function directSupervisorItems(
       },
     }));
 }
+function durableJobStatus(
+  status: WorkflowProjection["status"],
+): WorkflowJobState["status"] {
+  if (status === "done") return "done";
+  if (status === "error") return "error";
+  if (status === "cancelled") return "cancelled";
+  return "running";
+}
+
+function durableWorkflowJob(projection: WorkflowProjection): WorkflowJobState {
+  const tasks = Object.values(projection.tasks);
+  const runningCount = tasks.filter((task) => task.status === "running").length;
+  const errorCount = tasks.filter((task) => task.status === "failed").length;
+  const usage = zeroWorkflowUsage();
+  return {
+    id: projection.runId,
+    name: projection.runId,
+    status: durableJobStatus(projection.status),
+    startedAt: 0,
+    promise: Promise.resolve({
+      meta: {
+        name: projection.runId,
+        description: "Durable workflow projection",
+      },
+      result: projection.terminal?.result,
+      agentsSpawned: tasks.filter(
+        (task) =>
+          task.status === "running" ||
+          task.status === "succeeded" ||
+          task.status === "failed",
+      ).length,
+      errorCount,
+      tokensSpent: usage.output,
+      usage,
+      phases: projection.currentPhase ? [projection.currentPhase] : [],
+    }),
+    abort: new AbortController(),
+    snapshot: {
+      agentsSpawned: tasks.filter(
+        (task) =>
+          task.status === "running" ||
+          task.status === "succeeded" ||
+          task.status === "failed",
+      ).length,
+      errorCount,
+      tokensSpent: usage.output,
+      usage,
+      phases: projection.currentPhase ? [projection.currentPhase] : [],
+      currentPhase: projection.currentPhase,
+      runningCount,
+      agentRecords: [],
+      agentRecordsOmitted: 0,
+    },
+    parentSessionOwner: undefined,
+  };
+}
 
 export function buildAsyncSupervisorItems(
   interactiveItems: InteractiveSupervisorItem[],
   owner: SessionOwnerToken | undefined,
+  durableProjections: readonly WorkflowProjection[] = [],
 ): AsyncSupervisorItem[] {
   const processJobs = [...inProcessJobsForOwner(owner).values()]
     .filter((job) => owner !== undefined || !inProcessJobOwner(job))
     .sort(compareByStartedAt);
   const visibleJobs = new Map(processJobs.map((job) => [job.id, job]));
-  const workflowItems: WorkflowSupervisorItem[] = workflowJobsForOwner(owner)
-    .filter((job) => job.status === "running")
+  const durableIds = new Set(
+    durableProjections.map((projection) => projection.runId),
+  );
+  const liveWorkflowItems: WorkflowSupervisorItem[] = workflowJobsForOwner(
+    owner,
+  )
+    .filter((job) => job.status === "running" && !durableIds.has(job.id))
     .sort(compareByStartedAt)
     .map((job) => ({
       kind: "workflow",
@@ -130,6 +219,16 @@ export function buildAsyncSupervisorItems(
       depth: 0,
       actionable: job.status === "running",
     }));
+  const durableWorkflowItems: WorkflowSupervisorItem[] = durableProjections.map(
+    (projection) => ({
+      kind: "workflow",
+      job: durableWorkflowJob(projection),
+      durableProjection: projection,
+      depth: 0,
+      actionable: projection.status === "running",
+    }),
+  );
+  const workflowItems = [...liveWorkflowItems, ...durableWorkflowItems];
   const workflowIds = new Set(workflowItems.map((item) => item.job.id));
   /**
    * Only a child whose workflow row is present may be indented. Teardown deletes
@@ -458,6 +557,21 @@ export function supervisorStatusLines(
   return lines;
 }
 
+async function loadDurableWorkflowProjections(
+  scope?: SessionScope,
+): Promise<WorkflowProjection[]> {
+  const controller = durableControllerForScope(scope);
+  const store = durableStoreForScope(scope);
+  if (!controller || !store) return [];
+  const ids = await store.listRunIds();
+  const projections = await Promise.all(
+    ids.map((runId) => controller.getStatus(runId)),
+  );
+  return projections.filter(
+    (projection): projection is WorkflowProjection => projection !== undefined,
+  );
+}
+
 export function registerInteractiveSupervisor(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
@@ -480,6 +594,12 @@ export function registerInteractiveSupervisor(
       refreshError = errorMessage(error);
       return undefined;
     });
+    let durableProjections = await loadDurableWorkflowProjections(
+      sessionScope,
+    ).catch((error: unknown) => {
+      refreshError = errorMessage(error);
+      return [];
+    });
     await showInteractiveSupervisor(
       ctx.ui,
       {
@@ -487,6 +607,7 @@ export function registerInteractiveSupervisor(
           buildAsyncSupervisorItems(
             projection?.items ?? directSupervisorItems(sessionId, activeOwner),
             activeOwner,
+            durableProjections,
           ),
         status: () => supervisorStatusLines(projection, refreshError),
         refresh: async () => {
@@ -494,6 +615,8 @@ export function registerInteractiveSupervisor(
           // indication; the error now reaches the overlay footer.
           try {
             projection = await loadSupervisorProjection(sessionId, activeOwner);
+            durableProjections =
+              await loadDurableWorkflowProjections(sessionScope);
             refreshError = undefined;
           } catch (error) {
             refreshError = errorMessage(error);
@@ -537,7 +660,21 @@ export function registerInteractiveSupervisor(
           updateRunningSubagentFooter(ctx.ui, owner());
           return true;
         },
-        cancelWorkflow: (job) => {
+        cancelWorkflow: (job, durableProjection) => {
+          if (durableProjection) {
+            const controller = durableControllerForScope(sessionScope);
+            if (!controller || job.status !== "running") return false;
+            void controller
+              .cancel(job.id)
+              .then((updated) => {
+                if (!updated) return;
+                durableProjections = durableProjections.map((projection) =>
+                  projection.runId === updated.runId ? updated : projection,
+                );
+              })
+              .catch(() => undefined);
+            return true;
+          }
           if (job.status !== "running") return false;
           job.abort.abort();
           job.status = "cancelled";

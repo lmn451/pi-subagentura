@@ -13,6 +13,7 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import type { SessionOwnerToken } from "./session-scope";
+import type { WorkflowProjection } from "./workflow-projection-repository";
 import type { WorkflowJobState } from "./workflow-jobs";
 import {
   formatWorkflowUsage,
@@ -71,6 +72,8 @@ export interface InProcessSupervisorItem extends SupervisorItemBase {
 export interface WorkflowSupervisorItem extends SupervisorItemBase {
   kind: "workflow";
   job: WorkflowJobState;
+  /** Present when this row is backed by durable projection authority. */
+  durableProjection?: WorkflowProjection;
 }
 
 export type AsyncSupervisorItem =
@@ -82,7 +85,10 @@ export interface InteractiveSupervisorOptions {
   notify?: (message: string, level?: "info" | "warning" | "error") => void;
   cancel?: typeof cancelInteractiveSubagent;
   cancelInProcess?: (job: JobState) => boolean;
-  cancelWorkflow?: (job: WorkflowJobState) => boolean;
+  cancelWorkflow?: (
+    job: WorkflowJobState,
+    durableProjection?: WorkflowProjection,
+  ) => boolean;
   focus?: (state: InteractiveSubagentState) => void | Promise<void>;
   view?: (state: InteractiveSubagentState) => void | Promise<void>;
   nativeView?: (state: InteractiveSubagentState) => void | Promise<void>;
@@ -311,9 +317,11 @@ export class InteractiveSupervisorComponent {
     let label = "subagent";
     if (item.kind === "in-process") {
       cancelled = this.opts.cancelInProcess?.(item.job) ?? false;
-      label = item.job.id;
     } else if (item.kind === "workflow") {
-      cancelled = this.opts.cancelWorkflow?.(item.job) ?? false;
+      cancelled = item.durableProjection
+        ? (this.opts.cancelWorkflow?.(item.job, item.durableProjection) ??
+          false)
+        : (this.opts.cancelWorkflow?.(item.job) ?? false);
       label = item.job.name;
     } else {
       cancelled = Boolean(
@@ -634,6 +642,7 @@ function interactiveState(
 // were all unreachable and have been removed rather than made reachable —
 // hiding is the intended design and the README documents it.
 function supervisorItemIsActive(item: AsyncSupervisorItem): boolean {
+  if (item.kind === "workflow" && item.durableProjection) return true;
   if (!item.actionable) return false;
   if (item.kind === "in-process") return item.job.status === "running";
   if (item.kind === "workflow") return item.job.status === "running";
@@ -662,10 +671,14 @@ function formatAsyncSupervisorSummary(
     const phase = job.snapshot.currentPhase
       ? ` · phase: ${job.snapshot.currentPhase}`
       : "";
-    // A blocking sync workflow is holding the parent turn open — worth telling
-    // apart from a background one before the user reaches for the cancel key.
-    const label = job.executionMode === "sync" ? "workflow:sync" : "workflow";
-    return `[${label}] ${statusIcon(job.status)} ${job.status} ${job.name} (${job.id}) · ${elapsed} · ${job.snapshot.agentsSpawned} agents · ${job.snapshot.runningCount ?? 0} running${phase}`;
+    const durableStatus = item.durableProjection?.status;
+    const displayedStatus = durableStatus ?? job.status;
+    const label = item.durableProjection
+      ? "workflow:durable"
+      : job.executionMode === "sync"
+        ? "workflow:sync"
+        : "workflow";
+    return `[${label}] ${statusIcon(job.status)} ${displayedStatus} ${job.name} (${job.id}) · ${elapsed} · ${job.snapshot.agentsSpawned} agents · ${job.snapshot.runningCount ?? 0} running${phase}`;
   }
   const source = item.origin?.source ?? "registry";
   return `[${source}] ${formatSupervisorSummary(item.state, now)}`;
@@ -680,7 +693,7 @@ function formatAsyncDetails(
     return formatInProcessDetails(item.job, width);
   }
   if (item.kind === "workflow") {
-    return formatWorkflowDetails(item.job, width);
+    return formatWorkflowDetails(item.job, width, item.durableProjection);
   }
   return formatInteractiveDetails(item, width, artifact);
 }
@@ -698,8 +711,31 @@ function formatInProcessDetails(job: JobState, width: number): string[] {
   ];
   return fields.map((field) => trunc(`│     ${field}`, width));
 }
+function formatWorkflowDetails(
+  job: WorkflowJobState,
+  width: number,
+  durableProjection?: WorkflowProjection,
+): string[] {
+  if (durableProjection) {
+    const fields = [
+      `Workflow: ${job.name} (${job.id})`,
+      `Durable status: ${durableProjection.status} · revision ${durableProjection.revision}`,
+      `Phase: ${durableProjection.currentPhase ?? "none"}`,
+      `Tasks: ${Object.values(durableProjection.tasks)
+        .map(
+          (task) =>
+            `${task.id}=${task.status}${
+              task.attempt > 0 ? `#${task.attempt}` : ""
+            }`,
+        )
+        .join(", ")}`,
+      ...(durableProjection.terminal
+        ? [`Terminal: ${JSON.stringify(durableProjection.terminal)}`]
+        : []),
+    ];
+    return fields.map((field) => trunc(`│     ${field}`, width));
+  }
 
-function formatWorkflowDetails(job: WorkflowJobState, width: number): string[] {
   const snapshot = job.snapshot;
   const allRecords = snapshot.agentRecords ?? [];
   const records = allRecords.slice(-DETAIL_WORKFLOW_AGENT_COUNT);

@@ -735,6 +735,7 @@ export function launchInteractiveSubagent(params: {
       thinkingLevel: params.thinkingLevel,
     });
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
+      PATH: process.env.PATH ?? "",
       ...(rootId ? { PI_SUBAGENTURA_ROOT_ID: rootId } : {}),
       ...(rootId ? { PI_SUBAGENTURA_LINEAGE_SESSION_ROOT: sessionRoot } : {}),
       PI_SUBAGENTURA_AGENT_ID: id,

@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
@@ -45,9 +45,7 @@ import {
   type DurableWorkflowLiveJob,
   type WorkflowJobState,
 } from "./workflow-jobs";
-import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
-import type { WorkflowPlanState } from "./workflow-plan-state";
-import { renderProgress } from "./workflow-ui";
+import { renderProgress, renderWorkflowPlanProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
 import { sanitizeOutput } from "./notifications";
 import { showWorkflowTree } from "./workflow-tree-ui";
@@ -74,11 +72,32 @@ import { attachAsyncJobSettlement } from "./tools/in-process";
 import {
   durableWorkflowControllerForSession,
   durableWorkflowStoreForSession,
+  dispatchTerminalDeliveryForSession,
+  resumeDurableWorkflowForSession,
+  runDurableWorkflowForSession,
 } from "./workflow-owner";
+import { workflowDeliveryId } from "./workflow-durable-plan-runner";
+import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
+import type { WorkflowPlanState } from "./workflow-plan-state";
 import {
-  DurableWorkflowProjectionRepository,
-  type WorkflowProjection,
-} from "./workflow-projection-repository";
+  decideWorkflowRouting,
+  parseWorkflowEagerMode,
+} from "./workflow-routing";
+import {
+  workflowContinuitySnapshot,
+  type WorkflowContinuitySnapshot,
+} from "./workflow-continuity";
+import type { WorkflowProjection } from "./workflow-projection-repository";
+
+function publishWorkflowContinuity(
+  projection: WorkflowProjection,
+  scope?: SessionScope,
+): WorkflowContinuitySnapshot | undefined {
+  if (!scope) return undefined;
+  const snapshot = workflowContinuitySnapshot(projection);
+  scope.durableWorkflowContinuity = snapshot;
+  return snapshot;
+}
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -230,6 +249,26 @@ export function formatWorkflowNotificationSummary(
   }`;
 }
 
+function durableWorkflowRootForScope(
+  scope: SessionScope | undefined,
+): string | undefined {
+  return scope?.durableWorkflowOwner?.cwd;
+}
+
+function durableControllerForScope(scope?: SessionScope) {
+  const root = durableWorkflowRootForScope(scope);
+  return root && scope
+    ? durableWorkflowControllerForSession(root, scope)
+    : undefined;
+}
+
+function durableStoreForScope(scope?: SessionScope) {
+  const root = durableWorkflowRootForScope(scope);
+  return root && scope
+    ? durableWorkflowStoreForSession(root, scope)
+    : undefined;
+}
+
 export function registerWorkflowTool(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
@@ -240,68 +279,98 @@ export function registerWorkflowTool(
       ? { id: sessionScope.id, generation: sessionScope.generation }
       : getActiveSessionOwner();
 
-  function captureWorkflowCancellationInvocation(
-    ctx: WorkflowCancellationContext | undefined,
-  ): WorkflowCancellationInvocation {
-    let canonicalCwd: string | undefined;
-    try {
-      canonicalCwd =
-        typeof ctx?.cwd === "string" ? realpathSync.native(ctx.cwd) : undefined;
-    } catch {
-      canonicalCwd = undefined;
-    }
-    const sessionOwner = owner();
-    const liveScope = resolveLiveSessionScope(sessionOwner);
-    return {
-      sessionOwner,
-      durableOwner:
-        liveScope === sessionScope
-          ? sessionScope?.durableWorkflowOwner
-          : undefined,
-      controller:
-        liveScope === sessionScope && sessionScope
-          ? durableWorkflowControllerForSession(sessionScope)
-          : undefined,
-      canonicalCwd,
-    };
-  }
-
-  function assertWorkflowCancellationAuthority(
-    invocation: WorkflowCancellationInvocation,
-    ctx: WorkflowCancellationContext | undefined,
-  ): void {
-    if (!sessionScope) return;
-    if (
-      !invocation.sessionOwner ||
-      resolveLiveSessionScope(invocation.sessionOwner) !== sessionScope
-    ) {
-      throw new Error("Workflow cancellation session generation is stale");
-    }
-    let canonicalCwd: string | undefined;
-    try {
-      canonicalCwd =
-        typeof ctx?.cwd === "string" ? realpathSync.native(ctx.cwd) : undefined;
-    } catch {
-      canonicalCwd = undefined;
-    }
-    if (
-      !canonicalCwd ||
-      canonicalCwd !== invocation.canonicalCwd ||
-      (invocation.durableOwner && canonicalCwd !== invocation.durableOwner.cwd)
-    ) {
-      throw new Error(
-        "Workflow cancellation cwd does not match the invocation-captured live session",
-      );
-    }
-    if (
-      sessionScope.durableWorkflowOwner !== invocation.durableOwner ||
-      (invocation.controller &&
-        sessionScope.durableWorkflowController !== invocation.controller)
-    ) {
-      throw new Error("Workflow cancellation durable generation is stale");
-    }
-  }
-  const workflowDispatcher = createWorkflowDispatcher();
+  pi.registerTool({
+    name: "get_durable_workflow_status",
+    label: "Durable Workflow Status",
+    description: "Read the owner-scoped durable workflow projection.",
+    parameters: Type.Object({ workflowId: Type.String() }),
+    async execute(_id: string, params: { workflowId: string }): Promise<any> {
+      const controller = durableControllerForScope(sessionScope);
+      if (!controller) {
+        return {
+          content: [
+            { type: "text", text: "Durable workflow storage is unavailable." },
+          ],
+          details: { status: "unavailable" },
+          isError: true,
+        };
+      }
+      const projection = await controller.getStatus(params.workflowId);
+      if (!projection) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Durable workflow ${params.workflowId} was not found.`,
+            },
+          ],
+          details: { status: "not_found", workflowId: params.workflowId },
+          isError: true,
+        };
+      }
+      publishWorkflowContinuity(projection, sessionScope);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Durable workflow ${projection.runId}: ${projection.status}`,
+          },
+        ],
+        details: projection,
+      };
+    },
+  });
+  pi.registerTool({
+    name: "get_durable_workflow_result",
+    label: "Durable Workflow Result",
+    description: "Read a persisted terminal durable workflow result.",
+    parameters: Type.Object({ workflowId: Type.String() }),
+    async execute(_id: string, params: { workflowId: string }): Promise<any> {
+      const controller = durableControllerForScope(sessionScope);
+      if (!controller) {
+        return {
+          content: [
+            { type: "text", text: "Durable workflow storage is unavailable." },
+          ],
+          details: { status: "unavailable" },
+          isError: true,
+        };
+      }
+      const projection = await controller.getStatus(params.workflowId);
+      if (!projection) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Durable workflow ${params.workflowId} was not found.`,
+            },
+          ],
+          details: { status: "not_found", workflowId: params.workflowId },
+          isError: true,
+        };
+      }
+      if (!projection.terminal) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Durable workflow ${projection.runId} is not terminal.`,
+            },
+          ],
+          details: { status: projection.status, workflowId: projection.runId },
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(projection.terminal) }],
+        details: {
+          status: "terminal",
+          workflowId: projection.runId,
+          result: projection.terminal,
+        },
+      };
+    },
+  });
   // Build the real spawn function from the tool ctx. Switches backend on `isolation`.
   function makeRunAgent(
     ctx: any,
@@ -632,6 +701,75 @@ export function registerWorkflowTool(
   }
 
   pi.registerTool({
+    name: "start_durable_workflow",
+    label: "Start Durable Workflow",
+    description:
+      "Create and execute a validated sequential or parallel durable plan.",
+    parameters: Type.Object({
+      runId: Type.String(),
+      plan: Type.Any(),
+    }),
+    async execute(
+      _id: string,
+      params: any,
+      signal?: AbortSignal,
+      _onUpdate?: unknown,
+      ctx?: any,
+    ): Promise<any> {
+      const durableRoot = durableWorkflowRootForScope(sessionScope);
+      if (!sessionScope || !durableRoot) {
+        return {
+          content: [
+            { type: "text", text: "Durable workflow storage is unavailable." },
+          ],
+          isError: true,
+        };
+      }
+      const plan = params.plan as WorkflowPlan;
+      validateWorkflowPlan(plan);
+      const result = await runDurableWorkflowForSession(
+        durableRoot,
+        sessionScope,
+        {
+          runId: params.runId,
+          plan,
+          signal,
+          runAgent: makeRunAgent(ctx, params.runId, owner()),
+        },
+      );
+      if (
+        result.terminal &&
+        (result.delivery?.status === "pending" ||
+          result.delivery?.status === "dispatched")
+      ) {
+        const deliveryId =
+          result.delivery?.deliveryId ?? workflowDeliveryId(result.runId);
+        try {
+          const controller = durableWorkflowControllerForSession(
+            process.cwd(),
+            sessionScope,
+          );
+          await controller?.dispatchDelivery(result.runId, deliveryId);
+        } catch (error) {
+          debugLog("warn", "durable_workflow_delivery_failed", {
+            workflowId: result.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Durable workflow ${result.runId}: ${result.status}`,
+          },
+        ],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "workflow",
     label: "Workflow",
     description: [
@@ -693,6 +831,12 @@ export function registerWorkflowTool(
             "The workflow script (export const meta + top-level body). Omit if using `name` or `plan`.",
         }),
       ),
+      plan: Type.Optional(
+        Type.Unknown({
+          description:
+            "Declarative non-durable preview plan (mutually exclusive with script and name).",
+        }),
+      ),
       name: Type.Optional(
         Type.String({
           description:
@@ -729,6 +873,12 @@ export function registerWorkflowTool(
             "Run in the background and return a workflowId immediately.",
         }),
       ),
+      durable: Type.Optional(
+        Type.Boolean({
+          description:
+            "Durable JavaScript replay is not supported by the legacy workflow tool.",
+        }),
+      ),
     }),
 
     async execute(
@@ -738,87 +888,33 @@ export function registerWorkflowTool(
       onUpdate: any,
       ctx: any,
     ): Promise<any> {
-      const selectedInputs = ["script", "name", "plan"].filter(
-        (key) => params[key] !== undefined,
-      );
-      if (selectedInputs.length !== 1) {
+      if (params.durable === true) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Durable JavaScript workflows are not supported; use start_durable_workflow with a declarative plan.",
+            },
+          ],
+          details: { status: "unsupported_durable" },
+          isError: true,
+        };
+      }
+      const hasScript =
+        typeof params.script === "string" && params.script.trim().length > 0;
+      const hasName =
+        typeof params.name === "string" && params.name.trim().length > 0;
+      const hasPlan = params.plan !== undefined;
+      const selectorCount =
+        Number(hasScript) + Number(hasName) + Number(hasPlan);
+      if (selectorCount > 1) {
         const error =
-          "exactly one of `script`, `name`, or `plan` must be provided";
+          "Workflow inputs `script`, `name`, and `plan` are mutually exclusive.";
         return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
+          content: [{ type: "text", text: `Workflow not run: ${error}` }],
+          details: { status: "conflicting_inputs", error },
           isError: true,
         };
-      }
-      const durable = params.durable === true;
-      if (durable && params.plan === undefined) {
-        const error =
-          "durable script/name workflows are unavailable; durable execution requires `plan`";
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
-          isError: true,
-        };
-      }
-      if (params.resumePolicy !== undefined && !durable) {
-        const error =
-          "`resumePolicy` is supported only with `plan + durable:true`";
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
-          isError: true,
-        };
-      }
-      if (
-        durable &&
-        params.resumePolicy !== undefined &&
-        params.resumePolicy !== "manual"
-      ) {
-        const error = 'durable workflow `resumePolicy` must be "manual"';
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
-          isError: true,
-        };
-      }
-      if (durable && params.async === false) {
-        const error =
-          "durable plans are asynchronous only; `async:false` is unsupported";
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
-          isError: true,
-        };
-      }
-      if (
-        durable &&
-        (params.args !== undefined || params.budget !== undefined)
-      ) {
-        const error =
-          "durable plans do not support workflow `args` or `budget` in this milestone";
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${error}.` }],
-          details: { status: "error", error },
-          isError: true,
-        };
-      }
-      const plan = params.plan as WorkflowPlan | undefined;
-      if (plan !== undefined) {
-        try {
-          validateWorkflowPlan(plan);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Workflow plan not started: ${msg}`,
-              },
-            ],
-            details: { status: "error", error: msg },
-            isError: true,
-          };
-        }
       }
       const orchestrationContext = getOrchestrationContext();
       if (orchestrationContext) {
@@ -1110,6 +1206,131 @@ export function registerWorkflowTool(
         }
       }
 
+      if (hasPlan) {
+        if (params.durable === true) {
+          const error =
+            "Durable declarative workflows are not available through the legacy workflow tool; use start_durable_workflow.";
+          return {
+            content: [{ type: "text", text: `Workflow not run: ${error}` }],
+            details: { status: "unsupported_durable", error },
+            isError: true,
+          };
+        }
+        const plan = params.plan as WorkflowPlan;
+        const planOpts = (workflowId: string) => ({
+          budgetTotal: params.budget ?? null,
+          runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
+          concurrency: 4,
+        });
+        if (params.async !== false) {
+          try {
+            const job = startWorkflowPlanJob(
+              plan,
+              planOpts,
+              Date.now(),
+              notifyWorkflowCompletion,
+              workflowOwner,
+              "async",
+            );
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `Workflow "${plan.name}" started in background as ${job.id}. ` +
+                    `Poll get_workflow_status / get_workflow_result. ${WORKFLOW_SESSION_SCOPE_MESSAGE}`,
+                },
+              ],
+              details: {
+                status: "started",
+                workflowId: job.id,
+                name: plan.name,
+                plan: true,
+              },
+            };
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            return {
+              content: [
+                { type: "text", text: `Workflow not started: ${message}` },
+              ],
+              details: { status: "error", error: message, plan: true },
+              isError: true,
+            };
+          }
+        }
+        try {
+          const job = startWorkflowPlanJob(
+            plan,
+            {
+              ...planOpts("sync"),
+              signal,
+              onState: (state: WorkflowPlanState) => {
+                try {
+                  onUpdate?.({
+                    content: [
+                      { type: "text", text: renderWorkflowPlanProgress(state) },
+                    ],
+                    details: {
+                      status: state.status,
+                      planState: state,
+                    },
+                  });
+                } catch {
+                  /* progress updates are best-effort */
+                }
+              },
+            },
+            Date.now(),
+            undefined,
+            workflowOwner,
+            "sync",
+          );
+          const run = await job.promise;
+          const resultText =
+            typeof run.result === "string" ? run.result : stringify(run.result);
+          const usage = presentWorkflowUsage(run.usage);
+          const summary =
+            `Workflow "${run.meta.name}" complete — ` +
+            `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${
+              usage
+                ? `, ${formatWorkflowUsage(usage, {
+                    outputBudget: job.snapshot.budgetTotal,
+                  })}`
+                : ""
+            }.`;
+          return {
+            content: [{ type: "text", text: `${summary}\n\n${resultText}` }],
+            details: {
+              status: "done",
+              name: run.meta.name,
+              workflowId: job.id,
+              agentsSpawned: run.agentsSpawned,
+              errorCount: run.errorCount,
+              tokensSpent: run.tokensSpent,
+              usage: run.usage,
+              budgetTotal: job.snapshot.budgetTotal,
+              phases: run.phases,
+              plan: true,
+            },
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const usage = workflowErrorUsage(error);
+          return {
+            content: [{ type: "text", text: `Workflow failed: ${message}` }],
+            details: {
+              status: "error",
+              error: message,
+              ...(usage ? { usage } : {}),
+              plan: true,
+            },
+            isError: true,
+          };
+        }
+      }
       const script: string | null =
         typeof params.script === "string" && params.script.trim()
           ? params.script
@@ -1296,6 +1517,35 @@ export function registerWorkflowTool(
       }),
     }),
     async execute(_id: string, params: any): Promise<any> {
+      const durableController = durableControllerForScope(sessionScope);
+      const durableProjection = durableController
+        ? await durableController.getStatus(params.workflowId)
+        : undefined;
+      if (durableProjection) {
+        const tasks = Object.values(durableProjection.tasks);
+        const running = tasks.filter(
+          (task) => task.status === "running",
+        ).length;
+        const failed = tasks.filter((task) => task.status === "failed").length;
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Durable workflow ${durableProjection.runId} [${durableProjection.status}] — ` +
+                `${tasks.length} task(s)` +
+                (running > 0 ? `, ${running} running` : "") +
+                (failed > 0 ? `, ${failed} failed` : ""),
+            },
+          ],
+          details: {
+            ...durableProjection,
+            status: durableProjection.status,
+            workflowId: durableProjection.runId,
+            durable: true,
+          },
+        };
+      }
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
         try {
@@ -1406,117 +1656,56 @@ export function registerWorkflowTool(
       params: any,
       signal?: AbortSignal,
     ): Promise<any> {
-      const st = getWorkflowJobForOwner(params.workflowId, owner());
+      // Query durable authority first. A stale live Promise must never mask a
+      // terminal projection recovered after registry loss.
+      const durableProjection = sessionScope
+        ? await durableControllerForScope(sessionScope)?.getStatus(
+            params.workflowId,
+          )
+        : undefined;
+      const st = durableProjection
+        ? undefined
+        : getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
-        if (signal?.aborted) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Wait for workflow ${params.workflowId} cancelled.`,
-              },
-            ],
-            details: {
-              status: "wait_cancelled",
-              workflowId: params.workflowId,
-            },
-            isError: true,
-          };
-        }
-        try {
-          let projection = await getDurableWorkflowProjection(
-            params.workflowId,
-          );
-          const live = getDurableWorkflowLiveJobForOwner(
-            params.workflowId,
-            owner(),
-          );
-          if (projection && !projection.terminal && live) {
-            try {
-              const waitResult = await abortableWait(live.promise, signal);
-              if (waitResult.aborted) {
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Wait for workflow ${params.workflowId} cancelled.`,
-                    },
-                  ],
-                  details: {
-                    status: "wait_cancelled",
-                    workflowId: params.workflowId,
-                  },
-                  isError: true,
-                };
-              }
-            } catch {
-              /* The committed projection below remains authoritative. */
-            }
-            projection = await getDurableWorkflowProjection(params.workflowId);
-          }
+        const controller = durableControllerForScope(sessionScope);
+        if (controller) {
+          const projection = await controller.getStatus(params.workflowId);
           if (projection) {
-            const details = await durableProjectionDetails(projection);
             const terminal = projection.terminal;
-            if (!terminal) {
-              const resume =
-                projection.status === "interrupted" &&
-                details.leaseEpoch !== undefined &&
-                details.ownerGeneration !== undefined
-                  ? ` Resume with /workflow-resume ${projection.runId} ${projection.revision} ${details.ownerGeneration} ${details.leaseEpoch}.`
-                  : "";
+            if (terminal) {
               return {
                 content: [
                   {
                     type: "text",
-                    text: `Durable workflow ${projection.runId} is ${projection.status}.${resume}`,
+                    text: `Durable workflow ${projection.runId} ${projection.status}.`,
                   },
                 ],
-                details,
-                isError: projection.status !== "running",
+                details: {
+                  status: projection.status,
+                  workflowId: projection.runId,
+                  result: terminal.result,
+                  error: terminal.error,
+                  usage: projection.usage,
+                  durable: true,
+                },
+                isError: terminal.status === "error",
               };
             }
-            const terminalError = terminal.error?.message;
-            const resultText =
-              terminal.result === undefined
-                ? ""
-                : typeof terminal.result === "string"
-                  ? terminal.result
-                  : stringify(terminal.result);
             return {
               content: [
                 {
                   type: "text",
-                  text:
-                    terminal.status === "done"
-                      ? `Durable workflow ${projection.runId} complete.${resultText ? `\n\n${resultText}` : ""}`
-                      : `Durable workflow ${projection.runId} ${terminal.status}${terminalError ? `: ${terminalError}` : "."}`,
+                  text: `Durable workflow ${projection.runId} is still ${projection.status}.`,
                 },
               ],
               details: {
-                ...details,
-                result: terminal.result,
-                error: terminal.error,
+                status: projection.status,
+                workflowId: projection.runId,
+                durable: true,
               },
-              isError: terminal.status !== "done",
+              isError: true,
             };
           }
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Workflow result unavailable: ${message}`,
-              },
-            ],
-            details: {
-              status: "error",
-              workflowId: params.workflowId,
-              error: message,
-            },
-            isError: true,
-          };
         }
         return {
           content: [
@@ -1644,102 +1833,44 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(
-      _id: string,
-      params: { workflowId: string },
-      _signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: WorkflowCancellationContext | undefined,
-    ): Promise<
-      AgentToolResult<Record<string, unknown>> & { isError?: boolean }
-    > {
-      const invocation = captureWorkflowCancellationInvocation(ctx);
-      try {
-        let state = getWorkflowJobForOwner(
-          params.workflowId,
-          invocation.sessionOwner,
-        );
-        if (state) {
-          if (state.status === "cancelled") {
-            assertWorkflowCancellationAuthority(invocation, ctx);
-            if (cancellationSnapshotsEnabled()) {
-              await waitForCancellationReceipts(state);
-              normalizeCancelledWorkflowState(state);
-            }
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Workflow ${state.id} is already cancelled.`,
-                },
-              ],
-              details: {
-                status: "cancelled",
-                workflowId: state.id,
-                cancelled: true,
-                snapshots: [...(state.cancellationSnapshots ?? [])],
-              },
-            };
-          }
-          if (state.status !== "running") {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Workflow ${state.id} is already ${state.status}; nothing was cancelled.`,
-                },
-              ],
-              details: {
-                status: state.status,
-                workflowId: state.id,
-                cancelled: false,
-              },
-            };
-          }
-
-          assertWorkflowCancellationAuthority(invocation, ctx);
-          state = getWorkflowJobForOwner(
-            params.workflowId,
-            invocation.sessionOwner,
-          );
-          if (!state) {
-            throw new Error(
-              "Workflow cancellation session generation is stale",
-            );
-          }
-          if (state.status !== "running") {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Workflow ${state.id} is already ${state.status}; nothing was cancelled.`,
-                },
-              ],
-              details: {
-                status: state.status,
-                workflowId: state.id,
-                cancelled: false,
-              },
-            };
-          }
-          state.abort.abort();
-          state.status = "cancelled";
-          normalizeCancelledWorkflowState(state);
-          if (cancellationSnapshotsEnabled()) {
-            await waitForCancellationReceipts(state);
-            normalizeCancelledWorkflowState(state);
-          }
-          return {
-            content: [
-              { type: "text", text: `Workflow ${state.id} cancelled.` },
-            ],
-            details: {
-              status: "cancelled",
-              workflowId: state.id,
-              cancelled: true,
-              snapshots: [...(state.cancellationSnapshots ?? [])],
+    async execute(_id: string, params: any): Promise<any> {
+      const durableController = durableControllerForScope(sessionScope);
+      const durableProjection = durableController
+        ? await durableController.getStatus(params.workflowId)
+        : undefined;
+      if (durableProjection) {
+        const updated = await durableController?.cancel(params.workflowId);
+        const status = updated?.status ?? durableProjection.status;
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Durable workflow ${params.workflowId} ${status}.`,
             },
-          };
+          ],
+          details: {
+            ...(updated ?? durableProjection),
+            status,
+            workflowId: params.workflowId,
+            durable: true,
+            cancelled: status === "cancelled",
+          },
+        };
+      }
+      const st = getWorkflowJobForOwner(params.workflowId, owner());
+      if (!st) {
+        return {
+          content: [
+            { type: "text", text: workflowNotFoundMessage(params.workflowId) },
+          ],
+          details: { status: "not_found", workflowId: params.workflowId },
+          isError: true,
+        };
+      }
+      if (st.status === "cancelled") {
+        if (cancellationSnapshotsEnabled()) {
+          await waitForCancellationReceipts(st);
+          normalizeCancelledWorkflowState(st);
         }
 
         const controller = invocation.controller;
@@ -2129,117 +2260,407 @@ export function registerWorkflowTool(
       }
     }
 
-    const resumeDurableWorkflowCommand = async (
-      rawArgs: string,
+    const durableOperatorScope = (
+      ctx: ExtensionCommandContext,
+    ): SessionScope | undefined => {
+      const workflowOwner = owner();
+      if (
+        !sessionScope ||
+        !workflowOwner ||
+        !isSessionOwnerLive(workflowOwner)
+      ) {
+        const text =
+          "Durable workflow commands are available only in the live parent session.";
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+        return undefined;
+      }
+      return sessionScope;
+    };
+
+    const parseDurableAuthority = (
+      raw: string,
+      expectedLength: { min: number; max: number },
+      usage: string,
+    ): {
+      runId: string;
+      expectedRevision: number;
+      ownerGeneration: number;
+      leaseEpoch: number;
+      sessionGeneration: number;
+      rest: string[];
+    } => {
+      const parts = raw.trim().split(/\s+/);
+      if (
+        parts.length < expectedLength.min ||
+        parts.length > expectedLength.max
+      ) {
+        throw new Error(`Usage: ${usage}`);
+      }
+      const [
+        runId,
+        revisionText,
+        ownerGenerationText,
+        leaseEpochText,
+        sessionGenerationText,
+        ...rest
+      ] = parts;
+      const values = [
+        revisionText,
+        ownerGenerationText,
+        leaseEpochText,
+        sessionGenerationText,
+      ].map(Number);
+      if (
+        !runId ||
+        values.some((value) => !Number.isSafeInteger(value) || value < 0)
+      ) {
+        throw new Error(`Usage: ${usage}`);
+      }
+      return {
+        runId,
+        expectedRevision: values[0],
+        ownerGeneration: values[1],
+        leaseEpoch: values[2],
+        sessionGeneration: values[3],
+        rest,
+      };
+    };
+
+    const assertDurableAuthority = async (
+      scope: SessionScope,
+      envelope: ReturnType<typeof parseDurableAuthority>,
+      expectedRevision?: number,
+    ): Promise<{ controller: any; projection: any }> => {
+      const workflowOwner = owner();
+      const controller = durableWorkflowControllerForSession(
+        process.cwd(),
+        scope,
+      );
+      if (!workflowOwner || !controller) {
+        throw new Error("Durable workflow storage is unavailable.");
+      }
+      const store = durableWorkflowStoreForSession(process.cwd(), scope);
+      if (!store) throw new Error("Durable workflow storage is unavailable.");
+      const currentEpoch = await store.getLeaseEpoch();
+      if (
+        envelope.ownerGeneration !== workflowOwner.generation ||
+        envelope.leaseEpoch !== currentEpoch ||
+        envelope.sessionGeneration !== scope.generation
+      ) {
+        throw new Error("Durable workflow authority envelope is stale.");
+      }
+      const projection = await controller.getStatus(envelope.runId);
+      if (!projection) throw new Error("Durable workflow run was not found.");
+      if (
+        expectedRevision !== undefined &&
+        projection.revision !== expectedRevision
+      ) {
+        throw new Error(
+          `Workflow plan revision is stale: expected ${expectedRevision}, current ${projection.revision}`,
+        );
+      }
+      return { controller, projection } as any;
+    };
+
+    const handleDurableWorkflowResume = async (
+      args: string,
       ctx: ExtensionCommandContext,
     ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
       const usage =
-        "/workflow-resume <runId> <expectedRevision> <ownerGeneration> <leaseEpoch>";
+        "/workflow-resume <runId> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration>";
       try {
-        const parts = rawArgs.trim().split(/\s+/);
-        if (parts.length !== 4 || !WORKFLOW_RUN_ID.test(parts[0] ?? "")) {
-          throw new Error(`Usage: ${usage}`);
-        }
-        const [runId, revisionText, ownerGenerationText, leaseEpochText] =
-          parts;
-        const expectedRevision = Number(revisionText);
-        const ownerGeneration = Number(ownerGenerationText);
-        const leaseEpoch = Number(leaseEpochText);
+        const envelope = parseDurableAuthority(args, { min: 5, max: 5 }, usage);
+        const { controller } = await assertDurableAuthority(
+          scope,
+          envelope,
+          envelope.expectedRevision,
+        );
+        const result = await resumeDurableWorkflowForSession(
+          process.cwd(),
+          scope,
+          {
+            runId: envelope.runId,
+            runAgent: makeRunAgent(ctx, envelope.runId, owner()),
+          },
+        );
         if (
-          [expectedRevision, ownerGeneration, leaseEpoch].some(
-            (value) => !Number.isSafeInteger(value) || value < 0,
-          )
+          result.terminal &&
+          (result.delivery?.status === "pending" ||
+            result.delivery?.status === "dispatched")
         ) {
-          throw new Error(`Usage: ${usage}`);
-        }
-        const liveOwner = owner();
-        const durableOwner = sessionScope?.durableWorkflowOwner;
-        if (
-          !sessionScope ||
-          !liveOwner ||
-          !isSessionOwnerLive(liveOwner) ||
-          !durableOwner
-        ) {
-          throw new Error(
-            "Durable workflow resume is available only in the live parent session",
+          await controller.dispatchDelivery(
+            result.runId,
+            result.delivery.deliveryId,
           );
         }
-        let commandCwd = "";
-        try {
-          commandCwd = realpathSync.native(ctx.cwd);
-        } catch {
-          /* reported by the owner check below */
-        }
-        if (commandCwd !== durableOwner.cwd) {
-          throw new Error(
-            "Durable workflow resume cwd does not match the live owner",
-          );
-        }
-        if (getDurableWorkflowLiveJobForOwner(runId, liveOwner)) {
-          throw new Error(`Durable workflow ${runId} is already executing`);
-        }
-        const controller = durableWorkflowControllerForSession(sessionScope);
-        const store = durableWorkflowStoreForSession(sessionScope);
-        if (!controller || !store) {
-          throw new Error("Durable workflow storage is unavailable");
-        }
-        const projection = await controller.getStatus(runId);
-        if (!projection) throw new Error(`Durable workflow ${runId} not found`);
-        if (projection.terminal) {
-          throw new Error(
-            `Durable workflow ${runId} is already ${projection.terminal.status}`,
-          );
-        }
-        if (projection.status !== "interrupted") {
-          throw new Error(
-            `Durable workflow ${runId} is ${projection.status}, not interrupted`,
-          );
-        }
-        if (expectedRevision !== projection.revision) {
-          throw new Error(
-            `Workflow resume revision is stale: expected ${expectedRevision}, current ${projection.revision}`,
-          );
-        }
-        if (ownerGeneration !== durableOwner.ownerGeneration) {
-          throw new Error("Workflow resume owner generation is stale");
-        }
-        const currentLeaseEpoch = await store.getLeaseEpoch();
-        if (leaseEpoch !== currentLeaseEpoch) {
-          throw new Error(
-            `Workflow resume lease epoch is stale: expected ${leaseEpoch}, current ${currentLeaseEpoch}`,
-          );
-        }
-
-        const abort = new AbortController();
-        const completion = controller.resume(runId, {
-          expectedRevision,
-          expectedRunEpoch: projection.runEpoch,
-          ownerGeneration,
-          leaseEpoch,
-          runAgent: makeRunAgent(ctx, runId, liveOwner),
-          signal: abort.signal,
-        });
-        registerDurableWorkflowLiveJob({
-          id: runId,
-          name: runId,
-          startedAt: Date.now(),
-          runEpoch: leaseEpoch,
-          promise: completion,
-          abort,
-          parentSessionOwner: liveOwner,
-        });
-        const resumed = await completion;
-        if (!resumed) {
-          throw new Error(
-            `Durable workflow ${runId} disappeared during resume`,
-          );
-        }
-        const text = `Durable workflow ${runId} resumed: ${resumed.status}.`;
+        const text = `Resumed durable workflow ${result.runId}: ${result.status}`;
         ctx.ui.notify(text);
         sendCommandMessage(text);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const text = `Durable workflow resume failed: ${message}`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      }
+    };
+
+    const handleDurableWorkflowCancel = async (
+      args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
+      const usage =
+        "/workflow-cancel <runId> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> [reason]";
+      try {
+        const envelope = parseDurableAuthority(args, { min: 5, max: 6 }, usage);
+        const { controller } = await assertDurableAuthority(
+          scope,
+          envelope,
+          envelope.expectedRevision,
+        );
+        const result = await controller.cancel(envelope.runId, randomUUID());
+        const delivered = result
+          ? await dispatchTerminalDeliveryForSession(
+              process.cwd(),
+              scope,
+              result,
+            )
+          : result;
+        const text = delivered
+          ? `Cancelled durable workflow ${envelope.runId}: ${delivered.status}`
+          : `Durable workflow ${envelope.runId} was not found.`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const text = `Durable workflow cancellation failed: ${message}`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      }
+    };
+
+    const handleDurableWorkflowApproval = async (
+      args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
+      const usage =
+        "/workflow-approval <runId> <requestId> <approve|reject> <policyHash> <planRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> <version> [reason]";
+      try {
+        const parts = args.trim().split(/\s+/);
+        if (parts.length < 9 || parts.length > 10)
+          throw new Error(`Usage: ${usage}`);
+        const [
+          runId,
+          requestId,
+          operation,
+          policyHash,
+          planRevisionText,
+          ownerGenerationText,
+          leaseEpochText,
+          sessionGenerationText,
+          versionText,
+          ...reasonParts
+        ] = parts;
+        if (!runId || !requestId || !["approve", "reject"].includes(operation))
+          throw new Error(`Usage: ${usage}`);
+        const numbers = [
+          planRevisionText,
+          ownerGenerationText,
+          leaseEpochText,
+          sessionGenerationText,
+          versionText,
+        ].map(Number);
+        if (
+          !policyHash ||
+          numbers.some((value) => !Number.isSafeInteger(value) || value < 0)
+        )
+          throw new Error(`Usage: ${usage}`);
+        const [
+          planRevision,
+          ownerGeneration,
+          leaseEpoch,
+          sessionGeneration,
+          version,
+        ] = numbers;
+        const authority = {
+          runId,
+          expectedRevision: planRevision,
+          ownerGeneration,
+          leaseEpoch,
+          sessionGeneration,
+          rest: [],
+        };
+        const { controller, projection } = await assertDurableAuthority(
+          scope,
+          authority,
+        );
+        const binding = projection.approval?.request;
+        if (
+          !binding ||
+          binding.requestId !== requestId ||
+          binding.policyHash !== policyHash ||
+          binding.planRevision !== planRevision ||
+          binding.ownerGeneration !== ownerGeneration ||
+          binding.leaseEpoch !== leaseEpoch ||
+          binding.version !== version
+        ) {
+          throw new Error("Workflow approval authority envelope is stale.");
+        }
+        const updated = await controller.decideApproval(runId, requestId, {
+          requestId,
+          status: operation === "approve" ? "approved" : "rejected",
+          decidedBy: String(owner()?.id ?? "operator"),
+          policyHash,
+          planRevision,
+          ownerGeneration,
+          leaseEpoch,
+          version,
+          ...(reasonParts.length > 0 ? { reason: reasonParts.join(" ") } : {}),
+        });
+        const text = `${operation === "approve" ? "Approved" : "Rejected"} durable workflow approval ${requestId} for ${runId} (status ${updated?.approval?.status ?? "unknown"}).`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const text = `Durable workflow approval failed: ${message}`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      }
+    };
+
+    const handleDurablePlanAppend = async (
+      args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
+      const usage =
+        "/workflow-plan-append <runId> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> <taskId> <phaseId> <prompt>";
+      try {
+        const envelope = parseDurableAuthority(
+          args,
+          { min: 8, max: 512 },
+          usage,
+        );
+        if (envelope.rest.length < 3) throw new Error(`Usage: ${usage}`);
+        const { controller, projection } = await assertDurableAuthority(
+          scope,
+          envelope,
+          envelope.expectedRevision,
+        );
+        const [taskId, phaseId, ...promptParts] = envelope.rest;
+        const updated = await controller.mutateTask(envelope.runId, {
+          type: "append",
+          taskId,
+          phaseId,
+          prompt: promptParts.join(" "),
+          expectedRevision: envelope.expectedRevision,
+        });
+        const text = `Appended ${taskId} to durable workflow ${envelope.runId} (revision ${updated?.revision ?? projection.revision}).`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const text = `Durable workflow append failed: ${message}`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      }
+    };
+
+    const handleDurablePlanMutate = async (
+      args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
+      const usage =
+        "/workflow-plan-mutate <runId> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> <block|unblock|skip> <taskId>";
+      try {
+        const envelope = parseDurableAuthority(args, { min: 7, max: 7 }, usage);
+        const [operation, taskId] = envelope.rest;
+        if (
+          !operation ||
+          !taskId ||
+          !["block", "unblock", "skip"].includes(operation)
+        ) {
+          throw new Error(`Usage: ${usage}`);
+        }
+        const { controller, projection } = await assertDurableAuthority(
+          scope,
+          envelope,
+          envelope.expectedRevision,
+        );
+        const updated = await controller.mutateTask(envelope.runId, {
+          type: operation as "block" | "unblock" | "skip",
+          taskId,
+          expectedRevision: envelope.expectedRevision,
+        });
+        const text = `${operation}d ${taskId} in durable workflow ${envelope.runId} (revision ${updated?.revision ?? projection.revision}).`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const text = `Durable workflow mutation failed: ${message}`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      }
+    };
+
+    const handleDurablePlanEdit = async (
+      args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const scope = durableOperatorScope(ctx);
+      if (!scope) return;
+      const usage =
+        "/workflow-plan-edit <runId> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> <append <taskId> <phaseId> <prompt>|block|unblock|skip <taskId>>";
+      try {
+        const envelope = parseDurableAuthority(
+          args,
+          { min: 7, max: 512 },
+          usage,
+        );
+        const [operation, taskId, phaseId, ...promptParts] = envelope.rest;
+        const isAppend = operation === "append";
+        const valid = isAppend
+          ? Boolean(taskId && phaseId && promptParts.length > 0)
+          : Boolean(
+              taskId &&
+              envelope.rest.length === 2 &&
+              ["block", "unblock", "skip"].includes(operation),
+            );
+        if (!valid) throw new Error(`Usage: ${usage}`);
+        const { controller, projection } = await assertDurableAuthority(
+          scope,
+          envelope,
+          envelope.expectedRevision,
+        );
+        const mutation = isAppend
+          ? {
+              type: "append" as const,
+              taskId,
+              phaseId,
+              prompt: promptParts.join(" "),
+              expectedRevision: envelope.expectedRevision,
+            }
+          : {
+              type: operation as "block" | "unblock" | "skip",
+              taskId,
+              expectedRevision: envelope.expectedRevision,
+            };
+        const updated = await controller.mutateTask(envelope.runId, mutation);
+        const text = `${operation}d ${taskId} in durable workflow ${envelope.runId} (revision ${updated?.revision ?? projection.revision}).`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const text = `Durable workflow edit failed: ${message}`;
         ctx.ui.notify(text);
         sendCommandMessage(text);
       }
@@ -2283,26 +2704,7 @@ export function registerWorkflowTool(
       description:
         "List live and restart-safe durable workflow jobs with status, task/agent counts, usage, and resume authority.",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
-        const legacy = renderWorkflowJobs(owner());
-        let durable = "";
-        try {
-          const projections = await listDurableWorkflowProjections();
-          const store = sessionScope
-            ? durableWorkflowStoreForSession(sessionScope)
-            : undefined;
-          const leaseEpoch = store ? await store.getLeaseEpoch() : undefined;
-          durable = renderDurableWorkflowJobs(projections, leaseEpoch);
-        } catch (error) {
-          durable = `Durable workflow status unavailable: ${
-            error instanceof Error ? error.message : String(error)
-          }`;
-        }
-        const text =
-          durable && legacy === "No workflow jobs."
-            ? durable
-            : durable
-              ? `${legacy}\n\n${durable}`
-              : legacy;
+        const text = await renderWorkflowJobs(owner(), sessionScope);
         ctx.ui.notify("📋 Workflow status listed.");
         sendCommandMessage(text);
       },
@@ -2310,107 +2712,286 @@ export function registerWorkflowTool(
 
     pi.registerCommand("workflow-resume", {
       description:
-        "Resume an interrupted durable workflow using its current authority envelope.",
-      handler: resumeDurableWorkflowCommand,
+        "Resume a durable workflow from its persisted declarative plan using an authority envelope.",
+      handler: handleDurableWorkflowResume,
+    });
+
+    pi.registerCommand("workflow-cancel", {
+      description:
+        "Request authoritative cancellation of a durable workflow using an authority envelope.",
+      handler: handleDurableWorkflowCancel,
+    });
+
+    pi.registerCommand("workflow-approval", {
+      description:
+        "Approve or reject a pending durable workflow request using an authority envelope.",
+      handler: handleDurableWorkflowApproval,
+    });
+
+    pi.registerCommand("workflow-plan", {
+      description: "Create or view a durable workflow projection.",
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const input = args.trim();
+        if (input.startsWith("create ")) {
+          const task = input.slice("create ".length).trim();
+          const runId = `durable-${randomUUID()}`;
+          if (!task) {
+            ctx.ui.notify("Usage: /workflow-plan create <task>");
+            return;
+          }
+          const durableRoot = durableWorkflowRootForScope(sessionScope);
+          if (!sessionScope || !durableRoot) {
+            ctx.ui.notify("Durable workflow storage is unavailable.");
+            return;
+          }
+          try {
+            const result = await runDurableWorkflowForSession(
+              durableRoot,
+              sessionScope,
+              {
+                runId,
+                plan: {
+                  schemaVersion: 1,
+                  name: "host-plan",
+                  phases: [
+                    {
+                      id: "phase-1",
+                      mode: "sequential",
+                      tasks: [
+                        {
+                          id: "task-1",
+                          prompt: task,
+                          isolation: "in-process",
+                        },
+                      ],
+                    },
+                  ],
+                },
+                runAgent: makeRunAgent(ctx, runId, owner()),
+              },
+            );
+            const text = `Created durable workflow ${result.runId}: ${result.status}`;
+            ctx.ui.notify(text);
+            sendCommandMessage(text);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            const text = `Durable workflow not started: ${message}`;
+            ctx.ui.notify(text);
+            sendCommandMessage(text);
+          }
+          return;
+        }
+        const runId = input;
+        const controller = durableControllerForScope(sessionScope);
+        if (!controller || !runId) {
+          const text = !runId
+            ? "Usage: /workflow-plan <runId>"
+            : "Durable workflow storage is unavailable.";
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+          return;
+        }
+        const projection = await controller.getStatus(runId);
+        const text = projection
+          ? [
+              `Durable workflow ${runId}: ${projection.status} (revision ${projection.revision})`,
+              `Phase: ${projection.currentPhase ?? "none"}`,
+              `Tasks: ${Object.values(projection.tasks)
+                .map((task) => `${task.id}=${task.status}`)
+                .join(", ")}`,
+              projection.terminal
+                ? `Terminal: ${JSON.stringify(projection.terminal)}`
+                : "Terminal: none",
+            ].join("\n")
+          : `Durable workflow ${runId} was not found.`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      },
+    });
+
+    pi.registerCommand("workflow-plan-append", {
+      description:
+        "Append one future task to a durable workflow using an authority envelope.",
+      handler: handleDurablePlanAppend,
+    });
+
+    pi.registerCommand("workflow-plan-mutate", {
+      description:
+        "Block, unblock, or skip future durable workflow work using an authority envelope.",
+      handler: handleDurablePlanMutate,
+    });
+
+    pi.registerCommand("workflow-plan-edit", {
+      description:
+        "Edit future durable workflow work using an authority envelope and revision fence.",
+      handler: handleDurablePlanEdit,
+    });
+
+    pi.registerCommand("workflow-plan-export", {
+      description: "Export a durable workflow projection as JSON.",
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const runId = args.trim();
+        const controller = durableControllerForScope(sessionScope);
+        if (!controller || !runId) {
+          const text = !runId
+            ? "Usage: /workflow-plan-export <runId>"
+            : "Durable workflow storage is unavailable.";
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+          return;
+        }
+        const projection = await controller.getStatus(runId);
+        const text = projection
+          ? JSON.stringify(projection, null, 2)
+          : `Durable workflow ${runId} was not found.`;
+        ctx.ui.notify(
+          projection ? `Exported durable workflow ${runId}.` : text,
+        );
+        sendCommandMessage(text);
+      },
+    });
+
+    pi.registerCommand("workflow-budget", {
+      description:
+        "Pause or resume a durable workflow budget gate using an authority envelope.",
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const scope = durableOperatorScope(ctx);
+        if (!scope) return;
+        const usage =
+          "/workflow-budget <runId> <pause|resume> <expectedRevision> <ownerGeneration> <leaseEpoch> <sessionGeneration> [reason]";
+        try {
+          const parts = args.trim().split(/\s+/);
+          if (parts.length < 6 || parts.length > 7)
+            throw new Error(`Usage: ${usage}`);
+          const [
+            runId,
+            operation,
+            revisionText,
+            ownerText,
+            epochText,
+            sessionText,
+            ...reasonParts
+          ] = parts;
+          const numbers = [revisionText, ownerText, epochText, sessionText].map(
+            Number,
+          );
+          if (
+            !runId ||
+            !["pause", "resume"].includes(operation) ||
+            numbers.some((value) => !Number.isSafeInteger(value) || value < 0)
+          ) {
+            throw new Error(`Usage: ${usage}`);
+          }
+          const envelope = {
+            runId,
+            expectedRevision: numbers[0],
+            ownerGeneration: numbers[1],
+            leaseEpoch: numbers[2],
+            sessionGeneration: numbers[3],
+            rest: reasonParts,
+          };
+          const { controller } = await assertDurableAuthority(
+            scope,
+            envelope,
+            envelope.expectedRevision,
+          );
+          const updated =
+            operation === "pause"
+              ? await controller.pauseForBudget(
+                  runId,
+                  reasonParts.length > 0 ? reasonParts.join(" ") : undefined,
+                )
+              : await controller.resumeFromBudget(runId);
+          const text = `Durable workflow ${runId} budget ${operation}d (status ${updated?.status ?? "unknown"}).`;
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const text = `Durable workflow budget update failed: ${message}`;
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+        }
+      },
+    });
+
+    pi.registerCommand("workflow-retention", {
+      description: "Prune old terminal durable workflow runs.",
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const [olderThanText, maxRunsText] = args.trim().split(/\s+/);
+        const olderThanMs = Number(olderThanText);
+        const maxRuns =
+          maxRunsText === undefined ? undefined : Number(maxRunsText);
+        const store = durableStoreForScope(sessionScope);
+        if (
+          !store ||
+          !Number.isSafeInteger(olderThanMs) ||
+          olderThanMs < 0 ||
+          (maxRuns !== undefined &&
+            (!Number.isSafeInteger(maxRuns) || maxRuns < 0))
+        ) {
+          const text = "Usage: /workflow-retention <olderThanMs> [maxRuns]";
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+          return;
+        }
+        const result = await store.pruneTerminalRuns({
+          olderThanMs,
+          maxRuns,
+        });
+        const text = `Pruned ${result.length} terminal durable workflow run(s).`;
+        ctx.ui.notify(text);
+        sendCommandMessage(text);
+      },
+    });
+
+    pi.registerCommand("workflow-route", {
+      description: "Evaluate opt-in complex-task workflow routing.",
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const [modeText, ...taskParts] = args.trim().split(/\s+/);
+        try {
+          const mode = parseWorkflowEagerMode(modeText);
+          const task = taskParts.join(" ");
+          const decision = decideWorkflowRouting({ mode, text: task });
+          const observation =
+            decision.kind === "durable_plan"
+              ? " routing_unconfirmed: inspection does not start a run."
+              : "";
+          const text = `Routing decision: ${decision.kind} (${decision.reason}).${observation}`;
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(text);
+          sendCommandMessage(text);
+        }
+      },
     });
 
     pi.registerCommand("workflow-tree", {
       description:
         "Open an interactive workflow tree with expand/collapse and cancel controls.",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
-        const invocation = captureWorkflowCancellationInvocation(ctx);
-        let durableProjections: readonly WorkflowProjection[] = [];
-        if (invocation.controller) {
-          try {
-            durableProjections = await listDurableWorkflowProjections();
-          } catch (error) {
-            ctx.ui.notify(
-              `Durable workflow projections unavailable: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
+        const controller = durableControllerForScope(sessionScope);
+        const store = durableStoreForScope(sessionScope);
+        const action = await showWorkflowTree(ctx.ui, owner(), {
+          listDurable: async () => {
+            if (!controller || !store) return [];
+            const ids = await store.listRunIds();
+            const projections = await Promise.all(
+              ids.map((runId) => controller.getStatus(runId)),
             );
-          }
-        }
-        const action = await showWorkflowTree(
-          ctx.ui,
-          invocation.sessionOwner,
-          durableProjections,
-        );
-        if (action.kind !== "cancel") return;
-
-        try {
-          let state = getWorkflowJobForOwner(
-            action.workflowId,
-            invocation.sessionOwner,
-          );
-          if (state) {
-            assertWorkflowCancellationAuthority(invocation, ctx);
-            state = getWorkflowJobForOwner(
-              action.workflowId,
-              invocation.sessionOwner,
+            return projections.filter(
+              (projection): projection is WorkflowProjection =>
+                projection !== undefined,
             );
-            if (!state) {
-              throw new Error(
-                "Workflow cancellation session generation is stale",
-              );
-            }
-            if (state.status !== "running") {
-              sendCommandMessage(
-                `Workflow ${state.id} is already ${state.status}; nothing was cancelled.`,
-              );
-              return;
-            }
-            state.abort.abort();
-            state.status = "cancelled";
-            normalizeCancelledWorkflowState(state);
-            sendCommandMessage(`Workflow ${state.id} cancelled.`);
-            return;
-          }
-
-          const controller = invocation.controller;
-          if (!controller) {
-            throw new Error("durable workflow storage is unavailable");
-          }
-          const before = await controller.getStatus(action.workflowId);
-          if (!before) throw new Error("durable workflow was not found");
-          if (before.terminal) {
-            sendCommandMessage(
-              before.terminal.status === "cancelled"
-                ? `Workflow ${before.runId} is already cancelled.`
-                : `Workflow ${before.runId} is already ${before.terminal.status}; nothing was cancelled.`,
-            );
-            return;
-          }
-
-          assertWorkflowCancellationAuthority(invocation, ctx);
-          const cancelled = await controller.cancel(
-            action.workflowId,
-            undefined,
-            async () => {
-              const live = getDurableWorkflowLiveJobForOwner(
-                action.workflowId,
-                invocation.sessionOwner,
-              );
-              if (live) await interruptAndDrainDurableWorkflowJob(live);
-            },
-            () => assertWorkflowCancellationAuthority(invocation, ctx),
-          );
-          if (!cancelled?.terminal) {
-            throw new Error(
-              "durable workflow cancellation did not terminalize",
-            );
-          }
-          sendCommandMessage(
-            cancelled.terminal.status === "cancelled"
-              ? `Workflow ${cancelled.runId} cancelled.`
-              : `Workflow ${cancelled.runId} is already ${cancelled.terminal.status}; nothing was cancelled.`,
-          );
-        } catch (error) {
-          ctx.ui.notify(
-            `Workflow cancellation failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
+          },
+          cancelDurable: (workflowId) =>
+            controller?.cancel(workflowId) ?? Promise.resolve(undefined),
+        });
+        if (action.kind === "cancel") {
+          sendCommandMessage(`Workflow ${action.workflowId} cancelled.`);
         }
       },
     });
@@ -2515,11 +3096,30 @@ export function registerWorkflowTool(
     ].join("\n");
   }
 
-  function renderWorkflowJobs(owner: SessionOwnerToken | undefined): string {
+  async function renderWorkflowJobs(
+    owner: SessionOwnerToken | undefined,
+    scope?: SessionScope,
+  ): Promise<string> {
     const lines: string[] = [];
     const now = Date.now();
     let count = 0;
+    const durableController = durableControllerForScope(scope);
+    const durableStore = durableStoreForScope(scope);
+    const durableProjections: WorkflowProjection[] = [];
+    if (durableController && durableStore) {
+      const ids = await durableStore.listRunIds();
+      const projections = await Promise.all(
+        ids.map((runId) => durableController.getStatus(runId)),
+      );
+      for (const projection of projections) {
+        if (projection) durableProjections.push(projection);
+      }
+    }
+    const durableIds = new Set(
+      durableProjections.map((projection) => projection.runId),
+    );
     for (const st of workflowJobsForOwner(owner)) {
+      if (durableIds.has(st.id)) continue;
       count++;
       const elapsed = formatElapsed(now - st.startedAt);
       const s = st.snapshot;
@@ -2546,6 +3146,23 @@ export function registerWorkflowTool(
       if (st.error) parts.push(`error: ${st.error}`);
       lines.push(`- ${parts.join(" · ")}`);
       if (s.lastMessage && count <= 20) lines.push(`  last: ${s.lastMessage}`);
+    }
+    for (const projection of durableProjections) {
+      count++;
+      const tasks = Object.values(projection.tasks);
+      const running = tasks.filter((task) => task.status === "running").length;
+      const failed = tasks.filter((task) => task.status === "failed").length;
+      const parts = [
+        `**${projection.runId}** (${projection.runId}) [durable:${projection.status}]`,
+        `${tasks.length} task(s)`,
+      ];
+      if (running > 0) parts.push(`⚡ ${running} running`);
+      if (failed > 0) parts.push(`⚠ ${failed} failed`);
+      if (projection.currentPhase)
+        parts.push(`phase: ${projection.currentPhase}`);
+      if (projection.terminal?.error)
+        parts.push(`error: ${projection.terminal.error.message}`);
+      lines.push(`- ${parts.join(" · ")}`);
     }
     return count === 0
       ? "No workflow jobs."

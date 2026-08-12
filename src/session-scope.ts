@@ -8,6 +8,8 @@ import type { PendingJobDelivery } from "./notifications";
 import type { WorkflowOwnerIdentity } from "./workflow-run-types";
 import type { WorkflowRunStore } from "./workflow-run-store";
 import type { DurableWorkflowController } from "./workflow-durable-plan-runner";
+import type { WorkflowSessionDispatcher } from "./workflow-dispatcher";
+import type { WorkflowContinuitySnapshot } from "./workflow-continuity";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
 const SESSION_SCOPE_ID_COUNTER_KEY = "__piSubagenturaSessionScopeIdCounter";
@@ -35,10 +37,11 @@ export interface SessionScope {
   inProcessJobs: Map<string, JobState>;
   pendingInProcessDeliveries: PendingJobDelivery[];
   interactiveStates: Map<string, InteractiveSubagentState>;
-  durableWorkflowRootDir?: string;
   durableWorkflowOwner?: WorkflowOwnerIdentity;
   durableWorkflowStore?: WorkflowRunStore;
   durableWorkflowController?: DurableWorkflowController;
+  durableWorkflowDispatcher?: WorkflowSessionDispatcher;
+  durableWorkflowContinuity?: WorkflowContinuitySnapshot;
 }
 
 /** External registrations may omit runtime-owned collections and streaming state. */
@@ -53,10 +56,11 @@ export interface SessionScopeRegistration {
   inProcessJobs?: Map<string, JobState>;
   pendingInProcessDeliveries?: PendingJobDelivery[];
   interactiveStates?: Map<string, InteractiveSubagentState>;
-  durableWorkflowRootDir?: string;
   durableWorkflowOwner?: WorkflowOwnerIdentity;
   durableWorkflowStore?: WorkflowRunStore;
   durableWorkflowController?: DurableWorkflowController;
+  durableWorkflowDispatcher?: WorkflowSessionDispatcher;
+  durableWorkflowContinuity?: WorkflowContinuitySnapshot;
 }
 
 export interface SessionOwnerToken {
@@ -165,18 +169,16 @@ export function registerSessionScope(
     if (registration.interactiveStates !== undefined) {
       existing.interactiveStates = registration.interactiveStates;
     }
-    if (registration.durableWorkflowRootDir !== undefined) {
-      existing.durableWorkflowRootDir = registration.durableWorkflowRootDir;
-    }
-    if (registration.durableWorkflowOwner !== undefined) {
+    if ("durableWorkflowOwner" in registration) {
       existing.durableWorkflowOwner = registration.durableWorkflowOwner;
     }
-    if (registration.durableWorkflowStore !== undefined) {
-      existing.durableWorkflowStore = registration.durableWorkflowStore;
+    if (registration.durableWorkflowDispatcher !== undefined) {
+      existing.durableWorkflowDispatcher =
+        registration.durableWorkflowDispatcher;
     }
-    if (registration.durableWorkflowController !== undefined) {
-      existing.durableWorkflowController =
-        registration.durableWorkflowController;
+    if (registration.durableWorkflowContinuity !== undefined) {
+      existing.durableWorkflowContinuity =
+        registration.durableWorkflowContinuity;
     }
     return existing;
   }
@@ -195,10 +197,9 @@ export function registerSessionScope(
         pendingInProcessDeliveries:
           registration.pendingInProcessDeliveries ?? [],
         interactiveStates: registration.interactiveStates ?? new Map(),
-        durableWorkflowRootDir: registration.durableWorkflowRootDir,
         durableWorkflowOwner: registration.durableWorkflowOwner,
-        durableWorkflowStore: registration.durableWorkflowStore,
-        durableWorkflowController: registration.durableWorkflowController,
+        durableWorkflowDispatcher: registration.durableWorkflowDispatcher,
+        durableWorkflowContinuity: registration.durableWorkflowContinuity,
       };
   registry.set(scope.id, scope);
   return scope;
@@ -221,11 +222,27 @@ export function advanceSessionScopeGeneration(id: number): number {
   const scope = findSessionScope(id);
   if (!scope) return 0;
   scope.generation++;
+  scope.durableWorkflowContinuity = undefined;
   const state = getGlobalState();
   if (state[ACTIVE_SESSION_SCOPE_ID_KEY] === id) {
     state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = scope.generation;
   }
   return scope.generation;
+}
+
+function sameWorkflowOwner(
+  left: WorkflowOwnerIdentity | undefined,
+  right: WorkflowOwnerIdentity | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.projectKey === right.projectKey &&
+    left.cwd === right.cwd &&
+    left.piSessionId === right.piSessionId &&
+    left.ownerId === right.ownerId &&
+    left.ownerGeneration === right.ownerGeneration &&
+    left.leaseToken === right.leaseToken
+  );
 }
 
 export function sessionOwner(scope: SessionScope): SessionOwnerToken {
@@ -282,6 +299,55 @@ export async function releaseDurableWorkflowAuthority(
   if (scope.durableWorkflowStore === store) {
     clearDurableWorkflowServices(scope);
   }
+}
+
+export function setDurableWorkflowOwner(
+  scope: SessionScope,
+  owner: WorkflowOwnerIdentity | undefined,
+): void {
+  if (!sameWorkflowOwner(scope.durableWorkflowOwner, owner)) {
+    scope.durableWorkflowStore = undefined;
+    scope.durableWorkflowController = undefined;
+    scope.durableWorkflowDispatcher = undefined;
+    scope.durableWorkflowContinuity = undefined;
+  }
+  scope.durableWorkflowOwner = owner;
+}
+
+export function durableWorkflowOwner(
+  scope: SessionScope,
+): WorkflowOwnerIdentity | undefined {
+  return scope.durableWorkflowOwner;
+}
+
+export async function releaseDurableWorkflowAuthority(
+  scope: SessionScope,
+): Promise<void> {
+  const store = scope.durableWorkflowStore;
+  if (!store) {
+    scope.durableWorkflowController = undefined;
+    scope.durableWorkflowDispatcher = undefined;
+    scope.durableWorkflowContinuity = undefined;
+    return;
+  }
+  await store.release();
+  if (scope.durableWorkflowStore === store) {
+    scope.durableWorkflowStore = undefined;
+    scope.durableWorkflowController = undefined;
+    scope.durableWorkflowDispatcher = undefined;
+    scope.durableWorkflowContinuity = undefined;
+  }
+}
+
+/** Return continuity only for a live scope belonging to this Pi instance. */
+export function workflowContinuityForPi(
+  pi: SessionScope["pi"],
+): WorkflowContinuitySnapshot | undefined {
+  const scopes = getStartedSessionScopes().filter((scope) => scope.pi === pi);
+  if (scopes.length === 1) return scopes[0].durableWorkflowContinuity;
+  const activeId = getActiveSessionScopeId();
+  return scopes.find((scope) => scope.id === activeId)
+    ?.durableWorkflowContinuity;
 }
 
 /** Resolve an exact owner only while that lifecycle generation remains live. */

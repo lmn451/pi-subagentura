@@ -1,17 +1,22 @@
-import { MAX_TOTAL_AGENTS } from "./workflow-core";
-import { toDurableValue, type DurableValue } from "./workflow-durable-value";
+import { createHash } from "node:crypto";
+import { toDurableValue } from "./workflow-durable-value";
+import type { DurableValue } from "./workflow-durable-value";
 
 export const WORKFLOW_PLAN_VERSION = 1 as const;
-export type WorkflowPhaseMode = "sequential";
+export type WorkflowPhaseMode = "sequential" | "parallel";
 export type WorkflowTaskStatus =
-  "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+  "pending" | "blocked" | "running" | "succeeded" | "failed" | "skipped";
 
 export interface WorkflowPlanTask {
   id: string;
   prompt: string;
   label?: string;
-  isolation?: "in-process";
+  isolation?: "in-process" | "process";
   input?: DurableValue;
+  approval?: {
+    policyHash: string;
+    denial: "stop" | "skip";
+  };
 }
 
 export interface WorkflowPlanPhase {
@@ -28,128 +33,143 @@ export interface WorkflowPlan {
 
 const ID = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const MAX_PHASES = 64;
-const MAX_TASKS = MAX_TOTAL_AGENTS;
-const PLAN_FIELDS: Record<string, true> = {
-  schemaVersion: true,
-  name: true,
-  phases: true,
-};
-const PHASE_FIELDS: Record<string, true> = {
-  id: true,
-  mode: true,
-  tasks: true,
-};
-const TASK_FIELDS: Record<string, true> = {
-  id: true,
-  prompt: true,
-  label: true,
-  isolation: true,
-  input: true,
-};
+const MAX_TASKS = 1024;
 
-type DurableRecord = { [key: string]: DurableValue };
+export interface WorkflowPlanValidationOptions {
+  /**
+   * Durable execution is in-process only for the current admission protocol.
+   * Non-durable preview plans may still select process isolation.
+   */
+  durable?: boolean;
+}
 
-/** Validate an exact, bounded plan before any job or child can be created. */
 export function validateWorkflowPlan(
-  plan: unknown,
-): asserts plan is WorkflowPlan {
-  // This also proves every property is an enumerable data property without
-  // invoking accessors, and bounds all strings, input values, nodes, and bytes.
-  const root = expectRecord(toDurableValue(plan), "plan");
-  assertExactFields(
-    root,
-    PLAN_FIELDS,
-    ["schemaVersion", "name", "phases"],
-    "plan",
-  );
-
-  if (root.schemaVersion !== WORKFLOW_PLAN_VERSION) {
-    throw new Error(`plan.schemaVersion must be ${WORKFLOW_PLAN_VERSION}`);
+  plan: WorkflowPlan,
+  options: WorkflowPlanValidationOptions = {},
+): void {
+  if (plan.schemaVersion !== WORKFLOW_PLAN_VERSION || !ID.test(plan.name)) {
+    throw new Error("Invalid workflow plan header");
   }
-  if (typeof root.name !== "string" || !ID.test(root.name)) {
-    throw new Error("plan.name must be a valid workflow identifier");
-  }
-  if (!Array.isArray(root.phases)) {
-    throw new Error("plan.phases must be an array");
-  }
-  if (root.phases.length === 0 || root.phases.length > MAX_PHASES) {
+  if (
+    !Array.isArray(plan.phases) ||
+    plan.phases.length === 0 ||
+    plan.phases.length > MAX_PHASES
+  ) {
     throw new Error("Workflow plan must contain 1-64 phases");
   }
-
   const ids = new Set<string>();
   let taskCount = 0;
-  for (let phaseIndex = 0; phaseIndex < root.phases.length; phaseIndex++) {
-    const phasePath = `plan.phases[${phaseIndex}]`;
-    const phase = expectRecord(root.phases[phaseIndex], phasePath);
-    assertExactFields(phase, PHASE_FIELDS, ["id", "mode", "tasks"], phasePath);
-    if (typeof phase.id !== "string" || !ID.test(phase.id)) {
-      throw new Error(`${phasePath}.id must be a valid workflow identifier`);
-    }
-    if (ids.has(phase.id)) {
-      throw new Error(`Duplicate workflow id: ${phase.id}`);
-    }
-    if (phase.mode !== "sequential") {
-      throw new Error(`${phasePath}.mode must be "sequential"`);
-    }
-    if (!Array.isArray(phase.tasks)) {
-      throw new Error(`${phasePath}.tasks must be an array`);
-    }
-    if (phase.tasks.length === 0) {
-      throw new Error(`${phasePath}.tasks must contain at least one task`);
-    }
-    taskCount += phase.tasks.length;
-    if (taskCount > MAX_TASKS) {
-      throw new Error(`Workflow plan exceeds ${MAX_TASKS} tasks`);
+  for (const phase of plan.phases) {
+    if (
+      !ID.test(phase.id) ||
+      !["sequential", "parallel"].includes(phase.mode) ||
+      ids.has(phase.id) ||
+      !Array.isArray(phase.tasks)
+    ) {
+      throw new Error(`Invalid or duplicate phase id: ${phase.id}`);
     }
     ids.add(phase.id);
-
-    for (let taskIndex = 0; taskIndex < phase.tasks.length; taskIndex++) {
-      const taskPath = `${phasePath}.tasks[${taskIndex}]`;
-      const task = expectRecord(phase.tasks[taskIndex], taskPath);
-      assertExactFields(task, TASK_FIELDS, ["id", "prompt"], taskPath);
-      if (typeof task.id !== "string" || !ID.test(task.id)) {
-        throw new Error(`${taskPath}.id must be a valid workflow identifier`);
+    for (const task of phase.tasks) {
+      taskCount++;
+      if (
+        taskCount > MAX_TASKS ||
+        !ID.test(task.id) ||
+        ids.has(task.id) ||
+        !task.prompt.trim()
+      ) {
+        throw new Error(`Invalid or duplicate task id: ${task.id}`);
       }
-      if (ids.has(task.id)) {
-        throw new Error(`Duplicate workflow id: ${task.id}`);
-      }
-      if (typeof task.prompt !== "string" || task.prompt.trim().length === 0) {
-        throw new Error(`${taskPath}.prompt must be a nonempty string`);
-      }
-      if (Object.hasOwn(task, "label") && typeof task.label !== "string") {
-        throw new Error(`${taskPath}.label must be a string`);
-      }
-      if (Object.hasOwn(task, "isolation") && task.isolation !== "in-process") {
-        throw new Error(
-          `${taskPath}.isolation must be omitted or "in-process"`,
-        );
+      if (task.isolation === "process")
+        throw new Error("Process isolation is not supported by the preview");
+      if (
+        task.approval !== undefined &&
+        (!task.approval.policyHash.trim() ||
+          !["stop", "skip"].includes(task.approval.denial))
+      ) {
+        throw new Error(`Invalid approval gate for task: ${task.id}`);
       }
       ids.add(task.id);
     }
   }
 }
 
-function expectRecord(value: DurableValue, path: string): DurableRecord {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${path} must be an object`);
-  }
-  return value;
+export function assertDurableWorkflowPlan(plan: WorkflowPlan): void {
+  validateWorkflowPlan(plan, { durable: true });
+}
+/**
+ * Produce the immutable plan snapshot used by both execution and persistence.
+ *
+ * Only declared plan fields are retained, optional values are omitted when
+ * absent, and durable input values are validated while being copied. This
+ * prevents caller mutation after admission from changing the run definition.
+ */
+export function normalizeWorkflowPlan(
+  plan: WorkflowPlan,
+  options: WorkflowPlanValidationOptions = {},
+): WorkflowPlan {
+  validateWorkflowPlan(plan, options);
+  return {
+    schemaVersion: WORKFLOW_PLAN_VERSION,
+    name: plan.name,
+    phases: plan.phases.map((phase) => ({
+      id: phase.id,
+      mode: phase.mode,
+      tasks: phase.tasks.map((task) => ({
+        id: task.id,
+        prompt: task.prompt,
+        ...(task.label === undefined ? {} : { label: task.label }),
+        ...(task.isolation === undefined ? {} : { isolation: task.isolation }),
+        ...(task.input === undefined
+          ? {}
+          : { input: toDurableValue(task.input) }),
+      })),
+    })),
+  };
 }
 
-function assertExactFields(
-  value: DurableRecord,
-  allowed: Record<string, true>,
-  required: readonly string[],
-  path: string,
-): void {
-  for (const key of Object.keys(value)) {
-    if (!Object.hasOwn(allowed, key)) {
-      throw new Error(`${path} contains unknown field ${JSON.stringify(key)}`);
-    }
+/**
+ * Serialize JSON-compatible values with object keys in lexical order.
+ *
+ * Arrays retain their declared order because phase/task order is observable;
+ * object insertion order is not part of a workflow definition.
+ */
+export function canonicalizeWorkflowValue(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error("Cannot canonicalize a number");
+    return JSON.stringify(value);
   }
-  for (const key of required) {
-    if (!Object.hasOwn(value, key)) {
-      throw new Error(`${path}.${key} is required`);
-    }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalizeWorkflowValue).join(",")}]`;
   }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    return `{${entries
+      .map(
+        ([key, item]) =>
+          `${JSON.stringify(key)}:${canonicalizeWorkflowValue(item)}`,
+      )
+      .join(",")}}`;
+  }
+  throw new Error("Cannot canonicalize an unsupported workflow value");
 }
+
+export function canonicalWorkflowPlanDigest(
+  normalizedPlan: WorkflowPlan,
+): string {
+  return createHash("sha256")
+    .update(canonicalizeWorkflowValue(normalizedPlan))
+    .digest("hex");
+}
+
+export function workflowPlanDigest(plan: WorkflowPlan): string {
+  return canonicalWorkflowPlanDigest(normalizeWorkflowPlan(plan));
+}
+
+/** Compatibility spelling for callers that describe the operation as hashing. */
+export const digestWorkflowPlan = workflowPlanDigest;

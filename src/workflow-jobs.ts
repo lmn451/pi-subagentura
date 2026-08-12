@@ -17,6 +17,7 @@ import {
 } from "./workflow-plan-state";
 import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
 import {
+  addWorkflowUsage,
   type RunWorkflowOptions,
   type WorkflowAgentRunner,
   type WorkflowAgentRecord,
@@ -59,6 +60,8 @@ export interface WorkflowJobState {
     phases: string[];
     lastMessage?: string;
     currentPhase?: string;
+    /** Declarative preview state, present only for plan-backed jobs. */
+    planState?: WorkflowPlanState;
     agentRecords?: WorkflowAgentRecord[];
     agentRecordsOmitted?: number;
     runningCount?: number;
@@ -542,6 +545,160 @@ function startSharedWorkflowJob<TOptions extends SharedWorkflowJobOptions>(
       }
     });
   // Don't crash the process on an unobserved rejection before get_workflow_result is called.
+  state.promise.catch(() => {});
+  workflowJobRegistry.set(id, state);
+  return state;
+}
+export type StartWorkflowPlanJobOptions = Omit<
+  WorkflowPlanRunOptions,
+  "signal" | "onState"
+> &
+  Pick<WorkflowPlanRunOptions, "signal"> & {
+    budgetTotal?: number | null;
+    onState?: (state: WorkflowPlanState) => void;
+  };
+
+/**
+ * Start a non-durable declarative preview using the same owner-scoped registry
+ * and result lifecycle as legacy JavaScript workflows.
+ *
+ * Validation and initial state creation happen before the registry row, child
+ * dispatch, or runner promise is created.
+ */
+export function startWorkflowPlanJob(
+  plan: WorkflowPlan,
+  optsOrBuilder:
+    | StartWorkflowPlanJobOptions
+    | ((workflowId: string) => StartWorkflowPlanJobOptions),
+  startedAt?: number,
+  onComplete?: (job: WorkflowJobState) => boolean | void,
+  owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
+  executionMode: "async" | "sync" = "async",
+): WorkflowJobState {
+  validateWorkflowPlan(plan);
+  const initialPlanState = createWorkflowPlanState(plan);
+  const parentSessionOwner = owner;
+  while (
+    executionMode === "async" &&
+    workflowJobRegistry.size >= MAX_WORKFLOW_JOBS
+  ) {
+    let evicted = false;
+    for (const [id, st] of workflowJobRegistry) {
+      if (
+        st.status !== "running" &&
+        workflowJobBelongsToOwner(st, parentSessionOwner)
+      ) {
+        debugLog("info", "workflow_job_evicted", { evictedId: id });
+        workflowJobRegistry.delete(id);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) {
+      throw new Error(
+        `${MAX_WORKFLOW_JOBS} workflow jobs already running — cancel one with cancel_workflow before starting another.`,
+      );
+    }
+  }
+
+  const id = `wf_${randomBytes(5).toString("hex")}`;
+  const opts =
+    typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
+  const abort = new AbortController();
+  const externalSignal = opts.signal;
+  const forwardAbort = () => abort.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abort.abort(externalSignal.reason);
+  else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const state: WorkflowJobState = {
+    id,
+    name: plan.name,
+    status: "running",
+    executionMode,
+    startedAt: startedAt ?? Date.now(),
+    promise: undefined as unknown as Promise<WorkflowRunResultWithUsage>,
+    abort,
+    snapshot: {
+      agentsSpawned: 0,
+      errorCount: 0,
+      tokensSpent: 0,
+      budgetTotal: opts.budgetTotal ?? null,
+      usage: zeroWorkflowUsage(),
+      phases: [],
+      planState: initialPlanState,
+      agentRecords: [],
+      agentRecordsOmitted: 0,
+      runningCount: 0,
+    },
+    completionNotification: onComplete,
+    completionNotificationDelivered: false,
+    cancellationSnapshots: [],
+    activeAgentRuns: new Set(),
+    parentSessionOwner,
+  };
+  const updatePlanState = (next: WorkflowPlanState): void => {
+    state.snapshot.planState = next;
+    const statuses = Object.values(next.tasks);
+    state.snapshot.agentsSpawned = statuses.filter(
+      (status) =>
+        status === "running" || status === "succeeded" || status === "failed",
+    ).length;
+    state.snapshot.runningCount = statuses.filter(
+      (status) => status === "running",
+    ).length;
+    state.snapshot.errorCount = statuses.filter(
+      (status) => status === "failed",
+    ).length;
+    state.snapshot.currentPhase = next.currentPhase;
+    if (
+      next.currentPhase &&
+      state.snapshot.phases[state.snapshot.phases.length - 1] !==
+        next.currentPhase
+    ) {
+      state.snapshot.phases.push(next.currentPhase);
+    }
+    state.snapshot.lastMessage = `plan ${next.status}`;
+    opts.onState?.(next);
+  };
+  const runOptions: WorkflowPlanRunOptions = {
+    ...opts,
+    runAgent: (request) =>
+      runTrackedWorkflowAgent(state, opts.runAgent, request),
+    signal: abort.signal,
+    onState: updatePlanState,
+  };
+  state.promise = runWorkflowPlan(plan, runOptions)
+    .then((result) => {
+      const usage = result.taskResults.reduce(
+        (total, task) => addWorkflowUsage(total, task.result.usage),
+        zeroWorkflowUsage(),
+      );
+      const withUsage: WorkflowRunResultWithUsage = {
+        ...result,
+        usage,
+      };
+      if (state.status === "running") state.status = "done";
+      state.result = withUsage;
+      state.snapshot.usage = usage;
+      state.snapshot.tokensSpent = usage.output;
+      if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      invokeCompletionHook(state);
+      return withUsage;
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      state.status = abort.signal.aborted ? "cancelled" : "error";
+      state.error = message;
+      state.snapshot.liveUsage = undefined;
+      if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      invokeCompletionHook(state);
+      throw error;
+    })
+    .finally(() => {
+      externalSignal?.removeEventListener("abort", forwardAbort);
+      if (executionMode === "sync" && workflowJobRegistry.get(id) === state) {
+        workflowJobRegistry.delete(id);
+      }
+    });
   state.promise.catch(() => {});
   workflowJobRegistry.set(id, state);
   return state;
