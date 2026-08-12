@@ -9,6 +9,7 @@ import {
   writeOutput,
   type SubagentEventV2,
 } from "./artifact";
+import { persistWorkflowProcessChildStartedFromEnvironment } from "./workflow-process-attempt";
 
 interface ActiveTurn {
   turnId: string;
@@ -157,7 +158,12 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
   });
   // In createAgentSession 0.80.6, the first turn_start can precede persistence
   // of the user message. This is the earliest guaranteed pre-model fallback.
+  let workflowProcessHandshakeComplete = false;
   pi.on("before_provider_request", (_event, ctx) => {
+    if (!workflowProcessHandshakeComplete) {
+      persistWorkflowProcessChildStartedFromEnvironment();
+      workflowProcessHandshakeComplete = true;
+    }
     bindPersistedTurn(ctx, Date.now());
   });
 

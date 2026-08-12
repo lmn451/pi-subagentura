@@ -1,6 +1,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
   getWorkflowCompletionPresentation,
+  normalizeCancelledWorkflowState,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -10,41 +11,62 @@ import {
   formatWorkflowUsageLegend,
   presentWorkflowUsage,
 } from "./workflow-core";
-import { formatWorkflowPlanRows } from "./workflow-plan-ui";
-import type { WorkflowPlanState } from "./workflow-plan-state";
+import {
+  formatWorkflowPlanRows,
+  formatWorkflowPlanSummary,
+  sanitizeTerminalText,
+} from "./workflow-plan-ui";
 import type { SessionOwnerToken } from "./session-scope";
-import type { WorkflowProjection } from "./workflow-projection-repository";
+import type { WorkflowApprovalSnapshot } from "./workflow-approvals";
+import type { DurableWorkflowProjection } from "./workflow-projection-repository";
+import type {
+  DurableWorkflowOwner,
+  DurableWorkflowRunId,
+} from "./workflow-run-types";
 
 const MAX_WORKFLOW_TREE_AGENT_ROWS = 20;
 
-type WorkflowSnapshotWithPlanState = WorkflowJobState["snapshot"] & {
-  planState?: WorkflowPlanState;
-};
+export interface WorkflowTrustedResumeSnapshot {
+  readonly runId: DurableWorkflowRunId;
+  readonly executionKind: DurableWorkflowProjection["executionKind"];
+  readonly expectedOwner: DurableWorkflowOwner;
+  readonly expectedRunEpoch: number;
+}
 
 export type WorkflowTreeAction =
-  { kind: "cancel"; workflowId: string } | { kind: "close" };
+  | { kind: "cancel"; workflowId: string }
+  | {
+      kind: "approval";
+      decision: "approved" | "denied";
+      request: WorkflowApprovalSnapshot;
+    }
+  | { kind: "resume"; resume: WorkflowTrustedResumeSnapshot }
+  | { kind: "close" };
 
 type WorkflowTreeDone = (action: WorkflowTreeAction) => void;
 
 interface WorkflowTreeOptions {
   done: WorkflowTreeDone;
   owner?: SessionOwnerToken;
-  durableProjections?: readonly WorkflowProjection[];
+  approvals?: readonly WorkflowApprovalSnapshot[];
+  resumes?: readonly WorkflowTrustedResumeSnapshot[];
   requestRender?: () => void;
   notify?: (message: string) => void;
 }
 
+interface WorkflowTreeSelection {
+  readonly id: string;
+  readonly job?: WorkflowJobState;
+  readonly approval?: WorkflowApprovalSnapshot;
+  readonly resume?: WorkflowTrustedResumeSnapshot;
+}
+
 interface WorkflowRow {
   job?: WorkflowJobState;
-  projection?: WorkflowProjection;
   depth: number;
   text: string;
   selectable: boolean;
 }
-
-type WorkflowTreeSelection =
-  | { kind: "live"; id: string; job: WorkflowJobState }
-  | { kind: "durable"; id: string; projection: WorkflowProjection };
 
 export class WorkflowTreeComponent {
   private selectedWorkflowIndex = 0;
@@ -59,12 +81,12 @@ export class WorkflowTreeComponent {
       return this.cachedLines;
     }
 
-    const rows = this.rows();
+    const rows = this.rows(width);
     const lines: string[] = [];
     lines.push(trunc("┌ Workflow Tree", width));
     lines.push(
       trunc(
-        "│ ↑↓ select • enter/→ expand • ← collapse • c cancel • q/esc close",
+        "│ ↑↓ select • enter/→ expand • ← collapse • a approve • d deny • r resume • c cancel • q/esc close",
         width,
       ),
     );
@@ -91,15 +113,16 @@ export class WorkflowTreeComponent {
   }
 
   handleInput(data: string): void {
-    const jobs = selectableWorkflows(
+    const selections = selectableWorkflows(
       this.opts.owner,
-      this.opts.durableProjections,
+      this.opts.approvals ?? [],
+      this.opts.resumes ?? [],
     );
     if (data === "q" || data === "\x1b") {
       this.opts.done({ kind: "close" });
       return;
     }
-    if (jobs.length === 0) return;
+    if (selections.length === 0) return;
 
     if (data === "\x1b[A" || data === "k") {
       this.selectedWorkflowIndex = Math.max(0, this.selectedWorkflowIndex - 1);
@@ -108,14 +131,14 @@ export class WorkflowTreeComponent {
     }
     if (data === "\x1b[B" || data === "j") {
       this.selectedWorkflowIndex = Math.min(
-        jobs.length - 1,
+        selections.length - 1,
         this.selectedWorkflowIndex + 1,
       );
       this.changed();
       return;
     }
 
-    const selected = jobs[this.selectedWorkflowIndex];
+    const selected = selections[this.selectedWorkflowIndex];
     if (!selected) return;
 
     if (data === "\r" || data === "\n" || data === "\x1b[C") {
@@ -127,8 +150,34 @@ export class WorkflowTreeComponent {
       this.changed();
       return;
     }
+    if (data === "a" || data === "d") {
+      if (selected.approval === undefined) {
+        this.opts.notify?.(`Workflow ${selected.id} has no pending approval.`);
+        return;
+      }
+      this.opts.done({
+        kind: "approval",
+        decision: data === "a" ? "approved" : "denied",
+        request: selected.approval,
+      });
+      return;
+    }
+    if (data === "r") {
+      if (selected.resume === undefined) {
+        this.opts.notify?.(
+          `Workflow ${selected.id} is not awaiting trusted resume.`,
+        );
+        return;
+      }
+      this.opts.done({ kind: "resume", resume: selected.resume });
+      return;
+    }
     if (data === "c") {
-      this.cancel(selected);
+      if (selected.job === undefined) {
+        this.opts.notify?.(`Workflow ${selected.id} has no live executor.`);
+        return;
+      }
+      this.cancel(selected.job);
     }
   }
 
@@ -137,31 +186,47 @@ export class WorkflowTreeComponent {
     this.cachedLines = undefined;
   }
 
-  private rows(): WorkflowRow[] {
+  private rows(width: number): WorkflowRow[] {
     const rows: WorkflowRow[] = [];
-    for (const item of selectableWorkflows(
+    for (const selection of selectableWorkflows(
       this.opts.owner,
-      this.opts.durableProjections,
+      this.opts.approvals ?? [],
+      this.opts.resumes ?? [],
     )) {
-      const isExpanded = this.expanded.has(item.id);
-      if (item.kind === "live") {
+      const isExpanded = this.expanded.has(selection.id);
+      rows.push({
+        ...(selection.job === undefined ? {} : { job: selection.job }),
+        depth: 0,
+        selectable: true,
+        text: `${isExpanded ? "▾" : "▸"} ${
+          selection.job !== undefined
+            ? formatWorkflowSummary(selection.job, width)
+            : selection.resume !== undefined
+              ? `Durable ${selection.resume.executionKind} ${selection.id} [interrupted at epoch ${selection.resume.expectedRunEpoch}]`
+              : `Durable workflow ${selection.id} [awaiting approval]`
+        }`,
+      });
+      if (!isExpanded) continue;
+      if (selection.job !== undefined) {
+        rows.push(...formatWorkflowDetails(selection.job, width));
+      }
+      if (selection.approval !== undefined) {
         rows.push({
-          job: item.job,
-          depth: 0,
-          selectable: true,
-          text: `${isExpanded ? "▾" : "▸"} ${formatWorkflowSummary(item.job)}`,
+          ...(selection.job === undefined ? {} : { job: selection.job }),
+          depth: 1,
+          selectable: false,
+          text:
+            `approval ${selection.approval.requestId} · ` +
+            `${selection.approval.description} · denial=${selection.approval.denialPolicy}`,
         });
-        if (isExpanded) rows.push(...formatWorkflowDetails(item.job));
-      } else {
+      }
+      if (selection.resume !== undefined) {
         rows.push({
-          projection: item.projection,
-          depth: 0,
-          selectable: true,
-          text: `${isExpanded ? "▾" : "▸"} ${formatDurableWorkflowSummary(item.projection)}`,
+          ...(selection.job === undefined ? {} : { job: selection.job }),
+          depth: 1,
+          selectable: false,
+          text: `trusted resume · ${selection.resume.executionKind} · epoch ${selection.resume.expectedRunEpoch}`,
         });
-        if (isExpanded) {
-          rows.push(...formatDurableWorkflowDetails(item.projection));
-        }
       }
     }
     return rows;
@@ -173,26 +238,18 @@ export class WorkflowTreeComponent {
     this.changed();
   }
 
-  private cancel(item: WorkflowTreeSelection): void {
-    if (item.kind === "durable") {
-      if (item.projection.terminal) {
-        this.opts.notify?.(
-          `Workflow ${item.id} is ${item.projection.terminal.status}; nothing to cancel.`,
-        );
-        return;
-      }
-      this.opts.notify?.(`Cancelling durable workflow ${item.id}.`);
-      this.opts.done({ kind: "cancel", workflowId: item.id });
-      return;
-    }
-    const job = item.job;
+  private cancel(job: WorkflowJobState): void {
     if (job.status !== "running") {
       this.opts.notify?.(
         `Workflow ${job.id} is ${job.status}; nothing to cancel.`,
       );
       return;
     }
-    this.opts.notify?.(`Cancelling workflow ${job.id}.`);
+    job.abort.abort();
+    job.status = "cancelled";
+    normalizeCancelledWorkflowState(job);
+    this.opts.notify?.(`Cancelled workflow ${job.id}.`);
+    this.changed();
     this.opts.done({ kind: "cancel", workflowId: job.id });
   }
 
@@ -205,7 +262,8 @@ export class WorkflowTreeComponent {
 export async function showWorkflowTree(
   ui: ExtensionUIContext,
   owner?: SessionOwnerToken,
-  durableProjections: readonly WorkflowProjection[] = [],
+  approvals: readonly WorkflowApprovalSnapshot[] = [],
+  resumes: readonly WorkflowTrustedResumeSnapshot[] = [],
 ): Promise<WorkflowTreeAction> {
   const custom = (ui as any).custom;
   if (typeof custom !== "function") {
@@ -223,7 +281,8 @@ export async function showWorkflowTree(
       new WorkflowTreeComponent({
         done,
         owner,
-        durableProjections,
+        approvals,
+        resumes,
         requestRender: () => tui.requestRender?.(),
         notify: (message) => ui.notify(message),
       }),
@@ -239,29 +298,56 @@ export async function showWorkflowTree(
 }
 
 function selectableWorkflows(
-  owner?: SessionOwnerToken,
-  durableProjections: readonly WorkflowProjection[] = [],
+  owner: SessionOwnerToken | undefined,
+  approvals: readonly WorkflowApprovalSnapshot[],
+  resumes: readonly WorkflowTrustedResumeSnapshot[],
 ): WorkflowTreeSelection[] {
-  const live = workflowJobsForOwner(owner);
-  const liveIds = new Set(live.map((job) => job.id));
-  return [
-    ...live.map((job): WorkflowTreeSelection => ({
-      kind: "live",
-      id: job.id,
-      job,
-    })),
-    ...durableProjections
-      .filter((projection) => !liveIds.has(projection.runId))
-      .map((projection): WorkflowTreeSelection => ({
-        kind: "durable",
-        id: projection.runId,
-        projection,
-      })),
-  ];
+  const approvalByRunId = new Map<string, WorkflowApprovalSnapshot>(
+    approvals.map((approval) => [approval.runId, approval]),
+  );
+  const resumeByRunId = new Map<string, WorkflowTrustedResumeSnapshot>(
+    resumes.map((resume) => [resume.runId, resume]),
+  );
+  const selections = workflowJobsForOwner(owner).map(
+    (job): WorkflowTreeSelection => {
+      const approval = approvalByRunId.get(job.id);
+      const resume = resumeByRunId.get(job.id);
+      return {
+        id: job.id,
+        job,
+        ...(approval === undefined ? {} : { approval }),
+        ...(resume === undefined ? {} : { resume }),
+      };
+    },
+  );
+  const selectedIds = new Set(selections.map((selection) => selection.id));
+  for (const approval of approvals) {
+    if (selectedIds.has(approval.runId)) continue;
+    selections.push({
+      id: approval.runId,
+      approval,
+      ...(resumeByRunId.get(approval.runId) === undefined
+        ? {}
+        : { resume: resumeByRunId.get(approval.runId)! }),
+    });
+    selectedIds.add(approval.runId);
+  }
+  for (const resume of resumes) {
+    if (selectedIds.has(resume.runId)) continue;
+    selections.push({ id: resume.runId, resume });
+    selectedIds.add(resume.runId);
+  }
+  return selections;
 }
-function formatWorkflowSummary(job: WorkflowJobState): string {
+
+function formatWorkflowSummary(job: WorkflowJobState, width: number): string {
+  if (job.kind === "plan" && job.planProjection) {
+    const summary = formatWorkflowPlanSummary(job.planProjection, {
+      width: Math.max(1, width - 6),
+    });
+    return `${job.name} (${job.id}) · ${summary}`;
+  }
   const s = job.snapshot;
-  const planState = (s as WorkflowSnapshotWithPlanState).planState;
   const errorCount = job.result?.errorCount ?? s.errorCount;
   const presentation = getWorkflowCompletionPresentation(
     job.status,
@@ -270,7 +356,7 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
   const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
   const parts = [
     `${statusPrefix}${job.name} (${job.id})`,
-    `[${presentation.label}]`,
+    `[${job.durableStatus ?? presentation.label}]`,
     `${s.agentsSpawned} agent${s.agentsSpawned === 1 ? "" : "s"}`,
     `${s.runningCount ?? 0} running`,
   ];
@@ -279,112 +365,41 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
   if (usage) {
     parts.push(formatWorkflowUsage(usage, { outputBudget: s.budgetTotal }));
   }
-  const currentPhase = planState?.currentPhase ?? s.currentPhase;
-  if (currentPhase) parts.push(`phase: ${currentPhase}`);
+  if (s.currentPhase) parts.push(`phase: ${s.currentPhase}`);
   return parts.join(" · ");
 }
 
-function formatDurableWorkflowSummary(projection: WorkflowProjection): string {
-  const tasks = Object.values(projection.tasks);
-  const running = tasks.filter((task) => task.status === "running").length;
-  const errors = tasks.filter((task) => task.status === "failed").length;
-  const marker =
-    projection.status === "done"
-      ? "✓ "
-      : projection.status === "error"
-        ? "✗ "
-        : projection.status === "cancelled"
-          ? "⊘ "
-          : projection.status === "interrupted"
-            ? "‼ "
-            : "";
-  const parts = [
-    `${marker}durable (${projection.runId})`,
-    `[${projection.status}]`,
-    `${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
-    `${running} running`,
-  ];
-  if (errors > 0) parts.push(`${errors} errors`);
-  const usage = presentWorkflowUsage(projection.usage);
-  if (usage) parts.push(formatWorkflowUsage(usage));
-  if (projection.currentPhase) {
-    parts.push(`phase: ${projection.currentPhase}`);
-  }
-  return parts.join(" · ");
-}
-
-function formatDurableWorkflowDetails(
-  projection: WorkflowProjection,
+function formatWorkflowDetails(
+  job: WorkflowJobState,
+  width: number,
 ): WorkflowRow[] {
-  const rows: WorkflowRow[] = [];
-  const usage = presentWorkflowUsage(projection.usage);
-  if (usage) {
-    for (const field of formatWorkflowUsageFields(usage)) {
+  if (job.kind === "plan" && job.planProjection) {
+    const rows = formatWorkflowPlanRows(job.planProjection, {
+      width: Math.max(1, width - 7),
+    }).map((row) => ({
+      job,
+      depth: row.depth + 1,
+      selectable: false,
+      text: row.text,
+    }));
+    if (rows.length === 0) {
       rows.push({
-        projection,
+        job,
         depth: 1,
         selectable: false,
-        text: field,
+        text: "No plan phases yet.",
       });
     }
-  }
-  let previousPhase: string | undefined;
-  for (const task of Object.values(projection.tasks)) {
-    if (task.phaseId !== previousPhase) {
-      previousPhase = task.phaseId;
+    if (job.error) {
       rows.push({
-        projection,
+        job,
         depth: 1,
         selectable: false,
-        text: `◆ phase: ${task.phaseId}`,
+        text: `error: ${job.error}`,
       });
     }
-    const marker =
-      task.status === "succeeded"
-        ? "✓"
-        : task.status === "failed"
-          ? "✗"
-          : task.status === "running"
-            ? "→"
-            : task.status === "interrupted"
-              ? "‼"
-              : "○";
-    const error = task.error ? ` — ${task.error}` : "";
-    rows.push({
-      projection,
-      depth: 2,
-      selectable: false,
-      text: `${marker} ${task.status} ${task.label ?? task.id} (attempt ${task.attempt})${error}`,
-    });
+    return rows;
   }
-  if (projection.usageLowerBound) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: "Usage is a committed lower bound after interruption.",
-    });
-  }
-  if (projection.terminal?.error) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: `error: ${projection.terminal.error.message}`,
-    });
-  }
-  if (rows.length === 0) {
-    rows.push({
-      projection,
-      depth: 1,
-      selectable: false,
-      text: "No durable task events yet.",
-    });
-  }
-  return rows;
-}
-
-function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
   const rows: WorkflowRow[] = [];
   const usage = presentWorkflowUsage(job.snapshot.usage);
   if (usage) {
@@ -405,63 +420,50 @@ function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
       text: formatWorkflowUsageLegend(),
     });
   }
-
-  const planState = (job.snapshot as WorkflowSnapshotWithPlanState).planState;
-  if (planState) {
-    for (const row of formatWorkflowPlanRows(planState)) {
-      rows.push({
-        job,
-        depth: row.depth,
-        selectable: false,
-        text: row.text,
-      });
-    }
-  } else {
-    for (const phase of job.snapshot.phases) {
-      rows.push({
-        job,
-        depth: 1,
-        selectable: false,
-        text: `◆ phase: ${phase}`,
-      });
-    }
-    const records = job.snapshot.agentRecords ?? [];
-    const agentRows = records.slice(-MAX_WORKFLOW_TREE_AGENT_ROWS);
-    const omittedForUi =
-      (job.snapshot.agentRecordsOmitted ?? 0) +
-      Math.max(0, records.length - agentRows.length);
-    if (omittedForUi > 0) {
-      rows.push({
-        job,
-        depth: 1,
-        selectable: false,
-        text: `… ${omittedForUi} older agent records omitted`,
-      });
-    }
-    for (const record of agentRows) {
-      const marker =
-        record.status === "running"
-          ? "→"
-          : record.status === "error"
-            ? "✗"
-            : record.status === "cancelled"
-              ? "⊘"
-              : "✓";
-      const label = `${record.label ?? "agent"} #${record.agentId}`;
-      const model = record.model ? ` @${record.model}` : "";
-      const phase = record.phase ? ` (${record.phase})` : "";
-      const recordUsage = presentWorkflowUsage(record.usage);
-      rows.push({
-        job,
-        depth: 1,
-        selectable: false,
-        text: `${marker} ${record.status} ${label}${model}${phase}${
-          recordUsage
-            ? ` — ${formatWorkflowUsage(recordUsage, { ascii: true })}`
-            : ""
-        }`,
-      });
-    }
+  for (const phase of job.snapshot.phases) {
+    rows.push({
+      job,
+      depth: 1,
+      selectable: false,
+      text: `◆ phase: ${phase}`,
+    });
+  }
+  const records = job.snapshot.agentRecords ?? [];
+  const agentRows = records.slice(-MAX_WORKFLOW_TREE_AGENT_ROWS);
+  const omittedForUi =
+    (job.snapshot.agentRecordsOmitted ?? 0) +
+    Math.max(0, records.length - agentRows.length);
+  if (omittedForUi > 0) {
+    rows.push({
+      job,
+      depth: 1,
+      selectable: false,
+      text: `… ${omittedForUi} older agent records omitted`,
+    });
+  }
+  for (const record of agentRows) {
+    const marker =
+      record.status === "running"
+        ? "→"
+        : record.status === "error"
+          ? "✗"
+          : record.status === "cancelled"
+            ? "⊘"
+            : "✓";
+    const label = `${record.label ?? "agent"} #${record.agentId}`;
+    const model = record.model ? ` @${record.model}` : "";
+    const phase = record.phase ? ` (${record.phase})` : "";
+    const recordUsage = presentWorkflowUsage(record.usage);
+    rows.push({
+      job,
+      depth: 1,
+      selectable: false,
+      text: `${marker} ${record.status} ${label}${model}${phase}${
+        recordUsage
+          ? ` — ${formatWorkflowUsage(recordUsage, { ascii: true })}`
+          : ""
+      }`,
+    });
   }
   if (job.snapshot.lastMessage) {
     rows.push({
@@ -491,8 +493,9 @@ function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
 }
 
 function trunc(text: string, width: number): string {
+  const sanitized = sanitizeTerminalText(text);
   if (width <= 0) return "";
-  if (text.length <= width) return text;
-  if (width <= 1) return text.slice(0, width);
-  return `${text.slice(0, width - 1)}…`;
+  if (sanitized.length <= width) return sanitized;
+  if (width <= 1) return sanitized.slice(0, width);
+  return `${sanitized.slice(0, width - 1)}…`;
 }

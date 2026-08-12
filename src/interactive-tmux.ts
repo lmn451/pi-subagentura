@@ -32,7 +32,7 @@ import {
   type SessionScope,
 } from "./session-scope";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -67,6 +67,18 @@ import {
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
+import {
+  WorkflowProcessAttemptFenceIncompleteError,
+  WORKFLOW_PROCESS_MANIFEST_ENV,
+  WORKFLOW_PROCESS_MARKER_ENV,
+  WORKFLOW_PROCESS_NONCE_ENV,
+  isWorkflowProcessAttemptManifest,
+  workflowProcessManifestPath,
+  writeWorkflowProcessAttemptManifest,
+  type WorkflowProcessAttemptIdentity,
+  type WorkflowProcessAttemptManifest,
+  type WorkflowProcessPaneAssignment,
+} from "./workflow-process-attempt";
 import {
   snapshotInteractiveContext,
   type CancellationSnapshotReceipt,
@@ -190,7 +202,7 @@ export interface InteractiveSubagentState {
    * session_start. Optional for tests that don't care about reload semantics.
    */
   parentSessionId?: string;
-  /** Live supervisor owner; intentionally not persisted for workflow children. */
+  /** Live supervisor token; runtime-only, unlike persisted workflow completion ownership. */
   supervisorOwner?: SessionOwnerToken;
   /** Exact runtime session generation that owns this state; never persisted. */
   sessionOwner?: SessionOwnerToken;
@@ -198,6 +210,8 @@ export interface InteractiveSubagentState {
   workflowId?: string;
   /** Completion is delivered standalone or consumed by a workflow aggregate. */
   completionOwner?: "standalone" | "workflow";
+  /** Durable process-attempt identity when this workflow child has a manifest. */
+  workflowProcessIdentity?: WorkflowProcessAttemptIdentity;
   /** Workflow-runner acknowledgement that this child's result was consumed; runtime-only and intentionally not persisted. */
   workflowResultConsumed?: boolean;
   model?: string;
@@ -266,6 +280,7 @@ export interface InteractiveSubagentState {
   /** @deprecated Legacy protocol field retained for API compatibility. */
   injected?: boolean;
 }
+const dispatchedWorkflowProcessStates = new WeakSet<InteractiveSubagentState>();
 
 declare global {
   var __piSubagenturaInteractiveRegistry:
@@ -336,8 +351,12 @@ function defaultSessionRoot(): string {
     : join(homedir(), ".pi", "agent", "sessions");
 }
 
-function sessionDirFor(cwd: string): string {
-  const cwdLabel = `${safeSegment(basename(cwd))}-${randomBytes(3).toString("hex")}`;
+function sessionDirFor(cwd: string, deterministic: boolean): string {
+  const resolvedCwd = resolve(cwd);
+  const suffix = deterministic
+    ? createHash("sha256").update(resolvedCwd).digest("hex").slice(0, 12)
+    : randomBytes(3).toString("hex");
+  const cwdLabel = `${safeSegment(basename(resolvedCwd))}-${suffix}`;
   return join(defaultSessionRoot(), "subagentura", cwdLabel);
 }
 
@@ -345,6 +364,7 @@ export function createInteractiveSubagentPaths(params: {
   id: string;
   name: string;
   cwd: string;
+  deterministicSessionFile?: boolean;
 }): {
   sessionFile: string;
   artifactDir: string;
@@ -354,10 +374,18 @@ export function createInteractiveSubagentPaths(params: {
 } {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const label = safeSegment(params.name);
-  const dir = sessionDirFor(params.cwd);
+  const dir = sessionDirFor(
+    params.cwd,
+    params.deterministicSessionFile === true,
+  );
   const artifactDir = join(dir, "artifacts", params.id);
   return {
-    sessionFile: join(dir, `${timestamp}-${params.id}.jsonl`),
+    sessionFile: join(
+      dir,
+      params.deterministicSessionFile
+        ? `${params.id}.jsonl`
+        : `${timestamp}-${params.id}.jsonl`,
+    ),
     artifactDir,
     promptFile: join(artifactDir, `${label}-prompt.md`),
     systemPromptFile: join(artifactDir, `${label}-system.md`),
@@ -515,17 +543,45 @@ export function launchInteractiveSubagent(params: {
   parentCwd?: string;
   /** Thinking/reasoning level for the child Pi process. */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Durable process intent persisted by the workflow journal before this
+   * function is called. Its deterministic ID/marker replaces random launch
+   * identity and is written into the child environment.
+   */
+  workflowProcessAttempt?: WorkflowProcessAttemptManifest;
+  /** Return after pane creation/script preparation without sending a command. */
+  deferDispatch?: boolean;
 }): InteractiveSubagentState {
   // 8 bytes, not 4: at 32 bits a birthday collision inside one tree is not
   // remote, and the duplicate-id path only degrades gracefully — it does not
   // recover the shadowed agent.
-  const id = randomBytes(8).toString("hex");
+  const id =
+    params.workflowProcessAttempt?.agentId ?? randomBytes(8).toString("hex");
+  if (
+    params.workflowProcessAttempt !== undefined &&
+    params.completionOwner !== "workflow"
+  ) {
+    throw new Error(
+      "Workflow process attempts require workflow completion ownership.",
+    );
+  }
+  if (
+    params.completionOwner === "workflow" &&
+    (!params.workflowId || params.workflowId.length === 0)
+  ) {
+    throw new Error("Workflow completion ownership requires a workflow id.");
+  }
   const cwd = resolve(params.cwd);
   const stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
   const artifactOwnerSessionId =
     params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
   const background = params.background !== false; // default true (hidden)
-  const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
+  const paths = createInteractiveSubagentPaths({
+    id,
+    name: params.workflowProcessAttempt?.paneName ?? params.name,
+    cwd: params.workflowProcessAttempt === undefined ? cwd : stateCwd,
+    deterministicSessionFile: params.workflowProcessAttempt !== undefined,
+  });
   const parentAgentId = process.env.PI_SUBAGENTURA_AGENT_ID;
   const rootId = process.env.PI_SUBAGENTURA_ROOT_ID ?? params.parentSessionId;
   const sessionRoot =
@@ -587,6 +643,12 @@ export function launchInteractiveSubagent(params: {
     contextText: params.contextText,
   });
   mkdirSync(paths.artifactDir, { recursive: true });
+  if (params.workflowProcessAttempt !== undefined) {
+    writeWorkflowProcessAttemptManifest(
+      paths.artifactDir,
+      params.workflowProcessAttempt,
+    );
+  }
   if (artifactOwnerSessionId) {
     writeFileSync(
       join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),
@@ -639,6 +701,14 @@ export function launchInteractiveSubagent(params: {
     }
     throw err;
   }
+  if (
+    params.workflowProcessAttempt !== undefined &&
+    mux.findPanesByWindowName === undefined
+  ) {
+    throw new Error(
+      `${mux.name} cannot deterministically recover durable workflow panes`,
+    );
+  }
 
   // Create the pane FIRST (so we have a target for the launch script to attach
   // to). If any later step throws, try to kill the orphan pane and rethrow.
@@ -647,11 +717,13 @@ export function launchInteractiveSubagent(params: {
     windowName,
     session: muxSession,
   } = mux.createPane({
-    name: params.name,
+    name: params.workflowProcessAttempt?.paneName ?? params.name,
     cwd,
     background,
     parentPane: process.env.TMUX_PANE,
-    windowName: safeSegment(params.name),
+    windowName: safeSegment(
+      params.workflowProcessAttempt?.paneName ?? params.name,
+    ),
     id,
   });
   let persistedState = false;
@@ -672,6 +744,18 @@ export function launchInteractiveSubagent(params: {
         notifyOnComplete: params.notifyOnComplete ?? "inject",
         triggerTurnOnComplete: params.triggerTurnOnComplete,
         parentSessionId: params.parentSessionId,
+        completionOwner: params.completionOwner ?? "standalone",
+        ...(params.completionOwner === "workflow"
+          ? {
+              workflowId: params.workflowId!,
+              ...(params.workflowProcessAttempt === undefined
+                ? {}
+                : {
+                    workflowProcessIdentity:
+                      params.workflowProcessAttempt.identity,
+                  }),
+            }
+          : {}),
         eventByteCursor: 0,
         sessionByteCursor: 0,
         pendingDeliveries: [],
@@ -682,7 +766,11 @@ export function launchInteractiveSubagent(params: {
       try {
         mux.killPane(paneId, muxSession);
       } catch {
-        /* best effort — preserve the original persistence error */
+        if (params.workflowProcessAttempt !== undefined) {
+          throw new WorkflowProcessAttemptFenceIncompleteError(
+            "Workflow pane could not be fenced after assignment persistence failed.",
+          );
+        }
       }
       throw err;
     }
@@ -741,14 +829,27 @@ export function launchInteractiveSubagent(params: {
       PI_SUBAGENTURA_DEPTH: String(nextDepth),
       PI_SUBAGENTURA_MAX_DEPTH: String(effectiveMaxDepth),
       PI_SUBAGENTURA_MAX_NODES: String(maxNodes),
+      ...(params.workflowProcessAttempt === undefined
+        ? {}
+        : {
+            [WORKFLOW_PROCESS_MANIFEST_ENV]: workflowProcessManifestPath(
+              paths.artifactDir,
+            ),
+            [WORKFLOW_PROCESS_MARKER_ENV]:
+              params.workflowProcessAttempt.launchMarker,
+            [WORKFLOW_PROCESS_NONCE_ENV]:
+              params.workflowProcessAttempt.identity.nonce,
+          }),
     });
-    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-    mux.sendKeys(
-      paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
-      muxSession,
-    );
-    mux.sendEnter(paneId, muxSession);
+    if (!params.deferDispatch) {
+      const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+      mux.sendKeys(
+        paneId,
+        `exec bash ${escape(paths.launchScriptFile)}`,
+        muxSession,
+      );
+      mux.sendEnter(paneId, muxSession);
+    }
   } catch (err) {
     // Orphan-pane guard. If writeLaunchScript or sendKeys throws after
     // the pane was created, kill the pane before rethrowing so we don't
@@ -767,7 +868,16 @@ export function launchInteractiveSubagent(params: {
         /* best effort */
       }
     }
-    mux.killPane(paneId, muxSession);
+    try {
+      mux.killPane(paneId, muxSession);
+    } catch (fenceError) {
+      if (params.workflowProcessAttempt !== undefined) {
+        throw new WorkflowProcessAttemptFenceIncompleteError(
+          "Workflow pane could not be fenced after launch preparation failed.",
+        );
+      }
+      throw fenceError;
+    }
     throw err;
   }
 
@@ -788,7 +898,7 @@ export function launchInteractiveSubagent(params: {
     cwd: stateCwd,
     model: params.model,
     startedAt: Date.now(),
-    status: "running",
+    status: params.deferDispatch ? "idle" : "running",
     attachCommand: attach.attachCommand,
     selectPaneCommand: attach.focusCommand,
     launchScriptFile: paths.launchScriptFile,
@@ -797,17 +907,246 @@ export function launchInteractiveSubagent(params: {
     triggerTurnOnComplete: params.triggerTurnOnComplete,
     parentSessionId: params.parentSessionId,
     supervisorOwner: params.supervisorOwner,
-    workflowId: params.workflowId,
-    completionOwner: params.completionOwner,
+    ...(params.completionOwner === "workflow"
+      ? {
+          workflowId: params.workflowId,
+          workflowProcessIdentity: params.workflowProcessAttempt?.identity,
+        }
+      : {}),
+    completionOwner: params.completionOwner ?? "standalone",
     eventByteCursor: 0,
     pendingDeliveries: [],
     deliveryReceipts: [],
   };
+  if (!params.deferDispatch) {
+    dispatchedWorkflowProcessStates.add(state);
+    registerInteractiveSubagentState(
+      state,
+      params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner),
+    );
+  }
+  return state;
+}
+
+/** Persistable backend assignment emitted immediately after pane creation. */
+export function workflowProcessPaneAssignmentForState(
+  state: InteractiveSubagentState,
+): WorkflowProcessPaneAssignment {
+  return Object.freeze({
+    backend: state.mux,
+    paneId: state.paneId,
+    ...(state.windowName === undefined ? {} : { windowName: state.windowName }),
+    ...(state.muxSession === undefined ? {} : { muxSession: state.muxSession }),
+    artifactDir: state.artifactDir,
+    sessionFile: state.sessionFile,
+    launchScriptFile: state.launchScriptFile,
+  });
+}
+
+/**
+ * Submit a prepared durable launch exactly once. The caller must synchronously
+ * persist launch_dispatched before invoking this function.
+ */
+export function dispatchPreparedInteractiveSubagent(
+  state: InteractiveSubagentState,
+  scope?: SessionScope,
+): void {
+  if (dispatchedWorkflowProcessStates.has(state)) {
+    throw new Error("Workflow process launch command was already dispatched.");
+  }
+  const mux = getMuxForState(state);
+  const escape = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  mux.sendKeys(
+    state.paneId,
+    `exec bash ${escape(state.launchScriptFile)}`,
+    state.muxSession,
+  );
+  mux.sendEnter(state.paneId, state.muxSession);
+  dispatchedWorkflowProcessStates.add(state);
+  state.status = "running";
+  registerInteractiveSubagentState(
+    state,
+    scope ?? resolveLiveSessionScope(state.supervisorOwner),
+  );
+}
+
+/** Rebuild runtime state for a journal-authorized adoption without sending. */
+export function adoptWorkflowProcessSubagent(params: {
+  readonly manifest: WorkflowProcessAttemptManifest;
+  readonly assignment: WorkflowProcessPaneAssignment;
+  readonly task: string;
+  readonly model?: string;
+  readonly cwd: string;
+  readonly parentSessionId?: string;
+  readonly supervisorOwner?: SessionOwnerToken;
+  readonly workflowId?: string;
+  readonly sessionScope?: SessionScope;
+}): InteractiveSubagentState {
+  const mux = getMux({ preference: params.assignment.backend });
+  const attach = mux.buildAttachCommands({
+    paneId: params.assignment.paneId,
+    windowName: params.assignment.windowName,
+    session: params.assignment.muxSession,
+  });
+  const state: InteractiveSubagentState = {
+    id: params.manifest.agentId,
+    name: params.manifest.paneName,
+    task: params.task,
+    paneId: params.assignment.paneId,
+    windowName: params.assignment.windowName,
+    mux: params.assignment.backend,
+    muxSession: params.assignment.muxSession,
+    sessionFile: params.assignment.sessionFile,
+    cwd: resolve(params.cwd),
+    model: params.model,
+    startedAt: Date.now(),
+    status: "running",
+    attachCommand: attach.attachCommand,
+    selectPaneCommand: attach.focusCommand,
+    launchScriptFile: params.assignment.launchScriptFile,
+    artifactDir: params.assignment.artifactDir,
+    parentSessionId: params.parentSessionId,
+    supervisorOwner: params.supervisorOwner,
+    workflowId: params.workflowId,
+    completionOwner: "workflow",
+    workflowProcessIdentity: params.manifest.identity,
+    eventByteCursor: 0,
+    pendingDeliveries: [],
+    deliveryReceipts: [],
+  };
+  dispatchedWorkflowProcessStates.add(state);
   registerInteractiveSubagentState(
     state,
     params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner),
   );
   return state;
+}
+/**
+ * Recover the pane side-store row written immediately after creation. This
+ * closes the crash window before the journal receives pane_assigned; the
+ * deterministic agent ID prevents label/timestamp guesses.
+ */
+export function recoverWorkflowProcessPaneAssignment(
+  manifest: WorkflowProcessAttemptManifest,
+  parentCwd: string,
+  journalAssignment?: WorkflowProcessPaneAssignment,
+): WorkflowProcessPaneAssignment | undefined {
+  const resolvedParentCwd = resolve(parentCwd);
+  const paths = createInteractiveSubagentPaths({
+    id: manifest.agentId,
+    name: manifest.paneName,
+    cwd: resolvedParentCwd,
+    deterministicSessionFile: true,
+  });
+  const expectedWindowName = safeSegment(manifest.paneName);
+  const discovered: WorkflowProcessPaneAssignment[] = [];
+  const recoveryBackends: readonly MuxName[] = ["tmux", "zellij"];
+
+  for (const backend of recoveryBackends) {
+    let mux: Multiplexer;
+    try {
+      mux = getMux({ preference: backend });
+      if (!mux.isAvailable()) continue;
+      if (mux.findPanesByWindowName === undefined) {
+        throw new Error(`${backend} has no deterministic pane lookup`);
+      }
+      for (const match of mux.findPanesByWindowName(expectedWindowName)) {
+        discovered.push({
+          backend,
+          paneId: match.paneId,
+          windowName: match.windowName,
+          muxSession: match.session,
+          artifactDir: paths.artifactDir,
+          sessionFile: paths.sessionFile,
+          launchScriptFile: paths.launchScriptFile,
+        });
+      }
+    } catch (error) {
+      throw new WorkflowProcessAttemptFenceIncompleteError(
+        `Workflow ${backend} pane lookup was unavailable during recovery.`,
+      );
+    }
+  }
+
+  if (discovered.length > 1) {
+    let incompleteFence = false;
+    for (const duplicate of discovered) {
+      try {
+        fenceWorkflowProcessPaneAssignment(duplicate);
+      } catch {
+        incompleteFence = true;
+      }
+    }
+    if (incompleteFence) {
+      throw new WorkflowProcessAttemptFenceIncompleteError(
+        "Not all matching workflow panes could be fenced.",
+      );
+    }
+    return undefined;
+  }
+
+  const assignment = discovered[0];
+  if (assignment === undefined) return undefined;
+
+  if (
+    journalAssignment !== undefined &&
+    (journalAssignment.backend !== assignment.backend ||
+      journalAssignment.paneId !== assignment.paneId ||
+      journalAssignment.windowName !== expectedWindowName ||
+      journalAssignment.muxSession !== assignment.muxSession)
+  ) {
+    fenceWorkflowProcessPaneAssignment(assignment);
+    return undefined;
+  }
+
+  let persistedManifest: unknown;
+  try {
+    persistedManifest = JSON.parse(
+      readFileSync(workflowProcessManifestPath(paths.artifactDir), "utf8"),
+    );
+  } catch {
+    fenceWorkflowProcessPaneAssignment(assignment);
+    return undefined;
+  }
+  if (
+    !isWorkflowProcessAttemptManifest(persistedManifest) ||
+    JSON.stringify(persistedManifest) !== JSON.stringify(manifest)
+  ) {
+    fenceWorkflowProcessPaneAssignment(assignment);
+    return undefined;
+  }
+
+  // Journal and interactive side-store paths are not authority. The returned
+  // assignment always carries owner-derived, contained paths from `paths`.
+  return Object.freeze(assignment);
+}
+export async function getWorkflowProcessPaneLiveness(
+  assignment: WorkflowProcessPaneAssignment,
+): Promise<PaneLiveness> {
+  return getMux({ preference: assignment.backend }).getPaneLivenessAsync(
+    assignment.paneId,
+    assignment.muxSession,
+  );
+}
+
+export function fenceWorkflowProcessPaneAssignment(
+  assignment: WorkflowProcessPaneAssignment,
+): void {
+  try {
+    const mux = getMux({ preference: assignment.backend });
+    mux.killPane(assignment.paneId, assignment.muxSession);
+    if (
+      mux.getPaneLiveness(assignment.paneId, assignment.muxSession) !== "dead"
+    ) {
+      throw new Error("Pane remained live or its liveness was ambiguous");
+    }
+  } catch (error) {
+    throw new WorkflowProcessAttemptFenceIncompleteError(
+      error instanceof Error
+        ? `Workflow process pane could not be fenced: ${error.message}`
+        : undefined,
+    );
+  }
 }
 
 /**

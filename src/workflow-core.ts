@@ -10,16 +10,38 @@ import {
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { normalizeUsage, type SubagentResult, type Usage } from "./helpers";
+import type { WorkflowAgentDispatcher } from "./workflow-dispatcher";
+import type { WorkflowProcessAttemptDispatch } from "./workflow-process-attempt";
+import { DEFAULT_WORKFLOW_QUOTA_LIMITS } from "./workflow-quotas";
 
 // ── Limits ───────────────────────────────────────────────────────────
 export const MAX_TOTAL_AGENTS = 1000;
 export const MAX_ITEMS_PER_CALL = 4096;
 export const SCHEMA_RETRIES = 3;
-export const MAX_WORKFLOW_DEPTH = 1; // workflow() composition is one level deep
+export const MAX_WORKFLOW_DEPTH = 8;
 export const INTERACTIVE_POLL_MS = 1000;
 export const INTERACTIVE_DEAD_GRACE_TICKS = 3;
 export const WORKFLOW_SYNC_TIMEOUT_MS = 30_000;
 export const WORKFLOW_WALL_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Sender-side structured-clone bounds for the workflow VM boundary.
+ * These intentionally reuse the durable value quotas so model-authored values
+ * cannot create a second, less restrictive transfer format.
+ */
+export const WORKFLOW_CLONE_LIMITS = Object.freeze({
+  maxDepth: DEFAULT_WORKFLOW_QUOTA_LIMITS.maxValueDepth,
+  maxNodes: DEFAULT_WORKFLOW_QUOTA_LIMITS.maxValueNodes,
+  maxStringBytes: DEFAULT_WORKFLOW_QUOTA_LIMITS.maxValueStringBytes,
+  maxBytes: DEFAULT_WORKFLOW_QUOTA_LIMITS.maxValueBytes,
+});
+
+/** V8 limits contain hostile workflow allocation without risking the parent. */
+export const WORKFLOW_WORKER_RESOURCE_LIMITS = Object.freeze({
+  maxOldGenerationSizeMb: 64,
+  maxYoungGenerationSizeMb: 16,
+  codeRangeSizeMb: 16,
+  stackSizeMb: 4,
+});
 
 export function defaultConcurrency(): number {
   const n = cpus()?.length ?? 4;
@@ -253,6 +275,8 @@ export function formatWorkflowUsageLegend(ascii = false): string {
 
 /** Options accepted by the injected `agent()` helper. */
 export interface WorkflowAgentOpts {
+  /** Stable durable-operation identity; optional for legacy non-durable runs. */
+  id?: string;
   schema?: unknown;
   label?: string;
   phase?: string;
@@ -286,7 +310,7 @@ export type WorkflowAgentProgress =
     };
 
 /** Injectable spawn function — wraps in-process or process-backed agents. */
-export type WorkflowAgentRunner = (req: {
+export type WorkflowAgentRunner = ((req: {
   prompt: string;
   persona?: string;
   model?: string;
@@ -296,6 +320,8 @@ export type WorkflowAgentRunner = (req: {
   schema?: unknown;
   /** Thinking/reasoning for the sub-agent. */
   thinkingLevel?: ThinkingLevel;
+  /** Durable process identity and lifecycle boundary. Never populated in-process. */
+  workflowProcessAttempt?: WorkflowProcessAttemptDispatch;
   /**
    * Optional callback for emitting progress events from inside the runner.
    * Used to surface fallback warnings and forward mid-agent live status.
@@ -304,7 +330,10 @@ export type WorkflowAgentRunner = (req: {
   onCancellationSnapshot?: (
     receipt: import("./cancellation-snapshots").CancellationSnapshotReceipt,
   ) => void;
-}) => Promise<SubagentResult>;
+}) => Promise<SubagentResult>) & {
+  /** Resolve the exact provider/model identity before a durable request is fenced. */
+  resolveModel?: (requested: string | undefined) => string | undefined;
+};
 
 export interface WorkflowMeta {
   name: string;
@@ -439,6 +468,66 @@ export class WorkflowExecutionError extends Error {
   }
 }
 
+export interface WorkflowDurableAgentPayload {
+  prompt: unknown;
+  opts?: WorkflowAgentOpts;
+  definitionPath: string;
+  /** Parent-resolved provider/model identity used by both the digest and runner. */
+  effectiveModel?: string;
+}
+
+export interface WorkflowDurableWorkflowPayload {
+  name: unknown;
+  args: unknown;
+  opts?: { id?: unknown };
+  parentDefinitionPath: string;
+}
+
+export interface WorkflowDurableLoadedDefinition {
+  script: string;
+  definitionPath: string;
+}
+
+export type WorkflowDurableWorkflowCompletion =
+  | {
+      readonly status: "succeeded";
+      readonly value: unknown;
+    }
+  | {
+      readonly status: "failed";
+      readonly error: string;
+    };
+
+export interface WorkflowDurableAgentDispatchResult {
+  value: unknown;
+  tokensDelta: number;
+  usage: Usage;
+  /** The runner acknowledged cancellation instead of producing a value. */
+  cancelled?: true;
+}
+
+/**
+ * Parent-owned commit/replay boundary used only by durable legacy scripts.
+ * The ordinary worker path never constructs or calls this interface.
+ */
+export interface WorkflowDurableScriptAdapter {
+  readonly rootDefinitionPath: string;
+  runAgent(
+    payload: WorkflowDurableAgentPayload,
+    dispatch: (
+      request: Parameters<WorkflowAgentRunner>[0],
+    ) => Promise<WorkflowDurableAgentDispatchResult>,
+  ): Promise<WorkflowDurableAgentDispatchResult>;
+  loadWorkflow(
+    payload: WorkflowDurableWorkflowPayload,
+    load: (name: string) => string | null,
+  ): Promise<WorkflowDurableLoadedDefinition>;
+  completeWorkflow(
+    payload: WorkflowDurableWorkflowPayload,
+    completion: WorkflowDurableWorkflowCompletion,
+  ): Promise<unknown>;
+}
+
 export interface RunWorkflowOptions {
   args?: unknown;
   /** Parent execution directory exposed to workflow scripts as immutable `cwd`. */
@@ -453,8 +542,12 @@ export interface RunWorkflowOptions {
   ) => void;
   concurrency?: number;
   processConcurrency?: number;
+  /** Shared process/in-process concurrency boundary. */
+  dispatcher?: WorkflowAgentDispatcher;
   /** Resolve a saved workflow script by name, for `workflow(name, args)` composition. */
   loadWorkflow?: (name: string) => string | null;
+  /** Parent-owned durable operation adapter. Omitted for all legacy runs. */
+  durableScript?: WorkflowDurableScriptAdapter;
   /** Hard wall-clock cap for the workflow VM worker. Defaults to 30 minutes. */
   workflowTimeoutMs?: number;
 }

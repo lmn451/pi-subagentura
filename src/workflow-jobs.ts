@@ -6,16 +6,37 @@ import {
   type SessionOwnerToken,
 } from "./session-scope";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
+import {
+  createDurableWorkflowPlanRunId,
+  validateDurableWorkflowPlan,
+  type DurableWorkflowExecution,
+  type DurableWorkflowPlanController,
+} from "./workflow-durable-plan";
+import { createDurableWorkflowScriptRunId } from "./workflow-durable-script";
+import type {
+  DurableWorkflowStatus,
+  WorkflowOperationOutcome,
+} from "./workflow-run-types";
+import type {
+  WorkflowRecoveredRun,
+  WorkflowRecoveryFailure,
+} from "./workflow-recovery";
+import { parseWorkflow } from "./workflow-script";
 import { runWorkflow } from "./workflow-worker";
 import {
+  validateWorkflowPlan,
+  type WorkflowPlanDefinition,
+} from "./workflow-plan";
+import {
   runWorkflowPlan,
-  type WorkflowPlanRunOptions,
+  type RunWorkflowPlanOptions,
+  type WorkflowPlanRunResult,
 } from "./workflow-plan-runner";
 import {
-  createWorkflowPlanState,
-  type WorkflowPlanState,
+  applyPlanEvent,
+  createPlanProjection,
+  type WorkflowPlanProjection,
 } from "./workflow-plan-state";
-import { validateWorkflowPlan, type WorkflowPlan } from "./workflow-plan";
 import {
   type RunWorkflowOptions,
   type WorkflowAgentRunner,
@@ -32,11 +53,18 @@ import {
 // ── Background workflow-job registry ─────────────────────────────────
 
 export type WorkflowJobStatus = "running" | "done" | "error" | "cancelled";
+export type WorkflowJobKind = "script" | "plan";
 
 export interface WorkflowJobState {
+  kind: WorkflowJobKind;
   id: string;
   name: string;
   status: WorkflowJobStatus;
+  durable?: true;
+  /** Authoritative durable status when this row was restored from recovery. */
+  durableStatus?: DurableWorkflowStatus;
+  /** Bounded recovery diagnostic for a run that could not be projected. */
+  recoveryFailure?: WorkflowRecoveryFailure;
   executionMode?: "async" | "sync";
   startedAt: number;
   /**
@@ -62,8 +90,9 @@ export interface WorkflowJobState {
     agentRecords?: WorkflowAgentRecord[];
     agentRecordsOmitted?: number;
     runningCount?: number;
-    planState?: WorkflowPlanState;
   };
+  /** Live declarative-plan state, advanced only by runner evidence events. */
+  planProjection?: WorkflowPlanProjection;
   result?: WorkflowRunResult;
   error?: string;
   /** Completion notification callback bound to the current parent session. */
@@ -85,15 +114,6 @@ export interface WorkflowJobState {
   /** Parent session lifecycle that owns this workflow job. */
   parentSessionOwner?: SessionOwnerToken;
 }
-export interface DurableWorkflowLiveJob {
-  id: string;
-  name: string;
-  startedAt: number;
-  runEpoch: number;
-  promise: Promise<unknown>;
-  abort: AbortController;
-  parentSessionOwner?: SessionOwnerToken;
-}
 const g = typeof global !== "undefined" ? global : globalThis;
 declare global {
   // eslint-disable-next-line no-var
@@ -106,32 +126,8 @@ export const workflowJobRegistry = g.__piSubagenturaWorkflowJobs as Map<
   string,
   WorkflowJobState
 >;
-declare global {
-  // eslint-disable-next-line no-var
-  var __piSubagenturaDurableWorkflowLiveJobs:
-    Map<string, DurableWorkflowLiveJob> | undefined;
-}
-if (!g.__piSubagenturaDurableWorkflowLiveJobs) {
-  g.__piSubagenturaDurableWorkflowLiveJobs = new Map();
-}
-export const durableWorkflowLiveJobRegistry =
-  g.__piSubagenturaDurableWorkflowLiveJobs as Map<
-    string,
-    DurableWorkflowLiveJob
-  >;
 
 export const MAX_WORKFLOW_JOBS = 100;
-export function createDurableWorkflowRunId(): string {
-  for (;;) {
-    const runId = `wf_${randomBytes(16).toString("hex")}`;
-    if (
-      !workflowJobRegistry.has(runId) &&
-      !durableWorkflowLiveJobRegistry.has(runId)
-    ) {
-      return runId;
-    }
-  }
-}
 
 /** Maximum notification delivery attempts before giving up. */
 export const MAX_WORKFLOW_NOTIFICATION_ATTEMPTS = 5;
@@ -167,36 +163,6 @@ export function getWorkflowJobForOwner(
   if (!job || !workflowJobBelongsToOwner(job, owner)) return undefined;
   return job;
 }
-export function getDurableWorkflowLiveJobForOwner(
-  workflowId: string,
-  owner: SessionOwnerToken | undefined,
-): DurableWorkflowLiveJob | undefined {
-  const job = durableWorkflowLiveJobRegistry.get(workflowId);
-  if (!job) return undefined;
-  if (!owner) return job.parentSessionOwner ? undefined : job;
-  return job.parentSessionOwner?.id === owner.id &&
-    job.parentSessionOwner.generation === owner.generation
-    ? job
-    : undefined;
-}
-
-export function registerDurableWorkflowLiveJob(
-  job: DurableWorkflowLiveJob,
-): void {
-  if (
-    workflowJobRegistry.has(job.id) ||
-    durableWorkflowLiveJobRegistry.has(job.id)
-  ) {
-    throw new Error(`Workflow id is already live: ${job.id}`);
-  }
-  durableWorkflowLiveJobRegistry.set(job.id, job);
-  const forget = () => {
-    if (durableWorkflowLiveJobRegistry.get(job.id) === job) {
-      durableWorkflowLiveJobRegistry.delete(job.id);
-    }
-  };
-  void job.promise.then(forget, forget);
-}
 
 export function workflowJobsForActiveSession(): WorkflowJobState[] {
   return workflowJobsForOwner(getActiveSessionOwner());
@@ -212,7 +178,7 @@ export function workflowJobsForOwner(
 
 export function cleanupWorkflowJobsForOwner(
   owner: SessionOwnerToken | undefined,
-): Promise<void> {
+): void {
   for (const [id, job] of workflowJobRegistry) {
     if (!workflowJobBelongsToOwner(job, owner)) continue;
     job.suppressCompletionNotification = true;
@@ -223,21 +189,168 @@ export function cleanupWorkflowJobsForOwner(
     if (job.status === "cancelled") normalizeCancelledWorkflowState(job);
     workflowJobRegistry.delete(id);
   }
+}
 
-  const durableCompletions: Promise<unknown>[] = [];
-  for (const [id, job] of durableWorkflowLiveJobRegistry) {
-    const belongs = owner
-      ? job.parentSessionOwner?.id === owner.id &&
-        job.parentSessionOwner.generation === owner.generation
-      : !job.parentSessionOwner;
-    if (!belongs) continue;
-    durableCompletions.push(job.promise);
-    job.abort.abort(
-      new Error("Durable workflow interrupted by parent session shutdown"),
-    );
-    durableWorkflowLiveJobRegistry.delete(id);
+/**
+ * Rebuild owner-scoped management rows from durable recovery. The durable
+ * controller remains authoritative; these rows only make recovered runs
+ * discoverable through the existing status command and workflow tree.
+ */
+export function restoreRecoveredDurableWorkflowJobs(
+  runs: readonly WorkflowRecoveredRun[],
+  completions: readonly DurableWorkflowExecution[],
+  owner: SessionOwnerToken,
+): readonly WorkflowJobState[] {
+  const completionByRunId = new Map(
+    completions.map((execution) => [execution.runId, execution.completion]),
+  );
+  const restored: WorkflowJobState[] = [];
+  for (const recovered of runs) {
+    const projection = recovered.projection;
+    const failure = recovered.failure;
+    const executionKind = projection?.executionKind ?? "plan";
+    const durableStatus =
+      projection?.status ?? (failure === undefined ? "interrupted" : "error");
+    const recoveryError =
+      failure === undefined
+        ? undefined
+        : `Recovery failed (${failure.code}): ${failure.diagnostic}`;
+    const state = createWorkflowJobState({
+      id: recovered.runId,
+      kind: executionKind,
+      durable: true,
+      name:
+        projection === undefined
+          ? "Durable workflow recovery"
+          : `Recovered durable ${executionKind} workflow`,
+      executionMode: "async",
+      abort: new AbortController(),
+      owner,
+    });
+    state.durableStatus = durableStatus;
+    state.status =
+      recovered.kind === "recovery_failed"
+        ? "error"
+        : workflowJobStatusFromDurable(durableStatus);
+    if (failure !== undefined) state.recoveryFailure = failure;
+    if (recoveryError !== undefined) state.error = recoveryError;
+    if (projection !== undefined) {
+      const usage = projection.accounting.usage;
+      state.snapshot.agentsSpawned = projection.operations.reduce(
+        (count, operation) => count + operation.attempts.length,
+        0,
+      );
+      state.snapshot.errorCount = projection.operations.reduce(
+        (count, operation) =>
+          count +
+          (operationOutcomeIsError(operation.settlement?.outcome) ? 1 : 0),
+        0,
+      );
+      state.snapshot.tokensSpent = usage.output;
+      state.snapshot.usage = usage;
+      state.snapshot.runningCount = projection.operations.reduce(
+        (count, operation) =>
+          count +
+          operation.attempts.filter((attempt) => attempt.status === "started")
+            .length,
+        0,
+      );
+      state.snapshot.lastMessage = `Recovered durable status: ${durableStatus}`;
+    } else {
+      state.snapshot.errorCount = 1;
+      state.snapshot.lastMessage = recoveryError;
+    }
+
+    const completion = completionByRunId.get(recovered.runId);
+    if (completion !== undefined) {
+      state.promise = completion;
+      void completion.then(
+        (result) => settleRecoveredDurableJob(state, result),
+        (error) => failRecoveredDurableJob(state, error),
+      );
+    } else if (recoveryError !== undefined) {
+      const failed = Promise.reject(
+        new Error(`${recovered.runId}: ${recoveryError}`),
+      );
+      void failed.catch(() => undefined);
+      state.promise = failed;
+    } else {
+      state.promise = Promise.resolve(recoveredDurableResult(state));
+    }
+    workflowJobRegistry.set(recovered.runId, state);
+    restored.push(state);
   }
-  return Promise.allSettled(durableCompletions).then(() => undefined);
+  return Object.freeze(restored);
+}
+
+function workflowJobStatusFromDurable(
+  status: DurableWorkflowStatus,
+): WorkflowJobStatus {
+  return status === "done" || status === "error" || status === "cancelled"
+    ? status
+    : "running";
+}
+
+function operationOutcomeIsError(
+  outcome: WorkflowOperationOutcome | undefined,
+): boolean {
+  return (
+    outcome !== undefined &&
+    outcome.status !== "succeeded" &&
+    outcome.status !== "cancelled"
+  );
+}
+
+function recoveredDurableResult(
+  state: WorkflowJobState,
+): WorkflowRunResultWithUsage {
+  return {
+    meta: {
+      name: state.name,
+      description: "Recovered durable workflow management projection.",
+    },
+    result: null,
+    agentsSpawned: state.snapshot.agentsSpawned,
+    errorCount: state.snapshot.errorCount,
+    tokensSpent: state.snapshot.tokensSpent,
+    usage: state.snapshot.usage ?? zeroWorkflowUsage(),
+    phases: [...state.snapshot.phases],
+  };
+}
+
+function settleRecoveredDurableJob(
+  state: WorkflowJobState,
+  result: WorkflowRunResultWithUsage,
+): void {
+  if (workflowJobRegistry.get(state.id) !== state) return;
+  state.result = result;
+  state.snapshot.agentsSpawned = result.agentsSpawned;
+  state.snapshot.errorCount = result.errorCount;
+  state.snapshot.tokensSpent = result.tokensSpent;
+  state.snapshot.usage = result.usage;
+  state.snapshot.phases = [...result.phases];
+  state.snapshot.runningCount = 0;
+  if ("projection" in result) {
+    state.planProjection = (result as WorkflowPlanRunResult).projection;
+  }
+  const durableStatus =
+    "status" in result
+      ? (result as WorkflowPlanRunResult).status
+      : ("done" as const);
+  state.durableStatus = durableStatus;
+  state.status = workflowJobStatusFromDurable(durableStatus);
+}
+
+function failRecoveredDurableJob(
+  state: WorkflowJobState,
+  error: unknown,
+): void {
+  if (workflowJobRegistry.get(state.id) !== state) return;
+  state.status = "error";
+  state.durableStatus = "error";
+  state.snapshot.runningCount = 0;
+  state.snapshot.errorCount = Math.max(1, state.snapshot.errorCount);
+  state.error = error instanceof Error ? error.message : String(error);
 }
 
 async function runTrackedWorkflowAgent(
@@ -265,33 +378,42 @@ export type StartWorkflowJobOptions = Omit<
 > &
   Pick<RunWorkflowOptions, "signal" | "onProgress">;
 
-export type StartWorkflowPlanJobOptions = Pick<
-  WorkflowPlanRunOptions,
-  "runAgent" | "signal" | "onState"
-> & {
-  budgetTotal?: number | null;
-};
+export type StartWorkflowPlanJobOptions = Omit<
+  RunWorkflowPlanOptions,
+  "signal" | "appendEvent" | "onProgress"
+> &
+  Pick<RunWorkflowPlanOptions, "signal" | "onProgress"> & {
+    budgetTotal?: number | null;
+  };
 
-type SharedWorkflowJobOptions = {
-  runAgent: WorkflowAgentRunner;
+export interface StartDurableWorkflowPlanJobOptions {
   signal?: AbortSignal;
+  onProgress?: (progress: WorkflowProgress) => void;
   budgetTotal?: number | null;
-};
+}
 
-type WorkflowJobExecutor<TOptions extends SharedWorkflowJobOptions> = (
-  state: WorkflowJobState,
-  options: TOptions,
-  signal: AbortSignal,
-) => Promise<WorkflowRunResultWithUsage>;
+export interface StartDurableWorkflowScriptJobOptions {
+  readonly args?: unknown;
+  readonly cwd: string;
+  readonly budgetTotal?: number | null;
+  readonly loadWorkflow?: (name: string) => string | null;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (progress: WorkflowProgress) => void;
+}
+
+export interface WorkflowPlanJobState extends WorkflowJobState {
+  kind: "plan";
+  promise: Promise<WorkflowPlanRunResult>;
+  result?: WorkflowPlanRunResult;
+  planProjection: WorkflowPlanProjection;
+}
 
 /**
- * Start a JavaScript workflow. The shared lifecycle keeps script and plan jobs
- * in the same registry with identical ownership, cancellation, settlement, and
- * retention behavior.
+ * Start a workflow running in the background. Returns the job id immediately.
  *
  * `opts` may be a builder so callers that need the job id while constructing the
  * options (e.g. to tag spawned children with their owning `workflowId`) receive it
- * before either runner can invoke `runAgent`.
+ * before `runWorkflow` can invoke `runAgent`.
  */
 export function startWorkflowJob(
   name: string,
@@ -303,74 +425,57 @@ export function startWorkflowJob(
   owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
   executionMode: "async" | "sync" = "async",
 ): WorkflowJobState {
-  return startSharedWorkflowJob(
+  ensureWorkflowJobCapacity(owner, executionMode);
+
+  const id = `wf_${randomBytes(5).toString("hex")}`;
+  const opts =
+    typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
+  const { abort, externalSignal, forwardAbort } = workflowJobAbort(opts.signal);
+  const state = createWorkflowJobState({
+    id,
+    kind: "script",
     name,
-    optsOrBuilder,
+    executionMode,
     startedAt,
+    budgetTotal: opts.budgetTotal,
+    abort,
     onComplete,
     owner,
-    executionMode,
-    (state, opts, signal) => {
-      const liveUsageByAgent = new Map<number, WorkflowUsage>();
-      return runWorkflow(script, {
-        ...opts,
-        runAgent: (request) =>
-          runTrackedWorkflowAgent(state, opts.runAgent, request),
-        signal,
-        onProgress: (p) => {
-          state.snapshot.agentsSpawned = p.agentsSpawned;
-          state.snapshot.errorCount = p.errorCount;
-          state.snapshot.tokensSpent = p.tokensSpent;
-          state.snapshot.budgetTotal =
-            p.budgetTotal ?? state.snapshot.budgetTotal;
-          state.snapshot.usage = p.usage
-            ? { ...p.usage }
-            : state.snapshot.usage;
-          state.snapshot.runningCount = p.runningCount;
-          if (p.kind === "phase" && p.phase) {
-            state.snapshot.currentPhase = p.phase;
-            state.snapshot.phases.push(p.phase);
-            state.snapshot.lastMessage = `◆ phase: ${p.phase}`;
-          } else if (p.kind === "log" && p.message) {
-            state.snapshot.lastMessage = p.message;
-          } else if (p.kind === "agent_start") {
-            state.snapshot.lastMessage = `→ started${formatWorkflowAgentTag(p)}`;
-          } else if (p.kind === "agent_done") {
-            state.snapshot.lastMessage = `→ done${formatWorkflowAgentTag(p)}`;
-          }
-          if (p.kind === "agent_start" || p.kind === "agent_done") {
-            recordWorkflowAgentProgress(state.snapshot, p);
-          }
-          if (typeof p.agentId === "number") {
-            if (p.liveUsage) {
-              liveUsageByAgent.set(p.agentId, { ...p.liveUsage });
-              recordWorkflowAgentLiveUsage(
-                state.snapshot,
-                p.agentId,
-                p.liveUsage,
-              );
-            }
-            if (p.kind === "agent_done") liveUsageByAgent.delete(p.agentId);
-          }
-          state.snapshot.liveUsage =
-            aggregateWorkflowLiveUsage(liveUsageByAgent);
-          opts.onProgress?.(p);
-        },
-        onCancellationSnapshot: (receipt) => {
-          (state.cancellationSnapshots ??= []).push(receipt);
-        },
-      }).finally(() => liveUsageByAgent.clear());
+  });
+  const liveUsageByAgent = new Map<number, WorkflowUsage>();
+  const runnerPromise = runWorkflow(script, {
+    ...opts,
+    runAgent: (request) =>
+      runTrackedWorkflowAgent(state, opts.runAgent, request),
+    signal: abort.signal,
+    onProgress: (progress) =>
+      updateWorkflowJobProgress(
+        state,
+        liveUsageByAgent,
+        progress,
+        opts.onProgress,
+      ),
+    onCancellationSnapshot: (receipt) => {
+      (state.cancellationSnapshots ??= []).push(receipt);
     },
+  });
+  trackWorkflowJobPromise(
+    state,
+    runnerPromise,
+    externalSignal,
+    forwardAbort,
+    liveUsageByAgent,
+    executionMode,
   );
+  return state;
 }
 
 /**
- * Start a validated declarative preview through the ordinary workflow-job
- * lifecycle. Validation and initial-state construction happen before the shared
- * registry or runner is touched.
+ * Start a validated declarative plan through the same live registry lifecycle
+ * used by legacy script jobs. The plan is non-durable and process-local.
  */
 export function startWorkflowPlanJob(
-  plan: WorkflowPlan,
+  definition: WorkflowPlanDefinition,
   optsOrBuilder:
     | StartWorkflowPlanJobOptions
     | ((workflowId: string) => StartWorkflowPlanJobOptions),
@@ -378,65 +483,249 @@ export function startWorkflowPlanJob(
   onComplete?: (job: WorkflowJobState) => boolean | void,
   owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
   executionMode: "async" | "sync" = "async",
-): WorkflowJobState {
-  validateWorkflowPlan(plan);
-  const initialPlanState = createWorkflowPlanState(plan);
-  return startSharedWorkflowJob(
-    plan.name,
-    optsOrBuilder,
+): WorkflowPlanJobState {
+  const plan = validateWorkflowPlan(definition);
+  ensureWorkflowJobCapacity(owner, executionMode);
+
+  const id = `wf_${randomBytes(5).toString("hex")}`;
+  const opts =
+    typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
+  const { abort, externalSignal, forwardAbort } = workflowJobAbort(opts.signal);
+  const state = createWorkflowJobState({
+    id,
+    kind: "plan",
+    name: plan.name,
+    executionMode,
     startedAt,
+    budgetTotal: opts.budgetTotal,
+    abort,
     onComplete,
     owner,
-    executionMode,
-    (state, opts, signal) => {
-      state.snapshot.planState = initialPlanState;
-      return runWorkflowPlan(plan, {
-        runAgent: (request) =>
-          runTrackedWorkflowAgent(state, opts.runAgent, request),
-        signal,
-        onState: (planState) => {
-          state.snapshot.planState = planState;
-          state.snapshot.currentPhase = planState.currentPhase;
-          if (
-            planState.currentPhase &&
-            state.snapshot.phases.at(-1) !== planState.currentPhase
-          ) {
-            state.snapshot.phases.push(planState.currentPhase);
-          }
-          const taskStates = Object.values(planState.tasks);
-          const startedTaskCount = taskStates.filter(
-            (status) =>
-              status === "running" ||
-              status === "succeeded" ||
-              status === "failed",
-          ).length;
-          state.snapshot.agentsSpawned = Math.max(
-            state.snapshot.agentsSpawned,
-            startedTaskCount,
-          );
-          state.snapshot.errorCount = taskStates.filter(
-            (status) => status === "failed",
-          ).length;
-          state.snapshot.runningCount = taskStates.filter(
-            (status) => status === "running",
-          ).length;
-          opts.onState?.(planState);
-        },
-      });
+    planProjection: createPlanProjection(plan),
+  }) as WorkflowPlanJobState;
+  const liveUsageByAgent = new Map<number, WorkflowUsage>();
+  const runnerPromise = runWorkflowPlan(plan, {
+    ...opts,
+    runAgent: (request) =>
+      runTrackedWorkflowAgent(state, opts.runAgent, request),
+    signal: abort.signal,
+    appendEvent: (event) => {
+      state.planProjection = applyPlanEvent(state.planProjection, event);
     },
+    onProgress: (progress) =>
+      updateWorkflowJobProgress(
+        state,
+        liveUsageByAgent,
+        progress,
+        opts.onProgress,
+      ),
+  });
+  state.promise = trackWorkflowJobPromise(
+    state,
+    runnerPromise,
+    externalSignal,
+    forwardAbort,
+    liveUsageByAgent,
+    executionMode,
+    (result) =>
+      result.status === "error" || result.status === "cancelled"
+        ? result.status
+        : "done",
   );
+  return state;
 }
 
-function startSharedWorkflowJob<TOptions extends SharedWorkflowJobOptions>(
-  name: string,
-  optsOrBuilder: TOptions | ((workflowId: string) => TOptions),
-  startedAt: number | undefined,
-  onComplete: ((job: WorkflowJobState) => boolean | void) | undefined,
+/**
+ * Adapt a durable controller execution to the existing owner-scoped live job
+ * registry. The controller remains authoritative; removing this adapter only
+ * aborts the live executor as an interruption.
+ */
+export async function startDurableWorkflowPlanJob(
+  definition: WorkflowPlanDefinition,
+  controller: DurableWorkflowPlanController,
+  opts: StartDurableWorkflowPlanJobOptions = {},
+  startedAt?: number,
+  onComplete?: (job: WorkflowJobState) => boolean | void,
+  owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
+  executionMode: "async" | "sync" = "async",
+): Promise<WorkflowPlanJobState> {
+  const plan = validateDurableWorkflowPlan(definition);
+  ensureWorkflowJobCapacity(owner, executionMode);
+
+  const id = createDurableWorkflowPlanRunId();
+  const { abort, externalSignal, forwardAbort } = workflowJobAbort(opts.signal);
+  const state = createWorkflowJobState({
+    id,
+    kind: "plan",
+    durable: true,
+    name: plan.name,
+    executionMode,
+    startedAt,
+    budgetTotal: opts.budgetTotal,
+    abort,
+    onComplete,
+    owner,
+    planProjection: createPlanProjection(plan),
+  }) as WorkflowPlanJobState;
+  const liveUsageByAgent = new Map<number, WorkflowUsage>();
+  workflowJobRegistry.set(id, state);
+
+  try {
+    const execution = await controller.startPlan({
+      plan,
+      runId: id,
+      signal: abort.signal,
+      budgetTotal: opts.budgetTotal,
+      onPlanEvent: (event) => {
+        state.planProjection = applyPlanEvent(state.planProjection, event);
+      },
+      onProgress: (progress) =>
+        updateWorkflowJobProgress(
+          state,
+          liveUsageByAgent,
+          progress,
+          opts.onProgress,
+        ),
+    });
+    state.promise = trackWorkflowJobPromise(
+      state,
+      execution.completion,
+      externalSignal,
+      forwardAbort,
+      liveUsageByAgent,
+      executionMode,
+      (result) =>
+        result.status === "error" || result.status === "cancelled"
+          ? result.status
+          : "done",
+    );
+    return state;
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", forwardAbort);
+    if (workflowJobRegistry.get(id) === state) workflowJobRegistry.delete(id);
+    throw error;
+  }
+}
+
+/** Adapt a durable legacy-script controller execution to the live job registry. */
+export async function startDurableWorkflowScriptJob(
+  script: string,
+  controller: DurableWorkflowPlanController,
+  opts: StartDurableWorkflowScriptJobOptions,
+  startedAt?: number,
+  onComplete?: (job: WorkflowJobState) => boolean | void,
+  owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
+  executionMode: "async" | "sync" = "async",
+): Promise<WorkflowJobState> {
+  const meta = parseWorkflow(script).meta;
+  ensureWorkflowJobCapacity(owner, executionMode);
+  const id = createDurableWorkflowScriptRunId();
+  const { abort, externalSignal, forwardAbort } = workflowJobAbort(opts.signal);
+  const state = createWorkflowJobState({
+    id,
+    kind: "script",
+    durable: true,
+    name: meta.name,
+    executionMode,
+    startedAt,
+    budgetTotal: opts.budgetTotal,
+    abort,
+    onComplete,
+    owner,
+  });
+  const liveUsageByAgent = new Map<number, WorkflowUsage>();
+  workflowJobRegistry.set(id, state);
+  try {
+    const execution = await controller.startScript({
+      script,
+      args: opts.args,
+      cwd: opts.cwd,
+      budgetTotal: opts.budgetTotal,
+      loadWorkflow: opts.loadWorkflow,
+      runId: id,
+      signal: abort.signal,
+      onProgress: (progress: WorkflowProgress) =>
+        updateWorkflowJobProgress(
+          state,
+          liveUsageByAgent,
+          progress,
+          opts.onProgress,
+        ),
+    });
+    state.promise = trackWorkflowJobPromise(
+      state,
+      execution.completion,
+      externalSignal,
+      forwardAbort,
+      liveUsageByAgent,
+      executionMode,
+      (result) =>
+        (result as WorkflowRunResultWithUsage & { cancelled?: boolean })
+          .cancelled === true
+          ? "cancelled"
+          : "done",
+    );
+    return state;
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", forwardAbort);
+    if (workflowJobRegistry.get(id) === state) workflowJobRegistry.delete(id);
+    throw error;
+  }
+}
+
+interface CreateWorkflowJobStateOptions {
+  id: string;
+  kind: WorkflowJobKind;
+  durable?: true;
+  name: string;
+  executionMode: "async" | "sync";
+  startedAt?: number;
+  budgetTotal?: number | null;
+  abort: AbortController;
+  onComplete?: (job: WorkflowJobState) => boolean | void;
+  owner?: SessionOwnerToken;
+  planProjection?: WorkflowPlanProjection;
+}
+
+function createWorkflowJobState(
+  options: CreateWorkflowJobStateOptions,
+): WorkflowJobState {
+  return {
+    id: options.id,
+    kind: options.kind,
+    ...(options.durable === undefined ? {} : { durable: true as const }),
+    name: options.name,
+    status: "running",
+    executionMode: options.executionMode,
+    startedAt: options.startedAt ?? Date.now(),
+    promise: undefined as unknown as Promise<WorkflowRunResultWithUsage>,
+    abort: options.abort,
+    snapshot: {
+      agentsSpawned: 0,
+      errorCount: 0,
+      tokensSpent: 0,
+      budgetTotal: options.budgetTotal ?? null,
+      usage: zeroWorkflowUsage(),
+      phases: [],
+      agentRecords: [],
+      agentRecordsOmitted: 0,
+      runningCount: 0,
+    },
+    completionNotification: options.onComplete,
+    completionNotificationDelivered: false,
+    cancellationSnapshots: [],
+    activeAgentRuns: new Set(),
+    parentSessionOwner: options.owner,
+    ...(options.planProjection === undefined
+      ? {}
+      : { planProjection: options.planProjection }),
+  };
+}
+
+function ensureWorkflowJobCapacity(
   owner: SessionOwnerToken | undefined,
   executionMode: "async" | "sync",
-  execute: WorkflowJobExecutor<TOptions>,
-): WorkflowJobState {
-  const parentSessionOwner = owner;
+): void {
   // A blocking sync workflow ran unconditionally before it was tracked here.
   // Subjecting it to the cap would turn an always-succeeding call into a new
   // user-visible failure, so sync jobs are exempt — they are also removed from
@@ -445,12 +734,11 @@ function startSharedWorkflowJob<TOptions extends SharedWorkflowJobOptions>(
     executionMode === "async" &&
     workflowJobRegistry.size >= MAX_WORKFLOW_JOBS
   ) {
-    // Evict the oldest terminal job; if none, throw — the caller must cancel one first.
     let evicted = false;
-    for (const [id, st] of workflowJobRegistry) {
+    for (const [id, state] of workflowJobRegistry) {
       if (
-        st.status !== "running" &&
-        workflowJobBelongsToOwner(st, parentSessionOwner)
+        state.status !== "running" &&
+        workflowJobBelongsToOwner(state, owner)
       ) {
         debugLog("info", "workflow_job_evicted", { evictedId: id });
         workflowJobRegistry.delete(id);
@@ -464,87 +752,115 @@ function startSharedWorkflowJob<TOptions extends SharedWorkflowJobOptions>(
       );
     }
   }
+}
 
-  const id = `wf_${randomBytes(5).toString("hex")}`;
-  const opts =
-    typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
+function workflowJobAbort(externalSignal?: AbortSignal): {
+  abort: AbortController;
+  externalSignal: AbortSignal | undefined;
+  forwardAbort: () => void;
+} {
   const abort = new AbortController();
-  const externalSignal = opts.signal;
   const forwardAbort = () => abort.abort(externalSignal?.reason);
   if (externalSignal?.aborted) abort.abort(externalSignal.reason);
   else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  const state: WorkflowJobState = {
-    id,
-    name,
-    status: "running",
-    executionMode,
-    startedAt: startedAt ?? Date.now(),
-    promise: undefined as unknown as Promise<WorkflowRunResultWithUsage>,
-    abort,
-    snapshot: {
-      agentsSpawned: 0,
-      errorCount: 0,
-      tokensSpent: 0,
-      budgetTotal: opts.budgetTotal ?? null,
-      usage: zeroWorkflowUsage(),
-      phases: [],
-      agentRecords: [],
-      agentRecordsOmitted: 0,
-      runningCount: 0,
-    },
-    completionNotification: onComplete,
-    completionNotificationDelivered: false,
-    cancellationSnapshots: [],
-    activeAgentRuns: new Set(),
-    parentSessionOwner,
-  };
-  let execution: Promise<WorkflowRunResultWithUsage>;
-  try {
-    execution = execute(state, opts, abort.signal);
-  } catch (error) {
-    execution = Promise.reject(error);
-  }
-  state.promise = execution
+  return { abort, externalSignal, forwardAbort };
+}
+
+function trackWorkflowJobPromise<T extends WorkflowRunResultWithUsage>(
+  state: WorkflowJobState,
+  runnerPromise: Promise<T>,
+  externalSignal: AbortSignal | undefined,
+  forwardAbort: () => void,
+  liveUsageByAgent: Map<number, WorkflowUsage>,
+  executionMode: "async" | "sync",
+  terminalStatus: (result: T) => WorkflowJobStatus = () => "done",
+): Promise<T> {
+  const promise = runnerPromise
     .then((result) => {
-      if (state.status === "running") state.status = "done";
+      if (state.status === "running") state.status = terminalStatus(result);
       state.result = result;
-      state.snapshot.agentsSpawned = result.agentsSpawned;
-      state.snapshot.errorCount = result.errorCount;
-      state.snapshot.tokensSpent = result.tokensSpent;
-      state.snapshot.usage = { ...result.usage };
-      state.snapshot.phases = [...result.phases];
-      state.snapshot.runningCount = 0;
+      if (state.kind === "plan" && "projection" in result) {
+        state.planProjection = result.projection as WorkflowPlanProjection;
+      }
       state.snapshot.liveUsage = undefined;
+      liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
       invokeCompletionHook(state);
       return result;
     })
-    .catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      state.status = abort.signal.aborted ? "cancelled" : "error";
-      state.error = msg;
-      if (err instanceof WorkflowExecutionError && err.usage) {
-        state.snapshot.usage = { ...err.usage };
-        state.snapshot.tokensSpent = err.usage.output;
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      state.status = state.abort.signal.aborted ? "cancelled" : "error";
+      state.error = message;
+      if (error instanceof WorkflowExecutionError && error.usage) {
+        state.snapshot.usage = { ...error.usage };
+        state.snapshot.tokensSpent = error.usage.output;
       }
       state.snapshot.liveUsage = undefined;
+      liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
       invokeCompletionHook(state);
-      throw err;
+      throw error;
     })
     .finally(() => {
       externalSignal?.removeEventListener("abort", forwardAbort);
-      // A sync workflow returns its result inline. Retaining the terminal job
-      // would let get_workflow_result re-serve that result and would leave a dead
-      // `done` row in the supervisor for work the caller already collected.
-      if (executionMode === "sync" && workflowJobRegistry.get(id) === state) {
-        workflowJobRegistry.delete(id);
+      if (
+        executionMode === "sync" &&
+        workflowJobRegistry.get(state.id) === state
+      ) {
+        workflowJobRegistry.delete(state.id);
       }
     });
-  // Don't crash the process on an unobserved rejection before get_workflow_result is called.
-  state.promise.catch(() => {});
-  workflowJobRegistry.set(id, state);
-  return state;
+  state.promise = promise;
+  promise.catch(() => {});
+  workflowJobRegistry.set(state.id, state);
+  return promise;
+}
+
+function updateWorkflowJobProgress(
+  state: WorkflowJobState,
+  liveUsageByAgent: Map<number, WorkflowUsage>,
+  progress: WorkflowProgress,
+  onProgress: ((progress: WorkflowProgress) => void) | undefined,
+): void {
+  state.snapshot.agentsSpawned = progress.agentsSpawned;
+  state.snapshot.errorCount = progress.errorCount;
+  state.snapshot.tokensSpent = progress.tokensSpent;
+  state.snapshot.budgetTotal =
+    progress.budgetTotal ?? state.snapshot.budgetTotal;
+  state.snapshot.usage = progress.usage
+    ? { ...progress.usage }
+    : state.snapshot.usage;
+  state.snapshot.runningCount = progress.runningCount;
+  if (progress.kind === "phase" && progress.phase) {
+    state.snapshot.currentPhase = progress.phase;
+    state.snapshot.phases.push(progress.phase);
+    state.snapshot.lastMessage = `◆ phase: ${progress.phase}`;
+  } else if (progress.kind === "log" && progress.message) {
+    state.snapshot.lastMessage = progress.message;
+  } else if (progress.kind === "agent_start") {
+    state.snapshot.lastMessage = `→ started${formatWorkflowAgentTag(progress)}`;
+  } else if (progress.kind === "agent_done") {
+    state.snapshot.lastMessage = `→ done${formatWorkflowAgentTag(progress)}`;
+  }
+  if (progress.kind === "agent_start" || progress.kind === "agent_done") {
+    recordWorkflowAgentProgress(state.snapshot, progress);
+  }
+  if (typeof progress.agentId === "number") {
+    if (progress.liveUsage) {
+      liveUsageByAgent.set(progress.agentId, { ...progress.liveUsage });
+      recordWorkflowAgentLiveUsage(
+        state.snapshot,
+        progress.agentId,
+        progress.liveUsage,
+      );
+    }
+    if (progress.kind === "agent_done") {
+      liveUsageByAgent.delete(progress.agentId);
+    }
+  }
+  state.snapshot.liveUsage = aggregateWorkflowLiveUsage(liveUsageByAgent);
+  onProgress?.(progress);
 }
 
 function invokeCompletionHook(job: WorkflowJobState): void {

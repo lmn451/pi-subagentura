@@ -5,19 +5,34 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  appendCompletionEvent,
   appendEvent,
   appendInteractiveState,
   artifactPath,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
 } from "../src/artifact";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import {
+  dispatchPreparedInteractiveSubagent,
+  interactiveSubagentRegistry,
+  launchInteractiveSubagent,
+} from "../src/interactive-tmux";
+import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { pollArtifactChanges } from "../src/artifact-poller";
+import { rehydrateInteractiveSubagents } from "../src/rehydrate";
 import {
   clearSessionScopes,
   registerSessionScope,
   setLegacyActiveSessionRefs,
 } from "../src/session-scope";
+import type { WorkflowProcessAttemptManifest } from "../src/workflow-process-attempt";
+import {
+  createDurableWorkflowRunId,
+  createWorkflowAttemptId,
+  createWorkflowAttemptNumber,
+  createWorkflowDefinitionPath,
+} from "../src/workflow-run-types";
 import { importFresh } from "./test-utils";
 import { makeTmp } from "./subagent-rehydrate-helpers";
 
@@ -236,6 +251,103 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(scope.interactiveStates.get(id)?.pendingDeliveries?.[0]?.state).toBe(
       "queued",
     );
+  });
+
+  it("round-trips workflow process ownership and identity without standalone completion delivery", async () => {
+    const previousSessionRoot = process.env.PI_CODING_AGENT_SESSION_DIR;
+    process.env.PI_CODING_AGENT_SESSION_DIR = cwd;
+    // Use the statically imported production modules so the injected backend and
+    // the launch, rehydrate, and poll paths share one module graph.
+    const identity = {
+      runId: createDurableWorkflowRunId("ownership-round-trip"),
+      definitionPath: createWorkflowDefinitionPath("root"),
+      operationId: "task-a",
+      attemptId: createWorkflowAttemptId("attempt-1"),
+      attemptNumber: createWorkflowAttemptNumber(1),
+      runEpoch: 7,
+      nonce: "nonce_1234567890abcdef",
+    };
+    const manifest: WorkflowProcessAttemptManifest = {
+      schemaVersion: 1,
+      identity,
+      launchMarker: `wfpa-${"a".repeat(32)}`,
+      agentId: "wfpa0123456789abcdef",
+      paneName: "wf-ownership-round-trip",
+      requestedIsolation: "process",
+      effectiveIsolation: "process",
+      fallbackMode: "none",
+    };
+    const sendMessage = vi.fn();
+
+    __setTmuxMultiplexer({
+      name: "tmux",
+      isAvailable: () => true,
+      createPane: () => ({
+        paneId: "%workflow-owned",
+        windowName: manifest.paneName,
+        session: "workflow-session",
+      }),
+      findPanesByWindowName: () => [],
+      buildAttachCommands: () => ({
+        attachCommand: "tmux attach",
+        focusCommand: "tmux select-pane",
+      }),
+      sendKeys: vi.fn(),
+      sendEnter: vi.fn(),
+      getPaneLiveness: () => "alive",
+      getPaneLivenessAsync: async () => "alive",
+    } as never);
+
+    try {
+      const launched = launchInteractiveSubagent({
+        name: "Workflow child",
+        task: "complete durably",
+        cwd,
+        parentCwd: cwd,
+        parentSessionId: "workflow-parent",
+        workflowId: "workflow-job-owner",
+        completionOwner: "workflow",
+        notifyOnComplete: "inject",
+        triggerTurnOnComplete: true,
+        workflowProcessAttempt: manifest,
+        deferDispatch: true,
+      });
+      dispatchPreparedInteractiveSubagent(launched);
+
+      interactiveSubagentRegistry.clear();
+      rehydrateInteractiveSubagents(cwd, "workflow-parent");
+      const rehydrated = interactiveSubagentRegistry.get(manifest.agentId);
+      expect(rehydrated).toBeDefined();
+
+      expect(
+        appendCompletionEvent(
+          artifactPath(dirname(launched.artifactDir), launched.id),
+          {
+            turnId: "workflow-operation-turn",
+            eventId: "workflow-operation-completion",
+            outcome: "done",
+            source: "agent_settled",
+          },
+        ),
+      ).not.toBeNull();
+      await pollArtifactChanges({ sendMessage } as never);
+
+      expect.soft(rehydrated).toMatchObject({
+        completionOwner: "workflow",
+        workflowId: "workflow-job-owner",
+        workflowProcessIdentity: identity,
+      });
+      expect.soft(sendMessage).not.toHaveBeenCalled();
+      expect.soft(rehydrated?.pendingDeliveries).toEqual([]);
+      expect(rehydrated?.eventByteCursor).toBeGreaterThan(0);
+    } finally {
+      __setTmuxMultiplexer(undefined);
+      if (previousSessionRoot === undefined) {
+        delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionRoot;
+      }
+    }
   });
 
   it("rehydrates into the exact scope despite a stale aggregate id", async () => {

@@ -348,6 +348,7 @@ describe("pollArtifactChanges", () => {
     });
     workflowJobRegistry.set("workflow-a", {
       id: "workflow-a",
+      kind: "script",
       name: "flow-a",
       status: "running",
       startedAt: Date.now(),
@@ -375,6 +376,7 @@ describe("pollArtifactChanges", () => {
     });
     workflowJobRegistry.set("workflow-b", {
       id: "workflow-b",
+      kind: "script",
       name: "flow-b",
       status: "running",
       startedAt: Date.now(),
@@ -428,6 +430,7 @@ describe("pollArtifactChanges", () => {
     const { workflowJobRegistry } = await import("../src/workflow");
     workflowJobRegistry.set("zero-usage", {
       id: "zero-usage",
+      kind: "script",
       name: "zero-flow",
       status: "running",
       startedAt: Date.now(),
@@ -651,6 +654,7 @@ describe("pollArtifactChanges", () => {
     mod.interactiveSubagentRegistry.set(item.id, item.state);
     workflowJobRegistry.set("steady-workflow", {
       id: "steady-workflow",
+      kind: "script",
       name: "steady-flow",
       status: "running",
       // Both polls land inside the same coarse elapsed bucket, so every row
@@ -831,6 +835,7 @@ describe("pollArtifactChanges", () => {
     for (let index = 0; index < 7; index++) {
       workflowJobRegistry.set(`wf-${index}`, {
         id: `wf-${index}`,
+        kind: "script",
         name: `flow-${index}`,
         status: "running",
         startedAt: Date.now(),
@@ -1027,6 +1032,7 @@ describe("pollArtifactChanges", () => {
     const { workflowJobRegistry } = await import("../src/workflow");
     workflowJobRegistry.set("wf_test", {
       id: "wf_test",
+      kind: "script",
       name: "demo-flow",
       status: "running",
       startedAt: Date.now() - 5_000,

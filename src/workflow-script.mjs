@@ -36,6 +36,152 @@ export function parseWorkflow(script) {
   return { meta, body };
 }
 
+const DURABLE_OPERATION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?$/;
+
+/**
+ * Statically validate the deliberately bounded durable-script subset and
+ * return the stable operation table used by the parent-owned replay gate.
+ */
+export function analyzeDurableWorkflow(script, options = {}) {
+  parseWorkflow(script);
+  const ast = parseWorkflowAst(script);
+  const operations = [];
+
+  walkAst(ast, [], (node, ancestors) => {
+    if (node.type !== "CallExpression") return;
+    if (
+      node.callee?.type !== "Identifier" ||
+      (node.callee.name !== "agent" && node.callee.name !== "workflow")
+    ) {
+      return;
+    }
+    const insideLoop = ancestors.some((ancestor) => isLoopNode(ancestor));
+    const optionIndex = node.callee.name === "agent" ? 1 : 2;
+    const id = staticOperationId(
+      node.arguments[optionIndex],
+      node.callee.name,
+      insideLoop,
+    );
+    if (insideLoop && id !== undefined) {
+      throw new Error(
+        `Durable ${node.callee.name}() calls inside loops require a caller-authored unique runtime id.`,
+      );
+    }
+    const operation = {
+      ...(id === undefined ? { dynamicId: true } : { id }),
+      kind: node.callee.name,
+      start: node.start,
+    };
+    if (node.callee.name === "workflow") {
+      if (options.allowNested === false) {
+        throw new Error(
+          "Durable workflow() composition exceeds the configured maximum depth.",
+        );
+      }
+      const name = staticString(node.arguments[0]);
+      if (name === undefined || name.length === 0) {
+        throw new Error(
+          "Durable workflow(name, args, { id }) requires a static saved-workflow name.",
+        );
+      }
+      operation.name = name;
+    }
+    operations.push(operation);
+  });
+
+  operations.sort((left, right) => left.start - right.start);
+  const ids = new Set();
+  for (const operation of operations) {
+    if (operation.id === undefined) continue;
+    if (ids.has(operation.id)) {
+      throw new Error(
+        `Durable workflow operation id "${operation.id}" is duplicated in one definition.`,
+      );
+    }
+    ids.add(operation.id);
+  }
+  return {
+    operations: operations.map(({ id, dynamicId, kind, name }) => ({
+      ...(id === undefined ? { dynamicId } : { id }),
+      kind,
+      ...(name === undefined ? {} : { name }),
+    })),
+  };
+}
+
+function staticOperationId(node, helper, allowDynamic = false) {
+  if (!node || node.type !== "ObjectExpression") {
+    throw new Error(
+      `Durable ${helper}() requires an explicit static { id: "..." } option.`,
+    );
+  }
+  for (const property of node.properties) {
+    if (
+      property.type !== "Property" ||
+      property.kind !== "init" ||
+      property.computed ||
+      property.method
+    ) {
+      continue;
+    }
+    const key =
+      property.key.type === "Identifier"
+        ? property.key.name
+        : staticString(property.key);
+    if (key !== "id") continue;
+    const id = staticString(property.value);
+    if (id === undefined && allowDynamic) return undefined;
+    if (id === undefined || id.length > 256 || !DURABLE_OPERATION_ID.test(id)) {
+      throw new Error(
+        `Durable ${helper}() id must be a portable non-empty identifier of at most 256 characters.`,
+      );
+    }
+    return id;
+  }
+  throw new Error(
+    `Durable ${helper}() requires an explicit static { id: "..." } option.`,
+  );
+}
+
+function staticString(node) {
+  return node?.type === "Literal" && typeof node.value === "string"
+    ? node.value
+    : undefined;
+}
+
+function isLoopNode(node) {
+  return (
+    node.type === "ForStatement" ||
+    node.type === "ForInStatement" ||
+    node.type === "ForOfStatement" ||
+    node.type === "WhileStatement" ||
+    node.type === "DoWhileStatement"
+  );
+}
+
+function walkAst(node, ancestors, visit) {
+  if (!node || typeof node !== "object" || typeof node.type !== "string")
+    return;
+  visit(node, ancestors);
+  const nextAncestors = [...ancestors, node];
+  for (const [key, value] of Object.entries(node)) {
+    if (
+      key === "start" ||
+      key === "end" ||
+      key === "range" ||
+      key === "loc" ||
+      key === "type"
+    ) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) walkAst(child, nextAncestors, visit);
+    } else {
+      walkAst(value, nextAncestors, visit);
+    }
+  }
+}
+
 function parseWorkflowAst(script) {
   return parse(script, {
     sourceType: "module",

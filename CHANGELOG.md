@@ -9,8 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Non-durable declarative workflow plans with ordered sequential phases, stable task IDs, in-process execution, and the existing async status, result, cancellation, and tree surfaces.
-- Opt-in sequential durable plan preview with owner-fenced recovery, explicit trusted resume, committed-result replay, and cold status, result, cancellation, and tree queries.
+- Declarative phased workflows with sequential or parallel tasks, durable local operation ledgers, crash recovery, trusted resume and approval controls, revision-fenced plan mutations, bounded context/reminders, and owner-scoped management surfaces.
+- Durable JavaScript workflow mode with explicit operation IDs, response-order replay, recursive immutable nested-definition snapshots, namespace-wide dispatch caps, process-child adoption/fencing, and exact attempt accounting.
+
+### Changed
+
+- Workflow composition now supports a maximum nesting depth of eight; durable loop callsites may derive unique runtime operation IDs from their input items.
+- Workflow execution and recovery share one dispatcher across declarative plans and scripts, while legacy non-durable JavaScript behavior remains session-scoped.
+
+### Fixed
+
+- Durable terminal delivery requires parent transcript evidence before committing receipts, and pending deliveries remain recoverable after reload.
+- tmux and Zellij process recovery now revalidates deterministic pane identity, canonical owner-derived paths, manifests, and run fences before adoption.
 
 ## [3.3.0] - 2026-08-05
 

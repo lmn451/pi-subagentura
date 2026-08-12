@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { runInNewContext } from "node:vm";
+import { types as utilTypes } from "node:util";
 import {
   makeGuardedDate,
   makeGuardedMath,
@@ -21,16 +22,31 @@ let workerConfig = {
   maxWorkflowDepth: 1,
   budgetTotal: null,
   cwd: "",
+  durable: null,
+  cloneLimits: null,
 };
 let tokensSpent = 0;
 const rpcErrorIds = new WeakMap();
+const fatalWorkflowErrors = new WeakSet();
 
 function rpc(method, payload) {
   if (aborted) return Promise.reject(new Error("Workflow aborted."));
+  const message = { id: nextRpcId++, method, payload };
+  try {
+    assertBoundedClone(message, `workflow ${method} request`);
+  } catch (error) {
+    markFatalWorkflowError(error);
+    return Promise.reject(error);
+  }
   return new Promise((resolve, reject) => {
-    const id = nextRpcId++;
-    pending.set(id, { resolve, reject });
-    parentPort.postMessage({ id, method, payload });
+    pending.set(message.id, { resolve, reject });
+    try {
+      parentPort.postMessage(message);
+    } catch (error) {
+      pending.delete(message.id);
+      const failure = cloneTransferError(`workflow ${method} request`, error);
+      reject(failure);
+    }
   });
 }
 
@@ -58,14 +74,23 @@ parentPort.on("message", (msg) => {
       maxWorkflowDepth: msg.maxWorkflowDepth,
       budgetTotal: msg.budgetTotal,
       cwd: msg.cwd,
+      durable: msg.durable,
+      cloneLimits: msg.cloneLimits,
     };
-    executeScript(msg.script, msg.args, 0)
-      .then((value) => parentPort.postMessage({ type: "result", value }))
+    executeScript(
+      msg.script,
+      msg.args,
+      0,
+      msg.durable?.rootDefinitionPath ?? null,
+    )
+      .then((value) => {
+        postBounded({ type: "result", value }, "workflow result");
+      })
       .catch((err) => {
         const rpcId = rpcIdFromError(err);
         parentPort.postMessage({
           type: "error",
-          error: err instanceof Error ? err.message : String(err),
+          error: boundedErrorMessage(err),
           ...(rpcId === undefined ? {} : { rpcId }),
         });
       });
@@ -81,21 +106,28 @@ parentPort.on("message", (msg) => {
     } else {
       const error = new Error(String(msg.error || "Workflow RPC failed."));
       rpcErrorIds.set(error, msg.id);
+      if (msg.fatal === true) markFatalWorkflowError(error);
       waiter.reject(error);
     }
   }
 });
 
-async function executeScript(script, args, depth) {
+async function executeScript(script, args, depth, definitionPath) {
   const parsed = parseWorkflow(script);
-  const result = await executeBody(parsed.meta, parsed.body, args, depth);
+  const result = await executeBody(
+    parsed.meta,
+    parsed.body,
+    args,
+    depth,
+    definitionPath,
+  );
   while (outstandingAgentCalls.size > 0) {
     await Promise.all([...outstandingAgentCalls]);
   }
   return { meta: parsed.meta, result };
 }
 
-async function executeBody(meta, body, args, depth) {
+async function executeBody(meta, body, args, depth, definitionPath) {
   let currentPhase;
 
   function checkAbort() {
@@ -107,6 +139,14 @@ async function executeBody(meta, body, args, depth) {
       checkAbort();
       if (typeof prompt !== "string" || prompt.trim() === "") {
         throw new Error("agent(prompt): prompt must be a non-empty string.");
+      }
+      if (
+        workerConfig.durable !== null &&
+        (typeof opts.id !== "string" || opts.id.length === 0)
+      ) {
+        throw new Error(
+          "Durable agent(prompt, opts) requires an explicit stable opts.id.",
+        );
       }
       if (workerConfig.budgetTotal != null && budgetRemaining() <= 0) {
         throw new Error("Workflow token budget exhausted.");
@@ -123,6 +163,7 @@ async function executeBody(meta, body, args, depth) {
       return await rpc("agent", {
         prompt,
         opts: callOpts,
+        ...(workerConfig.durable === null ? {} : { definitionPath }),
       });
     })();
     outstandingAgentCalls.add(call);
@@ -155,7 +196,7 @@ async function executeBody(meta, body, args, depth) {
             return t();
           })
           .catch((err) => {
-            if (aborted) throw err;
+            if (aborted || isFatalWorkflowError(err)) throw err;
             return null;
           }),
       ),
@@ -187,7 +228,7 @@ async function executeBody(meta, body, args, depth) {
           }
           return acc;
         } catch (err) {
-          if (aborted) throw err;
+          if (aborted || isFatalWorkflowError(err)) throw err;
           return null;
         }
       }),
@@ -197,27 +238,73 @@ async function executeBody(meta, body, args, depth) {
   function phase(title) {
     const t = String(title ?? "");
     currentPhase = t;
-    parentPort.postMessage({
-      type: "progress",
-      payload: { kind: "phase", phase: t },
-    });
+    postBounded(
+      {
+        type: "progress",
+        payload: { kind: "phase", phase: t },
+      },
+      "workflow progress",
+    );
   }
 
   function log(message) {
-    parentPort.postMessage({
-      type: "progress",
-      payload: { kind: "log", message: String(message ?? "") },
-    });
+    postBounded(
+      {
+        type: "progress",
+        payload: { kind: "log", message: String(message ?? "") },
+      },
+      "workflow progress",
+    );
   }
 
-  async function workflow(nameOrRef, childArgs) {
+  async function workflow(nameOrRef, childArgs, opts = {}) {
     checkAbort();
     if (depth >= workerConfig.maxWorkflowDepth) {
-      throw new Error("workflow() composition is one level deep only.");
+      throw new Error(
+        `workflow() composition exceeds the maximum depth of ${workerConfig.maxWorkflowDepth}.`,
+      );
     }
-    const childScript = await rpc("loadWorkflow", nameOrRef);
-    const child = await executeScript(childScript, childArgs, depth + 1);
-    return child.result;
+    if (
+      workerConfig.durable !== null &&
+      (typeof opts.id !== "string" || opts.id.length === 0)
+    ) {
+      throw new Error(
+        "Durable workflow(name, args, opts) requires an explicit stable opts.id.",
+      );
+    }
+    const durablePayload =
+      workerConfig.durable === null
+        ? null
+        : {
+            name: nameOrRef,
+            args: childArgs,
+            opts,
+            parentDefinitionPath: definitionPath,
+          };
+    const loaded = await rpc(
+      "loadWorkflow",
+      durablePayload === null ? nameOrRef : durablePayload,
+    );
+    if (durablePayload === null) {
+      const child = await executeScript(loaded, childArgs, depth + 1, null);
+      return child.result;
+    }
+    let completion;
+    try {
+      const child = await executeScript(
+        loaded.script,
+        childArgs,
+        depth + 1,
+        loaded.definitionPath,
+      );
+      completion = { status: "succeeded", value: child.result };
+    } catch (error) {
+      completion = { status: "failed", error: boundedErrorMessage(error) };
+    }
+    return await rpc("completeWorkflow", {
+      workflow: durablePayload,
+      completion,
+    });
   }
 
   const budget = {
@@ -265,6 +352,7 @@ async function executeBody(meta, body, args, depth) {
     const wrapped = new Error(`Workflow "${meta.name}" failed: ${msg}`);
     const rpcId = rpcIdFromError(err);
     if (rpcId !== undefined) rpcErrorIds.set(wrapped, rpcId);
+    if (isFatalWorkflowError(err)) markFatalWorkflowError(wrapped);
     throw wrapped;
   }
 }
@@ -273,4 +361,207 @@ function budgetRemaining() {
   return workerConfig.budgetTotal == null
     ? Infinity
     : Math.max(0, workerConfig.budgetTotal - tokensSpent);
+}
+
+function markFatalWorkflowError(error) {
+  if (error !== null && typeof error === "object") {
+    fatalWorkflowErrors.add(error);
+  }
+  return error;
+}
+
+function isFatalWorkflowError(error) {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    fatalWorkflowErrors.has(error)
+  );
+}
+
+function boundedErrorMessage(error) {
+  let message;
+  try {
+    message = error instanceof Error ? error.message : String(error);
+  } catch {
+    message = "Workflow worker failed with an unprintable error.";
+  }
+  return message.length <= 512 ? message : `${message.slice(0, 509)}...`;
+}
+
+function cloneTransferError(label, cause) {
+  const detail = boundedErrorMessage(cause);
+  return markFatalWorkflowError(
+    new Error(`Unable to transfer bounded ${label}: ${detail}`),
+  );
+}
+
+function postBounded(message, label) {
+  assertBoundedClone(message, label);
+  try {
+    parentPort.postMessage(message);
+  } catch (error) {
+    throw cloneTransferError(label, error);
+  }
+}
+
+function assertBoundedClone(root, label) {
+  const limits = workerConfig.cloneLimits;
+  if (limits === null) {
+    throw markFatalWorkflowError(
+      new Error("Workflow clone limits were not initialized."),
+    );
+  }
+  const seen = new WeakSet();
+  const stack = [{ value: root, depth: 0 }];
+  let nodes = 0;
+  let bytes = 0;
+
+  const fail = (dimension, actual, detail = "exceeded") => {
+    const limit = limits[dimension];
+    const error = new Error(
+      `Workflow clone quota ${dimension} ${detail} for ${label} (${actual} > ${limit}).`,
+    );
+    error.name = "WorkflowCloneQuotaError";
+    throw markFatalWorkflowError(error);
+  };
+  const consumeBytes = (amount) => {
+    bytes += amount;
+    if (!Number.isSafeInteger(bytes) || bytes > limits.maxBytes) {
+      fail("maxBytes", bytes);
+    }
+  };
+  const consumeString = (value) => {
+    const stringBytes = Buffer.byteLength(value, "utf8");
+    if (stringBytes > limits.maxStringBytes) {
+      fail("maxStringBytes", stringBytes);
+    }
+    consumeBytes(stringBytes + 2);
+  };
+  const enqueue = (value, depth) => {
+    const projectedNodes = nodes + stack.length + 1;
+    if (projectedNodes > limits.maxNodes) {
+      fail("maxNodes", projectedNodes);
+    }
+    if (depth > limits.maxDepth) fail("maxDepth", depth);
+    stack.push({ value, depth });
+  };
+
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop();
+    nodes += 1;
+    if (nodes > limits.maxNodes) fail("maxNodes", nodes);
+    if (depth > limits.maxDepth) fail("maxDepth", depth);
+
+    if (value === null || value === undefined) {
+      consumeBytes(4);
+      continue;
+    }
+    switch (typeof value) {
+      case "boolean":
+        consumeBytes(5);
+        continue;
+      case "number":
+        consumeBytes(8);
+        continue;
+      case "string":
+        consumeString(value);
+        continue;
+      case "bigint":
+      case "symbol":
+      case "function":
+        throw markFatalWorkflowError(
+          new TypeError(
+            `Unsupported ${typeof value} in ${label} structured-clone payload.`,
+          ),
+        );
+      case "object":
+        break;
+      default:
+        throw markFatalWorkflowError(
+          new TypeError(
+            `Unsupported value in ${label} structured-clone payload.`,
+          ),
+        );
+    }
+
+    if (seen.has(value)) {
+      consumeBytes(4);
+      continue;
+    }
+    seen.add(value);
+    if (utilTypes.isProxy(value)) {
+      throw markFatalWorkflowError(
+        new TypeError(`Proxy values are not allowed in ${label}.`),
+      );
+    }
+
+    if (utilTypes.isAnyArrayBuffer(value)) {
+      consumeBytes(value.byteLength);
+      continue;
+    }
+    if (utilTypes.isArrayBufferView(value)) {
+      consumeBytes(8);
+      enqueue(value.buffer, depth + 1);
+      continue;
+    }
+    if (utilTypes.isDate(value)) {
+      consumeBytes(8);
+      continue;
+    }
+    if (utilTypes.isRegExp(value)) {
+      consumeString(
+        Object.getOwnPropertyDescriptor(RegExp.prototype, "source").get.call(
+          value,
+        ),
+      );
+      consumeBytes(8);
+      continue;
+    }
+    if (utilTypes.isMap(value)) {
+      consumeBytes(2);
+      for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+        enqueue(entryValue, depth + 1);
+        enqueue(key, depth + 1);
+      }
+      continue;
+    }
+    if (utilTypes.isSet(value)) {
+      consumeBytes(2);
+      for (const entryValue of Set.prototype.values.call(value)) {
+        enqueue(entryValue, depth + 1);
+      }
+      continue;
+    }
+    if (
+      utilTypes.isNativeError(value) ||
+      utilTypes.isPromise(value) ||
+      utilTypes.isWeakMap(value) ||
+      utilTypes.isWeakSet(value)
+    ) {
+      throw markFatalWorkflowError(
+        new TypeError(
+          `Unsupported object in ${label} structured-clone payload.`,
+        ),
+      );
+    }
+
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      const descriptor = descriptors[key];
+      if (!descriptor.enumerable) continue;
+      if (typeof key !== "string") {
+        throw markFatalWorkflowError(
+          new TypeError(`Symbol keys are not allowed in ${label}.`),
+        );
+      }
+      consumeString(key);
+      if (!("value" in descriptor)) {
+        throw markFatalWorkflowError(
+          new TypeError(`Accessors are not allowed in ${label}.`),
+        );
+      }
+      enqueue(descriptor.value, depth + 1);
+    }
+    consumeBytes(2);
+  }
 }

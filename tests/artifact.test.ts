@@ -46,6 +46,7 @@ import {
   stateFilePath,
   writeOutput,
   withInteractiveStateLock,
+  type InteractiveSubagentPersistedState,
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
 } from "../src/artifact";
@@ -755,7 +756,7 @@ describe("persisted interactive state helpers", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  const SAMPLE: InteractiveSubagentPersistedStateV2 = {
+  const LEGACY_SAMPLE: InteractiveSubagentPersistedStateV2 = {
     id: "abc12345",
 
     paneId: "%42",
@@ -774,6 +775,10 @@ describe("persisted interactive state helpers", () => {
     pendingDeliveries: [],
     deliveryReceipts: [],
     legacyCutoverOffset: 0,
+  };
+  const SAMPLE: InteractiveSubagentPersistedState = {
+    ...LEGACY_SAMPLE,
+    completionOwner: "standalone",
   };
 
   it("does not steal a stale-looking lock owned by a live process", () => {
@@ -831,7 +836,7 @@ describe("persisted interactive state helpers", () => {
 
   it("saveInteractiveStates + loadInteractiveStates round-trips a state file", () => {
     saveInteractiveStates(root, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -839,7 +844,7 @@ describe("persisted interactive state helpers", () => {
     const loaded = loadInteractiveStates(root);
 
     expect(loaded).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -878,12 +883,12 @@ describe("persisted interactive state helpers", () => {
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     writeFileSync(
       file,
-      JSON.stringify({ parent: "pi", states: { abc12345: SAMPLE } }),
+      JSON.stringify({ parent: "pi", states: { abc12345: LEGACY_SAMPLE } }),
       { mode: 0o600 },
     );
     const loaded = loadInteractiveStates(root);
     expect(loaded).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -897,13 +902,13 @@ describe("persisted interactive state helpers", () => {
       JSON.stringify({
         schemaVersion: 0,
         parent: "pi",
-        states: { abc12345: SAMPLE },
+        states: { abc12345: LEGACY_SAMPLE },
       }),
       { mode: 0o600 },
     );
     const loaded = loadInteractiveStates(root);
     expect(loaded).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -917,13 +922,13 @@ describe("persisted interactive state helpers", () => {
       JSON.stringify({
         schemaVersion: -1,
         parent: "pi",
-        states: { abc12345: SAMPLE },
+        states: { abc12345: LEGACY_SAMPLE },
       }),
       { mode: 0o600 },
     );
     const loaded = loadInteractiveStates(root);
     expect(loaded).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -940,7 +945,7 @@ describe("persisted interactive state helpers", () => {
 
     const loaded = loadInteractiveStates(root);
 
-    expect(loaded).toEqual({ schemaVersion: 2, parent: "pi", states: {} });
+    expect(loaded).toEqual({ schemaVersion: 3, parent: "pi", states: {} });
   });
 
   it("skips malformed v1 entries and normalizes untrusted fields", () => {
@@ -1090,7 +1095,7 @@ describe("persisted interactive state helpers", () => {
   it("saveInteractiveStates rejects an unknown future schema", () => {
     expect(() =>
       saveInteractiveStates(root, {
-        schemaVersion: 3 as any,
+        schemaVersion: 4 as any,
         parent: "pi",
         states: {},
       }),
@@ -1133,7 +1138,7 @@ describe("persisted interactive state helpers", () => {
 
   it("preserves updates from concurrent parents using the same cwd", () => {
     saveInteractiveStates(root, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       parent: "pi",
       states: {},
     });

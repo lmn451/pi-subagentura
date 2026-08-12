@@ -101,6 +101,7 @@ function ownedWorkflow(scope: SessionScope, id: string) {
   const abort = new AbortController();
   const workflow = {
     id,
+    kind: "script",
     status: "running",
     abort,
     parentSessionOwner: sessionOwner(scope),
@@ -166,6 +167,14 @@ describe("session handler lifecycle callbacks", () => {
     clearSessionScopes();
     __setTmuxMultiplexer(undefined);
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not register a system-prompt continuity hook after compaction", () => {
+    const registration = registerHandlers();
+    startSession(registration, root, "session-authority");
+
+    expect(registration.handlers.get("session_compact")).toBeUndefined();
+    expect(registration.handlers.get("before_agent_start")).toBeUndefined();
   });
 
   it("tracks streaming and flush lifecycle state on the exact scope", () => {

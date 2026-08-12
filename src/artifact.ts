@@ -37,9 +37,13 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
+import {
+  isWorkflowProcessAttemptIdentity,
+  type WorkflowProcessAttemptIdentity,
+} from "./workflow-process-attempt";
 
 /** Current schema version for the interactive state file. */
-export const CURRENT_STATE_SCHEMA_VERSION = 2;
+export const CURRENT_STATE_SCHEMA_VERSION = 3;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -1332,14 +1336,71 @@ export interface InteractiveSubagentPersistedStateV2 extends InteractiveSubagent
   lifecycle?: PersistedLifecycleFold;
 }
 
+export type InteractiveSubagentPersistedOwnership =
+  | {
+      completionOwner: "standalone";
+      workflowId?: never;
+      workflowProcessIdentity?: never;
+    }
+  | {
+      completionOwner: "workflow";
+      workflowId: string;
+      workflowProcessIdentity?: WorkflowProcessAttemptIdentity;
+    };
+
+export type InteractiveSubagentPersistedStateV3 =
+  InteractiveSubagentPersistedStateV2 & InteractiveSubagentPersistedOwnership;
+
+/** Entry shape written by the current interactive-state schema. */
+export type InteractiveSubagentPersistedState =
+  InteractiveSubagentPersistedStateV3;
+
+function normalizePersistedOwnership(
+  raw: Record<string, unknown>,
+  allowLegacyStandalone: boolean,
+): InteractiveSubagentPersistedOwnership | null {
+  if (raw.completionOwner === "workflow") {
+    if (
+      typeof raw.workflowId !== "string" ||
+      raw.workflowId.length === 0 ||
+      (raw.workflowProcessIdentity !== undefined &&
+        !isWorkflowProcessAttemptIdentity(raw.workflowProcessIdentity))
+    ) {
+      return null;
+    }
+    return {
+      completionOwner: "workflow",
+      workflowId: raw.workflowId,
+      ...(raw.workflowProcessIdentity === undefined
+        ? {}
+        : { workflowProcessIdentity: raw.workflowProcessIdentity }),
+    };
+  }
+  if (raw.completionOwner === "standalone") {
+    return raw.workflowId === undefined &&
+      raw.workflowProcessIdentity === undefined
+      ? { completionOwner: "standalone" }
+      : null;
+  }
+  if (
+    !allowLegacyStandalone ||
+    raw.completionOwner !== undefined ||
+    raw.workflowId !== undefined ||
+    raw.workflowProcessIdentity !== undefined
+  ) {
+    return null;
+  }
+  return { completionOwner: "standalone" };
+}
+
 export interface InteractiveSubagentStateFile {
-  schemaVersion: 2;
+  schemaVersion: 3;
 
   /** Parent pi session id; redundant with the filename but kept for verification/debugging. */
 
   parent: string;
 
-  states: { [id: string]: InteractiveSubagentPersistedStateV2 };
+  states: { [id: string]: InteractiveSubagentPersistedState };
 }
 
 type InteractiveSubagentStateFileInput =
@@ -1348,6 +1409,11 @@ type InteractiveSubagentStateFileInput =
       schemaVersion: 1;
       parent: string;
       states: { [id: string]: InteractiveSubagentPersistedStateV1 };
+    }
+  | {
+      schemaVersion: 2;
+      parent: string;
+      states: { [id: string]: InteractiveSubagentPersistedStateV2 };
     };
 
 /** File path for the project-local state file under .pi/. */
@@ -1410,9 +1476,10 @@ function migrateStatePayload(
   const asStates = (
     v: unknown,
     legacy: boolean,
-  ): { [id: string]: InteractiveSubagentPersistedStateV2 } => {
+    allowLegacyOwnership: boolean,
+  ): { [id: string]: InteractiveSubagentPersistedState } => {
     if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-    const migrated: { [id: string]: InteractiveSubagentPersistedStateV2 } = {};
+    const migrated: { [id: string]: InteractiveSubagentPersistedState } = {};
     for (const [id, value] of Object.entries(v)) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const raw = value as Record<string, unknown>;
@@ -1434,6 +1501,8 @@ function migrateStatePayload(
       }
       const entry = raw as unknown as InteractiveSubagentPersistedStateV1 &
         Partial<InteractiveSubagentPersistedStateV2>;
+      const ownership = normalizePersistedOwnership(raw, allowLegacyOwnership);
+      if (!ownership) continue;
       const art = artifactPath(
         dirname(entry.artifactDir),
         basename(entry.artifactDir),
@@ -1594,6 +1663,7 @@ function migrateStatePayload(
         ...(typeof entry.parentSessionId === "string"
           ? { parentSessionId: entry.parentSessionId }
           : {}),
+        ...ownership,
         eventByteCursor: cursor(entry.eventByteCursor, cutoverOffset),
         sessionByteCursor: cursor(entry.sessionByteCursor, 0),
         ...(entry.sessionPartialLineStart === null
@@ -1618,8 +1688,8 @@ function migrateStatePayload(
     return migrated;
   };
   const withLegacyCatchup = (states: {
-    [id: string]: InteractiveSubagentPersistedStateV2;
-  }): { [id: string]: InteractiveSubagentPersistedStateV2 } => {
+    [id: string]: InteractiveSubagentPersistedState;
+  }): { [id: string]: InteractiveSubagentPersistedState } => {
     for (const entry of Object.values(states)) {
       const cutover = entry.legacyCutoverOffset ?? 0;
       if (cutover <= 0 || entry.pendingDeliveries.length > 0) continue;
@@ -1652,7 +1722,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
-      states: withLegacyCatchup(asStates(rawStates, true)),
+      states: withLegacyCatchup(asStates(rawStates, true, true)),
     };
   }
 
@@ -1661,7 +1731,15 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
-      states: withLegacyCatchup(asStates(rawStates, true)),
+      states: withLegacyCatchup(asStates(rawStates, true, true)),
+    };
+  }
+
+  if (version === 2) {
+    return {
+      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+      parent,
+      states: asStates(rawStates, false, true),
     };
   }
 
@@ -1669,7 +1747,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
-      states: asStates(rawStates, false),
+      states: asStates(rawStates, false, false),
     };
   }
 
@@ -1679,7 +1757,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
-      states: withLegacyCatchup(asStates(rawStates, true)),
+      states: withLegacyCatchup(asStates(rawStates, true, true)),
     };
   }
 
@@ -1698,9 +1776,9 @@ export function saveInteractiveStates(
   payload: InteractiveSubagentStateFileInput,
 ): void {
   const current =
-    payload.schemaVersion === 1
-      ? migrateStatePayload(payload as unknown as Record<string, unknown>)
-      : payload;
+    payload.schemaVersion === CURRENT_STATE_SCHEMA_VERSION
+      ? payload
+      : migrateStatePayload(payload as unknown as Record<string, unknown>);
   if (!current || current.schemaVersion !== CURRENT_STATE_SCHEMA_VERSION) {
     throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
   }
@@ -1913,7 +1991,9 @@ function writeInteractiveStatesUnlocked(
 export function appendInteractiveState(
   cwd: string,
   entry:
-    InteractiveSubagentPersistedStateV1 | InteractiveSubagentPersistedStateV2,
+    | InteractiveSubagentPersistedStateV1
+    | InteractiveSubagentPersistedStateV2
+    | InteractiveSubagentPersistedState,
 ): void {
   withInteractiveStateLock(cwd, () => {
     const current = loadInteractiveStates(cwd) ?? {
@@ -1925,11 +2005,31 @@ export function appendInteractiveState(
       dirname(entry.artifactDir),
       basename(entry.artifactDir),
     );
-    current.states[entry.id] = {
-      ...entry,
+    const ownership = normalizePersistedOwnership(
+      entry as unknown as Record<string, unknown>,
+      true,
+    );
+    if (!ownership) {
+      throw new Error("invalid interactive subagent completion ownership");
+    }
+    const persistedEntry: InteractiveSubagentPersistedStateV2 = {
+      id: entry.id,
+      paneId: entry.paneId,
+      windowName: entry.windowName,
+      mux: entry.mux,
+      muxSession: entry.muxSession,
+      artifactDir: entry.artifactDir,
+      sessionFile: entry.sessionFile,
+      notifyOnComplete: entry.notifyOnComplete,
+      triggerTurnOnComplete: entry.triggerTurnOnComplete,
+      parentSessionId: entry.parentSessionId,
       eventByteCursor: "eventByteCursor" in entry ? entry.eventByteCursor : 0,
       sessionByteCursor:
         "sessionByteCursor" in entry ? entry.sessionByteCursor : 0,
+      ...("sessionPartialLineStart" in entry
+        ? { sessionPartialLineStart: entry.sessionPartialLineStart }
+        : {}),
+      ...("activeTurnId" in entry ? { activeTurnId: entry.activeTurnId } : {}),
       pendingDeliveries:
         "pendingDeliveries" in entry ? entry.pendingDeliveries : [],
       deliveryReceipts:
@@ -1938,7 +2038,12 @@ export function appendInteractiveState(
         "legacyCutoverOffset" in entry
           ? entry.legacyCutoverOffset
           : eventLogEndOffset(art),
+      ...("lifecycle" in entry ? { lifecycle: entry.lifecycle } : {}),
     };
+    current.states[entry.id] =
+      ownership.completionOwner === "workflow"
+        ? { ...persistedEntry, ...ownership }
+        : { ...persistedEntry, completionOwner: "standalone" };
     writeInteractiveStatesUnlocked(cwd, current);
   });
 }
@@ -1946,7 +2051,7 @@ export function appendInteractiveState(
 export function updateInteractiveState(
   cwd: string,
   id: string,
-  update: (entry: InteractiveSubagentPersistedStateV2) => void,
+  update: (entry: InteractiveSubagentPersistedState) => void,
 ): void {
   withInteractiveStateLock(cwd, () => {
     const current = loadInteractiveStates(cwd);

@@ -61,6 +61,7 @@ interface ZellijPaneRow {
   readonly id: number | string;
   readonly is_plugin?: boolean;
   readonly exited?: boolean;
+  readonly tab_name?: string;
 }
 
 function parsePaneListing(output: string): ZellijPaneRow[] {
@@ -81,7 +82,8 @@ function parsePaneListing(output: string): ZellijPaneRow[] {
     if (
       !validId ||
       (pane.is_plugin !== undefined && typeof pane.is_plugin !== "boolean") ||
-      (pane.exited !== undefined && typeof pane.exited !== "boolean")
+      (pane.exited !== undefined && typeof pane.exited !== "boolean") ||
+      (pane.tab_name !== undefined && typeof pane.tab_name !== "string")
     ) {
       throw new Error("Malformed zellij pane listing row");
     }
@@ -313,6 +315,79 @@ export class ZellijMultiplexer implements Multiplexer {
     }
 
     return { paneId, windowName, session: session || undefined };
+  }
+
+  /**
+   * Locate durable workflow panes by their deterministic tab name.
+   *
+   * Zellij pane ids are only session-local, so recovery must enumerate every
+   * active session and retain the session with each match. A listing failure is
+   * not an empty result: callers use this method to decide whether retrying can
+   * safely create another pane, so ambiguity must abort recovery instead.
+   */
+  findPanesByWindowName(windowName: string): readonly PaneRef[] {
+    let sessionsOutput: string;
+    try {
+      sessionsOutput = execFileSync(
+        "zellij",
+        ["list-sessions", "--short", "--no-formatting"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 5000,
+        },
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("No active zellij sessions found")
+      ) {
+        return [];
+      }
+      throw new Error("Failed to enumerate zellij sessions for pane recovery", {
+        cause: error,
+      });
+    }
+
+    const sessions = sessionsOutput
+      .split("\n")
+      .map((session) => session.trim())
+      .filter((session) => session.length > 0);
+    const matches: PaneRef[] = [];
+    for (const session of sessions) {
+      let output: string;
+      try {
+        output = execFileSync(
+          "zellij",
+          [...this.sessionFlag(session), "action", "list-panes", "--json"],
+          {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 5000,
+          },
+        );
+      } catch (error) {
+        throw new Error(
+          `Failed to enumerate zellij panes in session ${session}`,
+          { cause: error },
+        );
+      }
+      for (const pane of parsePaneListing(output)) {
+        if (
+          pane.tab_name !== windowName ||
+          pane.is_plugin ||
+          pane.exited === true
+        ) {
+          continue;
+        }
+        matches.push({
+          paneId: normalizePaneId(String(pane.id)),
+          windowName,
+          session,
+        });
+      }
+    }
+    return matches;
   }
 
   /**

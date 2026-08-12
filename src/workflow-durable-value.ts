@@ -1,295 +1,539 @@
+import { createHash, type Hash } from "node:crypto";
 import { isProxy } from "node:util/types";
 
-export type DurableValue =
-  | null
-  | boolean
-  | number
-  | string
-  | DurableValue[]
-  | { [key: string]: DurableValue };
+export type DurablePrimitive = null | boolean | number | string;
 
-const MAX_DURABLE_VALUE_DEPTH = 64;
-const MAX_DURABLE_VALUE_NODES = 100_000;
-const MAX_DURABLE_STRING_BYTES = 256 * 1024;
-const MAX_DURABLE_VALUE_BYTES = 256 * 1024;
-const SAFE_KEY = /^[A-Za-z0-9_.-]{1,128}$/;
-const UNSAFE_KEYS = {
-  ["__proto__"]: true,
-  constructor: true,
-  prototype: true,
-} as const satisfies Readonly<Record<string, boolean>>;
+export type DurableValue =
+  | DurablePrimitive
+  | readonly DurableValue[]
+  | { readonly [key: string]: DurableValue };
+
+export interface DurableValueLimits {
+  /** Maximum path depth below the root value. The root has depth zero. */
+  readonly maxDepth: number;
+  /** Maximum number of values, including the root and repeated shared values. */
+  readonly maxNodes: number;
+  /** Maximum UTF-8 byte length of any string value or object key. */
+  readonly maxStringBytes: number;
+  /** Maximum UTF-8 byte length of the canonical JSON encoding. */
+  readonly maxBytes: number;
+}
+
+export type DurableValueOptions = Partial<DurableValueLimits>;
+
+export const DEFAULT_DURABLE_VALUE_LIMITS: Readonly<DurableValueLimits> =
+  Object.freeze({
+    maxDepth: 64,
+    maxNodes: 100_000,
+    maxStringBytes: 256 * 1024,
+    maxBytes: 1024 * 1024,
+  });
+
+export type DurableValueErrorCode =
+  | "invalid_limit"
+  | "unsupported_type"
+  | "non_finite_number"
+  | "unsafe_number"
+  | "cycle"
+  | "accessor"
+  | "non_enumerable_property"
+  | "symbol_key"
+  | "unsafe_key"
+  | "sparse_array"
+  | "array_property"
+  | "malformed_json"
+  | "non_canonical"
+  | "max_depth"
+  | "max_nodes"
+  | "max_string_bytes"
+  | "max_bytes";
+
+export interface EncodedDurableValue {
+  /** Canonical JSON, with object keys ordered by UTF-16 code units. */
+  readonly json: string;
+  /** UTF-8 byte length of `json`. */
+  readonly bytes: number;
+  /** Lowercase SHA-256 hex digest of the UTF-8 bytes of `json`. */
+  readonly sha256: string;
+}
+
+export class DurableValueError extends Error {
+  readonly code: DurableValueErrorCode;
+  readonly path: string;
+  readonly limit?: number;
+  readonly actual?: number;
+
+  constructor(
+    code: DurableValueErrorCode,
+    message: string,
+    options: {
+      path?: string;
+      limit?: number;
+      actual?: number;
+    } = {},
+  ) {
+    super(message);
+    this.name = "DurableValueError";
+    this.code = code;
+    this.path = options.path ?? "$";
+    this.limit = options.limit;
+    this.actual = options.actual;
+  }
+}
+
+const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 type PathSegment = string | number;
 
-interface TraversalResult {
-  value: DurableValue;
-  encoded?: string;
+export function resolveDurableValueLimits(
+  options: DurableValueOptions = {},
+): DurableValueLimits {
+  const limits: DurableValueLimits = {
+    maxDepth: options.maxDepth ?? DEFAULT_DURABLE_VALUE_LIMITS.maxDepth,
+    maxNodes: options.maxNodes ?? DEFAULT_DURABLE_VALUE_LIMITS.maxNodes,
+    maxStringBytes:
+      options.maxStringBytes ?? DEFAULT_DURABLE_VALUE_LIMITS.maxStringBytes,
+    maxBytes: options.maxBytes ?? DEFAULT_DURABLE_VALUE_LIMITS.maxBytes,
+  };
+
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new DurableValueError(
+        "invalid_limit",
+        `${name} must be a non-negative safe integer.`,
+        { actual: value },
+      );
+    }
+  }
+
+  return limits;
 }
 
 /**
- * Copy a runtime value into the bounded durable-value contract.
- *
- * Property values are read only from data descriptors. Accessors and proxies are
- * rejected rather than observed, so validation cannot execute caller code.
+ * Validate and canonically encode a durable value in one bounded traversal.
+ * Shared (but acyclic) references are encoded at each position, as JSON values
+ * are trees; only references on the active ancestor path are cycles.
  */
-export function toDurableValue(value: unknown): DurableValue {
-  return traverseDurableValue(value, false).value;
+export function encodeDurableValue(
+  value: unknown,
+  options: DurableValueOptions = {},
+): EncodedDurableValue {
+  return new DurableValueEncoder(
+    resolveDurableValueLimits(options),
+    true,
+    true,
+  ).encode(value);
 }
 
-export function encodeDurableValue(value: unknown): string {
-  return traverseDurableValue(value, true).encoded!;
+/** Validate a value against the durable JSON contract. */
+export function validateDurableValue(
+  value: unknown,
+  options: DurableValueOptions = {},
+): asserts value is DurableValue {
+  new DurableValueEncoder(
+    resolveDurableValueLimits(options),
+    false,
+    false,
+  ).validate(value);
 }
 
-export function decodeDurableValue(encoded: string): DurableValue {
-  if (typeof encoded !== "string")
-    throw new Error("Durable value encoding must be a string");
-  const bytes = Buffer.byteLength(encoded, "utf8");
-  if (bytes > MAX_DURABLE_VALUE_BYTES) {
-    throw new Error(
-      `Durable value exceeds ${MAX_DURABLE_VALUE_BYTES} bytes at $`,
+/** Return the digest of the canonical durable JSON encoding. */
+export function digestDurableValue(
+  value: unknown,
+  options: DurableValueOptions = {},
+): string {
+  return new DurableValueEncoder(
+    resolveDurableValueLimits(options),
+    false,
+    true,
+  ).digest(value);
+}
+
+/**
+ * Decode owned JSON data and reject any representation that is not already the
+ * canonical encoding. JSON.parse creates the returned object graph, so it never
+ * aliases mutable state owned by the caller.
+ */
+export function decodeDurableValue(
+  input: string | Uint8Array,
+  options: DurableValueOptions = {},
+): DurableValue {
+  const limits = resolveDurableValueLimits(options);
+  const json = decodeJsonInput(input, limits.maxBytes);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new DurableValueError("malformed_json", "Malformed durable JSON.");
+  }
+
+  const canonicalJson = new DurableValueEncoder(
+    limits,
+    true,
+    false,
+  ).canonicalJson(parsed);
+  if (canonicalJson !== json) {
+    throw new DurableValueError(
+      "non_canonical",
+      "Durable JSON is valid but not canonically encoded.",
     );
   }
-  return toDurableValue(JSON.parse(encoded));
+  return parsed as DurableValue;
 }
 
-function traverseDurableValue(
-  value: unknown,
-  collectEncoded: boolean,
-): TraversalResult {
-  const traversal = new DurableValueTraversal(collectEncoded);
-  const durable = traversal.visit(value, 0);
-  return { value: durable, encoded: traversal.encoded() };
-}
-
-class DurableValueTraversal {
+class DurableValueEncoder {
+  private readonly chunks: string[] | undefined;
+  private readonly hash: Hash | undefined;
   private readonly ancestors = new WeakSet<object>();
-  private readonly chunks?: string[];
   private readonly path: PathSegment[] = [];
   private nodeCount = 0;
   private byteCount = 0;
 
-  constructor(collectEncoded: boolean) {
-    this.chunks = collectEncoded ? [] : undefined;
+  constructor(
+    private readonly limits: DurableValueLimits,
+    collectJson: boolean,
+    computeHash: boolean,
+  ) {
+    this.chunks = collectJson ? [] : undefined;
+    this.hash = computeHash ? createHash("sha256") : undefined;
   }
 
-  encoded(): string | undefined {
-    return this.chunks?.join("");
+  encode(value: unknown): EncodedDurableValue {
+    this.visit(value, 0);
+    return {
+      json: this.chunks!.join(""),
+      bytes: this.byteCount,
+      sha256: this.hash!.digest("hex"),
+    };
   }
 
-  visit(value: unknown, depth: number): DurableValue {
+  validate(value: unknown): void {
+    this.visit(value, 0);
+  }
+
+  digest(value: unknown): string {
+    this.visit(value, 0);
+    return this.hash!.digest("hex");
+  }
+
+  canonicalJson(value: unknown): string {
+    this.visit(value, 0);
+    return this.chunks!.join("");
+  }
+
+  private visit(value: unknown, depth: number): void {
     this.consumeNode(depth);
+
     if (value === null) {
       this.append("null");
-      return null;
+      return;
     }
-    if (typeof value === "boolean") {
-      this.append(value ? "true" : "false");
-      return value;
+
+    switch (typeof value) {
+      case "boolean":
+        this.append(value ? "true" : "false");
+        return;
+      case "number":
+        this.appendNumber(value);
+        return;
+      case "string":
+        this.appendString(value);
+        return;
+      case "object":
+        this.appendObject(value, depth);
+        return;
+      case "bigint":
+      case "function":
+      case "symbol":
+      case "undefined":
+        this.fail(
+          "unsupported_type",
+          `Unsupported durable value type: ${typeof value}.`,
+        );
     }
-    if (typeof value === "string") {
-      this.appendString(value);
-      return value;
+  }
+
+  private consumeNode(depth: number): void {
+    if (depth > this.limits.maxDepth) {
+      this.fail(
+        "max_depth",
+        `Durable value exceeds maxDepth (${depth} > ${this.limits.maxDepth}).`,
+        this.limits.maxDepth,
+        depth,
+      );
     }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value) || !Number.isSafeInteger(value)) {
-        throw new Error(`Invalid durable number at ${this.formatPath()}`);
-      }
-      this.append(String(value));
-      return value;
+
+    const nextCount = this.nodeCount + 1;
+    if (nextCount > this.limits.maxNodes) {
+      this.fail(
+        "max_nodes",
+        `Durable value exceeds maxNodes (${nextCount} > ${this.limits.maxNodes}).`,
+        this.limits.maxNodes,
+        nextCount,
+      );
     }
-    if (typeof value !== "object") {
-      throw new Error(`Invalid durable value at ${this.formatPath()}`);
+    this.nodeCount = nextCount;
+  }
+
+  private appendNumber(value: number): void {
+    if (!Number.isFinite(value)) {
+      this.fail("non_finite_number", "Durable numbers must be finite.");
     }
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      this.fail(
+        "unsafe_number",
+        "Durable integer values must be safe integers.",
+      );
+    }
+
+    this.append(String(value));
+  }
+
+  private appendString(value: string): void {
+    const stringBytes = Buffer.byteLength(value, "utf8");
+    if (stringBytes > this.limits.maxStringBytes) {
+      this.fail(
+        "max_string_bytes",
+        `Durable string exceeds maxStringBytes (${stringBytes} > ${this.limits.maxStringBytes}).`,
+        this.limits.maxStringBytes,
+        stringBytes,
+      );
+    }
+    const remaining = this.limits.maxBytes - this.byteCount;
+    const minimumBytes = stringBytes + 2;
+    if (minimumBytes > remaining) {
+      this.fail(
+        "max_bytes",
+        `Durable value exceeds maxBytes (at least ${this.byteCount + minimumBytes} > ${this.limits.maxBytes}).`,
+        this.limits.maxBytes,
+        this.byteCount + minimumBytes,
+      );
+    }
+    const encoded = JSON.stringify(value);
+    this.append(encoded);
+  }
+
+  private appendObject(value: object, depth: number): void {
     if (isProxy(value)) {
-      throw new Error(`Proxy values are not durable at ${this.formatPath()}`);
+      this.fail("unsupported_type", "Proxy objects are not durable values.");
     }
-    if (Array.isArray(value)) return this.visitArray(value, depth);
+
+    if (Array.isArray(value)) {
+      this.appendArray(value, depth);
+      return;
+    }
 
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new Error(`Only plain objects are durable at ${this.formatPath()}`);
+      this.fail(
+        "unsupported_type",
+        "Only arrays and plain objects are durable object values.",
+      );
     }
-    return this.visitRecord(value as Record<string, unknown>, depth);
+
+    this.appendPlainObject(value as Record<string, unknown>, depth);
   }
 
-  private visitArray(value: unknown[], depth: number): DurableValue[] {
-    if (Object.getPrototypeOf(value) !== Array.prototype) {
-      throw new Error(`Only plain arrays are durable at ${this.formatPath()}`);
-    }
-    this.enter(value);
+  private appendArray(value: unknown[], depth: number): void {
+    this.enterContainer(value);
     try {
       this.reserveChildNodes(value.length);
-      if (Object.getOwnPropertySymbols(value).length !== 0) {
-        throw new Error(
-          `Symbol-keyed properties are not durable at ${this.formatPath()}`,
-        );
-      }
-      const propertyNames = Object.getOwnPropertyNames(value);
-      for (const key of propertyNames) {
-        if (key !== "length" && !isCanonicalArrayIndex(key, value.length)) {
-          throw new Error(
-            `Invalid array property ${JSON.stringify(key)} at ${this.formatPath()}`,
-          );
-        }
-      }
-      if (propertyNames.length !== value.length + 1) {
-        throw new Error(
-          `Sparse arrays are not durable at ${this.formatPath()}`,
-        );
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        this.fail("symbol_key", "Symbol-keyed properties are not durable.");
       }
 
-      const output: DurableValue[] = [];
+      const propertyNames = Object.getOwnPropertyNames(value);
+      for (const key of propertyNames) {
+        if (key === "length" || isCanonicalArrayIndex(key, value.length)) {
+          continue;
+        }
+        this.withPath(key, () => {
+          if (UNSAFE_OBJECT_KEYS.has(key)) {
+            this.fail(
+              "unsafe_key",
+              `Unsafe durable object key: ${JSON.stringify(key)}.`,
+            );
+          }
+          this.fail(
+            "array_property",
+            `Non-index array property is not durable: ${JSON.stringify(key)}.`,
+          );
+        });
+      }
+
+      if (propertyNames.length !== value.length + 1) {
+        this.fail("sparse_array", "Sparse arrays are not durable values.");
+      }
+
       this.append("[");
       for (let index = 0; index < value.length; index++) {
-        if (index !== 0) this.append(",");
-        this.path.push(index);
-        try {
+        if (index > 0) this.append(",");
+        this.withPath(index, () => {
           const descriptor = Object.getOwnPropertyDescriptor(
             value,
             String(index),
           );
           if (descriptor === undefined) {
-            throw new Error(
-              `Sparse arrays are not durable at ${this.formatPath()}`,
-            );
+            this.fail("sparse_array", "Sparse arrays are not durable values.");
           }
           this.assertDataProperty(descriptor);
-          output.push(this.visit(descriptor.value, depth + 1));
-        } finally {
-          this.path.pop();
-        }
+          this.visit(descriptor.value, depth + 1);
+        });
       }
       this.append("]");
-      return output;
     } finally {
       this.ancestors.delete(value);
     }
   }
 
-  private visitRecord(
+  private appendPlainObject(
     value: Record<string, unknown>,
     depth: number,
-  ): { [key: string]: DurableValue } {
-    this.enter(value);
+  ): void {
+    this.enterContainer(value);
     try {
-      if (Object.getOwnPropertySymbols(value).length !== 0) {
-        throw new Error(
-          `Symbol-keyed properties are not durable at ${this.formatPath()}`,
-        );
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        this.fail("symbol_key", "Symbol-keyed properties are not durable.");
       }
-      const keys = Object.getOwnPropertyNames(value).sort();
+
+      const keys = Object.getOwnPropertyNames(value);
       this.reserveChildNodes(keys.length);
-      const output: { [key: string]: DurableValue } = {};
+      keys.sort();
+
       this.append("{");
       for (let index = 0; index < keys.length; index++) {
         const key = keys[index];
-        if (!SAFE_KEY.test(key) || Object.hasOwn(UNSAFE_KEYS, key)) {
-          throw new Error(
-            `Invalid durable key ${JSON.stringify(key)} at ${this.formatPath()}`,
-          );
-        }
-        if (index !== 0) this.append(",");
-        this.path.push(key);
-        try {
+        if (index > 0) this.append(",");
+        this.withPath(key, () => {
+          if (UNSAFE_OBJECT_KEYS.has(key)) {
+            this.fail(
+              "unsafe_key",
+              `Unsafe durable object key: ${JSON.stringify(key)}.`,
+            );
+          }
           const descriptor = Object.getOwnPropertyDescriptor(value, key);
           if (descriptor === undefined) {
-            throw new Error(
-              `Durable object changed during validation at ${this.formatPath()}`,
+            this.fail(
+              "unsupported_type",
+              "Durable object shape changed during encoding.",
             );
           }
           this.assertDataProperty(descriptor);
           this.appendString(key);
           this.append(":");
-          const child = this.visit(descriptor.value, depth + 1);
-          Object.defineProperty(output, key, {
-            value: child,
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
-        } finally {
-          this.path.pop();
-        }
+          this.visit(descriptor.value, depth + 1);
+        });
       }
       this.append("}");
-      return output;
     } finally {
       this.ancestors.delete(value);
     }
   }
 
-  private consumeNode(depth: number): void {
-    if (depth > MAX_DURABLE_VALUE_DEPTH) {
-      throw new Error(
-        `Durable value exceeds depth ${MAX_DURABLE_VALUE_DEPTH} at ${this.formatPath()}`,
-      );
-    }
-    this.nodeCount++;
-    if (this.nodeCount > MAX_DURABLE_VALUE_NODES) {
-      throw new Error(
-        `Durable value exceeds ${MAX_DURABLE_VALUE_NODES} nodes at ${this.formatPath()}`,
-      );
-    }
-  }
-
   private reserveChildNodes(count: number): void {
-    if (count > MAX_DURABLE_VALUE_NODES - this.nodeCount) {
-      throw new Error(
-        `Durable value exceeds ${MAX_DURABLE_VALUE_NODES} nodes at ${this.formatPath()}`,
+    if (count > this.limits.maxNodes - this.nodeCount) {
+      const actual = this.nodeCount + count;
+      this.fail(
+        "max_nodes",
+        `Durable value exceeds maxNodes (${actual} > ${this.limits.maxNodes}).`,
+        this.limits.maxNodes,
+        actual,
       );
     }
   }
 
-  private enter(value: object): void {
+  private enterContainer(value: object): void {
     if (this.ancestors.has(value)) {
-      throw new Error(`Cyclic durable value at ${this.formatPath()}`);
+      this.fail("cycle", "Cyclic values are not durable.");
     }
     this.ancestors.add(value);
   }
 
   private assertDataProperty(descriptor: PropertyDescriptor): void {
     if ("get" in descriptor || "set" in descriptor) {
-      throw new Error(
-        `Accessor properties are not durable at ${this.formatPath()}`,
-      );
+      this.fail("accessor", "Accessor properties are not durable.");
     }
     if (!descriptor.enumerable) {
-      throw new Error(
-        `Non-enumerable properties are not durable at ${this.formatPath()}`,
+      this.fail(
+        "non_enumerable_property",
+        "Non-enumerable properties are not durable.",
       );
     }
   }
 
-  private appendString(value: string): void {
-    const stringBytes = Buffer.byteLength(value, "utf8");
-    if (stringBytes > MAX_DURABLE_STRING_BYTES) {
-      throw new Error(
-        `Durable string exceeds ${MAX_DURABLE_STRING_BYTES} bytes at ${this.formatPath()}`,
-      );
+  private withPath(segment: PathSegment, action: () => void): void {
+    this.path.push(segment);
+    try {
+      action();
+    } finally {
+      this.path.pop();
     }
-    this.append(JSON.stringify(value));
   }
 
   private append(text: string): void {
-    const nextByteCount = this.byteCount + Buffer.byteLength(text, "utf8");
-    if (nextByteCount > MAX_DURABLE_VALUE_BYTES) {
-      throw new Error(
-        `Durable value exceeds ${MAX_DURABLE_VALUE_BYTES} bytes at ${this.formatPath()}`,
+    const bytes = Buffer.byteLength(text, "utf8");
+    const nextByteCount = this.byteCount + bytes;
+    if (nextByteCount > this.limits.maxBytes) {
+      this.fail(
+        "max_bytes",
+        `Durable value exceeds maxBytes (${nextByteCount} > ${this.limits.maxBytes}).`,
+        this.limits.maxBytes,
+        nextByteCount,
       );
     }
     this.byteCount = nextByteCount;
     this.chunks?.push(text);
+    this.hash?.update(text, "utf8");
   }
 
-  private formatPath(): string {
-    let result = "$";
-    for (const segment of this.path) {
-      result +=
-        typeof segment === "number"
-          ? `[${segment}]`
-          : `[${JSON.stringify(segment)}]`;
+  private fail(
+    code: DurableValueErrorCode,
+    message: string,
+    limit?: number,
+    actual?: number,
+  ): never {
+    throw new DurableValueError(code, message, {
+      path: formatPath(this.path),
+      limit,
+      actual,
+    });
+  }
+}
+
+function decodeJsonInput(input: string | Uint8Array, maxBytes: number): string {
+  if (typeof input === "string") {
+    const bytes = Buffer.byteLength(input, "utf8");
+    if (bytes > maxBytes) {
+      throw new DurableValueError(
+        "max_bytes",
+        `Durable JSON exceeds maxBytes (${bytes} > ${maxBytes}).`,
+        { limit: maxBytes, actual: bytes },
+      );
     }
-    return result;
+    return input;
+  }
+
+  if (!(input instanceof Uint8Array)) {
+    throw new DurableValueError(
+      "unsupported_type",
+      "Durable JSON input must be a string or Uint8Array.",
+    );
+  }
+  if (input.byteLength > maxBytes) {
+    throw new DurableValueError(
+      "max_bytes",
+      `Durable JSON exceeds maxBytes (${input.byteLength} > ${maxBytes}).`,
+      { limit: maxBytes, actual: input.byteLength },
+    );
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(input);
+  } catch {
+    throw new DurableValueError(
+      "malformed_json",
+      "Durable JSON is not valid UTF-8.",
+    );
   }
 }
 
@@ -301,4 +545,15 @@ function isCanonicalArrayIndex(key: string, length: number): boolean {
     index < length &&
     String(index) === key
   );
+}
+
+function formatPath(path: readonly PathSegment[]): string {
+  let result = "$";
+  for (const segment of path) {
+    result +=
+      typeof segment === "number"
+        ? `[${segment}]`
+        : `[${JSON.stringify(segment)}]`;
+  }
+  return result;
 }

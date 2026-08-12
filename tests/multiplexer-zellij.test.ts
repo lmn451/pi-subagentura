@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
+import type * as ZellijModule from "../src/multiplexer-zellij";
 
 /** Standard zellij pane id returned by mocks. Zellij uses bare integers. */
 const MOCK_PANE_ID = "42";
@@ -313,6 +314,60 @@ describe("multiplexer-zellij", () => {
     expect(newTabCall).toEqual(
       expect.arrayContaining(["--session", "pi-subagent-abc12345"]),
     );
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  deterministic workflow recovery lookup                            */
+  /* ------------------------------------------------------------------ */
+
+  it("finds exact named tabs across zellij sessions with session-scoped pane ids", async () => {
+    installMockExec((_file, args) => {
+      if (args[0] === "list-sessions") return "alpha\nbeta\n";
+      if (args.includes("list-panes")) {
+        const session = args[args.indexOf("--session") + 1];
+        return session === "alpha"
+          ? JSON.stringify([
+              { id: 4, tab_name: "wf-target", is_plugin: false },
+              { id: 5, tab_name: "other", is_plugin: false },
+            ])
+          : JSON.stringify([
+              { id: 4, tab_name: "wf-target", is_plugin: true },
+              { id: 8, tab_name: "wf-target", exited: true },
+              { id: 9, tab_name: "wf-target", is_plugin: false },
+            ]);
+      }
+      return "";
+    });
+    const { ZellijMultiplexer } = await importFresh<typeof ZellijModule>(
+      "../src/multiplexer-zellij",
+    );
+
+    expect(new ZellijMultiplexer().findPanesByWindowName("wf-target")).toEqual([
+      {
+        paneId: "4",
+        windowName: "wf-target",
+        session: "alpha",
+      },
+      {
+        paneId: "9",
+        windowName: "wf-target",
+        session: "beta",
+      },
+    ]);
+  });
+
+  it("does not report an empty recovery lookup when session enumeration fails", async () => {
+    installMockExec((_file, args) => {
+      if (args[0] === "list-sessions") throw new Error("permission denied");
+      return "";
+    });
+    const { ZellijMultiplexer } = await importFresh<typeof ZellijModule>(
+      "../src/multiplexer-zellij",
+    );
+
+    expect(() =>
+      new ZellijMultiplexer().findPanesByWindowName("wf-target"),
+    ).toThrow("Failed to enumerate zellij sessions");
   });
 
   /* ------------------------------------------------------------------ */

@@ -294,9 +294,9 @@ describe("workflow supervisor integration", () => {
         workflowId: workflow?.id,
       }),
     );
-    // Workflow children are never persisted, so they carry no parentSessionId —
-    // the reason ownership must be answered by supervisorOwner everywhere.
-    expect(mockLaunch.mock.calls[0]?.[0]?.parentSessionId).toBeUndefined();
+    // Process workflow children persist their parent session identity so a
+    // compatible restarted owner can adopt the pane safely.
+    expect(mockLaunch.mock.calls[0]?.[0]?.parentSessionId).toBe("session-a");
 
     const items = buildAsyncSupervisorItems(
       directSupervisorItems(undefined, owner),
@@ -574,6 +574,7 @@ describe("workflow supervisor integration", () => {
       const id = `saturating-${index}`;
       workflowJobRegistry.set(id, {
         id,
+        kind: "script",
         name: id,
         status: "running",
         startedAt: Date.now(),

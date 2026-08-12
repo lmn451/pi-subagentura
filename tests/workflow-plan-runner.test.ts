@@ -235,4 +235,46 @@ describe("workflow plan runner", () => {
       expect(error).toBeInstanceOf(WorkflowExecutionError);
     });
   });
+
+  it("lets a task-aware authority replay without entering the dispatcher", async () => {
+    const definition = plan([
+      {
+        id: "durable",
+        name: "Durable",
+        mode: "sequence",
+        tasks: [
+          { id: "a", content: "Alpha", instruction: "instruction-a" },
+          { id: "b", content: "Beta", instruction: "instruction-b" },
+        ],
+      },
+    ]);
+    const authority: string[] = [];
+    const runners: string[] = [];
+
+    const result = await runWorkflowPlan(definition, {
+      runAgent: async ({ prompt }) => {
+        runners.push(prompt);
+        return ok(`fresh:${prompt}`, { input: 2, output: 1 });
+      },
+      dispatchTask: async ({ task, request, dispatch }) => {
+        authority.push(`${task.definition.id}:${request.prompt}`);
+        return task.definition.id === "a"
+          ? ok("replayed:a", { input: 5, output: 3 })
+          : dispatch();
+      },
+    });
+
+    expect(authority).toEqual(["a:instruction-a", "b:instruction-b"]);
+    expect(runners).toEqual(["instruction-b"]);
+    expect(result.result.map((task) => task.output)).toEqual([
+      "replayed:a",
+      "fresh:instruction-b",
+    ]);
+    expect(result.agentsSpawned).toBe(1);
+    expect(result.usage).toMatchObject({
+      input: 7,
+      output: 4,
+      totalTokens: 11,
+    });
+  });
 });

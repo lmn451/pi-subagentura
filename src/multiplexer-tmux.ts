@@ -338,6 +338,51 @@ export class TmuxMultiplexer implements Multiplexer {
     return { paneId, windowName, session };
   }
 
+  findPanesByWindowName(windowName: string): readonly PaneRef[] {
+    try {
+      const output = execFileSync(
+        "tmux",
+        withTmuxSocket([
+          "list-panes",
+          "-a",
+          "-F",
+          "#{pane_id}\t#{window_name}\t#{session_name}",
+        ]),
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 5000,
+        },
+      );
+      return output
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .flatMap((line): PaneRef[] => {
+          const [paneId, listedWindowName, session] = line.split("\t");
+          if (
+            !paneId ||
+            !/^%\d+$/.test(paneId) ||
+            listedWindowName !== windowName
+          ) {
+            return [];
+          }
+          return [{ paneId, windowName: listedWindowName, session }];
+        });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /no server running|no sessions|No such file or directory/.test(
+          error.message,
+        )
+      ) {
+        return [];
+      }
+      throw new Error("Failed to enumerate tmux panes for recovery", {
+        cause: error,
+      });
+    }
+  }
+
   getPaneLiveness(paneId: string): PaneLiveness {
     if (!/^%\d+$/.test(paneId)) return "unknown";
     try {

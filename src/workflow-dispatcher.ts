@@ -1,3 +1,4 @@
+import type { SubagentResult } from "./helpers";
 import {
   defaultConcurrency,
   defaultProcessConcurrency,
@@ -5,134 +6,226 @@ import {
 } from "./workflow-core";
 
 type WorkflowAgentRequest = Parameters<WorkflowAgentRunner>[0];
-type WorkflowAgentResult = Awaited<ReturnType<WorkflowAgentRunner>>;
 
-export interface WorkflowDispatcherOptions {
-  inProcessCapacity?: number;
-  processCapacity?: number;
+export interface WorkflowAgentDispatcherOptions {
+  /** Maximum concurrently running in-process agents. */
+  concurrency?: number;
+  /** Maximum concurrently running process-backed agents. */
+  processConcurrency?: number;
+  /** Optional default runner used by run(). */
+  runAgent?: WorkflowAgentRunner;
 }
 
-export interface WorkflowDispatcher {
+export interface WorkflowAgentDispatchOptions {
+  /**
+   * Signal used only while waiting for a dispatcher slot. Once started, the
+   * request's own signal controls the agent.
+   */
+  signal?: AbortSignal;
+  /**
+   * Internal fence evaluated after acquiring a lane slot and immediately before
+   * invoking the runner. A rejection releases the slot without dispatching.
+   */
+  beforeStart?: () => void | Promise<void>;
+}
+
+interface QueuedDispatch {
+  readonly start: () => void;
+  readonly reject: (reason: unknown) => void;
+  readonly signal?: AbortSignal;
+  readonly onAbort?: () => void;
+}
+
+interface DispatchLane {
+  readonly cap: number;
+  active: number;
+  readonly queue: QueuedDispatch[];
+}
+
+/**
+ * The single concurrency boundary for workflow agent execution.
+ *
+ * It deliberately knows nothing about durable replay or workflow state. Process
+ * and in-process work use independent lanes, and every accepted dispatch remains
+ * observable by drain() until it either runs to settlement or leaves the queue.
+ */
+export class WorkflowAgentDispatcher {
+  readonly #inProcess: DispatchLane;
+  readonly #process: DispatchLane;
+  readonly #defaultRunner?: WorkflowAgentRunner;
+  #closed = false;
+  #closeReason: unknown;
+  #pending = 0;
+  readonly #drainWaiters = new Set<() => void>();
+
+  constructor(options: WorkflowAgentDispatcherOptions = {}) {
+    this.#inProcess = createLane(
+      options.concurrency ?? defaultConcurrency(),
+      "concurrency",
+    );
+    this.#process = createLane(
+      options.processConcurrency ?? defaultProcessConcurrency(),
+      "processConcurrency",
+    );
+    this.#defaultRunner = options.runAgent;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  get activeCount(): number {
+    return this.#inProcess.active + this.#process.active;
+  }
+
+  get queuedCount(): number {
+    return this.#inProcess.queue.length + this.#process.queue.length;
+  }
+
+  run(
+    request: WorkflowAgentRequest,
+    options?: WorkflowAgentDispatchOptions,
+  ): Promise<SubagentResult>;
   run(
     request: WorkflowAgentRequest,
     runner: WorkflowAgentRunner,
-  ): Promise<WorkflowAgentResult>;
-}
+    options?: WorkflowAgentDispatchOptions,
+  ): Promise<SubagentResult>;
+  run(
+    request: WorkflowAgentRequest,
+    runnerOrOptions?: WorkflowAgentRunner | WorkflowAgentDispatchOptions,
+    maybeOptions?: WorkflowAgentDispatchOptions,
+  ): Promise<SubagentResult> {
+    const runner =
+      typeof runnerOrOptions === "function"
+        ? runnerOrOptions
+        : this.#defaultRunner;
+    const options =
+      typeof runnerOrOptions === "function" ? maybeOptions : runnerOrOptions;
+    if (runner === undefined) {
+      return Promise.reject(
+        new Error("WorkflowAgentDispatcher requires a runner."),
+      );
+    }
 
-interface Waiter {
-  signal?: AbortSignal;
-  queued: boolean;
-  resolve: (release: () => void) => void;
-  reject: (reason: unknown) => void;
-  onAbort?: () => void;
-}
+    const lane =
+      request.isolation === "in-process" ? this.#inProcess : this.#process;
+    const queueSignal = options?.signal ?? request.signal;
+    if (this.#closed) return Promise.reject(this.#closeReason);
+    if (queueSignal?.aborted) {
+      return Promise.reject(abortReason(queueSignal));
+    }
 
-interface Lane {
-  capacity: number;
-  active: number;
-  queue: Waiter[];
-}
-
-/** Shared raw-backend capacity for every job from one tool registration. */
-export function createWorkflowDispatcher(
-  options: WorkflowDispatcherOptions = {},
-): WorkflowDispatcher {
-  const inProcess = createLane(
-    options.inProcessCapacity ?? defaultConcurrency(),
-    "in-process",
-  );
-  const process = createLane(
-    options.processCapacity ?? defaultProcessConcurrency(),
-    "process",
-  );
-
-  return {
-    async run(request, runner) {
-      const lane = request.isolation === "in-process" ? inProcess : process;
-      const release = await acquire(lane, request.signal);
-      try {
-        throwIfAborted(request.signal);
-        return await runner(request);
-      } finally {
-        release();
-      }
-    },
-  };
-}
-
-function createLane(capacity: number, name: string): Lane {
-  if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new Error(`${name} workflow capacity must be a positive integer`);
-  }
-  return {
-    capacity,
-    active: 0,
-    queue: [],
-  };
-}
-
-function acquire(lane: Lane, signal?: AbortSignal): Promise<() => void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const waiter: Waiter = {
-      signal,
-      queued: true,
-      resolve,
-      reject,
-    };
-    if (signal) {
-      waiter.onAbort = () => {
-        if (!waiter.queued) return;
-        waiter.queued = false;
-        const index = lane.queue.indexOf(waiter);
-        if (index >= 0) lane.queue.splice(index, 1);
-        reject(abortReason(signal));
+    this.#pending++;
+    return new Promise<SubagentResult>((resolve, reject) => {
+      const settleQueuedRejection = (reason: unknown) => {
+        this.#pending--;
+        reject(reason);
+        this.#notifyDrained();
       };
-      signal.addEventListener("abort", waiter.onAbort, { once: true });
-    }
-    lane.queue.push(waiter);
-    pump(lane);
-  });
-}
+      const queued: QueuedDispatch = {
+        signal: queueSignal,
+        reject: settleQueuedRejection,
+        start: () => {
+          if (queued.onAbort && queued.signal) {
+            queued.signal.removeEventListener("abort", queued.onAbort);
+          }
+          lane.active++;
+          Promise.resolve()
+            .then(() => options?.beforeStart?.())
+            .then(() => runner(request))
+            .then(resolve, reject)
+            .finally(() => {
+              lane.active--;
+              this.#pending--;
+              this.#pump(lane);
+              this.#notifyDrained();
+            });
+        },
+        ...(queueSignal
+          ? {
+              onAbort: () => {
+                const index = lane.queue.indexOf(queued);
+                if (index < 0) return;
+                lane.queue.splice(index, 1);
+                settleQueuedRejection(abortReason(queueSignal));
+              },
+            }
+          : {}),
+      };
 
-function pump(lane: Lane): void {
-  while (lane.active < lane.capacity) {
-    const waiter = lane.queue.shift();
-    if (!waiter) return;
-    if (!waiter.queued) continue;
-    waiter.queued = false;
-    if (waiter.signal && waiter.onAbort) {
-      waiter.signal.removeEventListener("abort", waiter.onAbort);
-    }
-    if (waiter.signal?.aborted) {
-      waiter.reject(abortReason(waiter.signal));
-      continue;
-    }
-
-    lane.active++;
-    if (waiter.signal?.aborted) {
-      releaseLane(lane);
-      waiter.reject(abortReason(waiter.signal));
-      continue;
-    }
-    let released = false;
-    waiter.resolve(() => {
-      if (released) return;
-      released = true;
-      releaseLane(lane);
+      if (lane.active < lane.cap) {
+        queued.start();
+        return;
+      }
+      lane.queue.push(queued);
+      if (queued.onAbort && queueSignal) {
+        queueSignal.addEventListener("abort", queued.onAbort, { once: true });
+      }
     });
   }
+
+  /** Reject queued and future dispatches. Already-running agents are untouched. */
+  close(
+    reason: unknown = new Error("Workflow agent dispatcher is closed."),
+  ): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#closeReason = reason;
+    this.#rejectQueue(this.#inProcess, reason);
+    this.#rejectQueue(this.#process, reason);
+    this.#notifyDrained();
+  }
+
+  /** Wait for every dispatch accepted before or during this call to settle. */
+  drain(): Promise<void> {
+    if (this.#pending === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => this.#drainWaiters.add(resolve));
+  }
+
+  #pump(lane: DispatchLane): void {
+    while (!this.#closed && lane.active < lane.cap) {
+      const next = lane.queue.shift();
+      if (next === undefined) return;
+      if (next.signal?.aborted) {
+        if (next.onAbort) {
+          next.signal.removeEventListener("abort", next.onAbort);
+        }
+        next.reject(abortReason(next.signal));
+        continue;
+      }
+      next.start();
+    }
+  }
+
+  #rejectQueue(lane: DispatchLane, reason: unknown): void {
+    for (;;) {
+      const queued = lane.queue.shift();
+      if (queued === undefined) return;
+      if (queued.onAbort && queued.signal) {
+        queued.signal.removeEventListener("abort", queued.onAbort);
+      }
+      queued.reject(reason);
+    }
+  }
+
+  #notifyDrained(): void {
+    if (this.#pending !== 0) return;
+    for (const resolve of this.#drainWaiters) resolve();
+    this.#drainWaiters.clear();
+  }
 }
 
-function releaseLane(lane: Lane): void {
-  lane.active--;
-  pump(lane);
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortReason(signal);
+function createLane(cap: number, name: string): DispatchLane {
+  if (!Number.isSafeInteger(cap) || cap < 1) {
+    throw new Error(`${name} must be a positive safe integer.`);
+  }
+  return { cap, active: 0, queue: [] };
 }
 
 function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error("Workflow agent cancelled");
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
 }

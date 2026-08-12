@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_ITEMS_PER_CALL,
+  MAX_WORKFLOW_DEPTH,
   MAX_WORKFLOW_AGENT_RECORDS,
   SCHEMA_RETRIES,
   MAX_WORKFLOW_JOBS,
@@ -1202,18 +1203,32 @@ describe("workflow() composition", () => {
     ).rejects.toThrow(/saved-workflow name/i);
   });
 
-  it("rejects nesting beyond one level", async () => {
-    const child = `export const meta = { name: "child", description: "c" };\nreturn await workflow("grand");`;
-    const loadWorkflow = (n: string) =>
-      n === "child"
-        ? child
-        : `export const meta = { name: "g", description: "g" };\nreturn 1;`;
+  it("allows nested workflows up to the configured depth and rejects deeper", async () => {
+    const sourceAt = (level: number, last: number) =>
+      `export const meta = { name: "level-${level}", description: "nested" };\n` +
+      (level === last
+        ? `return ${level};`
+        : `return await workflow("level-${level + 1}");`);
+    const loaderThrough =
+      (last: number) =>
+      (name: string): string | null => {
+        const match = /^level-(\d+)$/.exec(name);
+        return match === null ? null : sourceAt(Number(match[1]), last);
+      };
+    const root = meta + `return await workflow("level-1");`;
+
     await expect(
-      runWorkflow(meta + `return await workflow("child");`, {
+      runWorkflow(root, {
         runAgent: echoRunner(),
-        loadWorkflow,
+        loadWorkflow: loaderThrough(MAX_WORKFLOW_DEPTH),
       }),
-    ).rejects.toThrow(/one level deep/);
+    ).resolves.toMatchObject({ result: MAX_WORKFLOW_DEPTH });
+    await expect(
+      runWorkflow(root, {
+        runAgent: echoRunner(),
+        loadWorkflow: loaderThrough(MAX_WORKFLOW_DEPTH + 1),
+      }),
+    ).rejects.toThrow(`maximum depth of ${MAX_WORKFLOW_DEPTH}`);
   });
 });
 
@@ -1731,6 +1746,7 @@ it("throws when all 100 job slots are full and none can be evicted", () => {
       const id = `cap-fill-${i}`;
       workflowJobRegistry.set(id, {
         id,
+        kind: "script",
         name: "filler",
         status: "running",
         startedAt: Date.now(),
@@ -2457,6 +2473,42 @@ describe("renderProgress", () => {
     expect(result).toContain("⚠ 1 error(s)");
   });
 
+  it("neutralizes controls in provider-controlled progress fields", () => {
+    const unsafe = "\u001b[31m注入\u009b2J\nΩ";
+    const base = {
+      agentsSpawned: 1,
+      errorCount: 0,
+      tokensSpent: 0,
+      runningCount: 1,
+    };
+    const rendered = [
+      renderProgress({ ...base, kind: "phase", phase: unsafe }),
+      renderProgress({ ...base, kind: "log", message: unsafe }),
+      renderProgress({
+        ...base,
+        kind: "agent_start",
+        label: unsafe,
+        model: unsafe,
+      }),
+      renderProgress({
+        ...base,
+        kind: "agent_done",
+        label: unsafe,
+        model: unsafe,
+      }),
+    ];
+
+    for (const progress of rendered) {
+      const rows = progress.split("\n");
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+      }
+      expect(progress).toContain("注入");
+      expect(progress).toContain("Ω");
+    }
+  });
+
   it("omits running count when runningCount is 0", () => {
     const p: WorkflowProgress = {
       kind: "phase",
@@ -2502,7 +2554,7 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers 6 tools with the Pi SDK", () => {
+  it("registers model-safe workflow tools with the Pi SDK", () => {
     const tools: Array<{ name: string }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -2511,9 +2563,11 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
     registerWorkflowTool(pi as any);
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(9);
     expect(tools.map((t) => t.name)).toEqual([
+      "workflow_plan",
       "workflow",
+      "workflow_approval",
       "get_workflow_status",
       "get_workflow_result",
       "cancel_workflow",
@@ -2836,7 +2890,7 @@ describe("registerWorkflowTool", () => {
     registerWorkflowTool(pi as any);
     const wf = tools.find((t) => t.name === "workflow")!;
     expect(wf.description).toContain("agent(prompt, opts?)");
-    expect(wf.description).toContain("workflow(name, args?)");
+    expect(wf.description).toContain("workflow(name, args?, opts?)");
     expect(wf.description).toContain("immutable parent working directory");
     expect(wf.promptSnippet).toContain("decomposable multi-agent work");
     const guidance = wf.promptGuidelines.join("\n");
@@ -3131,6 +3185,7 @@ describe("registerWorkflowTool", () => {
         const id = `sync-cap-filler-${index}`;
         workflowJobRegistry.set(id, {
           id,
+          kind: "script",
           name: id,
           status: "running",
           startedAt: Date.now(),

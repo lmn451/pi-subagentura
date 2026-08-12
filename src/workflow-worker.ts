@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { types as utilTypes } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -21,16 +22,15 @@ import {
   SCHEMA_RETRIES,
   WORKFLOW_SYNC_TIMEOUT_MS,
   WORKFLOW_WALL_TIMEOUT_MS,
-  createSemaphore,
-  defaultConcurrency,
-  defaultProcessConcurrency,
+  WORKFLOW_CLONE_LIMITS,
+  WORKFLOW_WORKER_RESOURCE_LIMITS,
   extractJson,
   validateSchemaDefinition,
   validateSchema,
   type RunWorkflowOptions,
-  type Semaphore,
   type WorkflowAgentOpts,
   type WorkflowAgentRunner,
+  type WorkflowDurableAgentDispatchResult,
   type WorkflowMeta,
   type WorkflowProgress,
   type WorkflowProgressUpdate,
@@ -49,6 +49,11 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
+import { WorkflowAgentDispatcher } from "./workflow-dispatcher";
+import {
+  WorkflowQuotaError,
+  type WorkflowQuotaDimension,
+} from "./workflow-quotas";
 
 // ── Engine (shared across nested workflows) ──────────────────────────
 
@@ -65,9 +70,10 @@ interface Engine {
   closed: boolean;
   onProgress?: (p: WorkflowProgress) => void;
   onCancellationSnapshot?: RunWorkflowOptions["onCancellationSnapshot"];
-  sem: Semaphore;
-  processSem: Semaphore;
+  dispatcher: WorkflowAgentDispatcher;
+  ownsDispatcher: boolean;
   loadWorkflow?: (name: string) => string | null;
+  durableScript?: RunWorkflowOptions["durableScript"];
   cwd: string;
   budgetTotal: number | null;
   workflowTimeoutMs: number;
@@ -184,6 +190,12 @@ export async function runWorkflow(
   } else {
     opts.signal?.addEventListener("abort", forwardAbort, { once: true });
   }
+  const dispatcher =
+    opts.dispatcher ??
+    new WorkflowAgentDispatcher({
+      concurrency: opts.concurrency,
+      processConcurrency: opts.processConcurrency,
+    });
   const engine: Engine = {
     runAgent: opts.runAgent,
     abort,
@@ -191,11 +203,10 @@ export async function runWorkflow(
     closed: false,
     onProgress: opts.onProgress,
     onCancellationSnapshot: opts.onCancellationSnapshot,
-    sem: createSemaphore(opts.concurrency ?? defaultConcurrency()),
-    processSem: createSemaphore(
-      opts.processConcurrency ?? defaultProcessConcurrency(),
-    ),
+    dispatcher,
+    ownsDispatcher: opts.dispatcher === undefined,
     loadWorkflow: opts.loadWorkflow,
+    durableScript: opts.durableScript,
     cwd: opts.cwd ?? process.cwd(),
     budgetTotal: opts.budgetTotal ?? null,
     counters: {
@@ -235,6 +246,9 @@ export async function runWorkflow(
     );
   } finally {
     opts.signal?.removeEventListener("abort", forwardAbort);
+    if (engine.ownsDispatcher) {
+      engine.dispatcher.close();
+    }
   }
 }
 
@@ -245,21 +259,35 @@ type WorkerRpcResponse = {
   value?: unknown;
   error?: string;
   tokensDelta: number;
+  fatal?: boolean;
 };
+
+type WorkerAgentCall = (
+  payload: {
+    prompt: unknown;
+    opts?: WorkflowAgentOpts;
+  },
+  gateRequest?: Parameters<WorkflowAgentRunner>[0],
+) => Promise<WorkflowDurableAgentDispatchResult>;
 
 class WorkerRpcFailure extends Error {
   readonly tokensDelta: number;
   readonly runnerFailure: { cause: unknown } | undefined;
+  readonly originalCause: unknown;
+  readonly usage: Usage;
 
   constructor(
     error: unknown,
     tokensDelta: number,
-    runnerFailure?: { cause: unknown },
+    runnerFailure: { cause: unknown } | undefined,
+    usage: Usage,
   ) {
     super(error instanceof Error ? error.message : String(error));
     this.name = "WorkerRpcFailure";
+    this.originalCause = error;
     this.tokensDelta = tokensDelta;
     this.runnerFailure = runnerFailure;
+    this.usage = usage;
   }
 }
 
@@ -270,6 +298,197 @@ class WorkerTerminalFailure extends Error {
     super(message);
     this.name = "WorkerTerminalFailure";
     this.originalCause = originalCause;
+  }
+}
+
+class WorkerCloneTransferFailure extends Error {
+  readonly originalCause: unknown;
+
+  constructor(label: string, originalCause: unknown) {
+    const detail =
+      originalCause instanceof Error
+        ? originalCause.message
+        : "structured clone rejected the payload";
+    super(`Unable to transfer bounded ${label}: ${detail.slice(0, 512)}`, {
+      cause: originalCause,
+    });
+    this.name = "WorkerCloneTransferFailure";
+    this.originalCause = originalCause;
+  }
+}
+
+function boundedWorkerErrorMessage(error: unknown): string {
+  let message: string;
+  try {
+    message = error instanceof Error ? error.message : String(error);
+  } catch {
+    message = "Workflow RPC failed with an unprintable error.";
+  }
+  return message.length <= 512 ? message : `${message.slice(0, 509)}...`;
+}
+
+const CLONE_QUOTA_DIMENSIONS = {
+  maxDepth: "maxValueDepth",
+  maxNodes: "maxValueNodes",
+  maxStringBytes: "maxValueStringBytes",
+  maxBytes: "maxValueBytes",
+} as const satisfies Record<
+  keyof typeof WORKFLOW_CLONE_LIMITS,
+  WorkflowQuotaDimension
+>;
+
+function assertBoundedWorkerClone(root: unknown, label: string): void {
+  const seen = new WeakSet<object>();
+  const stack: Array<{ value: unknown; depth: number }> = [
+    { value: root, depth: 0 },
+  ];
+  let nodes = 0;
+  let bytes = 0;
+
+  const fail = (
+    dimension: keyof typeof WORKFLOW_CLONE_LIMITS,
+    actual: number,
+  ): never => {
+    throw new WorkflowQuotaError(
+      CLONE_QUOTA_DIMENSIONS[dimension],
+      WORKFLOW_CLONE_LIMITS[dimension],
+      actual,
+    );
+  };
+  const consumeBytes = (amount: number): void => {
+    bytes += amount;
+    if (
+      !Number.isSafeInteger(bytes) ||
+      bytes > WORKFLOW_CLONE_LIMITS.maxBytes
+    ) {
+      fail("maxBytes", bytes);
+    }
+  };
+  const consumeString = (value: string): void => {
+    const stringBytes = Buffer.byteLength(value, "utf8");
+    if (stringBytes > WORKFLOW_CLONE_LIMITS.maxStringBytes) {
+      fail("maxStringBytes", stringBytes);
+    }
+    consumeBytes(stringBytes + 2);
+  };
+  const enqueue = (value: unknown, depth: number): void => {
+    const projectedNodes = nodes + stack.length + 1;
+    if (projectedNodes > WORKFLOW_CLONE_LIMITS.maxNodes) {
+      fail("maxNodes", projectedNodes);
+    }
+    if (depth > WORKFLOW_CLONE_LIMITS.maxDepth) fail("maxDepth", depth);
+    stack.push({ value, depth });
+  };
+  const unsupported = (detail: string): never => {
+    throw new TypeError(`${detail} in ${label} structured-clone payload.`);
+  };
+
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    nodes += 1;
+    if (nodes > WORKFLOW_CLONE_LIMITS.maxNodes) fail("maxNodes", nodes);
+    if (depth > WORKFLOW_CLONE_LIMITS.maxDepth) fail("maxDepth", depth);
+
+    if (value === null || value === undefined) {
+      consumeBytes(4);
+      continue;
+    }
+    switch (typeof value) {
+      case "boolean":
+        consumeBytes(5);
+        continue;
+      case "number":
+        consumeBytes(8);
+        continue;
+      case "string":
+        consumeString(value);
+        continue;
+      case "bigint":
+      case "symbol":
+      case "function":
+        unsupported(`Unsupported ${typeof value}`);
+      case "object":
+        break;
+      default:
+        unsupported("Unsupported value");
+    }
+
+    if (seen.has(value)) {
+      consumeBytes(4);
+      continue;
+    }
+    seen.add(value);
+    if (utilTypes.isProxy(value)) unsupported("Proxy value");
+
+    if (utilTypes.isAnyArrayBuffer(value)) {
+      consumeBytes(value.byteLength);
+      continue;
+    }
+    if (utilTypes.isArrayBufferView(value)) {
+      consumeBytes(8);
+      enqueue(value.buffer, depth + 1);
+      continue;
+    }
+    if (utilTypes.isDate(value)) {
+      consumeBytes(8);
+      continue;
+    }
+    if (utilTypes.isRegExp(value)) {
+      const sourceDescriptor = Object.getOwnPropertyDescriptor(
+        RegExp.prototype,
+        "source",
+      );
+      if (typeof sourceDescriptor?.get !== "function") {
+        throw new TypeError(
+          `Uninspectable RegExp in ${label} structured-clone payload.`,
+        );
+      }
+      const source = sourceDescriptor.get.call(value);
+      if (typeof source !== "string") {
+        throw new TypeError(
+          `Invalid RegExp source in ${label} structured-clone payload.`,
+        );
+      }
+      consumeString(source);
+      consumeBytes(8);
+      continue;
+    }
+    if (utilTypes.isMap(value)) {
+      consumeBytes(2);
+      for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+        enqueue(entryValue, depth + 1);
+        enqueue(key, depth + 1);
+      }
+      continue;
+    }
+    if (utilTypes.isSet(value)) {
+      consumeBytes(2);
+      for (const entryValue of Set.prototype.values.call(value)) {
+        enqueue(entryValue, depth + 1);
+      }
+      continue;
+    }
+    if (
+      utilTypes.isNativeError(value) ||
+      utilTypes.isPromise(value) ||
+      utilTypes.isWeakMap(value) ||
+      utilTypes.isWeakSet(value)
+    ) {
+      unsupported("Unsupported object");
+    }
+
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== "string") {
+        throw new TypeError(`Symbol key in ${label} structured-clone payload.`);
+      }
+      const descriptor = descriptors[key]!;
+      if (!descriptor.enumerable) continue;
+      consumeString(key);
+      if (!("value" in descriptor)) unsupported("Accessor");
+      enqueue(descriptor.value, depth + 1);
+    }
+    consumeBytes(2);
   }
 }
 
@@ -293,10 +512,13 @@ async function executeScript(
       ),
     );
   };
-  const runAgentCall = async (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }): Promise<{ value: unknown; tokensDelta: number }> => {
+  const runAgentCall = async (
+    payload: {
+      prompt: unknown;
+      opts?: WorkflowAgentOpts;
+    },
+    gateRequest?: Parameters<WorkflowAgentRunner>[0],
+  ): Promise<WorkflowDurableAgentDispatchResult> => {
     if (typeof payload.prompt !== "string" || payload.prompt.trim() === "") {
       throw new Error("agent(prompt): prompt must be a non-empty string.");
     }
@@ -312,38 +534,26 @@ async function executeScript(
         );
       }
     }
-    const isolation = agentOpts.isolation ?? "process";
+    const isolation =
+      gateRequest?.isolation ?? agentOpts.isolation ?? "process";
+    const effectiveModel = gateRequest?.model ?? agentOpts.model;
     const isProcess = isolation !== "in-process";
-    const sem = isProcess ? engine.processSem : engine.sem;
     const resolvedPhase =
       agentOpts.phase != null ? String(agentOpts.phase) : undefined;
-    await sem.acquire();
     let tokensDelta = 0;
+    let operationUsage = zeroWorkflowUsage();
     let runnerFailure: { cause: unknown } | undefined;
     try {
       let lastErr = "";
       const attempts = hasSchema ? SCHEMA_RETRIES : 1;
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (engine.signal?.aborted) throw new Error("Workflow aborted.");
-        if (engine.counters.agentsSpawned >= MAX_TOTAL_AGENTS) {
-          throw new Error(
-            `Workflow exceeded the ${MAX_TOTAL_AGENTS}-agent lifetime cap.`,
-          );
-        }
-        engine.counters.agentsSpawned++;
-        const agentId = ++engine.nextAgentAttemptId;
-        engine.counters.runningCount++;
+        let agentId: number | undefined;
+        let runnerStarted = false;
         let status: "done" | "error" = "done";
         let agentUsage: WorkflowUsage | undefined;
-        let finalModel = agentOpts.model;
+        let finalModel = effectiveModel;
         try {
-          emit({
-            kind: "agent_start",
-            label: agentOpts.label,
-            phase: resolvedPhase,
-            model: agentOpts.model,
-            agentId,
-          });
           const finalPrompt = hasSchema
             ? isProcess
               ? buildProcessSchemaPrompt(
@@ -359,19 +569,21 @@ async function executeScript(
             promise: undefined as unknown as Promise<SubagentResult>,
             usageAccounted: false,
           };
-          const agentRun = Promise.resolve().then(() =>
-            engine.runAgent({
+          const agentRun = engine.dispatcher.run(
+            {
+              ...gateRequest,
               prompt: finalPrompt,
-              persona: agentOpts.persona,
-              model: agentOpts.model,
+              persona: gateRequest?.persona ?? agentOpts.persona,
+              model: effectiveModel,
               signal: engine.signal,
               isolation,
-              label: agentOpts.label,
+              label: gateRequest?.label ?? agentOpts.label,
               ...(hasSchema && !isProcess ? { schema: agentOpts.schema } : {}),
               onCancellationSnapshot: engine.onCancellationSnapshot,
               thinkingLevel: agentOpts.thinkingLevel,
               onProgress: (ev) => {
                 if (ev.liveUsage) activeRun.liveUsage = { ...ev.liveUsage };
+                gateRequest?.onProgress?.(ev);
                 if (ev.kind === "phase") {
                   if (ev.phase) {
                     emit({
@@ -388,7 +600,27 @@ async function executeScript(
                   agentId,
                 });
               },
-            }),
+            },
+            async (request: Parameters<WorkflowAgentRunner>[0]) => {
+              if (engine.signal.aborted) throw new Error("Workflow aborted.");
+              if (engine.counters.agentsSpawned >= MAX_TOTAL_AGENTS) {
+                throw new Error(
+                  `Workflow exceeded the ${MAX_TOTAL_AGENTS}-agent lifetime cap.`,
+                );
+              }
+              engine.counters.agentsSpawned++;
+              agentId = ++engine.nextAgentAttemptId;
+              engine.counters.runningCount++;
+              runnerStarted = true;
+              emit({
+                kind: "agent_start",
+                label: agentOpts.label,
+                phase: resolvedPhase,
+                model: effectiveModel,
+                agentId,
+              });
+              return engine.runAgent(request);
+            },
           );
           activeRun.promise = agentRun;
           engine.activeAgentRuns.add(activeRun);
@@ -409,6 +641,7 @@ async function executeScript(
                 terminalAgentUsage ?? workflowUsageFromUsage(partialUsage);
               tokensDelta += agentUsage?.output ?? 0;
               accountAgentUsage(engine, activeRun, partialUsage);
+              operationUsage = addWorkflowUsage(operationUsage, partialUsage);
               status = "error";
               runnerFailure = { cause: error };
               if (!engine.signal.aborted) engine.counters.errorCount++;
@@ -421,12 +654,30 @@ async function executeScript(
           const outTokens = agentUsage?.output ?? 0;
           tokensDelta += outTokens;
           accountAgentUsage(engine, activeRun, res.usage);
+          operationUsage = addWorkflowUsage(operationUsage, res.usage);
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
-            return { value: null, tokensDelta };
+            return {
+              value: null,
+              tokensDelta,
+              usage: usageAsProjectUsage(operationUsage),
+            };
           }
-          if (!hasSchema) return { value: res.output, tokensDelta };
+          if (res.cancelled) {
+            return {
+              value: res.output,
+              tokensDelta,
+              usage: usageAsProjectUsage(operationUsage),
+              cancelled: true,
+            };
+          }
+          if (!hasSchema)
+            return {
+              value: res.output,
+              tokensDelta,
+              usage: usageAsProjectUsage(operationUsage),
+            };
           if (!isProcess && res.workflowStructuredOutput != null) {
             const schemaCapture = res.workflowStructuredOutput;
             if (!schemaCapture?.called) {
@@ -436,7 +687,11 @@ async function executeScript(
             }
             const verrs = validateSchema(schemaCapture.value, agentOpts.schema);
             if (verrs.length === 0)
-              return { value: schemaCapture.value, tokensDelta };
+              return {
+                value: schemaCapture.value,
+                tokensDelta,
+                usage: usageAsProjectUsage(operationUsage),
+              };
             status = "error";
             lastErr = verrs.slice(0, 5).join("; ");
             continue;
@@ -446,7 +701,12 @@ async function executeScript(
             try {
               const parsed = JSON.parse(raw);
               const verrs = validateSchema(parsed, agentOpts.schema);
-              if (verrs.length === 0) return { value: parsed, tokensDelta };
+              if (verrs.length === 0)
+                return {
+                  value: parsed,
+                  tokensDelta,
+                  usage: usageAsProjectUsage(operationUsage),
+                };
               status = "error";
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
@@ -460,16 +720,18 @@ async function executeScript(
             lastErr = "no JSON object/array found in output";
           }
         } finally {
-          engine.counters.runningCount--;
-          emit({
-            kind: "agent_done",
-            label: agentOpts.label,
-            phase: resolvedPhase,
-            model: finalModel,
-            status,
-            agentId,
-            agentUsage,
-          });
+          if (runnerStarted) {
+            engine.counters.runningCount--;
+            emit({
+              kind: "agent_done",
+              label: agentOpts.label,
+              phase: resolvedPhase,
+              model: finalModel,
+              status,
+              agentId,
+              agentUsage,
+            });
+          }
         }
       }
       engine.counters.errorCount++;
@@ -477,11 +739,18 @@ async function executeScript(
         kind: "log",
         message: `agent(schema) failed after ${attempts} attempts: ${lastErr}`,
       });
-      return { value: null, tokensDelta };
+      return {
+        value: null,
+        tokensDelta,
+        usage: usageAsProjectUsage(operationUsage),
+      };
     } catch (error) {
-      throw new WorkerRpcFailure(error, tokensDelta, runnerFailure);
-    } finally {
-      sem.release();
+      throw new WorkerRpcFailure(
+        error,
+        tokensDelta,
+        runnerFailure,
+        usageAsProjectUsage(operationUsage),
+      );
     }
   };
 
@@ -502,16 +771,32 @@ function runWorkflowWorker(
   args: unknown,
   engine: Engine,
   emit: (p: WorkflowProgressUpdate) => void,
-  runAgentCall: (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }) => Promise<{ value: unknown; tokensDelta: number }>,
+  runAgentCall: WorkerAgentCall,
 ): Promise<{ meta: WorkflowMeta; result: unknown }> {
+  const initMessage = {
+    type: "init",
+    script,
+    args,
+    cwd: engine.cwd,
+    budgetTotal: engine.budgetTotal,
+    syncTimeoutMs: WORKFLOW_SYNC_TIMEOUT_MS,
+    maxItemsPerCall: MAX_ITEMS_PER_CALL,
+    maxWorkflowDepth: MAX_WORKFLOW_DEPTH,
+    cloneLimits: WORKFLOW_CLONE_LIMITS,
+    durable:
+      engine.durableScript === undefined
+        ? null
+        : {
+            rootDefinitionPath: engine.durableScript.rootDefinitionPath,
+          },
+  };
+  assertBoundedWorkerClone(initMessage, "workflow initialization");
   return new Promise((resolve, reject) => {
     let settled = false;
-    const runnerFailures = new Map<number, unknown>();
+    const terminalFailures = new Map<number, unknown>();
     const worker = new Worker(
       new URL("./workflow-worker-thread.mjs", import.meta.url),
+      { resourceLimits: WORKFLOW_WORKER_RESOURCE_LIMITS },
     );
     const terminateWorker = () => {
       try {
@@ -548,7 +833,7 @@ function runWorkflowWorker(
     const cleanup = () => {
       clearTimeout(timeout);
       engine.signal.removeEventListener("abort", onAbort);
-      runnerFailures.clear();
+      terminalFailures.clear();
       worker.removeAllListeners();
     };
 
@@ -566,9 +851,9 @@ function runWorkflowWorker(
       }
       if (msg.type === "error") {
         const message = String(msg.error ?? "Workflow worker failed.");
-        if (typeof msg.rpcId === "number" && runnerFailures.has(msg.rpcId)) {
+        if (typeof msg.rpcId === "number" && terminalFailures.has(msg.rpcId)) {
           fail(
-            new WorkerTerminalFailure(message, runnerFailures.get(msg.rpcId)),
+            new WorkerTerminalFailure(message, terminalFailures.get(msg.rpcId)),
           );
         } else {
           fail(new Error(message));
@@ -586,35 +871,65 @@ function runWorkflowWorker(
         engine,
         runAgentCall,
       ).catch((err) => {
+        if (settled) return;
+        const fatal =
+          engine.durableScript !== undefined ||
+          err instanceof WorkflowQuotaError ||
+          err instanceof WorkerCloneTransferFailure;
         if (err instanceof WorkerRpcFailure && err.runnerFailure) {
-          runnerFailures.set(msg.id, err.runnerFailure.cause);
+          terminalFailures.set(msg.id, err.runnerFailure.cause);
+        } else if (fatal) {
+          const originalCause =
+            err instanceof WorkerRpcFailure
+              ? err.originalCause
+              : err instanceof WorkerCloneTransferFailure
+                ? err.originalCause
+                : err;
+          terminalFailures.set(msg.id, originalCause);
         }
-        const error = err instanceof Error ? err.message : String(err);
         const tokensDelta =
           err instanceof WorkerRpcFailure ? err.tokensDelta : 0;
-        postWorkerResponse(worker, {
-          id: msg.id,
-          ok: false,
-          error,
-          tokensDelta,
-        });
+        try {
+          postWorkerResponse(worker, {
+            id: msg.id,
+            ok: false,
+            error: boundedWorkerErrorMessage(err),
+            tokensDelta,
+            fatal,
+          });
+        } catch (responseError) {
+          fail(responseError);
+        }
       });
     });
-    worker.on("error", fail);
+    worker.on("error", (error) => {
+      const errorCode =
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : undefined;
+      if (errorCode === "ERR_WORKER_OUT_OF_MEMORY") {
+        fail(
+          new Error(
+            `Workflow worker exceeded its ${WORKFLOW_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb} MiB old-generation memory limit.`,
+            { cause: error },
+          ),
+        );
+        return;
+      }
+      fail(error);
+    });
     worker.on("exit", (code) => {
       if (!settled && code !== 0)
         fail(new Error(`Workflow worker exited with code ${code}.`));
     });
-    worker.postMessage({
-      type: "init",
-      script,
-      args,
-      cwd: engine.cwd,
-      budgetTotal: engine.budgetTotal,
-      syncTimeoutMs: WORKFLOW_SYNC_TIMEOUT_MS,
-      maxItemsPerCall: MAX_ITEMS_PER_CALL,
-      maxWorkflowDepth: MAX_WORKFLOW_DEPTH,
-    });
+    try {
+      worker.postMessage(initMessage);
+    } catch (error) {
+      fail(new WorkerCloneTransferFailure("workflow initialization", error));
+    }
   });
 }
 
@@ -622,13 +937,21 @@ async function handleWorkerRpc(
   msg: WorkerRpcRequest,
   worker: Worker,
   engine: Engine,
-  runAgentCall: (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }) => Promise<{ value: unknown; tokensDelta: number }>,
+  runAgentCall: WorkerAgentCall,
 ): Promise<void> {
   if (msg.method === "agent") {
-    const response = await runAgentCall(msg.payload);
+    let response: WorkflowDurableAgentDispatchResult;
+    if (engine.durableScript === undefined) {
+      response = await runAgentCall(msg.payload);
+    } else {
+      const requestedModel = msg.payload?.opts?.model;
+      const effectiveModel =
+        engine.runAgent.resolveModel?.(requestedModel) ?? requestedModel;
+      response = await engine.durableScript.runAgent(
+        { ...msg.payload, effectiveModel },
+        (request) => runAgentCall(msg.payload, request),
+      );
+    }
     postWorkerResponse(worker, {
       id: msg.id,
       ok: true,
@@ -637,7 +960,38 @@ async function handleWorkerRpc(
     });
     return;
   }
+  if (msg.method === "completeWorkflow") {
+    if (engine.durableScript === undefined) {
+      throw new Error(
+        "completeWorkflow is only available to durable workflow runs.",
+      );
+    }
+    const value = await engine.durableScript.completeWorkflow(
+      msg.payload?.workflow,
+      msg.payload?.completion,
+    );
+    postWorkerResponse(worker, {
+      id: msg.id,
+      ok: true,
+      value,
+      tokensDelta: 0,
+    });
+    return;
+  }
   if (msg.method === "loadWorkflow") {
+    if (engine.durableScript !== undefined) {
+      const loaded = await engine.durableScript.loadWorkflow(
+        msg.payload,
+        (name) => loadWorkflowRef(name, engine),
+      );
+      postWorkerResponse(worker, {
+        id: msg.id,
+        ok: true,
+        value: loaded,
+        tokensDelta: 0,
+      });
+      return;
+    }
     const script = loadWorkflowRef(msg.payload, engine);
     if (script == null && typeof msg.payload === "string") {
       throw new Error(`workflow(): no saved workflow named "${msg.payload}".`);
@@ -655,9 +1009,12 @@ async function handleWorkerRpc(
 
 function postWorkerResponse(worker: Worker, msg: WorkerRpcResponse): void {
   try {
+    assertBoundedWorkerClone(msg, "workflow RPC response");
     worker.postMessage(msg);
-  } catch {
-    /* worker may already be terminated after cancellation */
+  } catch (error) {
+    if (error instanceof WorkflowQuotaError) throw error;
+    if (error instanceof WorkerCloneTransferFailure) throw error;
+    throw new WorkerCloneTransferFailure("workflow RPC response", error);
   }
 }
 

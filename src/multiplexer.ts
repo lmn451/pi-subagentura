@@ -189,6 +189,14 @@ export interface Multiplexer {
   getPaneLivenessAsync(paneId: string, session?: string): Promise<PaneLiveness>;
 
   /**
+   * Optional deterministic recovery lookup. Backends that cannot search by an
+   * exact native window/tab identity must omit it; durable launch then falls
+   * back before pane creation. Implementations must throw when enumeration is
+   * ambiguous or unavailable rather than reporting a false empty result.
+   */
+  findPanesByWindowName?(windowName: string): readonly PaneRef[];
+
+  /**
    * Send literal text to the pane's shell input buffer, character-by-character.
    * Does NOT submit (no Enter). Callers that want to submit pair this with
    * a second call to `sendEnter`.

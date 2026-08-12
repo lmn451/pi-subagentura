@@ -4,6 +4,7 @@ import {
   type WorkflowProgress,
 } from "./workflow-core";
 import { assertNever } from "./artifact";
+import { sanitizeTerminalText } from "./workflow-plan-ui";
 
 // ── Workflow progress renderer ───────────────────────────────────────
 export function renderProgress(p: WorkflowProgress): string {
@@ -21,16 +22,20 @@ export function renderProgress(p: WorkflowProgress): string {
   const head = parts.join(", ");
   switch (p.kind) {
     case "phase":
-      return `${head}\n  ◆ phase: ${p.phase}`;
+      return `${head}\n  ◆ phase: ${sanitizeTerminalText(p.phase)}`;
     case "log":
-      return `${head}\n  ${p.message}`;
+      return `${head}\n  ${sanitizeTerminalText(p.message)}`;
     case "agent_start": {
-      const tag = p.model ? ` @${p.model}` : "";
-      return `${head}\n  → started${p.label ? ` ${p.label}` : ""}${tag}`;
+      const label = p.label ? sanitizeTerminalText(p.label) : "";
+      const model = p.model ? sanitizeTerminalText(p.model) : "";
+      const tag = model ? ` @${model}` : "";
+      return `${head}\n  → started${label ? ` ${label}` : ""}${tag}`;
     }
     case "agent_done": {
-      const tag = p.model ? ` @${p.model}` : "";
-      return `${head}\n  → done${p.label ? ` ${p.label}` : ""}${tag}`;
+      const label = p.label ? sanitizeTerminalText(p.label) : "";
+      const model = p.model ? sanitizeTerminalText(p.model) : "";
+      const tag = model ? ` @${model}` : "";
+      return `${head}\n  → done${label ? ` ${label}` : ""}${tag}`;
     }
     default:
       return assertNever(p);

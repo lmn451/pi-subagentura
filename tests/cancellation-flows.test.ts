@@ -403,6 +403,7 @@ describe("get_workflow_result abort-aware wait", () => {
 
     workflowJobRegistry.set("wf-test-1", {
       id: "wf-test-1",
+      kind: "script",
       status: "running",
       promise: new Promise(() => {}), // never resolves
       abort: new AbortController(),
@@ -443,6 +444,7 @@ describe("get_workflow_result abort-aware wait", () => {
 
     workflowJobRegistry.set("wf-test-2", {
       id: "wf-test-2",
+      kind: "script",
       status: "running",
       promise: deferred,
       abort: new AbortController(),
@@ -489,6 +491,7 @@ describe("get_workflow_result abort-aware wait", () => {
 
     workflowJobRegistry.set("wf-test-3", {
       id: "wf-test-3",
+      kind: "script",
       status: "error",
       promise: Promise.reject(new DOMException("worker crashed", "AbortError")),
       abort: new AbortController(),
@@ -555,16 +558,19 @@ describe("cancelAllFlows helper", () => {
 
     workflowJobRegistry.set("wf-1", {
       id: "wf-1",
+      kind: "script",
       status: "running",
       abort: abortCtrl1,
     } as any);
     workflowJobRegistry.set("wf-2", {
       id: "wf-2",
+      kind: "script",
       status: "running",
       abort: abortCtrl2,
     } as any);
     workflowJobRegistry.set("wf-3", {
       id: "wf-3",
+      kind: "script",
       status: "done",
       abort: new AbortController(),
     } as any);

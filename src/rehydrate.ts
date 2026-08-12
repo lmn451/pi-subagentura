@@ -16,7 +16,7 @@ import { join } from "node:path";
 import {
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   loadInteractiveStates,
-  type InteractiveSubagentPersistedStateV2,
+  type InteractiveSubagentPersistedState,
 } from "./artifact";
 import { reconcileDeliveryReceipts } from "./delivery";
 import {
@@ -47,7 +47,7 @@ export function rehydrateInteractiveSubagents(
 
   for (const entry of Object.values(
     payload.states,
-  ) as Array<InteractiveSubagentPersistedStateV2>) {
+  ) as Array<InteractiveSubagentPersistedState>) {
     if (currentSessionId && entry.parentSessionId !== currentSessionId) {
       continue;
     }
@@ -118,6 +118,13 @@ export function rehydrateInteractiveSubagents(
       notifyOnComplete: entry.notifyOnComplete,
       triggerTurnOnComplete: entry.triggerTurnOnComplete,
       parentSessionId: entry.parentSessionId ?? "pi",
+      completionOwner: entry.completionOwner,
+      ...(entry.completionOwner === "workflow"
+        ? {
+            workflowId: entry.workflowId,
+            workflowProcessIdentity: entry.workflowProcessIdentity,
+          }
+        : {}),
       eventByteCursor: entry.eventByteCursor,
       lastDeliveredSessionByte: sessionResumeCursor,
       sessionPartialLineStart:

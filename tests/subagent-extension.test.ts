@@ -32,6 +32,8 @@ const WORKFLOW_TOOL_NAMES = [
   "get_workflow_status",
   "list_workflows",
   "save_workflow",
+  "workflow_approval",
+  "workflow_plan",
   "workflow",
 ].sort();
 
@@ -48,7 +50,9 @@ function mockApi(overrides: Record<string, any> = {}) {
     registerFlag: vi.fn(),
     registerCommand: vi.fn(),
     registerShortcut: vi.fn(),
-    getFlag: vi.fn().mockReturnValue(false),
+    getFlag: vi.fn((name: string) =>
+      name === "workflow-eager" ? "off" : false,
+    ),
     on: vi.fn(),
     ...overrides,
   };
@@ -94,7 +98,7 @@ describe("extension registration", () => {
     );
   });
 
-  it("registers the --orchestrator flag", () => {
+  it("registers parent orchestration and eager-routing surfaces", () => {
     const api = mockApi();
 
     registerExtension(api as any);
@@ -104,11 +108,26 @@ describe("extension registration", () => {
       type: "boolean",
       default: false,
     });
+    expect(api.registerFlag).toHaveBeenCalledWith("workflow-eager", {
+      description: expect.any(String),
+      type: "string",
+      default: "off",
+    });
+    expect(api.registerCommand).toHaveBeenCalledWith(
+      "workflow-plan",
+      expect.any(Object),
+    );
   });
 
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
-      getFlag: vi.fn((name: string) => name === "orchestrator"),
+      getFlag: vi.fn((name: string) =>
+        name === "orchestrator"
+          ? true
+          : name === "workflow-eager"
+            ? "off"
+            : undefined,
+      ),
     });
 
     registerExtension(api as any);
@@ -170,6 +189,12 @@ describe("extension registration", () => {
     expect(api.registerCommand).toHaveBeenCalledWith(
       "subagents",
       expect.any(Object),
+    );
+    expect(api.registerCommand.mock.calls.map(([name]) => name)).not.toContain(
+      "workflow-plan",
+    );
+    expect(api.registerFlag.mock.calls.map(([name]) => name)).not.toContain(
+      "workflow-eager",
     );
     expect(api.registerShortcut).toHaveBeenCalledWith(
       "ctrl+alt+a",

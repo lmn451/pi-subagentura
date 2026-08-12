@@ -39,6 +39,8 @@ export type WorkflowThinkingLevel =
   "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface WorkflowAgentOptions {
+  /** Stable durable-operation identity. Required only when the run uses durable: true. */
+  readonly id?: string;
   readonly schema?: WorkflowJSONSchema;
   readonly label?: string;
   readonly phase?: string;
@@ -47,6 +49,11 @@ export interface WorkflowAgentOptions {
   readonly isolation?: "process" | "in-process";
   readonly agentType?: string;
   readonly thinkingLevel?: WorkflowThinkingLevel;
+}
+
+export interface WorkflowCallOptions {
+  /** Stable durable-operation identity. Required only when the run uses durable: true. */
+  readonly id?: string;
 }
 
 export type WorkflowThunk<T> = () => T | PromiseLike<T>;
@@ -100,6 +107,7 @@ declare global {
   function workflow(
     name: string,
     childArgs?: WorkflowJSONValue,
+    options?: WorkflowCallOptions,
   ): Promise<unknown>;
   function phase(title: string): void;
   function log(message: unknown): void;

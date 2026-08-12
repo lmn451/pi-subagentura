@@ -47,6 +47,7 @@ function makeJob(
 ): WorkflowJobState {
   return {
     id,
+    kind: "script",
     name: id,
     status,
     startedAt: Date.now(),

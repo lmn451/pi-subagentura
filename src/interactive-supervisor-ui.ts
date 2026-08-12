@@ -20,6 +20,10 @@ import {
   formatWorkflowUsageLegend,
   presentWorkflowUsage,
 } from "./workflow-core";
+import {
+  formatWorkflowPlanRows,
+  formatWorkflowPlanSummary,
+} from "./workflow-plan-ui";
 
 export const INTERACTIVE_SUPERVISOR_SHORTCUT = "ctrl+alt+a";
 const DEFAULT_REFRESH_INTERVAL_MS = 1_000;
@@ -659,6 +663,12 @@ function formatAsyncSupervisorSummary(
   if (item.kind === "workflow") {
     const job = item.job;
     const elapsed = formatElapsed(Math.max(0, now - job.startedAt));
+    if (job.kind === "plan" && job.planProjection) {
+      const planSummary = formatWorkflowPlanSummary(job.planProjection, {
+        ascii: true,
+      });
+      return `[workflow:plan] ${statusIcon(job.status)} ${job.status} ${job.name} (${job.id}) · ${elapsed} · ${planSummary}`;
+    }
     const phase = job.snapshot.currentPhase
       ? ` · phase: ${job.snapshot.currentPhase}`
       : "";
@@ -693,13 +703,31 @@ function formatInProcessDetails(job: JobState, width: number): string[] {
     `cwd: ${job.cwd ?? "unknown"}`,
     `Turn: ${job.liveStatus.turn}`,
     `Active tool: ${activeTool}`,
-    `Usage: ${job.liveStatus.usage.input} input · ${job.liveStatus.usage.output} output`,
     `Output preview: ${compactText(job.liveStatus.output) || "none yet"}`,
   ];
   return fields.map((field) => trunc(`│     ${field}`, width));
 }
 
 function formatWorkflowDetails(job: WorkflowJobState, width: number): string[] {
+  if (job.kind === "plan" && job.planProjection) {
+    const planWidth = Math.max(1, width - 6);
+    const planRows = formatWorkflowPlanRows(job.planProjection, {
+      ascii: true,
+      width: planWidth,
+    });
+    const planSummary = formatWorkflowPlanSummary(job.planProjection, {
+      ascii: true,
+      width: planWidth,
+    });
+    const fields = [
+      `Workflow: ${job.name} (${job.id})`,
+      `Plan: ${planSummary}`,
+      ...planRows.map((row) => `${"  ".repeat(row.depth)}${row.text}`),
+    ];
+    if (planRows.length === 0) fields.push("Plan: no phases yet");
+    if (job.error) fields.push(`Error: ${job.error}`);
+    return fields.map((field) => trunc(`│     ${field}`, width));
+  }
   const snapshot = job.snapshot;
   const allRecords = snapshot.agentRecords ?? [];
   const records = allRecords.slice(-DETAIL_WORKFLOW_AGENT_COUNT);

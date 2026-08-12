@@ -42,6 +42,11 @@ import {
   type WorkflowJobState,
 } from "../src/workflow-jobs";
 import {
+  createPlanProjection,
+  type WorkflowPlanProjection,
+} from "../src/workflow-plan-state";
+import type { WorkflowPlanDefinition } from "../src/workflow-plan";
+import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
@@ -111,6 +116,7 @@ function workflowJob(
   return {
     id,
     name: `workflow-${id}`,
+    kind: "script",
     status: "running",
     startedAt: Date.now() - 3_000,
     promise: Promise.resolve({}) as never,
@@ -126,6 +132,45 @@ function workflowJob(
       agentRecordsOmitted: 0,
     },
     ...overrides,
+  };
+}
+function planProjection(): WorkflowPlanProjection {
+  const definition: WorkflowPlanDefinition = {
+    name: "deploy plan",
+    description: "A projected deployment",
+    phases: [
+      {
+        id: "build",
+        name: "Build",
+        mode: "sequence",
+        tasks: [
+          { id: "compile", content: "Compile package", instruction: "compile" },
+        ],
+      },
+      {
+        id: "verify",
+        name: "Verify",
+        mode: "parallel",
+        tasks: [{ id: "checks", content: "Run checks", instruction: "check" }],
+      },
+    ],
+  };
+  const projection = createPlanProjection(definition);
+  return {
+    ...projection,
+    phases: projection.phases.map((phase) => ({
+      ...phase,
+      tasks: phase.tasks.map((task) => ({
+        ...task,
+        status: task.definition.id === "compile" ? "succeeded" : "blocked",
+        ...(task.definition.id === "checks"
+          ? {
+              reason: "waiting for approval",
+              result: { output: "hidden output" },
+            }
+          : {}),
+      })),
+    })),
   };
 }
 function startedScope(
@@ -307,6 +352,36 @@ describe("interactive supervisor", () => {
     expect(component.render(180).join("\n")).toContain(
       "Agent: → running reviewer #1",
     );
+  });
+  it("renders plan phases and bounded task details without output bodies", () => {
+    const plan = workflowJob("wf-plan", {
+      name: "deploy",
+      kind: "plan",
+      planProjection: planProjection(),
+    });
+    const cancelWorkflow = vi.fn().mockReturnValue(true);
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      cancelWorkflow,
+      items: () => [
+        { kind: "workflow", job: plan, depth: 0, actionable: true },
+      ],
+    });
+
+    expect(component.render(160).join("\n")).toContain("[workflow:plan]");
+    component.handleInput("\r");
+    const lines = component.render(64);
+    const rendered = lines.join("\n");
+    expect(rendered).toContain("Build");
+    expect(rendered).toContain("compile [succeeded]");
+    expect(rendered).toContain("Verify");
+    expect(rendered).toContain("checks [blocked]");
+    expect(rendered).not.toContain("hidden output");
+    expect(lines.every((line) => line.length <= 64)).toBe(true);
+
+    component.handleInput("\x1b[D");
+    component.handleInput("x");
+    expect(cancelWorkflow).toHaveBeenCalledWith(plan);
   });
 
   it("keeps every workflow total field on its own row at narrow widths", () => {

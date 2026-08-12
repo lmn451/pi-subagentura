@@ -18,6 +18,7 @@ const schema: WorkflowJSONSchema = {
 };
 
 const options = {
+  id: "structured",
   schema,
   label: "scan",
   phase: "Scan",
@@ -44,8 +45,20 @@ async function authorWorkflow(): Promise<unknown> {
     (value, item, index) => ({ value, item, index }),
   );
   const nested = await workflow("child", { parentCwd: cwd });
+  const durableNested = await workflow(
+    "child",
+    { parentCwd: cwd },
+    { id: "nested-child" },
+  );
 
-  return { text, structured, parallelResults, piped, nested };
+  return {
+    text,
+    structured,
+    parallelResults,
+    piped,
+    nested,
+    durableNested,
+  };
 }
 
 // @ts-expect-error cwd is an immutable workflow global.

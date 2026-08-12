@@ -99,7 +99,23 @@
     "src/abortable-wait.ts",
     "src/cancel-all-flows.ts",
     "src/cancel-all-flows-registration.ts",
-    "src/cancellation-snapshots.ts"
+    "src/cancellation-snapshots.ts",
+    "src/workflow-durable-plan.ts",
+    "src/workflow-durable-runtime.ts",
+    "src/workflow-operation-gate.ts",
+    "src/workflow-operation-journal.ts",
+    "src/workflow-approvals.ts",
+    "src/workflow-delivery.ts",
+    "src/workflow-durable-script.ts",
+    "src/workflow-eager-policy.ts",
+    "src/workflow-eager.ts",
+    "src/workflow-plan-commands.ts",
+    "src/workflow-plan-context.ts",
+    "src/workflow-plan-mutations.ts",
+    "src/workflow-plan-tool.ts",
+    "src/workflow-process-attempt.ts",
+    "src/workflow-quotas.ts",
+    "src/workflow-retention.ts"
   ],
   "engines": {
     "node": ">=18.0.0"

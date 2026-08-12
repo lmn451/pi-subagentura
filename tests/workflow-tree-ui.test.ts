@@ -4,40 +4,77 @@ import {
   WorkflowTreeComponent,
   workflowJobRegistry,
   type WorkflowJobState,
+  type WorkflowTrustedResumeSnapshot,
 } from "../src/workflow";
-import type { WorkflowPlanState } from "../src/workflow-plan-state";
+import { createPlanProjection } from "../src/workflow-plan-state";
+import type { WorkflowPlanDefinition } from "../src/workflow-plan";
+import type { WorkflowPlanProjection } from "../src/workflow-plan-state";
+import type { WorkflowApprovalSnapshot } from "../src/workflow-approvals";
+import {
+  createDurableWorkflowRunId,
+  createWorkflowSha256Digest,
+} from "../src/workflow-run-types";
 
-type WorkflowSnapshotWithPlanState = WorkflowJobState["snapshot"] & {
-  planState?: WorkflowPlanState;
-};
-
-type WorkflowJobOverrides = Omit<Partial<WorkflowJobState>, "snapshot"> & {
-  snapshot?: Partial<WorkflowSnapshotWithPlanState>;
-};
-
-function makeJob(overrides: WorkflowJobOverrides = {}): WorkflowJobState {
-  const { snapshot: snapshotOverrides, ...jobOverrides } = overrides;
-  const snapshot = {
-    agentsSpawned: 2,
-    errorCount: 0,
-    tokensSpent: 42,
-    phases: ["Scan"],
-    currentPhase: "Scan",
-    lastMessage: "→ started scout",
-    runningCount: 1,
-    agentRecords: [],
-    agentRecordsOmitted: 0,
-    ...snapshotOverrides,
-  };
+function makeJob(overrides: Partial<WorkflowJobState> = {}): WorkflowJobState {
   return {
     id: "wf_test",
     name: "demo-flow",
     status: "running",
+    kind: "script",
     startedAt: 123,
     promise: Promise.resolve({}) as any,
     abort: new AbortController(),
-    ...jobOverrides,
-    snapshot,
+    snapshot: {
+      agentsSpawned: 2,
+      errorCount: 0,
+      tokensSpent: 42,
+      phases: ["Scan"],
+      currentPhase: "Scan",
+      lastMessage: "→ started scout",
+      runningCount: 1,
+      agentRecords: [],
+      agentRecordsOmitted: 0,
+    },
+
+    ...overrides,
+  };
+}
+function makePlanProjection(): WorkflowPlanProjection {
+  const definition: WorkflowPlanDefinition = {
+    name: "release plan",
+    description: "A projected release",
+    phases: [
+      {
+        id: "prepare",
+        name: "Prepare",
+        mode: "sequence",
+        tasks: [
+          { id: "check", content: "Check package", instruction: "check" },
+        ],
+      },
+      {
+        id: "publish",
+        name: "Publish",
+        mode: "parallel",
+        tasks: [
+          { id: "publish", content: "Publish package", instruction: "publish" },
+        ],
+      },
+    ],
+  };
+  const projection = createPlanProjection(definition);
+  return {
+    ...projection,
+    phases: projection.phases.map((phase) => ({
+      ...phase,
+      tasks: phase.tasks.map((task) => ({
+        ...task,
+        status: task.definition.id === "check" ? "succeeded" : "running",
+        ...(task.definition.id === "check"
+          ? { result: { output: "must stay hidden" } }
+          : {}),
+      })),
+    })),
   };
 }
 
@@ -54,6 +91,30 @@ describe("WorkflowTreeComponent", () => {
     expect(lines.join("\n")).toContain("No workflow jobs");
   });
 
+  it("renders projected plan phases and task statuses", () => {
+    const plan = makeJob({
+      id: "wf_plan",
+      name: "release-plan",
+      kind: "plan",
+      planProjection: makePlanProjection(),
+    });
+    workflowJobRegistry.set(plan.id, plan);
+    const component = new WorkflowTreeComponent({ done: vi.fn() });
+
+    const summary = component.render(120).join("\n");
+    expect(summary).toContain(
+      "release-plan (wf_plan) · release plan · status: running",
+    );
+    component.handleInput("\r");
+    const expanded = component.render(120).join("\n");
+    expect(expanded).toContain("◆ phase: Prepare [sequence]");
+    expect(expanded).toContain("✓ check [succeeded]");
+    expect(expanded).toContain("◆ phase: Publish [parallel]");
+    expect(expanded).toContain("→ publish [running]");
+    expect(expanded).not.toContain("must stay hidden");
+    expect(component.render(36).every((line) => line.length <= 36)).toBe(true);
+  });
+
   it("renders workflow summaries and expands details", () => {
     workflowJobRegistry.set("wf_test", makeJob());
     const component = new WorkflowTreeComponent({ done: vi.fn() });
@@ -68,68 +129,29 @@ describe("WorkflowTreeComponent", () => {
     expect(expanded).toContain("→ started scout");
   });
 
-  it("renders declarative plan phases and every task state in order", () => {
-    const planState: WorkflowPlanState = {
-      plan: {
-        schemaVersion: 1,
-        name: "preview",
-        phases: [
-          {
-            id: "prepare",
-            mode: "sequential",
-            tasks: [
-              { id: "draft", label: "draft", prompt: "Draft the work" },
-              { id: "check", label: "check", prompt: "Check the draft" },
-            ],
-          },
-          {
-            id: "execute",
-            mode: "sequential",
-            tasks: [
-              { id: "apply", label: "apply", prompt: "Apply the work" },
-              { id: "verify", label: "verify", prompt: "Verify the work" },
-            ],
-          },
-        ],
+  it("shows the authoritative durable status for a recovered job row", () => {
+    const recovered = makeJob({
+      id: "durable_recovered",
+      name: "Recovered durable plan workflow",
+      kind: "plan",
+      durable: true,
+      status: "running",
+      durableStatus: "interrupted",
+      snapshot: {
+        ...makeJob().snapshot,
+        lastMessage: "Recovered durable status: interrupted",
+        runningCount: 0,
       },
-      status: "error",
-      currentPhase: "execute",
-      tasks: {
-        draft: "succeeded",
-        check: "pending",
-        apply: "running",
-        verify: "failed",
-      },
-      revision: 4,
-    };
-    workflowJobRegistry.set(
-      "wf_test",
-      makeJob({
-        status: "error",
-        snapshot: {
-          ...makeJob().snapshot,
-          currentPhase: undefined,
-          planState,
-        },
-      }),
-    );
-
+    });
+    workflowJobRegistry.set(recovered.id, recovered);
     const component = new WorkflowTreeComponent({ done: vi.fn() });
-    component.handleInput("\r");
-    const expanded = component.render(160).join("\n");
 
-    expect(expanded).toContain("phase: execute");
-    expect(expanded).toContain("◆ phase: prepare");
-    expect(expanded).toContain("◆ phase: execute (current)");
-    expect(expanded).toContain("✓ succeeded draft (draft)");
-    expect(expanded).toContain("· pending check (check)");
-    expect(expanded).toContain("→ running apply (apply)");
-    expect(expanded).toContain("✗ failed verify (verify)");
-    expect(expanded.indexOf("◆ phase: prepare")).toBeLessThan(
-      expanded.indexOf("◆ phase: execute"),
+    expect(component.render(120).join("\n")).toContain(
+      "Recovered durable plan workflow (durable_recovered) · [interrupted]",
     );
-    expect(expanded.indexOf("pending check")).toBeLessThan(
-      expanded.indexOf("running apply"),
+    component.handleInput("\r");
+    expect(component.render(120).join("\n")).toContain(
+      "Recovered durable status: interrupted",
     );
   });
 
@@ -343,7 +365,7 @@ describe("WorkflowTreeComponent", () => {
     expect(done).toHaveBeenCalledTimes(2);
   });
 
-  it("returns a cancellation action without mutating the selected workflow", () => {
+  it("cancels the selected running workflow with c", () => {
     const job = makeJob({
       snapshot: {
         ...makeJob().snapshot,
@@ -358,14 +380,32 @@ describe("WorkflowTreeComponent", () => {
 
     component.handleInput("c");
 
-    expect(abortSpy).not.toHaveBeenCalled();
-    expect(job.status).toBe("running");
-    expect(job.snapshot.runningCount).toBe(1);
-    expect(job.snapshot.agentRecords?.[0]?.status).toBe("running");
-    expect(notify).toHaveBeenCalledWith("Cancelling workflow wf_test.");
+    expect(abortSpy).toHaveBeenCalledTimes(1);
+    expect(job.status).toBe("cancelled");
+    expect(job.snapshot.runningCount).toBe(0);
+    expect(job.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
+    expect(notify).toHaveBeenCalledWith("Cancelled workflow wf_test.");
     expect(done).toHaveBeenCalledWith({
       kind: "cancel",
       workflowId: "wf_test",
+    });
+  });
+
+  it("cancels a plan through the same workflow job action", () => {
+    const job = makeJob({
+      id: "wf_plan_cancel",
+      kind: "plan",
+      planProjection: makePlanProjection(),
+    });
+    workflowJobRegistry.set(job.id, job);
+    const done = vi.fn();
+    const component = new WorkflowTreeComponent({ done });
+
+    component.handleInput("c");
+
+    expect(done).toHaveBeenCalledWith({
+      kind: "cancel",
+      workflowId: job.id,
     });
   });
 
@@ -400,6 +440,127 @@ describe("WorkflowTreeComponent", () => {
     expect(component.render(100).join("\n")).toContain(
       "⚠ demo-flow (wf_test) · [completed with errors]",
     );
+  });
+
+  it("neutralizes controls in provider, approval, log, and error rows", () => {
+    const bidiControls =
+      "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+    const runId = createDurableWorkflowRunId("tree-terminal-controls");
+    const job = makeJob({
+      id: runId,
+      name: `\u001b[31m计划${bidiControls}Ω`,
+      error: "错误\u202e]KO[\u202c原因\u001b[2J",
+      snapshot: {
+        ...makeJob().snapshot,
+        phases: [`阶段${bidiControls}Ω\u001b]0;owned\u0007`],
+        currentPhase: "当前\u2066]enod[\u2069阶段\u009b2J",
+        lastMessage: "日志\u200f内容\u001b[31m",
+        agentRecords: [
+          {
+            agentId: 1,
+            label: "代理\u202d]rorre[\u202cΩ\u001b[2J",
+            model: "提供商/\u061c模型\u009b2J",
+            phase: "阶段\u200e一\u0007",
+            status: "error",
+          },
+        ],
+      },
+    });
+    const approval = {
+      runId,
+      requestId: "approval-\u2066denied\u2069",
+      description: `批准\u202e]deined[\u202c说明${bidiControls}Ω\u001b]52;c;owned\u0007`,
+      denialPolicy: "stop",
+    } as unknown as WorkflowApprovalSnapshot;
+    workflowJobRegistry.set(job.id, job);
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      approvals: [approval],
+    });
+
+    component.render(240);
+    component.handleInput("\r");
+    const lines = component.render(240);
+    for (const line of lines) {
+      expect(line).not.toMatch(
+        /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/,
+      );
+    }
+    const rendered = lines.join("\n");
+    expect(rendered).toContain("计划Ω");
+    expect(rendered).toContain("阶段");
+    expect(rendered).toContain("日志内容");
+    expect(rendered).toContain("代理]rorre[Ω");
+    expect(rendered).toContain("批准]deined[说明Ω");
+    expect(rendered).toContain("错误]KO[原因");
+  });
+
+  it("returns a trusted approval selection for a cold durable row", () => {
+    const done = vi.fn();
+    const request: WorkflowApprovalSnapshot = {
+      runId: createDurableWorkflowRunId("tree-approval"),
+      requestId: "approval-tree",
+      requestEventId: "request-event",
+      approvalKind: "budget",
+      reason: "token_limit",
+      description: "Continue the exhausted budget.",
+      accounting: {
+        completeness: "exact",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          costUsd: 0,
+          turns: 1,
+        },
+      },
+      policyHash: createWorkflowSha256Digest("a".repeat(64)),
+      planRevision: 1,
+      requestOwnerGeneration: 1,
+      requestRunEpoch: 1,
+      owner: { projectKey: "project", piSessionKey: "session" },
+      ownerGeneration: 2,
+      runEpoch: 2,
+      version: 1,
+      denialPolicy: "stop",
+      subjectTaskId: "task-b",
+    };
+    const component = new WorkflowTreeComponent({
+      done,
+      approvals: [request],
+    });
+
+    expect(component.render(120).join("\n")).toContain(
+      "Durable workflow wfr-v1-tree-approval [awaiting approval]",
+    );
+    component.handleInput("a");
+    expect(done).toHaveBeenCalledWith({
+      kind: "approval",
+      decision: "approved",
+      request,
+    });
+  });
+
+  it("returns the exact recovered owner and epoch for trusted resume", () => {
+    const done = vi.fn();
+    const resume: WorkflowTrustedResumeSnapshot = {
+      runId: createDurableWorkflowRunId("tree-resume"),
+      executionKind: "script",
+      expectedOwner: { projectKey: "project", piSessionKey: "session" },
+      expectedRunEpoch: 7,
+    };
+    const component = new WorkflowTreeComponent({
+      done,
+      resumes: [resume],
+    });
+
+    expect(component.render(120).join("\n")).toContain(
+      "Durable script wfr-v1-tree-resume [interrupted at epoch 7]",
+    );
+    component.handleInput("r");
+    expect(done).toHaveBeenCalledWith({ kind: "resume", resume });
   });
 
   it("falls back when custom UI is unavailable", async () => {
