@@ -6,7 +6,10 @@ import { formatUsage } from "./helpers";
 import type { SubagentDetails } from "./subagent";
 import type { SubagentResult } from "./helpers";
 import { sanitizeOutput } from "./notifications";
-import type { InteractiveSubagentState } from "./interactive-tmux";
+import {
+  interactiveStatusForState,
+  type InteractiveSubagentState,
+} from "./interactive-tmux";
 
 function thinkingSuffix(level?: ThinkingLevel): string {
   return level ? ` · thinking: ${level}` : "";
@@ -250,7 +253,7 @@ export function formatActivityRow(
   state: InteractiveSubagentState,
   now: number = Date.now(),
 ): string {
-  if (state.status === "idle") {
+  if (interactiveStatusForState(state) === "idle") {
     return `○ ${state.name}: idle — ready for follow-up`;
   }
   const summary = state.lastToolSummary ?? "starting…";

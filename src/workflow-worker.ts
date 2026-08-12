@@ -44,8 +44,10 @@ import {
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
 import {
+  advanceInteractiveState,
   cancelInteractiveSubagent,
-  isPaneAlive,
+  getInteractiveMachineState,
+  observeInteractivePane,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
@@ -848,14 +850,33 @@ export async function awaitInteractiveResult(
           return assertNever(terminal);
       }
     }
-    // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
-    let alive = true;
+    // No terminal event yet — only a confirmed dead pane advances the grace
+    // counter. Unavailable or unknown observation cannot prove process death.
+    const started = advanceInteractiveState(state, {
+      type: "pane_observation_started",
+    });
+    const revision =
+      started.kind === "applied"
+        ? started.state.observationRevision
+        : getInteractiveMachineState(state).observationRevision;
     try {
-      alive = isPaneAlive(state);
-    } catch {
-      alive = false;
+      const liveness = await observeInteractivePane(state);
+      advanceInteractiveState(state, {
+        type: "pane_observed",
+        revision,
+        liveness,
+      });
+    } catch (error) {
+      advanceInteractiveState(state, {
+        type: "pane_observed",
+        revision,
+        liveness: {
+          kind: "unknown",
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
-    if (!alive) {
+    if (getInteractiveMachineState(state).pane.kind === "dead") {
       deadTicks++;
       debugLog("warn", "interactive_dead_pane", {
         deadTicks,

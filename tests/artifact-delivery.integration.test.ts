@@ -370,7 +370,7 @@ describe("artifact protocol v2 delivery", () => {
       interactiveSubagentRegistry;
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
     const first = appendDeterministicTurn(art, 1, "first immutable result");
     const second = appendDeterministicTurn(art, 2, "second immutable result");
@@ -454,7 +454,7 @@ describe("artifact protocol v2 delivery", () => {
       interactiveSubagentRegistry;
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
     const bytes = MAX_OUTPUT_SNAPSHOT_BYTES + 1;
     writeOutput(art, "");

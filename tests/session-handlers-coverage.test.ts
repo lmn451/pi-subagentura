@@ -447,7 +447,7 @@ describe("session handler lifecycle callbacks", () => {
     const aState = makeState(a.sessionScope, "agent-a", "session-a");
     const bState = makeState(b.sessionScope, "agent-b", "session-b");
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
+      observePane: async () => ({ kind: "alive" }),
     } as any);
 
     await vi.advanceTimersByTimeAsync(5000);

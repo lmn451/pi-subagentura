@@ -28,10 +28,12 @@ import {
   type SubagentEvent,
 } from "./artifact";
 import {
-  deriveInteractiveSubagentStatusFromLifecycle,
-  foldInteractiveLifecycle,
+  advanceInteractiveState,
+  getInteractiveMachineState,
   interactiveSubagentRegistry,
-  getInteractivePaneLivenessAsync,
+  interactiveStatusForState,
+  isInteractiveStateActive,
+  observeInteractivePane,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { shouldNotify } from "./notifications";
@@ -137,11 +139,8 @@ function getRunningSubagentCount(
   const inProcessCount = inProcessJobsForOwners(owners).filter(
     (job) => job.status === "running",
   ).length;
-  const interactiveCount = interactiveStatesForOwners(owners).filter(
-    (state) =>
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown",
+  const interactiveCount = [...interactiveSubagentRegistry.values()].filter(
+    isInteractiveStateActive,
   ).length;
   return inProcessCount + interactiveCount;
 }
@@ -328,9 +327,8 @@ function projectActivityWidgetRows(
   const owners = [owner];
   const states = interactiveStatesForOwners(owners).filter(
     (state) =>
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown",
+      isInteractiveStateActive(state) &&
+      stateBelongsToUi(state, ui, owner, contexts),
   );
   return states.map((state) => formatActivityRow(state, now));
 }
@@ -410,19 +408,38 @@ async function runPollArtifactChanges(
       pi;
     if (!interactivePi) return;
 
-    const stateMap =
-      ownerContext?.interactiveStates ?? interactiveSubagentRegistry;
-    const states = [...stateMap.values()];
+    const states = [...interactiveSubagentRegistry.values()].filter((state) =>
+      parentSessionBelongsToOwner(state.parentSessionId, owner),
+    );
+    const pendingObservations = states.map((state) => {
+      const transition = advanceInteractiveState(state, {
+        type: "pane_observation_started",
+      });
+      const revision =
+        transition.kind === "applied"
+          ? transition.state.observationRevision
+          : getInteractiveMachineState(state).observationRevision;
+      return { state, revision } as const;
+    });
     const liveness = await Promise.all(
-      states.map(async (state) => {
+      pendingObservations.map(async ({ state, revision }) => {
         try {
-          return [state, await getInteractivePaneLivenessAsync(state)] as const;
+          return {
+            state,
+            revision,
+            liveness: await observeInteractivePane(state),
+          } as const;
         } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
           debugLog("error", "poller_liveness_error", {
             stateId: state.id,
-            error: err instanceof Error ? err.message : String(err),
+            error: reason,
           });
-          return [state, "unknown"] as const;
+          return {
+            state,
+            revision,
+            liveness: { kind: "unknown", reason } as const,
+          } as const;
         }
       }),
     );
@@ -446,11 +463,15 @@ async function runPollArtifactChanges(
     const ui =
       ownerContext?.ui ??
       (g2.__piSubagenturaUi as ExtensionUIContext | undefined);
-    for (const [state, paneLiveness] of liveness) {
-      if (stateMap.get(state.id) !== state) continue;
-      // Cancelled is terminal. Unknown means pane liveness is unavailable, so keep polling
-      // the artifact log: a later done/error event must still reach the parent.
-      // 'exited' is intentionally not skipped: a follow-up user entry can revive it to "running".
+    for (const observation of liveness) {
+      const { state, revision, liveness: paneLiveness } = observation;
+      if (interactiveSubagentRegistry.get(state.id) !== state) continue;
+      advanceInteractiveState(state, {
+        type: "pane_observed",
+        revision,
+        liveness: paneLiveness,
+      });
+      // Terminal states still consume durable records in physical byte order.
       const art = artifactPath(
         dirname(state.artifactDir),
         basename(state.artifactDir),
@@ -462,12 +483,11 @@ async function runPollArtifactChanges(
       const cursor = state.eventByteCursor ?? 0;
       const batch = readEventBatch(art, cursor);
       const records = batch.records;
-      const lifecycle = (state.lifecycle ??= {});
       let nextCursor = cursor;
       for (const record of records) {
         const ev = record.event;
         nextCursor = record.endOffset;
-        foldInteractiveLifecycle(lifecycle, ev);
+        advanceInteractiveState(state, { type: "artifact", event: ev });
         if ("version" in ev && ev.version === 2 && ev.type === "turn_started") {
           state.activeTurnId = ev.turnId;
         }
@@ -538,18 +558,7 @@ async function runPollArtifactChanges(
       }
       nextCursor = batch.endOffset;
       state.eventByteCursor = nextCursor;
-      const next = deriveInteractiveSubagentStatusFromLifecycle(
-        lifecycle,
-        paneLiveness,
-      );
-      if (next !== state.status) state.status = next;
-      if (next === "exited") {
-        if (lifecycle.processExitCode !== undefined) {
-          state.exitCode = lifecycle.processExitCode;
-        } else if (lifecycle.completionExitCode !== undefined) {
-          state.exitCode = lifecycle.completionExitCode;
-        }
-      }
+
       if (state.parentSessionId) {
         updateInteractiveState(state.cwd, state.id, (entry) => {
           entry.eventByteCursor = nextCursor;
@@ -570,12 +579,18 @@ async function runPollArtifactChanges(
     const widgetRows = projectActivityWidgetRows(ui, owner, now);
     flushDeliveries(interactivePi, ui, owner);
     for (const state of states) {
-      if (stateMap.get(state.id) !== state) continue;
-      const terminal =
-        state.status === "cancelled" || state.status === "exited";
-      if (terminal) destroySessionParser(state);
+      if (interactiveSubagentRegistry.get(state.id) !== state) continue;
+      const machine = getInteractiveMachineState(state);
+      const processDeathConfirmed =
+        machine.pane.kind === "dead" ||
+        machine.lifecycle.processStatus !== undefined;
+      const status = interactiveStatusForState(state);
+      const retired =
+        status === "exited" ||
+        (status === "cancelled" && processDeathConfirmed);
+      if (retired) destroySessionParser(state);
       if (
-        terminal &&
+        retired &&
         state.parentSessionId &&
         (state.pendingDeliveries?.length ?? 0) === 0
       ) {
@@ -880,17 +895,13 @@ function processSessionLogEntry(
     state.lastStopReason = undefined;
     state.lastStopReasonAt = undefined;
     state.lastStopText = undefined;
-    if (state.lifecycle && !state.lifecycle.parentCancelled) {
-      state.lifecycle.currentTurnId = undefined;
-      state.lifecycle.completionTurnId = undefined;
-      state.lifecycle.completionOutcome = undefined;
-      state.lifecycle.completionSource = undefined;
-      state.lifecycle.completionExitCode = undefined;
-      state.lifecycle.legacyTerminal = undefined;
+    // Session replay is a compatibility signal until the durable turn_started
+    // record arrives; the kernel still owns the transition and rejects terminal
+    // process or parent-cancellation states.
+    const status = interactiveStatusForState(state);
+    if (status === "exited" || status === "idle") {
+      advanceInteractiveState(state, { type: "followup_started" });
     }
-    // A user-role entry starts a new turn regardless of how the previous turn ended.
-    if (state.status === "exited" || state.status === "idle")
-      state.status = "running";
     return;
   }
 

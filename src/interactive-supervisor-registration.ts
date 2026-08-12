@@ -17,6 +17,9 @@ import {
   focusInteractiveSubagent,
   interactiveSubagentHasAttachedClient,
   interactiveSubagentRegistry,
+  initializeInteractiveStateMachine,
+  interactiveStatusForState,
+  isInteractiveStateActive,
   showInteractiveSubagentNativeViewer,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -82,16 +85,6 @@ interface SupervisorProjection {
   truncated: boolean;
 }
 
-function isInteractiveStateActionable(
-  state: InteractiveSubagentState,
-): boolean {
-  return (
-    state.status === "running" ||
-    state.status === "idle" ||
-    state.status === "unknown"
-  );
-}
-
 export function directSupervisorItems(
   sessionId?: string,
   owner?: SessionOwnerToken,
@@ -105,7 +98,7 @@ export function directSupervisorItems(
       // Workflow indentation is decided by buildAsyncSupervisorItems, which is the
       // only place that knows whether the owning workflow row is actually present.
       depth: 0,
-      actionable: isInteractiveStateActionable(state),
+      actionable: isInteractiveStateActive(state),
       origin: {
         source: "registry",
         ownerSessionId: state.parentSessionId,
@@ -274,7 +267,7 @@ function stateForNode(
   } catch {
     const target = manifest.pane.windowName ?? manifest.pane.paneId;
     const detail =
-      paneLiveness === "dead"
+      paneLiveness?.kind === "dead"
         ? `pane ${target} is gone`
         : `pane ${target} could not be resolved`;
     attach = {
@@ -285,7 +278,7 @@ function stateForNode(
   // Liveness comes from the pane probe, not from `node.state`. Deriving it from
   // the same field the actionable gate then tests made that gate a tautology
   // for lineage-only nodes, and mislabelled a live pane hidden for a cycle.
-  return {
+  const state: InteractiveSubagentState = {
     id: manifest.agentId,
     name: manifest.name,
     task: manifest.taskPreview,
@@ -297,19 +290,17 @@ function stateForNode(
     cwd: manifest.cwd,
     parentSessionId: manifest.ownerSessionId,
     startedAt: parseStartedAt(manifest.startedAt),
-    status:
-      paneLiveness === undefined
-        ? node.state === "actionable"
-          ? "running"
-          : "unknown"
-        : paneLiveness === "alive"
-          ? "running"
-          : "unknown",
+    status: "unknown",
     attachCommand: attach.attachCommand,
     selectPaneCommand: attach.focusCommand,
     launchScriptFile: "unknown",
     artifactDir: manifest.artifactDir ?? "unknown",
   };
+  const initialPane: PaneLiveness =
+    paneLiveness ??
+    (node.state === "actionable" ? { kind: "alive" } : { kind: "unknown" });
+  initializeInteractiveStateMachine(state, initialPane);
+  return state;
 }
 
 /**
@@ -339,24 +330,27 @@ async function loadSupervisorProjection(
   const paneLivenessById = new Map<string, PaneLiveness>();
   const isNodeStale = async (manifest: LineageManifest): Promise<boolean> => {
     const cached = paneLivenessById.get(manifest.agentId);
-    if (cached !== undefined) return cached === "dead";
+    if (cached !== undefined) return cached.kind === "dead";
     if (
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij"
     ) {
-      paneLivenessById.set(manifest.agentId, "unknown");
+      paneLivenessById.set(manifest.agentId, {
+        kind: "unknown",
+        reason: `unsupported pane backend ${manifest.pane.backend}`,
+      });
       return false;
     }
     let paneLiveness: PaneLiveness;
     try {
       paneLiveness = await getMux({
         preference: manifest.pane.backend,
-      }).getPaneLivenessAsync(manifest.pane.paneId, manifest.pane.muxSession);
-    } catch {
-      paneLiveness = "unknown";
+      }).observePane(manifest.pane.paneId, manifest.pane.muxSession);
+    } catch (error) {
+      paneLiveness = { kind: "unavailable", reason: errorMessage(error) };
     }
     paneLivenessById.set(manifest.agentId, paneLiveness);
-    return paneLiveness === "dead";
+    return paneLiveness.kind === "dead";
   };
   const projection = await projectLineageStore(
     paths.nodesDir,
@@ -387,7 +381,7 @@ async function loadSupervisorProjection(
         state,
         depth: node.depth,
         actionable:
-          node.state === "actionable" && isInteractiveStateActionable(state),
+          node.state === "actionable" && isInteractiveStateActive(state),
         origin: {
           source: "lineage",
           rootId: node.manifest.rootId,
@@ -403,7 +397,7 @@ async function loadSupervisorProjection(
       items.push({
         state,
         depth: 0,
-        actionable: isInteractiveStateActionable(state),
+        actionable: isInteractiveStateActive(state),
         origin: {
           source: "registry",
           ownerSessionId: state.parentSessionId,
@@ -529,69 +523,15 @@ export function registerInteractiveSupervisor(
               "Native presentation is unavailable here; continuing with the portable Pi overlay.",
               "info",
             );
-          }
-        },
-        cancelInProcess: (job) => {
-          if (!cancelInProcessFromSupervisor(job, sessionId, activeOwner))
-            return false;
-          updateRunningSubagentFooter(ctx.ui, owner());
-          return true;
-        },
-        cancelWorkflow: (job) => {
-          if (job.status !== "running") return false;
-          job.abort.abort();
-          job.status = "cancelled";
-          normalizeCancelledWorkflowState(job);
-          return true;
-        },
-        cancel: (id) => {
-          const item = projection?.items.find(
-            (candidate) => candidate.state.id === id,
-          );
-          if (!item?.actionable) return undefined;
-          const direct = supervisorInteractiveStates(activeOwner).get(id);
-          if (direct === item.state) {
-            cancelInteractiveSubagent(
-              id,
-              "cancel_interactive_subagent",
-              direct,
-            );
-          } else {
-            cancelInteractiveDescendantByState(item.state);
-          }
-          updateRunningSubagentFooter(ctx.ui, owner());
-          return item.state;
-        },
-        cancelSubtree: async (state) => {
-          // Snapshot the tree BEFORE the confirm blocks for human time. The 1 Hz
-          // refresh reassigns `projection` while the dialog is open, so reading it
-          // afterwards acted on a newer tree than the one the user confirmed.
-          const snapshotRoot = projection?.nodes.get(state.id);
-          const snapshotManifests = projection?.manifests ?? [];
-          const snapshotTruncated = projection?.truncated === true;
-          const descendantCount = snapshotRoot
-            ? subtreeManifestIds(snapshotRoot, snapshotManifests).size - 1
-            : 0;
-          const truncationWarning = snapshotTruncated
-            ? " The lineage view is truncated, so the tree may be larger than shown."
-            : "";
-          const confirmed = await ctx.ui.confirm(
-            "Cancel interactive subagent subtree?",
-            `Cancel ${state.name} and its ${descendantCount} descendant${descendantCount === 1 ? "" : "s"}? This closes their mux panes but retains artifacts.${truncationWarning}`,
-          );
-          if (!confirmed) return;
-          if (!snapshotRoot) {
-            const direct = supervisorInteractiveStates(activeOwner).get(
-              state.id,
-            );
-            if (direct === state) {
-              cancelInteractiveSubagent(
-                state.id,
-                "cancel_interactive_subagent",
-                direct,
-              );
-            } else {
-              cancelInteractiveDescendantByState(state);
+            if (!direct) return false;
+            const status = interactiveStatusForState(direct);
+            return status === "cancelled" || status === "exited";
+          },
+          cancel: async (node) => {
+            const nodeState = stateForNode(node);
+            if (!nodeState) return;
+            if (!cancelInteractiveSubagent(nodeState.id)) {
+              cancelInteractiveDescendantByState(nodeState);
             }
             updateRunningSubagentFooter(ctx.ui, owner());
             return;

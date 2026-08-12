@@ -28,7 +28,8 @@ import { snapshotInProcessSession } from "./cancellation-snapshots";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
   cancelInteractiveSubagentByState,
-  removeInteractiveSubagentState,
+  interactiveStatusForState,
+  interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
@@ -53,6 +54,13 @@ import {
 } from "./workflow-owner";
 import type { WorkflowOwnerIdentity } from "./workflow-run-types";
 import { DurableWorkflowProjectionRepository } from "./workflow-projection-repository";
+
+function shouldTerminateInteractiveState(
+  state: InteractiveSubagentState,
+): boolean {
+  const status = interactiveStatusForState(state);
+  return status !== "cancelled" && status !== "exited";
+}
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -231,11 +239,13 @@ function cleanupScopeGeneration(
   for (const state of [...scope.interactiveStates.values()]) {
     removeInteractiveSubagentState(state);
     if (
-      (!preserveInteractivePanes || isInMemoryWorkflowPane(state)) &&
-      (state.status === "running" ||
-        state.status === "idle" ||
-        state.status === "unknown")
+      state.parentSessionId === undefined ||
+      !staleSessionIds.has(state.parentSessionId)
     ) {
+      continue;
+    }
+    interactiveSubagentRegistry.delete(state.id);
+    if (shouldTerminateInteractiveState(state)) {
       try {
         cancelInteractiveSubagentByState(state);
       } catch {
@@ -397,11 +407,175 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       advanceSessionScopeGeneration(scope.id);
       removeSessionScope(scope.id);
 
-      const remainingScopes = getStartedSessionScopes();
-      setLegacyActiveSessionRefs(remainingScopes.at(-1));
-      if (remainingScopes.length === 0) {
-        const handle = globalState.__piSubagenturaInteractivePollerHandle;
-        if (handle) {
+      // Only started ancestors registered before this context may keep the
+      // shared poller and registries alive. Descendants are structurally owned
+      // by this context; a missed nested shutdown must not outlive its parent.
+      const startedAncestors = contextStack
+        .slice(0, contextIndex)
+        .filter((context) => context.lifecycle === "started");
+      const descendants = contextStack.slice(contextIndex + 1);
+
+      const shutdownOwners: Array<{
+        token: ActiveSessionContextToken;
+        sessionId: string | undefined;
+      }> = [];
+      for (const context of [sessionContext, ...descendants]) {
+        let sessionId: string | undefined;
+        try {
+          const manager =
+            context.sessionManager ??
+            (context.id === sessionContext.id
+              ? ctx?.sessionManager
+              : undefined);
+          sessionId = manager?.getSessionId?.();
+        } catch {
+          sessionId = undefined;
+        }
+        shutdownOwners.push({
+          token: { id: context.id, generation: context.generation },
+          sessionId,
+        });
+      }
+      const shutdownSessionId = shutdownOwners[0]!.sessionId;
+      sessionContext.lifecycle = "shutdown";
+      advanceSessionContextGeneration(sessionContext.id);
+      removeSessionContext(sessionContext.id);
+      for (const descendant of descendants) {
+        descendant.lifecycle = "shutdown";
+        advanceSessionContextGeneration(descendant.id);
+        removeSessionContext(descendant.id);
+      }
+      setActiveSessionRefs(startedAncestors[startedAncestors.length - 1]);
+      g2.__piSubagenturaParentStreaming = false;
+
+      // A live ancestor may defer global teardown while this nested context
+      // cleans its own state. Descendants never participate in this decision:
+      // if their shutdown hook was omitted, their lifecycle is stale.
+      if (startedAncestors.length > 0) {
+        const preserveInteractivePanes =
+          event?.reason === "reload" ||
+          event?.reason === "resume" ||
+          event?.reason === "quit";
+        // An absent session id must match nothing. `parentSessionId` is
+        // legitimately undefined for states spawned without a parent session,
+        // and `undefined === undefined` would kill unrelated panes.
+        const ownedSessionIds = new Set(
+          shutdownOwners
+            .map((owner) => owner.sessionId)
+            .filter(
+              (sessionId): sessionId is string => sessionId !== undefined,
+            ),
+        );
+        const ownedStates = [...interactiveSubagentRegistry.values()].filter(
+          (state) =>
+            state.parentSessionId !== undefined &&
+            ownedSessionIds.has(state.parentSessionId),
+        );
+        const ownedJobs = shutdownOwners.flatMap((owner) =>
+          [...jobRegistry.entries()]
+            .filter(([, job]) => inProcessJobBelongsToOwner(job, owner.token))
+            .map(([jobId, job]) => ({
+              jobId,
+              job,
+              owner,
+              cancellation: {
+                source: "session_shutdown" as const,
+                initiator: owner.sessionId,
+                reason: `session_shutdown (${event?.reason ?? "unknown"})`,
+              },
+            })),
+        );
+
+        // Snapshot every invalidated owner's in-process job before any of
+        // those sessions is aborted.
+        for (const { job, owner, cancellation } of ownedJobs) {
+          if (job.status !== "running") continue;
+          job.cancellation = { ...cancellation, at: Date.now() };
+          job.cancellationSnapshot = snapshotInProcessSession({
+            kind: "in-process",
+            jobId: job.id,
+            session: job.session,
+            cwd: job.cwd ?? ctx?.cwd ?? process.cwd(),
+            parentSessionId: owner.sessionId,
+            model: job.modelLabel,
+            activeTool: job.liveStatus?.activeTool,
+            partialOutput: job.liveStatus?.output,
+            startedAt: job.startedAt,
+            source: "session_shutdown",
+            initiator: cancellation.initiator,
+            reason: cancellation.reason,
+          });
+        }
+
+        for (const owner of shutdownOwners) {
+          cleanupWorkflowJobsForOwner(owner.token);
+        }
+
+        for (const state of ownedStates) {
+          interactiveSubagentRegistry.delete(state.id);
+          if (
+            !preserveInteractivePanes &&
+            shouldTerminateInteractiveState(state)
+          ) {
+            try {
+              cancelInteractiveSubagentByState(state);
+            } catch {
+              /* best effort */
+            }
+          }
+        }
+
+        for (const { jobId, job, cancellation } of ownedJobs) {
+          if (job.status === "running") {
+            try {
+              if (job.abort) job.abort.abort(cancellation);
+              else void job.session.abort().catch(() => {});
+            } catch {
+              /* session may already be disposed */
+            }
+          }
+          jobRegistry.delete(jobId);
+        }
+        return;
+      }
+
+      // Stop the global poller so it doesn't fire after we're gone. Without
+      // clearInterval the handle would keep the event loop alive across restarts.
+      if (g2.__piSubagenturaInteractivePollerHandle) {
+        try {
+          clearInterval(g2.__piSubagenturaInteractivePollerHandle);
+        } catch {
+          /* defensive */
+        }
+        g2.__piSubagenturaInteractivePollerHandle = undefined;
+      }
+
+      // Snapshot live state objects before clearing. Non-preserving shutdowns
+      // kill their panes; reload/resume/quit leave them for rehydration.
+      const runningStates: InteractiveSubagentState[] = [];
+      for (const state of interactiveSubagentRegistry.values()) {
+        if (shouldTerminateInteractiveState(state)) runningStates.push(state);
+      }
+
+      // Drop in-memory state FIRST. An in-flight poll tick (dequeued from
+      // setInterval before clearInterval ran) finds an empty registry and its
+      // for-loop iterates over zero entries — no work, no notification delivery.
+      try {
+        clearSessionParsers();
+        interactiveSubagentRegistry.clear();
+      } catch {
+        /* best effort */
+      }
+
+      const preserveInteractivePanes =
+        event?.reason === "reload" ||
+        event?.reason === "resume" ||
+        event?.reason === "quit";
+      if (!preserveInteractivePanes) {
+        // Kill the panes using the already-snapshotted states.
+        // cancelInteractiveSubagentByState is used (not the id-based variant)
+        // because the registry was already cleared above.
+        for (const state of runningStates) {
           try {
             clearInterval(handle);
           } catch {

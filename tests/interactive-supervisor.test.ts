@@ -22,6 +22,7 @@ import {
   writeLineageManifestAtomic,
 } from "../src/interactive-lineage";
 import {
+  advanceInteractiveState,
   captureInteractiveSubagent,
   focusInteractiveSubagent,
   interactiveSubagentRegistry,
@@ -849,7 +850,6 @@ describe("interactive supervisor", () => {
       lifecycle: {
         currentTurnId: "turn-1",
         completionOutcome: "done",
-        processStatus: "done",
       },
     });
     interactiveSubagentRegistry.set(item.id, item);
@@ -864,9 +864,7 @@ describe("interactive supervisor", () => {
     await vi.waitFor(() => {
       component.invalidate();
       const rendered = component.render(160).join("\n");
-      expect(rendered).toContain(
-        "Lifecycle: turn=turn-1 · completion=done · process=done",
-      );
+      expect(rendered).toContain("Lifecycle: turn=turn-1 · completion=done");
       expect(rendered).toContain(
         "Recent events: turn_started → tool_activity(read) → completion(done)",
       );
@@ -1160,7 +1158,7 @@ describe("interactive supervisor", () => {
     const active = state("active", { name: "active-agent" });
     const stale = state("stale", { name: "stale-agent", status: "unknown" });
     const cancel = vi.fn(() => {
-      active.status = "cancelled";
+      advanceInteractiveState(active, { type: "parent_cancelled" });
       return active;
     });
     const component = new InteractiveSupervisorComponent({
@@ -1330,11 +1328,11 @@ describe("interactive supervisor", () => {
       pane: { backend: "tmux", paneId: exited.paneId },
       artifactDir,
     });
-    const getPaneLivenessAsync = vi.fn().mockResolvedValue("alive");
+    const observePane = vi.fn().mockResolvedValue({ kind: "alive" });
     interactiveSubagentRegistry.set(exited.id, exited);
     __setTmuxMultiplexer({
-      getPaneLivenessAsync,
-      getPaneLiveness: vi.fn().mockReturnValue("dead"),
+      observePane,
+      getPaneLiveness: vi.fn().mockReturnValue({ kind: "dead" }),
     } as never);
     process.env.PI_SUBAGENTURA_ROOT_ID = rootId;
     process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT = sessionRoot;
@@ -1366,10 +1364,7 @@ describe("interactive supervisor", () => {
 
       expect.soft(rendered).not.toContain(exited.name);
       expect(exited.status).toBe("exited");
-      expect(getPaneLivenessAsync).toHaveBeenCalledWith(
-        exited.paneId,
-        undefined,
-      );
+      expect(observePane).toHaveBeenCalledWith(exited.paneId, undefined);
       expect(readdirSync(paths.nodesDir)).toContain(`${exited.id}.json`);
     } finally {
       if (previousRootId === undefined)
@@ -1628,12 +1623,16 @@ describe("interactive supervisor", () => {
     for (const id of ["alive", "unknown", "dead"]) {
       interactiveSubagentRegistry.set(id, state(id, { status: "exited" }));
     }
-    const getPaneLivenessAsync = vi.fn(async (paneId: string) =>
-      paneId === "%dead" ? "dead" : paneId === "%unknown" ? "unknown" : "alive",
+    const observePane = vi.fn(async (paneId: string) =>
+      paneId === "%dead"
+        ? { kind: "dead" as const }
+        : paneId === "%unknown"
+          ? { kind: "unknown" as const }
+          : { kind: "alive" as const },
     );
     __setTmuxMultiplexer({
-      getPaneLivenessAsync,
-      getPaneLiveness: () => "alive",
+      observePane,
+      getPaneLiveness: () => ({ kind: "alive" }),
       buildAttachCommands: () => ({
         attachCommand: "tmux attach -t x",
         focusCommand: "tmux select-window -t x",
@@ -1642,9 +1641,7 @@ describe("interactive supervisor", () => {
 
     await harness.open();
 
-    const probedPanes = getPaneLivenessAsync.mock.calls.map(
-      ([paneId]) => paneId,
-    );
+    const probedPanes = observePane.mock.calls.map(([paneId]) => paneId);
     expect(probedPanes).toEqual(
       expect.arrayContaining(["%alive", "%unknown", "%dead"]),
     );
@@ -1655,8 +1652,8 @@ describe("interactive supervisor", () => {
     const harness = await lineageHarness("prune-root");
     await harness.writeNode("dead", { paneId: "%dead" });
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "dead",
-      getPaneLiveness: () => "dead",
+      observePane: async () => ({ kind: "dead" }),
+      getPaneLiveness: () => ({ kind: "dead" }),
       buildAttachCommands: () => ({
         attachCommand: "tmux attach -t x",
         focusCommand: "tmux select-window -t x",
@@ -1668,12 +1665,12 @@ describe("interactive supervisor", () => {
     expect(await harness.nodeFiles()).toEqual([]);
   });
 
-  it("keeps unknown lineage panes visible and retained", async () => {
+  it("hides unknown lineage panes while retaining their manifests", async () => {
     const harness = await lineageHarness("unknown-root");
     await harness.writeNode("unknown", { paneId: "%unknown" });
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "unknown",
-      getPaneLiveness: () => "unknown",
+      observePane: async () => ({ kind: "unknown" }),
+      getPaneLiveness: () => ({ kind: "unknown" }),
       buildAttachCommands: () => ({
         attachCommand: "tmux attach -t x",
         focusCommand: "tmux select-window -t x",
@@ -1682,7 +1679,7 @@ describe("interactive supervisor", () => {
 
     const { rendered } = await harness.open();
 
-    expect(rendered).toContain("agent-unknown");
+    expect(rendered).not.toContain("agent-unknown");
     expect(await harness.nodeFiles()).toEqual(["unknown.json"]);
   });
 
@@ -1692,11 +1689,11 @@ describe("interactive supervisor", () => {
       paneId: "remote-pane",
       backend: "remote",
     });
-    const getPaneLivenessAsync = vi.fn();
+    const observePane = vi.fn();
     const buildAttachCommands = vi.fn();
     const killPane = vi.fn();
     __setTmuxMultiplexer({
-      getPaneLivenessAsync,
+      observePane,
       getPaneLiveness: vi.fn(),
       buildAttachCommands,
       killPane,
@@ -1710,7 +1707,7 @@ describe("interactive supervisor", () => {
 
     expect(rendered).not.toContain("agent-unsupported");
     expect(await harness.nodeFiles()).toEqual(["unsupported.json"]);
-    expect(getPaneLivenessAsync).not.toHaveBeenCalled();
+    expect(observePane).not.toHaveBeenCalled();
     expect(buildAttachCommands).not.toHaveBeenCalled();
     expect(killPane).not.toHaveBeenCalled();
   });
@@ -1720,9 +1717,9 @@ describe("interactive supervisor", () => {
     await harness.writeNode("alive", { paneId: "%alive" });
     await harness.writeNode("zombie", { paneId: "%zombie" });
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async (paneId: string) =>
-        paneId === "%alive" ? "alive" : "dead",
-      getPaneLiveness: () => "alive",
+      observePane: async (paneId: string) =>
+        paneId === "%alive" ? { kind: "alive" } : { kind: "dead" },
+      getPaneLiveness: () => ({ kind: "alive" }),
       buildAttachCommands: ({ paneId }: { paneId: string }) => {
         if (paneId === "%zombie") {
           throw new Error("[tmux] display-message failed: can't find pane");
@@ -1752,8 +1749,8 @@ describe("interactive supervisor", () => {
     });
     await harness.writeBroken("broken");
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
-      getPaneLiveness: () => "alive",
+      observePane: async () => ({ kind: "alive" }),
+      getPaneLiveness: () => ({ kind: "alive" }),
       buildAttachCommands: () => ({
         attachCommand: "tmux attach -t x",
         focusCommand: "tmux select-window -t x",
@@ -1827,8 +1824,8 @@ describe("interactive supervisor", () => {
     });
     const killed: string[] = [];
     __setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
-      getPaneLiveness: () => "alive",
+      observePane: async () => ({ kind: "alive" }),
+      getPaneLiveness: () => ({ kind: "alive" }),
       killPane: (paneId: string) => killed.push(paneId),
       buildAttachCommands: () => ({
         attachCommand: "tmux attach -t x",

@@ -160,9 +160,9 @@ describe.skipIf(!hasZellij)("zellij backend against the real binary", () => {
     // Normalized to the bare integer form `list-panes --json` reports.
     expect(pane.paneId).toMatch(/^\d+$/);
     expect(mux.getPaneLiveness(pane.paneId, pane.session)).toBe("alive");
-    await expect(
-      mux.getPaneLivenessAsync(pane.paneId, pane.session),
-    ).resolves.toBe("alive");
+    await expect(mux.observePane(pane.paneId, pane.session)).resolves.toEqual({
+      kind: "alive",
+    });
   });
 
   it("reports dead for an id the session never had", async () => {
@@ -294,9 +294,9 @@ describe.skipIf(!hasZellij)("zellij backend against the real binary", () => {
       () => mux.getPaneLiveness(pane.paneId, pane.session) === "dead",
       "pane never reported dead after killPane",
     );
-    await expect(
-      mux.getPaneLivenessAsync(pane.paneId, pane.session),
-    ).resolves.toBe("dead");
+    await expect(mux.observePane(pane.paneId, pane.session)).resolves.toEqual({
+      kind: "dead",
+    });
     expect(() => mux.killPane(pane.paneId, pane.session)).not.toThrow();
   });
 

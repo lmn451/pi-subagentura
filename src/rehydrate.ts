@@ -21,10 +21,10 @@ import {
 import { reconcileDeliveryReceipts } from "./delivery";
 import {
   buildAttachCommandsForState,
-  deriveInteractiveSubagentStatusFromLifecycle,
+  initializeInteractiveStateMachine,
   interactiveSubagentRegistry,
-  registerInteractiveSubagentState,
-  isPaneAlive,
+  interactiveStatusForState,
+  inspectInteractivePaneForRehydrate,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { sessionOwner, type SessionScope } from "./session-scope";
@@ -138,20 +138,20 @@ export function rehydrateInteractiveSubagents(
       lastStopText: undefined,
     };
 
-    const paneAlive = isPaneAlive(rehydrated);
-    const next = deriveInteractiveSubagentStatusFromLifecycle(
-      rehydrated.lifecycle ?? {},
-      paneAlive,
-    );
-    rehydrated.status = next;
-    reconcileDeliveryReceipts(
+    initializeInteractiveStateMachine(
       rehydrated,
-      sessionEntries,
-      scope ? sessionOwner(scope) : undefined,
+      entry.paneDeathConfirmed
+        ? { kind: "dead" }
+        : inspectInteractivePaneForRehydrate(rehydrated),
     );
-    if (next === "exited" || next === "cancelled") terminal++;
-    else if (next === "running" || next === "idle") alive++;
-    registerInteractiveSubagentState(rehydrated, scope);
+    reconcileDeliveryReceipts(rehydrated, sessionEntries);
+    const status = interactiveStatusForState(rehydrated);
+    if (status === "exited" || status === "cancelled") {
+      terminal++;
+    } else if (status === "running" || status === "idle") {
+      alive++;
+    }
+    interactiveSubagentRegistry.set(entry.id, rehydrated);
   }
 
   return { total: Object.keys(payload.states).length, alive, terminal };

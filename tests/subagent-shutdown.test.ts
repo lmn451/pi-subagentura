@@ -267,13 +267,10 @@ describe("session_shutdown handler", () => {
     clearSessionScopes();
     jobRegistry.clear();
     workflowJobRegistry.clear();
-    interactiveTmux.interactiveSubagentRegistry.clear();
-    const globalState = shutdownGlobalState();
-    globalState.__piSubagenturaInteractivePollerHandle = undefined;
-    globalState.__piSubagenturaPiRef = undefined;
-    globalState.__piSubagenturaUi = undefined;
-    globalState.__piSubagenturaSessionManager = undefined;
-    globalState.__piSubagenturaParentStreaming = false;
+    __setTmuxMultiplexer({
+      getPaneLiveness: () => "alive",
+      observePane: async () => ({ kind: "alive" }),
+    } as any);
 
     installLivenessMultiplexer(async () => "alive");
     fakeHandle = { unref: vi.fn() };
@@ -586,11 +583,79 @@ describe("session_shutdown handler", () => {
     const owner = sessionOwner(registration.scope);
     const tick = setIntervalSpy.mock.calls[0][0] as () => void;
 
-    await pollArtifactChanges(
-      registration.api as unknown as ExtensionAPI,
-      owner,
-    );
-    expect(registration.api.sendMessage).toHaveBeenCalledOnce();
+    // 1. Pre-shutdown tick: no artifact events, no notification.
+
+    tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(0);
+
+    // 2. Shutdown handler runs. The order of operations inside
+
+    // session_shutdown is what we're protecting: snapshot → clear → cancel.
+
+    // If someone re-orders to cancel → clear, the post-shutdown tick below
+
+    // would still see an empty registry (clear runs last), so this test
+
+    // alone would pass. The cancellation must use the byState export
+
+    // (covered by the test at line ~166) for the shutdown handler to
+
+    // actually kill panes after clear.
+
+    shutdownHandler!();
+
+    // 3. Post-shutdown tick (the in-flight one that survived clearInterval):
+
+    //    must deliver zero notifications because the registry is empty.
+
+    tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  it("AC-A2: setInterval tick after shutdown does not re-deliver a done event already in the artifact", async () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "pi-shutdown-a2-"));
+
+    const artifactDir = join(tmpRoot, "run-1");
+
+    const running = makeArtifactState("run-1", "running", artifactDir);
+
+    // Pre-write a done event with a fixed ts.
+
+    const doneTs = 1000;
+
+    const art = artifactPath(join(artifactDir, ".."), "run-1");
+
+    appendEvent(art, { ts: doneTs, type: "done", status: "done", exitCode: 0 });
+
+    interactiveTmux.interactiveSubagentRegistry.set(running.id, running);
+    __setTmuxMultiplexer({
+      getPaneLiveness: () => "alive",
+      observePane: async () => ({ kind: "alive" }),
+    } as any);
+
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    };
+    const { api, shutdownHandler } = setupExtension({ ui });
+
+    // Capture the actual setInterval callback for the real code path.
+
+    const tick = setIntervalSpy.mock.calls[0][0] as () => void;
+
+    // 1. Pre-shutdown tick: the done event (cursor=0, ts=1000) is
+
+    // delivered. Exactly one notification.
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await pollArtifactChanges(api as any);
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
     expect(ui.notify).toHaveBeenCalledOnce();
 
     registration.shutdown({ reason: "quit" }, shutdownContext("session-a"));

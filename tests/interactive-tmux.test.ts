@@ -658,7 +658,19 @@ describe("interactive-tmux", () => {
   it("pruneDeadInteractiveSubagents uses the incremental lifecycle fold", async () => {
     process.env.PI_CODING_AGENT_SESSION_DIR = makeTmp();
     process.env.TMUX = makeArgs().TMUX;
-    installMockExec(() => "");
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => "",
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const message = `can't find pane: ${MOCK_PANE_ID}`;
+        callback(new Error(message), "", message);
+      },
+    }));
 
     const mod = await importFresh<typeof import("../src/interactive-tmux")>(
       "../src/interactive-tmux",
@@ -691,7 +703,7 @@ describe("interactive-tmux", () => {
           },
         };
       mod.interactiveSubagentRegistry.set(state.id, state);
-      mod.pruneDeadInteractiveSubagents();
+      await mod.pruneDeadInteractiveSubagents();
       expect(state.status).toBe("exited");
       expect(state.exitCode).toBe(0);
     }
@@ -718,7 +730,7 @@ describe("interactive-tmux", () => {
           lifecycle: { parentCancelled: true },
         };
       mod.interactiveSubagentRegistry.set(state.id, state);
-      mod.pruneDeadInteractiveSubagents();
+      await mod.pruneDeadInteractiveSubagents();
       expect(state.status).toBe("cancelled");
     }
   });

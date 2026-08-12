@@ -8,7 +8,7 @@
  * implementation behind the same interface.
  *
  * Backends that participate MUST:
- *   - implement the 8 methods below with the documented semantics;
+ *   - implement the methods below with the documented semantics;
  *   - stringify any internal numeric pane id to match `paneId: string` on
  *     `InteractiveSubagentState`;
  *   - be safe to instantiate cheaply (the resolver holds a long-lived instance
@@ -27,11 +27,13 @@ import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { assertNever } from "./artifact";
+import type { PaneLiveness } from "./interactive-state";
+export type { PaneLiveness } from "./interactive-state";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
 export type MuxName = "tmux" | "zellij";
-/** Result of a backend pane-listing liveness probe. */
-export type PaneLiveness = "alive" | "dead" | "unknown";
+/** Synchronous listing result retained for lineage and launch preflights. */
+export type SyncPaneLiveness = "alive" | "dead" | "unknown";
 
 /** Backend-neutral structured reference to a durable mux pane. */
 export interface PaneRef {
@@ -151,7 +153,7 @@ export interface Multiplexer {
    *                           and generate their own (zellij requires unique
    *                           tab names per session).
    * @returns paneId           String id usable in subsequent `sendKeys` /
-   *                           `getPaneLiveness` / `killPane` calls. The string
+   *                           `observePane` / `killPane` calls. The string
    *                           format is backend-specific (tmux uses `%N`,
    *                           zellij uses `terminal_N` or just an integer
    *                           stringified).
@@ -174,19 +176,28 @@ export interface Multiplexer {
   }): { paneId: string; windowName?: string; session?: string };
 
   /**
-   * Probe whether the pane is still known to the backend.
-   *
-   * A successful pane listing returns `alive` when the pane is present and
-   * `dead` when it is absent. Command, setup, timeout, and parse failures return
-   * `unknown`; callers must not mistake an unavailable backend for a dead pane.
+   * Probe a complete synchronous backend listing. Only a successful listing
+   * may return `dead`; transport and parse failures return `unknown`.
+   */
+  getPaneLiveness(paneId: string, session?: string): SyncPaneLiveness;
+
+  /**
+   * Synchronously probe whether the pane appears alive. Retained for launch
+   * and rehydration preflight compatibility; `false` is inconclusive because
+   * backend, timeout, and parse failures cannot be distinguished from absence.
+   * Recurring pollers and durable death decisions MUST use `observePane`.
    *
    * @param session  The session returned by `createPane`. zellij needs it to
    *                 target the right server; tmux pane ids are server-global.
    */
-  getPaneLiveness(paneId: string, session?: string): PaneLiveness;
+  isPaneAlive(paneId: string, session?: string): boolean;
 
-  /** Asynchronously perform the same tri-state pane-listing probe. */
-  getPaneLivenessAsync(paneId: string, session?: string): Promise<PaneLiveness>;
+  /**
+   * Asynchronously observe pane liveness without blocking the parent event
+   * loop. A confirmed absent or exited pane is `dead`; transport failures
+   * preserve uncertainty as `unavailable` or `unknown`.
+   */
+  observePane(paneId: string, session?: string): Promise<PaneLiveness>;
 
   /**
    * Send literal text to the pane's shell input buffer, character-by-character.

@@ -14,6 +14,7 @@ import {
 } from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import type * as SubagentModule from "../src/subagent";
 import { flushDeliveries } from "../src/delivery";
 import { importFresh } from "./test-utils";
 import { makeTmp, makeState } from "./subagent-rehydrate-helpers";
@@ -24,10 +25,16 @@ describe("rehydrateInteractiveSubagents", () => {
   beforeEach(() => {
     cwd = makeTmp();
     vi.resetModules();
+    const alivePaneId = "%alive1";
     vi.doMock("../src/multiplexer", () => ({
       getMux: () => ({
         name: "tmux",
-        getPaneLiveness: () => "dead",
+        isAvailable: () => true,
+        isPaneAlive: (paneId: string) => paneId === alivePaneId,
+        observePane: async (paneId: string) =>
+          paneId === alivePaneId
+            ? ({ kind: "alive" } as const)
+            : ({ kind: "dead" } as const),
         buildAttachCommands: (state: { windowName?: string }) => ({
           attachCommand: `tmux attach -t ${state.windowName ?? "session"}`,
           focusCommand: `tmux select-window -t ${state.windowName ?? "session"}`,
@@ -321,7 +328,7 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(result.terminal).toBe(1);
   });
 
-  it("restores completion status from persisted lifecycle without log replay", async () => {
+  it("preserves an uncertain synchronous pane miss during rehydrate", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const state = makeState(cwd, "abc12345");
@@ -345,18 +352,38 @@ describe("rehydrateInteractiveSubagents", () => {
 
     mod.rehydrateInteractiveSubagents(cwd);
 
-    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("exited");
+    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("unknown");
     expect(interactiveSubagentRegistry.get(state.id)?.eventByteCursor).toBe(
       1_000_000,
     );
   });
 
+  it("restores a persisted confirmed pane death despite id reuse", async () => {
+    const mod = await importFresh<typeof SubagentModule>("../src/subagent");
+    const id = "alive1";
+    appendInteractiveState(cwd, {
+      id,
+      paneId: "%alive1",
+      mux: "tmux",
+      artifactDir: join(cwd, id),
+      sessionFile: "/tmp/sess.jsonl",
+      paneDeathConfirmed: true,
+      lifecycle: {
+        completionOutcome: "done",
+        completionSource: "explicit",
+      },
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd);
+
+    expect(interactiveSubagentRegistry.get(id)?.status).toBe("exited");
+  });
+
   it("counts alive vs terminal in the return value", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    // Two entries: alive1 (no events, pane not alive → unknown), done1 (done event,
-    // pane not alive → exited). We can predict exact counts here because the test
-    // runs in a tmux environment and isPaneAlive returns false for fake pane IDs.
+    // alive1 is synchronously observed alive. A false compatibility probe for
+    // done1 is uncertain until the async poll can classify the failure.
     const cwdA = cwd;
     const cwdB = cwd;
     for (const id of ["alive1", "done1"]) {
@@ -382,11 +409,10 @@ describe("rehydrateInteractiveSubagents", () => {
     const result = mod.rehydrateInteractiveSubagents(cwdA);
 
     expect(result.total).toBe(2);
-    // alive1 has no events → status=unknown (not counted); done1 has done event → status=exited (terminal)
-    expect(result.alive).toBe(0);
-    expect(result.terminal).toBe(1);
-    expect(interactiveSubagentRegistry.get("alive1")?.status).toBe("unknown");
-    expect(interactiveSubagentRegistry.get("done1")?.status).toBe("exited");
+    expect(result.alive).toBe(1);
+    expect(result.terminal).toBe(0);
+    expect(interactiveSubagentRegistry.get("alive1")?.status).toBe("running");
+    expect(interactiveSubagentRegistry.get("done1")?.status).toBe("unknown");
   });
 
   it("does not throw when ctx.cwd is unreachable (best-effort recovery)", async () => {

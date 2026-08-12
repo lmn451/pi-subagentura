@@ -27,6 +27,8 @@ import {
   cancelInteractiveSubagent,
   formatInteractiveState,
   interactiveSubagentRegistry,
+  interactiveStatusForState,
+  isInteractiveStateActive,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
@@ -355,15 +357,8 @@ export function registerInteractiveSubagentTools(
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
-      const registration = resolveInteractiveToolStates(toolToken);
-      const visibleStates = registration?.states;
-      if (visibleStates) {
-        pruneDeadInteractiveSubagents(visibleStates.values());
-        updateRunningSubagentFooter(
-          ctx.ui,
-          registration.scope ? sessionOwner(registration.scope) : undefined,
-        );
-      }
+      await pruneDeadInteractiveSubagents();
+      updateRunningSubagentFooter(ctx.ui);
       const states = params.jobId
         ? [visibleStates?.get(params.jobId)].filter(
             (s): s is InteractiveSubagentState => Boolean(s),
@@ -568,33 +563,18 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      if (
-        state.completionOwner === "workflow" &&
-        (!state.workflowResultConsumed || state.status !== "idle")
-      ) {
+      // Accept both running and idle states. The compatibility status comes
+      // from the lifecycle kernel rather than an independently mutable field.
+      const status = interactiveStatusForState(state);
+      if (!isInteractiveStateActive(state)) {
         return {
           content: [
             {
               type: "text",
-              text: `Interactive sub-agent ${params.id} is still under workflow ownership; its workflow must consume the current result and the pane must be idle before a follow-up can be sent.`,
+              text: `Interactive sub-agent ${params.id} is ${status}; follow-up messages can only be sent to running or idle sub-agents. Spawn a new one if needed.`,
             },
           ],
-          details: { id: params.id, status: "workflow_owned" },
-          isError: true,
-        };
-      }
-      // Standalone panes accept follow-ups while running or idle. Workflow ownership has two
-      // independent release conditions: artifact polling folded the completion into idle, and the
-      // workflow runner acknowledged returning that result.
-      if (state.status !== "running" && state.status !== "idle") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Interactive sub-agent ${params.id} is ${state.status}; follow-up messages can only be sent to running or idle sub-agents. Spawn a new one if needed.`,
-            },
-          ],
-          details: { id: params.id, status: state.status },
+          details: { id: params.id, status },
           isError: true,
         };
       }
@@ -840,16 +820,9 @@ export function registerInteractiveSubagentTools(
     parameters: Type.Object({}),
 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<any> {
-      const registration = resolveInteractiveToolStates(toolToken);
-      const visibleStates = registration?.states;
-      if (visibleStates) {
-        pruneDeadInteractiveSubagents(visibleStates.values());
-        updateRunningSubagentFooter(
-          ctx.ui,
-          registration.scope ? sessionOwner(registration.scope) : undefined,
-        );
-      }
-      const states = visibleStates ? [...visibleStates.values()] : [];
+      await pruneDeadInteractiveSubagents();
+      updateRunningSubagentFooter(ctx.ui);
+      const states = [...interactiveSubagentRegistry.values()];
       const summary = states.map((s) => {
         const art = getArtifactForState(s);
         const last = lastEvent(art);

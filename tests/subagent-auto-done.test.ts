@@ -105,7 +105,8 @@ describe("no parent-side timeout completion synthesis", () => {
   let root: string;
 
   beforeEach(() => {
-    // A successful pane listing containing %99 keeps the synthetic child live.
+    // The poller now uses the asynchronous observePane contract. Return the
+    // pane id exactly as tmux does so the synthetic %99 pane is observed alive.
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => Buffer.from("%99\n"),
@@ -113,8 +114,8 @@ describe("no parent-side timeout completion synthesis", () => {
         _file: string,
         _args: string[],
         _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, "%99\n"),
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => callback(null, "%99", ""),
     }));
     root = makeTmp();
     const g = globalThis as any;

@@ -59,6 +59,8 @@
     "src/tools/in-process.ts",
     "src/tools/interactive.ts",
     "src/interactive-tmux.ts",
+    "src/interactive-state.ts",
+    "src/interactive-state-xstate.ts",
     "src/interactive-supervisor-registration.ts",
     "src/interactive-supervisor-ui.ts",
     "src/interactive-lineage.ts",
@@ -158,6 +160,7 @@
   "dependencies": {
     "acorn": "^8.14.0",
     "is-path-inside": "^4.0.0",
-    "ndjson": "^2.0.0"
+    "ndjson": "^2.0.0",
+    "xstate": "^5.32.5"
   }
 }
