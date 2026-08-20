@@ -59,6 +59,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tmux
 
+      # Pi 0.80.6 uses fd and ripgrep to discover the explicitly loaded
+      # resources shown in the terminal startup screen. The harness asserts
+      # that both the fixture provider and extension were loaded.
+      - name: Install terminal E2E search tools
+        if: matrix.pi-version == '0.80.6'
+        run: |
+          sudo apt-get install -y fd-find ripgrep
+          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+          fd --version
+          rg --version
+
       # zellij is not in apt, so pull the prebuilt musl binary from the release
       # the backend is verified against. Without a real zellij on PATH the whole
       # zellij suite is mocked, which is exactly how a `dump-screen` argv that
