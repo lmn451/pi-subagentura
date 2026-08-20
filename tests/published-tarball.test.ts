@@ -222,6 +222,39 @@ describe("published tarball", () => {
     ).toContain("src/helpers.ts");
   });
 
+  it("contains the Orchestratorv2 prompt and routing import closure", () => {
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+        "src/orchestrator-routing.ts",
+        "src/tools/orchestrator.ts",
+      ]),
+    );
+
+    const extensionSource = readFileSync(
+      join(pkgDir, "src/subagent.ts"),
+      "utf8",
+    );
+    expect(sourceReferences(extensionSource)).toEqual(
+      expect.arrayContaining([
+        {
+          specifier: "../ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+          runtime: true,
+        },
+        { specifier: "./tools/orchestrator", runtime: true },
+      ]),
+    );
+
+    const toolSource = readFileSync(
+      join(pkgDir, "src/tools/orchestrator.ts"),
+      "utf8",
+    );
+    expect(sourceReferences(toolSource)).toContainEqual({
+      specifier: "../orchestrator-routing",
+      runtime: true,
+    });
+  });
+
   it("publishes workflow declarations through the workflow subpath", () => {
     expect(entries).toContain("types/workflow.d.ts");
     const packedPackage = JSON.parse(
@@ -312,7 +345,7 @@ describe("published tarball", () => {
     ).toEqual([]);
   });
 
-  it("loads the packed TypeScript extension in a clean production consumer", () => {
+  it("loads and registers the packed extension in a clean production consumer", () => {
     const consumer = join(work, "consumer");
     mkdirSync(consumer);
     const install = spawnSync(
@@ -330,7 +363,7 @@ describe("published tarball", () => {
       [
         "--input-type=module",
         "--eval",
-        'import { createJiti } from "jiti"; const jiti = createJiti(import.meta.url); const mod = await jiti.import("pi-subagentura", { default: false }); if (typeof mod.default !== "function") process.exit(2);',
+        'import { createJiti } from "jiti"; const jiti = createJiti(import.meta.url); const mod = await jiti.import("pi-subagentura", { default: false }); if (typeof mod.default !== "function") process.exit(2); const flags = []; const tools = []; mod.default({ registerTool: (tool) => tools.push(tool.name), registerMessageRenderer() {}, registerFlag: (name) => flags.push(name), registerCommand() {}, registerShortcut() {}, getFlag: () => false, on() {} }); if (!flags.includes("orchestratorv2") || !tools.includes("list_orchestrator_agents") || !tools.includes("update_orchestrator_agent_description")) process.exit(3);',
       ],
       { cwd: consumer, encoding: "utf8" },
     );

@@ -112,6 +112,18 @@ describe("extension registration", () => {
     });
   });
 
+  it("registers the separate --orchestratorv2 flag", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    expect(api.registerFlag).toHaveBeenCalledWith("orchestratorv2", {
+      description: "Append the bundled Orchestratorv2 thin-router prompt",
+      type: "boolean",
+      default: false,
+    });
+  });
+
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestrator"),
@@ -125,6 +137,32 @@ describe("extension registration", () => {
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
     expect(result.systemPrompt).toContain("# Orchestrator System Prompt");
+    expect(result.systemPrompt).not.toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(result.systemPrompt).toContain("`workflow`");
+    expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+  });
+
+  it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {
+    const api = mockApi({
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    });
+
+    registerExtension(api as any);
+
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
+
+    expect(result.systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(result.systemPrompt).not.toContain("# Orchestrator System Prompt");
+    expect(result.systemPrompt).toContain("send_interactive_subagent_message");
+    expect(result.systemPrompt).toContain("includeContext");
+    expect(result.systemPrompt).toContain("not a security boundary");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 
@@ -169,6 +207,9 @@ describe("extension registration", () => {
     );
     expect(names).not.toContain("workflow");
     expect(names).not.toContain("subagent_with_context");
+    expect(names).not.toContain("list_orchestrator_agents");
+    expect(names).not.toContain("update_orchestrator_agent_description");
+    expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",
       expect.any(Function),

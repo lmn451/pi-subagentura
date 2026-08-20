@@ -84,6 +84,10 @@ const ORCHESTRATOR_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
+  new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENTURA_CHILD === "1") {
@@ -108,10 +112,22 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
+  pi.registerFlag("orchestratorv2", {
+    description: "Append the bundled Orchestratorv2 thin-router prompt",
+    type: "boolean",
+    default: false,
+  });
   pi.on("before_agent_start", (event) => {
-    if (pi.getFlag("orchestrator") !== true) return;
+    const prompts: string[] = [];
+    if (pi.getFlag("orchestrator") === true) {
+      prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
+    }
+    if (pi.getFlag("orchestratorv2") === true) {
+      prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+    }
+    if (prompts.length === 0) return;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_SYSTEM_PROMPT}`,
+      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
     };
   });
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
