@@ -25,6 +25,11 @@ const IN_PROCESS_TOOL_NAMES = [
   "subagent_with_context",
 ].sort();
 
+const ORCHESTRATOR_TOOL_NAMES = [
+  "list_orchestrator_agents",
+  "update_orchestrator_agent_description",
+].sort();
+
 const WORKFLOW_TOOL_NAMES = [
   "cancel_workflow",
   "delete_workflow",
@@ -81,6 +86,7 @@ describe("extension registration", () => {
       [
         ...INTERACTIVE_TOOL_NAMES,
         ...IN_PROCESS_TOOL_NAMES,
+        ...ORCHESTRATOR_TOOL_NAMES,
         ...WORKFLOW_TOOL_NAMES,
       ].sort(),
     );

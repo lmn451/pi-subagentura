@@ -37,6 +37,7 @@ import {
   registerSubagentModelListTool,
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
+import { registerOrchestratorTools } from "./tools/orchestrator";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
@@ -116,6 +117,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi);
   registerInteractiveSubagentTools(pi, sessionScope);
+  registerOrchestratorTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);
   registerWorkflowTool(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);

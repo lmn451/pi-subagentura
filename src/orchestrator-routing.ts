@@ -12,6 +12,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { withInteractiveStateLock } from "./artifact";
+import {
+  getInteractivePaneLivenessAsync,
+  type InteractiveSubagentState,
+  type InteractiveSubagentStatus,
+} from "./interactive-tmux";
+import type { PaneLiveness } from "./multiplexer";
 
 export const ORCHESTRATOR_ROUTING_SCHEMA_VERSION = 1;
 export const MAX_ORCHESTRATOR_ROUTING_RECORDS = 128;
@@ -20,6 +26,9 @@ export const MAX_ORCHESTRATOR_ROUTING_ALIASES = 16;
 export const MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES = 256;
 export const MAX_ORCHESTRATOR_ROUTING_FILE_BYTES = 1024 * 1024;
 export const MAX_ORCHESTRATOR_PROJECT_PATH_BYTES = 4 * 1024;
+export const MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS = 128;
+export const MAX_ORCHESTRATOR_AGENT_NAME_BYTES = 512;
+export const MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES = 512;
 
 const CHILD_ID = /^[a-f0-9]{16}$/;
 const PROJECT_ID = /^[a-f0-9]{64}$/;
@@ -49,6 +58,39 @@ export interface OrchestratorRoutingOverlay {
   schemaVersion: typeof ORCHESTRATOR_ROUTING_SCHEMA_VERSION;
   projectId: string;
   records: OrchestratorRoutingEntry[];
+}
+
+export type OrchestratorAgentReason =
+  | "runtime_missing"
+  | "pane_dead"
+  | "pane_liveness_unknown"
+  | "runtime_cancelled"
+  | "runtime_exited"
+  | "runtime_status_unknown";
+
+export interface OrchestratorAgentView {
+  childId: string;
+  name?: string;
+  description?: string;
+  aliases?: string[];
+  provenance?: OrchestratorRoutingProvenance;
+  updatedAt?: string;
+  taskPreview?: string;
+  status: InteractiveSubagentStatus;
+  liveness: PaneLiveness;
+  stale: boolean;
+  actionable: boolean;
+  reason?: OrchestratorAgentReason;
+  attachCommand?: string;
+  focusCommand?: string;
+  artifactDir?: string;
+  sessionFile?: string;
+}
+
+export interface OrchestratorAgentProjection {
+  agents: OrchestratorAgentView[];
+  total: number;
+  omitted: number;
 }
 
 export type OrchestratorRoutingLoadResult =
@@ -183,6 +225,133 @@ export function listOrchestratorRoutingEntries(
     return result.overlay.records.map(cloneEntry);
   }
   throw routingLoadError(result);
+}
+
+export async function buildOrchestratorAgentProjection(
+  entries: readonly OrchestratorRoutingEntry[],
+  interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
+): Promise<OrchestratorAgentProjection> {
+  const metadata = new Map(entries.map((entry) => [entry.childId, entry]));
+  const metadataIds = [...metadata.keys()].sort();
+  const runtimeOnlyIds = [...interactiveStates.keys()]
+    .filter((childId) => !metadata.has(childId))
+    .sort();
+  const allIds = [...metadataIds, ...runtimeOnlyIds];
+  const selectedIds = allIds.slice(0, MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS);
+  const agents = await Promise.all(
+    selectedIds.map((childId) => {
+      return projectOrchestratorAgent(
+        childId,
+        metadata.get(childId),
+        interactiveStates.get(childId),
+      );
+    }),
+  );
+  return {
+    agents,
+    total: allIds.length,
+    omitted: allIds.length - selectedIds.length,
+  };
+}
+
+async function projectOrchestratorAgent(
+  childId: string,
+  metadata: OrchestratorRoutingEntry | undefined,
+  state: InteractiveSubagentState | undefined,
+): Promise<OrchestratorAgentView> {
+  const routingFields = metadata
+    ? {
+        description: metadata.description,
+        ...(metadata.aliases === undefined
+          ? {}
+          : { aliases: [...metadata.aliases] }),
+        ...(metadata.provenance === undefined
+          ? {}
+          : { provenance: metadata.provenance }),
+        ...(metadata.updatedAt === undefined
+          ? {}
+          : { updatedAt: metadata.updatedAt }),
+      }
+    : {};
+  if (!state) {
+    return {
+      childId,
+      ...routingFields,
+      status: "unknown",
+      liveness: "unknown",
+      stale: true,
+      actionable: false,
+      reason: "runtime_missing",
+    };
+  }
+
+  const liveness = await probeInteractiveLiveness(state);
+  const actionable = isRuntimeActionable(state.status, liveness);
+  const reason = orchestratorAgentReason(state.status, liveness);
+  return {
+    childId,
+    name: boundedPreview(state.name, MAX_ORCHESTRATOR_AGENT_NAME_BYTES),
+    ...routingFields,
+    taskPreview: boundedPreview(
+      state.task.replace(/\s+/g, " ").trim(),
+      MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES,
+    ),
+    status: state.status,
+    liveness,
+    stale: false,
+    actionable,
+    ...(reason === undefined ? {} : { reason }),
+    ...(actionable
+      ? {
+          attachCommand: state.attachCommand,
+          focusCommand: state.selectPaneCommand,
+        }
+      : {}),
+    artifactDir: state.artifactDir,
+    sessionFile: state.sessionFile,
+  };
+}
+
+async function probeInteractiveLiveness(
+  state: InteractiveSubagentState,
+): Promise<PaneLiveness> {
+  try {
+    return await getInteractivePaneLivenessAsync(state);
+  } catch {
+    /* A failed backend probe is represented explicitly as unknown liveness. */
+    return "unknown";
+  }
+}
+
+function isRuntimeActionable(
+  status: InteractiveSubagentStatus,
+  liveness: PaneLiveness,
+): boolean {
+  return (
+    liveness !== "dead" &&
+    (status === "running" || status === "idle" || status === "unknown")
+  );
+}
+
+function orchestratorAgentReason(
+  status: InteractiveSubagentStatus,
+  liveness: PaneLiveness,
+): OrchestratorAgentReason | undefined {
+  if (liveness === "dead") return "pane_dead";
+  if (status === "cancelled") return "runtime_cancelled";
+  if (status === "exited") return "runtime_exited";
+  if (liveness === "unknown") return "pane_liveness_unknown";
+  if (status === "unknown") return "runtime_status_unknown";
+  return undefined;
+}
+
+function boundedPreview(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return value;
+  const suffix = Buffer.from("…", "utf8");
+  let end = maxBytes - suffix.length;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return `${bytes.subarray(0, end).toString("utf8").trimEnd()}…`;
 }
 
 function readRoutingFile(file: string): RoutingFileReadResult {
