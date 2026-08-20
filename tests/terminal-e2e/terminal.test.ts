@@ -144,8 +144,13 @@ describe("real Pi terminal E2E", () => {
     "starts a real Pi editor in the isolated PTY",
     async () => {
       await harness.start();
-      // start() gates on the editor key hints, so assert the things it does not:
-      // the scripted model is selected and both extensions loaded.
+      // The editor key-hint line is painted before Pi finishes discovering the
+      // explicitly loaded resources. Wait for the latter before asserting that
+      // both the fixture provider and extension were loaded.
+      await harness.waitForScreen(
+        (screen) => screen.includes("mock-provider.ts, subagent.ts"),
+        "explicitly loaded resources",
+      );
       const screen = harness.renderedScreen();
       expect(screen).toContain("mock • medium");
       expect(screen).toContain("mock-provider.ts, subagent.ts");
