@@ -18,10 +18,12 @@ const {
   mockCancelInteractiveSubagent,
   mockLaunchInteractiveSubagent,
   mockPruneDeadInteractiveSubagents,
+  mockUpsertOrchestratorRoutingEntry,
 } = vi.hoisted(() => ({
   mockCancelInteractiveSubagent: vi.fn(),
   mockLaunchInteractiveSubagent: vi.fn(),
   mockPruneDeadInteractiveSubagents: vi.fn(),
+  mockUpsertOrchestratorRoutingEntry: vi.fn(),
 }));
 
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
@@ -35,6 +37,15 @@ vi.mock("../src/interactive-tmux", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/orchestrator-routing", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../src/orchestrator-routing")>();
+  return {
+    ...actual,
+    upsertOrchestratorRoutingEntry: mockUpsertOrchestratorRoutingEntry,
+  };
+});
+
 import registerExtension from "../src/subagent";
 import {
   formatInteractiveState,
@@ -45,6 +56,7 @@ import {
   getStartedSessionScopes,
   registerSessionScope,
 } from "../src/session-scope";
+import { InteractiveParams } from "../src/schemas";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
 
 const savedTmux = process.env.TMUX;
@@ -135,6 +147,7 @@ describe("subagent_interactive tool lifecycle", () => {
     mockLaunchInteractiveSubagent.mockReset();
     mockCancelInteractiveSubagent.mockReset();
     mockPruneDeadInteractiveSubagents.mockReset();
+    mockUpsertOrchestratorRoutingEntry.mockReset();
     mockCancelInteractiveSubagent.mockReturnValue(
       mockInteractiveState("cancelled"),
     );
@@ -223,11 +236,174 @@ describe("subagent_interactive tool lifecycle", () => {
     const callArgs = mockLaunchInteractiveSubagent.mock.calls[0][0];
     expect(callArgs.notifyOnComplete).toBe("notify");
     expect(callArgs.triggerTurnOnComplete).toBe(true);
+    expect(callArgs.contextText).toBeNull();
+    expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain(
       "Completion output will not be injected into the parent LLM",
     );
     expect(result.content[0].text).toContain(
       "A new parent turn will start automatically after the pointer delivery",
+    );
+  });
+
+  it("passes explicit context directly without reading the parent branch", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+
+    await toolDef.execute(
+      "call-explicit-context",
+      {
+        task: "research X",
+        includeContext: false,
+        context: "EXPLICIT-CONTEXT-MARKER",
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(mockLaunchInteractiveSubagent.mock.calls[0][0].contextText).toBe(
+      "EXPLICIT-CONTEXT-MARKER",
+    );
+  });
+
+  it("uses only the serialized parent branch when includeContext is true", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: "message",
+        message: { role: "user", content: "PARENT-BRANCH-MARKER" },
+      },
+    ]);
+
+    await toolDef.execute(
+      "call-parent-context",
+      {
+        task: "research X",
+        includeContext: true,
+        context: "EXPLICIT-CONTEXT-MUST-NOT-BE-CONCATENATED",
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(ctx.sessionManager.getBranch).toHaveBeenCalledOnce();
+    const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
+      .contextText as string;
+    expect(contextText).toContain("PARENT-BRANCH-MARKER");
+    expect(contextText).not.toContain(
+      "EXPLICIT-CONTEXT-MUST-NOT-BE-CONCATENATED",
+    );
+  });
+
+  it("persists initial routing metadata only after a successful spawn", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const state = {
+      ...mockInteractiveState(),
+      id: "0123456789abcdef",
+      artifactDir: "/tmp/artifacts/0123456789abcdef",
+    };
+    const entry = {
+      childId: state.id,
+      description: "Own the API migration",
+      aliases: ["api", "migration"],
+    };
+    mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
+    mockUpsertOrchestratorRoutingEntry.mockReturnValueOnce({
+      records: [entry],
+    });
+
+    const result = await toolDef.execute(
+      "call-routing-metadata",
+      {
+        task: "research X",
+        routingDescription: entry.description,
+        routingAliases: entry.aliases,
+      },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
+    expect(mockUpsertOrchestratorRoutingEntry).toHaveBeenCalledWith(
+      "/tmp",
+      entry,
+    );
+    expect(
+      mockLaunchInteractiveSubagent.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mockUpsertOrchestratorRoutingEntry.mock.invocationCallOrder[0],
+    );
+    expect(result.details).toMatchObject({
+      status: "started",
+      routingMetadata: { status: "persisted", entry },
+    });
+
+    mockLaunchInteractiveSubagent.mockReset();
+    mockUpsertOrchestratorRoutingEntry.mockClear();
+    mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
+      throw new Error("mux unavailable");
+    });
+    const failed = await toolDef.execute(
+      "call-routing-spawn-failure",
+      {
+        task: "research X",
+        routingDescription: entry.description,
+        routingAliases: entry.aliases,
+      },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(failed.details.status).toBe("error");
+    expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
+  });
+
+  it("reports routing persistence failure without pretending the child failed", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const state = {
+      ...mockInteractiveState(),
+      id: "0123456789abcdef",
+      artifactDir: "/tmp/artifacts/0123456789abcdef",
+    };
+    mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
+    mockUpsertOrchestratorRoutingEntry.mockImplementationOnce(() => {
+      throw new Error("routing disk is read-only");
+    });
+
+    const result = await toolDef.execute(
+      "call-routing-warning",
+      {
+        task: "research X",
+        routingDescription: "Own the API migration",
+        routingAliases: ["api"],
+      },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(result.details).toMatchObject({
+      id: state.id,
+      status: "started",
+      routingMetadata: {
+        status: "warning",
+        error: "routing disk is read-only",
+      },
+    });
+    expect(result.content[0].text).toContain(
+      `Interactive sub-agent ${state.id} started`,
+    );
+    expect(result.content[0].text).toContain(
+      "Warning: initial routing metadata was not persisted: routing disk is read-only",
+    );
+    expect(result.content[0].text).not.toContain(
+      "Failed to start interactive sub-agent",
     );
   });
 
@@ -491,15 +667,19 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
-  it("exposes notifyOnComplete in the schema with the new default documented", () => {
+  it("registers the intersected InteractiveParams schema and documents defaults", () => {
     const toolDef = getInteractiveToolDef(api);
     expect(toolDef).toBeDefined();
     const params = toolDef.parameters;
-    // TypeBox runtime shape: properties.notifyOnComplete exists
-    const properties = (params as any).properties;
+    expect(params).toBe(InteractiveParams);
+    const [commonFields, contextModes] = (params as any).allOf;
+    const properties = commonFields.properties;
     expect(properties).toBeDefined();
     expect(properties.notifyOnComplete).toBeDefined();
     expect(properties.triggerTurnOnComplete).toBeDefined();
+    expect(properties.routingDescription).toBeDefined();
+    expect(properties.routingAliases).toBeDefined();
+    expect(contextModes.anyOf).toHaveLength(3);
     // Description must document 'notify' as the default and 'inject' as a valid
     // alternative.
     const desc = properties.notifyOnComplete.description ?? "";

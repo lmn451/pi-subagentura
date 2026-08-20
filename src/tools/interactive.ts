@@ -38,6 +38,10 @@ import {
   completionTriggersTurn,
   formatCompletionDeliveryBehavior,
 } from "../notifications";
+import {
+  upsertOrchestratorRoutingEntry,
+  type OrchestratorRoutingEntry,
+} from "../orchestrator-routing";
 import { InteractiveParams } from "../schemas";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import {
@@ -60,6 +64,42 @@ const FOLLOWUP_COMPLETION_REMINDER =
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
+}
+
+type InitialRoutingMetadataResult =
+  | { status: "persisted"; entry: OrchestratorRoutingEntry }
+  | { status: "warning"; error: string };
+
+function persistInitialRoutingMetadata(params: {
+  cwd: string;
+  childId: string;
+  description?: string;
+  aliases?: string[];
+}): InitialRoutingMetadataResult | undefined {
+  if (params.description === undefined) return undefined;
+  if (!isValidSubagentId(params.childId)) {
+    return {
+      status: "warning",
+      error: `spawn returned invalid child id ${params.childId}`,
+    };
+  }
+  try {
+    const overlay = upsertOrchestratorRoutingEntry(params.cwd, {
+      childId: params.childId,
+      description: params.description,
+      ...(params.aliases === undefined ? {} : { aliases: params.aliases }),
+    });
+    const entry = overlay.records.find(
+      (record) => record.childId === params.childId,
+    );
+    if (!entry) throw new Error("routing metadata update was not persisted");
+    return { status: "persisted", entry };
+  } catch (error) {
+    return {
+      status: "warning",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export function findArtifactById(id: string): SubagentArtifact | null {
@@ -213,19 +253,26 @@ export function registerInteractiveSubagentTools(
         completionMode,
         params.triggerTurnOnComplete ?? true,
       );
+      const contextParams = params as typeof params & {
+        includeContext?: boolean;
+        context?: string;
+      };
       debugLog("info", "tool_call", {
         toolName: "subagent_interactive",
         toolCallId: _toolCallId,
         taskLength: params.task?.length ?? 0,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        includeContext: params.includeContext ?? false,
+        includeContext: contextParams.includeContext ?? false,
         notifyOnComplete: completionMode,
         triggerTurnOnComplete: triggerTurn,
       });
 
-      let contextText: string | null = null;
-      if (params.includeContext === true) {
+      let contextText: string | null =
+        contextParams.includeContext === false
+          ? (contextParams.context ?? null)
+          : null;
+      if (contextParams.includeContext === true) {
         const branch = ctx.sessionManager.getBranch();
         const messages = branch
           .filter(
@@ -256,6 +303,12 @@ export function registerInteractiveSubagentTools(
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
         });
+        const routingMetadata = persistInitialRoutingMetadata({
+          cwd: ctx.cwd,
+          childId: state.id,
+          description: params.routingDescription,
+          aliases: params.routingAliases,
+        });
         updateRunningSubagentFooter(
           ctx.ui,
           registration.scope ? sessionOwner(registration.scope) : undefined,
@@ -270,6 +323,11 @@ export function registerInteractiveSubagentTools(
         }
         locationLines.push(`Focus: ${state.selectPaneCommand}`);
         locationLines.push(`Session: ${state.sessionFile}`);
+        if (routingMetadata?.status === "warning") {
+          locationLines.push(
+            `Warning: initial routing metadata was not persisted: ${routingMetadata.error}`,
+          );
+        }
         return {
           content: [
             {
@@ -284,6 +342,7 @@ export function registerInteractiveSubagentTools(
             ...state,
             status: "started",
             thinkingLevel: params.thinkingLevel,
+            ...(routingMetadata === undefined ? {} : { routingMetadata }),
           },
         };
       } catch (error) {
