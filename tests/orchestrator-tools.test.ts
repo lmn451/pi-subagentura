@@ -7,6 +7,7 @@ import {
   MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES,
   buildOrchestratorAgentProjection,
   listOrchestratorRoutingEntries,
+  saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../src/orchestrator-routing";
@@ -300,6 +301,59 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE-parent-b-agent");
     expect(JSON.stringify(result)).not.toContain("PRIVATE parent B task");
     expect(JSON.stringify(result)).not.toContain(CHILD_C);
+  });
+
+  it("loads missing, empty, and loaded metadata on demand without a routing cache", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerOrchestratorTools(api as never, scope);
+    const list = tool(api, "list_orchestrator_agents");
+
+    const missing = await list.execute(
+      "list-missing",
+      {},
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+    expect(missing.details).toMatchObject({
+      status: "ok",
+      routingMetadataStatus: "missing",
+      agents: [],
+    });
+    expect(missing.content[0].text).toContain(
+      '"routingMetadataStatus": "missing"',
+    );
+
+    saveOrchestratorRoutingEntries(root, []);
+    const empty = await list.execute("list-empty", {}, undefined, undefined, {
+      cwd: root,
+    });
+    expect(empty.details).toMatchObject({
+      status: "ok",
+      routingMetadataStatus: "empty",
+      agents: [],
+    });
+    expect(empty.content[0].text).toContain('"routingMetadataStatus": "empty"');
+
+    upsertOrchestratorRoutingEntry(root, routingEntry(CHILD_A));
+    const loaded = await list.execute("list-loaded", {}, undefined, undefined, {
+      cwd: root,
+    });
+    expect(loaded.details).toMatchObject({
+      status: "ok",
+      routingMetadataStatus: "loaded",
+      agents: [
+        {
+          childId: CHILD_A,
+          status: "unknown",
+          liveness: "unknown",
+          stale: true,
+          actionable: false,
+          reason: "runtime_missing",
+        },
+      ],
+    });
   });
 
   it("updates confirmed metadata for a child in the current session scope", async () => {

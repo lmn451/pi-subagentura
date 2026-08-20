@@ -93,6 +93,17 @@ export interface OrchestratorAgentProjection {
   omitted: number;
 }
 
+export type OrchestratorRoutingMetadataStatus = "missing" | "empty" | "loaded";
+
+export interface OrchestratorRoutingMetadataView {
+  status: OrchestratorRoutingMetadataStatus;
+  entries: OrchestratorRoutingEntry[];
+}
+
+export interface OrchestratorAgentRegistryView extends OrchestratorAgentProjection {
+  routingMetadataStatus: OrchestratorRoutingMetadataStatus;
+}
+
 export type OrchestratorRoutingLoadResult =
   | { status: "missing" }
   | { status: "empty"; overlay: OrchestratorRoutingOverlay }
@@ -219,12 +230,38 @@ export function upsertOrchestratorRoutingEntry(
 export function listOrchestratorRoutingEntries(
   cwd: string,
 ): OrchestratorRoutingEntry[] {
+  return loadOrchestratorRoutingMetadata(cwd).entries;
+}
+
+export function loadOrchestratorRoutingMetadata(
+  cwd: string,
+): OrchestratorRoutingMetadataView {
   const result = loadOrchestratorRoutingOverlay(cwd);
-  if (result.status === "missing") return [];
+  if (result.status === "missing") {
+    return { status: result.status, entries: [] };
+  }
   if (result.status === "empty" || result.status === "loaded") {
-    return result.overlay.records.map(cloneEntry);
+    return {
+      status: result.status,
+      entries: result.overlay.records.map(cloneEntry),
+    };
   }
   throw routingLoadError(result);
+}
+
+export async function loadOrchestratorAgentRegistryView(
+  cwd: string,
+  interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
+): Promise<OrchestratorAgentRegistryView> {
+  const metadata = loadOrchestratorRoutingMetadata(cwd);
+  const projection = await buildOrchestratorAgentProjection(
+    metadata.entries,
+    interactiveStates,
+  );
+  return {
+    routingMetadataStatus: metadata.status,
+    ...projection,
+  };
 }
 
 export async function buildOrchestratorAgentProjection(

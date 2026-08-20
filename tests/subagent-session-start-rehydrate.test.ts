@@ -5,12 +5,15 @@
  * resume) and filters by parentSessionId.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendInteractiveState } from "../src/artifact";
 import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import { upsertOrchestratorRoutingEntry } from "../src/orchestrator-routing";
 import { importFresh } from "./test-utils";
 import { makeTmp } from "./subagent-rehydrate-helpers";
+
+const ROUTED_CHILD = "0123456789abcdef";
 
 describe("session_start rehydrate integration", () => {
   let cwd: string;
@@ -24,6 +27,7 @@ describe("session_start rehydrate integration", () => {
 
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
+    vi.restoreAllMocks();
     vi.doUnmock("node:child_process");
   });
 
@@ -41,11 +45,18 @@ describe("session_start rehydrate integration", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent")
     ).default;
     mod(api as any);
-    let startHandler: ((event: any, ctx: any) => void) | undefined;
+    let startHandler:
+      ((event: any, ctx: any) => void | Promise<void>) | undefined;
     for (const [event, handler] of (api.on as any).mock.calls) {
       if (event === "session_start") startHandler = handler;
     }
     return { api, startHandler };
+  }
+
+  function registeredTool(api: any, name: string): any {
+    return api.registerTool.mock.calls.find(([definition]: any[]) => {
+      return definition.name === name;
+    })?.[0];
   }
 
   it("session_start handler repopulates the registry from the on-disk state file", async () => {
@@ -83,6 +94,65 @@ describe("session_start rehydrate integration", () => {
       ),
     ).not.toThrow();
     expect(interactiveSubagentRegistry.size).toBe(0);
+  });
+
+  it.each(["startup", "reload", "resume"])(
+    "keeps routing metadata visible as stale/unknown after a fresh %s lifecycle",
+    async (reason) => {
+      upsertOrchestratorRoutingEntry(cwd, {
+        childId: ROUTED_CHILD,
+        description: "Own the restart-sensitive API work",
+        aliases: ["restart-api"],
+        provenance: "user",
+      });
+
+      const { api, startHandler } = await setupExtension();
+      await startHandler!({ type: "session_start", reason }, { cwd });
+      const result = await registeredTool(
+        api,
+        "list_orchestrator_agents",
+      ).execute("list-after-lifecycle", {}, undefined, undefined, { cwd });
+
+      expect(interactiveSubagentRegistry.size).toBe(0);
+      expect(result.details).toMatchObject({
+        status: "ok",
+        routingMetadataStatus: "loaded",
+        agents: [
+          {
+            childId: ROUTED_CHILD,
+            description: "Own the restart-sensitive API work",
+            aliases: ["restart-api"],
+            status: "unknown",
+            liveness: "unknown",
+            stale: true,
+            actionable: false,
+            reason: "runtime_missing",
+          },
+        ],
+      });
+    },
+  );
+
+  it("fails routing metadata closed without blocking runtime rehydration", async () => {
+    appendInteractiveState(cwd, {
+      id: "runtime-survives",
+      paneId: "%42",
+      mux: "tmux",
+      artifactDir: join(cwd, "runtime-survives"),
+      sessionFile: "/tmp/sess.jsonl",
+    });
+    writeFileSync(join(cwd, ".pi", "subagentura-routing.json"), "{");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { startHandler } = await setupExtension();
+    await startHandler!({ type: "session_start", reason: "reload" }, { cwd });
+
+    expect(interactiveSubagentRegistry.has("runtime-survives")).toBe(true);
+    expect(error).toHaveBeenCalledWith(
+      "[subagentura] orchestrator routing metadata recovery failed",
+      expect.any(Error),
+    );
+    error.mockRestore();
   });
 
   it("session_start does NOT rehydrate on startup when session ID doesn't match", async () => {

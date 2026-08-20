@@ -4,8 +4,8 @@ import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
   MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
   MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
-  buildOrchestratorAgentProjection,
   listOrchestratorRoutingEntries,
+  loadOrchestratorAgentRegistryView,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
@@ -69,19 +69,15 @@ export function registerOrchestratorTools(
       const scope = resolveToolSessionScope(toolToken);
       if (!scope) return sessionUnavailableResult();
       try {
-        const entries = listOrchestratorRoutingEntries(ctx.cwd);
-        const projection = await buildOrchestratorAgentProjection(
-          entries,
+        const projection = await loadOrchestratorAgentRegistryView(
+          ctx.cwd,
           scope.interactiveStates,
         );
         return {
           content: [
             {
               type: "text",
-              text:
-                projection.agents.length === 0
-                  ? "No orchestrator agents are registered."
-                  : JSON.stringify(projection, null, 2),
+              text: JSON.stringify(projection, null, 2),
             },
           ],
           details: { status: "ok", ...projection },
