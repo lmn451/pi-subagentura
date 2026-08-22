@@ -94,20 +94,14 @@ export interface OrchestratorAgentProjection {
 }
 
 export type OrchestratorRoutingMetadataStatus =
-  | "missing"
-  | "empty"
-  | "loaded"
-  | "malformed"
-  | "unsupported"
-  | "unreadable";
+  "missing" | "empty" | "loaded" | "malformed" | "unsupported" | "unreadable";
 
 export interface OrchestratorRoutingMetadataView {
   status: "missing" | "empty" | "loaded";
   entries: OrchestratorRoutingEntry[];
 }
 
-export interface OrchestratorAgentRegistryView
-  extends OrchestratorAgentProjection {
+export interface OrchestratorAgentRegistryView extends OrchestratorAgentProjection {
   routingMetadataStatus: OrchestratorRoutingMetadataStatus;
   routingMetadataError?: string;
 }
@@ -347,7 +341,11 @@ export async function buildOrchestratorAgentProjection(
   const selectedStaleIds = staleMetadataIds.slice(0, staleSlots);
   const staleAgents = await Promise.all(
     selectedStaleIds.map((childId) => {
-      return projectOrchestratorAgent(childId, metadata.get(childId), undefined);
+      return projectOrchestratorAgent(
+        childId,
+        metadata.get(childId),
+        undefined,
+      );
     }),
   );
   const agents = [...selectedRuntimeAgents, ...staleAgents];
