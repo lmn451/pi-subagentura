@@ -347,11 +347,7 @@ export async function buildOrchestratorAgentProjection(
   const selectedStaleIds = staleMetadataIds.slice(0, staleSlots);
   const staleAgents = await Promise.all(
     selectedStaleIds.map((childId) => {
-      return projectOrchestratorAgent(
-        childId,
-        metadata.get(childId),
-        undefined,
-      );
+      return projectOrchestratorAgent(childId, metadata.get(childId), undefined);
     }),
   );
   const agents = [...selectedRuntimeAgents, ...staleAgents];
