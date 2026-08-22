@@ -93,15 +93,23 @@ export interface OrchestratorAgentProjection {
   omitted: number;
 }
 
-export type OrchestratorRoutingMetadataStatus = "missing" | "empty" | "loaded";
+export type OrchestratorRoutingMetadataStatus =
+  | "missing"
+  | "empty"
+  | "loaded"
+  | "malformed"
+  | "unsupported"
+  | "unreadable";
 
 export interface OrchestratorRoutingMetadataView {
-  status: OrchestratorRoutingMetadataStatus;
+  status: "missing" | "empty" | "loaded";
   entries: OrchestratorRoutingEntry[];
 }
 
-export interface OrchestratorAgentRegistryView extends OrchestratorAgentProjection {
+export interface OrchestratorAgentRegistryView
+  extends OrchestratorAgentProjection {
   routingMetadataStatus: OrchestratorRoutingMetadataStatus;
+  routingMetadataError?: string;
 }
 
 export type OrchestratorRoutingLoadResult =
@@ -207,11 +215,12 @@ export function saveOrchestratorRoutingEntries(
       current.records.map((record) => [record.childId, record]),
     );
     for (const record of incoming) records.set(record.childId, record);
+    const boundedRecords = boundRoutingRecords(records, incoming);
     const overlay = validateOverlay(
       {
         schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION,
         projectId: current.projectId,
-        records: [...records.values()],
+        records: boundedRecords,
       },
       current.projectId,
     );
@@ -249,17 +258,55 @@ export function loadOrchestratorRoutingMetadata(
   throw routingLoadError(result);
 }
 
+interface OrchestratorRoutingProjectionMetadata {
+  status: OrchestratorRoutingMetadataStatus;
+  entries: OrchestratorRoutingEntry[];
+  error?: string;
+}
+
+function loadOrchestratorRoutingProjectionMetadata(
+  cwd: string,
+): OrchestratorRoutingProjectionMetadata {
+  let result: OrchestratorRoutingLoadResult;
+  try {
+    result = loadOrchestratorRoutingOverlay(cwd);
+  } catch (error) {
+    return {
+      status: "unreadable",
+      entries: [],
+      error: errorMessage(error),
+    };
+  }
+  if (result.status === "missing") {
+    return { status: result.status, entries: [] };
+  }
+  if (result.status === "empty" || result.status === "loaded") {
+    return {
+      status: result.status,
+      entries: result.overlay.records.map(cloneEntry),
+    };
+  }
+  return {
+    status: result.status,
+    entries: [],
+    error: result.error,
+  };
+}
+
 export async function loadOrchestratorAgentRegistryView(
   cwd: string,
   interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
 ): Promise<OrchestratorAgentRegistryView> {
-  const metadata = loadOrchestratorRoutingMetadata(cwd);
+  const metadata = loadOrchestratorRoutingProjectionMetadata(cwd);
   const projection = await buildOrchestratorAgentProjection(
     metadata.entries,
     interactiveStates,
   );
   return {
     routingMetadataStatus: metadata.status,
+    ...(metadata.error === undefined
+      ? {}
+      : { routingMetadataError: metadata.error }),
     ...projection,
   };
 }
@@ -269,14 +316,9 @@ export async function buildOrchestratorAgentProjection(
   interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
 ): Promise<OrchestratorAgentProjection> {
   const metadata = new Map(entries.map((entry) => [entry.childId, entry]));
-  const metadataIds = [...metadata.keys()].sort();
-  const runtimeOnlyIds = [...interactiveStates.keys()]
-    .filter((childId) => !metadata.has(childId))
-    .sort();
-  const allIds = [...metadataIds, ...runtimeOnlyIds];
-  const selectedIds = allIds.slice(0, MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS);
-  const agents = await Promise.all(
-    selectedIds.map((childId) => {
+  const runtimeIds = [...interactiveStates.keys()].sort();
+  const runtimeAgents = await Promise.all(
+    runtimeIds.map((childId) => {
       return projectOrchestratorAgent(
         childId,
         metadata.get(childId),
@@ -284,11 +326,49 @@ export async function buildOrchestratorAgentProjection(
       );
     }),
   );
+  runtimeAgents.sort(compareOrchestratorRuntimeAgents);
+
+  const staleMetadataIds = [...metadata.keys()]
+    .filter((childId) => !interactiveStates.has(childId))
+    .sort((leftId, rightId) => {
+      return compareNewestRoutingEntries(
+        metadata.get(leftId)!,
+        metadata.get(rightId)!,
+      );
+    });
+  const selectedRuntimeAgents = runtimeAgents.slice(
+    0,
+    MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS,
+  );
+  const staleSlots = Math.max(
+    0,
+    MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS - selectedRuntimeAgents.length,
+  );
+  const selectedStaleIds = staleMetadataIds.slice(0, staleSlots);
+  const staleAgents = await Promise.all(
+    selectedStaleIds.map((childId) => {
+      return projectOrchestratorAgent(
+        childId,
+        metadata.get(childId),
+        undefined,
+      );
+    }),
+  );
+  const agents = [...selectedRuntimeAgents, ...staleAgents];
+  const total = runtimeAgents.length + staleMetadataIds.length;
   return {
     agents,
-    total: allIds.length,
-    omitted: allIds.length - selectedIds.length,
+    total,
+    omitted: total - agents.length,
   };
+}
+
+function compareOrchestratorRuntimeAgents(
+  left: OrchestratorAgentView,
+  right: OrchestratorAgentView,
+): number {
+  if (left.actionable !== right.actionable) return left.actionable ? -1 : 1;
+  return left.childId.localeCompare(right.childId);
 }
 
 async function projectOrchestratorAgent(
@@ -389,6 +469,53 @@ function boundedPreview(value: string, maxBytes: number): string {
   let end = maxBytes - suffix.length;
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
   return `${bytes.subarray(0, end).toString("utf8").trimEnd()}…`;
+}
+
+function boundRoutingRecords(
+  records: Map<string, OrchestratorRoutingEntry>,
+  incoming: readonly OrchestratorRoutingEntry[],
+): OrchestratorRoutingEntry[] {
+  if (records.size <= MAX_ORCHESTRATOR_ROUTING_RECORDS) {
+    return [...records.values()];
+  }
+
+  const protectedIds = new Set(incoming.map((record) => record.childId));
+  const evictionCandidates = [...records.values()]
+    .filter((record) => !protectedIds.has(record.childId))
+    .sort(compareOldestRoutingEntries);
+  for (const candidate of evictionCandidates) {
+    if (records.size <= MAX_ORCHESTRATOR_ROUTING_RECORDS) break;
+    records.delete(candidate.childId);
+  }
+  if (records.size > MAX_ORCHESTRATOR_ROUTING_RECORDS) {
+    throw new Error(
+      `routing record count exceeds ${MAX_ORCHESTRATOR_ROUTING_RECORDS}`,
+    );
+  }
+  return [...records.values()];
+}
+
+function compareOldestRoutingEntries(
+  left: OrchestratorRoutingEntry,
+  right: OrchestratorRoutingEntry,
+): number {
+  const timeDifference =
+    routingEntryTimestamp(left) - routingEntryTimestamp(right);
+  if (timeDifference !== 0) return timeDifference;
+  return left.childId.localeCompare(right.childId);
+}
+
+function compareNewestRoutingEntries(
+  left: OrchestratorRoutingEntry,
+  right: OrchestratorRoutingEntry,
+): number {
+  return compareOldestRoutingEntries(right, left);
+}
+
+function routingEntryTimestamp(entry: OrchestratorRoutingEntry): number {
+  return entry.updatedAt === undefined
+    ? Number.NEGATIVE_INFINITY
+    : Date.parse(entry.updatedAt);
 }
 
 function readRoutingFile(file: string): RoutingFileReadResult {
