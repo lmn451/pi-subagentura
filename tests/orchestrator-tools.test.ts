@@ -200,27 +200,32 @@ describe("Orchestratorv2 compact agent projection", () => {
     ]);
   });
 
-  it("bounds the projection while prioritizing current runtimes over stale metadata", async () => {
-    const states = new Map<string, InteractiveSubagentState>();
-    for (let index = 0; index <= MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS; index++) {
-      const childId = index.toString(16).padStart(16, "0");
-      states.set(childId, runtimeState(childId));
-    }
-    const persisted = routingEntry("ffffffffffffffff");
+  it(
+    "bounds the projection while prioritizing current runtimes over stale metadata",
+    async () => {
+      const states = new Map<string, InteractiveSubagentState>();
+      for (let index = 0; index <= MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS; index++) {
+        const childId = index.toString(16).padStart(16, "0");
+        states.set(childId, runtimeState(childId));
+      }
+      const persisted = routingEntry("ffffffffffffffff");
 
-    const projection = await buildOrchestratorAgentProjection(
-      [persisted],
-      states,
-    );
+      const projection = await buildOrchestratorAgentProjection(
+        [persisted],
+        states,
+      );
 
-    expect(projection.total).toBe(MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS + 2);
-    expect(projection.agents).toHaveLength(MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS);
-    expect(projection.omitted).toBe(2);
-    expect(
-      projection.agents.some((agent) => agent.childId === persisted.childId),
-    ).toBe(false);
-    expect(projection.agents.every((agent) => agent.stale === false)).toBe(true);
-  });
+      expect(projection.total).toBe(MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS + 2);
+      expect(projection.agents).toHaveLength(MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS);
+      expect(projection.omitted).toBe(2);
+      expect(
+        projection.agents.some((agent) => agent.childId === persisted.childId),
+      ).toBe(false);
+      expect(
+        projection.agents.every((agent) => agent.stale === false),
+      ).toBe(true);
+    },
+  );
 });
 
 describe("Orchestratorv2 metadata tools", () => {
