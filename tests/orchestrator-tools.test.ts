@@ -200,7 +200,7 @@ describe("Orchestratorv2 compact agent projection", () => {
     ]);
   });
 
-  it("bounds the projection while retaining persisted entries first", async () => {
+  it("bounds the projection while prioritizing current runtimes over stale metadata", async () => {
     const states = new Map<string, InteractiveSubagentState>();
     for (let index = 0; index <= MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS; index++) {
       const childId = index.toString(16).padStart(16, "0");
@@ -218,7 +218,8 @@ describe("Orchestratorv2 compact agent projection", () => {
     expect(projection.omitted).toBe(2);
     expect(
       projection.agents.some((agent) => agent.childId === persisted.childId),
-    ).toBe(true);
+    ).toBe(false);
+    expect(projection.agents.every((agent) => agent.stale === false)).toBe(true);
   });
 });
 
