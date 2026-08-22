@@ -36,10 +36,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Check formatting
-        run: |
-          npx prettier --write src/orchestrator-routing.ts
-          git diff -- src/orchestrator-routing.ts
-          git diff --exit-code -- src/orchestrator-routing.ts
+        run: npm run format:check
 
       - name: Install selected Pi SDK
         env:
