@@ -42,6 +42,15 @@ function collectErrorMessages(schema: XSchema, value: unknown): string[] {
   return errs.map((e: { message: string }) => e.message);
 }
 
+/** Reproduce Pi 0.80.6's Anthropic convertTools top-level schema projection. */
+function piAnthropicInputSchema(schema: any) {
+  return {
+    type: "object",
+    properties: schema.properties ?? {},
+    required: schema.required ?? [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // BaseParams
 // ---------------------------------------------------------------------------
@@ -584,6 +593,32 @@ describe("InteractiveParams", () => {
     expect(variants[1].properties.includeContext.const).toBe(false);
     expect(variants[1].properties.context.type).toBe("string");
     expect(variants[2].properties).toEqual({});
+  });
+
+  it("exposes the full model-visible shape through Pi's Anthropic conversion", () => {
+    const providerSchema = piAnthropicInputSchema(InteractiveParams);
+
+    expect(providerSchema.required).toEqual(["task"]);
+    expect(Object.keys(providerSchema.properties).sort()).toEqual(
+      [
+        "background",
+        "context",
+        "cwd",
+        "includeContext",
+        "model",
+        "mux",
+        "name",
+        "notifyOnComplete",
+        "persona",
+        "routingAliases",
+        "routingDescription",
+        "task",
+        "thinkingLevel",
+        "triggerTurnOnComplete",
+      ].sort(),
+    );
+    expect(providerSchema.properties.includeContext.type).toBe("boolean");
+    expect(providerSchema.properties.context.type).toBe("string");
   });
 
   /* ---------- optional initial routing metadata ---------- */

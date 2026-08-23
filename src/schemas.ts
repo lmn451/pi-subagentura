@@ -197,12 +197,15 @@ const InteractiveSpawnFields = Type.Object({
 });
 
 const InteractiveContextMode = Type.Union([
-  Type.Object({
-    includeContext: Type.Literal(true, {
-      description:
-        "Serialize the full parent conversation branch into the initial child prompt.",
-    }),
-  }),
+  Type.Object(
+    {
+      includeContext: Type.Literal(true, {
+        description:
+          "Serialize the full parent conversation branch into the initial child prompt.",
+      }),
+    },
+    { not: { required: ["context"] } },
+  ),
   Type.Object({
     includeContext: Type.Literal(false, {
       description:
@@ -220,11 +223,46 @@ const InteractiveContextMode = Type.Union([
     {
       description:
         "Legacy default with neither parent-branch nor explicit context fields.",
+      not: {
+        anyOf: [{ required: ["includeContext"] }, { required: ["context"] }],
+      },
     },
   ),
 ]);
 
-export const InteractiveParams = Type.Intersect(
-  [InteractiveSpawnFields, InteractiveContextMode],
-  { unevaluatedProperties: false },
+const InteractiveProviderFields = Type.Object({
+  ...InteractiveSpawnFields.properties,
+  includeContext: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether to serialize the parent branch. False permits an explicit context handoff; true forbids one.",
+    }),
+  ),
+  context: Type.Optional(
+    Type.String({
+      description:
+        "Explicit handoff/context, permitted only when includeContext is false.",
+    }),
+  ),
+});
+
+function exposeProviderObjectShape<T extends object>(
+  validationSchema: T,
+  providerShape: typeof InteractiveProviderFields,
+): T {
+  // Pi 0.80.6's Anthropic adapter projects only these top-level keywords.
+  // Keep allOf/anyOf on the returned schema so TypeBox validation stays strict.
+  return {
+    ...validationSchema,
+    type: providerShape.type,
+    properties: providerShape.properties,
+    required: providerShape.required,
+  };
+}
+
+export const InteractiveParams = exposeProviderObjectShape(
+  Type.Intersect([InteractiveSpawnFields, InteractiveContextMode], {
+    unevaluatedProperties: false,
+  }),
+  InteractiveProviderFields,
 );
