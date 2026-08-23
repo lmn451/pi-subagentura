@@ -205,16 +205,16 @@ export function saveOrchestratorRoutingEntries(
   const incoming = validateIncomingEntries(entries, now);
   return withInteractiveStateLock(cwd, () => {
     const current = overlayForWrite(cwd, loadOrchestratorRoutingOverlay(cwd));
+    assertRoutingRecordCapacity(current.records, incoming);
     const records = new Map(
       current.records.map((record) => [record.childId, record]),
     );
     for (const record of incoming) records.set(record.childId, record);
-    const boundedRecords = boundRoutingRecords(records, incoming);
     const overlay = validateOverlay(
       {
         schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION,
         projectId: current.projectId,
-        records: boundedRecords,
+        records: [...records.values()],
       },
       current.projectId,
     );
@@ -465,28 +465,19 @@ function boundedPreview(value: string, maxBytes: number): string {
   return `${bytes.subarray(0, end).toString("utf8").trimEnd()}…`;
 }
 
-function boundRoutingRecords(
-  records: Map<string, OrchestratorRoutingEntry>,
+function assertRoutingRecordCapacity(
+  current: readonly OrchestratorRoutingEntry[],
   incoming: readonly OrchestratorRoutingEntry[],
-): OrchestratorRoutingEntry[] {
-  if (records.size <= MAX_ORCHESTRATOR_ROUTING_RECORDS) {
-    return [...records.values()];
-  }
-
-  const protectedIds = new Set(incoming.map((record) => record.childId));
-  const evictionCandidates = [...records.values()]
-    .filter((record) => !protectedIds.has(record.childId))
-    .sort(compareOldestRoutingEntries);
-  for (const candidate of evictionCandidates) {
-    if (records.size <= MAX_ORCHESTRATOR_ROUTING_RECORDS) break;
-    records.delete(candidate.childId);
-  }
-  if (records.size > MAX_ORCHESTRATOR_ROUTING_RECORDS) {
+): void {
+  const existingIds = new Set(current.map((record) => record.childId));
+  const addedRecords = incoming.filter(
+    (record) => !existingIds.has(record.childId),
+  ).length;
+  if (current.length + addedRecords > MAX_ORCHESTRATOR_ROUTING_RECORDS) {
     throw new Error(
       `routing record count exceeds ${MAX_ORCHESTRATOR_ROUTING_RECORDS}`,
     );
   }
-  return [...records.values()];
 }
 
 function compareOldestRoutingEntries(

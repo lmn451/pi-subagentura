@@ -372,7 +372,7 @@ describe("subagent_interactive tool lifecycle", () => {
     };
     mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
     mockUpsertOrchestratorRoutingEntry.mockImplementationOnce(() => {
-      throw new Error("routing disk is read-only");
+      throw new Error("routing record count exceeds 128");
     });
 
     const result = await toolDef.execute(
@@ -393,14 +393,14 @@ describe("subagent_interactive tool lifecycle", () => {
       status: "started",
       routingMetadata: {
         status: "warning",
-        error: "routing disk is read-only",
+        error: "routing record count exceeds 128",
       },
     });
     expect(result.content[0].text).toContain(
       `Interactive sub-agent ${state.id} started`,
     );
     expect(result.content[0].text).toContain(
-      "Warning: initial routing metadata was not persisted: routing disk is read-only",
+      "Warning: initial routing metadata was not persisted: routing record count exceeds 128",
     );
     expect(result.content[0].text).not.toContain(
       "Failed to start interactive sub-agent",

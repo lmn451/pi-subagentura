@@ -263,6 +263,61 @@ describe("orchestrator routing metadata persistence", () => {
     );
   });
 
+  it("rejects a partial merge at capacity without changing the file", () => {
+    const records = Array.from(
+      { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
+      (_, index) =>
+        entry({
+          childId: index.toString(16).padStart(16, "0"),
+          description: `Responsibility ${index}`,
+          aliases: [],
+        }),
+    );
+    saveOrchestratorRoutingEntries(root, records);
+    const file = orchestratorRoutingFilePath(root);
+    const before = readFileSync(file, "utf8");
+
+    expect(() =>
+      saveOrchestratorRoutingEntries(root, [
+        { ...records[0], description: "Must not be partially updated" },
+        entry({ childId: "ffffffffffffffff", aliases: [] }),
+      ]),
+    ).toThrow(/routing record count exceeds/);
+
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(readdirSync(join(root, ".pi"))).toEqual([
+      "subagentura-routing.json",
+    ]);
+    expect(listOrchestratorRoutingEntries(root)).toEqual(records);
+  });
+
+  it("updates an existing routing record while already at capacity", () => {
+    const records = Array.from(
+      { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
+      (_, index) =>
+        entry({
+          childId: index.toString(16).padStart(16, "0"),
+          description: `Responsibility ${index}`,
+          aliases: [],
+        }),
+    );
+    saveOrchestratorRoutingEntries(root, records);
+    const updated = {
+      ...records[0],
+      description: "Updated responsibility at capacity",
+    };
+
+    const saved = upsertOrchestratorRoutingEntry(root, updated);
+    const listed = listOrchestratorRoutingEntries(root);
+
+    expect(saved.records).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
+    expect(saved.records).toContainEqual(updated);
+    expect(listed).toEqual(saved.records);
+    expect(listed.map((record) => record.childId)).toEqual(
+      records.map((record) => record.childId),
+    );
+  });
+
   it("bounds the stored file before parsing", () => {
     const file = orchestratorRoutingFilePath(root);
     const oversized = "x".repeat(MAX_ORCHESTRATOR_ROUTING_FILE_BYTES + 1);

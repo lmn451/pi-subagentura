@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS,
   MAX_ORCHESTRATOR_ROUTING_RECORDS,
   buildOrchestratorAgentProjection,
+  listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
+  orchestratorRoutingFilePath,
   saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
@@ -100,24 +109,28 @@ describe("Orchestratorv2 routing blockers", () => {
     });
   });
 
-  it("evicts the oldest record so a new child can persist at the cap", () => {
+  it("rejects a new child at the cap without deleting existing metadata", () => {
     const historical = Array.from(
       { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
       (_, index) => routingEntry(index),
     );
     saveOrchestratorRoutingEntries(root, historical);
+    const file = orchestratorRoutingFilePath(root);
+    const before = readFileSync(file, "utf8");
     const live = {
       childId: LIVE_ID,
       description: "Own the newly spawned live child",
       updatedAt: "2026-08-21T12:00:00.000Z",
     };
 
-    const saved = upsertOrchestratorRoutingEntry(root, live);
+    expect(() => upsertOrchestratorRoutingEntry(root, live)).toThrow(
+      /routing record count exceeds/,
+    );
 
-    expect(saved.records).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
-    expect(saved.records).toContainEqual(live);
-    expect(
-      saved.records.some((record) => record.childId === "0000000000000000"),
-    ).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(readdirSync(join(root, ".pi"))).toEqual([
+      "subagentura-routing.json",
+    ]);
+    expect(listOrchestratorRoutingEntries(root)).toEqual(historical);
   });
 });
