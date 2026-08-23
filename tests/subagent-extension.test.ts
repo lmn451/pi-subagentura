@@ -163,6 +163,12 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain("send_interactive_subagent_message");
     expect(result.systemPrompt).toContain("includeContext");
     expect(result.systemPrompt).toContain("not a security boundary");
+    expect(result.systemPrompt).toContain(
+      "An exact or continuation match is not routable",
+    );
+    expect(result.systemPrompt).toContain(
+      "never auto-delegate, replace, or respawn it",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 

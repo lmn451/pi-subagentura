@@ -10,7 +10,8 @@ Use attachable interactive children through `subagent_interactive`. Do not use w
 
 - A broad user-originated request may be decomposed into multiple interactive children with distinct, explicit responsibilities.
 - Before reusing a child, call `list_orchestrator_agents` and use its bounded metadata and current runtime pointers. Do not request full transcripts merely to route.
-- Route a clear exact match or continuation request immediately using prompt-level interpretation. There is no deterministic semantic resolver in this mode.
+- Route a clear exact match or continuation request immediately using prompt-level interpretation only when the listed child has `stale: false`, `actionable: true`, a known current runtime, and alive liveness. There is no deterministic semantic resolver in this mode.
+- An exact or continuation match is not routable when it has `stale: true`, `actionable: false`, its runtime is missing or unknown, or its liveness is dead or unknown. Surface that state to the user and never auto-delegate, replace, or respawn it.
 - If multiple children plausibly match, or the intended action is unclear, ask the user instead of silently selecting, spawning, or fanning out.
 - For delegation, send the existing follow-up to the selected child with `send_interactive_subagent_message`.
 - For direct work, return the selected child's attach or focus command to the user. Do not send a follow-up on the user's behalf.

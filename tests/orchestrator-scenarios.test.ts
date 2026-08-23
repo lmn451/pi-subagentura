@@ -450,7 +450,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
   });
 
   it("keeps persisted metadata with a missing runtime stale, unknown, non-actionable, and unreplaced", async () => {
-    const environment = setupScenario();
+    const environment = setupScenario(true);
     upsertOrchestratorRoutingEntry(environment.root, {
       childId: CHILD_C,
       description: "Own a previously approved investigation",
@@ -480,6 +480,26 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(listOrchestratorRoutingEntries(environment.root)).toHaveLength(1);
     expect(environment.scope.interactiveStates.size).toBe(0);
     expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+
+    const beforeAgentStart = environment.api.on.mock.calls.find(
+      ([event]) => event === "before_agent_start",
+    )?.[1];
+    const promptResult = await beforeAgentStart(
+      { systemPrompt: "base prompt" },
+      {},
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "An exact or continuation match is not routable",
+    );
+    expect(promptResult.systemPrompt).toContain("`stale: true`");
+    expect(promptResult.systemPrompt).toContain("`actionable: false`");
+    expect(promptResult.systemPrompt).toContain(
+      "runtime is missing or unknown",
+    );
+    expect(promptResult.systemPrompt).toContain("liveness is dead or unknown");
+    expect(promptResult.systemPrompt).toContain(
+      "never auto-delegate, replace, or respawn it",
+    );
   });
 
   it("exercises the registered context schema for legacy, parent-branch, and explicit-context spawns", async () => {
