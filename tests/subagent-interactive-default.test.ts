@@ -363,6 +363,38 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
+  it("rejects routing metadata that cannot persist before spawning", async () => {
+    const toolDef = getInteractiveToolDef(api);
+
+    const aliasesOnly = await toolDef.execute(
+      "call-routing-aliases-only",
+      { task: "research X", routingAliases: ["api"] },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(aliasesOnly.isError).toBe(true);
+    expect(aliasesOnly.details).toMatchObject({
+      status: "invalid_routing_metadata",
+    });
+
+    const oversizedDescription = "😀".repeat(2048);
+    const oversized = await toolDef.execute(
+      "call-routing-oversized",
+      { task: "research X", routingDescription: oversizedDescription },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(oversized.isError).toBe(true);
+    expect(oversized.details).toMatchObject({
+      status: "invalid_routing_metadata",
+      error: expect.stringContaining("description exceeds 4096 bytes"),
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+    expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
+  });
+
   it("reports routing persistence failure without pretending the child failed", async () => {
     const toolDef = getInteractiveToolDef(api);
     const state = {

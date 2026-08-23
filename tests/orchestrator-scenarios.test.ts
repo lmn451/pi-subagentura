@@ -7,7 +7,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Schema from "typebox/schema";
@@ -41,7 +41,10 @@ import {
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
 import {
+  MAX_ORCHESTRATOR_ROUTING_RECORDS,
   listOrchestratorRoutingEntries,
+  orchestratorRoutingFilePath,
+  saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
 } from "../src/orchestrator-routing";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
@@ -255,6 +258,79 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       CHILD_A,
       CHILD_B,
     ]);
+  });
+
+  it("recovers a full routing overlay through confirmed removal and update", async () => {
+    const environment = setupScenario(true);
+    const historical = Array.from(
+      { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
+      (_, index) => ({
+        childId: index.toString(16).padStart(16, "0"),
+        description: `Historical responsibility ${index}`,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      }),
+    );
+    saveOrchestratorRoutingEntries(environment.root, historical);
+    const routingFile = orchestratorRoutingFilePath(environment.root);
+    const beforeSpawn = readFileSync(routingFile, "utf8");
+    const spawn = registeredTool(environment.api, "subagent_interactive");
+
+    const spawned = await executeTool(
+      spawn,
+      {
+        name: "Capacity recovery child",
+        task: "Own work after routing capacity is exhausted",
+        routingDescription: "Own post-capacity work",
+        routingAliases: ["capacity-recovery"],
+      },
+      environment.ctx,
+    );
+
+    expect(spawned.isError).not.toBe(true);
+    expect(spawned.details.routingMetadata).toMatchObject({
+      status: "warning",
+      error: expect.stringContaining("routing record count exceeds"),
+    });
+    expect(readFileSync(routingFile, "utf8")).toBe(beforeSpawn);
+    expect(environment.scope.interactiveStates.has(CHILD_A)).toBe(true);
+
+    const remove = registeredTool(
+      environment.api,
+      "remove_orchestrator_agent_description",
+    );
+    const removed = await executeTool(
+      remove,
+      { childId: historical[0].childId, confirmed: true },
+      environment.ctx,
+    );
+    expect(removed.details.status).toBe("removed");
+
+    const update = registeredTool(
+      environment.api,
+      "update_orchestrator_agent_description",
+    );
+    const updated = await executeTool(
+      update,
+      {
+        childId: CHILD_A,
+        description: "Own post-capacity work",
+        aliases: ["capacity-recovery"],
+        confirmed: true,
+      },
+      environment.ctx,
+    );
+
+    expect(updated.details.status).toBe("updated");
+    const entries = listOrchestratorRoutingEntries(environment.root);
+    expect(entries).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        childId: CHILD_A,
+        description: "Own post-capacity work",
+        aliases: ["capacity-recovery"],
+      }),
+    );
+    expect(entries).not.toContainEqual(historical[0]);
   });
 
   it("lists A and B with current pointers and delegates to the selected child without creating a new one", async () => {

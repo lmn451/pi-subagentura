@@ -39,6 +39,9 @@ import {
   formatCompletionDeliveryBehavior,
 } from "../notifications";
 import {
+  MAX_ORCHESTRATOR_ROUTING_ALIASES,
+  MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
+  MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
@@ -100,6 +103,39 @@ function persistInitialRoutingMetadata(params: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function validateInitialRoutingMetadata(
+  description: string | undefined,
+  aliases: string[] | undefined,
+): string | undefined {
+  if (aliases !== undefined && description === undefined) {
+    return "routingAliases requires routingDescription";
+  }
+  if (description === undefined) return undefined;
+  if (description.trim().length === 0) {
+    return "description must be a non-empty string";
+  }
+  const descriptionBytes = Buffer.byteLength(description, "utf8");
+  if (descriptionBytes > MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES) {
+    return `description exceeds ${MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES} bytes`;
+  }
+  if (aliases === undefined) return undefined;
+  if (aliases.length > MAX_ORCHESTRATOR_ROUTING_ALIASES) {
+    return `aliases exceeds ${MAX_ORCHESTRATOR_ROUTING_ALIASES} entries`;
+  }
+  const seen = new Set<string>();
+  for (const alias of aliases) {
+    if (alias.trim().length === 0) return "alias must be a non-empty string";
+    if (
+      Buffer.byteLength(alias, "utf8") > MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES
+    ) {
+      return `alias exceeds ${MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES} bytes`;
+    }
+    if (seen.has(alias)) return `duplicate alias: ${alias}`;
+    seen.add(alias);
+  }
+  return undefined;
 }
 
 export function findArtifactById(id: string): SubagentArtifact | null {
@@ -245,6 +281,25 @@ export function registerInteractiveSubagentTools(
             },
           ],
           details: { status: "session_unavailable" },
+          isError: true,
+        };
+      }
+      const routingMetadataError = validateInitialRoutingMetadata(
+        params.routingDescription,
+        params.routingAliases,
+      );
+      if (routingMetadataError) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Invalid initial routing metadata: ${routingMetadataError}`,
+            },
+          ],
+          details: {
+            status: "invalid_routing_metadata",
+            error: routingMetadataError,
+          },
           isError: true,
         };
       }

@@ -127,7 +127,7 @@ These commands are intended for people at the Pi prompt.
 
 ## Agent-facing tools
 
-The extension registers 23 public tools for parent agents.
+The extension registers 24 public tools for parent agents.
 
 | Tool                                    | Purpose                                                              |
 | --------------------------------------- | -------------------------------------------------------------------- |
@@ -147,6 +147,7 @@ The extension registers 23 public tools for parent agents.
 | `list_available_models`                 | List configured model identifiers                                    |
 | `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers    |
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases           |
+| `remove_orchestrator_agent_description` | Remove one confirmed routing metadata entry to recover capacity      |
 | `subagent_interactive`                  | Launch an attachable Pi session in tmux/Zellij                       |
 | `get_interactive_subagent_status`       | Inspect attachable child sessions                                    |
 | `cancel_interactive_subagent`           | Kill an attachable child pane                                        |
@@ -207,6 +208,27 @@ The guidance gives the parent agent reasonable default behavior when the user as
 - “implement and review” — use one writer, parallel reviewers, and capped fix/review rounds
 
 The defaults prefer async `subagent_isolated` for fresh scouts/reviewers, `subagent_with_context` for oracle checks, injected completions instead of polling, and one writer at a time for implementation. For cheap fanout, they suggest validating model availability before using optional model overrides.
+
+### Orchestratorv2 thin-router mode
+
+Enable the separate interactive-only thin router with:
+
+```bash
+pi --orchestratorv2
+```
+
+This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
+verify the parent model. Select the intended Luna-compatible model separately,
+and do not enable `--orchestrator` and `--orchestratorv2` together. The thin
+router delegates only through attachable interactive children and uses
+project-local confirmed descriptions and aliases to route continuations.
+
+Routing metadata is capped at 128 records and is never evicted automatically.
+If stale history reaches that cap, inspect it with `list_orchestrator_agents`,
+ask the user which entry may be retired, and call
+`remove_orchestrator_agent_description` with `confirmed: true` before retrying
+the metadata update. Removal changes only routing metadata; it does not cancel
+a child or delete its artifacts.
 
 ## Cancellation context snapshots (opt-in)
 

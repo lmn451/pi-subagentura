@@ -171,7 +171,7 @@ describe("Orchestratorv2 compact agent projection", () => {
     ]);
   });
 
-  it("includes current runtime-only agents and preserves unknown liveness", async () => {
+  it("keeps unknown pane liveness non-actionable", async () => {
     __setTmuxMultiplexer({
       getPaneLivenessAsync: vi.fn().mockResolvedValue("unknown"),
     } as never);
@@ -190,14 +190,31 @@ describe("Orchestratorv2 compact agent projection", () => {
         status: "idle",
         liveness: "unknown",
         stale: false,
-        actionable: true,
+        actionable: false,
         reason: "pane_liveness_unknown",
-        attachCommand: `tmux attach -t ${CHILD_B}`,
-        focusCommand: `tmux select-pane -t %${CHILD_B}`,
         artifactDir: `/artifacts/${CHILD_B}`,
         sessionFile: `/sessions/${CHILD_B}.jsonl`,
       },
     ]);
+  });
+
+  it("keeps unknown runtime status non-actionable", async () => {
+    const state = runtimeState(CHILD_B, { status: "unknown" });
+
+    const projection = await buildOrchestratorAgentProjection(
+      [],
+      new Map([[CHILD_B, state]]),
+    );
+
+    expect(projection.agents[0]).toMatchObject({
+      childId: CHILD_B,
+      status: "unknown",
+      liveness: "alive",
+      actionable: false,
+      reason: "runtime_status_unknown",
+    });
+    expect(projection.agents[0]).not.toHaveProperty("attachCommand");
+    expect(projection.agents[0]).not.toHaveProperty("focusCommand");
   });
 
   it("bounds the projection while prioritizing current runtimes over stale metadata", async () => {
@@ -242,13 +259,13 @@ describe("Orchestratorv2 metadata tools", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("registers the list and confirmed metadata update definitions", () => {
+  it("registers list, update, and confirmed removal definitions", () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
 
     registerOrchestratorTools(api as never, scope);
 
-    expect(api.registerTool).toHaveBeenCalledTimes(2);
+    expect(api.registerTool).toHaveBeenCalledTimes(3);
     expect(tool(api, "list_orchestrator_agents")).toBeDefined();
     const update = tool(api, "update_orchestrator_agent_description");
     expect(update).toBeDefined();
@@ -256,6 +273,10 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(update.parameters.required).toEqual(
       expect.arrayContaining(["childId", "description", "confirmed"]),
     );
+    const remove = tool(api, "remove_orchestrator_agent_description");
+    expect(remove).toBeDefined();
+    expect(remove.parameters.properties.confirmed.const).toBe(true);
+    expect(remove.parameters.required).toEqual(["childId", "confirmed"]);
   });
 
   it("lists only current-scope runtime fields while retaining foreign metadata as stale", async () => {
@@ -405,6 +426,50 @@ describe("Orchestratorv2 metadata tools", () => {
         updatedAt: expect.any(String),
       }),
     ]);
+  });
+
+  it("removes confirmed metadata without touching the live runtime", async () => {
+    const original = routingEntry(CHILD_A);
+    upsertOrchestratorRoutingEntry(root, original);
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    const state = registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const remove = tool(api, "remove_orchestrator_agent_description");
+
+    const result = await remove.execute(
+      "remove-stale",
+      { childId: CHILD_A, confirmed: true },
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.details).toEqual({
+      status: "removed",
+      entry: original,
+    });
+    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
+    expect(scope.interactiveStates.get(CHILD_A)).toBe(state);
+    expect(state).toMatchObject({
+      artifactDir: `/artifacts/${CHILD_A}`,
+      sessionFile: `/sessions/${CHILD_A}.jsonl`,
+      status: "running",
+    });
+
+    const missing = await remove.execute(
+      "remove-missing",
+      { childId: CHILD_A, confirmed: true },
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+    expect(missing.isError).toBe(true);
+    expect(missing.details).toEqual({
+      status: "not_found",
+      childId: CHILD_A,
+    });
   });
 
   it("does not update stale metadata backed only by another parent scope", async () => {

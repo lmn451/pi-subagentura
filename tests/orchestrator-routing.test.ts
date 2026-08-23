@@ -21,6 +21,7 @@ import {
   listOrchestratorRoutingEntries,
   loadOrchestratorRoutingOverlay,
   orchestratorRoutingFilePath,
+  removeOrchestratorRoutingEntry,
   routingProjectId,
   saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
@@ -154,6 +155,9 @@ describe("orchestrator routing metadata persistence", () => {
     expect(() => upsertOrchestratorRoutingEntry(root, entry())).toThrow(
       /malformed routing metadata/,
     );
+    expect(() => removeOrchestratorRoutingEntry(root, CHILD_A)).toThrow(
+      /malformed routing metadata/,
+    );
     expect(readFileSync(file, "utf8")).toBe(malformed);
   });
 
@@ -173,6 +177,9 @@ describe("orchestrator routing metadata persistence", () => {
       schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION + 1,
     });
     expect(() => saveOrchestratorRoutingEntries(root, [entry()])).toThrow(
+      /unsupported routing metadata schemaVersion/,
+    );
+    expect(() => removeOrchestratorRoutingEntry(root, CHILD_A)).toThrow(
       /unsupported routing metadata schemaVersion/,
     );
     expect(readFileSync(file, "utf8")).toBe(future);
@@ -315,6 +322,22 @@ describe("orchestrator routing metadata persistence", () => {
     expect(listed).toEqual(saved.records);
     expect(listed.map((record) => record.childId)).toEqual(
       records.map((record) => record.childId),
+    );
+  });
+
+  it("removes one confirmed routing record without touching peers", () => {
+    const first = entry();
+    const second = entry({
+      childId: CHILD_B,
+      description: "Own the persistence tests",
+    });
+    saveOrchestratorRoutingEntries(root, [first, second]);
+
+    expect(removeOrchestratorRoutingEntry(root, CHILD_A)).toEqual(first);
+    expect(listOrchestratorRoutingEntries(root)).toEqual([second]);
+    expect(removeOrchestratorRoutingEntry(root, CHILD_A)).toBeUndefined();
+    expect(() => removeOrchestratorRoutingEntry(root, "../unsafe")).toThrow(
+      /childId/,
     );
   });
 

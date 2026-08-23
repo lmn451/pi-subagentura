@@ -163,7 +163,7 @@ const InteractiveSpawnFields = Type.Object({
       {
         maxItems: MAX_ORCHESTRATOR_ROUTING_ALIASES,
         description:
-          "Optional exact aliases persisted with the initial Orchestratorv2 routing description.",
+          "Optional exact aliases persisted with the initial Orchestratorv2 routing description. Requires routingDescription.",
       },
     ),
   ),
@@ -194,6 +194,9 @@ const InteractiveSpawnFields = Type.Object({
       },
     ),
   ),
+});
+Object.assign(InteractiveSpawnFields, {
+  dependentRequired: { routingAliases: ["routingDescription"] },
 });
 
 const InteractiveContextMode = Type.Union([

@@ -583,6 +583,9 @@ describe("InteractiveParams", () => {
     expect(commonProperties).toHaveProperty("task");
     expect(commonProperties).toHaveProperty("routingDescription");
     expect(commonProperties).toHaveProperty("routingAliases");
+    expect(schema.allOf[0].dependentRequired).toEqual({
+      routingAliases: ["routingDescription"],
+    });
     expect(commonProperties).not.toHaveProperty("includeContext");
     expect(commonProperties).not.toHaveProperty("context");
 
@@ -619,6 +622,9 @@ describe("InteractiveParams", () => {
     );
     expect(providerSchema.properties.includeContext.type).toBe("boolean");
     expect(providerSchema.properties.context.type).toBe("string");
+    expect(providerSchema.properties.routingAliases.description).toContain(
+      "Requires routingDescription",
+    );
   });
 
   /* ---------- optional initial routing metadata ---------- */
@@ -631,6 +637,12 @@ describe("InteractiveParams", () => {
         routingAliases: ["api", "migration"],
       }),
     ).toBe(true);
+  });
+
+  it("rejects routing aliases without a routing description", () => {
+    expect(
+      check(InteractiveParams)({ task: "t", routingAliases: ["api"] }),
+    ).toBe(false);
   });
 
   it("rejects empty routing descriptions and aliases", () => {

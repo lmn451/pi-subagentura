@@ -363,7 +363,7 @@ describe("published tarball", () => {
       [
         "--input-type=module",
         "--eval",
-        'import { createJiti } from "jiti"; const jiti = createJiti(import.meta.url); const mod = await jiti.import("pi-subagentura", { default: false }); if (typeof mod.default !== "function") process.exit(2); const flags = []; const tools = []; mod.default({ registerTool: (tool) => tools.push(tool.name), registerMessageRenderer() {}, registerFlag: (name) => flags.push(name), registerCommand() {}, registerShortcut() {}, getFlag: () => false, on() {} }); if (!flags.includes("orchestratorv2") || !tools.includes("list_orchestrator_agents") || !tools.includes("update_orchestrator_agent_description")) process.exit(3);',
+        'import { createJiti } from "jiti"; const jiti = createJiti(import.meta.url); const mod = await jiti.import("pi-subagentura", { default: false }); if (typeof mod.default !== "function") process.exit(2); const flags = []; const tools = []; mod.default({ registerTool: (tool) => tools.push(tool.name), registerMessageRenderer() {}, registerFlag: (name) => flags.push(name), registerCommand() {}, registerShortcut() {}, getFlag: () => false, on() {} }); if (!flags.includes("orchestratorv2") || !tools.includes("list_orchestrator_agents") || !tools.includes("update_orchestrator_agent_description") || !tools.includes("remove_orchestrator_agent_description")) process.exit(3);',
       ],
       { cwd: consumer, encoding: "utf8" },
     );

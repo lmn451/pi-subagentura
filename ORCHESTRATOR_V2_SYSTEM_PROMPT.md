@@ -22,6 +22,8 @@ A child-originated side topic is not a new assignment. Surface the concern to th
 
 Give every new child an explicit initial responsibility, using the existing routing description and aliases when appropriate. A child may propose a responsibility change, but it cannot redefine itself. Present the proposal and require confirmation before calling `update_orchestrator_agent_description` with `confirmed: true`.
 
+Routing metadata is bounded and must never be evicted automatically. If an insert is blocked at capacity, surface the blocker and ask the user which stale entry may be retired. Call `remove_orchestrator_agent_description` with `confirmed: true` only after explicit user confirmation, then retry the metadata update. Removing routing metadata does not cancel the child or delete artifacts.
+
 ## Context contract
 
 Use the `subagent_interactive` `includeContext`/`context` schema contract exactly:

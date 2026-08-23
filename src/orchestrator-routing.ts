@@ -230,6 +230,33 @@ export function upsertOrchestratorRoutingEntry(
   return saveOrchestratorRoutingEntries(cwd, [entry]);
 }
 
+export function removeOrchestratorRoutingEntry(
+  cwd: string,
+  childId: string,
+): OrchestratorRoutingEntry | undefined {
+  const validatedChildId = expectChildId(childId);
+  return withInteractiveStateLock(cwd, () => {
+    const result = loadOrchestratorRoutingOverlay(cwd);
+    if (result.status === "missing") return undefined;
+    const current = overlayForWrite(cwd, result);
+    const removed = current.records.find(
+      (record) => record.childId === validatedChildId,
+    );
+    if (!removed) return undefined;
+    const overlay = validateOverlay(
+      {
+        ...current,
+        records: current.records.filter(
+          (record) => record.childId !== validatedChildId,
+        ),
+      },
+      current.projectId,
+    );
+    writeOverlayUnlocked(cwd, overlay);
+    return cloneEntry(removed);
+  });
+}
+
 export function listOrchestratorRoutingEntries(
   cwd: string,
 ): OrchestratorRoutingEntry[] {
@@ -438,10 +465,7 @@ function isRuntimeActionable(
   status: InteractiveSubagentStatus,
   liveness: PaneLiveness,
 ): boolean {
-  return (
-    liveness !== "dead" &&
-    (status === "running" || status === "idle" || status === "unknown")
-  );
+  return liveness === "alive" && (status === "running" || status === "idle");
 }
 
 function orchestratorAgentReason(

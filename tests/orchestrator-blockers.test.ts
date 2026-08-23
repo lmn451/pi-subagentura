@@ -16,6 +16,7 @@ import {
   listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
   orchestratorRoutingFilePath,
+  removeOrchestratorRoutingEntry,
   saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
@@ -109,7 +110,7 @@ describe("Orchestratorv2 routing blockers", () => {
     });
   });
 
-  it("rejects a new child at the cap without deleting existing metadata", () => {
+  it("recovers capacity only after confirmed metadata removal", () => {
     const historical = Array.from(
       { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
       (_, index) => routingEntry(index),
@@ -126,11 +127,17 @@ describe("Orchestratorv2 routing blockers", () => {
     expect(() => upsertOrchestratorRoutingEntry(root, live)).toThrow(
       /routing record count exceeds/,
     );
-
     expect(readFileSync(file, "utf8")).toBe(before);
+
+    const removed = removeOrchestratorRoutingEntry(root, historical[0].childId);
+    expect(removed).toEqual(historical[0]);
+    const saved = upsertOrchestratorRoutingEntry(root, live);
+
+    expect(saved.records).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
+    expect(saved.records).toContainEqual(live);
+    expect(saved.records).not.toContainEqual(historical[0]);
     expect(readdirSync(join(root, ".pi"))).toEqual([
       "subagentura-routing.json",
     ]);
-    expect(listOrchestratorRoutingEntries(root)).toEqual(historical);
   });
 });

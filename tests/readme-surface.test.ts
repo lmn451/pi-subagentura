@@ -19,12 +19,13 @@ describe("README public surface", () => {
   it("inventories every registered public tool and slash command", () => {
     const tools: string[] = [];
     const commands: string[] = [];
+    const flags: string[] = [];
     const api = {
       registerTool: vi.fn((tool: { name: string }) => tools.push(tool.name)),
       registerCommand: vi.fn((name: string) => commands.push(name)),
       registerShortcut: vi.fn(),
       registerMessageRenderer: vi.fn(),
-      registerFlag: vi.fn(),
+      registerFlag: vi.fn((name: string) => flags.push(name)),
       getFlag: vi.fn().mockReturnValue(false),
       on: vi.fn(),
     };
@@ -45,8 +46,12 @@ describe("README public surface", () => {
       "## User commands",
       "## Agent-facing tools",
     );
+    const orchestrationDefaults = section(
+      "## Bundled orchestration defaults",
+      "## Cancellation context snapshots",
+    );
 
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(24);
     expect(commands).toHaveLength(9);
     for (const name of tools) {
       expect(toolInventory, `Missing tool inventory row for ${name}`).toContain(
@@ -58,6 +63,12 @@ describe("README public surface", () => {
         commandInventory,
         `Missing command inventory row for /${name}`,
       ).toContain(`| \`/${name}\``);
+    }
+    for (const name of flags) {
+      expect(
+        orchestrationDefaults,
+        `Missing flag documentation for --${name}`,
+      ).toContain(`--${name}`);
     }
   });
 });

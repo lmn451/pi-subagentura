@@ -27,6 +27,7 @@ const IN_PROCESS_TOOL_NAMES = [
 
 const ORCHESTRATOR_TOOL_NAMES = [
   "list_orchestrator_agents",
+  "remove_orchestrator_agent_description",
   "update_orchestrator_agent_description",
 ].sort();
 
@@ -215,6 +216,7 @@ describe("extension registration", () => {
     expect(names).not.toContain("subagent_with_context");
     expect(names).not.toContain("list_orchestrator_agents");
     expect(names).not.toContain("update_orchestrator_agent_description");
+    expect(names).not.toContain("remove_orchestrator_agent_description");
     expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",
