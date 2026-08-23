@@ -247,6 +247,7 @@ describe("notifyOnComplete", () => {
       getFlag: vi.fn().mockReturnValue(false),
       sendMessage: vi.fn(),
       sendUserMessage: vi.fn(),
+      appendEntry: vi.fn(),
       on: vi.fn(),
       notify: vi.fn(),
     };
@@ -296,6 +297,29 @@ describe("notifyOnComplete", () => {
     expect(isolatedToolDef).toBeDefined();
     expect(contextToolDef).toBeDefined();
     expect(statusToolDef).toBeDefined();
+  });
+
+  it("does not instruct Orchestratorv2 to call an in-process result tool", async () => {
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
+    const control = createJobControl();
+    mockStartSubagentJob.mockImplementationOnce(() =>
+      mockJobResult("compatibility-job", control.jobPromise),
+    );
+
+    await isolatedToolDef.execute(
+      "call-v2-compatibility",
+      { async: true, task: "legacy", notifyOnComplete: "notify" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    control.resolve(SUCCESS_RESULT);
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledOnce());
+
+    const content = sentMessageAt(api, 0).content;
+    expect(content).toContain("compatibility job");
+    expect(content).toContain("without calling in-process tools");
+    expect(content).not.toContain("use get_subagent_result");
   });
 
   afterEach(() => {
@@ -1911,7 +1935,41 @@ describe("read_subagent_artifact (output reporting)", () => {
       );
       const text = result.content[0].text;
       expect(text).toContain("Output: 13 chars");
+      expect(text).toContain(
+        "<untrusted-subagent-output>\nHello, world!\n</untrusted-subagent-output>",
+      );
       expect(result.details.output).toBe("Hello, world!");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds artifact output included in provider-facing content", async () => {
+    const id = "ab12cd3700000007";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent);
+      const oversized = "x".repeat(80 * 1024);
+      writeOutput(art, oversized);
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+
+      const result = await readTool.execute(
+        "call-bounded-output",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(result.content[0].text).toContain(
+        "[Output truncated from 81920 bytes.]",
+      );
+      expect(Buffer.byteLength(result.content[0].text, "utf8")).toBeLessThan(
+        66 * 1024,
+      );
+      expect(result.details.output).toBe(oversized);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
@@ -1961,6 +2019,9 @@ describe("read_subagent_artifact (output reporting)", () => {
       ]);
       expect(result.content[0].text).toContain(
         "Reading turnId: pi-user-entry-first",
+      );
+      expect(result.content[0].text).toContain(
+        "<untrusted-subagent-output>\nfirst immutable output\n</untrusted-subagent-output>",
       );
     } finally {
       rmSync(parent, { recursive: true, force: true });

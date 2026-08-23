@@ -226,6 +226,7 @@ describe("published tarball", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+        "src/completion-turn.ts",
         "src/orchestrator-routing.ts",
         "src/tools/orchestrator.ts",
       ]),

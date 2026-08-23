@@ -83,7 +83,9 @@ describe("Orchestratorv2 routing blockers", () => {
       expect.objectContaining({
         childId: LIVE_ID,
         stale: false,
-        actionable: true,
+        attachable: true,
+        actionable: false,
+        reason: "routing_metadata_missing",
       }),
     ]);
     expect(view.agents[0]).not.toHaveProperty("description");
@@ -105,8 +107,63 @@ describe("Orchestratorv2 routing blockers", () => {
     expect(view.agents[0]).toMatchObject({
       childId: LIVE_ID,
       stale: false,
-      actionable: true,
+      attachable: true,
+      actionable: false,
     });
+  });
+
+  it("bounds concurrent pane liveness probes", async () => {
+    let active = 0;
+    let maximum = 0;
+    __setTmuxMultiplexer({
+      getPaneLivenessAsync: vi.fn().mockImplementation(async () => {
+        active++;
+        maximum = Math.max(maximum, active);
+        await Promise.resolve();
+        active--;
+        return "alive";
+      }),
+    } as never);
+    const states = new Map<string, InteractiveSubagentState>();
+    for (let index = 0; index < 24; index++) {
+      const childId = index.toString(16).padStart(16, "0");
+      states.set(childId, {
+        ...liveState(),
+        id: childId,
+        paneId: `%${index}`,
+      });
+    }
+
+    const view = await buildOrchestratorAgentProjection([], states);
+
+    expect(view.total).toBe(states.size);
+    expect(maximum).toBeLessThanOrEqual(8);
+  });
+
+  it("bounds total liveness latency when backend probes do not settle", async () => {
+    __setTmuxMultiplexer({
+      getPaneLivenessAsync: vi.fn().mockReturnValue(new Promise(() => {})),
+    } as never);
+    const states = new Map<string, InteractiveSubagentState>();
+    for (let index = 0; index < 24; index++) {
+      const childId = index.toString(16).padStart(16, "0");
+      states.set(childId, {
+        ...liveState(),
+        id: childId,
+        paneId: `%${index}`,
+      });
+    }
+    const startedAt = Date.now();
+
+    const view = await buildOrchestratorAgentProjection([], states, {
+      livenessDeadlineMs: 25,
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(view.agents).toHaveLength(states.size);
+    expect(view.agents.every((agent) => agent.liveness === "unknown")).toBe(
+      true,
+    );
   });
 
   it("fails closed at capacity without eviction or replacement", () => {

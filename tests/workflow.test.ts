@@ -3390,6 +3390,54 @@ describe("registerWorkflowTool", () => {
     }
   });
 
+  it("does not instruct Orchestratorv2 to call a workflow result tool", async () => {
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const sendMessage = vi.fn();
+    const sendUserMessage = vi.fn();
+    const pi = {
+      appendEntry: vi.fn(),
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      sendMessage,
+      sendUserMessage,
+    };
+    registerWorkflowTool(pi as any);
+    const workflow = tools.find((tool) => tool.name === "workflow")!;
+    const started = await workflow.execute(
+      "call-v2-compatibility",
+      {
+        script:
+          'export const meta = { name: "compatibility", description: "d" };\n' +
+          'return "final result";',
+        async: true,
+      },
+      undefined,
+      vi.fn(),
+      { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
+    );
+    const job = workflowJobRegistry.get(started.details.workflowId)!;
+
+    await job.promise;
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customType: "workflow-notify",
+        content: expect.stringContaining(
+          "separate workflow compatibility mode",
+        ),
+      }),
+      { deliverAs: "followUp", triggerTurn: false },
+    );
+    expect(sendMessage.mock.calls[0][0].content).not.toContain(
+      "Call get_workflow_result",
+    );
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    workflowJobRegistry.delete(job.id);
+  });
+
   it("notifies and triggers a turn when a workflow returns no result", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const sendMessage = vi.fn();

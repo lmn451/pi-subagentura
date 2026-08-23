@@ -27,6 +27,8 @@ export const MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES = 256;
 export const MAX_ORCHESTRATOR_ROUTING_FILE_BYTES = 1024 * 1024;
 export const MAX_ORCHESTRATOR_PROJECT_PATH_BYTES = 4 * 1024;
 export const MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS = 128;
+export const MAX_ORCHESTRATOR_LIVENESS_CONCURRENCY = 8;
+export const MAX_ORCHESTRATOR_LIVENESS_DEADLINE_MS = 5_000;
 export const MAX_ORCHESTRATOR_AGENT_NAME_BYTES = 512;
 export const MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES = 512;
 
@@ -65,6 +67,10 @@ export interface OrchestratorRoutingEntryInput {
   updatedAt?: string;
 }
 
+export interface OrchestratorRoutingUpsertOptions {
+  expectedEntry: OrchestratorRoutingEntry | undefined;
+}
+
 export interface OrchestratorRoutingOverlay {
   schemaVersion: typeof ORCHESTRATOR_ROUTING_SCHEMA_VERSION;
   projectId: string;
@@ -78,7 +84,8 @@ export type OrchestratorAgentReason =
   | "runtime_cancelled"
   | "runtime_exited"
   | "runtime_status_unknown"
-  | "workflow_owned";
+  | "workflow_owned"
+  | "routing_metadata_missing";
 
 export interface OrchestratorAgentView {
   childId: string;
@@ -91,6 +98,7 @@ export interface OrchestratorAgentView {
   status: InteractiveSubagentStatus;
   liveness: PaneLiveness;
   stale: boolean;
+  attachable: boolean;
   actionable: boolean;
   reason?: OrchestratorAgentReason;
   attachCommand?: string;
@@ -238,8 +246,58 @@ export function saveOrchestratorRoutingEntries(
 export function upsertOrchestratorRoutingEntry(
   cwd: string,
   entry: OrchestratorRoutingEntryInput,
+  options?: OrchestratorRoutingUpsertOptions,
 ): OrchestratorRoutingOverlay {
-  return saveOrchestratorRoutingEntries(cwd, [entry]);
+  const now = new Date().toISOString();
+  const incoming = validateIncomingEntries([entry], now);
+  return withInteractiveStateLock(cwd, () => {
+    const current = overlayForWrite(cwd, loadOrchestratorRoutingOverlay(cwd));
+    if (options !== undefined) {
+      const currentEntry = current.records.find(
+        (record) => record.childId === incoming[0]!.childId,
+      );
+      if (!sameRoutingEntry(currentEntry, options.expectedEntry)) {
+        throw new Error(
+          "routing metadata changed after confirmation was requested",
+        );
+      }
+    }
+    assertRoutingRecordCapacity(current.records, incoming);
+    const records = new Map(
+      current.records.map((record) => [record.childId, record]),
+    );
+    records.set(incoming[0]!.childId, incoming[0]!);
+    const overlay = validateOverlay(
+      {
+        schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION,
+        projectId: current.projectId,
+        records: [...records.values()],
+      },
+      current.projectId,
+    );
+    writeOverlayUnlocked(cwd, overlay);
+    return overlay;
+  });
+}
+
+function sameRoutingEntry(
+  left: OrchestratorRoutingEntry | undefined,
+  right: OrchestratorRoutingEntry | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.childId === right.childId &&
+    left.description === right.description &&
+    left.provenance === right.provenance &&
+    left.updatedAt === right.updatedAt &&
+    JSON.stringify(left.aliases) === JSON.stringify(right.aliases)
+  );
+}
+
+export function validateOrchestratorRoutingEntryInput(
+  entry: OrchestratorRoutingEntryInput,
+): void {
+  validateIncomingEntries([entry], new Date().toISOString());
 }
 
 export function listOrchestratorRoutingEntries(
@@ -302,11 +360,13 @@ function loadOrchestratorRoutingProjectionMetadata(
 export async function loadOrchestratorAgentRegistryView(
   cwd: string,
   interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
+  options: { signal?: AbortSignal; livenessDeadlineMs?: number } = {},
 ): Promise<OrchestratorAgentRegistryView> {
   const metadata = loadOrchestratorRoutingProjectionMetadata(cwd);
   const projection = await buildOrchestratorAgentProjection(
     metadata.entries,
     interactiveStates,
+    options,
   );
   return {
     routingMetadataStatus: metadata.status,
@@ -320,17 +380,28 @@ export async function loadOrchestratorAgentRegistryView(
 export async function buildOrchestratorAgentProjection(
   entries: readonly OrchestratorRoutingEntry[],
   interactiveStates: ReadonlyMap<string, InteractiveSubagentState>,
+  options: { signal?: AbortSignal; livenessDeadlineMs?: number } = {},
 ): Promise<OrchestratorAgentProjection> {
   const metadata = new Map(entries.map((entry) => [entry.childId, entry]));
   const runtimeIds = [...interactiveStates.keys()].sort();
-  const runtimeAgents = await Promise.all(
-    runtimeIds.map((childId) => {
+  const deadlineAt =
+    Date.now() +
+    Math.max(
+      0,
+      options.livenessDeadlineMs ?? MAX_ORCHESTRATOR_LIVENESS_DEADLINE_MS,
+    );
+  const runtimeAgents = await mapWithConcurrency(
+    runtimeIds,
+    MAX_ORCHESTRATOR_LIVENESS_CONCURRENCY,
+    (childId) => {
       return projectOrchestratorAgent(
         childId,
         metadata.get(childId),
         interactiveStates.get(childId),
+        options.signal,
+        deadlineAt,
       );
-    }),
+    },
   );
   runtimeAgents.sort(compareOrchestratorRuntimeAgents);
 
@@ -369,10 +440,30 @@ export async function buildOrchestratorAgentProjection(
   };
 }
 
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  project: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  const workerCount = Math.min(values.length, Math.max(1, concurrency));
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < values.length) {
+        const index = cursor++;
+        results[index] = await project(values[index]!);
+      }
+    }),
+  );
+  return results;
+}
+
 function compareOrchestratorRuntimeAgents(
   left: OrchestratorAgentView,
   right: OrchestratorAgentView,
 ): number {
+  if (left.attachable !== right.attachable) return left.attachable ? -1 : 1;
   if (left.actionable !== right.actionable) return left.actionable ? -1 : 1;
   return left.childId.localeCompare(right.childId);
 }
@@ -381,6 +472,8 @@ async function projectOrchestratorAgent(
   childId: string,
   metadata: OrchestratorRoutingEntry | undefined,
   state: InteractiveSubagentState | undefined,
+  signal?: AbortSignal,
+  deadlineAt = Number.POSITIVE_INFINITY,
 ): Promise<OrchestratorAgentView> {
   const routingFields = metadata
     ? {
@@ -403,15 +496,19 @@ async function projectOrchestratorAgent(
       status: "unknown",
       liveness: "unknown",
       stale: true,
+      attachable: false,
       actionable: false,
       reason: "runtime_missing",
     };
   }
 
-  const liveness = await probeInteractiveLiveness(state);
-  const actionable =
+  const liveness = await probeInteractiveLiveness(state, signal, deadlineAt);
+  const attachable =
     isValidOrchestratorChildId(childId) && isRuntimeActionable(state, liveness);
-  const reason = orchestratorAgentReason(state, liveness);
+  const actionable = attachable && metadata !== undefined;
+  const reason =
+    orchestratorAgentReason(state, liveness) ??
+    (metadata === undefined ? "routing_metadata_missing" : undefined);
   return {
     childId,
     name: boundedPreview(state.name, MAX_ORCHESTRATOR_AGENT_NAME_BYTES),
@@ -423,9 +520,10 @@ async function projectOrchestratorAgent(
     status: state.status,
     liveness,
     stale: false,
+    attachable,
     actionable,
     ...(reason === undefined ? {} : { reason }),
-    ...(actionable
+    ...(attachable
       ? {
           attachCommand: state.attachCommand,
           focusCommand: state.selectPaneCommand,
@@ -438,13 +536,31 @@ async function projectOrchestratorAgent(
 
 async function probeInteractiveLiveness(
   state: InteractiveSubagentState,
+  signal: AbortSignal | undefined,
+  deadlineAt: number,
 ): Promise<PaneLiveness> {
-  try {
-    return await getInteractivePaneLivenessAsync(state);
-  } catch {
-    /* A failed backend probe is represented explicitly as unknown liveness. */
-    return "unknown";
-  }
+  if (signal?.aborted || Date.now() >= deadlineAt) return "unknown";
+  return await new Promise<PaneLiveness>((resolve) => {
+    let settled = false;
+    const finish = (liveness: PaneLiveness) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      resolve(liveness);
+    };
+    const abort = () => finish("unknown");
+    const timer = setTimeout(
+      () => finish("unknown"),
+      Math.max(0, deadlineAt - Date.now()),
+    );
+    timer.unref?.();
+    signal?.addEventListener("abort", abort, { once: true });
+    void getInteractivePaneLivenessAsync(state).then(
+      (liveness) => finish(liveness),
+      () => finish("unknown"),
+    );
+  });
 }
 
 function isRuntimeActionable(

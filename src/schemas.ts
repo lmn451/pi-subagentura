@@ -16,6 +16,8 @@ const THINKING_LEVELS = [
   "max",
 ] as const;
 
+export const MAX_INTERACTIVE_CONTEXT_BYTES = 64 * 1024;
+
 function thinkingLevelSchema(description: string) {
   return StringEnum(THINKING_LEVELS, { description });
 }
@@ -216,6 +218,7 @@ const InteractiveContextMode = Type.Union([
     }),
     context: Type.Optional(
       Type.String({
+        maxLength: MAX_INTERACTIVE_CONTEXT_BYTES,
         description:
           "Explicit handoff/context passed directly to the initial child prompt.",
       }),
@@ -243,6 +246,7 @@ const InteractiveProviderFields = Type.Object({
   ),
   context: Type.Optional(
     Type.String({
+      maxLength: MAX_INTERACTIVE_CONTEXT_BYTES,
       description:
         "Explicit handoff/context, permitted only when includeContext is false.",
     }),

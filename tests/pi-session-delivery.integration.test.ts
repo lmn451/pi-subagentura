@@ -37,6 +37,11 @@ import { spawnSync } from "node:child_process";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendDeterministicTurn } from "./helpers/deterministic-artifacts";
 import { registerInProcessJob } from "../src/helpers";
+import {
+  ORCHESTRATOR_V2_WAKE_DETAIL_KEY,
+  ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
+  ORCHESTRATOR_V2_WAKEUP_MESSAGE,
+} from "../src/completion-turn";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const harnesses: PiSessionHarness[] = [];
@@ -71,6 +76,7 @@ function resolveHarnessScope(
   scope.lifecycle = "started";
   scope.sessionManager = harness.sessionManager;
   scope.ui = harness.session.extensionRunner.getUIContext();
+  scope.isParentIdle = () => !harness.session.isStreaming;
   return scope;
 }
 
@@ -78,9 +84,18 @@ function flushHarnessDeliveries(scope: SessionScope): void {
   flushDeliveries(scope.pi, scope.ui, sessionOwner(scope));
 }
 
-async function setup(mode: "notify" | "inject", triggerTurn: boolean) {
+async function setup(
+  mode: "notify" | "inject",
+  triggerTurn: boolean,
+  orchestratorV2 = false,
+  bindExtensionLifecycle = false,
+) {
   const existingScopeIds = new Set(getSessionScopes().map(({ id }) => id));
-  const harness = await createPiSessionHarness(repoRoot);
+  const harness = await createPiSessionHarness(repoRoot, {
+    extensionFlags: orchestratorV2 ? { orchestratorv2: true } : undefined,
+    bindExtensionLifecycle,
+    includeTools: orchestratorV2,
+  });
   harnesses.push(harness);
   expect(harness.session.hasExtensionHandlers("agent_start")).toBe(true);
   const notify = vi.fn();
@@ -90,7 +105,9 @@ async function setup(mode: "notify" | "inject", triggerTurn: boolean) {
   scope.ui = ui;
   const pi = scope.pi;
   const sendMessage = vi.fn(pi.sendMessage.bind(pi));
+  const sendUserMessage = vi.fn(pi.sendUserMessage.bind(pi));
   pi.sendMessage = sendMessage;
+  pi.sendUserMessage = sendUserMessage;
   __setTmuxMultiplexer({
     getPaneLiveness: () => "alive",
     getPaneLivenessAsync: async () => "alive",
@@ -127,7 +144,7 @@ async function setup(mode: "notify" | "inject", triggerTurn: boolean) {
     message: `${mode} completion`,
     state: "queued",
   });
-  return { harness, notify, sendMessage, state, scope };
+  return { harness, notify, sendMessage, sendUserMessage, state, scope };
 }
 
 describe("Pi session delivery integration", () => {
@@ -286,6 +303,124 @@ describe("Pi session delivery integration", () => {
     const { harness, scope } = await setup("notify", true);
     flushHarnessDeliveries(scope);
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    harness.completeNext();
+    await harness.session.waitForIdle();
+  });
+
+  it("runs an idle Orchestratorv2 completion with the thin-router prompt", async () => {
+    const { harness, scope, sendMessage, sendUserMessage } = await setup(
+      "notify",
+      true,
+      true,
+    );
+    scope.parentStreaming = true;
+
+    flushHarnessDeliveries(scope);
+
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    expect(sendMessage.mock.calls[0][1]).toMatchObject({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    expect(harness.contexts[0].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(harness.contexts[0].tools?.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        "read",
+        "workflow",
+        "subagent_isolated",
+        "subagent_interactive",
+        "list_orchestrator_agents",
+      ]),
+    );
+    const providerMessages = JSON.stringify(harness.contexts[0].messages);
+    expect(providerMessages).toContain("notify completion");
+    expect(providerMessages).toContain(ORCHESTRATOR_V2_WAKEUP_MESSAGE);
+    expect(providerMessages.indexOf("notify completion")).toBeLessThan(
+      providerMessages.indexOf(ORCHESTRATOR_V2_WAKEUP_MESSAGE),
+    );
+    harness.completeNext();
+    await harness.session.waitForIdle();
+  });
+
+  it("queues a streaming Orchestratorv2 completion under the current router prompt", async () => {
+    const { harness, scope, sendMessage, sendUserMessage } = await setup(
+      "notify",
+      true,
+      true,
+    );
+    const firstTurn = harness.session.prompt("parent turn");
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+
+    flushHarnessDeliveries(scope);
+
+    expect(sendMessage.mock.calls[0][1]).toMatchObject({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    harness.completeNext("parent done");
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(2));
+    expect(harness.contexts[1].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(JSON.stringify(harness.contexts[1].messages)).toContain(
+      "notify completion",
+    );
+    harness.completeNext("follow-up done");
+    await firstTurn;
+    await harness.session.waitForIdle();
+  });
+
+  it("coalesces simultaneous Orchestratorv2 broker wakes into one turn", async () => {
+    const { harness, scope, sendUserMessage } = await setup(
+      "notify",
+      true,
+      true,
+    );
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    const job: any = {
+      id: "simultaneous-in-process",
+      notifyOnComplete: "notify",
+      triggerTurnOnComplete: true,
+      notificationDelivered: false,
+      deliveryOwner: {
+        pi: scope.pi,
+        sessionId: harness.sessionManager.getSessionId(),
+        sessionScopeId: owner.id,
+        sessionScopeGeneration: owner.generation,
+      },
+    };
+    expect(registerInProcessJob(job, owner)).toBe(true);
+    deliverNotification(job, {
+      isError: false,
+      output: "in-process result",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 0,
+      },
+    } as any);
+
+    flushHarnessDeliveries(scope);
+    flushInProcessDeliveries(owner);
+
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    expect(harness.contexts[0].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(
+      harness.sessionManager
+        .getEntries()
+        .filter((entry: any) => entry.type === "custom_message"),
+    ).toHaveLength(2);
     harness.completeNext();
     await harness.session.waitForIdle();
   });
@@ -671,7 +806,10 @@ describe("child protocol lifecycle integration", () => {
 });
 
 describe("persisted delivery Pi session integration", () => {
-  async function persistedHarness(acknowledged: boolean) {
+  async function persistedHarness(
+    acknowledged: boolean,
+    orchestratorV2 = false,
+  ) {
     const art = childArtifact();
     const cwd = join(art.dir, "..");
     const completion = appendDeterministicTurn(
@@ -724,7 +862,9 @@ describe("persisted delivery Pi session integration", () => {
     }
     const existingScopeIds = new Set(getSessionScopes().map(({ id }) => id));
     const harness = await createPiSessionHarness(cwd, {
+      extensionFlags: orchestratorV2 ? { orchestratorv2: true } : undefined,
       extensionRoot: repoRoot,
+      includeTools: orchestratorV2,
       sessionManager,
     });
     harnesses.push(harness);
@@ -760,6 +900,149 @@ describe("persisted delivery Pi session integration", () => {
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
     expect(harness.contexts[0].messages.at(-1)).toMatchObject({ role: "user" });
+    harness.completeNext();
+    await harness.session.waitForIdle();
+  });
+
+  it("rehydrates an Orchestratorv2 completion into one prompted wake", async () => {
+    const { art, deliveryId, harness, scope } = await persistedHarness(
+      false,
+      true,
+    );
+    const sendUserMessage = vi.fn(scope.pi.sendUserMessage.bind(scope.pi));
+    scope.pi.sendUserMessage = sendUserMessage;
+
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
+
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    expect(harness.contexts[0].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    const providerMessages = JSON.stringify(harness.contexts[0].messages);
+    expect(providerMessages).toContain("persisted immutable result");
+    expect(providerMessages).toContain(ORCHESTRATOR_V2_WAKEUP_MESSAGE);
+    expect(scope.interactiveStates.get(art.id)?.pendingDeliveries).toEqual([]);
+    expect(scope.interactiveStates.get(art.id)?.deliveryReceipts).toContain(
+      deliveryId,
+    );
+    harness.completeNext();
+    await harness.session.waitForIdle();
+  });
+
+  it("recovers an unstarted Orchestratorv2 wake through an actual Pi reload", async () => {
+    const { harness, scope } = await setup("notify", true, true, true);
+    const droppedWake = vi.fn();
+    scope.pi.sendUserMessage = droppedWake;
+
+    flushHarnessDeliveries(scope);
+
+    expect(droppedWake).toHaveBeenCalledOnce();
+    expect(harness.contexts).toHaveLength(0);
+    const beforeReload = harness.sessionManager.getEntries();
+    expect(
+      beforeReload.filter((entry: any) => entry.type === "custom_message"),
+    ).toHaveLength(1);
+    expect(
+      beforeReload.some(
+        (entry: any) =>
+          entry.type === "custom" &&
+          entry.customType === "orchestratorv2-completion-wake" &&
+          entry.data?.state === "requested",
+      ),
+    ).toBe(true);
+
+    await harness.reload();
+
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    expect(harness.contexts[0].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    const providerMessages = JSON.stringify(harness.contexts[0].messages);
+    expect(providerMessages).toContain("notify completion");
+    expect(providerMessages).toContain(ORCHESTRATOR_V2_WAKEUP_MESSAGE);
+    expect(
+      harness.sessionManager
+        .getEntries()
+        .filter((entry: any) => entry.type === "custom_message"),
+    ).toHaveLength(1);
+    expect(
+      harness.sessionManager
+        .getEntries()
+        .some(
+          (entry: any) =>
+            entry.type === "custom" &&
+            entry.customType === "orchestratorv2-completion-wake" &&
+            entry.data?.state === "acknowledged",
+        ),
+    ).toBe(true);
+    harness.completeNext();
+    await harness.session.waitForIdle();
+  });
+
+  it("does not recover an Orchestratorv2 wake from an inactive session branch", async () => {
+    const { harness, scope } = await setup("notify", true, true, true);
+    scope.pi.sendUserMessage = vi.fn();
+
+    flushHarnessDeliveries(scope);
+    expect(harness.contexts).toHaveLength(0);
+    expect(
+      harness.sessionManager
+        .getEntries()
+        .some(
+          (entry: any) =>
+            entry.type === "custom" &&
+            entry.customType === "orchestratorv2-completion-wake" &&
+            entry.data?.state === "requested",
+        ),
+    ).toBe(true);
+
+    harness.sessionManager.resetLeaf();
+    harness.sessionManager.appendCustomMessageEntry(
+      "active-branch-marker",
+      "Active branch",
+      false,
+    );
+    await harness.reload();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(harness.contexts).toHaveLength(0);
+  });
+
+  it("does not let a sibling-branch acknowledgement suppress the active wake", async () => {
+    const { harness } = await setup("notify", true, true, true);
+    const wakeId = "12345678-1234-1234-9234-123456789abc";
+    harness.sessionManager.resetLeaf();
+    const rootEntryId = harness.sessionManager.appendCustomMessageEntry(
+      "branch-root",
+      "Branch root",
+      false,
+    );
+    harness.sessionManager.appendCustomEntry(ORCHESTRATOR_V2_WAKE_ENTRY_TYPE, {
+      schemaVersion: 1,
+      state: "requested",
+      wakeId,
+    });
+    const deliveredEntryId = harness.sessionManager.appendCustomMessageEntry(
+      "subagent-notify",
+      "Active completion",
+      true,
+      { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+    );
+    harness.sessionManager.branch(rootEntryId);
+    harness.sessionManager.appendCustomEntry(ORCHESTRATOR_V2_WAKE_ENTRY_TYPE, {
+      schemaVersion: 1,
+      state: "acknowledged",
+      wakeIds: [wakeId],
+    });
+    harness.sessionManager.branch(deliveredEntryId);
+
+    await harness.reload();
+
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    expect(harness.contexts[0].systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
     harness.completeNext();
     await harness.session.waitForIdle();
   });

@@ -46,6 +46,7 @@ export interface PiSessionHarness {
   contexts: Context[];
   completeNext(text?: string): void;
   failNext(errorMessage?: string): void;
+  reload(): Promise<void>;
   dispose(): void;
 }
 
@@ -53,7 +54,10 @@ export async function createPiSessionHarness(
   cwd: string,
   options: {
     childArtifactDir?: string;
+    bindExtensionLifecycle?: boolean;
+    extensionFlags?: Record<string, boolean | string>;
     extensionRoot?: string;
+    includeTools?: boolean;
     sessionManager?: SessionManager;
     retrySettings?: {
       enabled: boolean;
@@ -72,7 +76,7 @@ export async function createPiSessionHarness(
   const contexts: Context[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
-  registerProvider(sessionRuntime, "subagentura-faux", {
+  const fauxProvider = {
     api: "subagentura-faux",
     apiKey: "test",
     baseUrl: "http://127.0.0.1.invalid",
@@ -99,7 +103,10 @@ export async function createPiSessionHarness(
       pending.push(stream);
       return stream;
     },
-  });
+  };
+  const registerFauxProvider = () =>
+    registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
+  registerFauxProvider();
   const model = findModel(sessionRuntime, "subagentura-faux", "faux-model");
   if (!model) throw new Error("faux model registration failed");
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
@@ -127,6 +134,9 @@ export async function createPiSessionHarness(
   }
   try {
     await resourceLoader.reload();
+    for (const [name, value] of Object.entries(options.extensionFlags ?? {})) {
+      resourceLoader.getExtensions().runtime.flagValues.set(name, value);
+    }
   } finally {
     if (previousChild === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
     else process.env.PI_SUBAGENTURA_CHILD = previousChild;
@@ -140,11 +150,14 @@ export async function createPiSessionHarness(
     sessionManager,
     settingsManager,
     resourceLoader,
-    noTools: "all",
+    noTools: options.includeTools ? undefined : "all",
   });
   const { session } = await createAgentSession(
     sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
   );
+  if (options.bindExtensionLifecycle) {
+    await session.bindExtensions({ shutdownHandler: async () => {} });
+  }
   return {
     session,
     sessionManager,
@@ -191,6 +204,13 @@ export async function createPiSessionHarness(
       stream.push({ type: "start", partial: { ...message, content: [] } });
       stream.push({ type: "error", reason: "error", error: message });
       stream.end(message);
+    },
+    async reload() {
+      await session.reload({
+        beforeSessionStart: async () => {
+          registerFauxProvider();
+        },
+      });
     },
     dispose() {
       session.dispose();

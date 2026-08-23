@@ -20,11 +20,13 @@ import type { InteractiveSubagentState } from "./interactive-tmux";
 import {
   findSessionScope,
   getStartedSessionScopes,
+  resolveActualStreamingFlag,
   resolveLiveSessionScope,
   resolveStreamingFlag,
   resolveToolSessionOwner,
   type SessionOwnerToken,
 } from "./session-scope";
+import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 interface NotificationGlobalState {
   __piSubagenturaPiRef?: ExtensionAPI;
   __piSubagenturaUi?: CompletionNotificationUi;
@@ -432,16 +434,6 @@ function appendRunningJobsNote(
   return note ? `${content}\n${note}` : content;
 }
 
-function completionMessageOptions(triggerTurnOnComplete?: boolean): {
-  deliverAs: "followUp";
-  triggerTurn?: true;
-} {
-  if (triggerTurnOnComplete) {
-    return { deliverAs: "followUp", triggerTurn: true };
-  }
-  return { deliverAs: "followUp" };
-}
-
 /**
  * Resolve the async spawn's exact live owner.
  * Process-global compatibility refs are used only before any session starts.
@@ -600,6 +592,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   if (queue.length === 0) return;
 
   const streaming = resolveStreamingFlag(effectiveOwner);
+  const actualStreaming = resolveActualStreamingFlag(effectiveOwner);
   const deliveryOwner =
     (streaming ? queue.find(pendingTriggersTurn) : undefined) ?? queue[0];
   const target = resolvePendingDeliveryTarget(deliveryOwner);
@@ -645,7 +638,9 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
     let content =
       mode === "inject"
         ? `${summary}\n[Untrusted sub-agent output]\n${sanitizeOutput(result.output) || "(sub-agent produced no output)"}`
-        : `${summary}\nResult retained in job ${jobState.id}; use get_subagent_result for details.`;
+        : isOrchestratorV2Enabled(target.pi)
+          ? `${summary}\nResult remains in compatibility job ${jobState.id}. Surface its status without calling in-process tools in Orchestratorv2 mode.`
+          : `${summary}\nResult retained in job ${jobState.id}; use get_subagent_result for details.`;
     content = appendRunningJobsNote(content, effectiveOwner);
     const itemBytes = Buffer.byteLength(content, "utf8");
     if (llm.length > 0 && bytes + itemBytes > MAX_IN_PROCESS_FLUSH_BYTES) break;
@@ -664,7 +659,8 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   if (streaming && !triggersTurn) return;
   const deliveryIds = llm.map(({ pending }) => pending.deliveryId);
   try {
-    target.pi.sendMessage(
+    sendCompletionTurn(
+      target.pi,
       {
         customType: "subagent-notify",
         content: llm.map(({ content }) => content).join("\n\n---\n\n"),
@@ -686,6 +682,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
       {
         deliverAs: "followUp",
         triggerTurn: triggersTurn,
+        parentStreaming: actualStreaming,
       },
     );
   } catch {
@@ -839,17 +836,21 @@ export function deliverArtifactNotification(
   event: SubagentEvent,
 ): boolean {
   try {
-    pi.sendMessage!(
+    sendCompletionTurn(
+      pi,
       {
         customType: "subagent-notify",
         content: buildArtifactMessage(state, event),
         display: true,
         details: { subagentId: state.id, event },
       },
-      completionMessageOptions(
-        state.triggerTurnOnComplete === true &&
+      {
+        deliverAs: "followUp",
+        triggerTurn:
+          state.triggerTurnOnComplete === true &&
           !(state.notifyOnComplete === "inject" && event.type === "done"),
-      ),
+        parentStreaming: resolveActualStreamingFlag(state.sessionOwner),
+      },
     );
     return true;
   } catch {

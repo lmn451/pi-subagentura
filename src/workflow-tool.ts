@@ -66,10 +66,13 @@ import { getOrchestrationContext } from "./orchestration-context";
 import {
   getActiveSessionOwner,
   isSessionOwnerLive,
+  resolveActualStreamingFlag,
   resolveLiveSessionScope,
+  sessionOwner,
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
+import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 import { attachAsyncJobSettlement } from "./tools/in-process";
 import {
   durableWorkflowControllerForSession,
@@ -509,10 +512,14 @@ export function registerWorkflowTool(
     const summary = truncateWorkflowNotification(sanitizeOutput(rawSummary));
     let content = `${icon} Workflow "${job.name}" (${job.id}) ${presentation.label} — ${summary}`;
     if (run) {
-      content += `\n\nCall get_workflow_result with workflowId "${job.id}" to retrieve the result.`;
+      content += isOrchestratorV2Enabled(pi)
+        ? "\n\nThis completion came from the separate workflow compatibility mode. Surface its status without calling workflow tools in Orchestratorv2 mode."
+        : `\n\nCall get_workflow_result with workflowId "${job.id}" to retrieve the result.`;
     }
     try {
-      pi.sendMessage!(
+      const owner = sessionScope ? sessionOwner(sessionScope) : undefined;
+      sendCompletionTurn(
+        pi,
         {
           customType: "workflow-notify",
           content,
@@ -525,7 +532,11 @@ export function registerWorkflowTool(
             budgetTotal: job.snapshot.budgetTotal,
           },
         },
-        { deliverAs: "followUp", triggerTurn: true },
+        {
+          deliverAs: "followUp",
+          triggerTurn: true,
+          parentStreaming: resolveActualStreamingFlag(owner),
+        },
       );
       return true;
     } catch (err) {

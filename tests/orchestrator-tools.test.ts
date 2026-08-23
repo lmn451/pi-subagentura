@@ -12,6 +12,7 @@ import {
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../src/orchestrator-routing";
+import * as orchestratorRouting from "../src/orchestrator-routing";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
 import {
@@ -21,6 +22,10 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { registerOrchestratorTools } from "../src/tools/orchestrator";
+import {
+  ORCHESTRATOR_V2_WAKE_DETAIL_KEY,
+  orchestratorV2WakeupMessage,
+} from "../src/completion-turn";
 
 const CHILD_A = "0123456789abcdef";
 const CHILD_B = "fedcba9876543210";
@@ -100,6 +105,23 @@ function tool(api: ReturnType<typeof mockApi>, name: string): any {
   })?.[0];
 }
 
+function toolContext(root: string, userId?: string, userText?: string) {
+  const branch =
+    userId && userText !== undefined
+      ? [
+          {
+            id: userId,
+            type: "message",
+            message: { role: "user", content: userText },
+          },
+        ]
+      : [];
+  return {
+    cwd: root,
+    sessionManager: { getBranch: () => branch },
+  };
+}
+
 describe("Orchestratorv2 compact agent projection", () => {
   beforeEach(() => {
     __setTmuxMultiplexer({
@@ -137,6 +159,7 @@ describe("Orchestratorv2 compact agent projection", () => {
       status: "running",
       liveness: "alive",
       stale: false,
+      attachable: true,
       actionable: true,
       attachCommand: `tmux attach -t ${CHILD_A}`,
       focusCommand: `tmux select-pane -t %${CHILD_A}`,
@@ -166,6 +189,7 @@ describe("Orchestratorv2 compact agent projection", () => {
         status: "unknown",
         liveness: "unknown",
         stale: true,
+        attachable: false,
         actionable: false,
         reason: "runtime_missing",
       },
@@ -191,6 +215,7 @@ describe("Orchestratorv2 compact agent projection", () => {
         status: "idle",
         liveness: "unknown",
         stale: false,
+        attachable: false,
         actionable: false,
         reason: "pane_liveness_unknown",
         artifactDir: `/artifacts/${CHILD_B}`,
@@ -259,7 +284,9 @@ describe("Orchestratorv2 compact agent projection", () => {
 
     expect(projection.agents[0]).toMatchObject({
       childId: CHILD_B,
-      actionable: true,
+      attachable: true,
+      actionable: false,
+      reason: "routing_metadata_missing",
       attachCommand: `tmux attach -t ${CHILD_B}`,
       focusCommand: `tmux select-pane -t %${CHILD_B}`,
     });
@@ -302,12 +329,14 @@ describe("Orchestratorv2 metadata tools", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     clearSessionScopes();
     __resetMuxInstances();
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("registers exactly list and update with required provenance", () => {
+  it("registers exactly list and token-confirmed update with required provenance", () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
 
@@ -324,7 +353,8 @@ describe("Orchestratorv2 metadata tools", () => {
     );
     const update = tool(api, "update_orchestrator_agent_description");
     expect(update).toBeDefined();
-    expect(update.parameters.properties.confirmed.const).toBe(true);
+    expect(update.parameters.properties.confirmed.type).toBe("boolean");
+    expect(update.parameters.properties.confirmationToken).toBeDefined();
     expect(update.parameters.required).toEqual(
       expect.arrayContaining([
         "childId",
@@ -472,7 +502,7 @@ describe("Orchestratorv2 metadata tools", () => {
     });
   });
 
-  it("updates confirmed metadata for a child in the current session scope", async () => {
+  it("updates metadata only after the exact token appears in a later user message", async () => {
     upsertOrchestratorRoutingEntry(
       root,
       routingEntry(CHILD_A, { aliases: ["old"], provenance: "user" }),
@@ -482,21 +512,37 @@ describe("Orchestratorv2 metadata tools", () => {
     registerState(scope, CHILD_A);
     registerOrchestratorTools(api as never, scope);
 
-    const result = await tool(
-      api,
-      "update_orchestrator_agent_description",
-    ).execute(
-      "update-1",
+    const update = tool(api, "update_orchestrator_agent_description");
+    const requested = await update.execute(
+      "update-request",
+      {
+        childId: CHILD_A,
+        description: "Own the public API and release compatibility",
+        aliases: ["api", "release"],
+        provenance: "orchestratorv2",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Please change the responsibility"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    expect(requested.details.status).toBe("confirmation_required");
+    expect(listOrchestratorRoutingEntries(root)[0].aliases).toEqual(["old"]);
+
+    const result = await update.execute(
+      "update-confirmed",
       {
         childId: CHILD_A,
         description: "Own the public API and release compatibility",
         aliases: ["api", "release"],
         provenance: "orchestratorv2",
         confirmed: true,
+        confirmationToken,
       },
       undefined,
       undefined,
-      { cwd: root },
+      toolContext(root, "user-2", `I confirm ${confirmationToken}`),
     );
 
     expect(result.isError).toBeFalsy();
@@ -518,6 +564,423 @@ describe("Orchestratorv2 metadata tools", () => {
         updatedAt: expect.any(String),
       }),
     ]);
+
+    const replay = await update.execute(
+      "update-replay",
+      {
+        childId: CHILD_A,
+        description: "Own the public API and release compatibility",
+        aliases: ["api", "release"],
+        provenance: "orchestratorv2",
+        confirmed: true,
+        confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `I confirm ${confirmationToken}`),
+    );
+    expect(replay.details.status).toBe("confirmation_invalid");
+  });
+
+  it("ignores extension-generated coordinator wakes when finding user confirmation", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    const branch = [
+      {
+        id: "user-1",
+        type: "message",
+        message: { role: "user", content: "Make the change" },
+      },
+      {
+        id: "user-2",
+        type: "message",
+        message: { role: "user", content: `Confirm ${confirmationToken}` },
+      },
+      {
+        id: "completion-pointer",
+        type: "custom_message",
+        details: {
+          [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]:
+            "12345678-1234-1234-9234-123456789abc",
+        },
+      },
+      {
+        id: "extension-wake",
+        type: "message",
+        message: {
+          role: "user",
+          content: `hook prefix\n${orchestratorV2WakeupMessage(
+            "12345678-1234-1234-9234-123456789abc",
+          )}\nhook suffix`,
+        },
+      },
+    ];
+
+    const result = await update.execute(
+      "confirmed",
+      { ...params, confirmed: true, confirmationToken },
+      undefined,
+      undefined,
+      { cwd: root, sessionManager: { getBranch: () => branch } },
+    );
+
+    expect(result.details.status).toBe("updated");
+  });
+
+  it("accepts a real confirmation after a pointer whose synthetic wake never arrived", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    const branch = [
+      {
+        id: "user-1",
+        type: "message",
+        message: { role: "user", content: "Make the change" },
+      },
+      {
+        id: "completion-pointer",
+        type: "custom_message",
+        details: {
+          [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]:
+            "12345678-1234-1234-9234-123456789abc",
+        },
+      },
+      {
+        id: "user-2",
+        type: "message",
+        message: { role: "user", content: `Confirm ${confirmationToken}` },
+      },
+    ];
+
+    const result = await update.execute(
+      "confirmed",
+      { ...params, confirmed: true, confirmationToken },
+      undefined,
+      undefined,
+      { cwd: root, sessionManager: { getBranch: () => branch } },
+    );
+
+    expect(result.details.status).toBe("updated");
+  });
+
+  it("rejects byte-invalid routing metadata before issuing a token", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+
+    const result = await update.execute(
+      "request-invalid",
+      {
+        childId: CHILD_A,
+        description: "😀".repeat(1025),
+        provenance: "user",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+
+    expect(result.details.status).toBe("routing_metadata_error");
+    expect(result.details).not.toHaveProperty("confirmationToken");
+    expect(result.content[0].text).toContain("description exceeds 4096 bytes");
+  });
+
+  it("atomically rejects a confirmed update when metadata changes during the write", async () => {
+    upsertOrchestratorRoutingEntry(root, routingEntry(CHILD_A));
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    const originalUpsert = orchestratorRouting.upsertOrchestratorRoutingEntry;
+    vi.spyOn(
+      orchestratorRouting,
+      "upsertOrchestratorRoutingEntry",
+    ).mockImplementationOnce((cwd, entry, options) => {
+      originalUpsert(
+        cwd,
+        routingEntry(CHILD_A, {
+          description: "Concurrent checkout ownership",
+          updatedAt: "2026-08-23T20:30:00.000Z",
+        }),
+      );
+      return originalUpsert(cwd, entry, options);
+    });
+
+    const result = await update.execute(
+      "confirmed",
+      { ...params, confirmed: true, confirmationToken },
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${confirmationToken}`),
+    );
+
+    expect(result.details.status).toBe("routing_metadata_error");
+    expect(listOrchestratorRoutingEntries(root)[0]).toMatchObject({
+      description: "Concurrent checkout ownership",
+      updatedAt: "2026-08-23T20:30:00.000Z",
+    });
+  });
+
+  it("rejects model-asserted confirmation and mismatched payloads", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+
+    const direct = await update.execute(
+      "direct",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        provenance: "user",
+        confirmed: true,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    expect(direct.details.status).toBe("confirmation_invalid");
+
+    const requested = await update.execute(
+      "request",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        provenance: "user",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    const mismatch = await update.execute(
+      "mismatch",
+      {
+        childId: CHILD_A,
+        description: "Own checkout instead",
+        provenance: "user",
+        confirmed: true,
+        confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${confirmationToken}`),
+    );
+
+    expect(mismatch.details.status).toBe("confirmation_invalid");
+    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
+  });
+
+  it("retains a valid token across persistence failure and consumes it after success", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    vi.spyOn(
+      orchestratorRouting,
+      "upsertOrchestratorRoutingEntry",
+    ).mockImplementationOnce(() => {
+      throw new Error("transient rename failure");
+    });
+    const confirmed = {
+      ...params,
+      confirmed: true,
+      confirmationToken,
+    };
+
+    const failed = await update.execute(
+      "failed",
+      confirmed,
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${confirmationToken}`),
+    );
+    const retried = await update.execute(
+      "retried",
+      confirmed,
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${confirmationToken}`),
+    );
+    const replay = await update.execute(
+      "replay",
+      confirmed,
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${confirmationToken}`),
+    );
+
+    expect(failed.details.status).toBe("routing_metadata_error");
+    expect(retried.details.status).toBe("updated");
+    expect(replay.details.status).toBe("confirmation_invalid");
+  });
+
+  it("expires confirmation tokens and binds them to scope generation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T20:00:00.000Z"));
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request-expiring",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const expiredToken = requested.details.confirmationToken;
+    vi.setSystemTime(new Date("2026-08-23T20:10:00.001Z"));
+
+    const expired = await update.execute(
+      "expired",
+      { ...params, confirmed: true, confirmationToken: expiredToken },
+      undefined,
+      undefined,
+      toolContext(root, "user-2", `Confirm ${expiredToken}`),
+    );
+    expect(expired.details.status).toBe("confirmation_invalid");
+
+    const fresh = await update.execute(
+      "request-generation",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-2", "Try again"),
+    );
+    scope.generation++;
+    const generationMismatch = await update.execute(
+      "generation-mismatch",
+      {
+        ...params,
+        confirmed: true,
+        confirmationToken: fresh.details.confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-3", `Confirm ${fresh.details.confirmationToken}`),
+    );
+    expect(generationMismatch.details.status).toBe("confirmation_invalid");
+  });
+
+  it("does not accept a confirmation token in another session scope", async () => {
+    const apiA = mockApi();
+    const scopeA = startedScope(apiA, 1, "parent-a");
+    registerState(scopeA, CHILD_A);
+    registerOrchestratorTools(apiA as never, scopeA);
+    const requested = await tool(
+      apiA,
+      "update_orchestrator_agent_description",
+    ).execute(
+      "request-a",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        provenance: "user",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "user-a1", "Make the change"),
+    );
+    const apiB = mockApi();
+    const scopeB = startedScope(apiB, 2, "parent-b");
+    registerState(scopeB, CHILD_A);
+    registerOrchestratorTools(apiB as never, scopeB);
+
+    const crossScope = await tool(
+      apiB,
+      "update_orchestrator_agent_description",
+    ).execute(
+      "confirm-b",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        provenance: "user",
+        confirmed: true,
+        confirmationToken: requested.details.confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(
+        root,
+        "user-b1",
+        `Confirm ${requested.details.confirmationToken}`,
+      ),
+    );
+
+    expect(crossScope.details.status).toBe("confirmation_invalid");
+    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
   });
 
   it("does not update stale metadata backed only by another parent scope", async () => {

@@ -218,15 +218,18 @@ pi --orchestratorv2
 
 This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
 verify the parent model and does not enforce a host-level tool allowlist. Select
-the intended Luna-compatible model separately, and do not enable
+the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
 tools remain registered for compatibility, while the Orchestratorv2 prompt
 directs the parent to delegate only through attachable interactive children and
 use project-local confirmed descriptions and aliases to route continuations.
 
-The Orchestratorv2 routing surface is exactly two tools:
+Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
+Responsibility updates use a server-issued, single-use confirmation token bound
+to the exact payload, current session generation, and a later user message; a
+model-supplied `confirmed: true` is not sufficient by itself.
 Routing metadata is capped at 128 records and is never evicted automatically.
 The interactive runtime launches before its initial routing metadata is
 persisted. If persistence fails, the child intentionally remains live and the
@@ -377,7 +380,10 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — include serialized parent conversation in the child prompt (default: `false`)
+- `includeContext` — context mode selector: `true` serializes the full parent branch; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
+- `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
+- `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux` — optional backend: `"auto"` (default), `"tmux"`, or `"zellij"`. Auto picks the currently attached mux (via ZELLIJ_SESSION_NAME / TMUX env vars) then falls back to whichever backend binary is available. Explicit choice forces that backend.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `notifyOnComplete` — `"notify"` (default) persists only an artifact pointer; `"inject"` persists full output. Both modes show a user-facing completion notification.
@@ -536,16 +542,22 @@ LLM turn. Both payload modes display the same user-facing notification;
 | `notify` (interactive default)            | Artifact pointer only       | Yes                             |
 | `notify` + `triggerTurnOnComplete: false` | Artifact pointer only       | No                              |
 
-Triggering completions are handed to Pi's native `followUp` queue even while the
-parent is busy, so they run after the active turn without relying on extension-owned
-streaming state. Non-triggering completions wait until the parent is idle before
-delivery into parent context, which prevents them from accidentally starting a
-provider turn.
+Triggering completions are handed to Pi's native `followUp` queue while the
+parent is busy. For an idle Orchestratorv2 parent, the extension first persists
+the custom completion and a durable wake intent, then starts an
+extension-generated user turn so Pi runs `before_agent_start` and installs the
+thin-router prompt. Concurrent completions coalesce into one wake; an
+unacknowledged wake is retried after reload without duplicating the custom
+completion. Other idle modes use Pi's native custom-message trigger.
+Non-triggering completions wait until the parent is idle before delivery into
+parent context, which prevents them from accidentally starting a provider turn.
 
-Therefore plain `notify` records the completion for both the UI and the parent
-conversation, but the LLM does not react immediately. The pointer becomes
-available to the model when the user starts the next parent turn. It is not a
-visual-only notification and the completion is not discarded.
+Therefore `notify + triggerTurnOnComplete: false` records the completion for
+both the UI and the parent conversation without an immediate LLM reaction; the
+pointer becomes available when the user starts the next parent turn. Plain
+interactive `notify` keeps its default trigger and wakes the parent as shown in
+the table. Neither form is a visual-only notification, and neither completion
+is discarded.
 
 Both modes also show a user notification (`ui.notify`) after successful delivery. The notification
 explicitly states whether completion output was injected into the parent LLM and

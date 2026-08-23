@@ -82,6 +82,7 @@ function mockApi(orchestratorv2 = false) {
     ),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
+    appendEntry: vi.fn(),
     on: vi.fn(),
   };
 }
@@ -225,7 +226,7 @@ afterAll(() => {
 
 describe("Orchestratorv2 thin-router scenarios", () => {
   it("spawns broad-request children A and B through the existing interactive path with explicit routing metadata", async () => {
-    const environment = setupScenario();
+    const environment = setupScenario(true);
 
     await spawnAgentsAB(environment);
 
@@ -300,10 +301,22 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     );
     expect(environment.scope.interactiveStates.has(CHILD_A)).toBe(true);
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
+    const listed = await executeTool(
+      registeredTool(environment.api, "list_orchestrator_agents"),
+      {},
+      environment.ctx,
+    );
+    expect(
+      listed.details.agents.find((agent: any) => agent.childId === CHILD_A),
+    ).toMatchObject({
+      attachable: true,
+      actionable: false,
+      reason: "routing_metadata_missing",
+    });
   });
 
   it("lists A and B with current pointers and delegates to the selected child without creating a new one", async () => {
-    const environment = setupScenario();
+    const environment = setupScenario(true);
     await spawnAgentsAB(environment);
     const list = registeredTool(environment.api, "list_orchestrator_agents");
     const send = registeredTool(
@@ -403,7 +416,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
   });
 
   it("delivers an important completion through the existing pointer-only artifact path without auto-spawn", async () => {
-    const environment = setupScenario();
+    const environment = setupScenario(true);
     const spawn = registeredTool(environment.api, "subagent_interactive");
     await executeTool(
       spawn,
@@ -446,13 +459,17 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(message.content).not.toContain(
       "PRIVATE CHILD OUTPUT THAT MUST REMAIN POINTER-ONLY",
     );
-    expect(options).toMatchObject({ deliverAs: "followUp", triggerTurn: true });
+    expect(options).toMatchObject({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(environment.api.sendUserMessage).toHaveBeenCalledOnce();
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
     expect(environment.scope.interactiveStates.size).toBe(1);
   });
 
   it("uses the existing spawn tool for a user-approved separate investigation while A and B remain represented", async () => {
-    const environment = setupScenario();
+    const environment = setupScenario(true);
     await spawnAgentsAB(environment);
     const originalA = environment.scope.interactiveStates.get(CHILD_A);
     const originalB = environment.scope.interactiveStates.get(CHILD_B);
@@ -510,7 +527,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       focusCommand: "tmux select-pane -t %0123",
     });
     expect(promptResult.systemPrompt).toContain(
-      "For direct work, return the selected child's attach or focus command to the user",
+      "When the user asks to switch, join, attach, or work with a child directly",
     );
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
@@ -624,5 +641,74 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockLaunchInteractiveSubagent.mock.calls[2][0].contextText).toBe(
       "EXPLICIT-HANDOFF-CONTEXT",
     );
+  });
+
+  it("requires routing responsibility for top-level Orchestratorv2 spawns", async () => {
+    const environment = setupScenario(true);
+    const spawn = registeredTool(environment.api, "subagent_interactive");
+
+    const result = await executeTool(
+      spawn,
+      { task: "Unroutable specialist task" },
+      environment.ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      status: "invalid_routing_metadata",
+      error: expect.stringContaining("routingDescription is required"),
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+  });
+
+  it("rejects Orchestratorv2 routing provenance from legacy and nested sessions", async () => {
+    const legacy = setupScenario(false);
+    const legacyResult = await executeTool(
+      registeredTool(legacy.api, "subagent_interactive"),
+      {
+        task: "Legacy task",
+        routingDescription: "Must not enter the V2 overlay",
+      },
+      legacy.ctx,
+    );
+
+    const nested = setupScenario(true);
+    process.env.PI_SUBAGENTURA_CHILD = "1";
+    const nestedResult = await executeTool(
+      registeredTool(nested.api, "subagent_interactive"),
+      {
+        task: "Nested task",
+        routingDescription: "Must remain owned by the immediate child",
+      },
+      nested.ctx,
+    );
+
+    expect(legacyResult.details.status).toBe("invalid_routing_metadata");
+    expect(nestedResult.details.status).toBe("invalid_routing_metadata");
+    expect(listOrchestratorRoutingEntries(legacy.root)).toEqual([]);
+    expect(listOrchestratorRoutingEntries(nested.root)).toEqual([]);
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+  });
+
+  it("rejects multibyte explicit handoffs above the byte cap", async () => {
+    const environment = setupScenario(false);
+    const spawn = registeredTool(environment.api, "subagent_interactive");
+
+    const result = await executeTool(
+      spawn,
+      {
+        task: "Bounded handoff",
+        includeContext: false,
+        context: "💥".repeat(20_000),
+      },
+      environment.ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      status: "invalid_context",
+      maxBytes: 64 * 1024,
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
   });
 });

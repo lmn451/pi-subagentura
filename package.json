@@ -53,6 +53,7 @@
     "src/artifact.ts",
     "src/artifact-poller.ts",
     "src/child-protocol.ts",
+    "src/completion-turn.ts",
     "src/delivery.ts",
     "src/helpers.ts",
     "src/orchestrator-routing.ts",

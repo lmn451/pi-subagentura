@@ -300,6 +300,7 @@ describe("subagent_interactive tool lifecycle", () => {
   });
 
   it("persists initial routing metadata only after a successful spawn", async () => {
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
     const toolDef = getInteractiveToolDef(api);
     const state = {
       ...mockInteractiveState(),
@@ -397,6 +398,7 @@ describe("subagent_interactive tool lifecycle", () => {
   });
 
   it("reports routing persistence failure without pretending the child failed", async () => {
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
     const toolDef = getInteractiveToolDef(api);
     const state = {
       ...mockInteractiveState(),

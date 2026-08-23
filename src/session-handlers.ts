@@ -54,6 +54,11 @@ import {
 } from "./workflow-owner";
 import type { WorkflowOwnerIdentity } from "./workflow-run-types";
 import { DurableWorkflowProjectionRepository } from "./workflow-projection-repository";
+import {
+  acknowledgeCompletionTurnWake,
+  clearCompletionTurnWake,
+  recoverCompletionTurnWakes,
+} from "./completion-turn";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -280,11 +285,13 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
 
   pi.on("agent_start", () => {
     if (scope.lifecycle !== "started") return;
+    acknowledgeCompletionTurnWake(pi);
     scope.parentStreaming = true;
     setLegacyActiveSessionRefs(scope);
   });
   pi.on("agent_settled", () => {
     if (scope.lifecycle !== "started") return;
+    acknowledgeCompletionTurnWake(pi);
     scope.parentStreaming = false;
     const owner = sessionOwner(scope);
     setLegacyActiveSessionRefs(scope);
@@ -334,6 +341,8 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
     scope.lifecycle = "started";
     scope.ui = ctx.ui;
     scope.sessionManager = ctx.sessionManager;
+    scope.isParentIdle =
+      typeof ctx.isIdle === "function" ? ctx.isIdle.bind(ctx) : undefined;
     scope.parentStreaming = false;
     if (durableContext) {
       setDurableWorkflowRootDir(scope, durableContext.rootDir);
@@ -377,6 +386,14 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
         /* best effort — rehydrate is a recovery path */
       }
       try {
+        recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
+      } catch (error) {
+        console.error(
+          "[subagentura] Orchestratorv2 completion wake recovery failed",
+          error,
+        );
+      }
+      try {
         await recoverDurableWorkflowProjections(scope);
       } catch (error) {
         console.error(
@@ -406,6 +423,8 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
         ctx,
       );
       scope.parentStreaming = false;
+      scope.isParentIdle = undefined;
+      clearCompletionTurnWake(pi);
       scope.lifecycle = "shutdown";
       advanceSessionScopeGeneration(scope.id);
       removeSessionScope(scope.id);
