@@ -310,6 +310,7 @@ describe("subagent_interactive tool lifecycle", () => {
       childId: state.id,
       description: "Own the API migration",
       aliases: ["api", "migration"],
+      provenance: "orchestratorv2" as const,
     };
     mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
     mockUpsertOrchestratorRoutingEntry.mockReturnValueOnce({

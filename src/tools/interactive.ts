@@ -42,6 +42,7 @@ import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
   MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
   MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
+  isValidOrchestratorChildId,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
@@ -55,9 +56,8 @@ import {
   type SessionToolToken,
 } from "../session-scope";
 
-const SUBAGENT_ID_INVALID_CHAR_RE = /[^a-f0-9]/;
 function isValidSubagentId(id: string): boolean {
-  return id.length === 16 && !SUBAGENT_ID_INVALID_CHAR_RE.test(id);
+  return isValidOrchestratorChildId(id);
 }
 const MAX_FOLLOWUP_BYTES = 64 * 1024;
 const MAX_FOLLOWUP_PREVIEW_CHARS = 500;
@@ -91,6 +91,7 @@ function persistInitialRoutingMetadata(params: {
       childId: params.childId,
       description: params.description,
       ...(params.aliases === undefined ? {} : { aliases: params.aliases }),
+      provenance: "orchestratorv2",
     });
     const entry = overlay.records.find(
       (record) => record.childId === params.childId,
@@ -139,9 +140,9 @@ function validateInitialRoutingMetadata(
 }
 
 export function findArtifactById(id: string): SubagentArtifact | null {
-  // Sub-agent ids are randomBytes(8).toString("hex") at spawn time, i.e. 16
-  // lowercase hex chars. Validate the id before joining it into a path so that an
-  // LLM-supplied id like "../../../etc" can't escape the artifact root
+  // Sub-agent ids are historically 4 random bytes (8 hex chars) and currently
+  // 8 random bytes (16 hex chars). Validate before joining into a path so that
+  // an LLM-supplied id like "../../../etc" cannot escape the artifact root.
   // (path.join normalises "..", so a malicious id would otherwise resolve
   // to a sibling directory and get exfiltrated to the parent LLM via
   // read_subagent_artifact).
@@ -628,7 +629,7 @@ export function registerInteractiveSubagentTools(
           content: [
             {
               type: "text",
-              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 16 lowercase hex chars.`,
+              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 8 or 16 lowercase hex chars.`,
             },
           ],
           details: { id: params.id, status: "invalid_id" },
@@ -821,7 +822,7 @@ export function registerInteractiveSubagentTools(
           content: [
             {
               type: "text",
-              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 16 lowercase hex chars.`,
+              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 8 or 16 lowercase hex chars.`,
             },
           ],
           details: { id: params.id, status: "invalid_id" },

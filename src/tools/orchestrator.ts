@@ -6,7 +6,6 @@ import {
   MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
   listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
-  removeOrchestratorRoutingEntry,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
@@ -16,7 +15,7 @@ import {
   type SessionToolToken,
 } from "../session-scope";
 
-const CHILD_ID_PATTERN = "^[a-f0-9]{16}$";
+const CHILD_ID_PATTERN = "^(?:[a-f0-9]{8}|[a-f0-9]{16})$";
 
 const ListOrchestratorAgentsParams = Type.Object({});
 
@@ -43,23 +42,13 @@ const UpdateOrchestratorAgentDescriptionParams = Type.Object({
       },
     ),
   ),
-  provenance: Type.Optional(
-    Type.Union([Type.Literal("user"), Type.Literal("luna")]),
-  ),
+  provenance: Type.Union([
+    Type.Literal("user"),
+    Type.Literal("orchestratorv2"),
+  ]),
   confirmed: Type.Literal(true, {
     description:
-      "Must be true after the user or Luna has confirmed this metadata update",
-  }),
-});
-
-const RemoveOrchestratorAgentDescriptionParams = Type.Object({
-  childId: Type.String({
-    pattern: CHILD_ID_PATTERN,
-    description: "Interactive child ID whose routing metadata is removed",
-  }),
-  confirmed: Type.Literal(true, {
-    description:
-      "Must be true after the user has confirmed permanent metadata removal",
+      "Must be true after the user or Orchestratorv2 has confirmed this metadata update",
   }),
 });
 
@@ -136,9 +125,7 @@ export function registerOrchestratorTools(
           ...(params.aliases === undefined
             ? optionalAliases(existing)
             : { aliases: params.aliases }),
-          ...(params.provenance === undefined
-            ? optionalProvenance(existing)
-            : { provenance: params.provenance }),
+          provenance: params.provenance,
         });
         const entry = overlay.records.find(
           (record) => record.childId === params.childId,
@@ -159,61 +146,12 @@ export function registerOrchestratorTools(
       }
     },
   });
-
-  pi.registerTool({
-    name: "remove_orchestrator_agent_description",
-    label: "Remove Orchestrator Agent Description",
-    description:
-      "Remove one confirmed routing metadata entry so stale records can be retired and capacity recovered. This does not cancel or delete an interactive child.",
-    parameters: RemoveOrchestratorAgentDescriptionParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const scope = resolveToolSessionScope(toolToken);
-      if (!scope) return sessionUnavailableResult();
-      try {
-        const entry = removeOrchestratorRoutingEntry(ctx.cwd, params.childId);
-        if (!entry) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No routing metadata exists for interactive child ${params.childId}.`,
-              },
-            ],
-            details: {
-              status: "not_found",
-              childId: params.childId,
-            },
-            isError: true,
-          };
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Removed confirmed routing metadata for interactive child ${params.childId}.`,
-            },
-          ],
-          details: { status: "removed", entry },
-        };
-      } catch (error) {
-        return routingErrorResult(error);
-      }
-    },
-  });
 }
 
 function optionalAliases(
   entry: OrchestratorRoutingEntry | undefined,
 ): { aliases: string[] } | Record<string, never> {
   return entry?.aliases === undefined ? {} : { aliases: [...entry.aliases] };
-}
-
-function optionalProvenance(
-  entry: OrchestratorRoutingEntry | undefined,
-): { provenance: "user" | "luna" } | Record<string, never> {
-  return entry?.provenance === undefined
-    ? {}
-    : { provenance: entry.provenance };
 }
 
 function sessionUnavailableResult() {

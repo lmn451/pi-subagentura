@@ -3,7 +3,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,7 +15,6 @@ import {
   listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
   orchestratorRoutingFilePath,
-  removeOrchestratorRoutingEntry,
   saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
   type OrchestratorRoutingEntry,
@@ -30,6 +28,7 @@ function routingEntry(index: number): OrchestratorRoutingEntry {
   return {
     childId: index.toString(16).padStart(16, "0"),
     description: `Historical responsibility ${index}`,
+    provenance: "user",
     updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   };
 }
@@ -110,7 +109,7 @@ describe("Orchestratorv2 routing blockers", () => {
     });
   });
 
-  it("recovers capacity only after confirmed metadata removal", () => {
+  it("fails closed at capacity without eviction or replacement", () => {
     const historical = Array.from(
       { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
       (_, index) => routingEntry(index),
@@ -121,6 +120,7 @@ describe("Orchestratorv2 routing blockers", () => {
     const live = {
       childId: LIVE_ID,
       description: "Own the newly spawned live child",
+      provenance: "orchestratorv2" as const,
       updatedAt: "2026-08-21T12:00:00.000Z",
     };
 
@@ -128,16 +128,6 @@ describe("Orchestratorv2 routing blockers", () => {
       /routing record count exceeds/,
     );
     expect(readFileSync(file, "utf8")).toBe(before);
-
-    const removed = removeOrchestratorRoutingEntry(root, historical[0].childId);
-    expect(removed).toEqual(historical[0]);
-    const saved = upsertOrchestratorRoutingEntry(root, live);
-
-    expect(saved.records).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
-    expect(saved.records).toContainEqual(live);
-    expect(saved.records).not.toContainEqual(historical[0]);
-    expect(readdirSync(join(root, ".pi"))).toEqual([
-      "subagentura-routing.json",
-    ]);
+    expect(listOrchestratorRoutingEntries(root)).toEqual(historical);
   });
 });

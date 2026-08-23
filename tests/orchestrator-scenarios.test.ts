@@ -246,12 +246,14 @@ describe("Orchestratorv2 thin-router scenarios", () => {
         description: "Own API migration and compatibility",
         aliases: ["api", "migration"],
         updatedAt: expect.any(String),
+        provenance: "orchestratorv2",
       }),
       expect.objectContaining({
         childId: CHILD_B,
         description: "Own release verification and packaging",
         aliases: ["release", "packaging"],
         updatedAt: expect.any(String),
+        provenance: "orchestratorv2",
       }),
     ]);
     expect([...environment.scope.interactiveStates.keys()]).toEqual([
@@ -260,13 +262,14 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     ]);
   });
 
-  it("recovers a full routing overlay through confirmed removal and update", async () => {
+  it("fails closed when the routing overlay is full without eviction", async () => {
     const environment = setupScenario(true);
     const historical = Array.from(
       { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
       (_, index) => ({
         childId: index.toString(16).padStart(16, "0"),
         description: `Historical responsibility ${index}`,
+        provenance: "user" as const,
         updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
       }),
     );
@@ -278,10 +281,10 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     const spawned = await executeTool(
       spawn,
       {
-        name: "Capacity recovery child",
+        name: "Capacity-blocked child",
         task: "Own work after routing capacity is exhausted",
         routingDescription: "Own post-capacity work",
-        routingAliases: ["capacity-recovery"],
+        routingAliases: ["capacity-blocked"],
       },
       environment.ctx,
     );
@@ -292,45 +295,11 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       error: expect.stringContaining("routing record count exceeds"),
     });
     expect(readFileSync(routingFile, "utf8")).toBe(beforeSpawn);
+    expect(listOrchestratorRoutingEntries(environment.root)).toEqual(
+      historical,
+    );
     expect(environment.scope.interactiveStates.has(CHILD_A)).toBe(true);
-
-    const remove = registeredTool(
-      environment.api,
-      "remove_orchestrator_agent_description",
-    );
-    const removed = await executeTool(
-      remove,
-      { childId: historical[0].childId, confirmed: true },
-      environment.ctx,
-    );
-    expect(removed.details.status).toBe("removed");
-
-    const update = registeredTool(
-      environment.api,
-      "update_orchestrator_agent_description",
-    );
-    const updated = await executeTool(
-      update,
-      {
-        childId: CHILD_A,
-        description: "Own post-capacity work",
-        aliases: ["capacity-recovery"],
-        confirmed: true,
-      },
-      environment.ctx,
-    );
-
-    expect(updated.details.status).toBe("updated");
-    const entries = listOrchestratorRoutingEntries(environment.root);
-    expect(entries).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
-    expect(entries).toContainEqual(
-      expect.objectContaining({
-        childId: CHILD_A,
-        description: "Own post-capacity work",
-        aliases: ["capacity-recovery"],
-      }),
-    );
-    expect(entries).not.toContainEqual(historical[0]);
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
   });
 
   it("lists A and B with current pointers and delegates to the selected child without creating a new one", async () => {
@@ -408,6 +377,28 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     );
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+  });
+  it("surfaces a zero-match narrow request without spawning or fanning out", async () => {
+    const environment = setupScenario(true);
+    const beforeAgentStart = environment.api.on.mock.calls.find(
+      ([event]) => event === "before_agent_start",
+    )?.[1];
+    const promptResult = await beforeAgentStart(
+      { systemPrompt: "base prompt" },
+      {},
+    );
+
+    expect(promptResult.systemPrompt).toContain(
+      "A narrow, exact, continuation, or delegation request with no matching child must be surfaced to the user",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "must not silently spawn or fan out",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "A broad user-originated request may be decomposed into multiple interactive children",
+    );
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
 

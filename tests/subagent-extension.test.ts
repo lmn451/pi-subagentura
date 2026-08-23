@@ -27,7 +27,6 @@ const IN_PROCESS_TOOL_NAMES = [
 
 const ORCHESTRATOR_TOOL_NAMES = [
   "list_orchestrator_agents",
-  "remove_orchestrator_agent_description",
   "update_orchestrator_agent_description",
 ].sort();
 
@@ -168,6 +167,25 @@ describe("extension registration", () => {
       "An exact or continuation match is not routable",
     );
     expect(result.systemPrompt).toContain(
+      "A narrow, exact, continuation, or delegation request with no matching child",
+    );
+    expect(result.systemPrompt).toContain("must not silently spawn or fan out");
+    expect(result.systemPrompt).toContain(
+      "may autonomously create nested children",
+    );
+    expect(result.systemPrompt).toContain(
+      "owned by their immediate parent session",
+    );
+    expect(result.systemPrompt).toContain(
+      "interactive runtime launches before its initial metadata is persisted",
+    );
+    expect(result.systemPrompt).toContain(
+      "child remains live and the spawn result includes an explicit warning",
+    );
+    expect(result.systemPrompt).toContain(
+      "Surface only substantial additional information, blockers or errors, completion, and needs-attention events",
+    );
+    expect(result.systemPrompt).toContain(
       "never auto-delegate, replace, or respawn it",
     );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
@@ -216,7 +234,7 @@ describe("extension registration", () => {
     expect(names).not.toContain("subagent_with_context");
     expect(names).not.toContain("list_orchestrator_agents");
     expect(names).not.toContain("update_orchestrator_agent_description");
-    expect(names).not.toContain("remove_orchestrator_agent_description");
+
     expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",

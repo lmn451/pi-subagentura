@@ -21,7 +21,6 @@ import {
   listOrchestratorRoutingEntries,
   loadOrchestratorRoutingOverlay,
   orchestratorRoutingFilePath,
-  removeOrchestratorRoutingEntry,
   routingProjectId,
   saveOrchestratorRoutingEntries,
   upsertOrchestratorRoutingEntry,
@@ -122,7 +121,7 @@ describe("orchestrator routing metadata persistence", () => {
         childId: CHILD_B,
         description: "Own the persistence tests",
         aliases: ["tests"],
-        provenance: "luna",
+        provenance: "orchestratorv2",
       }),
     );
 
@@ -138,7 +137,7 @@ describe("orchestrator routing metadata persistence", () => {
         childId: CHILD_B,
         description: "Own the persistence tests",
         aliases: ["tests"],
-        provenance: "luna",
+        provenance: "orchestratorv2",
       }),
     ]);
   });
@@ -153,9 +152,6 @@ describe("orchestrator routing metadata persistence", () => {
       status: "malformed",
     });
     expect(() => upsertOrchestratorRoutingEntry(root, entry())).toThrow(
-      /malformed routing metadata/,
-    );
-    expect(() => removeOrchestratorRoutingEntry(root, CHILD_A)).toThrow(
       /malformed routing metadata/,
     );
     expect(readFileSync(file, "utf8")).toBe(malformed);
@@ -177,9 +173,6 @@ describe("orchestrator routing metadata persistence", () => {
       schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION + 1,
     });
     expect(() => saveOrchestratorRoutingEntries(root, [entry()])).toThrow(
-      /unsupported routing metadata schemaVersion/,
-    );
-    expect(() => removeOrchestratorRoutingEntry(root, CHILD_A)).toThrow(
       /unsupported routing metadata schemaVersion/,
     );
     expect(readFileSync(file, "utf8")).toBe(future);
@@ -228,6 +221,17 @@ describe("orchestrator routing metadata persistence", () => {
       } as unknown as OrchestratorRoutingEntryInput),
     ).toThrow(/unknown field.*paneId/);
     expect(existsSync(orchestratorRoutingFilePath(root))).toBe(false);
+  });
+
+  it("accepts historical 8-character child IDs", () => {
+    const saved = upsertOrchestratorRoutingEntry(
+      root,
+      entry({ childId: "0123abcd" }),
+    );
+    expect(saved.records[0].childId).toBe("0123abcd");
+    expect(() =>
+      upsertOrchestratorRoutingEntry(root, entry({ childId: "abcdefghi" })),
+    ).toThrow(/childId/);
   });
 
   it("enforces description, alias, and record-count bounds", () => {
@@ -325,22 +329,6 @@ describe("orchestrator routing metadata persistence", () => {
     );
   });
 
-  it("removes one confirmed routing record without touching peers", () => {
-    const first = entry();
-    const second = entry({
-      childId: CHILD_B,
-      description: "Own the persistence tests",
-    });
-    saveOrchestratorRoutingEntries(root, [first, second]);
-
-    expect(removeOrchestratorRoutingEntry(root, CHILD_A)).toEqual(first);
-    expect(listOrchestratorRoutingEntries(root)).toEqual([second]);
-    expect(removeOrchestratorRoutingEntry(root, CHILD_A)).toBeUndefined();
-    expect(() => removeOrchestratorRoutingEntry(root, "../unsafe")).toThrow(
-      /childId/,
-    );
-  });
-
   it("bounds the stored file before parsing", () => {
     const file = orchestratorRoutingFilePath(root);
     const oversized = "x".repeat(MAX_ORCHESTRATOR_ROUTING_FILE_BYTES + 1);
@@ -372,5 +360,65 @@ describe("orchestrator routing metadata persistence", () => {
     expect(() =>
       saveOrchestratorRoutingEntries(root, [entry(), entry()]),
     ).toThrow(/duplicate childId/);
+  });
+
+  it("accepts an input without updatedAt and stamps a persisted timestamp", () => {
+    const saved = upsertOrchestratorRoutingEntry(root, {
+      childId: "0123abcd",
+      description: "Own legacy child compatibility",
+      provenance: "orchestratorv2",
+    });
+
+    expect(saved.records[0]).toMatchObject({
+      childId: "0123abcd",
+      provenance: "orchestratorv2",
+      updatedAt: expect.any(String),
+    });
+    expect(Date.parse(saved.records[0].updatedAt)).not.toBeNaN();
+  });
+
+  it("rejects loaded records missing provenance or updatedAt", () => {
+    const file = orchestratorRoutingFilePath(root);
+    const base = {
+      schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION,
+      projectId: routingProjectId(root),
+    };
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...base,
+        records: [
+          {
+            childId: CHILD_A,
+            description: "Missing provenance",
+            updatedAt: UPDATED_AT,
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    expect(loadOrchestratorRoutingOverlay(root)).toMatchObject({
+      status: "malformed",
+    });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...base,
+        records: [
+          {
+            childId: CHILD_A,
+            description: "Missing timestamp",
+            provenance: "user",
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    expect(loadOrchestratorRoutingOverlay(root)).toMatchObject({
+      status: "malformed",
+    });
   });
 });

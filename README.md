@@ -127,7 +127,7 @@ These commands are intended for people at the Pi prompt.
 
 ## Agent-facing tools
 
-The extension registers 24 public tools for parent agents.
+The extension registers 23 public tools for parent agents.
 
 | Tool                                    | Purpose                                                              |
 | --------------------------------------- | -------------------------------------------------------------------- |
@@ -147,7 +147,6 @@ The extension registers 24 public tools for parent agents.
 | `list_available_models`                 | List configured model identifiers                                    |
 | `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers    |
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases           |
-| `remove_orchestrator_agent_description` | Remove one confirmed routing metadata entry to recover capacity      |
 | `subagent_interactive`                  | Launch an attachable Pi session in tmux/Zellij                       |
 | `get_interactive_subagent_status`       | Inspect attachable child sessions                                    |
 | `cancel_interactive_subagent`           | Kill an attachable child pane                                        |
@@ -211,24 +210,35 @@ The defaults prefer async `subagent_isolated` for fresh scouts/reviewers, `subag
 
 ### Orchestratorv2 thin-router mode
 
-Enable the separate interactive-only thin router with:
+Enable the separate prompt-directed thin router with:
 
 ```bash
 pi --orchestratorv2
 ```
 
 This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
-verify the parent model. Select the intended Luna-compatible model separately,
-and do not enable `--orchestrator` and `--orchestratorv2` together. The thin
-router delegates only through attachable interactive children and uses
-project-local confirmed descriptions and aliases to route continuations.
+verify the parent model and does not enforce a host-level tool allowlist. Select
+the intended Luna-compatible model separately, and do not enable
+`--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
+tools remain registered for compatibility, while the Orchestratorv2 prompt
+directs the parent to delegate only through attachable interactive children and
+use project-local confirmed descriptions and aliases to route continuations.
 
+The Orchestratorv2 routing surface is exactly two tools:
+`list_orchestrator_agents` and `update_orchestrator_agent_description`.
+Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Routing metadata is capped at 128 records and is never evicted automatically.
-If stale history reaches that cap, inspect it with `list_orchestrator_agents`,
-ask the user which entry may be retired, and call
-`remove_orchestrator_agent_description` with `confirmed: true` before retrying
-the metadata update. Removal changes only routing metadata; it does not cancel
-a child or delete its artifacts.
+The interactive runtime launches before its initial routing metadata is
+persisted. If persistence fails, the child intentionally remains live and the
+spawn result includes an explicit warning; the extension does not cancel, roll
+back, replace, or respawn that child. Capacity exhaustion fails closed without
+evicting or deleting metadata.
+
+Interactive children retain `subagent_interactive` and may autonomously create
+nested children without top-level approval. Nested children belong to the
+immediate child session and are not automatically actionable in the top-level
+Orchestratorv2 routing registry; their important outcomes return through that
+child or the existing artifact and notification paths.
 
 ## Cancellation context snapshots (opt-in)
 

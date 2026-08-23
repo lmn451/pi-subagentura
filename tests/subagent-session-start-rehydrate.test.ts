@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type * as InteractiveTmuxModule from "../src/interactive-tmux";
 import { appendInteractiveState } from "../src/artifact";
 import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import { upsertOrchestratorRoutingEntry } from "../src/orchestrator-routing";
@@ -14,6 +15,7 @@ import { importFresh } from "./test-utils";
 import { makeTmp } from "./subagent-rehydrate-helpers";
 
 const ROUTED_CHILD = "0123456789abcdef";
+const LEGACY_ROUTED_CHILD = "abc12345";
 
 describe("session_start rehydrate integration", () => {
   let cwd: string;
@@ -29,6 +31,7 @@ describe("session_start rehydrate integration", () => {
     rmSync(cwd, { recursive: true, force: true });
     vi.restoreAllMocks();
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/interactive-tmux");
   });
 
   async function setupExtension() {
@@ -132,6 +135,69 @@ describe("session_start rehydrate integration", () => {
       });
     },
   );
+
+  it("rehydrates an 8-hex child for routing list and follow-up send", async () => {
+    upsertOrchestratorRoutingEntry(cwd, {
+      childId: LEGACY_ROUTED_CHILD,
+      description: "Own legacy interactive follow-ups",
+      provenance: "user",
+    });
+    appendInteractiveState(cwd, {
+      id: LEGACY_ROUTED_CHILD,
+      paneId: "%42",
+      mux: "tmux",
+      artifactDir: join(cwd, LEGACY_ROUTED_CHILD),
+      sessionFile: "/tmp/sess.jsonl",
+    });
+
+    const mockSendCommandToPane = vi.fn();
+    vi.doMock("../src/interactive-tmux", async (importOriginal) => {
+      const actual = await importOriginal<typeof InteractiveTmuxModule>();
+      return {
+        ...actual,
+        isPaneAlive: vi.fn().mockReturnValue(true),
+        getInteractivePaneLivenessAsync: vi.fn().mockResolvedValue("alive"),
+        sendCommandToPane: mockSendCommandToPane,
+      };
+    });
+
+    const { api, startHandler } = await setupExtension();
+    await startHandler!({ type: "session_start", reason: "reload" }, { cwd });
+
+    const listed = await registeredTool(
+      api,
+      "list_orchestrator_agents",
+    ).execute("list-legacy-child", {}, undefined, undefined, { cwd });
+    expect(listed.details).toMatchObject({
+      routingMetadataStatus: "loaded",
+      agents: [
+        {
+          childId: LEGACY_ROUTED_CHILD,
+          description: "Own legacy interactive follow-ups",
+          provenance: "user",
+          status: "running",
+          liveness: "alive",
+          actionable: true,
+        },
+      ],
+    });
+
+    const sent = await registeredTool(
+      api,
+      "send_interactive_subagent_message",
+    ).execute(
+      "send-legacy-child",
+      { id: LEGACY_ROUTED_CHILD, message: "Continue the legacy task" },
+      undefined,
+      undefined,
+      { cwd },
+    );
+    expect(sent.details).toMatchObject({
+      id: LEGACY_ROUTED_CHILD,
+      status: "sent",
+    });
+    expect(mockSendCommandToPane).toHaveBeenCalledOnce();
+  });
 
   it("fails routing metadata closed without blocking runtime rehydration", async () => {
     appendInteractiveState(cwd, {

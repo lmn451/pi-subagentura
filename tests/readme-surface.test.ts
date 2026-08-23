@@ -51,7 +51,15 @@ describe("README public surface", () => {
       "## Cancellation context snapshots",
     );
 
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(23);
+    expect(
+      tools.filter((name) => name.includes("orchestrator")).sort(),
+    ).toEqual(
+      [
+        "list_orchestrator_agents",
+        "update_orchestrator_agent_description",
+      ].sort(),
+    );
     expect(commands).toHaveLength(9);
     for (const name of tools) {
       expect(toolInventory, `Missing tool inventory row for ${name}`).toContain(

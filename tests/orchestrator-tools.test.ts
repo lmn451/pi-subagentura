@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Schema from "typebox/schema";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -259,24 +260,68 @@ describe("Orchestratorv2 metadata tools", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("registers list, update, and confirmed removal definitions", () => {
+  it("registers exactly list and update with required provenance", () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
 
     registerOrchestratorTools(api as never, scope);
 
-    expect(api.registerTool).toHaveBeenCalledTimes(3);
-    expect(tool(api, "list_orchestrator_agents")).toBeDefined();
+    expect(api.registerTool).toHaveBeenCalledTimes(2);
+    expect(
+      api.registerTool.mock.calls.map(([definition]) => definition.name).sort(),
+    ).toEqual(
+      [
+        "list_orchestrator_agents",
+        "update_orchestrator_agent_description",
+      ].sort(),
+    );
     const update = tool(api, "update_orchestrator_agent_description");
     expect(update).toBeDefined();
     expect(update.parameters.properties.confirmed.const).toBe(true);
     expect(update.parameters.required).toEqual(
-      expect.arrayContaining(["childId", "description", "confirmed"]),
+      expect.arrayContaining([
+        "childId",
+        "description",
+        "provenance",
+        "confirmed",
+      ]),
     );
-    const remove = tool(api, "remove_orchestrator_agent_description");
-    expect(remove).toBeDefined();
-    expect(remove.parameters.properties.confirmed.const).toBe(true);
-    expect(remove.parameters.required).toEqual(["childId", "confirmed"]);
+
+    const compiled = Schema.Compile(update.parameters);
+    const common = {
+      childId: CHILD_A,
+      description: "Own the API",
+      confirmed: true as const,
+    };
+    expect(compiled.Check({ ...common, provenance: "user" })).toBe(true);
+    expect(compiled.Check({ ...common, provenance: "orchestratorv2" })).toBe(
+      true,
+    );
+    expect(compiled.Check(common)).toBe(false);
+  });
+
+  it("accepts exactly the safe legacy and current child ID lengths", () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const compiled = Schema.Compile(update.parameters);
+    const common = {
+      description: "Own the API",
+      provenance: "user" as const,
+      confirmed: true as const,
+    };
+
+    expect(compiled.Check({ ...common, childId: "01234567" })).toBe(true);
+    expect(compiled.Check({ ...common, childId: CHILD_A })).toBe(true);
+    expect(compiled.Check({ ...common, childId: "0123456789abcde" })).toBe(
+      false,
+    );
+    expect(compiled.Check({ ...common, childId: "0123456789abcdef0" })).toBe(
+      false,
+    );
+    expect(compiled.Check({ ...common, childId: "0123456A" })).toBe(false);
   });
 
   it("lists only current-scope runtime fields while retaining foreign metadata as stale", async () => {
@@ -399,7 +444,7 @@ describe("Orchestratorv2 metadata tools", () => {
         childId: CHILD_A,
         description: "Own the public API and release compatibility",
         aliases: ["api", "release"],
-        provenance: "luna",
+        provenance: "orchestratorv2",
         confirmed: true,
       },
       undefined,
@@ -414,7 +459,7 @@ describe("Orchestratorv2 metadata tools", () => {
         childId: CHILD_A,
         description: "Own the public API and release compatibility",
         aliases: ["api", "release"],
-        provenance: "luna",
+        provenance: "orchestratorv2",
       },
     });
     expect(listOrchestratorRoutingEntries(root)).toEqual([
@@ -422,54 +467,10 @@ describe("Orchestratorv2 metadata tools", () => {
         childId: CHILD_A,
         description: "Own the public API and release compatibility",
         aliases: ["api", "release"],
-        provenance: "luna",
+        provenance: "orchestratorv2",
         updatedAt: expect.any(String),
       }),
     ]);
-  });
-
-  it("removes confirmed metadata without touching the live runtime", async () => {
-    const original = routingEntry(CHILD_A);
-    upsertOrchestratorRoutingEntry(root, original);
-    const api = mockApi();
-    const scope = startedScope(api, 1, "parent-a");
-    const state = registerState(scope, CHILD_A);
-    registerOrchestratorTools(api as never, scope);
-    const remove = tool(api, "remove_orchestrator_agent_description");
-
-    const result = await remove.execute(
-      "remove-stale",
-      { childId: CHILD_A, confirmed: true },
-      undefined,
-      undefined,
-      { cwd: root },
-    );
-
-    expect(result.isError).toBeFalsy();
-    expect(result.details).toEqual({
-      status: "removed",
-      entry: original,
-    });
-    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
-    expect(scope.interactiveStates.get(CHILD_A)).toBe(state);
-    expect(state).toMatchObject({
-      artifactDir: `/artifacts/${CHILD_A}`,
-      sessionFile: `/sessions/${CHILD_A}.jsonl`,
-      status: "running",
-    });
-
-    const missing = await remove.execute(
-      "remove-missing",
-      { childId: CHILD_A, confirmed: true },
-      undefined,
-      undefined,
-      { cwd: root },
-    );
-    expect(missing.isError).toBe(true);
-    expect(missing.details).toEqual({
-      status: "not_found",
-      childId: CHILD_A,
-    });
   });
 
   it("does not update stale metadata backed only by another parent scope", async () => {
@@ -492,6 +493,7 @@ describe("Orchestratorv2 metadata tools", () => {
       {
         childId: CHILD_B,
         description: "Parent A should not replace this",
+        provenance: "user",
         confirmed: true,
       },
       undefined,

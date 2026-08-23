@@ -30,9 +30,14 @@ export const MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS = 128;
 export const MAX_ORCHESTRATOR_AGENT_NAME_BYTES = 512;
 export const MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES = 512;
 
-const CHILD_ID = /^[a-f0-9]{16}$/;
+const CHILD_ID = /^[a-f0-9]{8}(?:[a-f0-9]{8})?$/;
 const PROJECT_ID = /^[a-f0-9]{64}$/;
 const MAX_UPDATED_AT_BYTES = 64;
+
+export function isValidOrchestratorChildId(value: unknown): value is string {
+  return typeof value === "string" && CHILD_ID.test(value);
+}
+
 const OVERLAY_KEYS = new Set(["schemaVersion", "projectId", "records"]);
 const RECORD_KEYS = new Set([
   "childId",
@@ -42,17 +47,23 @@ const RECORD_KEYS = new Set([
   "updatedAt",
 ]);
 
-export type OrchestratorRoutingProvenance = "user" | "luna";
+export type OrchestratorRoutingProvenance = "user" | "orchestratorv2";
 
 export interface OrchestratorRoutingEntry {
   childId: string;
   description: string;
   aliases?: string[];
-  provenance?: OrchestratorRoutingProvenance;
-  updatedAt?: string;
+  provenance: OrchestratorRoutingProvenance;
+  updatedAt: string;
 }
 
-export type OrchestratorRoutingEntryInput = OrchestratorRoutingEntry;
+export interface OrchestratorRoutingEntryInput {
+  childId: string;
+  description: string;
+  aliases?: string[];
+  provenance: OrchestratorRoutingProvenance;
+  updatedAt?: string;
+}
 
 export interface OrchestratorRoutingOverlay {
   schemaVersion: typeof ORCHESTRATOR_ROUTING_SCHEMA_VERSION;
@@ -230,33 +241,6 @@ export function upsertOrchestratorRoutingEntry(
   return saveOrchestratorRoutingEntries(cwd, [entry]);
 }
 
-export function removeOrchestratorRoutingEntry(
-  cwd: string,
-  childId: string,
-): OrchestratorRoutingEntry | undefined {
-  const validatedChildId = expectChildId(childId);
-  return withInteractiveStateLock(cwd, () => {
-    const result = loadOrchestratorRoutingOverlay(cwd);
-    if (result.status === "missing") return undefined;
-    const current = overlayForWrite(cwd, result);
-    const removed = current.records.find(
-      (record) => record.childId === validatedChildId,
-    );
-    if (!removed) return undefined;
-    const overlay = validateOverlay(
-      {
-        ...current,
-        records: current.records.filter(
-          (record) => record.childId !== validatedChildId,
-        ),
-      },
-      current.projectId,
-    );
-    writeOverlayUnlocked(cwd, overlay);
-    return cloneEntry(removed);
-  });
-}
-
 export function listOrchestratorRoutingEntries(
   cwd: string,
 ): OrchestratorRoutingEntry[] {
@@ -424,7 +408,9 @@ async function projectOrchestratorAgent(
   }
 
   const liveness = await probeInteractiveLiveness(state);
-  const actionable = isRuntimeActionable(state.status, liveness);
+  const actionable =
+    isValidOrchestratorChildId(childId) &&
+    isRuntimeActionable(state.status, liveness);
   const reason = orchestratorAgentReason(state.status, liveness);
   return {
     childId,
@@ -522,9 +508,7 @@ function compareNewestRoutingEntries(
 }
 
 function routingEntryTimestamp(entry: OrchestratorRoutingEntry): number {
-  return entry.updatedAt === undefined
-    ? Number.NEGATIVE_INFINITY
-    : Date.parse(entry.updatedAt);
+  return Date.parse(entry.updatedAt);
 }
 
 function readRoutingFile(file: string): RoutingFileReadResult {
@@ -663,8 +647,8 @@ function validateEntry(value: unknown): OrchestratorRoutingEntry {
     childId,
     description,
     ...(aliases === undefined ? {} : { aliases }),
-    ...(provenance === undefined ? {} : { provenance }),
-    ...(updatedAt === undefined ? {} : { updatedAt }),
+    provenance,
+    updatedAt,
   };
 }
 
@@ -691,18 +675,14 @@ function validateAliases(value: unknown): string[] | undefined {
   });
 }
 
-function validateProvenance(
-  value: unknown,
-): OrchestratorRoutingProvenance | undefined {
-  if (value === undefined) return undefined;
-  if (value !== "user" && value !== "luna") {
-    throw new Error('provenance must be "user" or "luna"');
+function validateProvenance(value: unknown): OrchestratorRoutingProvenance {
+  if (value !== "user" && value !== "orchestratorv2") {
+    throw new Error('provenance must be "user" or "orchestratorv2"');
   }
   return value;
 }
 
-function validateUpdatedAt(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
+function validateUpdatedAt(value: unknown): string {
   if (
     typeof value !== "string" ||
     Buffer.byteLength(value, "utf8") > MAX_UPDATED_AT_BYTES ||
@@ -724,8 +704,8 @@ function validateProjectId(value: unknown, expected: string): string {
 }
 
 function expectChildId(value: unknown): string {
-  if (typeof value !== "string" || !CHILD_ID.test(value)) {
-    throw new Error("childId must be 16 lowercase hexadecimal characters");
+  if (!isValidOrchestratorChildId(value)) {
+    throw new Error("childId must be 8 or 16 lowercase hexadecimal characters");
   }
   return value;
 }
