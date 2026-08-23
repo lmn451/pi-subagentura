@@ -218,6 +218,53 @@ describe("Orchestratorv2 compact agent projection", () => {
     expect(projection.agents[0]).not.toHaveProperty("focusCommand");
   });
 
+  it("keeps workflow-owned runtimes non-actionable until their result is consumed and idle", async () => {
+    for (const overrides of [
+      {
+        status: "running" as const,
+        workflowResultConsumed: true,
+      },
+      {
+        status: "idle" as const,
+        workflowResultConsumed: false,
+      },
+    ]) {
+      const state = runtimeState(CHILD_B, {
+        completionOwner: "workflow",
+        ...overrides,
+      });
+      const projection = await buildOrchestratorAgentProjection(
+        [],
+        new Map([[CHILD_B, state]]),
+      );
+
+      expect(projection.agents[0]).toMatchObject({
+        childId: CHILD_B,
+        actionable: false,
+        reason: "workflow_owned",
+      });
+      expect(projection.agents[0]).not.toHaveProperty("attachCommand");
+      expect(projection.agents[0]).not.toHaveProperty("focusCommand");
+    }
+
+    const released = runtimeState(CHILD_B, {
+      status: "idle",
+      completionOwner: "workflow",
+      workflowResultConsumed: true,
+    });
+    const projection = await buildOrchestratorAgentProjection(
+      [],
+      new Map([[CHILD_B, released]]),
+    );
+
+    expect(projection.agents[0]).toMatchObject({
+      childId: CHILD_B,
+      actionable: true,
+      attachCommand: `tmux attach -t ${CHILD_B}`,
+      focusCommand: `tmux select-pane -t %${CHILD_B}`,
+    });
+  });
+
   it("bounds the projection while prioritizing current runtimes over stale metadata", async () => {
     const states = new Map<string, InteractiveSubagentState>();
     for (let index = 0; index <= MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS; index++) {

@@ -77,7 +77,8 @@ export type OrchestratorAgentReason =
   | "pane_liveness_unknown"
   | "runtime_cancelled"
   | "runtime_exited"
-  | "runtime_status_unknown";
+  | "runtime_status_unknown"
+  | "workflow_owned";
 
 export interface OrchestratorAgentView {
   childId: string;
@@ -409,9 +410,8 @@ async function projectOrchestratorAgent(
 
   const liveness = await probeInteractiveLiveness(state);
   const actionable =
-    isValidOrchestratorChildId(childId) &&
-    isRuntimeActionable(state.status, liveness);
-  const reason = orchestratorAgentReason(state.status, liveness);
+    isValidOrchestratorChildId(childId) && isRuntimeActionable(state, liveness);
+  const reason = orchestratorAgentReason(state, liveness);
   return {
     childId,
     name: boundedPreview(state.name, MAX_ORCHESTRATOR_AGENT_NAME_BYTES),
@@ -448,22 +448,36 @@ async function probeInteractiveLiveness(
 }
 
 function isRuntimeActionable(
-  status: InteractiveSubagentStatus,
+  state: InteractiveSubagentState,
   liveness: PaneLiveness,
 ): boolean {
-  return liveness === "alive" && (status === "running" || status === "idle");
+  return (
+    liveness === "alive" &&
+    (state.status === "running" || state.status === "idle") &&
+    !isWorkflowOwnedRuntimeBlocked(state)
+  );
 }
 
 function orchestratorAgentReason(
-  status: InteractiveSubagentStatus,
+  state: InteractiveSubagentState,
   liveness: PaneLiveness,
 ): OrchestratorAgentReason | undefined {
   if (liveness === "dead") return "pane_dead";
-  if (status === "cancelled") return "runtime_cancelled";
-  if (status === "exited") return "runtime_exited";
+  if (state.status === "cancelled") return "runtime_cancelled";
+  if (state.status === "exited") return "runtime_exited";
   if (liveness === "unknown") return "pane_liveness_unknown";
-  if (status === "unknown") return "runtime_status_unknown";
+  if (state.status === "unknown") return "runtime_status_unknown";
+  if (isWorkflowOwnedRuntimeBlocked(state)) return "workflow_owned";
   return undefined;
+}
+
+function isWorkflowOwnedRuntimeBlocked(
+  state: InteractiveSubagentState,
+): boolean {
+  return (
+    state.completionOwner === "workflow" &&
+    (!state.workflowResultConsumed || state.status !== "idle")
+  );
 }
 
 function boundedPreview(value: string, maxBytes: number): string {
