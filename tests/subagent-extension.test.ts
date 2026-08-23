@@ -55,6 +55,7 @@ function mockApi(overrides: Record<string, any> = {}) {
     registerCommand: vi.fn(),
     registerShortcut: vi.fn(),
     getFlag: vi.fn().mockReturnValue(false),
+    setActiveTools: vi.fn(),
     on: vi.fn(),
     ...overrides,
   };
@@ -125,6 +126,28 @@ describe("extension registration", () => {
     });
   });
 
+  it("registers only router-safe tools when --orchestratorv2 is enabled", () => {
+    const api = mockApi({
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    });
+
+    registerExtension(api as any);
+
+    expect(getRegisteredToolNames(api)).toEqual(
+      [...INTERACTIVE_TOOL_NAMES, ...ORCHESTRATOR_TOOL_NAMES].sort(),
+    );
+    expect(getRegisteredToolNames(api)).not.toEqual(
+      expect.arrayContaining(IN_PROCESS_TOOL_NAMES),
+    );
+    expect(getRegisteredToolNames(api)).not.toEqual(
+      expect.arrayContaining(WORKFLOW_TOOL_NAMES),
+    );
+    expect(getRegisteredToolNames(api)).not.toContain("prune_subagent_jobs");
+    expect(api.setActiveTools).toHaveBeenCalledWith(
+      [...INTERACTIVE_TOOL_NAMES, ...ORCHESTRATOR_TOOL_NAMES].sort(),
+    );
+  });
+
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestrator"),
@@ -163,7 +186,12 @@ describe("extension registration", () => {
     expect(result.systemPrompt).not.toContain("# Orchestrator System Prompt");
     expect(result.systemPrompt).toContain("send_interactive_subagent_message");
     expect(result.systemPrompt).toContain("includeContext");
-    expect(result.systemPrompt).toContain("not a security boundary");
+    expect(result.systemPrompt).toContain(
+      "enforces the control-only boundary with an active-tool allowlist",
+    );
+    expect(result.systemPrompt).toContain(
+      "Built-in repository tools, workflows, and in-process worker tools are unavailable",
+    );
     expect(result.systemPrompt).toContain(
       "An exact or continuation match is not routable",
     );

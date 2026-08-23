@@ -99,6 +99,23 @@ function tool(api: ReturnType<typeof mockApi>, name: string): any {
   })?.[0];
 }
 
+function toolContext(root: string, userText?: string) {
+  return {
+    cwd: root,
+    sessionManager: {
+      getBranch: () =>
+        userText === undefined
+          ? []
+          : [
+              {
+                type: "message",
+                message: { role: "user", content: userText },
+              },
+            ],
+    },
+  };
+}
+
 describe("Orchestratorv2 compact agent projection", () => {
   beforeEach(() => {
     __setTmuxMultiplexer({
@@ -259,7 +276,7 @@ describe("Orchestratorv2 metadata tools", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("registers list, update, and confirmed removal definitions", () => {
+  it("registers list, update, and user-bound confirmation definitions", () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
 
@@ -269,13 +286,15 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(tool(api, "list_orchestrator_agents")).toBeDefined();
     const update = tool(api, "update_orchestrator_agent_description");
     expect(update).toBeDefined();
-    expect(update.parameters.properties.confirmed.const).toBe(true);
+    expect(update.parameters.properties.confirmed.type).toBe("boolean");
+    expect(update.parameters.properties.confirmationToken.type).toBe("string");
     expect(update.parameters.required).toEqual(
       expect.arrayContaining(["childId", "description", "confirmed"]),
     );
     const remove = tool(api, "remove_orchestrator_agent_description");
     expect(remove).toBeDefined();
-    expect(remove.parameters.properties.confirmed.const).toBe(true);
+    expect(remove.parameters.properties.confirmed.type).toBe("boolean");
+    expect(remove.parameters.properties.confirmationToken.type).toBe("string");
     expect(remove.parameters.required).toEqual(["childId", "confirmed"]);
   });
 
@@ -380,7 +399,7 @@ describe("Orchestratorv2 metadata tools", () => {
     });
   });
 
-  it("updates confirmed metadata for a child in the current session scope", async () => {
+  it("updates metadata only after the exact pending token appears in a user message", async () => {
     upsertOrchestratorRoutingEntry(
       root,
       routingEntry(CHILD_A, { aliases: ["old"], provenance: "user" }),
@@ -390,21 +409,47 @@ describe("Orchestratorv2 metadata tools", () => {
     registerState(scope, CHILD_A);
     registerOrchestratorTools(api as never, scope);
 
-    const result = await tool(
-      api,
-      "update_orchestrator_agent_description",
-    ).execute(
+    const update = tool(api, "update_orchestrator_agent_description");
+    const requested = await update.execute(
       "update-1",
       {
         childId: CHILD_A,
         description: "Own the public API and release compatibility",
         aliases: ["api", "release"],
         provenance: "luna",
-        confirmed: true,
+        confirmed: false,
       },
       undefined,
       undefined,
-      { cwd: root },
+      toolContext(root),
+    );
+
+    expect(requested.isError).toBe(true);
+    expect(requested.details).toMatchObject({
+      status: "confirmation_required",
+      action: "update",
+      childId: CHILD_A,
+      confirmationToken: expect.any(String),
+    });
+    expect(listOrchestratorRoutingEntries(root)[0]).toMatchObject({
+      aliases: ["old"],
+      provenance: "user",
+    });
+
+    const confirmationToken = requested.details.confirmationToken;
+    const result = await update.execute(
+      "update-2",
+      {
+        childId: CHILD_A,
+        description: "Own the public API and release compatibility",
+        aliases: ["api", "release"],
+        provenance: "luna",
+        confirmed: true,
+        confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, `I confirm ${confirmationToken}`),
     );
 
     expect(result.isError).toBeFalsy();
@@ -428,7 +473,134 @@ describe("Orchestratorv2 metadata tools", () => {
     ]);
   });
 
-  it("removes confirmed metadata without touching the live runtime", async () => {
+  it("rejects model-asserted confirmation without a matching user message", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const requested = await update.execute(
+      "update-request",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root),
+    );
+
+    const result = await update.execute(
+      "update-unconfirmed",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        confirmed: true,
+        confirmationToken: requested.details.confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, "Yes, make the change"),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      status: "user_confirmation_required",
+      action: "update",
+      childId: CHILD_A,
+    });
+    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
+  });
+
+  it("rejects a token when the confirmed update differs from the pending change", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const requested = await update.execute(
+      "update-request",
+      {
+        childId: CHILD_A,
+        description: "Own authentication",
+        confirmed: false,
+      },
+      undefined,
+      undefined,
+      toolContext(root),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+
+    const result = await update.execute(
+      "update-mismatch",
+      {
+        childId: CHILD_A,
+        description: "Own checkout instead",
+        confirmed: true,
+        confirmationToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, `Confirm ${confirmationToken}`),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      status: "confirmation_invalid",
+      action: "update",
+      childId: CHILD_A,
+    });
+    expect(listOrchestratorRoutingEntries(root)).toEqual([]);
+  });
+
+  it("does not evict a valid oldest confirmation while checking a full pending set", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    let oldestToken = "";
+
+    for (let index = 0; index < 32; index++) {
+      const requested = await update.execute(
+        `update-request-${index}`,
+        {
+          childId: CHILD_A,
+          description: `Own responsibility ${index}`,
+          confirmed: false,
+        },
+        undefined,
+        undefined,
+        toolContext(root),
+      );
+      if (index === 0) oldestToken = requested.details.confirmationToken;
+    }
+
+    const result = await update.execute(
+      "update-confirm-oldest",
+      {
+        childId: CHILD_A,
+        description: "Own responsibility 0",
+        confirmed: true,
+        confirmationToken: oldestToken,
+      },
+      undefined,
+      undefined,
+      toolContext(root, `Confirm ${oldestToken}`),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.details).toMatchObject({
+      status: "updated",
+      entry: {
+        childId: CHILD_A,
+        description: "Own responsibility 0",
+      },
+    });
+  });
+
+  it("removes metadata only after user-bound confirmation without touching the live runtime", async () => {
     const original = routingEntry(CHILD_A);
     upsertOrchestratorRoutingEntry(root, original);
     const api = mockApi();
@@ -437,12 +609,30 @@ describe("Orchestratorv2 metadata tools", () => {
     registerOrchestratorTools(api as never, scope);
     const remove = tool(api, "remove_orchestrator_agent_description");
 
+    const requested = await remove.execute(
+      "remove-request",
+      { childId: CHILD_A, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root),
+    );
+    expect(requested.details).toMatchObject({
+      status: "confirmation_required",
+      action: "remove",
+      childId: CHILD_A,
+      confirmationToken: expect.any(String),
+    });
+
     const result = await remove.execute(
-      "remove-stale",
-      { childId: CHILD_A, confirmed: true },
+      "remove-confirmed",
+      {
+        childId: CHILD_A,
+        confirmed: true,
+        confirmationToken: requested.details.confirmationToken,
+      },
       undefined,
       undefined,
-      { cwd: root },
+      toolContext(root, `Confirm ${requested.details.confirmationToken}`),
     );
 
     expect(result.isError).toBeFalsy();
@@ -460,10 +650,10 @@ describe("Orchestratorv2 metadata tools", () => {
 
     const missing = await remove.execute(
       "remove-missing",
-      { childId: CHILD_A, confirmed: true },
+      { childId: CHILD_A, confirmed: false },
       undefined,
       undefined,
-      { cwd: root },
+      toolContext(root),
     );
     expect(missing.isError).toBe(true);
     expect(missing.details).toEqual({

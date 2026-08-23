@@ -71,7 +71,9 @@ function formatFollowupPreview(message: string): string {
 
 type InitialRoutingMetadataResult =
   | { status: "persisted"; entry: OrchestratorRoutingEntry }
-  | { status: "warning"; error: string };
+  | { status: "error"; error: string };
+
+const INITIAL_ROUTING_CLEANUP_ATTEMPTS = 2;
 
 function persistInitialRoutingMetadata(params: {
   cwd: string;
@@ -82,7 +84,7 @@ function persistInitialRoutingMetadata(params: {
   if (params.description === undefined) return undefined;
   if (!isValidSubagentId(params.childId)) {
     return {
-      status: "warning",
+      status: "error",
       error: `spawn returned invalid child id ${params.childId}`,
     };
   }
@@ -99,10 +101,28 @@ function persistInitialRoutingMetadata(params: {
     return { status: "persisted", entry };
   } catch (error) {
     return {
-      status: "warning",
+      status: "error",
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function cancelAfterInitialRoutingFailure(
+  state: InteractiveSubagentState,
+): string | undefined {
+  let cleanupError: string | undefined;
+  for (let attempt = 0; attempt < INITIAL_ROUTING_CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      cancelInteractiveSubagent(state.id, "cancel_interactive_subagent", state);
+      return undefined;
+    } catch (error) {
+      cleanupError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  // Cancellation marks the state before pane teardown. If teardown never
+  // succeeds, keep the registry honest and allow an explicit cancellation retry.
+  state.status = "unknown";
+  return cleanupError ?? "interactive sub-agent cleanup failed";
 }
 
 function validateInitialRoutingMetadata(
@@ -364,6 +384,36 @@ export function registerInteractiveSubagentTools(
           description: params.routingDescription,
           aliases: params.routingAliases,
         });
+        if (routingMetadata?.status === "error") {
+          const cleanupError = cancelAfterInitialRoutingFailure(state);
+          updateRunningSubagentFooter(
+            ctx.ui,
+            registration.scope ? sessionOwner(registration.scope) : undefined,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  (cleanupError
+                    ? `Interactive sub-agent ${state.id} could not be confirmed stopped after its initial routing metadata failed to persist: ${routingMetadata.error}`
+                    : `Interactive sub-agent ${state.id} was cancelled because its initial routing metadata could not be persisted: ${routingMetadata.error}`) +
+                  (cleanupError
+                    ? `\nPane cleanup also failed: ${cleanupError}`
+                    : ""),
+              },
+            ],
+            details: {
+              status: cleanupError
+                ? "routing_metadata_cleanup_error"
+                : "routing_metadata_error",
+              id: state.id,
+              error: routingMetadata.error,
+              ...(cleanupError === undefined ? {} : { cleanupError }),
+            },
+            isError: true,
+          };
+        }
         updateRunningSubagentFooter(
           ctx.ui,
           registration.scope ? sessionOwner(registration.scope) : undefined,
@@ -378,11 +428,6 @@ export function registerInteractiveSubagentTools(
         }
         locationLines.push(`Focus: ${state.selectPaneCommand}`);
         locationLines.push(`Session: ${state.sessionFile}`);
-        if (routingMetadata?.status === "warning") {
-          locationLines.push(
-            `Warning: initial routing metadata was not persisted: ${routingMetadata.error}`,
-          );
-        }
         return {
           content: [
             {

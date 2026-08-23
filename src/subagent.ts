@@ -88,6 +88,19 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCHESTRATOR_V2_ACTIVE_TOOLS = [
+  "cancel_interactive_subagent",
+  "cleanup_subagent_artifacts",
+  "get_interactive_subagent_status",
+  "list_available_models",
+  "list_orchestrator_agents",
+  "list_subagent_artifacts",
+  "read_subagent_artifact",
+  "remove_orchestrator_agent_description",
+  "send_interactive_subagent_message",
+  "subagent_interactive",
+  "update_orchestrator_agent_description",
+];
 
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENTURA_CHILD === "1") {
@@ -117,12 +130,14 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
+  const orchestratorV2Enabled = pi.getFlag("orchestratorv2") === true;
   pi.on("before_agent_start", (event) => {
     const prompts: string[] = [];
     if (pi.getFlag("orchestrator") === true) {
       prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
     }
     if (pi.getFlag("orchestratorv2") === true) {
+      pi.setActiveTools(ORCHESTRATOR_V2_ACTIVE_TOOLS);
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
     }
     if (prompts.length === 0) return;
@@ -135,11 +150,19 @@ export default function (pi: ExtensionAPI) {
   registerInteractiveSubagentTools(pi, sessionScope);
   registerOrchestratorTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);
-  registerWorkflowTool(pi, sessionScope);
-  registerInProcessSubagentTools(pi, sessionScope);
-  registerInProcessMaintenanceTools(pi, sessionScope);
+  if (orchestratorV2Enabled) {
+    registerSubagentArtifactsCleanupTool(pi, sessionScope);
+    registerSubagentModelListTool(pi);
+  } else {
+    registerWorkflowTool(pi, sessionScope);
+    registerInProcessSubagentTools(pi, sessionScope);
+    registerInProcessMaintenanceTools(pi, sessionScope);
+  }
   // ── Cancel-all-flows shortcut and command ──────────────────────
   registerCancelAllFlows(pi, sessionScope);
+  if (orchestratorV2Enabled) {
+    pi.setActiveTools(ORCHESTRATOR_V2_ACTIVE_TOOLS);
+  }
 }
 
 /**

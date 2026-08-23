@@ -395,7 +395,7 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
-  it("reports routing persistence failure without pretending the child failed", async () => {
+  it("cancels a spawned child when its routing metadata cannot persist", async () => {
     const toolDef = getInteractiveToolDef(api);
     const state = {
       ...mockInteractiveState(),
@@ -419,23 +419,19 @@ describe("subagent_interactive tool lifecycle", () => {
       mockCtx(),
     );
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
     expect(result.details).toMatchObject({
       id: state.id,
-      status: "started",
-      routingMetadata: {
-        status: "warning",
-        error: "routing record count exceeds 128",
-      },
+      status: "routing_metadata_error",
+      error: "routing record count exceeds 128",
     });
     expect(result.content[0].text).toContain(
-      `Interactive sub-agent ${state.id} started`,
+      `Interactive sub-agent ${state.id} was cancelled`,
     );
-    expect(result.content[0].text).toContain(
-      "Warning: initial routing metadata was not persisted: routing record count exceeds 128",
-    );
-    expect(result.content[0].text).not.toContain(
-      "Failed to start interactive sub-agent",
+    expect(mockCancelInteractiveSubagent).toHaveBeenCalledWith(
+      state.id,
+      "cancel_interactive_subagent",
+      state,
     );
   });
 

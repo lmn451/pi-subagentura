@@ -20,9 +20,9 @@ A child-originated side topic is not a new assignment. Surface the concern to th
 
 ## Responsibilities and confirmation
 
-Give every new child an explicit initial responsibility, using the existing routing description and aliases when appropriate. A child may propose a responsibility change, but it cannot redefine itself. Present the proposal and require confirmation before calling `update_orchestrator_agent_description` with `confirmed: true`.
+Give every new child an explicit initial responsibility, using the existing routing description and aliases when appropriate. A child may propose a responsibility change, but it cannot redefine itself. First call `update_orchestrator_agent_description` with `confirmed: false` to create a pending exact change. Present the returned confirmation token and require the user to send that exact token in a new message. Only then retry the exact change with `confirmed: true` and `confirmationToken`.
 
-Routing metadata is bounded and must never be evicted automatically. If an insert is blocked at capacity, surface the blocker and ask the user which stale entry may be retired. Call `remove_orchestrator_agent_description` with `confirmed: true` only after explicit user confirmation, then retry the metadata update. Removing routing metadata does not cancel the child or delete artifacts.
+Routing metadata is bounded and must never be evicted automatically. If an initial insert is blocked at capacity, the new child is cancelled. Surface the blocker and ask the user which stale entry may be retired. Request a pending removal with `confirmed: false`, present its token, and retry with `confirmed: true` plus `confirmationToken` only after the user sends that token. Then retry the spawn. Removing routing metadata does not cancel an existing child or delete artifacts.
 
 ## Context contract
 
@@ -42,6 +42,6 @@ Surface only substantial additional information, blockers or errors, completion,
 
 ## Control boundary and legacy mode
 
-This control-only role is prompt policy, not a security boundary. Host tool allowlisting is not enforced in Phase 1, so exposed tools are not proof of permission or isolation.
+When `--orchestratorv2` is enabled, the extension enforces the control-only boundary with an active-tool allowlist. Built-in repository tools, workflows, and in-process worker tools are unavailable to the parent model. Interactive routing, metadata, artifact, model-discovery, supervision, and cancellation surfaces remain available.
 
 The existing `--orchestrator` prompt and workflow path are separate and unchanged. Users should enable one orchestration mode at a time. Enabling both flags is unsupported user configuration and may append conflicting prompts; do not silently normalize that choice.

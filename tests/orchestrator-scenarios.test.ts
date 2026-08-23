@@ -12,18 +12,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Schema from "typebox/schema";
 
-const { mockLaunchInteractiveSubagent, mockSendCommandToPane } = vi.hoisted(
-  () => ({
-    mockLaunchInteractiveSubagent: vi.fn(),
-    mockSendCommandToPane: vi.fn(),
-  }),
-);
+const {
+  mockCancelInteractiveSubagent,
+  mockLaunchInteractiveSubagent,
+  mockSendCommandToPane,
+} = vi.hoisted(() => ({
+  mockCancelInteractiveSubagent: vi.fn(),
+  mockLaunchInteractiveSubagent: vi.fn(),
+  mockSendCommandToPane: vi.fn(),
+}));
 
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
   return {
     ...actual,
+    cancelInteractiveSubagent: mockCancelInteractiveSubagent,
     launchInteractiveSubagent: mockLaunchInteractiveSubagent,
     sendCommandToPane: mockSendCommandToPane,
   };
@@ -82,6 +86,7 @@ function mockApi(orchestratorv2 = false) {
     ),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
+    setActiveTools: vi.fn(),
     on: vi.fn(),
   };
 }
@@ -122,6 +127,19 @@ function setupScenario(orchestratorv2 = false): ScenarioEnvironment {
   scope.ui = ctx.ui as never;
   scope.sessionManager = ctx.sessionManager;
   return { api, ctx, root, scope };
+}
+
+function fillRoutingCapacity(root: string) {
+  const historical = Array.from(
+    { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
+    (_, index) => ({
+      childId: index.toString(16).padStart(16, "0"),
+      description: `Historical responsibility ${index}`,
+      updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    }),
+  );
+  saveOrchestratorRoutingEntries(root, historical);
+  return historical;
 }
 
 function makeRuntimeState(
@@ -198,6 +216,16 @@ beforeEach(() => {
     getPaneLivenessAsync: vi.fn().mockResolvedValue("alive"),
   } as never);
   mockSendCommandToPane.mockReturnValue(undefined);
+  mockCancelInteractiveSubagent.mockImplementation(
+    (
+      _id: string,
+      _source: string,
+      state: InteractiveSubagentState | undefined,
+    ) => {
+      if (state) state.status = "cancelled";
+      return state;
+    },
+  );
   mockLaunchInteractiveSubagent.mockImplementation((params: any) => {
     const id = launchIds.shift();
     if (!id) throw new Error("scenario did not reserve a child id");
@@ -260,17 +288,9 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     ]);
   });
 
-  it("recovers a full routing overlay through confirmed removal and update", async () => {
+  it("fails closed and cancels the child when initial routing metadata cannot be persisted", async () => {
     const environment = setupScenario(true);
-    const historical = Array.from(
-      { length: MAX_ORCHESTRATOR_ROUTING_RECORDS },
-      (_, index) => ({
-        childId: index.toString(16).padStart(16, "0"),
-        description: `Historical responsibility ${index}`,
-        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
-      }),
-    );
-    saveOrchestratorRoutingEntries(environment.root, historical);
+    const historical = fillRoutingCapacity(environment.root);
     const routingFile = orchestratorRoutingFilePath(environment.root);
     const beforeSpawn = readFileSync(routingFile, "utf8");
     const spawn = registeredTool(environment.api, "subagent_interactive");
@@ -286,51 +306,106 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       environment.ctx,
     );
 
-    expect(spawned.isError).not.toBe(true);
-    expect(spawned.details.routingMetadata).toMatchObject({
-      status: "warning",
+    expect(spawned.isError).toBe(true);
+    expect(spawned.details).toMatchObject({
+      status: "routing_metadata_error",
+      id: CHILD_A,
       error: expect.stringContaining("routing record count exceeds"),
     });
     expect(readFileSync(routingFile, "utf8")).toBe(beforeSpawn);
     expect(environment.scope.interactiveStates.has(CHILD_A)).toBe(true);
+    expect(environment.scope.interactiveStates.get(CHILD_A)?.status).toBe(
+      "cancelled",
+    );
+    expect(mockCancelInteractiveSubagent).toHaveBeenCalledWith(
+      CHILD_A,
+      "cancel_interactive_subagent",
+      expect.objectContaining({ id: CHILD_A }),
+    );
+    expect(listOrchestratorRoutingEntries(environment.root)).toEqual(
+      historical,
+    );
+  });
 
-    const remove = registeredTool(
-      environment.api,
-      "remove_orchestrator_agent_description",
-    );
-    const removed = await executeTool(
-      remove,
-      { childId: historical[0].childId, confirmed: true },
-      environment.ctx,
-    );
-    expect(removed.details.status).toBe("removed");
+  it("retries transient child cleanup failures after routing metadata persistence fails", async () => {
+    const environment = setupScenario(true);
+    fillRoutingCapacity(environment.root);
+    mockCancelInteractiveSubagent
+      .mockImplementationOnce(
+        (
+          _id: string,
+          _source: string,
+          state: InteractiveSubagentState | undefined,
+        ) => {
+          if (state) state.status = "cancelled";
+          throw new Error("transient pane kill failure");
+        },
+      )
+      .mockImplementationOnce(
+        (
+          _id: string,
+          _source: string,
+          state: InteractiveSubagentState | undefined,
+        ) => {
+          if (state) state.status = "cancelled";
+          return state;
+        },
+      );
+    const spawn = registeredTool(environment.api, "subagent_interactive");
 
-    const update = registeredTool(
-      environment.api,
-      "update_orchestrator_agent_description",
-    );
-    const updated = await executeTool(
-      update,
+    const spawned = await executeTool(
+      spawn,
       {
-        childId: CHILD_A,
-        description: "Own post-capacity work",
-        aliases: ["capacity-recovery"],
-        confirmed: true,
+        task: "Own work after a transient cleanup failure",
+        routingDescription: "Own transient cleanup recovery",
       },
       environment.ctx,
     );
 
-    expect(updated.details.status).toBe("updated");
-    const entries = listOrchestratorRoutingEntries(environment.root);
-    expect(entries).toHaveLength(MAX_ORCHESTRATOR_ROUTING_RECORDS);
-    expect(entries).toContainEqual(
-      expect.objectContaining({
-        childId: CHILD_A,
-        description: "Own post-capacity work",
-        aliases: ["capacity-recovery"],
-      }),
+    expect(mockCancelInteractiveSubagent).toHaveBeenCalledTimes(2);
+    expect(spawned.details).toMatchObject({
+      status: "routing_metadata_error",
+      id: CHILD_A,
+    });
+    expect(environment.scope.interactiveStates.get(CHILD_A)?.status).toBe(
+      "cancelled",
     );
-    expect(entries).not.toContainEqual(historical[0]);
+  });
+
+  it("keeps cleanup failures retryable instead of reporting a live child as cancelled", async () => {
+    const environment = setupScenario(true);
+    fillRoutingCapacity(environment.root);
+    mockCancelInteractiveSubagent.mockImplementation(
+      (
+        _id: string,
+        _source: string,
+        state: InteractiveSubagentState | undefined,
+      ) => {
+        if (state) state.status = "cancelled";
+        throw new Error("pane kill failure");
+      },
+    );
+    const spawn = registeredTool(environment.api, "subagent_interactive");
+
+    const spawned = await executeTool(
+      spawn,
+      {
+        task: "Own work after an unrecoverable cleanup failure",
+        routingDescription: "Own cleanup failure recovery",
+      },
+      environment.ctx,
+    );
+
+    expect(mockCancelInteractiveSubagent).toHaveBeenCalledTimes(2);
+    expect(spawned.details).toMatchObject({
+      status: "routing_metadata_cleanup_error",
+      id: CHILD_A,
+      cleanupError: "pane kill failure",
+    });
+    expect(spawned.content[0].text).toContain("could not be confirmed stopped");
+    expect(environment.scope.interactiveStates.get(CHILD_A)?.status).toBe(
+      "unknown",
+    );
   });
 
   it("lists A and B with current pointers and delegates to the selected child without creating a new one", async () => {

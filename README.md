@@ -219,16 +219,19 @@ pi --orchestratorv2
 
 This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
 verify the parent model. Select the intended Luna-compatible model separately,
-and do not enable `--orchestrator` and `--orchestratorv2` together. The thin
-router delegates only through attachable interactive children and uses
-project-local confirmed descriptions and aliases to route continuations.
+and do not enable `--orchestrator` and `--orchestratorv2` together. The mode uses
+an active-tool allowlist that excludes built-in repository tools, workflows, and
+in-process workers. It delegates only through attachable interactive children
+and uses project-local confirmed descriptions and aliases to route
+continuations.
 
 Routing metadata is capped at 128 records and is never evicted automatically.
-If stale history reaches that cap, inspect it with `list_orchestrator_agents`,
-ask the user which entry may be retired, and call
-`remove_orchestrator_agent_description` with `confirmed: true` before retrying
-the metadata update. Removal changes only routing metadata; it does not cancel
-a child or delete its artifacts.
+If initial metadata cannot be persisted, the newly launched child is cancelled.
+To update or remove metadata, first call the relevant tool with
+`confirmed: false`, show the server-issued token to the user, and wait for the
+user to send that exact token in a new message. Retry the exact change with
+`confirmed: true` and `confirmationToken`. Removal changes only routing
+metadata; it does not cancel an existing child or delete its artifacts.
 
 ## Cancellation context snapshots (opt-in)
 

@@ -157,6 +157,7 @@ const KNOWN_MARKERS = new Set([
   "[E2E:INTERACTIVE_FOLLOWUP_PARENT]",
   "[E2E:INTERACTIVE_CANCEL_PARENT]",
   "[E2E:INTERACTIVE_ERROR_PARENT]",
+  "[E2E:ORCHESTRATOR_BOUNDARY]",
   "[E2E:CANCEL]",
   "[E2E:ERROR]",
   "[E2E:CHILD_SMOKE]",
@@ -464,6 +465,52 @@ async function runRequest(
   let state: State = previous ?? { stage: "initial", requestSeq: 0 };
   if (state.stage === "complete" && !marker.includes("WORKFLOW_ASYNC")) {
     throw new Error(`duplicate request for completed marker ${marker}`);
+  }
+  if (marker === "[E2E:ORCHESTRATOR_BOUNDARY]") {
+    const tools = context.tools?.map((tool) => tool.name).sort() ?? [];
+    if (state.stage === "initial") {
+      const call = toolCall(
+        "e2e-orchestrator-list-1",
+        "list_orchestrator_agents",
+        {},
+      );
+      const final = message([call], "toolUse");
+      states.set(marker, {
+        stage: "toolIssued",
+        requestSeq,
+        toolCallId: call.id,
+      });
+      emit(stream, toolEvents(final), final);
+      return;
+    }
+    if (!toolResultId || toolResultId !== state.toolCallId) {
+      throw new Error(
+        `invalid Orchestratorv2 transition: expected tool result ${state.toolCallId ?? "none"}`,
+      );
+    }
+    const routingResult = toolResultText(context, "list_orchestrator_agents");
+    const final = message([
+      {
+        type: "text",
+        text: `Orchestrator active tools: ${tools.join(", ")}. Routing registry checked.`,
+      },
+    ]);
+    states.set(marker, { stage: "complete", requestSeq });
+    emit(stream, textEvents(final), final);
+    diagnostic({
+      marker,
+      requestSeq,
+      afterStage: "complete",
+      eventType: "done",
+      contextHasOrchestratorV2Prompt:
+        context.systemPrompt?.includes(
+          "# Orchestratorv2 Thin Router System Prompt",
+        ) ?? false,
+      routingListObserved:
+        routingResult.includes('"routingMetadataStatus":"missing"') &&
+        routingResult.includes('"agents":[]'),
+    });
+    return;
   }
   if (
     marker === "[E2E:ERROR]" ||
