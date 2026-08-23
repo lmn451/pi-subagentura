@@ -25,6 +25,11 @@ const IN_PROCESS_TOOL_NAMES = [
   "subagent_with_context",
 ].sort();
 
+const ORCHESTRATOR_TOOL_NAMES = [
+  "list_orchestrator_agents",
+  "update_orchestrator_agent_description",
+].sort();
+
 const WORKFLOW_TOOL_NAMES = [
   "cancel_workflow",
   "delete_workflow",
@@ -81,6 +86,7 @@ describe("extension registration", () => {
       [
         ...INTERACTIVE_TOOL_NAMES,
         ...IN_PROCESS_TOOL_NAMES,
+        ...ORCHESTRATOR_TOOL_NAMES,
         ...WORKFLOW_TOOL_NAMES,
       ].sort(),
     );
@@ -106,6 +112,18 @@ describe("extension registration", () => {
     });
   });
 
+  it("registers the separate --orchestratorv2 flag", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    expect(api.registerFlag).toHaveBeenCalledWith("orchestratorv2", {
+      description: "Append the bundled Orchestratorv2 thin-router prompt",
+      type: "boolean",
+      default: false,
+    });
+  });
+
   it("appends the bundled prompt when --orchestrator is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestrator"),
@@ -119,6 +137,57 @@ describe("extension registration", () => {
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
     expect(result.systemPrompt).toContain("# Orchestrator System Prompt");
+    expect(result.systemPrompt).not.toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(result.systemPrompt).toContain("`workflow`");
+    expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+  });
+
+  it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {
+    const api = mockApi({
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    });
+
+    registerExtension(api as any);
+
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
+
+    expect(result.systemPrompt).toContain(
+      "# Orchestratorv2 Thin Router System Prompt",
+    );
+    expect(result.systemPrompt).not.toContain("# Orchestrator System Prompt");
+    expect(result.systemPrompt).toContain("send_interactive_subagent_message");
+    expect(result.systemPrompt).toContain("includeContext");
+    expect(result.systemPrompt).toContain("not a security boundary");
+    expect(result.systemPrompt).toContain(
+      "An exact or continuation match is not routable",
+    );
+    expect(result.systemPrompt).toContain(
+      "A narrow, exact, continuation, or delegation request with no matching child",
+    );
+    expect(result.systemPrompt).toContain("must not silently spawn or fan out");
+    expect(result.systemPrompt).toContain(
+      "may autonomously create nested children",
+    );
+    expect(result.systemPrompt).toContain(
+      "owned by their immediate parent session",
+    );
+    expect(result.systemPrompt).toContain(
+      "interactive runtime launches before its initial metadata is persisted",
+    );
+    expect(result.systemPrompt).toContain(
+      "child remains live and the spawn result includes an explicit warning",
+    );
+    expect(result.systemPrompt).toContain(
+      "Surface only substantial additional information, blockers or errors, completion, and needs-attention events",
+    );
+    expect(result.systemPrompt).toContain(
+      "never auto-delegate, replace, or respawn it",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 
@@ -163,6 +232,10 @@ describe("extension registration", () => {
     );
     expect(names).not.toContain("workflow");
     expect(names).not.toContain("subagent_with_context");
+    expect(names).not.toContain("list_orchestrator_agents");
+    expect(names).not.toContain("update_orchestrator_agent_description");
+
+    expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",
       expect.any(Function),

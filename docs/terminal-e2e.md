@@ -23,6 +23,9 @@ Requirements:
 - **tmux >= 3.2.** The generated config sets `extended-keys on`, which does not
   parse on older versions; the harness asserts the floor with a named error
   instead of letting `new-session` die on an opaque config error.
+- **`fd` and `ripgrep`.** Pi 0.80.6 uses these commands to discover explicitly
+  loaded resources for the startup screen. CI installs `fd-find` and `ripgrep`
+  and exposes Ubuntu's `fdfind` binary as `fd`.
 - **The Pi CLI.** Resolved from `node_modules/.bin/pi`, then `PATH`, then
   `SUBAGENTURA_E2E_REAL_PI`. Because `node_modules/.bin/pi` is a
   `#!/usr/bin/env node` script, the harness also asserts that the child

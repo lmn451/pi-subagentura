@@ -7,8 +7,7 @@
  *   - compiled.Parse(value) → decoded value (throws ParseError on invalid)
  */
 import { describe, expect, it } from "vitest";
-import Schema from "typebox/schema";
-import { Type } from "typebox";
+import Schema, { type XSchema } from "typebox/schema";
 
 import {
   BaseParams,
@@ -23,27 +22,33 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Compile a schema and return its Check function. */
-function check(schema: ReturnType<typeof Type.Object>) {
+function check(schema: XSchema) {
   return Schema.Compile(schema).Check.bind(Schema.Compile(schema));
 }
 
 /** Compile a schema and return its Errors function (returns [valid, errors[]]). */
-function errors(schema: ReturnType<typeof Type.Object>) {
+function errors(schema: XSchema) {
   return Schema.Compile(schema).Errors.bind(Schema.Compile(schema));
 }
 
 /** Compile a schema and return its Parse function. */
-function parse(schema: ReturnType<typeof Type.Object>) {
+function parse(schema: XSchema) {
   return Schema.Compile(schema).Parse.bind(Schema.Compile(schema));
 }
 
 /** Collect error messages only (skip the valid/invalid flag). */
-function collectErrorMessages(
-  schema: ReturnType<typeof Type.Object>,
-  value: unknown,
-): string[] {
+function collectErrorMessages(schema: XSchema, value: unknown): string[] {
   const [, errs] = Schema.Compile(schema).Errors(value);
   return errs.map((e: { message: string }) => e.message);
+}
+
+/** Reproduce Pi 0.80.6's Anthropic convertTools top-level schema projection. */
+function piAnthropicInputSchema(schema: any) {
+  return {
+    type: "object",
+    properties: schema.properties ?? {},
+    required: schema.required ?? [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +324,7 @@ describe("BaseParams", () => {
 // StatusParams / ResultParams / CancelParams (identical shape)
 // ---------------------------------------------------------------------------
 
-function runJobIdTests(label: string, schema: ReturnType<typeof Type.Object>) {
+function runJobIdTests(label: string, schema: XSchema) {
   describe(label, () => {
     it("passes with a valid jobId string", () => {
       expect(check(schema)({ jobId: "job_abc123" })).toBe(true);
@@ -393,6 +398,8 @@ describe("InteractiveParams", () => {
       thinkingLevel: "xhigh" as const,
       cwd: "/workspace",
       includeContext: true,
+      routingDescription: "Debug the memory leak",
+      routingAliases: ["memory", "leak"],
       background: false,
       notifyOnComplete: "inject" as const,
       mux: "auto" as const,
@@ -501,7 +508,7 @@ describe("InteractiveParams", () => {
     );
   });
 
-  /* ---------- optional `includeContext` (boolean) ---------- */
+  /* ---------- discriminated context source ---------- */
 
   it("accepts missing includeContext", () => {
     expect(check(InteractiveParams)({ task: "t" })).toBe(true);
@@ -519,6 +526,42 @@ describe("InteractiveParams", () => {
     );
   });
 
+  it("accepts arbitrary explicit context only with includeContext false", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        includeContext: false,
+        context: "User-provided handoff\nwith arbitrary detail.",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects explicit context without includeContext false", () => {
+    expect(check(InteractiveParams)({ task: "t", context: "handoff" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects explicit context with includeContext true", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        includeContext: true,
+        context: "handoff",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects explicit context with a non-string value", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        includeContext: false,
+        context: { handoff: true },
+      }),
+    ).toBe(false);
+  });
+
   it("rejects includeContext as string", () => {
     expect(check(InteractiveParams)({ task: "t", includeContext: "yes" })).toBe(
       false,
@@ -529,6 +572,107 @@ describe("InteractiveParams", () => {
     expect(check(InteractiveParams)({ task: "t", includeContext: 1 })).toBe(
       false,
     );
+  });
+
+  it("declares common fields intersected with three strict context variants", () => {
+    const schema = InteractiveParams as any;
+    expect(schema.unevaluatedProperties).toBe(false);
+    expect(schema.allOf).toHaveLength(2);
+
+    const commonProperties = schema.allOf[0].properties;
+    expect(commonProperties).toHaveProperty("task");
+    expect(commonProperties).toHaveProperty("routingDescription");
+    expect(commonProperties).toHaveProperty("routingAliases");
+    expect(schema.allOf[0].dependentRequired).toEqual({
+      routingAliases: ["routingDescription"],
+    });
+    expect(commonProperties).not.toHaveProperty("includeContext");
+    expect(commonProperties).not.toHaveProperty("context");
+
+    const variants = schema.allOf[1].anyOf;
+    expect(variants).toHaveLength(3);
+    expect(variants[0].properties.includeContext.const).toBe(true);
+    expect(variants[0].properties).not.toHaveProperty("context");
+    expect(variants[1].properties.includeContext.const).toBe(false);
+    expect(variants[1].properties.context.type).toBe("string");
+    expect(variants[2].properties).toEqual({});
+  });
+
+  it("exposes the full model-visible shape through Pi's Anthropic conversion", () => {
+    const providerSchema = piAnthropicInputSchema(InteractiveParams);
+
+    expect(providerSchema.required).toEqual(["task"]);
+    expect(Object.keys(providerSchema.properties).sort()).toEqual(
+      [
+        "background",
+        "context",
+        "cwd",
+        "includeContext",
+        "model",
+        "mux",
+        "name",
+        "notifyOnComplete",
+        "persona",
+        "routingAliases",
+        "routingDescription",
+        "task",
+        "thinkingLevel",
+        "triggerTurnOnComplete",
+      ].sort(),
+    );
+    expect(providerSchema.properties.includeContext.type).toBe("boolean");
+    expect(providerSchema.properties.context.type).toBe("string");
+    expect(providerSchema.properties.routingAliases.description).toContain(
+      "Requires routingDescription",
+    );
+  });
+
+  /* ---------- optional initial routing metadata ---------- */
+
+  it("accepts an initial routing description and aliases", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        routingDescription: "Own the API migration",
+        routingAliases: ["api", "migration"],
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects routing aliases without a routing description", () => {
+    expect(
+      check(InteractiveParams)({ task: "t", routingAliases: ["api"] }),
+    ).toBe(false);
+  });
+
+  it("rejects empty routing descriptions and aliases", () => {
+    expect(
+      check(InteractiveParams)({ task: "t", routingDescription: "" }),
+    ).toBe(false);
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        routingDescription: "Own the API migration",
+        routingAliases: [""],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects unbounded routing aliases", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        routingDescription: "Own the API migration",
+        routingAliases: Array.from({ length: 17 }, (_, index) => `a${index}`),
+      }),
+    ).toBe(false);
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        routingDescription: "Own the API migration",
+        routingAliases: ["a".repeat(257)],
+      }),
+    ).toBe(false);
   });
 
   /* ---------- optional `background` (boolean) ---------- */
@@ -712,13 +856,13 @@ describe("Parse (decoding)", () => {
     }
   });
 
-  it("InteractiveParams.Parse passes through unknown properties", () => {
-    const result = parse(InteractiveParams)({
-      task: "test",
-      unknownProp: 1,
-    });
-    expect(result).toHaveProperty("unknownProp");
-    expect(result).toMatchObject({ task: "test", unknownProp: 1 });
+  it("InteractiveParams.Parse rejects unknown properties", () => {
+    expect(() =>
+      parse(InteractiveParams)({
+        task: "test",
+        unknownProp: 1,
+      }),
+    ).toThrow();
   });
 
   it("InteractiveParams.Parse preserves optionals when present", () => {

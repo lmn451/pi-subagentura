@@ -38,6 +38,14 @@ import {
   completionTriggersTurn,
   formatCompletionDeliveryBehavior,
 } from "../notifications";
+import {
+  MAX_ORCHESTRATOR_ROUTING_ALIASES,
+  MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
+  MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
+  isValidOrchestratorChildId,
+  upsertOrchestratorRoutingEntry,
+  type OrchestratorRoutingEntry,
+} from "../orchestrator-routing";
 import { InteractiveParams } from "../schemas";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import {
@@ -48,9 +56,8 @@ import {
   type SessionToolToken,
 } from "../session-scope";
 
-const SUBAGENT_ID_INVALID_CHAR_RE = /[^a-f0-9]/;
 function isValidSubagentId(id: string): boolean {
-  return id.length === 16 && !SUBAGENT_ID_INVALID_CHAR_RE.test(id);
+  return isValidOrchestratorChildId(id);
 }
 const MAX_FOLLOWUP_BYTES = 64 * 1024;
 const MAX_FOLLOWUP_PREVIEW_CHARS = 500;
@@ -62,10 +69,80 @@ function formatFollowupPreview(message: string): string {
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
 }
 
+type InitialRoutingMetadataResult =
+  | { status: "persisted"; entry: OrchestratorRoutingEntry }
+  | { status: "warning"; error: string };
+
+function persistInitialRoutingMetadata(params: {
+  cwd: string;
+  childId: string;
+  description?: string;
+  aliases?: string[];
+}): InitialRoutingMetadataResult | undefined {
+  if (params.description === undefined) return undefined;
+  if (!isValidSubagentId(params.childId)) {
+    return {
+      status: "warning",
+      error: `spawn returned invalid child id ${params.childId}`,
+    };
+  }
+  try {
+    const overlay = upsertOrchestratorRoutingEntry(params.cwd, {
+      childId: params.childId,
+      description: params.description,
+      ...(params.aliases === undefined ? {} : { aliases: params.aliases }),
+      provenance: "orchestratorv2",
+    });
+    const entry = overlay.records.find(
+      (record) => record.childId === params.childId,
+    );
+    if (!entry) throw new Error("routing metadata update was not persisted");
+    return { status: "persisted", entry };
+  } catch (error) {
+    return {
+      status: "warning",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function validateInitialRoutingMetadata(
+  description: string | undefined,
+  aliases: string[] | undefined,
+): string | undefined {
+  if (aliases !== undefined && description === undefined) {
+    return "routingAliases requires routingDescription";
+  }
+  if (description === undefined) return undefined;
+  if (description.trim().length === 0) {
+    return "description must be a non-empty string";
+  }
+  const descriptionBytes = Buffer.byteLength(description, "utf8");
+  if (descriptionBytes > MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES) {
+    return `description exceeds ${MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES} bytes`;
+  }
+  if (aliases === undefined) return undefined;
+  if (aliases.length > MAX_ORCHESTRATOR_ROUTING_ALIASES) {
+    return `aliases exceeds ${MAX_ORCHESTRATOR_ROUTING_ALIASES} entries`;
+  }
+  const seen = new Set<string>();
+  for (const alias of aliases) {
+    if (alias.trim().length === 0) return "alias must be a non-empty string";
+    if (
+      Buffer.byteLength(alias, "utf8") > MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES
+    ) {
+      return `alias exceeds ${MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES} bytes`;
+    }
+    if (seen.has(alias)) return `duplicate alias: ${alias}`;
+    seen.add(alias);
+  }
+  return undefined;
+}
+
 export function findArtifactById(id: string): SubagentArtifact | null {
-  // Sub-agent ids are randomBytes(8).toString("hex") at spawn time, i.e. 16
-  // lowercase hex chars. Validate the id before joining it into a path so that an
-  // LLM-supplied id like "../../../etc" can't escape the artifact root
+  // Sub-agent ids are historically 4 random bytes (8 hex chars) and currently
+  // 8 random bytes (16 hex chars). Validate before joining into a path so that
+  // an LLM-supplied id like "../../../etc" cannot escape the artifact root.
   // (path.join normalises "..", so a malicious id would otherwise resolve
   // to a sibling directory and get exfiltrated to the parent LLM via
   // read_subagent_artifact).
@@ -208,24 +285,50 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
+      const routingMetadataError = validateInitialRoutingMetadata(
+        params.routingDescription,
+        params.routingAliases,
+      );
+      if (routingMetadataError) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Invalid initial routing metadata: ${routingMetadataError}`,
+            },
+          ],
+          details: {
+            status: "invalid_routing_metadata",
+            error: routingMetadataError,
+          },
+          isError: true,
+        };
+      }
       const completionMode = params.notifyOnComplete ?? "notify";
       const triggerTurn = completionTriggersTurn(
         completionMode,
         params.triggerTurnOnComplete ?? true,
       );
+      const contextParams = params as typeof params & {
+        includeContext?: boolean;
+        context?: string;
+      };
       debugLog("info", "tool_call", {
         toolName: "subagent_interactive",
         toolCallId: _toolCallId,
         taskLength: params.task?.length ?? 0,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        includeContext: params.includeContext ?? false,
+        includeContext: contextParams.includeContext ?? false,
         notifyOnComplete: completionMode,
         triggerTurnOnComplete: triggerTurn,
       });
 
-      let contextText: string | null = null;
-      if (params.includeContext === true) {
+      let contextText: string | null =
+        contextParams.includeContext === false
+          ? (contextParams.context ?? null)
+          : null;
+      if (contextParams.includeContext === true) {
         const branch = ctx.sessionManager.getBranch();
         const messages = branch
           .filter(
@@ -256,6 +359,12 @@ export function registerInteractiveSubagentTools(
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
         });
+        const routingMetadata = persistInitialRoutingMetadata({
+          cwd: ctx.cwd,
+          childId: state.id,
+          description: params.routingDescription,
+          aliases: params.routingAliases,
+        });
         updateRunningSubagentFooter(
           ctx.ui,
           registration.scope ? sessionOwner(registration.scope) : undefined,
@@ -270,6 +379,11 @@ export function registerInteractiveSubagentTools(
         }
         locationLines.push(`Focus: ${state.selectPaneCommand}`);
         locationLines.push(`Session: ${state.sessionFile}`);
+        if (routingMetadata?.status === "warning") {
+          locationLines.push(
+            `Warning: initial routing metadata was not persisted: ${routingMetadata.error}`,
+          );
+        }
         return {
           content: [
             {
@@ -284,6 +398,7 @@ export function registerInteractiveSubagentTools(
             ...state,
             status: "started",
             thinkingLevel: params.thinkingLevel,
+            ...(routingMetadata === undefined ? {} : { routingMetadata }),
           },
         };
       } catch (error) {
@@ -514,7 +629,7 @@ export function registerInteractiveSubagentTools(
           content: [
             {
               type: "text",
-              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 16 lowercase hex chars.`,
+              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 8 or 16 lowercase hex chars.`,
             },
           ],
           details: { id: params.id, status: "invalid_id" },
@@ -707,7 +822,7 @@ export function registerInteractiveSubagentTools(
           content: [
             {
               type: "text",
-              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 16 lowercase hex chars.`,
+              text: `Invalid sub-agent id ${JSON.stringify(params.id)}; expected 8 or 16 lowercase hex chars.`,
             },
           ],
           details: { id: params.id, status: "invalid_id" },

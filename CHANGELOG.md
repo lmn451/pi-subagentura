@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Non-durable declarative workflow plans with ordered sequential phases, stable task IDs, in-process execution, and the existing async status, result, cancellation, and tree surfaces.
 - Opt-in sequential durable plan preview with owner-fenced recovery, explicit trusted resume, committed-result replay, and cold status, result, cancellation, and tree queries.
+- A separate prompt-directed `--orchestratorv2` thin-router mode with bounded project-local responsibility metadata, runtime-authoritative interactive-agent routing, and legacy interactive-session compatibility.
 
 ## [3.3.0] - 2026-08-05
 

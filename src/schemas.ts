@@ -1,5 +1,10 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import {
+  MAX_ORCHESTRATOR_ROUTING_ALIASES,
+  MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
+  MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
+} from "./orchestrator-routing";
 
 const THINKING_LEVELS = [
   "off",
@@ -112,7 +117,7 @@ export const CancelParams = Type.Object({
   }),
 });
 
-export const InteractiveParams = Type.Object({
+const InteractiveSpawnFields = Type.Object({
   name: Type.Optional(
     Type.String({
       description:
@@ -141,11 +146,26 @@ export const InteractiveParams = Type.Object({
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the child Pi process" }),
   ),
-  includeContext: Type.Optional(
-    Type.Boolean({
+  routingDescription: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
       description:
-        "Include serialized parent conversation in the initial child prompt. Default false to keep the child session small.",
+        "Optional initial responsibility description persisted for Orchestratorv2 routing after the child starts.",
     }),
+  ),
+  routingAliases: Type.Optional(
+    Type.Array(
+      Type.String({
+        minLength: 1,
+        maxLength: MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
+      }),
+      {
+        maxItems: MAX_ORCHESTRATOR_ROUTING_ALIASES,
+        description:
+          "Optional exact aliases persisted with the initial Orchestratorv2 routing description. Requires routingDescription.",
+      },
+    ),
   ),
   background: Type.Optional(
     Type.Boolean({
@@ -175,3 +195,77 @@ export const InteractiveParams = Type.Object({
     ),
   ),
 });
+Object.assign(InteractiveSpawnFields, {
+  dependentRequired: { routingAliases: ["routingDescription"] },
+});
+
+const InteractiveContextMode = Type.Union([
+  Type.Object(
+    {
+      includeContext: Type.Literal(true, {
+        description:
+          "Serialize the full parent conversation branch into the initial child prompt.",
+      }),
+    },
+    { not: { required: ["context"] } },
+  ),
+  Type.Object({
+    includeContext: Type.Literal(false, {
+      description:
+        "Keep the child independent unless an explicit context handoff is supplied.",
+    }),
+    context: Type.Optional(
+      Type.String({
+        description:
+          "Explicit handoff/context passed directly to the initial child prompt.",
+      }),
+    ),
+  }),
+  Type.Object(
+    {},
+    {
+      description:
+        "Legacy default with neither parent-branch nor explicit context fields.",
+      not: {
+        anyOf: [{ required: ["includeContext"] }, { required: ["context"] }],
+      },
+    },
+  ),
+]);
+
+const InteractiveProviderFields = Type.Object({
+  ...InteractiveSpawnFields.properties,
+  includeContext: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether to serialize the parent branch. False permits an explicit context handoff; true forbids one.",
+    }),
+  ),
+  context: Type.Optional(
+    Type.String({
+      description:
+        "Explicit handoff/context, permitted only when includeContext is false.",
+    }),
+  ),
+});
+
+function exposeProviderObjectShape<T extends object>(
+  validationSchema: T,
+  providerShape: typeof InteractiveProviderFields,
+): T {
+  // Pi 0.80.6's Anthropic adapter projects only these top-level keywords.
+  // Keep allOf/anyOf on the returned schema so TypeBox validation stays strict.
+  return {
+    ...validationSchema,
+    type: providerShape.type,
+    properties: providerShape.properties,
+    required: providerShape.required,
+  };
+}
+
+export const InteractiveParams = exposeProviderObjectShape(
+  Type.Intersect([InteractiveSpawnFields, InteractiveContextMode], {
+    unevaluatedProperties: false,
+  }),
+  InteractiveProviderFields,
+);
