@@ -16,7 +16,7 @@ function section(start: string, end: string): string {
 }
 
 describe("README public surface", () => {
-  it("inventories every registered public tool and slash command", () => {
+  it("inventories the 21-tool master baseline; PR #90 Orchestratorv2 is deferred", () => {
     const tools: string[] = [];
     const commands: string[] = [];
     const api = {

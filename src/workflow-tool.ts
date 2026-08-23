@@ -63,6 +63,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { cancellationSnapshotsEnabled } from "./cancellation-snapshots";
 import { getOrchestrationContext } from "./orchestration-context";
+import { registerToolWithRuntimeValidation } from "./runtime-validation";
 import {
   getActiveSessionOwner,
   isSessionOwnerLive,
@@ -631,7 +632,7 @@ export function registerWorkflowTool(
     };
   }
 
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "workflow",
     label: "Workflow",
     description: [
@@ -1283,7 +1284,7 @@ export function registerWorkflowTool(
   });
 
   // ── get_workflow_status ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "get_workflow_status",
     label: "Workflow Status",
     description:
@@ -1389,7 +1390,7 @@ export function registerWorkflowTool(
   });
 
   // ── get_workflow_result ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "get_workflow_result",
     label: "Workflow Result",
     description:
@@ -1632,7 +1633,7 @@ export function registerWorkflowTool(
   });
 
   // ── cancel_workflow ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "cancel_workflow",
     label: "Cancel Workflow",
     description:
@@ -1848,7 +1849,7 @@ export function registerWorkflowTool(
   });
 
   // ── save_workflow ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "save_workflow",
     label: "Save Workflow",
     description:
@@ -1885,7 +1886,7 @@ export function registerWorkflowTool(
   });
 
   // ── list_workflows ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "list_workflows",
     label: "List Workflows",
     description: "List saved workflows (name + description).",
@@ -1903,7 +1904,7 @@ export function registerWorkflowTool(
   });
 
   // ── delete_workflow ──
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "delete_workflow",
     label: "Delete Workflow",
     description: "Delete a saved workflow by name.",

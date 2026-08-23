@@ -54,6 +54,7 @@ import {
 } from "../notifications";
 import { interactiveSubagentRegistry } from "../interactive-tmux";
 import { renderSubagentCall, renderSubagentResult } from "../rendering";
+import { registerToolWithRuntimeValidation } from "../runtime-validation";
 import {
   BaseParams,
   CancelParams,
@@ -353,7 +354,7 @@ function registerSubagentWithContextTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "subagent_with_context",
     label: "Sub-Agent (with context)",
     description: [
@@ -595,7 +596,7 @@ function registerSubagentIsolatedTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "subagent_isolated",
     label: "Sub-Agent (isolated)",
     description: [
@@ -797,7 +798,7 @@ function registerGetSubagentStatusTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "get_subagent_status",
     label: "Get Subagent Status",
     description:
@@ -884,7 +885,7 @@ function registerGetSubagentResultTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "get_subagent_result",
     label: "Get Subagent Result",
     description: [
@@ -1095,7 +1096,7 @@ function registerCancelSubagentTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "cancel_subagent",
     label: "Cancel Subagent",
     description: "Abort a running async subagent job by jobId.",
@@ -1217,7 +1218,7 @@ function registerCancelSubagentTool(
 }
 
 function registerListAvailableModelsTool(pi: ExtensionAPI): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "list_available_models",
     label: "List Available Models",
     description: [
@@ -1307,7 +1308,7 @@ function registerPruneSubagentJobsTool(
   pi: ExtensionAPI,
   toolToken?: SessionToolToken,
 ): void {
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "prune_subagent_jobs",
     label: "Prune Subagent Jobs",
     description: [
@@ -1370,7 +1371,7 @@ function registerCleanupArtifactsTool(
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "cleanup_subagent_artifacts",
     label: "Cleanup Subagent Artifacts",
     description: [

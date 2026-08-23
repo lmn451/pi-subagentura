@@ -28,6 +28,7 @@ import {
   formatInteractiveState,
   interactiveSubagentRegistry,
   launchInteractiveSubagent,
+  MAX_PERSONA_BYTES,
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
   tmuxSetupHint,
@@ -39,6 +40,13 @@ import {
   formatCompletionDeliveryBehavior,
 } from "../notifications";
 import { InteractiveParams } from "../schemas";
+import {
+  invalidRuntimeParamsError,
+  invalidRuntimeParamsResult,
+  registerToolWithRuntimeValidation,
+  runtimeParameterValidationEnabled,
+  type InvalidParameterError,
+} from "../runtime-validation";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import {
   getStartedSessionScopes,
@@ -54,12 +62,41 @@ function isValidSubagentId(id: string): boolean {
 }
 const MAX_FOLLOWUP_BYTES = 64 * 1024;
 const MAX_FOLLOWUP_PREVIEW_CHARS = 500;
+const INTERACTIVE_TOOL_NAME = "subagent_interactive";
 const FOLLOWUP_COMPLETION_REMINDER =
   ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Before sending your final assistant response, write the result to output.md; make "$ARTIFACT_DIR/cli.mjs" done 0 your final tool call and wait for success. If it fails, do not send the final response; fix the cause and retry until completion is recorded. Do not rely on the lifecycle hook.]';
 
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
+}
+
+function interactivePersonaErrors(
+  args: unknown,
+): InvalidParameterError[] | undefined {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return undefined;
+  }
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(args, "persona");
+  } catch {
+    return undefined;
+  }
+  if (
+    !descriptor ||
+    !("value" in descriptor) ||
+    typeof descriptor.value !== "string" ||
+    Buffer.byteLength(descriptor.value, "utf8") <= MAX_PERSONA_BYTES
+  ) {
+    return undefined;
+  }
+  return [
+    {
+      path: "/persona",
+      message: "String exceeds the 64 KiB byte limit",
+    },
+  ];
 }
 
 export function findArtifactById(id: string): SubagentArtifact | null {
@@ -179,8 +216,8 @@ export function registerInteractiveSubagentTools(
     ? { id: registrationScope.id }
     : undefined;
   // ── Tool 6: spawn an attachable mux-backed Pi session ──────────────
-  pi.registerTool({
-    name: "subagent_interactive",
+  registerToolWithRuntimeValidation(pi, {
+    name: INTERACTIVE_TOOL_NAME,
     label: "Interactive Subagent",
     description: [
       "Spawn a separate Pi process in a tmux/zellij pane and return immediately.",
@@ -193,8 +230,21 @@ export function registerInteractiveSubagentTools(
       "Explicit triggerTurnOnComplete=false disables the automatic turn for either mode.",
     ].join("\n"),
     parameters: InteractiveParams,
+    prepareArguments(args) {
+      if (!runtimeParameterValidationEnabled()) return args as never;
+      const errors = interactivePersonaErrors(args);
+      if (errors)
+        throw invalidRuntimeParamsError(INTERACTIVE_TOOL_NAME, errors);
+      return args as never;
+    },
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (runtimeParameterValidationEnabled()) {
+        const errors = interactivePersonaErrors(params);
+        if (errors) {
+          return invalidRuntimeParamsResult(INTERACTIVE_TOOL_NAME, errors);
+        }
+      }
       const registration = resolveInteractiveToolStates(toolToken);
       if (!registration) {
         return {
@@ -340,7 +390,7 @@ export function registerInteractiveSubagentTools(
   });
 
   // ── Tool 7: inspect attachable tmux-backed sessions ────────────────
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "get_interactive_subagent_status",
     label: "Get Interactive Subagent Status",
     description:
@@ -402,7 +452,7 @@ export function registerInteractiveSubagentTools(
   });
 
   // ── Tool 8: cancel an attachable tmux-backed session ───────────────
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "cancel_interactive_subagent",
     label: "Cancel Interactive Subagent",
     description:
@@ -484,7 +534,7 @@ export function registerInteractiveSubagentTools(
   // blank prompt) and at most MAX_FOLLOWUP_BYTES UTF-8 bytes (symmetric with
   // MAX_PERSONA_BYTES in interactive-tmux.ts — 64 KiB is well above any realistic
   // follow-up prompt; larger values are rejected up-front with a structured error).
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "send_interactive_subagent_message",
     label: "Send Interactive Subagent Message",
     description: [
@@ -660,7 +710,7 @@ export function registerInteractiveSubagentTools(
   // sub-agent did. The main agent calls this when it wants to know more than the pointer.
   // The artifact (events.ndjson + output.md + output-N.md snapshots) is the source of truth for what
   // the sub-agent did. The main agent calls this when it wants to know more than the pointer.
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "read_subagent_artifact",
     label: "Read Subagent Artifact",
     description: [
@@ -829,7 +879,7 @@ export function registerInteractiveSubagentTools(
   });
 
   // ── Tool: list known interactive sub-agent artifacts ─────────────
-  pi.registerTool({
+  registerToolWithRuntimeValidation(pi, {
     name: "list_subagent_artifacts",
     label: "List Subagent Artifacts",
     description: [

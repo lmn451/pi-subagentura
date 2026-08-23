@@ -92,6 +92,8 @@ import {
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
 
+export const MAX_PERSONA_BYTES = 64 * 1024;
+
 /**
  * System prompt sent to every interactive sub-agent. Tells the child how to
  * signal completion so the parent can be notified, and where to write its
@@ -600,7 +602,6 @@ export function launchInteractiveSubagent(params: {
   // system prompt to the model on every turn. 64 KiB is well above what any
   // realistic persona needs; larger values are rejected so the child session
   // fails fast with a clear error.
-  const MAX_PERSONA_BYTES = 64 * 1024;
   if (
     params.persona !== undefined &&
     Buffer.byteLength(params.persona, "utf8") > MAX_PERSONA_BYTES

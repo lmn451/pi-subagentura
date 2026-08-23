@@ -3,6 +3,8 @@
  * prompt running-footer refreshes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runAgentLoop } from "@earendil-works/pi-agent-core";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
   existsSync,
   mkdirSync,
@@ -48,6 +50,15 @@ import {
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
 
 const savedTmux = process.env.TMUX;
+const savedValidationFlag = process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+
+function setValidationFlag(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+  } else {
+    process.env.PI_SUBAGENTURA_WITH_VALIDATION = value;
+  }
+}
 
 /** Minimal ctx for the tool's execute signature. */
 function mockCtx() {
@@ -59,6 +70,78 @@ function mockCtx() {
       getSessionId: vi.fn().mockReturnValue("test-session-id"),
     },
   };
+}
+
+async function runToolThroughPi(
+  tool: any,
+  args: Record<string, unknown>,
+): Promise<any> {
+  const ctx = mockCtx();
+  const boundTool = {
+    ...tool,
+    execute: (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+    ) => tool.execute(toolCallId, params, signal, onUpdate, ctx),
+  };
+  const final = {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "interactive-validation-call",
+        name: tool.name,
+        arguments: args,
+      },
+    ],
+    api: "interactive-validation-test",
+    provider: "interactive-validation-test",
+    model: "interactive-validation-test",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  } as any;
+  const streamFn = () => {
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial: { ...final, content: [] } });
+    stream.push({ type: "done", reason: "toolUse", message: final });
+    stream.end(final);
+    return stream;
+  };
+  const messages = await runAgentLoop(
+    [],
+    { systemPrompt: "", messages: [], tools: [boundTool] },
+    {
+      model: {
+        id: "interactive-validation-test",
+        provider: "interactive-validation-test",
+        api: "interactive-validation-test",
+      } as any,
+      convertToLlm: (values: any[]) => values,
+      shouldStopAfterTurn: () => true,
+    },
+    () => {},
+    undefined,
+    streamFn,
+  );
+  const result = messages.find((message: any) => message.role === "toolResult");
+  if (!result) throw new Error("Pi did not emit a tool result");
+  return result;
 }
 
 /** Find the subagent_interactive tool def from the registered API. */
@@ -152,6 +235,87 @@ describe("subagent_interactive tool lifecycle", () => {
     vi.clearAllMocks();
     if (savedTmux === undefined) delete process.env.TMUX;
     else process.env.TMUX = savedTmux;
+    setValidationFlag(savedValidationFlag);
+  });
+
+  it("rejects invalid spawn params before launching a pane", async () => {
+    setValidationFlag("on");
+    const toolDef = getInteractiveToolDef(api);
+
+    const result = await toolDef.execute(
+      "call-invalid",
+      { task: 42 },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: {
+        status: "error",
+        code: "invalid_params",
+        tool: "subagent_interactive",
+      },
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized persona at Pi preflight before launching a pane", async () => {
+    setValidationFlag("on");
+    const toolDef = getInteractiveToolDef(api);
+    const secretPersona = `RAW_PERSONA_TOKEN_${"x".repeat(64 * 1024)}`;
+
+    const result = await runToolThroughPi(toolDef, {
+      task: "research X",
+      persona: secretPersona,
+    });
+
+    expect(result).toMatchObject({ isError: true, details: {} });
+    expect(result.content[0].text).toContain("Invalid parameters");
+    expect(result.content[0].text).toContain("/persona");
+    expect(JSON.stringify(result)).not.toContain("RAW_PERSONA_TOKEN");
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "false"])(
+    "preserves oversized-persona execution when validation is %s",
+    async (value) => {
+      setValidationFlag(value);
+      const toolDef = getInteractiveToolDef(api);
+      const persona = "x".repeat(64 * 1024 + 1);
+
+      const result = await runToolThroughPi(toolDef, {
+        task: "research X",
+        persona,
+      });
+
+      expect(result.isError).toBe(false);
+      expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
+      expect(mockLaunchInteractiveSubagent.mock.calls[0][0].persona).toBe(
+        persona,
+      );
+    },
+  );
+
+  it("validates a representative inline schema before field access", async () => {
+    setValidationFlag("true");
+    const sendTool = api.registerTool.mock.calls.find(
+      ([tool]: any[]) => tool.name === "send_interactive_subagent_message",
+    )?.[0];
+
+    const result = await sendTool.execute("call-invalid-inline", {
+      id: "aaaaaaaaaaaaaaaa",
+    });
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: {
+        status: "error",
+        code: "invalid_params",
+        tool: "send_interactive_subagent_message",
+      },
+    });
   });
 
   it("shows focus instead of nested attach guidance inside tmux", async () => {

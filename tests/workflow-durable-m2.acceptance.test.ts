@@ -479,9 +479,14 @@ describe("Milestone 2 durable creation boundaries", () => {
           dispatchTrap,
         );
         expect(result.isError).toBe(true);
-        expect(result.details.error).not.toContain(
-          "runner or child dispatch attempted",
-        );
+        const diagnostic = [
+          result.details?.error,
+          ...result.content.map((item: { text?: unknown }) => item.text),
+          JSON.stringify(result.details),
+        ]
+          .filter((value): value is string => typeof value === "string")
+          .join("\n");
+        expect(diagnostic).not.toContain("runner or child dispatch attempted");
       }
       await expect(readdir(root)).resolves.toEqual([]);
     } finally {

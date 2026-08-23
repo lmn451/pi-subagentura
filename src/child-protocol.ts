@@ -9,6 +9,10 @@ import {
   writeOutput,
   type SubagentEventV2,
 } from "./artifact";
+import {
+  isRuntimeValidationRejectionResult,
+  runtimeParameterValidationEnabled,
+} from "./runtime-validation";
 
 interface ActiveTurn {
   turnId: string;
@@ -88,6 +92,13 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
+  const pendingActivity = new Map<
+    string,
+    {
+      event: { toolName?: string; toolCallId?: string; isError?: boolean };
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,
@@ -163,10 +174,37 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
 
   pi.on("tool_execution_start", (event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
-    appendActivity(art, "start", event);
+    if (!runtimeParameterValidationEnabled() || !event.toolCallId) {
+      appendActivity(art, "start", event);
+      return;
+    }
+    const pending = {
+      event,
+      timer: setTimeout(() => {
+        if (pendingActivity.get(event.toolCallId) !== pending) return;
+        pendingActivity.delete(event.toolCallId);
+        appendActivity(art, "start", event);
+      }, 0),
+    };
+    pending.timer.unref();
+    pendingActivity.set(event.toolCallId, pending);
   });
   pi.on("tool_execution_end", (event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
+    if (runtimeParameterValidationEnabled() && event.toolCallId) {
+      const pending = pendingActivity.get(event.toolCallId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingActivity.delete(event.toolCallId);
+      }
+      if (
+        event.isError &&
+        isRuntimeValidationRejectionResult(event.toolName, event.result)
+      ) {
+        return;
+      }
+      if (pending) appendActivity(art, "start", pending.event);
+    }
     appendActivity(art, "end", event);
   });
   pi.on("agent_end", (event, ctx) => {

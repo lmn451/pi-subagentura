@@ -2547,6 +2547,33 @@ describe("registerWorkflowTool", () => {
     ]);
   });
 
+  it("accepts undefined list_workflows params with validation enabled", async () => {
+    const previous = process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const pi = {
+      registerTool: vi.fn((definition: any) => tools.push(definition)),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+    };
+    registerWorkflowTool(pi as any);
+    process.env.PI_SUBAGENTURA_WITH_VALIDATION = "on";
+
+    try {
+      const list = tools.find((tool) => tool.name === "list_workflows")!;
+      const result = await list.execute();
+
+      expect(result.details.status).toBe("ok");
+      expect(result.details.code).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+      } else {
+        process.env.PI_SUBAGENTURA_WITH_VALIDATION = previous;
+      }
+    }
+  });
+
   it("routes durable plans and management through the session controller after the live job is lost", async () => {
     const root = realpathSync.native(
       mkdtempSync(join(tmpdir(), "wf-durable-tool-")),
@@ -2917,6 +2944,61 @@ describe("registerWorkflowTool", () => {
     expect([...workflowJobRegistry.keys()]).toEqual(before);
   });
 
+  it("rejects invalid runtime params before creating a workflow job", async () => {
+    const previous = process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const pi = {
+      registerTool: vi.fn((definition: { name: string; execute: Function }) =>
+        tools.push(definition),
+      ),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+    };
+    registerWorkflowTool(
+      pi as unknown as Parameters<typeof registerWorkflowTool>[0],
+    );
+    const execute = tools.find((tool) => tool.name === "workflow")!.execute;
+    const before = [...workflowJobRegistry.keys()];
+    process.env.PI_SUBAGENTURA_WITH_VALIDATION = "on";
+
+    try {
+      const result = await execute(
+        "call-invalid-runtime",
+        { script: 42 },
+        undefined,
+        undefined,
+        new Proxy(
+          {},
+          {
+            get() {
+              throw new Error("workflow side effect attempted");
+            },
+          },
+        ),
+      );
+
+      expect(result).toMatchObject({
+        isError: true,
+        details: {
+          status: "error",
+          code: "invalid_params",
+          tool: "workflow",
+        },
+      });
+      expect(result.content[0].text).not.toContain(
+        "workflow side effect attempted",
+      );
+      expect([...workflowJobRegistry.keys()]).toEqual(before);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+      } else {
+        process.env.PI_SUBAGENTURA_WITH_VALIDATION = previous;
+      }
+    }
+  });
+
   it("rejects invalid plan input before job creation or child dispatch", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const pi = {
@@ -2962,8 +3044,15 @@ describe("registerWorkflowTool", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.details.error).toMatch(/isolation|preview/i);
-    expect(result.details.error).not.toContain("child dispatch attempted");
+    const diagnostic = [
+      result.details?.error,
+      ...result.content.map((item: { text?: unknown }) => item.text),
+      JSON.stringify(result.details),
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    expect(diagnostic).toMatch(/invalid_params|isolation|preview/i);
+    expect(diagnostic).not.toContain("child dispatch attempted");
     expect([...workflowJobRegistry.keys()]).toEqual(before);
   });
 

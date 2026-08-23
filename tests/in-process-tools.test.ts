@@ -108,6 +108,16 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 
+const savedValidationFlag = process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+
+function setValidationFlag(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.PI_SUBAGENTURA_WITH_VALIDATION;
+  } else {
+    process.env.PI_SUBAGENTURA_WITH_VALIDATION = value;
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /** A minimal context object that satisfies the tools' `ctx` parameter. */
@@ -259,6 +269,7 @@ beforeEach(() => {
 afterEach(() => {
   jobRegistry.clear();
   clearSessionScopes();
+  setValidationFlag(savedValidationFlag);
 });
 describe("peer session scope isolation", () => {
   it("keeps an A spawn owned by A after B becomes the legacy active session", async () => {
@@ -478,6 +489,59 @@ describe("subagent_isolated tool", () => {
   beforeEach(() => {
     api = setupExtension();
     toolDef = getToolDef(api, "subagent_isolated");
+  });
+
+  it("rejects invalid params before creating an in-process job", async () => {
+    setValidationFlag("on");
+
+    const result = await toolDef.execute(
+      "call-invalid",
+      { task: 42 },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: {
+        status: "error",
+        code: "invalid_params",
+        tool: "subagent_isolated",
+      },
+    });
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(jobRegistry.size).toBe(0);
+  });
+
+  it("continues through the existing path for valid params when enabled", async () => {
+    setValidationFlag("yes");
+
+    const result = await toolDef.execute(
+      "call-valid",
+      { task: "analyze code", async: false },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.details.status).toBe("done");
+    expect(mockStartSubagentJob).toHaveBeenCalledOnce();
+  });
+
+  it("preserves existing behavior when validation is disabled", async () => {
+    setValidationFlag("off");
+
+    const result = await toolDef.execute(
+      "call-bypassed",
+      { task: 42, async: false },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.details.status).toBe("done");
+    expect(mockStartSubagentJob).toHaveBeenCalledOnce();
   });
 
   it("passes null context to startSubagentJob (sync path)", async () => {
@@ -1132,6 +1196,34 @@ describe("list_available_models tool", () => {
     { provider: "google", id: "gemini-2.5-flash", name: undefined },
   ];
 
+  it("validates its inline schema before reading the model registry", async () => {
+    setValidationFlag("true");
+    const getAvailable = vi.fn().mockReturnValue(baseModels);
+    const getAll = vi.fn().mockReturnValue(baseModels);
+    const ctx = mockCtx({
+      modelRegistry: { getAvailable, getAll, find: vi.fn() },
+    });
+
+    const result = await toolDef.execute(
+      "call-invalid-inline",
+      { authOnly: "yes" },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: {
+        status: "error",
+        code: "invalid_params",
+        tool: "list_available_models",
+      },
+    });
+    expect(getAvailable).not.toHaveBeenCalled();
+    expect(getAll).not.toHaveBeenCalled();
+  });
+
   it("uses modelRegistry.getAvailable() when authOnly is true (default)", async () => {
     const getAvailable = vi.fn().mockReturnValue(baseModels.slice(0, 3));
     const getAll = vi.fn().mockReturnValue(baseModels);
@@ -1648,6 +1740,15 @@ describe("prune_subagent_jobs tool", () => {
     const result = await toolDef.execute();
     expect(result.content[0].text).toContain("Removed 0");
     expect(result.details.removed).toBe(0);
+  });
+
+  it("accepts undefined params when runtime validation is enabled", async () => {
+    setValidationFlag("on");
+
+    const result = await toolDef.execute();
+
+    expect(result.details).toMatchObject({ removed: 0 });
+    expect(result.details.code).toBeUndefined();
   });
 
   it("returns correct count when done/error jobs exist", async () => {
