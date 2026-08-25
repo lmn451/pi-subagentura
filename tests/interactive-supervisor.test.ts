@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
@@ -51,6 +59,10 @@ import {
 
 const tempDirs: string[] = [];
 const savedTmux = process.env.TMUX;
+const inheritedLineageEnv = {
+  rootId: process.env.PI_SUBAGENTURA_ROOT_ID,
+  sessionRoot: process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT,
+};
 
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "interactive-supervisor-"));
@@ -230,6 +242,12 @@ async function lineageHarness(rootId: string) {
   };
 }
 
+// A child reviewer inherits live lineage paths; isolate tests from real panes.
+beforeEach(() => {
+  delete process.env.PI_SUBAGENTURA_ROOT_ID;
+  delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
+});
+
 afterEach(() => {
   interactiveSubagentRegistry.clear();
   jobRegistry.clear();
@@ -247,6 +265,20 @@ afterEach(() => {
   }
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+afterAll(() => {
+  if (inheritedLineageEnv.rootId === undefined) {
+    delete process.env.PI_SUBAGENTURA_ROOT_ID;
+  } else {
+    process.env.PI_SUBAGENTURA_ROOT_ID = inheritedLineageEnv.rootId;
+  }
+  if (inheritedLineageEnv.sessionRoot === undefined) {
+    delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
+  } else {
+    process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT =
+      inheritedLineageEnv.sessionRoot;
   }
 });
 

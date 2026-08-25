@@ -1203,6 +1203,7 @@ describe("pollArtifactChanges", () => {
     expect(completions[1]).toMatchObject({
       outcome: "cancelled",
       source: "parent",
+      cancellationOrigin: "cancel_interactive_subagent",
     });
     expect(completions[1].turnId).toMatch(/^process-cancel-/);
     expect(state.pendingDeliveries).toEqual([]);

@@ -137,6 +137,13 @@ deleted on `session_shutdown(reason="new")` to give the next session a clean sla
 On `session_shutdown(reason="quit")` the panes and state file are preserved so the
 subagents survive a restart.
 
+Standalone interactive panes are preserved for continuity transitions (`startup`,
+`reload`, `resume`, and `quit`) and unknown lifecycle reasons. Automatic lifecycle
+cleanup destroys them only for intentional fresh-session transitions (`new` and
+`fork`); workflow-owned panes retain their generation-scoped cleanup. Parent
+cancellation completion events keep `source="parent"` for compatibility and add
+closed-enum `cancellationOrigin` and `cancellationLifecycleReason` diagnostics.
+
 **Delivery receipts:** Rehydrate reconciles deterministic `deliveryId` values
 against parent custom session entries. The synchronous Pi API proves dispatch,
 not durable commit, so delivery is at-least-once and a crash-window duplicate

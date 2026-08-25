@@ -53,6 +53,8 @@ import {
   type SubagentEvent,
   type PersistedDeliveryIntent,
   type PersistedLifecycleFold,
+  type ParentCancellationLifecycleReason,
+  type ParentCancellationOrigin,
   removeInteractiveState,
 } from "./artifact";
 import { acknowledgeDeliveryWithoutDispatch, deliveryIdFor } from "./delivery";
@@ -137,7 +139,7 @@ When your task is done, follow this checklist in order. The parent is a parent a
   4. Only after the lifecycle command succeeds, produce your final assistant text in the chat summarising what you did and where to find the work. Make no more tool calls during this turn.
   5. Stay in the REPL. Do not call \`/exit\` or press Ctrl-D. The REPL stays open after step 3 so the user (or the parent) can follow up; the wrapper's EXIT trap will only fire if you actually exit. If you exit, the wrapper will treat it as a crash and the parent will not see your final answer.
 
-Do not call 'cancelled' yourself — the parent agent writes that event only when it explicitly aborts you via the cancel_interactive_subagent tool.
+Do not call 'cancelled' yourself — only parent lifecycle or cancellation actions record that event.
 
 For reference: ${cliPath} is the lifecycle CLI. Each invocation appends one NDJSON line to events.ndjson. The parent reads that file every few seconds. The atomic write pattern (write to .tmp, then rename onto output.md) is fine if you want crash-safety.
 
@@ -374,7 +376,9 @@ export function buildInteractivePrompt(params: {
     "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
     "write your result to output.md (path from the system prompt), run the command below, " +
     "and wait for it to succeed. Repeat this for every turn:\n" +
-    '  "$ARTIFACT_DIR/cli.mjs" done 0';
+    '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
+    "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
+    "Do not intentionally exit or close the pane unless explicitly asked.";
 
   if (!params.contextText) return params.task + footer;
   return (
@@ -970,11 +974,18 @@ export function sendCommandToTmuxPane(paneId: string, command: string): void {
   mux.sendEnter(paneId);
 }
 
+interface ParentCancellationContext {
+  origin: ParentCancellationOrigin;
+  lifecycleReason?: ParentCancellationLifecycleReason;
+}
+
 export function cancelInteractiveSubagent(
   id: string,
   source: CancellationSnapshotSource = "cancel_interactive_subagent",
   ownedState?: InteractiveSubagentState,
 ): InteractiveSubagentState | undefined {
+  const snapshotSource =
+    source === "supervisor" ? "cancel_interactive_subagent" : source;
   const state =
     ownedState?.id === id ? ownedState : interactiveSubagentRegistry.get(id);
   if (!state) return undefined;
@@ -987,7 +998,8 @@ export function cancelInteractiveSubagent(
     sessionFile: state.sessionFile,
     artifactDir: state.artifactDir,
     startedAt: state.startedAt,
-    source,
+    source: snapshotSource,
+    cancellationOrigin: source,
   });
   state.cancellationSnapshot = snapshot;
 
@@ -999,7 +1011,7 @@ export function cancelInteractiveSubagent(
   } catch {
     /* best effort — dir may not exist yet if the launch script is still warming up */
   }
-  appendCancellation(state);
+  appendCancellation(state, { origin: source });
 
   // 2. Update the registry. The poller still processes the durable cancellation.
   state.status = "cancelled";
@@ -1014,6 +1026,7 @@ export function cancelInteractiveSubagent(
 
 function appendCancellation(
   state: InteractiveSubagentState,
+  context: ParentCancellationContext,
   acknowledgeDelivery = true,
 ): void {
   let turnId = "process";
@@ -1033,6 +1046,8 @@ function appendCancellation(
     turnId,
     outcome: "cancelled",
     source: "parent",
+    cancellationOrigin: context.origin,
+    cancellationLifecycleReason: context.lifecycleReason,
   });
   if (!completion) {
     turnId = `process-cancel-${newEventId()}`;
@@ -1040,6 +1055,8 @@ function appendCancellation(
       turnId,
       outcome: "cancelled",
       source: "parent",
+      cancellationOrigin: context.origin,
+      cancellationLifecycleReason: context.lifecycleReason,
     });
   }
   if (!completion) return;
@@ -1074,13 +1091,14 @@ export function cancelInteractiveDescendantByState(
     artifactDir: state.artifactDir,
     startedAt: state.startedAt,
     source: "cancel_interactive_subagent",
+    cancellationOrigin: "supervisor_descendant",
   });
   try {
     writeFileSync(join(state.artifactDir, ".cancelled"), "", { mode: 0o600 });
   } catch {
     /* best effort; the owner will reconcile the durable pane state */
   }
-  appendCancellation(state, false);
+  appendCancellation(state, { origin: "supervisor_descendant" }, false);
   state.status = "cancelled";
   const mux = getMuxForState(state);
   if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
@@ -1114,6 +1132,7 @@ export function cancelInteractiveDescendantByState(
  */
 export function cancelInteractiveSubagentByState(
   state: InteractiveSubagentState,
+  context: ParentCancellationContext = { origin: "session_shutdown" },
 ): void {
   const snapshot = snapshotInteractiveContext({
     kind: "interactive",
@@ -1124,6 +1143,8 @@ export function cancelInteractiveSubagentByState(
     artifactDir: state.artifactDir,
     startedAt: state.startedAt,
     source: "session_shutdown",
+    cancellationOrigin: context.origin,
+    cancellationLifecycleReason: context.lifecycleReason,
   });
   state.cancellationSnapshot = snapshot;
 
@@ -1133,9 +1154,9 @@ export function cancelInteractiveSubagentByState(
   } catch {
     /* best-effort */
   }
-  appendCancellation(state);
+  appendCancellation(state, context);
 
-  // Explicit cancellation is destructive by request: unless absence is
+  // A destructive lifecycle transition owns teardown: unless absence is
   // confirmed, attempt the kill even when the listing probe is unavailable.
   const mux = getMuxForState(state);
   if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {

@@ -308,6 +308,69 @@ describe("artifact", () => {
     expect(readEvents(art)).toContainEqual(event);
   });
 
+  it("round-trips only valid parent cancellation metadata", () => {
+    const art = artifactPath(root, "parent-cancellation-origin");
+    const event = appendCompletionEvent(art, {
+      turnId: "cancel-turn",
+      outcome: "cancelled",
+      source: "parent",
+      cancellationOrigin: "session_start",
+      cancellationLifecycleReason: "startup",
+    });
+
+    expect(event).toMatchObject({
+      cancellationOrigin: "session_start",
+      cancellationLifecycleReason: "startup",
+    });
+    expect(readEvents(art)).toContainEqual(event);
+
+    appendFileSync(
+      art.statusFile,
+      JSON.stringify({
+        version: 2,
+        eventId: "invalid-cancel-origin",
+        turnId: "invalid-cancel-turn",
+        ts: 2,
+        type: "completion",
+        outcome: "cancelled",
+        source: "parent",
+        cancellationOrigin: "unbounded-user-value",
+        cancellationLifecycleReason: "startup",
+      }) + "\n",
+    );
+    expect(readEvents(art).at(-1)).toMatchObject({
+      eventId: "invalid-cancel-origin",
+      cancellationOrigin: undefined,
+      cancellationLifecycleReason: undefined,
+    });
+  });
+
+  it("omits cancellation metadata from non-parent completions", () => {
+    const art = artifactPath(root, "non-parent-cancellation-origin");
+    const event = appendCompletionEvent(art, {
+      turnId: "done-turn",
+      outcome: "done",
+      source: "explicit",
+      cancellationOrigin: "session_start",
+      cancellationLifecycleReason: "startup",
+    });
+
+    expect(event).not.toHaveProperty("cancellationOrigin");
+    expect(event).not.toHaveProperty("cancellationLifecycleReason");
+
+    const supervisorEvent = appendCompletionEvent(art, {
+      turnId: "supervisor-cancel-turn",
+      outcome: "cancelled",
+      source: "parent",
+      cancellationOrigin: "supervisor",
+      cancellationLifecycleReason: "startup",
+    });
+    expect(supervisorEvent).toMatchObject({
+      cancellationOrigin: "supervisor",
+    });
+    expect(supervisorEvent).not.toHaveProperty("cancellationLifecycleReason");
+  });
+
   it("reports one deterministic issue for an oversized physical record", () => {
     const art = artifactPath(root, "ultra-oversized-event");
     ensureArtifactDir(art);

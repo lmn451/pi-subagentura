@@ -56,7 +56,7 @@ function isValidSubagentId(id: string): boolean {
 const MAX_FOLLOWUP_BYTES = 64 * 1024;
 const MAX_FOLLOWUP_PREVIEW_CHARS = 500;
 const FOLLOWUP_COMPLETION_REMINDER =
-  ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Before sending your final assistant response, write the result to output.md; make "$ARTIFACT_DIR/cli.mjs" done 0 your final tool call and wait for success. If it fails, do not send the final response; fix the cause and retry until completion is recorded. Do not rely on the lifecycle hook.]';
+  ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Before sending your final assistant response, write the result to output.md; make "$ARTIFACT_DIR/cli.mjs" done 0 your final tool call and wait for success. If it fails, do not send the final response; fix the cause and retry until completion is recorded. Do not rely on the lifecycle hook. After completion is recorded, remain in the Pi REPL and wait for follow-up; do not intentionally exit or close the pane unless explicitly asked.]';
 
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;

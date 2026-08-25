@@ -28,6 +28,8 @@ import {
   type CancellationSnapshotReceipt,
 } from "../src/cancellation-snapshots";
 import type { CancellationSnapshotSource } from "../src/cancellation-snapshots";
+import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import { __setTmuxMultiplexer } from "../src/multiplexer";
 
 const originalEnv = {
   mode: process.env.SUBAGENT_CANCEL_SNAPSHOT,
@@ -123,6 +125,10 @@ beforeEach(() => {
   jobRegistry.clear();
   workflowJobRegistry.clear();
   clearSessionScopes();
+  interactiveSubagentRegistry.clear();
+  __setTmuxMultiplexer({
+    getPaneLiveness: () => "dead",
+  } as any);
 });
 
 afterEach(() => {
@@ -137,6 +143,8 @@ afterEach(() => {
   else process.env.SUBAGENT_CANCEL_SNAPSHOT_MAX_BYTES = originalEnv.maxBytes;
   vi.restoreAllMocks();
   workflowJobRegistry.clear();
+  interactiveSubagentRegistry.clear();
+  __setTmuxMultiplexer(undefined);
 });
 
 describe("cancellation snapshots", () => {
@@ -225,15 +233,101 @@ describe("cancellation snapshots", () => {
     const root = mkdtempSync(join(tmpdir(), "cancel-snapshot-interactive-"));
     setSnapshotEnv(join(root, "snapshots"));
     const input = interactiveInput(root);
-    const receipt = snapshotInteractiveContext(input);
+    const receipt = snapshotInteractiveContext({
+      ...input,
+      source: "session_shutdown",
+      cancellationOrigin: "session_start",
+      cancellationLifecycleReason: "startup",
+    });
     expect(receipt.status).toBe("written");
     const payload = JSON.parse(readFileSync(receipt.path!, "utf8"));
     expect(payload.kind).toBe("interactive");
+    expect(payload.cancellation).toMatchObject({
+      source: "session_shutdown",
+      cancellationOrigin: "session_start",
+      cancellationLifecycleReason: "startup",
+    });
     expect(payload.files.sessionFile.bytes).toBeGreaterThan(0);
     expect(payload.files.sessionFile.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(existsSync(join(root, "snapshots", "interactive-1.jsonl"))).toBe(
       false,
     );
+  });
+
+  it("normalizes interactive snapshot cancellation metadata", () => {
+    const supervisorRoot = mkdtempSync(
+      join(tmpdir(), "cancel-snapshot-supervisor-"),
+    );
+    setSnapshotEnv(join(supervisorRoot, "snapshots"));
+    const supervisorReceipt = snapshotInteractiveContext({
+      ...interactiveInput(supervisorRoot),
+      cancellationOrigin: "supervisor",
+      cancellationLifecycleReason: "startup",
+    });
+    const supervisorPayload = JSON.parse(
+      readFileSync(supervisorReceipt.path!, "utf8"),
+    );
+    expect(supervisorPayload.cancellation.cancellationOrigin).toBe(
+      "supervisor",
+    );
+    expect(supervisorPayload.cancellation).not.toHaveProperty(
+      "cancellationLifecycleReason",
+    );
+
+    const invalidRoot = mkdtempSync(
+      join(tmpdir(), "cancel-snapshot-invalid-origin-"),
+    );
+    setSnapshotEnv(join(invalidRoot, "snapshots"));
+    const invalidReceipt = snapshotInteractiveContext({
+      ...interactiveInput(invalidRoot),
+      cancellationOrigin: "invalid" as any,
+      cancellationLifecycleReason: "startup",
+    });
+    const invalidPayload = JSON.parse(
+      readFileSync(invalidReceipt.path!, "utf8"),
+    );
+    expect(invalidPayload.cancellation).not.toHaveProperty(
+      "cancellationOrigin",
+    );
+    expect(invalidPayload.cancellation).not.toHaveProperty(
+      "cancellationLifecycleReason",
+    );
+  });
+
+  it("retains cancel-all origin in the pre-captured interactive snapshot", async () => {
+    const root = mkdtempSync(
+      join(tmpdir(), "cancel-snapshot-all-interactive-"),
+    );
+    setSnapshotEnv(join(root, "snapshots"));
+    const input = interactiveInput(root);
+    interactiveSubagentRegistry.set(input.id, {
+      id: input.id,
+      name: "interactive",
+      task: "test",
+      paneId: "%42",
+      mux: "tmux",
+      sessionFile: input.sessionFile,
+      cwd: input.cwd,
+      parentSessionId: input.parentSessionId,
+      startedAt: input.startedAt,
+      status: "running",
+      attachCommand: "attach",
+      selectPaneCommand: "focus",
+      launchScriptFile: join(root, "launch.sh"),
+      artifactDir: input.artifactDir,
+    });
+
+    const result = await cancelAllFlows();
+
+    expect(result.interactiveKilled).toBe(1);
+    expect(result.snapshots).toHaveLength(1);
+    const payload = JSON.parse(
+      readFileSync(result.snapshots![0].path!, "utf8"),
+    );
+    expect(payload.cancellation).toMatchObject({
+      source: "cancel_all",
+      cancellationOrigin: "cancel_all",
+    });
   });
 
   it("never blocks cancellation when snapshot capture fails", () => {

@@ -551,11 +551,7 @@ export function registerInteractiveSupervisor(
           if (!item?.actionable) return undefined;
           const direct = supervisorInteractiveStates(activeOwner).get(id);
           if (direct === item.state) {
-            cancelInteractiveSubagent(
-              id,
-              "cancel_interactive_subagent",
-              direct,
-            );
+            cancelInteractiveSubagent(id, "supervisor", direct);
           } else {
             cancelInteractiveDescendantByState(item.state);
           }
@@ -585,11 +581,7 @@ export function registerInteractiveSupervisor(
               state.id,
             );
             if (direct === state) {
-              cancelInteractiveSubagent(
-                state.id,
-                "cancel_interactive_subagent",
-                direct,
-              );
+              cancelInteractiveSubagent(state.id, "supervisor", direct);
             } else {
               cancelInteractiveDescendantByState(state);
             }
@@ -622,11 +614,7 @@ export function registerInteractiveSupervisor(
                 nodeState.id,
               );
               if (direct === nodeState) {
-                cancelInteractiveSubagent(
-                  nodeState.id,
-                  "cancel_interactive_subagent",
-                  direct,
-                );
+                cancelInteractiveSubagent(nodeState.id, "supervisor", direct);
               } else {
                 cancelInteractiveDescendantByState(nodeState);
               }

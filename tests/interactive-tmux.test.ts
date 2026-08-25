@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   deriveInteractiveSubagentStatus,
   deriveInteractiveSubagentStatusFromEvents,
@@ -23,6 +31,10 @@ import { loadInteractiveStates } from "../src/artifact";
 const MOCK_PANE_ID = "%42";
 /** Tab-separated session/window/pane — matches real tmux #{...} format. */
 const MOCK_LOCATION = "sess\t1\t0\n";
+const inheritedLineageEnv = {
+  rootId: process.env.PI_SUBAGENTURA_ROOT_ID,
+  sessionRoot: process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT,
+};
 
 function installMockExec(scenario: (file: string, args: string[]) => string) {
   vi.resetModules();
@@ -85,6 +97,13 @@ describe("interactive-tmux", () => {
   beforeEach(() => {
     const g = globalThis as any;
     g.__piSubagenturaInteractiveRegistry?.clear?.();
+    // Tests may run inside a live child; never let fixtures mutate its lineage.
+    delete process.env.PI_SUBAGENTURA_AGENT_ID;
+    delete process.env.PI_SUBAGENTURA_ROOT_ID;
+    delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
+    delete process.env.PI_SUBAGENTURA_DEPTH;
+    delete process.env.PI_SUBAGENTURA_MAX_DEPTH;
+    delete process.env.PI_SUBAGENTURA_MAX_NODES;
   });
 
   afterEach(() => {
@@ -92,11 +111,26 @@ describe("interactive-tmux", () => {
     delete process.env.PI_SUBAGENTURA_AGENT_ID;
     delete process.env.PI_SUBAGENTURA_ROOT_ID;
     delete process.env.PI_SUBAGENTURA_DEPTH;
+    delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
     delete process.env.PI_SUBAGENTURA_MAX_DEPTH;
     delete process.env.PI_SUBAGENTURA_MAX_NODES;
     vi.doUnmock("node:child_process");
     vi.doUnmock("node:fs");
     vi.doUnmock("../src/artifact");
+  });
+
+  afterAll(() => {
+    if (inheritedLineageEnv.rootId === undefined) {
+      delete process.env.PI_SUBAGENTURA_ROOT_ID;
+    } else {
+      process.env.PI_SUBAGENTURA_ROOT_ID = inheritedLineageEnv.rootId;
+    }
+    if (inheritedLineageEnv.sessionRoot === undefined) {
+      delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
+    } else {
+      process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT =
+        inheritedLineageEnv.sessionRoot;
+    }
   });
 
   it("is unavailable when tmux binary is not on PATH", async () => {
@@ -990,6 +1024,8 @@ describe("interactive-tmux", () => {
     expect(prompt).toMatch(/before sending your final assistant response/i);
     expect(prompt).toContain('"$ARTIFACT_DIR/cli.mjs" done 0');
     expect(prompt).toMatch(/every turn/i);
+    expect(prompt).toMatch(/remain in the Pi REPL and wait for follow-up/i);
+    expect(prompt).toMatch(/do not intentionally exit or close the pane/i);
   });
 
   describe("system prompt is always written", () => {

@@ -8,11 +8,17 @@ import {
   type Mock,
   type MockInstance,
 } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendEvent, artifactPath } from "../src/artifact";
+import {
+  appendCompletionEvent,
+  appendEvent,
+  appendInteractiveState,
+  artifactPath,
+  readEvents,
+} from "../src/artifact";
 import {
   jobRegistry,
   registerInProcessJob,
@@ -104,6 +110,7 @@ function setupExtension(
     startSession?: boolean;
     sessionId?: string;
     ui?: Record<string, unknown>;
+    cwd?: string;
   } = {},
 ): Registration {
   const api = {
@@ -144,7 +151,7 @@ function setupExtension(
     sessionStartHandler(
       { reason },
       {
-        cwd: "/tmp",
+        cwd: options.cwd ?? "/tmp",
         ui,
         sessionManager: {
           getSessionId: () => sessionId,
@@ -368,8 +375,14 @@ describe("session_shutdown handler", () => {
       expect(surviving.scope.interactiveStates.get(survivingState.id)).toBe(
         survivingState,
       );
-      expect(cancelByStateSpy).toHaveBeenCalledWith(shuttingState);
-      expect(cancelByStateSpy).not.toHaveBeenCalledWith(survivingState);
+      expect(cancelByStateSpy).toHaveBeenCalledWith(shuttingState, {
+        origin: "session_shutdown",
+        lifecycleReason: "new",
+      });
+      expect(cancelByStateSpy).not.toHaveBeenCalledWith(
+        survivingState,
+        expect.anything(),
+      );
       expect(
         interactiveTmux.interactiveSubagentRegistry.has(shuttingState.id),
       ).toBe(false);
@@ -398,7 +411,7 @@ describe("session_shutdown handler", () => {
     },
   );
 
-  it("accepts an omitted shutdown event and still cleans the exact scope", () => {
+  it("accepts an omitted shutdown event without guessing that panes should be killed", () => {
     const registration = setupExtension({ sessionId: "session-a" });
     const state = ownedInteractive(registration.scope, "state-a", "running");
     const workflow = ownedWorkflow(registration.scope, "workflow-a");
@@ -406,7 +419,7 @@ describe("session_shutdown handler", () => {
 
     expect(() => registration.shutdown()).not.toThrow();
 
-    expect(cancelByStateSpy).toHaveBeenCalledWith(state);
+    expect(cancelByStateSpy).not.toHaveBeenCalledWith(state, expect.anything());
     expect(workflow.abort.signal.aborted).toBe(true);
     expect(job.abort).toHaveBeenCalledOnce();
     expect(registration.scope.lifecycle).toBe("shutdown");
@@ -441,11 +454,21 @@ describe("session_shutdown handler", () => {
       registration.shutdown({ reason });
 
       expect(cancelByStateSpy).toHaveBeenCalledTimes(3);
-      expect(cancelByStateSpy).toHaveBeenCalledWith(running);
-      expect(cancelByStateSpy).toHaveBeenCalledWith(idle);
-      expect(cancelByStateSpy).toHaveBeenCalledWith(unknown);
-      expect(cancelByStateSpy).not.toHaveBeenCalledWith(cancelled);
-      expect(cancelByStateSpy).not.toHaveBeenCalledWith(exited);
+      const context = {
+        origin: "session_shutdown",
+        lifecycleReason: reason,
+      };
+      expect(cancelByStateSpy).toHaveBeenCalledWith(running, context);
+      expect(cancelByStateSpy).toHaveBeenCalledWith(idle, context);
+      expect(cancelByStateSpy).toHaveBeenCalledWith(unknown, context);
+      expect(cancelByStateSpy).not.toHaveBeenCalledWith(
+        cancelled,
+        expect.anything(),
+      );
+      expect(cancelByStateSpy).not.toHaveBeenCalledWith(
+        exited,
+        expect.anything(),
+      );
       expect(registration.scope.interactiveStates.size).toBe(0);
       for (const state of [running, idle, unknown, cancelled, exited]) {
         expect(interactiveTmux.interactiveSubagentRegistry.has(state.id)).toBe(
@@ -455,7 +478,102 @@ describe("session_shutdown handler", () => {
     },
   );
 
-  it.each(["reload", "resume", "quit"])(
+  it("preserves a completed idle pane and permits a same-pane follow-up across repeated startup", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "pi-repeated-startup-"));
+    const id = "a1b2c3d4e5f60718";
+    const sessionId = "session-a";
+    const art = artifactPath(tmpRoot, id);
+    const killPane = vi.fn();
+    const sendKeys = vi.fn();
+    const sendEnter = vi.fn();
+    let paneAlive = true;
+    appendCompletionEvent(art, {
+      turnId: "completed-turn",
+      outcome: "done",
+      source: "explicit",
+    });
+    writeFileSync(
+      join(art.dir, "active-turn.json"),
+      JSON.stringify({ turnId: "completed-turn" }),
+    );
+    appendInteractiveState(tmpRoot, {
+      id,
+      paneId: "%42",
+      mux: "tmux",
+      artifactDir: art.dir,
+      sessionFile: join(tmpRoot, "child.jsonl"),
+      parentSessionId: sessionId,
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      lifecycle: {
+        currentTurnId: "completed-turn",
+        completionTurnId: "completed-turn",
+        completionOutcome: "done",
+        completionSource: "explicit",
+      },
+    });
+    __setTmuxMultiplexer({
+      getPaneLiveness: () => (paneAlive ? "alive" : "dead"),
+      getPaneLivenessAsync: async () => (paneAlive ? "alive" : "dead"),
+      buildAttachCommands: () => ({
+        attachCommand: "attach",
+        focusCommand: "focus",
+      }),
+      killPane: (...args: unknown[]) => {
+        paneAlive = false;
+        killPane(...args);
+      },
+      sendKeys,
+      sendEnter,
+    } as unknown as Multiplexer);
+    cancelByStateSpy.mockRestore();
+    const registration = setupExtension({
+      startSession: false,
+      sessionId,
+      cwd: tmpRoot,
+    });
+
+    registration.start(sessionId, {}, "startup");
+    expect(registration.scope.interactiveStates.get(id)?.status).toBe("idle");
+    registration.start(sessionId, {}, "startup");
+
+    const rehydrated = registration.scope.interactiveStates.get(id);
+    expect(existsSync(join(art.dir, ".cancelled"))).toBe(false);
+    expect(killPane).not.toHaveBeenCalled();
+    expect(
+      readEvents(art).filter(
+        (event) =>
+          event.type === "completion" &&
+          event.outcome === "cancelled" &&
+          event.source === "parent",
+      ),
+    ).toEqual([]);
+    expect(rehydrated?.status).toBe("idle");
+    interactiveTmux.sendCommandToPane(rehydrated!, "follow-up");
+    expect(sendKeys).toHaveBeenCalledWith("%42", "follow-up", undefined);
+    expect(sendEnter).toHaveBeenCalledWith("%42", undefined);
+  });
+
+  it("labels repeated-startup cleanup of workflow panes with its exact origin", () => {
+    const registration = setupExtension({ sessionId: "session-a" });
+    const workflowChild = ownedInteractive(
+      registration.scope,
+      "startup-workflow-child",
+      "running",
+      { completionOwner: "workflow", workflowId: "workflow-a" },
+    );
+
+    registration.start("session-a", {}, "startup");
+
+    expect(cancelByStateSpy).toHaveBeenCalledWith(workflowChild, {
+      origin: "session_start",
+      lifecycleReason: "startup",
+    });
+  });
+
+  it.each(["startup", "reload", "resume", "quit", "unexpected"])(
     "preserves standalone panes while removing their scope metadata for reason %s",
     (reason) => {
       const registration = setupExtension();
@@ -483,7 +601,7 @@ describe("session_shutdown handler", () => {
     },
   );
 
-  it.each(["reload", "resume", "quit"])(
+  it.each(["startup", "reload", "resume", "quit", "unexpected"])(
     "kills workflow-origin panes but preserves standalone panes for reason %s",
     (reason) => {
       const registration = setupExtension();
@@ -512,9 +630,17 @@ describe("session_shutdown handler", () => {
       registration.shutdown({ reason });
 
       expect(cancelByStateSpy).toHaveBeenCalledTimes(2);
-      expect(cancelByStateSpy).toHaveBeenCalledWith(workflowChild);
-      expect(cancelByStateSpy).toHaveBeenCalledWith(promotedChild);
-      expect(cancelByStateSpy).not.toHaveBeenCalledWith(standalone);
+      const context = {
+        origin: "session_shutdown",
+        lifecycleReason:
+          reason === "unexpected" ? ("unknown" as const) : reason,
+      };
+      expect(cancelByStateSpy).toHaveBeenCalledWith(workflowChild, context);
+      expect(cancelByStateSpy).toHaveBeenCalledWith(promotedChild, context);
+      expect(cancelByStateSpy).not.toHaveBeenCalledWith(
+        standalone,
+        expect.anything(),
+      );
       expect(registration.scope.interactiveStates.size).toBe(0);
     },
   );

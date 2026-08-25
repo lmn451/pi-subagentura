@@ -114,40 +114,56 @@ function snapshotOwnedJobs(
   }
 }
 
+function cancellationLifecycleReason(reason: string | undefined) {
+  switch (reason) {
+    case "startup":
+    case "reload":
+    case "resume":
+    case "quit":
+    case "new":
+    case "fork":
+      return reason;
+    default:
+      return "unknown" as const;
+  }
+}
+
 function cleanupScopeGeneration(
   scope: SessionScope,
   owner: SessionOwnerToken,
   event: { reason?: string } | undefined,
+  lifecycleOrigin: "session_start" | "session_shutdown",
   ctx?: {
     cwd?: string;
     sessionManager?: { getSessionId?: () => string };
   },
 ): void {
   const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
-  const reason = `session_shutdown (${event?.reason ?? "unknown"})`;
+  const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
   snapshotOwnedJobs(scope, sessionId, ctx?.cwd, reason);
   cleanupWorkflowJobsForOwner(owner);
   clearInProcessDeliveries(owner);
 
-  const preserveInteractivePanes =
-    event?.reason === "reload" ||
-    event?.reason === "resume" ||
-    event?.reason === "quit";
+  const destroysStandalonePanes =
+    event?.reason === "new" || event?.reason === "fork";
   for (const state of [...scope.interactiveStates.values()]) {
     removeInteractiveSubagentState(state);
     if (
-      (!preserveInteractivePanes || isInMemoryWorkflowPane(state)) &&
+      (destroysStandalonePanes || isInMemoryWorkflowPane(state)) &&
       (state.status === "running" ||
         state.status === "idle" ||
         state.status === "unknown")
     ) {
       try {
-        cancelInteractiveSubagentByState(state);
+        cancelInteractiveSubagentByState(state, {
+          origin: lifecycleOrigin,
+          lifecycleReason: cancellationLifecycleReason(event?.reason),
+        });
       } catch {
         /* best effort */
       }
     }
-    if (event?.reason === "new") {
+    if (event?.reason === "new" || event?.reason === "fork") {
       try {
         removeInteractiveState(state.cwd, state.id);
       } catch {
@@ -200,7 +216,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       const previousOwner = sessionOwner(scope);
       closeActiveInteractiveSupervisor(previousOwner);
       clearSessionParsers(previousOwner);
-      cleanupScopeGeneration(scope, previousOwner, event, ctx);
+      cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
       scope.lifecycle = "shutdown";
     }
 
@@ -242,7 +258,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       const owner = sessionOwner(scope);
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
-      cleanupScopeGeneration(scope, owner, event, ctx);
+      cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
       scope.parentStreaming = false;
       scope.lifecycle = "shutdown";
       advanceSessionScopeGeneration(scope.id);

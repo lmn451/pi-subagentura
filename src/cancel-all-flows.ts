@@ -74,6 +74,7 @@ export async function cancelAllFlows(
       artifactDir: state.artifactDir,
       startedAt: state.startedAt,
       source: "cancel_all",
+      cancellationOrigin: "cancel_all",
     });
     addSnapshot(state.cancellationSnapshot);
   }

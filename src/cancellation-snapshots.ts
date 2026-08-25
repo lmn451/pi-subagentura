@@ -15,6 +15,10 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+  ParentCancellationLifecycleReason,
+  ParentCancellationOrigin,
+} from "./artifact";
 
 export const CANCELLATION_SNAPSHOT_SCHEMA_VERSION = 1;
 export const DEFAULT_CANCEL_SNAPSHOT_MAX_BYTES = 1024 * 1024;
@@ -79,6 +83,44 @@ export interface InteractiveSnapshotInput {
   artifactDir: string;
   startedAt?: number;
   source: CancellationSnapshotSource;
+  cancellationOrigin?: ParentCancellationOrigin;
+  cancellationLifecycleReason?: ParentCancellationLifecycleReason;
+}
+
+function normalizeParentCancellationOrigin(
+  value: unknown,
+): ParentCancellationOrigin | undefined {
+  switch (value) {
+    case "signal":
+    case "cancel_subagent":
+    case "cancel_all":
+    case "workflow":
+    case "supervisor":
+    case "cancel_interactive_subagent":
+    case "session_start":
+    case "session_shutdown":
+    case "supervisor_descendant":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeParentCancellationLifecycleReason(
+  value: unknown,
+): ParentCancellationLifecycleReason | undefined {
+  switch (value) {
+    case "startup":
+    case "reload":
+    case "resume":
+    case "quit":
+    case "new":
+    case "fork":
+    case "unknown":
+      return value;
+    default:
+      return undefined;
+  }
 }
 
 interface FileMetadata {
@@ -499,6 +541,16 @@ export function snapshotInteractiveContext(
   input: InteractiveSnapshotInput,
 ): CancellationSnapshotReceipt {
   const key = keyFor("interactive", input.id, input.parentSessionId);
+  const cancellationOrigin = normalizeParentCancellationOrigin(
+    input.cancellationOrigin,
+  );
+  const cancellationLifecycleReason =
+    cancellationOrigin === "session_start" ||
+    cancellationOrigin === "session_shutdown"
+      ? normalizeParentCancellationLifecycleReason(
+          input.cancellationLifecycleReason,
+        )
+      : undefined;
   if (!cancellationSnapshotsEnabled()) {
     return disabledReceipt("interactive", input.source, key);
   }
@@ -527,6 +579,8 @@ export function snapshotInteractiveContext(
       capturedAt: new Date().toISOString(),
       cancellation: {
         source: input.source,
+        cancellationOrigin,
+        cancellationLifecycleReason,
         id: input.id,
         parentSessionId: input.parentSessionId,
         startedAt: input.startedAt,

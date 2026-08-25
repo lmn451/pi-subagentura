@@ -72,6 +72,18 @@ export interface OutputHistoryEntry {
 export type CompletionOutcome = "done" | "error" | "cancelled";
 export type CompletionSource =
   "agent_settled" | "agent_end" | "explicit" | "process_exit" | "parent";
+export type ParentCancellationOrigin =
+  | "signal"
+  | "cancel_subagent"
+  | "cancel_all"
+  | "workflow"
+  | "supervisor"
+  | "cancel_interactive_subagent"
+  | "session_start"
+  | "session_shutdown"
+  | "supervisor_descendant";
+export type ParentCancellationLifecycleReason =
+  "startup" | "reload" | "resume" | "quit" | "new" | "fork" | "unknown";
 
 export type SubagentEventV2 =
   | {
@@ -104,6 +116,8 @@ export type SubagentEventV2 =
       status: "done" | "error" | "cancelled";
       outcome: CompletionOutcome;
       source: CompletionSource;
+      cancellationOrigin?: ParentCancellationOrigin;
+      cancellationLifecycleReason?: ParentCancellationLifecycleReason;
       output?: OutputSnapshot;
       outputError?: OutputSnapshotError;
       exitCode?: number;
@@ -264,6 +278,42 @@ export function boundedOptionalEventText(
   maxLength = MAX_EVENT_TEXT_LENGTH,
 ): string | undefined {
   return typeof value === "string" ? value.slice(0, maxLength) : undefined;
+}
+
+function normalizeParentCancellationOrigin(
+  value: unknown,
+): ParentCancellationOrigin | undefined {
+  switch (value) {
+    case "signal":
+    case "cancel_subagent":
+    case "cancel_all":
+    case "workflow":
+    case "supervisor":
+    case "cancel_interactive_subagent":
+    case "session_start":
+    case "session_shutdown":
+    case "supervisor_descendant":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeParentCancellationLifecycleReason(
+  value: unknown,
+): ParentCancellationLifecycleReason | undefined {
+  switch (value) {
+    case "startup":
+    case "reload":
+    case "resume":
+    case "quit":
+    case "new":
+    case "fork":
+    case "unknown":
+      return value;
+    default:
+      return undefined;
+  }
 }
 
 export interface SubagentArtifact {
@@ -504,6 +554,8 @@ export function appendCompletionEvent(
     turnId: string;
     outcome: CompletionOutcome;
     source: CompletionSource;
+    cancellationOrigin?: ParentCancellationOrigin;
+    cancellationLifecycleReason?: ParentCancellationLifecycleReason;
     exitCode?: number;
     message?: string;
     errorMessage?: string;
@@ -524,6 +576,18 @@ export function appendCompletionEvent(
     const snapshot = snapshotOutputForEvent(art, eventId);
     const message = boundedOptionalEventText(params.message);
     const errorMessage = boundedOptionalEventText(params.errorMessage);
+    const isParentCancellation =
+      params.outcome === "cancelled" && params.source === "parent";
+    const cancellationOrigin = isParentCancellation
+      ? normalizeParentCancellationOrigin(params.cancellationOrigin)
+      : undefined;
+    const cancellationLifecycleReason =
+      cancellationOrigin === "session_start" ||
+      cancellationOrigin === "session_shutdown"
+        ? normalizeParentCancellationLifecycleReason(
+            params.cancellationLifecycleReason,
+          )
+        : undefined;
     const event: CompletionEventV2 = {
       version: 2,
       eventId,
@@ -537,6 +601,8 @@ export function appendCompletionEvent(
       ...(params.exitCode === undefined ? {} : { exitCode: params.exitCode }),
       ...(message ? { message } : {}),
       ...(errorMessage ? { errorMessage } : {}),
+      ...(cancellationOrigin ? { cancellationOrigin } : {}),
+      ...(cancellationLifecycleReason ? { cancellationLifecycleReason } : {}),
     };
     appendEvent(art, event);
     return event;
@@ -783,6 +849,18 @@ function normalizeEvent(
               message: rawOutputError.message.slice(0, MAX_EVENT_TEXT_LENGTH),
             }
           : undefined;
+    const isParentCancellation =
+      obj.outcome === "cancelled" && obj.source === "parent";
+    const cancellationOrigin = isParentCancellation
+      ? normalizeParentCancellationOrigin(obj.cancellationOrigin)
+      : undefined;
+    const cancellationLifecycleReason =
+      cancellationOrigin === "session_start" ||
+      cancellationOrigin === "session_shutdown"
+        ? normalizeParentCancellationLifecycleReason(
+            obj.cancellationLifecycleReason,
+          )
+        : undefined;
     return {
       event: {
         ...base,
@@ -796,6 +874,8 @@ function normalizeEvent(
         message,
         errorMessage: boundedOptionalEventText(obj.errorMessage),
         summary,
+        cancellationOrigin,
+        cancellationLifecycleReason,
       },
       legacy: false,
     };

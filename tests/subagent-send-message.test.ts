@@ -159,6 +159,8 @@ describe("send_interactive_subagent_message", () => {
     expect(forwarded).toContain('"$ARTIFACT_DIR/cli.mjs" done 0');
     expect(forwarded).toMatch(/before.*final assistant response/i);
     expect(forwarded).toMatch(/if.*fails.*do not.*final.*retry/i);
+    expect(forwarded).toMatch(/remain in the Pi REPL and wait for follow-up/i);
+    expect(forwarded).toMatch(/do not intentionally exit or close the pane/i);
   });
 
   it("shows the sent message and trims an oversized preview", async () => {
