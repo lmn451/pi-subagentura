@@ -20,7 +20,7 @@ import {
   createRootSpawnTreeContext,
   resetRuntimeSpawnTreeContextForTests,
   writeLineageBootstrap,
-  type SpawnTreeContext,
+  type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
 import { appendEvent, artifactPath } from "../src/artifact";
@@ -41,7 +41,7 @@ interface HandlerRegistration {
 }
 
 function registerHandlers(
-  initialSpawnTreeContext?: SpawnTreeContext,
+  initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();

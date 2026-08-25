@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
-import type { SpawnTreeContext } from "./spawn-tree-context";
+import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
 import type { PendingJobDelivery } from "./notifications";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
@@ -29,7 +29,7 @@ export interface SessionScope {
   ui?: ExtensionUIContext;
   lifecycle: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
-  spawnTreeContext?: SpawnTreeContext;
+  spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
@@ -45,7 +45,7 @@ export interface SessionScopeRegistration {
   ui?: ExtensionUIContext;
   lifecycle?: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
-  spawnTreeContext?: SpawnTreeContext;
+  spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
@@ -104,7 +104,7 @@ export function nextSessionScopeId(): number {
 
 export function createSessionScope(
   pi: ExtensionAPI,
-  spawnTreeContext?: SpawnTreeContext,
+  spawnTreeContext?: ParsedSpawnTreeContext,
   lineageMode: "root" | "child" = "root",
 ): SessionScope {
   return {

@@ -42,18 +42,26 @@ export interface SpawnTreeContext {
   maxNodes: number;
 }
 
+// Parse-don't-validate: only values that came out of `parseSpawnTreeContext`
+// (directly or via the constructors below) carry this brand, so trust-boundary
+// consumers can require `ParsedSpawnTreeContext` and skip re-validation.
+const parsedBrand = Symbol("spawnTreeContext.parsed");
+export type ParsedSpawnTreeContext = SpawnTreeContext & {
+  readonly [parsedBrand]: true;
+};
+
 interface LineageBootstrapEnvelope {
   schemaVersion: typeof LINEAGE_BOOTSTRAP_SCHEMA_VERSION;
   issuedAt: number;
   expiresAt: number;
-  context: SpawnTreeContext;
+  context: ParsedSpawnTreeContext;
 }
 
 interface RuntimeContextGlobal {
-  __piSubagenturaRuntimeSpawnTreeContexts?: Map<string, SpawnTreeContext>;
+  __piSubagenturaRuntimeSpawnTreeContexts?: Map<string, ParsedSpawnTreeContext>;
 }
 
-function runtimeContexts(): Map<string, SpawnTreeContext> {
+function runtimeContexts(): Map<string, ParsedSpawnTreeContext> {
   const state = globalThis as typeof globalThis & RuntimeContextGlobal;
   return (state[RUNTIME_CONTEXTS_KEY] ??= new Map());
 }
@@ -111,7 +119,7 @@ function assertRoleIdentity(
   }
 }
 
-export function parseSpawnTreeContext(value: unknown): SpawnTreeContext {
+export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid lineage bootstrap payload");
   }
@@ -159,6 +167,7 @@ export function parseSpawnTreeContext(value: unknown): SpawnTreeContext {
     depth,
     maxDepth,
     maxNodes: boundedInteger(raw.maxNodes, "maxNodes", 1, MAX_CONTEXT_NODES),
+    [parsedBrand]: true,
   };
 }
 
@@ -171,7 +180,7 @@ export function defaultSpawnTreeSessionRoot(): string {
 export function createRootSpawnTreeContext(
   rootId: string,
   sessionRoot = defaultSpawnTreeSessionRoot(),
-): SpawnTreeContext {
+): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
     role: "root",
@@ -184,10 +193,10 @@ export function createRootSpawnTreeContext(
 }
 
 export function createDescendantSpawnTreeContext(
-  parent: SpawnTreeContext,
+  parent: ParsedSpawnTreeContext,
   currentAgentId: string,
   artifactDir: string,
-): SpawnTreeContext {
+): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     ...parent,
     role: "descendant",
@@ -200,11 +209,10 @@ export function createDescendantSpawnTreeContext(
 
 export function writeLineageBootstrap(
   artifactDir: string,
-  context: SpawnTreeContext,
+  context: ParsedSpawnTreeContext,
 ): string {
-  const validated = parseSpawnTreeContext(context);
   const targetDir = resolve(artifactDir);
-  if (validated.role !== "descendant" || validated.artifactDir !== targetDir) {
+  if (context.role !== "descendant" || context.artifactDir !== targetDir) {
     throw new Error(
       "Lineage bootstrap target does not match artifact directory",
     );
@@ -217,7 +225,7 @@ export function writeLineageBootstrap(
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
     issuedAt,
     expiresAt: issuedAt + LINEAGE_BOOTSTRAP_TTL_MS,
-    context: validated,
+    context,
   };
   mkdirSync(targetDir, { recursive: true });
   try {
@@ -234,7 +242,7 @@ export function writeLineageBootstrap(
   }
 }
 
-function validateEnvelope(value: unknown, now: number): SpawnTreeContext {
+function validateEnvelope(value: unknown, now: number): ParsedSpawnTreeContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid lineage bootstrap envelope");
   }
@@ -273,7 +281,7 @@ function readBoundedJson(descriptor: number): unknown {
   return JSON.parse(buffer.subarray(0, offset).toString("utf8"));
 }
 
-function readClaimedBootstrap(path: string): SpawnTreeContext {
+function readClaimedBootstrap(path: string): ParsedSpawnTreeContext {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
   const descriptor = openSync(path, flags);
   try {
@@ -319,7 +327,7 @@ function cleanupClaim(path: string | undefined): void {
 
 export function acquireRuntimeSpawnTreeContext(
   artifactDir: string,
-): SpawnTreeContext | undefined {
+): ParsedSpawnTreeContext | undefined {
   const artifactKey = resolve(artifactDir);
   const bootstrapValue = process.env[LINEAGE_BOOTSTRAP_ENV];
   delete process.env[LINEAGE_BOOTSTRAP_ENV];

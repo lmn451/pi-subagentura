@@ -25,7 +25,7 @@ import {
   createRootSpawnTreeContext,
   releaseRuntimeSpawnTreeContext,
   retireLineageBootstraps,
-  type SpawnTreeContext,
+  type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
@@ -211,7 +211,7 @@ function cleanupScopeGeneration(
 
 export function registerSessionHandlers(
   pi: ExtensionAPI,
-  initialSpawnTreeContext?: SpawnTreeContext,
+  initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
 ): SessionScope {
   const scope = createSessionScope(

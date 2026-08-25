@@ -30,7 +30,7 @@ import {
   type ProjectedLineageNode,
   type ProjectionIssue,
 } from "./interactive-lineage";
-import type { SpawnTreeContext } from "./spawn-tree-context";
+import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
 import { getMux, type MuxName, type PaneLiveness } from "./multiplexer";
 import {
   abortJobTree,
@@ -323,7 +323,7 @@ function parseStartedAt(value: string): number {
 }
 
 async function loadSupervisorProjection(
-  context: SpawnTreeContext | undefined,
+  context: ParsedSpawnTreeContext | undefined,
   sessionId: string | undefined,
   owner: SessionOwnerToken | undefined,
 ): Promise<SupervisorProjection | undefined> {
@@ -458,13 +458,13 @@ export function supervisorStatusLines(
 export function registerInteractiveSupervisor(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
-  explicitSpawnTreeContext?: SpawnTreeContext,
+  explicitSpawnTreeContext?: ParsedSpawnTreeContext,
 ): void {
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
       ? { id: sessionScope.id, generation: sessionScope.generation }
       : undefined;
-  const spawnTreeContext = (): SpawnTreeContext | undefined =>
+  const spawnTreeContext = (): ParsedSpawnTreeContext | undefined =>
     sessionScope?.spawnTreeContext ?? explicitSpawnTreeContext;
   const open = async (ctx: {
     ui: Parameters<typeof showInteractiveSupervisor>[0];

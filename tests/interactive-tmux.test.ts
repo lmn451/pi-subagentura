@@ -27,7 +27,9 @@ import { importFresh } from "./test-utils";
 import { hashLineageRoot } from "../src/interactive-lineage";
 import {
   createRootSpawnTreeContext,
+  parseSpawnTreeContext,
   type SpawnTreeContext,
+  type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 
 import { loadInteractiveStates } from "../src/artifact";
@@ -66,18 +68,16 @@ function lineageNodesDir(sessionRoot: string, rootId: string): string {
 function syntheticSpawnTreeContext(
   sessionRoot: string,
   overrides: Partial<SpawnTreeContext> = {},
-): SpawnTreeContext {
+): ParsedSpawnTreeContext {
   const context: SpawnTreeContext = {
     ...createRootSpawnTreeContext("root-session", sessionRoot),
     ...overrides,
   };
-  return context.role === "descendant" && context.currentAgentId
-    ? {
-        ...context,
-        artifactDir:
-          context.artifactDir ?? join(sessionRoot, context.currentAgentId),
-      }
-    : context;
+  if (context.role === "descendant" && context.currentAgentId) {
+    context.artifactDir ??= join(sessionRoot, context.currentAgentId);
+  }
+  // Re-parse so the helper honors the parse-don't-validate brand contract.
+  return parseSpawnTreeContext(context);
 }
 
 /** Write a schema-valid node manifest so the prune sweep can read it. */

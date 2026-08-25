@@ -89,9 +89,8 @@ import {
   defaultSpawnTreeSessionRoot,
   LINEAGE_BOOTSTRAP_ENV,
   retireLineageBootstraps,
-  parseSpawnTreeContext,
   writeLineageBootstrap,
-  type SpawnTreeContext,
+  type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
@@ -515,7 +514,7 @@ export function launchInteractiveSubagent(params: {
   /** Current runtime scope that authoritatively owns the spawned state. */
   sessionScope?: SessionScope;
   /** Explicit lineage authority; ambient lineage environment is never consulted. */
-  spawnTreeContext?: SpawnTreeContext;
+  spawnTreeContext?: ParsedSpawnTreeContext;
   /** Workflow owner for grouping and cancellation. */
   workflowId?: string;
   /** Workflow-managed completions are consumed by the workflow runner. */
@@ -538,9 +537,8 @@ export function launchInteractiveSubagent(params: {
     params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
   const background = params.background !== false; // default true (hidden)
   const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
-  const spawnTreeContext = params.spawnTreeContext
-    ? parseSpawnTreeContext(params.spawnTreeContext)
-    : undefined;
+  // Parse-don't-validate: callers must hand us an already-parsed context.
+  const spawnTreeContext = params.spawnTreeContext;
   const parentAgentId = spawnTreeContext?.currentAgentId;
   const rootId = spawnTreeContext?.rootId;
   const sessionRoot =
