@@ -223,7 +223,7 @@ describe("subagent_interactive tool lifecycle", () => {
     const callArgs = mockLaunchInteractiveSubagent.mock.calls[0][0];
     expect(callArgs.notifyOnComplete).toBe("notify");
     expect(callArgs.triggerTurnOnComplete).toBe(true);
-    expect(callArgs.lineageContext).toMatchObject({
+    expect(callArgs.spawnTreeContext).toMatchObject({
       role: "root",
       rootId: "test-session-id",
     });
@@ -416,7 +416,7 @@ describe("subagent_interactive tool lifecycle", () => {
     const toolDef = getInteractiveToolDef(api);
     const scope = getStartedSessionScopes()[0];
     scope!.lineageMode = "child";
-    scope!.lineageContext = undefined;
+    scope!.spawnTreeContext = undefined;
 
     const result = await toolDef.execute(
       "call-no-lineage",

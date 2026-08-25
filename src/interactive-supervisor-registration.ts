@@ -30,7 +30,7 @@ import {
   type ProjectedLineageNode,
   type ProjectionIssue,
 } from "./interactive-lineage";
-import type { LineageContext } from "./lineage-context";
+import type { SpawnTreeContext } from "./spawn-tree-context";
 import { getMux, type MuxName, type PaneLiveness } from "./multiplexer";
 import {
   abortJobTree,
@@ -323,7 +323,7 @@ function parseStartedAt(value: string): number {
 }
 
 async function loadSupervisorProjection(
-  context: LineageContext | undefined,
+  context: SpawnTreeContext | undefined,
   sessionId: string | undefined,
   owner: SessionOwnerToken | undefined,
 ): Promise<SupervisorProjection | undefined> {
@@ -458,24 +458,24 @@ export function supervisorStatusLines(
 export function registerInteractiveSupervisor(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
-  explicitLineageContext?: LineageContext,
+  explicitSpawnTreeContext?: SpawnTreeContext,
 ): void {
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
       ? { id: sessionScope.id, generation: sessionScope.generation }
       : undefined;
-  const lineageContext = (): LineageContext | undefined =>
-    sessionScope?.lineageContext ?? explicitLineageContext;
+  const spawnTreeContext = (): SpawnTreeContext | undefined =>
+    sessionScope?.spawnTreeContext ?? explicitSpawnTreeContext;
   const open = async (ctx: {
     ui: Parameters<typeof showInteractiveSupervisor>[0];
     sessionManager?: { getSessionId?: () => string };
   }) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const activeOwner = owner();
-    const activeLineageContext = lineageContext();
+    const activeSpawnTreeContext = spawnTreeContext();
     let refreshError: string | undefined;
     let projection = await loadSupervisorProjection(
-      activeLineageContext,
+      activeSpawnTreeContext,
       sessionId,
       activeOwner,
     ).catch((error: unknown) => {
@@ -496,7 +496,7 @@ export function registerInteractiveSupervisor(
           // indication; the error now reaches the overlay footer.
           try {
             projection = await loadSupervisorProjection(
-              activeLineageContext,
+              activeSpawnTreeContext,
               sessionId,
               activeOwner,
             );

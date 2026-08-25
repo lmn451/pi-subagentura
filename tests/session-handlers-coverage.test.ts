@@ -15,13 +15,13 @@ import {
 import { registerSessionHandlers } from "../src/session-handlers";
 import {
   LINEAGE_BOOTSTRAP_ENV,
-  acquireRuntimeLineageContext,
-  createDescendantLineageContext,
-  createRootLineageContext,
-  resetRuntimeLineageContextForTests,
+  acquireRuntimeSpawnTreeContext,
+  createDescendantSpawnTreeContext,
+  createRootSpawnTreeContext,
+  resetRuntimeSpawnTreeContextForTests,
   writeLineageBootstrap,
-  type LineageContext,
-} from "../src/lineage-context";
+  type SpawnTreeContext,
+} from "../src/spawn-tree-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
 import { appendEvent, artifactPath } from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
@@ -41,7 +41,7 @@ interface HandlerRegistration {
 }
 
 function registerHandlers(
-  initialLineageContext?: LineageContext,
+  initialSpawnTreeContext?: SpawnTreeContext,
   allowRootLineage = true,
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
@@ -55,7 +55,7 @@ function registerHandlers(
   };
   const sessionScope = registerSessionHandlers(
     pi as any,
-    initialLineageContext,
+    initialSpawnTreeContext,
     allowRootLineage,
   );
   return { handlers, pi, sessionScope };
@@ -175,7 +175,7 @@ describe("session handler lifecycle callbacks", () => {
     interactiveSubagentRegistry.clear();
     clearSessionScopes();
     __setTmuxMultiplexer(undefined);
-    resetRuntimeLineageContextForTests();
+    resetRuntimeSpawnTreeContextForTests();
     delete process.env[LINEAGE_BOOTSTRAP_ENV];
     rmSync(root, { recursive: true, force: true });
   });
@@ -185,7 +185,7 @@ describe("session handler lifecycle callbacks", () => {
 
     startSession(registration, root, "session-a");
 
-    expect(registration.sessionScope.lineageContext).toMatchObject({
+    expect(registration.sessionScope.spawnTreeContext).toMatchObject({
       role: "root",
       rootId: "session-a",
       depth: 0,
@@ -197,12 +197,12 @@ describe("session handler lifecycle callbacks", () => {
 
     startSession(registration, root, "child-session");
 
-    expect(registration.sessionScope.lineageContext).toBeUndefined();
+    expect(registration.sessionScope.spawnTreeContext).toBeUndefined();
   });
 
   it("preserves a consumed descendant context across session_start", () => {
-    const initial = createDescendantLineageContext(
-      createRootLineageContext("lineage-root", root),
+    const initial = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext("lineage-root", root),
       "child-agent",
       join(root, "child-agent"),
     );
@@ -210,13 +210,13 @@ describe("session handler lifecycle callbacks", () => {
 
     startSession(registration, root, "child-session");
 
-    expect(registration.sessionScope.lineageContext).toBe(initial);
+    expect(registration.sessionScope.spawnTreeContext).toBe(initial);
   });
 
   it("clears descendant authority on a fresh child session", () => {
     const artifactDir = join(root, "child-agent");
-    const expected = createDescendantLineageContext(
-      createRootLineageContext("lineage-root", root),
+    const expected = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext("lineage-root", root),
       "child-agent",
       artifactDir,
     );
@@ -224,22 +224,22 @@ describe("session handler lifecycle callbacks", () => {
       artifactDir,
       expected,
     );
-    const initial = acquireRuntimeLineageContext(artifactDir)!;
+    const initial = acquireRuntimeSpawnTreeContext(artifactDir)!;
     const registration = registerHandlers(initial, false);
     const ctx = startSession(registration, root, "child-session");
     const abandonedPath = writeLineageBootstrap(artifactDir, expected);
 
     registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
 
-    expect(registration.sessionScope.lineageContext).toBeUndefined();
-    expect(acquireRuntimeLineageContext(artifactDir)).toBeUndefined();
+    expect(registration.sessionScope.spawnTreeContext).toBeUndefined();
+    expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
     expect(existsSync(abandonedPath)).toBe(false);
   });
 
   it("clears descendant authority on fresh child shutdown", () => {
     const artifactDir = join(root, "shutdown-child");
-    const expected = createDescendantLineageContext(
-      createRootLineageContext("lineage-root", root),
+    const expected = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext("lineage-root", root),
       "shutdown-child",
       artifactDir,
     );
@@ -247,14 +247,14 @@ describe("session handler lifecycle callbacks", () => {
       artifactDir,
       expected,
     );
-    const initial = acquireRuntimeLineageContext(artifactDir)!;
+    const initial = acquireRuntimeSpawnTreeContext(artifactDir)!;
     const registration = registerHandlers(initial, false);
     const ctx = startSession(registration, root, "child-session");
 
     registration.handlers.get("session_shutdown")![0]({ reason: "fork" }, ctx);
 
-    expect(registration.sessionScope.lineageContext).toBeUndefined();
-    expect(acquireRuntimeLineageContext(artifactDir)).toBeUndefined();
+    expect(registration.sessionScope.spawnTreeContext).toBeUndefined();
+    expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
   });
 
   it("tracks streaming and flush lifecycle state on the exact scope", () => {

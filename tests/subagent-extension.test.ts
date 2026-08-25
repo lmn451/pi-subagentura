@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LINEAGE_BOOTSTRAP_ENV,
-  createDescendantLineageContext,
-  createRootLineageContext,
-  resetRuntimeLineageContextForTests,
+  createDescendantSpawnTreeContext,
+  createRootSpawnTreeContext,
+  resetRuntimeSpawnTreeContextForTests,
   writeLineageBootstrap,
-} from "../src/lineage-context";
+} from "../src/spawn-tree-context";
 
 const BASE_INTERACTIVE_TOOL_NAMES = [
   "cancel_interactive_subagent",
@@ -147,8 +147,8 @@ describe("extension registration", () => {
   it("does not consume descendant bootstrap authority in parent mode", () => {
     const root = mkdtempSync(join(tmpdir(), "parent-bootstrap-gate-"));
     const artifactDir = join(root, "child-agent");
-    const child = createDescendantLineageContext(
-      createRootLineageContext("root-session", root),
+    const child = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext("root-session", root),
       "child-agent",
       artifactDir,
     );
@@ -164,7 +164,7 @@ describe("extension registration", () => {
     } finally {
       delete process.env[LINEAGE_BOOTSTRAP_ENV];
       delete process.env.ARTIFACT_DIR;
-      resetRuntimeLineageContextForTests();
+      resetRuntimeSpawnTreeContextForTests();
       rmSync(root, { recursive: true, force: true });
     }
   });

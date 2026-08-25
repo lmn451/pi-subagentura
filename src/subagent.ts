@@ -43,9 +43,9 @@ import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
 import {
-  acquireRuntimeLineageContext,
+  acquireRuntimeSpawnTreeContext,
   LINEAGE_BOOTSTRAP_ENV,
-} from "./lineage-context";
+} from "./spawn-tree-context";
 /** @internal Session-rehydration helper used by session-handlers.ts */
 export { rehydrateInteractiveSubagents } from "./rehydrate";
 /**
@@ -94,8 +94,8 @@ export default function (pi: ExtensionAPI) {
   if (!isChild || !childArtifactDir) {
     delete process.env[LINEAGE_BOOTSTRAP_ENV];
   }
-  const initialLineageContext = childArtifactDir
-    ? acquireRuntimeLineageContext(childArtifactDir)
+  const initialSpawnTreeContext = childArtifactDir
+    ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
   if (isChild) {
     registerChildProtocol(pi);
@@ -104,7 +104,7 @@ export default function (pi: ExtensionAPI) {
     }
     const sessionScope = registerSessionHandlers(
       pi,
-      initialLineageContext,
+      initialSpawnTreeContext,
       false,
     );
     registerInteractiveSubagentTools(pi, sessionScope);

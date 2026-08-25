@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
-import type { LineageContext } from "./lineage-context";
+import type { SpawnTreeContext } from "./spawn-tree-context";
 import type { PendingJobDelivery } from "./notifications";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
@@ -29,7 +29,7 @@ export interface SessionScope {
   ui?: ExtensionUIContext;
   lifecycle: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
-  lineageContext?: LineageContext;
+  spawnTreeContext?: SpawnTreeContext;
   lineageMode?: "root" | "child";
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
@@ -45,7 +45,7 @@ export interface SessionScopeRegistration {
   ui?: ExtensionUIContext;
   lifecycle?: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
-  lineageContext?: LineageContext;
+  spawnTreeContext?: SpawnTreeContext;
   lineageMode?: "root" | "child";
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
@@ -104,7 +104,7 @@ export function nextSessionScopeId(): number {
 
 export function createSessionScope(
   pi: ExtensionAPI,
-  lineageContext?: LineageContext,
+  spawnTreeContext?: SpawnTreeContext,
   lineageMode: "root" | "child" = "root",
 ): SessionScope {
   return {
@@ -112,7 +112,7 @@ export function createSessionScope(
     generation: 0,
     lifecycle: "registered",
     pi,
-    lineageContext,
+    spawnTreeContext,
     lineageMode,
     parentStreaming: false,
     inProcessJobs: new Map(),
@@ -155,8 +155,8 @@ export function registerSessionScope(
     if (registration.sessionManager !== undefined) {
       existing.sessionManager = registration.sessionManager;
     }
-    if (Object.hasOwn(registration, "lineageContext")) {
-      existing.lineageContext = registration.lineageContext;
+    if (Object.hasOwn(registration, "spawnTreeContext")) {
+      existing.spawnTreeContext = registration.spawnTreeContext;
     }
     if (registration.lineageMode !== undefined) {
       existing.lineageMode = registration.lineageMode;
@@ -183,7 +183,7 @@ export function registerSessionScope(
         ui: registration.ui,
         lifecycle: registration.lifecycle ?? "started",
         sessionManager: registration.sessionManager,
-        lineageContext: registration.lineageContext,
+        spawnTreeContext: registration.spawnTreeContext,
         lineageMode: registration.lineageMode ?? "root",
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),

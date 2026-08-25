@@ -29,7 +29,7 @@ import {
 } from "../src/interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
-import { createRootLineageContext } from "../src/lineage-context";
+import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -345,7 +345,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
-      lineageContext: createRootLineageContext("pi", cwd),
+      spawnTreeContext: createRootSpawnTreeContext("pi", cwd),
     });
 
     const script = readFileSync(state.launchScriptFile, "utf8");

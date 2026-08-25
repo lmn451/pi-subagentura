@@ -63,7 +63,7 @@
     "src/interactive-supervisor-registration.ts",
     "src/interactive-supervisor-ui.ts",
     "src/interactive-lineage.ts",
-    "src/lineage-context.ts",
+    "src/spawn-tree-context.ts",
     "src/multiplexer.ts",
     "src/multiplexer-tmux.ts",
     "src/multiplexer-zellij.ts",

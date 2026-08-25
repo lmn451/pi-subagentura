@@ -211,7 +211,7 @@ export function registerInteractiveSubagentTools(
       }
       if (
         registration.scope?.lineageMode === "child" &&
-        !registration.scope.lineageContext
+        !registration.scope.spawnTreeContext
       ) {
         return {
           content: [
@@ -271,7 +271,7 @@ export function registerInteractiveSubagentTools(
           parentSessionId: ctx.sessionManager.getSessionId(),
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
-          lineageContext: registration.scope?.lineageContext,
+          spawnTreeContext: registration.scope?.spawnTreeContext,
         });
         updateRunningSubagentFooter(
           ctx.ui,

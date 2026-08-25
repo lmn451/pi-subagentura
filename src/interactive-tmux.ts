@@ -85,14 +85,14 @@ import {
   writeLineageManifestAtomicSync,
 } from "./interactive-lineage";
 import {
-  createDescendantLineageContext,
-  defaultLineageSessionRoot,
+  createDescendantSpawnTreeContext,
+  defaultSpawnTreeSessionRoot,
   LINEAGE_BOOTSTRAP_ENV,
   retireLineageBootstraps,
-  validateLineageContext,
+  parseSpawnTreeContext,
   writeLineageBootstrap,
-  type LineageContext,
-} from "./lineage-context";
+  type SpawnTreeContext,
+} from "./spawn-tree-context";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -341,7 +341,7 @@ export function tmuxSetupHint(): string {
 }
 
 function defaultSessionRoot(): string {
-  return defaultLineageSessionRoot();
+  return defaultSpawnTreeSessionRoot();
 }
 
 function sessionDirFor(cwd: string): string {
@@ -515,7 +515,7 @@ export function launchInteractiveSubagent(params: {
   /** Current runtime scope that authoritatively owns the spawned state. */
   sessionScope?: SessionScope;
   /** Explicit lineage authority; ambient lineage environment is never consulted. */
-  lineageContext?: LineageContext;
+  spawnTreeContext?: SpawnTreeContext;
   /** Workflow owner for grouping and cancellation. */
   workflowId?: string;
   /** Workflow-managed completions are consumed by the workflow runner. */
@@ -538,22 +538,22 @@ export function launchInteractiveSubagent(params: {
     params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
   const background = params.background !== false; // default true (hidden)
   const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
-  const lineageContext = params.lineageContext
-    ? validateLineageContext(params.lineageContext)
+  const spawnTreeContext = params.spawnTreeContext
+    ? parseSpawnTreeContext(params.spawnTreeContext)
     : undefined;
-  const parentAgentId = lineageContext?.currentAgentId;
-  const rootId = lineageContext?.rootId;
+  const parentAgentId = spawnTreeContext?.currentAgentId;
+  const rootId = spawnTreeContext?.rootId;
   const sessionRoot =
-    lineageContext?.sessionRoot ?? defaultLineageSessionRoot();
-  const effectiveCurrentDepth = lineageContext?.depth ?? 0;
-  const effectiveMaxDepth = lineageContext?.maxDepth ?? DEFAULT_MAX_DEPTH;
+    spawnTreeContext?.sessionRoot ?? defaultSpawnTreeSessionRoot();
+  const effectiveCurrentDepth = spawnTreeContext?.depth ?? 0;
+  const effectiveMaxDepth = spawnTreeContext?.maxDepth ?? DEFAULT_MAX_DEPTH;
   const nextDepth = effectiveCurrentDepth + 1;
   if (rootId && nextDepth > effectiveMaxDepth) {
     throw new Error(
       `interactive sub-agent depth ${nextDepth} exceeds max ${effectiveMaxDepth}`,
     );
   }
-  const maxNodes = lineageContext?.maxNodes ?? DEFAULT_MAX_NODES;
+  const maxNodes = spawnTreeContext?.maxNodes ?? DEFAULT_MAX_NODES;
   // The cap applies whenever a lineage root exists, even when this spawn will
   // not persist a manifest of its own — recursion inside a tree still has to be
   // bounded by that tree's budget.
@@ -732,10 +732,14 @@ export function launchInteractiveSubagent(params: {
       cwd,
       thinkingLevel: params.thinkingLevel,
     });
-    if (lineageContext) {
+    if (spawnTreeContext) {
       lineageBootstrapPath = writeLineageBootstrap(
         paths.artifactDir,
-        createDescendantLineageContext(lineageContext, id, paths.artifactDir),
+        createDescendantSpawnTreeContext(
+          spawnTreeContext,
+          id,
+          paths.artifactDir,
+        ),
       );
     }
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {

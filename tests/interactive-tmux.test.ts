@@ -26,9 +26,9 @@ import { join } from "node:path";
 import { importFresh } from "./test-utils";
 import { hashLineageRoot } from "../src/interactive-lineage";
 import {
-  createRootLineageContext,
-  type LineageContext,
-} from "../src/lineage-context";
+  createRootSpawnTreeContext,
+  type SpawnTreeContext,
+} from "../src/spawn-tree-context";
 
 import { loadInteractiveStates } from "../src/artifact";
 /** Standard tmux pane id returned by mocks when "new-window"/"split-window" is called. */
@@ -63,12 +63,12 @@ function lineageNodesDir(sessionRoot: string, rootId: string): string {
   );
 }
 
-function syntheticLineageContext(
+function syntheticSpawnTreeContext(
   sessionRoot: string,
-  overrides: Partial<LineageContext> = {},
-): LineageContext {
-  const context: LineageContext = {
-    ...createRootLineageContext("root-session", sessionRoot),
+  overrides: Partial<SpawnTreeContext> = {},
+): SpawnTreeContext {
+  const context: SpawnTreeContext = {
+    ...createRootSpawnTreeContext("root-session", sessionRoot),
     ...overrides,
   };
   return context.role === "descendant" && context.currentAgentId
@@ -263,7 +263,7 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
-      lineageContext: syntheticLineageContext(tmp, {
+      spawnTreeContext: syntheticSpawnTreeContext(tmp, {
         role: "descendant",
         currentAgentId: "parent-agent",
         depth: 1,
@@ -326,7 +326,7 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
-        lineageContext: syntheticLineageContext(tmp, {
+        spawnTreeContext: syntheticSpawnTreeContext(tmp, {
           role: "descendant",
           currentAgentId: "current-agent",
           depth: 2,
@@ -367,7 +367,7 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
-        lineageContext: syntheticLineageContext(tmp, { maxNodes: 1 }),
+        spawnTreeContext: syntheticSpawnTreeContext(tmp, { maxNodes: 1 }),
       }),
     ).toThrow(/reached max nodes 1/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
@@ -401,7 +401,7 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
-      lineageContext: syntheticLineageContext(tmp, { maxNodes: 4 }),
+      spawnTreeContext: syntheticSpawnTreeContext(tmp, { maxNodes: 4 }),
     });
 
     expect(state.id).toBeTruthy();
@@ -438,7 +438,7 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
-      lineageContext: syntheticLineageContext(tmp, { maxNodes: 2 }),
+      spawnTreeContext: syntheticSpawnTreeContext(tmp, { maxNodes: 2 }),
     });
 
     expect(state.id).toBeTruthy();
@@ -478,7 +478,7 @@ describe("interactive-tmux", () => {
         task: "must remain bounded",
         cwd: tmp,
         parentSessionId: "owner-session",
-        lineageContext: syntheticLineageContext(tmp, { maxNodes: 1 }),
+        spawnTreeContext: syntheticSpawnTreeContext(tmp, { maxNodes: 1 }),
       }),
     ).toThrow(/reached max nodes 1/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
@@ -515,7 +515,7 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
-        lineageContext: syntheticLineageContext(tmp, { maxNodes: 4 }),
+        spawnTreeContext: syntheticSpawnTreeContext(tmp, { maxNodes: 4 }),
       }),
     ).toThrow(/reached max nodes 4/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);

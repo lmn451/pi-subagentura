@@ -22,11 +22,11 @@ import {
 import { debugLog, removeInProcessJob } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import {
-  createRootLineageContext,
-  releaseRuntimeLineageContext,
+  createRootSpawnTreeContext,
+  releaseRuntimeSpawnTreeContext,
   retireLineageBootstraps,
-  type LineageContext,
-} from "./lineage-context";
+  type SpawnTreeContext,
+} from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
   cancelInteractiveSubagentByState,
@@ -139,10 +139,10 @@ function clearFreshChildLineage(
   reason: string | undefined,
 ): void {
   if (reason !== "new" && reason !== "fork") return;
-  if (scope.lineageContext?.role !== "descendant") return;
-  retireLineageBootstraps(scope.lineageContext.artifactDir!);
-  releaseRuntimeLineageContext(scope.lineageContext);
-  scope.lineageContext = undefined;
+  if (scope.spawnTreeContext?.role !== "descendant") return;
+  retireLineageBootstraps(scope.spawnTreeContext.artifactDir!);
+  releaseRuntimeSpawnTreeContext(scope.spawnTreeContext);
+  scope.spawnTreeContext = undefined;
 }
 
 function cleanupScopeGeneration(
@@ -211,12 +211,12 @@ function cleanupScopeGeneration(
 
 export function registerSessionHandlers(
   pi: ExtensionAPI,
-  initialLineageContext?: LineageContext,
+  initialSpawnTreeContext?: SpawnTreeContext,
   allowRootLineage = true,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
-    initialLineageContext,
+    initialSpawnTreeContext,
     allowRootLineage ? "root" : "child",
   );
   const globalState = getGlobalState() as any;
@@ -255,9 +255,9 @@ export function registerSessionHandlers(
     if (
       allowRootLineage &&
       sessionId &&
-      scope.lineageContext?.role !== "descendant"
+      scope.spawnTreeContext?.role !== "descendant"
     ) {
-      scope.lineageContext = createRootLineageContext(sessionId);
+      scope.spawnTreeContext = createRootSpawnTreeContext(sessionId);
     }
     scope.parentStreaming = false;
     registerSessionScope(scope);

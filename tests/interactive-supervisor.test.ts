@@ -29,7 +29,7 @@ import {
   resolveLineageStorePaths,
   writeLineageManifestAtomic,
 } from "../src/interactive-lineage";
-import { createRootLineageContext } from "../src/lineage-context";
+import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import {
   captureInteractiveSubagent,
   focusInteractiveSubagent,
@@ -171,7 +171,7 @@ async function lineageHarness(rootId: string) {
       registerShortcut: vi.fn(),
     } as never,
     undefined,
-    createRootLineageContext(rootId, sessionRoot),
+    createRootSpawnTreeContext(rootId, sessionRoot),
   );
 
   return {
@@ -1381,7 +1381,7 @@ describe("interactive supervisor", () => {
         registerShortcut: vi.fn(),
       } as never,
       undefined,
-      createRootLineageContext(rootId, sessionRoot),
+      createRootSpawnTreeContext(rootId, sessionRoot),
     );
     const custom = vi.fn(async (factory: Function) => {
       const component = factory(
@@ -1882,7 +1882,7 @@ describe("interactive supervisor", () => {
         registerShortcut: vi.fn(),
       } as never,
       undefined,
-      createRootLineageContext("failing-root", file),
+      createRootSpawnTreeContext("failing-root", file),
     );
     try {
       await commandHandler?.("", {

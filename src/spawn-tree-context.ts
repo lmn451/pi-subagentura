@@ -27,9 +27,9 @@ const MAX_CONTEXT_DEPTH = 64;
 const MAX_CONTEXT_NODES = 4096;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const BOOTSTRAP_NAME = /^\.lineage-bootstrap-[a-f0-9]{16}\.json$/;
-const RUNTIME_CONTEXTS_KEY = "__piSubagenturaRuntimeLineageContexts";
+const RUNTIME_CONTEXTS_KEY = "__piSubagenturaRuntimeSpawnTreeContexts";
 
-export interface LineageContext {
+export interface SpawnTreeContext {
   schemaVersion: typeof LINEAGE_BOOTSTRAP_SCHEMA_VERSION;
   role: "root" | "descendant";
   rootId: string;
@@ -46,14 +46,14 @@ interface LineageBootstrapEnvelope {
   schemaVersion: typeof LINEAGE_BOOTSTRAP_SCHEMA_VERSION;
   issuedAt: number;
   expiresAt: number;
-  context: LineageContext;
+  context: SpawnTreeContext;
 }
 
 interface RuntimeContextGlobal {
-  __piSubagenturaRuntimeLineageContexts?: Map<string, LineageContext>;
+  __piSubagenturaRuntimeSpawnTreeContexts?: Map<string, SpawnTreeContext>;
 }
 
-function runtimeContexts(): Map<string, LineageContext> {
+function runtimeContexts(): Map<string, SpawnTreeContext> {
   const state = globalThis as typeof globalThis & RuntimeContextGlobal;
   return (state[RUNTIME_CONTEXTS_KEY] ??= new Map());
 }
@@ -91,7 +91,7 @@ function boundedInteger(
 }
 
 function assertRoleIdentity(
-  role: LineageContext["role"],
+  role: SpawnTreeContext["role"],
   depth: number,
   currentAgentId: string | undefined,
   parentAgentId: string | undefined,
@@ -111,7 +111,7 @@ function assertRoleIdentity(
   }
 }
 
-export function validateLineageContext(value: unknown): LineageContext {
+export function parseSpawnTreeContext(value: unknown): SpawnTreeContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid lineage bootstrap payload");
   }
@@ -162,17 +162,17 @@ export function validateLineageContext(value: unknown): LineageContext {
   };
 }
 
-export function defaultLineageSessionRoot(): string {
+export function defaultSpawnTreeSessionRoot(): string {
   return process.env.PI_CODING_AGENT_SESSION_DIR
     ? resolve(process.env.PI_CODING_AGENT_SESSION_DIR)
     : join(homedir(), ".pi", "agent", "sessions");
 }
 
-export function createRootLineageContext(
+export function createRootSpawnTreeContext(
   rootId: string,
-  sessionRoot = defaultLineageSessionRoot(),
-): LineageContext {
-  return validateLineageContext({
+  sessionRoot = defaultSpawnTreeSessionRoot(),
+): SpawnTreeContext {
+  return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
     role: "root",
     rootId,
@@ -183,12 +183,12 @@ export function createRootLineageContext(
   });
 }
 
-export function createDescendantLineageContext(
-  parent: LineageContext,
+export function createDescendantSpawnTreeContext(
+  parent: SpawnTreeContext,
   currentAgentId: string,
   artifactDir: string,
-): LineageContext {
-  return validateLineageContext({
+): SpawnTreeContext {
+  return parseSpawnTreeContext({
     ...parent,
     role: "descendant",
     artifactDir,
@@ -200,9 +200,9 @@ export function createDescendantLineageContext(
 
 export function writeLineageBootstrap(
   artifactDir: string,
-  context: LineageContext,
+  context: SpawnTreeContext,
 ): string {
-  const validated = validateLineageContext(context);
+  const validated = parseSpawnTreeContext(context);
   const targetDir = resolve(artifactDir);
   if (validated.role !== "descendant" || validated.artifactDir !== targetDir) {
     throw new Error(
@@ -234,7 +234,7 @@ export function writeLineageBootstrap(
   }
 }
 
-function validateEnvelope(value: unknown, now: number): LineageContext {
+function validateEnvelope(value: unknown, now: number): SpawnTreeContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid lineage bootstrap envelope");
   }
@@ -250,7 +250,7 @@ function validateEnvelope(value: unknown, now: number): LineageContext {
     issuedAt + LINEAGE_BOOTSTRAP_TTL_MS,
   );
   if (now > expiresAt) throw new Error("Lineage bootstrap expired");
-  return validateLineageContext(raw.context);
+  return parseSpawnTreeContext(raw.context);
 }
 
 function readBoundedJson(descriptor: number): unknown {
@@ -273,7 +273,7 @@ function readBoundedJson(descriptor: number): unknown {
   return JSON.parse(buffer.subarray(0, offset).toString("utf8"));
 }
 
-function readClaimedBootstrap(path: string): LineageContext {
+function readClaimedBootstrap(path: string): SpawnTreeContext {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
   const descriptor = openSync(path, flags);
   try {
@@ -317,9 +317,9 @@ function cleanupClaim(path: string | undefined): void {
   }
 }
 
-export function acquireRuntimeLineageContext(
+export function acquireRuntimeSpawnTreeContext(
   artifactDir: string,
-): LineageContext | undefined {
+): SpawnTreeContext | undefined {
   const artifactKey = resolve(artifactDir);
   const bootstrapValue = process.env[LINEAGE_BOOTSTRAP_ENV];
   delete process.env[LINEAGE_BOOTSTRAP_ENV];
@@ -380,11 +380,13 @@ export function retireLineageBootstraps(artifactDir: string): void {
   }
 }
 
-export function releaseRuntimeLineageContext(context: LineageContext): void {
+export function releaseRuntimeSpawnTreeContext(
+  context: SpawnTreeContext,
+): void {
   if (context.role !== "descendant" || !context.artifactDir) return;
   runtimeContexts().delete(resolve(context.artifactDir));
 }
 
-export function resetRuntimeLineageContextForTests(): void {
+export function resetRuntimeSpawnTreeContextForTests(): void {
   runtimeContexts().clear();
 }

@@ -24,9 +24,9 @@ import {
   resolveLineageStorePaths,
 } from "../src/interactive-lineage";
 import {
-  createDescendantLineageContext,
-  createRootLineageContext,
-} from "../src/lineage-context";
+  createDescendantSpawnTreeContext,
+  createRootSpawnTreeContext,
+} from "../src/spawn-tree-context";
 import {
   __resetMuxInstances,
   MUX_CAPABILITIES,
@@ -504,7 +504,7 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
   const childCwd = mkdtempSync(join(tempRoot, "child-workspace-"));
   const grandchildCwd = mkdtempSync(join(tempRoot, "grandchild-workspace-"));
   const rootId = "tmux-recursive-root";
-  const rootContext = createRootLineageContext(
+  const rootContext = createRootSpawnTreeContext(
     rootId,
     process.env.PI_CODING_AGENT_SESSION_DIR!,
   );
@@ -516,9 +516,9 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     parentSessionId: "root-owner",
     muxPreference: "tmux",
     background: true,
-    lineageContext: rootContext,
+    spawnTreeContext: rootContext,
   });
-  const childContext = createDescendantLineageContext(
+  const childContext = createDescendantSpawnTreeContext(
     rootContext,
     child.id,
     child.artifactDir,
@@ -530,7 +530,7 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     parentSessionId: "child-owner",
     muxPreference: "tmux",
     background: true,
-    lineageContext: childContext,
+    spawnTreeContext: childContext,
   });
 
   const paths = await resolveLineageStorePaths(
