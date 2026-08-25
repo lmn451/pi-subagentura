@@ -15,6 +15,10 @@ Reference docs for the pi-subagentura project.
 | [workflows.md](./workflows.md)                             | Workflow scripts shipped in the repo (consensus pipelines + converters) |
 | [interactive-tmux-review.md](./interactive-tmux-review.md) | Code review of `src/interactive-tmux.ts` via GLM-5.2                    |
 
+## Known limitations
+
+Interactive lineage bootstrap credentials expire 60 seconds after the parent creates them. If child startup takes longer, the child pane remains usable, but recursive `subagent_interactive` spawning is unavailable for that session. Start a fresh child session or respawn the child to recover; no automatic retry occurs.
+
 ## Workflow scripts in `examples/workflows/`
 
 These are `.mjs` workflow files under `examples/workflows/` invoked via the `workflow` tool:
