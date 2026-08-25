@@ -1943,18 +1943,37 @@ export function appendInteractiveState(
   });
 }
 
+export interface InteractiveStateUpdate {
+  id: string;
+  update: (entry: InteractiveSubagentPersistedStateV2) => void;
+}
+
+/** Apply multiple state mutations under one lock and publish one atomic file. */
+export function updateInteractiveStates(
+  cwd: string,
+  updates: readonly InteractiveStateUpdate[],
+): void {
+  if (updates.length === 0) return;
+  withInteractiveStateLock(cwd, () => {
+    const current = loadInteractiveStates(cwd);
+    if (!current) return;
+    let changed = false;
+    for (const update of updates) {
+      const entry = current.states[update.id];
+      if (!entry) continue;
+      update.update(entry);
+      changed = true;
+    }
+    if (changed) writeInteractiveStatesUnlocked(cwd, current);
+  });
+}
+
 export function updateInteractiveState(
   cwd: string,
   id: string,
   update: (entry: InteractiveSubagentPersistedStateV2) => void,
 ): void {
-  withInteractiveStateLock(cwd, () => {
-    const current = loadInteractiveStates(cwd);
-    const entry = current?.states[id];
-    if (!current || !entry) return;
-    update(entry);
-    writeInteractiveStatesUnlocked(cwd, current);
-  });
+  updateInteractiveStates(cwd, [{ id, update }]);
 }
 /**
  * Convenience: load + drop entry by id + save. No-op if absent or file missing.

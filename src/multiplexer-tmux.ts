@@ -106,12 +106,19 @@ function parsePaneListing(output: string): ReadonlySet<string> {
   return new Set(paneIds);
 }
 
+const PANE_LIVENESS_CACHE_MS = 500;
+
 export class TmuxMultiplexer implements Multiplexer {
   readonly name = "tmux" as const;
   readonly capabilities = MUX_CAPABILITIES.tmux;
 
   /** Shared detached session used when the parent is outside tmux. */
   private detachedSessionName?: string;
+  private paneListingInFlight?: Promise<ReadonlySet<string> | undefined>;
+  private paneListingCache?: {
+    at: number;
+    panes: ReadonlySet<string> | undefined;
+  };
 
   /**
    * True iff the `tmux` binary is on PATH. Does NOT require the parent
@@ -356,9 +363,13 @@ export class TmuxMultiplexer implements Multiplexer {
     }
   }
 
-  getPaneLivenessAsync(paneId: string): Promise<PaneLiveness> {
-    if (!/^%\d+$/.test(paneId)) return Promise.resolve("unknown");
-    return new Promise((resolve) => {
+  private listPanesAsync(): Promise<ReadonlySet<string> | undefined> {
+    const cached = this.paneListingCache;
+    if (cached && Date.now() - cached.at < PANE_LIVENESS_CACHE_MS) {
+      return Promise.resolve(cached.panes);
+    }
+    if (this.paneListingInFlight) return this.paneListingInFlight;
+    const request = new Promise<ReadonlySet<string> | undefined>((resolve) => {
       try {
         execFile(
           "tmux",
@@ -366,20 +377,34 @@ export class TmuxMultiplexer implements Multiplexer {
           { encoding: "utf8", timeout: 5000 },
           (error, stdout) => {
             if (error) {
-              resolve("unknown");
+              resolve(undefined);
               return;
             }
             try {
-              resolve(parsePaneListing(stdout).has(paneId) ? "alive" : "dead");
+              resolve(parsePaneListing(stdout));
             } catch {
-              resolve("unknown");
+              resolve(undefined);
             }
           },
         );
       } catch {
-        resolve("unknown");
+        resolve(undefined);
       }
     });
+    this.paneListingInFlight = request;
+    void request.then((panes) => {
+      this.paneListingCache = { at: Date.now(), panes };
+      if (this.paneListingInFlight === request) {
+        this.paneListingInFlight = undefined;
+      }
+    });
+    return request;
+  }
+
+  async getPaneLivenessAsync(paneId: string): Promise<PaneLiveness> {
+    if (!/^%\d+$/.test(paneId)) return "unknown";
+    const panes = await this.listPanesAsync();
+    return panes ? (panes.has(paneId) ? "alive" : "dead") : "unknown";
   }
 
   sendKeys(paneId: string, text: string): void {

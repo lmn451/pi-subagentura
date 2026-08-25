@@ -406,6 +406,43 @@ describe("multiplexer-zellij", () => {
     ).resolves.toBe("alive");
   });
 
+  it("coalesces concurrent async probes within one zellij session", async () => {
+    vi.resetModules();
+    const execFile = vi.fn(
+      (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) =>
+        setTimeout(
+          () => callback(null, JSON.stringify([{ id: 1 }, { id: 2 }])),
+          0,
+        ),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+      spawn: vi.fn(),
+    }));
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+
+    await expect(
+      Promise.all([
+        mux.getPaneLivenessAsync("1", "shared"),
+        mux.getPaneLivenessAsync("2", "shared"),
+        mux.getPaneLivenessAsync("3", "shared"),
+      ]),
+    ).resolves.toEqual(["alive", "alive", "dead"]);
+    await expect(mux.getPaneLivenessAsync("1", "shared")).resolves.toBe(
+      "alive",
+    );
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
   /* ------------------------------------------------------------------ */
   /*  sendKeys + sendEnter                                               */
   /* ------------------------------------------------------------------ */

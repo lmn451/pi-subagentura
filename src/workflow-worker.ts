@@ -3,10 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertNever,
+  eventLogEndOffset,
   isTurnTerminal,
-  readEvents,
+  readEventBatch,
   readOutput,
   readOutputForTurnId,
+  type SubagentArtifact,
   type SubagentEvent,
   type TurnTerminalEvent,
 } from "./artifact";
@@ -45,7 +47,7 @@ import {
 import { workflowStringify } from "./workflow-script";
 import {
   cancelInteractiveSubagent,
-  isPaneAlive,
+  isPaneAliveAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
@@ -736,32 +738,52 @@ function parseUsageFromSessionFile(sessionFile: string | undefined): Usage {
   }
 }
 
-function findCurrentTurnTerminal(
-  events: SubagentEvent[],
+interface InteractiveResultEventCursor {
+  byteOffset: number;
+  activeTurnId?: string;
+  sawTurnStart: boolean;
+  terminal: TurnTerminalEvent | null;
+}
+
+function foldInteractiveResultEvent(
+  cursor: InteractiveResultEventCursor,
+  event: SubagentEvent,
+): void {
+  if (event.type === "turn_started") {
+    cursor.sawTurnStart = true;
+    cursor.activeTurnId = event.turnId;
+    cursor.terminal = null;
+    return;
+  }
+  if (cursor.sawTurnStart) {
+    if (event.type === "completion" && event.turnId === cursor.activeTurnId) {
+      cursor.terminal = event;
+    }
+    return;
+  }
+  if (isTurnTerminal(event)) cursor.terminal = event;
+}
+
+function readCurrentTurnTerminal(
+  art: SubagentArtifact,
+  cursor: InteractiveResultEventCursor,
 ): TurnTerminalEvent | null {
-  let latestTurnStart = -1;
-  let latestTurnId: string | undefined;
-  for (let index = 0; index < events.length; index++) {
-    const event = events[index];
-    if (event.type === "turn_started") {
-      latestTurnStart = index;
-      latestTurnId = event.turnId;
+  if (eventLogEndOffset(art) < cursor.byteOffset) {
+    cursor.byteOffset = 0;
+    cursor.activeTurnId = undefined;
+    cursor.sawTurnStart = false;
+    cursor.terminal = null;
+  }
+  for (;;) {
+    const batch = readEventBatch(art, cursor.byteOffset);
+    for (const record of batch.records) {
+      foldInteractiveResultEvent(cursor, record.event);
     }
+    if (batch.endOffset <= cursor.byteOffset) break;
+    cursor.byteOffset = batch.endOffset;
+    if (cursor.byteOffset >= eventLogEndOffset(art)) break;
   }
-  if (latestTurnStart >= 0) {
-    for (let index = events.length - 1; index > latestTurnStart; index--) {
-      const event = events[index];
-      if (event.type === "completion" && event.turnId === latestTurnId) {
-        return event;
-      }
-    }
-    return null;
-  }
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (isTurnTerminal(event)) return event;
-  }
-  return null;
+  return cursor.terminal;
 }
 
 /**
@@ -776,7 +798,13 @@ export async function awaitInteractiveResult(
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
+  const eventCursor: InteractiveResultEventCursor = {
+    byteOffset: 0,
+    sawTurnStart: false,
+    terminal: null,
+  };
   for (;;) {
+    let terminal: TurnTerminalEvent | null;
     if (signal?.aborted) {
       try {
         const cancelled = cancelInteractiveSubagent(
@@ -798,8 +826,7 @@ export async function awaitInteractiveResult(
         errorMessage: "aborted",
       };
     }
-    const events = readEvents(art);
-    const terminal = findCurrentTurnTerminal(events);
+    terminal = readCurrentTurnTerminal(art, eventCursor);
     if (terminal) {
       const usage = parseUsageFromSessionFile(state.sessionFile);
       switch (terminal.type) {
@@ -851,7 +878,7 @@ export async function awaitInteractiveResult(
     // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
     let alive = true;
     try {
-      alive = isPaneAlive(state);
+      alive = await isPaneAliveAsync(state);
     } catch {
       alive = false;
     }

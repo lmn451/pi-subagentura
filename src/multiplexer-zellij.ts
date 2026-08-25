@@ -144,9 +144,21 @@ class BoundedByteTail {
   }
 }
 
+const PANE_LIVENESS_CACHE_MS = 500;
+
+interface ZellijPaneListingProbe {
+  cachedAt?: number;
+  panes?: readonly ZellijPaneRow[];
+  inFlight?: Promise<readonly ZellijPaneRow[] | undefined>;
+}
+
 export class ZellijMultiplexer implements Multiplexer {
   readonly name = "zellij" as const;
   readonly capabilities = MUX_CAPABILITIES.zellij;
+  private readonly paneListingProbes = new Map<
+    string,
+    ZellijPaneListingProbe
+  >();
 
   /**
    * True iff `zellij` is on PATH. Binary-only — symmetric with
@@ -401,40 +413,63 @@ export class ZellijMultiplexer implements Multiplexer {
     }
   }
 
-  getPaneLivenessAsync(
+  private listPanesAsync(
+    session?: string,
+  ): Promise<readonly ZellijPaneRow[] | undefined> {
+    const key = session ?? "";
+    const probe = this.paneListingProbes.get(key) ?? {};
+    this.paneListingProbes.set(key, probe);
+    if (
+      probe.cachedAt !== undefined &&
+      Date.now() - probe.cachedAt < PANE_LIVENESS_CACHE_MS
+    ) {
+      return Promise.resolve(probe.panes);
+    }
+    if (probe.inFlight) return probe.inFlight;
+    const request = new Promise<readonly ZellijPaneRow[] | undefined>(
+      (resolve) => {
+        try {
+          execFile(
+            "zellij",
+            [...this.sessionFlag(session), "action", "list-panes", "--json"],
+            { encoding: "utf8", timeout: 5000 },
+            (error, stdout) => {
+              if (error) {
+                resolve(undefined);
+                return;
+              }
+              try {
+                resolve(parsePaneListing(stdout));
+              } catch {
+                resolve(undefined);
+              }
+            },
+          );
+        } catch {
+          resolve(undefined);
+        }
+      },
+    );
+    probe.inFlight = request;
+    void request.then((panes) => {
+      probe.cachedAt = Date.now();
+      probe.panes = panes;
+      if (probe.inFlight === request) probe.inFlight = undefined;
+    });
+    return request;
+  }
+
+  async getPaneLivenessAsync(
     paneId: string,
     session?: string,
   ): Promise<PaneLiveness> {
     const target = normalizePaneId(paneId);
-    if (!/^\d+$/.test(target)) return Promise.resolve("unknown");
-    return new Promise((resolve) => {
-      try {
-        execFile(
-          "zellij",
-          [...this.sessionFlag(session), "action", "list-panes", "--json"],
-          { encoding: "utf8", timeout: 5000 },
-          (error, stdout) => {
-            if (error) {
-              resolve("unknown");
-              return;
-            }
-            try {
-              resolve(
-                parsePaneListing(stdout).some((pane) =>
-                  this.paneRowMatches(pane, target),
-                )
-                  ? "alive"
-                  : "dead",
-              );
-            } catch {
-              resolve("unknown");
-            }
-          },
-        );
-      } catch {
-        resolve("unknown");
-      }
-    });
+    if (!/^\d+$/.test(target)) return "unknown";
+    const panes = await this.listPanesAsync(session);
+    if (!panes) return "unknown";
+    return panes.some((pane) => this.paneRowMatches(pane, target))
+      ? "alive"
+      : "dead";
   }
 
   /**

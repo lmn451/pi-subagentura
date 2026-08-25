@@ -17,8 +17,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   MAX_DELIVERY_RECEIPTS,
-  updateInteractiveState,
+  updateInteractiveStates,
   type PersistedDeliveryIntent,
+  type InteractiveSubagentPersistedStateV2,
 } from "./artifact";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
@@ -134,19 +135,42 @@ export function deliveryIdFor(params: {
     .slice(0, 32);
 }
 
+function copyDeliveryState(
+  state: InteractiveSubagentState,
+  entry: InteractiveSubagentPersistedStateV2,
+): void {
+  entry.eventByteCursor = state.eventByteCursor ?? 0;
+  entry.sessionByteCursor =
+    state.sessionObservedByteCursor ?? state.lastDeliveredSessionByte ?? 0;
+  entry.sessionPartialLineStart = state.sessionPartialLineStart ?? null;
+  entry.activeTurnId = state.activeTurnId;
+  entry.pendingDeliveries = state.pendingDeliveries ?? [];
+  entry.deliveryReceipts = state.deliveryReceipts ?? [];
+  entry.lifecycle = state.lifecycle;
+}
+
+function persistStates(states: readonly InteractiveSubagentState[]): void {
+  const statesByCwd = new Map<string, Map<string, InteractiveSubagentState>>();
+  for (const state of states) {
+    compactDeliveryReceipts(state);
+    if (!state.parentSessionId) continue;
+    const grouped = statesByCwd.get(state.cwd) ?? new Map();
+    grouped.set(state.id, state);
+    statesByCwd.set(state.cwd, grouped);
+  }
+  for (const [cwd, grouped] of statesByCwd) {
+    updateInteractiveStates(
+      cwd,
+      [...grouped.values()].map((state) => ({
+        id: state.id,
+        update: (entry) => copyDeliveryState(state, entry),
+      })),
+    );
+  }
+}
+
 function persistState(state: InteractiveSubagentState): void {
-  compactDeliveryReceipts(state);
-  if (!state.parentSessionId) return;
-  updateInteractiveState(state.cwd, state.id, (entry) => {
-    entry.eventByteCursor = state.eventByteCursor ?? 0;
-    entry.sessionByteCursor =
-      state.sessionObservedByteCursor ?? state.lastDeliveredSessionByte ?? 0;
-    entry.sessionPartialLineStart = state.sessionPartialLineStart ?? null;
-    entry.activeTurnId = state.activeTurnId;
-    entry.pendingDeliveries = state.pendingDeliveries ?? [];
-    entry.deliveryReceipts = state.deliveryReceipts ?? [];
-    entry.lifecycle = state.lifecycle;
-  });
+  persistStates([state]);
 }
 
 function queueBytes(queue: PersistedDeliveryIntent[]): number {
@@ -229,6 +253,7 @@ function collapseOldestIntent(state: InteractiveSubagentState): void {
 export function enqueueDelivery(
   state: InteractiveSubagentState,
   intent: PersistedDeliveryIntent,
+  options: { persist?: boolean } = {},
 ): void {
   if (typeof intent.message !== "string") {
     intent.message = undefined;
@@ -256,7 +281,7 @@ export function enqueueDelivery(
   ) {
     collapseOldestIntent(state);
   }
-  persistState(state);
+  if (options.persist !== false) persistState(state);
 }
 
 /** Mark a completion as handled by the parent tool without sending it to LLM context. */
@@ -418,10 +443,8 @@ export function flushDeliveries(
       status: intent.status,
     })),
   );
-  for (const { state, intent } of selected) {
-    intent.state = "dispatchAttempted";
-    persistState(state);
-  }
+  for (const { intent } of selected) intent.state = "dispatchAttempted";
+  persistStates(selected.map(({ state }) => state));
   reconcileAllDeliveryReceipts(owner);
 }
 
@@ -442,11 +465,11 @@ function deliveryIdsFromEntry(entry: unknown): unknown[] | undefined {
   return Array.isArray(ids) ? ids : undefined;
 }
 
-export function reconcileDeliveryReceipts(
+function reconcileDeliveryReceiptsInMemory(
   state: InteractiveSubagentState,
   entries: unknown[],
   owner?: SessionOwnerToken,
-): void {
+): boolean {
   compactDeliveryReceipts(state);
   const seen = new Set<string>();
   for (const entry of entries) {
@@ -471,9 +494,18 @@ export function reconcileDeliveryReceipts(
   state.pendingDeliveries = (state.pendingDeliveries ?? []).filter(
     (intent) => !seen.has(intent.deliveryId),
   );
-  if (!changed) return;
-  compactDeliveryReceipts(state);
-  persistState(state);
+  if (changed) compactDeliveryReceipts(state);
+  return changed;
+}
+
+export function reconcileDeliveryReceipts(
+  state: InteractiveSubagentState,
+  entries: unknown[],
+  owner?: SessionOwnerToken,
+): void {
+  if (reconcileDeliveryReceiptsInMemory(state, entries, owner)) {
+    persistState(state);
+  }
 }
 
 export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
@@ -481,8 +513,12 @@ export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
     ? resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.()
     : deliveryGlobals().__piSubagenturaSessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
+  const changedStates: InteractiveSubagentState[] = [];
   for (const state of interactiveStatesForOwner(owner)) {
     if (!interactiveStateBelongsToOwner(state, owner)) continue;
-    reconcileDeliveryReceipts(state, entries, owner);
+    if (reconcileDeliveryReceiptsInMemory(state, entries, owner)) {
+      changedStates.push(state);
+    }
   }
+  persistStates(changedStates);
 }

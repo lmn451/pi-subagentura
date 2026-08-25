@@ -620,6 +620,36 @@ describe("multiplexer-tmux", () => {
     ).resolves.toBe("alive");
   });
 
+  it("coalesces concurrent async pane liveness probes", async () => {
+    vi.resetModules();
+    const execFile = vi.fn(
+      (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => setTimeout(() => callback(null, "%1\n%2\n"), 0),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+    }));
+    const { TmuxMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+    const mux = new TmuxMultiplexer();
+
+    await expect(
+      Promise.all([
+        mux.getPaneLivenessAsync("%1"),
+        mux.getPaneLivenessAsync("%2"),
+        mux.getPaneLivenessAsync("%3"),
+      ]),
+    ).resolves.toEqual(["alive", "alive", "dead"]);
+    await expect(mux.getPaneLivenessAsync("%1")).resolves.toBe("alive");
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
   it("treats a successful blank listing as dead", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({

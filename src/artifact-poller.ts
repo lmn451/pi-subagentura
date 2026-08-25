@@ -21,11 +21,12 @@ import {
   isCompletionEvent,
   readEventBatch,
   removeInteractiveState,
-  updateInteractiveState,
+  updateInteractiveStates,
   type CompletionEvent,
   type CompletionOutcome,
   type SubagentArtifact,
   type SubagentEvent,
+  type InteractiveSubagentPersistedStateV2,
 } from "./artifact";
 import {
   deriveInteractiveSubagentStatusFromLifecycle,
@@ -370,6 +371,40 @@ function pollOwnerKey(owner: SessionOwnerToken | undefined): string {
   return owner ? `${owner.id}:${owner.generation}` : "unscoped";
 }
 
+function persistPolledState(
+  state: InteractiveSubagentState,
+  entry: InteractiveSubagentPersistedStateV2,
+): void {
+  entry.eventByteCursor = state.eventByteCursor ?? 0;
+  entry.sessionByteCursor =
+    state.sessionObservedByteCursor ?? state.lastDeliveredSessionByte ?? 0;
+  entry.sessionPartialLineStart = state.sessionPartialLineStart ?? null;
+  entry.activeTurnId = state.activeTurnId;
+  entry.pendingDeliveries = state.pendingDeliveries ?? [];
+  entry.deliveryReceipts = state.deliveryReceipts ?? [];
+  entry.lifecycle = state.lifecycle;
+}
+
+function persistPolledStates(
+  states: readonly InteractiveSubagentState[],
+): void {
+  const statesByCwd = new Map<string, InteractiveSubagentState[]>();
+  for (const state of states) {
+    const grouped = statesByCwd.get(state.cwd) ?? [];
+    grouped.push(state);
+    statesByCwd.set(state.cwd, grouped);
+  }
+  for (const [cwd, grouped] of statesByCwd) {
+    updateInteractiveStates(
+      cwd,
+      grouped.map((state) => ({
+        id: state.id,
+        update: (entry) => persistPolledState(state, entry),
+      })),
+    );
+  }
+}
+
 /**
  * Poll the artifact directory of every running interactive sub-agent and fire a
  * pointer-only notification for any new events that match the spawner's cadence.
@@ -446,6 +481,7 @@ async function runPollArtifactChanges(
     const ui =
       ownerContext?.ui ??
       (g2.__piSubagenturaUi as ExtensionUIContext | undefined);
+    const persistedStates: InteractiveSubagentState[] = [];
     for (const [state, paneLiveness] of liveness) {
       if (stateMap.get(state.id) !== state) continue;
       // Cancelled is terminal. Unknown means pane liveness is unavailable, so keep polling
@@ -485,24 +521,28 @@ async function runPollArtifactChanges(
           (ev as unknown as { eventId?: string }).eventId ??
           `legacy-${record.startOffset}`;
         const status = deliveryStatusFromEvent(ev);
-        enqueueDelivery(state, {
-          deliveryId: deliveryIdFor({
-            parentSessionId: state.parentSessionId ?? "pi",
+        enqueueDelivery(
+          state,
+          {
+            deliveryId: deliveryIdFor({
+              parentSessionId: state.parentSessionId ?? "pi",
+              subagentId: state.id,
+              turnId,
+              mode,
+            }),
             subagentId: state.id,
             turnId,
+            eventId,
             mode,
-          }),
-          subagentId: state.id,
-          turnId,
-          eventId,
-          mode,
-          triggerTurn,
-          status,
-          artifactDir: state.artifactDir,
-          output: v2?.output,
-          message: deliveryMessageFromEvent(ev),
-          state: "queued",
-        });
+            triggerTurn,
+            status,
+            artifactDir: state.artifactDir,
+            output: v2?.output,
+            message: deliveryMessageFromEvent(ev),
+            state: "queued",
+          },
+          { persist: false },
+        );
       }
       for (const issue of batch.issues) {
         if (state.completionOwner === "workflow") continue;
@@ -512,29 +552,27 @@ async function runPollArtifactChanges(
             ? state.triggerTurnOnComplete !== false
             : state.triggerTurnOnComplete === true;
         const identity = `record-overflow-${issue.startOffset}`;
-        enqueueDelivery(state, {
-          deliveryId: deliveryIdFor({
-            parentSessionId: state.parentSessionId ?? "pi",
+        enqueueDelivery(
+          state,
+          {
+            deliveryId: deliveryIdFor({
+              parentSessionId: state.parentSessionId ?? "pi",
+              subagentId: state.id,
+              turnId: identity,
+              mode,
+            }),
             subagentId: state.id,
             turnId: identity,
+            eventId: identity,
             mode,
-          }),
-          subagentId: state.id,
-          turnId: identity,
-          eventId: identity,
-          mode,
-          triggerTurn,
-          status: "error",
-          artifactDir: state.artifactDir,
-          message: `Artifact record at byte ${issue.startOffset} exceeded the ${issue.maxBytes}-byte limit and was skipped.`,
-          state: "queued",
-        });
-      }
-      if (batch.issues.length > 0 && state.parentSessionId) {
-        updateInteractiveState(state.cwd, state.id, (entry) => {
-          entry.pendingDeliveries = state.pendingDeliveries ?? [];
-          entry.deliveryReceipts = state.deliveryReceipts ?? [];
-        });
+            triggerTurn,
+            status: "error",
+            artifactDir: state.artifactDir,
+            message: `Artifact record at byte ${issue.startOffset} exceeded the ${issue.maxBytes}-byte limit and was skipped.`,
+            state: "queued",
+          },
+          { persist: false },
+        );
       }
       nextCursor = batch.endOffset;
       state.eventByteCursor = nextCursor;
@@ -550,21 +588,11 @@ async function runPollArtifactChanges(
           state.exitCode = lifecycle.completionExitCode;
         }
       }
-      if (state.parentSessionId) {
-        updateInteractiveState(state.cwd, state.id, (entry) => {
-          entry.eventByteCursor = nextCursor;
-          entry.sessionByteCursor =
-            state.sessionObservedByteCursor ??
-            state.lastDeliveredSessionByte ??
-            0;
-          entry.sessionPartialLineStart = state.sessionPartialLineStart ?? null;
-          entry.activeTurnId = state.activeTurnId;
-          entry.pendingDeliveries = state.pendingDeliveries ?? [];
-          entry.deliveryReceipts = state.deliveryReceipts ?? [];
-          entry.lifecycle = state.lifecycle;
-        });
-      }
+      if (state.parentSessionId) persistedStates.push(state);
     }
+    // Queue state and its advanced byte cursor reach disk atomically. A crash
+    // before this write replays the old cursor; deterministic delivery ids dedupe it.
+    persistPolledStates(persistedStates);
     // One clock for both widgets so their coarse elapsed buckets stay aligned.
     const now = Date.now();
     const widgetRows = projectActivityWidgetRows(ui, owner, now);

@@ -46,6 +46,7 @@ import {
   stateFilePath,
   writeOutput,
   withInteractiveStateLock,
+  updateInteractiveStates,
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
 } from "../src/artifact";
@@ -1129,6 +1130,35 @@ describe("persisted interactive state helpers", () => {
     appendInteractiveState(root, updated);
 
     expect(loadInteractiveStates(root)?.states["abc12345"]?.paneId).toBe("%99");
+  });
+
+  it("updates multiple interactive states in one batch", () => {
+    appendInteractiveState(root, SAMPLE);
+    appendInteractiveState(root, {
+      ...SAMPLE,
+      id: "def67890",
+      artifactDir: "/tmp/artifacts/def67890",
+    });
+
+    updateInteractiveStates(root, [
+      {
+        id: SAMPLE.id,
+        update: (entry) => {
+          entry.eventByteCursor = 10;
+        },
+      },
+      {
+        id: "def67890",
+        update: (entry) => {
+          entry.eventByteCursor = 20;
+        },
+      },
+      { id: "missing", update: () => expect.unreachable() },
+    ]);
+
+    const states = loadInteractiveStates(root)?.states;
+    expect(states?.[SAMPLE.id].eventByteCursor).toBe(10);
+    expect(states?.def67890.eventByteCursor).toBe(20);
   });
 
   it("preserves updates from concurrent parents using the same cwd", () => {
