@@ -21,6 +21,12 @@ import {
 } from "./notifications";
 import { debugLog, removeInProcessJob } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
+import {
+  createRootLineageContext,
+  releaseRuntimeLineageContext,
+  retireLineageBootstraps,
+  type LineageContext,
+} from "./lineage-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
 import {
   cancelInteractiveSubagentByState,
@@ -128,6 +134,17 @@ function cancellationLifecycleReason(reason: string | undefined) {
   }
 }
 
+function clearFreshChildLineage(
+  scope: SessionScope,
+  reason: string | undefined,
+): void {
+  if (reason !== "new" && reason !== "fork") return;
+  if (scope.lineageContext?.role !== "descendant") return;
+  retireLineageBootstraps(scope.lineageContext.artifactDir!);
+  releaseRuntimeLineageContext(scope.lineageContext);
+  scope.lineageContext = undefined;
+}
+
 function cleanupScopeGeneration(
   scope: SessionScope,
   owner: SessionOwnerToken,
@@ -148,6 +165,7 @@ function cleanupScopeGeneration(
     event?.reason === "new" || event?.reason === "fork";
   for (const state of [...scope.interactiveStates.values()]) {
     removeInteractiveSubagentState(state);
+    if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
     if (
       (destroysStandalonePanes || isInMemoryWorkflowPane(state)) &&
       (state.status === "running" ||
@@ -191,8 +209,16 @@ function cleanupScopeGeneration(
   if (scope.ui) clearSessionScopeUiContributions(scope.ui, owner);
 }
 
-export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
-  const scope = createSessionScope(pi);
+export function registerSessionHandlers(
+  pi: ExtensionAPI,
+  initialLineageContext?: LineageContext,
+  allowRootLineage = true,
+): SessionScope {
+  const scope = createSessionScope(
+    pi,
+    initialLineageContext,
+    allowRootLineage ? "root" : "child",
+  );
   const globalState = getGlobalState() as any;
   registerSessionScope(scope);
   setLegacyActiveSessionRefs(scope);
@@ -224,6 +250,15 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
     scope.lifecycle = "started";
     scope.ui = ctx.ui;
     scope.sessionManager = ctx.sessionManager;
+    clearFreshChildLineage(scope, event.reason);
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (
+      allowRootLineage &&
+      sessionId &&
+      scope.lineageContext?.role !== "descendant"
+    ) {
+      scope.lineageContext = createRootLineageContext(sessionId);
+    }
     scope.parentStreaming = false;
     registerSessionScope(scope);
     setLegacyActiveSessionRefs(scope);
@@ -259,6 +294,7 @@ export function registerSessionHandlers(pi: ExtensionAPI): SessionScope {
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
       cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
+      clearFreshChildLineage(scope, event?.reason);
       scope.parentStreaming = false;
       scope.lifecycle = "shutdown";
       advanceSessionScopeGeneration(scope.id);

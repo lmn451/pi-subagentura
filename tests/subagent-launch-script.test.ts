@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -28,6 +29,7 @@ import {
 } from "../src/interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
+import { createRootLineageContext } from "../src/lineage-context";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -249,6 +251,7 @@ const SPAWN_ENV_NAMES = [
   "PI_SUBAGENTURA_DEPTH",
   "PI_SUBAGENTURA_MAX_DEPTH",
   "PI_SUBAGENTURA_MAX_NODES",
+  "PI_SUBAGENTURA_LINEAGE_BOOTSTRAP",
 ] as const;
 
 type SpawnEnvName = (typeof SPAWN_ENV_NAMES)[number];
@@ -272,6 +275,7 @@ describe("spawn-time state persistence", () => {
     delete process.env.PI_SUBAGENTURA_DEPTH;
     delete process.env.PI_SUBAGENTURA_MAX_DEPTH;
     delete process.env.PI_SUBAGENTURA_MAX_NODES;
+    delete process.env.PI_SUBAGENTURA_LINEAGE_BOOTSTRAP;
     process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
     process.env.TMUX_PANE = "%1";
     process.env.HOME = process.env.HOME ?? "/tmp";
@@ -329,6 +333,40 @@ describe("spawn-time state persistence", () => {
     const sendKeys = tmuxCalls.find((args) => args[0] === "send-keys");
     expect(sendKeys).toBeDefined();
     expect(sendKeys?.join(" ")).toContain("exec bash");
+  });
+
+  it("passes lineage through a one-use bootstrap instead of ambient variables", async () => {
+    const { launchInteractiveSubagent } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    process.env.PI_SUBAGENTURA_ROOT_ID = "ambient-live-root";
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      parentSessionId: "pi",
+      lineageContext: createRootLineageContext("pi", cwd),
+    });
+
+    const script = readFileSync(state.launchScriptFile, "utf8");
+    expect(script).toContain("PI_SUBAGENTURA_LINEAGE_BOOTSTRAP=");
+    expect(script).not.toContain("PI_SUBAGENTURA_ROOT_ID=");
+    expect(script).not.toContain("PI_SUBAGENTURA_LINEAGE_SESSION_ROOT=");
+    expect(script).not.toContain("PI_SUBAGENTURA_AGENT_ID=");
+    expect(script).not.toContain("PI_SUBAGENTURA_DEPTH=");
+    const bootstrapName = readdirSync(state.artifactDir).find((name) =>
+      name.startsWith(".lineage-bootstrap-"),
+    );
+    expect(bootstrapName).toBeDefined();
+    const bootstrap = JSON.parse(
+      readFileSync(join(state.artifactDir, bootstrapName!), "utf8"),
+    );
+    expect(bootstrap.context).toMatchObject({
+      role: "descendant",
+      rootId: "pi",
+      currentAgentId: state.id,
+      depth: 1,
+    });
   });
 
   it("the persisted entry records windowName, mux, and artifactDir", async () => {

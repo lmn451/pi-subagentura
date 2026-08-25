@@ -25,6 +25,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importFresh } from "./test-utils";
 import { hashLineageRoot } from "../src/interactive-lineage";
+import {
+  createRootLineageContext,
+  type LineageContext,
+} from "../src/lineage-context";
 
 import { loadInteractiveStates } from "../src/artifact";
 /** Standard tmux pane id returned by mocks when "new-window"/"split-window" is called. */
@@ -57,6 +61,23 @@ function lineageNodesDir(sessionRoot: string, rootId: string): string {
     hashLineageRoot(rootId),
     "nodes",
   );
+}
+
+function syntheticLineageContext(
+  sessionRoot: string,
+  overrides: Partial<LineageContext> = {},
+): LineageContext {
+  const context: LineageContext = {
+    ...createRootLineageContext("root-session", sessionRoot),
+    ...overrides,
+  };
+  return context.role === "descendant" && context.currentAgentId
+    ? {
+        ...context,
+        artifactDir:
+          context.artifactDir ?? join(sessionRoot, context.currentAgentId),
+      }
+    : context;
 }
 
 /** Write a schema-valid node manifest so the prune sweep can read it. */
@@ -242,6 +263,12 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
+      lineageContext: syntheticLineageContext(tmp, {
+        role: "descendant",
+        currentAgentId: "parent-agent",
+        depth: 1,
+        maxDepth: 4,
+      }),
     });
 
     const manifestPath = join(
@@ -261,10 +288,20 @@ describe("interactive-tmux", () => {
       cwd: tmp,
     });
     const launchScript = readFileSync(state.launchScriptFile, "utf8");
-    expect(launchScript).toContain(
-      `export PI_SUBAGENTURA_AGENT_ID='${state.id}'`,
+    expect(launchScript).toContain("PI_SUBAGENTURA_LINEAGE_BOOTSTRAP=");
+    expect(launchScript).not.toContain("PI_SUBAGENTURA_AGENT_ID=");
+    expect(launchScript).not.toContain("PI_SUBAGENTURA_DEPTH=");
+    const bootstrapName = readdirSync(state.artifactDir).find((name) =>
+      name.startsWith(".lineage-bootstrap-"),
     );
-    expect(launchScript).toContain("export PI_SUBAGENTURA_DEPTH='2'");
+    const bootstrap = JSON.parse(
+      readFileSync(join(state.artifactDir, bootstrapName!), "utf8"),
+    );
+    expect(bootstrap.context).toMatchObject({
+      parentAgentId: "parent-agent",
+      currentAgentId: state.id,
+      depth: 2,
+    });
   });
 
   it("rejects recursive spawns beyond the configured depth before creating a pane", async () => {
@@ -289,6 +326,12 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
+        lineageContext: syntheticLineageContext(tmp, {
+          role: "descendant",
+          currentAgentId: "current-agent",
+          depth: 2,
+          maxDepth: 2,
+        }),
       }),
     ).toThrow(/depth 3 exceeds max 2/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
@@ -324,6 +367,7 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
+        lineageContext: syntheticLineageContext(tmp, { maxNodes: 1 }),
       }),
     ).toThrow(/reached max nodes 1/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
@@ -357,6 +401,7 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
+      lineageContext: syntheticLineageContext(tmp, { maxNodes: 4 }),
     });
 
     expect(state.id).toBeTruthy();
@@ -393,6 +438,7 @@ describe("interactive-tmux", () => {
       cwd: tmp,
       parentSessionId: "owner-session",
       parentCwd: tmp,
+      lineageContext: syntheticLineageContext(tmp, { maxNodes: 2 }),
     });
 
     expect(state.id).toBeTruthy();
@@ -432,6 +478,7 @@ describe("interactive-tmux", () => {
         task: "must remain bounded",
         cwd: tmp,
         parentSessionId: "owner-session",
+        lineageContext: syntheticLineageContext(tmp, { maxNodes: 1 }),
       }),
     ).toThrow(/reached max nodes 1/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
@@ -468,6 +515,7 @@ describe("interactive-tmux", () => {
         task: "fail",
         cwd: tmp,
         parentSessionId: "owner-session",
+        lineageContext: syntheticLineageContext(tmp, { maxNodes: 4 }),
       }),
     ).toThrow(/reached max nodes 4/);
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);

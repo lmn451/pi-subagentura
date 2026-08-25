@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  LINEAGE_BOOTSTRAP_ENV,
+  createDescendantLineageContext,
+  createRootLineageContext,
+  resetRuntimeLineageContextForTests,
+  writeLineageBootstrap,
+} from "../src/lineage-context";
 
 const BASE_INTERACTIVE_TOOL_NAMES = [
   "cancel_interactive_subagent",
@@ -132,6 +142,31 @@ describe("extension registration", () => {
 
     expect(result.systemPrompt).toContain("# Orchestrator System Prompt");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+  });
+
+  it("does not consume descendant bootstrap authority in parent mode", () => {
+    const root = mkdtempSync(join(tmpdir(), "parent-bootstrap-gate-"));
+    const artifactDir = join(root, "child-agent");
+    const child = createDescendantLineageContext(
+      createRootLineageContext("root-session", root),
+      "child-agent",
+      artifactDir,
+    );
+    const bootstrapPath = writeLineageBootstrap(artifactDir, child);
+    process.env[LINEAGE_BOOTSTRAP_ENV] = bootstrapPath;
+    process.env.ARTIFACT_DIR = artifactDir;
+
+    try {
+      registerExtension(mockApi() as any);
+
+      expect(existsSync(bootstrapPath)).toBe(true);
+      expect(process.env[LINEAGE_BOOTSTRAP_ENV]).toBeUndefined();
+    } finally {
+      delete process.env[LINEAGE_BOOTSTRAP_ENV];
+      delete process.env.ARTIFACT_DIR;
+      resetRuntimeLineageContextForTests();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("registers a minimal interactive runtime in child mode", () => {

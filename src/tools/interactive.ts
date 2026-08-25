@@ -209,6 +209,21 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
+      if (
+        registration.scope?.lineageMode === "child" &&
+        !registration.scope.lineageContext
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Recursive interactive spawning is disabled because this child has no explicit lineage bootstrap.",
+            },
+          ],
+          details: { status: "lineage_unavailable" },
+          isError: true,
+        };
+      }
       const completionMode = params.notifyOnComplete ?? "notify";
       const triggerTurn = completionTriggersTurn(
         completionMode,
@@ -256,6 +271,7 @@ export function registerInteractiveSubagentTools(
           parentSessionId: ctx.sessionManager.getSessionId(),
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
+          lineageContext: registration.scope?.lineageContext,
         });
         updateRunningSubagentFooter(
           ctx.ui,

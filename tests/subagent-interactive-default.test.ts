@@ -223,6 +223,10 @@ describe("subagent_interactive tool lifecycle", () => {
     const callArgs = mockLaunchInteractiveSubagent.mock.calls[0][0];
     expect(callArgs.notifyOnComplete).toBe("notify");
     expect(callArgs.triggerTurnOnComplete).toBe(true);
+    expect(callArgs.lineageContext).toMatchObject({
+      role: "root",
+      rootId: "test-session-id",
+    });
     expect(result.content[0].text).toContain(
       "Completion output will not be injected into the parent LLM",
     );
@@ -405,6 +409,27 @@ describe("subagent_interactive tool lifecycle", () => {
     );
 
     expect(result.details.status).toBe("session_unavailable");
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+  });
+
+  it("denies recursive spawning when a child has no bootstrap context", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const scope = getStartedSessionScopes()[0];
+    scope!.lineageMode = "child";
+    scope!.lineageContext = undefined;
+
+    const result = await toolDef.execute(
+      "call-no-lineage",
+      { task: "spawn recursively" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: { status: "lineage_unavailable" },
+    });
     expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
   });
 

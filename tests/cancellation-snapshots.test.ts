@@ -300,6 +300,11 @@ describe("cancellation snapshots", () => {
     );
     setSnapshotEnv(join(root, "snapshots"));
     const input = interactiveInput(root);
+    const bootstrapPath = join(
+      input.artifactDir,
+      ".lineage-bootstrap-0123456789abcdef.json",
+    );
+    writeFileSync(bootstrapPath, "unconsumed", { mode: 0o600 });
     interactiveSubagentRegistry.set(input.id, {
       id: input.id,
       name: "interactive",
@@ -321,6 +326,7 @@ describe("cancellation snapshots", () => {
 
     expect(result.interactiveKilled).toBe(1);
     expect(result.snapshots).toHaveLength(1);
+    expect(existsSync(bootstrapPath)).toBe(false);
     const payload = JSON.parse(
       readFileSync(result.snapshots![0].path!, "utf8"),
     );

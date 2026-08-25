@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import {
   compareByStartedAt,
   INTERACTIVE_SUPERVISOR_SHORTCUT,
@@ -31,6 +30,7 @@ import {
   type ProjectedLineageNode,
   type ProjectionIssue,
 } from "./interactive-lineage";
+import type { LineageContext } from "./lineage-context";
 import { getMux, type MuxName, type PaneLiveness } from "./multiplexer";
 import {
   abortJobTree,
@@ -323,15 +323,12 @@ function parseStartedAt(value: string): number {
 }
 
 async function loadSupervisorProjection(
+  context: LineageContext | undefined,
   sessionId: string | undefined,
   owner: SessionOwnerToken | undefined,
 ): Promise<SupervisorProjection | undefined> {
-  const rootId = process.env.PI_SUBAGENTURA_ROOT_ID ?? sessionId;
-  if (!rootId) return undefined;
-  const sessionRoot =
-    process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT ??
-    process.env.PI_CODING_AGENT_SESSION_DIR ??
-    join(homedir(), ".pi", "agent", "sessions");
+  if (!context) return undefined;
+  const { rootId, sessionRoot } = context;
   const interactiveStates = supervisorInteractiveStates(owner);
   const paths = await resolveLineageStorePaths(sessionRoot, rootId);
   // Reused across the projection AND the prune sweep so no manifest is probed
@@ -461,19 +458,24 @@ export function supervisorStatusLines(
 export function registerInteractiveSupervisor(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
+  explicitLineageContext?: LineageContext,
 ): void {
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
       ? { id: sessionScope.id, generation: sessionScope.generation }
       : undefined;
+  const lineageContext = (): LineageContext | undefined =>
+    sessionScope?.lineageContext ?? explicitLineageContext;
   const open = async (ctx: {
     ui: Parameters<typeof showInteractiveSupervisor>[0];
     sessionManager?: { getSessionId?: () => string };
   }) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const activeOwner = owner();
+    const activeLineageContext = lineageContext();
     let refreshError: string | undefined;
     let projection = await loadSupervisorProjection(
+      activeLineageContext,
       sessionId,
       activeOwner,
     ).catch((error: unknown) => {
@@ -493,7 +495,11 @@ export function registerInteractiveSupervisor(
           // A swallowed failure used to freeze the snapshot indefinitely with no
           // indication; the error now reaches the overlay footer.
           try {
-            projection = await loadSupervisorProjection(sessionId, activeOwner);
+            projection = await loadSupervisorProjection(
+              activeLineageContext,
+              sessionId,
+              activeOwner,
+            );
             refreshError = undefined;
           } catch (error) {
             refreshError = errorMessage(error);

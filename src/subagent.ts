@@ -42,6 +42,10 @@ import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
+import {
+  acquireRuntimeLineageContext,
+  LINEAGE_BOOTSTRAP_ENV,
+} from "./lineage-context";
 /** @internal Session-rehydration helper used by session-handlers.ts */
 export { rehydrateInteractiveSubagents } from "./rehydrate";
 /**
@@ -85,12 +89,24 @@ const ORCHESTRATOR_SYSTEM_PROMPT = readFileSync(
 ).trim();
 
 export default function (pi: ExtensionAPI) {
-  if (process.env.PI_SUBAGENTURA_CHILD === "1") {
+  const isChild = process.env.PI_SUBAGENTURA_CHILD === "1";
+  const childArtifactDir = isChild ? process.env.ARTIFACT_DIR : undefined;
+  if (!isChild || !childArtifactDir) {
+    delete process.env[LINEAGE_BOOTSTRAP_ENV];
+  }
+  const initialLineageContext = childArtifactDir
+    ? acquireRuntimeLineageContext(childArtifactDir)
+    : undefined;
+  if (isChild) {
     registerChildProtocol(pi);
     if (typeof pi.registerMessageRenderer === "function") {
       pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
     }
-    const sessionScope = registerSessionHandlers(pi);
+    const sessionScope = registerSessionHandlers(
+      pi,
+      initialLineageContext,
+      false,
+    );
     registerInteractiveSubagentTools(pi, sessionScope);
     registerSubagentArtifactsCleanupTool(pi, sessionScope);
     registerSubagentModelListTool(pi);

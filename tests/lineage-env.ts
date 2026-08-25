@@ -1,0 +1,15 @@
+export const LIVE_LINEAGE_ENV_NAMES = [
+  "PI_SUBAGENTURA_CHILD",
+  "ARTIFACT_DIR",
+  "PI_SUBAGENTURA_AGENT_ID",
+  "PI_SUBAGENTURA_ROOT_ID",
+  "PI_SUBAGENTURA_LINEAGE_SESSION_ROOT",
+  "PI_SUBAGENTURA_DEPTH",
+  "PI_SUBAGENTURA_MAX_DEPTH",
+  "PI_SUBAGENTURA_MAX_NODES",
+  "PI_SUBAGENTURA_LINEAGE_BOOTSTRAP",
+] as const;
+
+export function clearLiveLineageEnvironment(): void {
+  for (const name of LIVE_LINEAGE_ENV_NAMES) delete process.env[name];
+}

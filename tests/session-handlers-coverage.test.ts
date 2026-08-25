@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,15 @@ import {
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
 import { registerSessionHandlers } from "../src/session-handlers";
+import {
+  LINEAGE_BOOTSTRAP_ENV,
+  acquireRuntimeLineageContext,
+  createDescendantLineageContext,
+  createRootLineageContext,
+  resetRuntimeLineageContextForTests,
+  writeLineageBootstrap,
+  type LineageContext,
+} from "../src/lineage-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
 import { appendEvent, artifactPath } from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
@@ -31,7 +40,10 @@ interface HandlerRegistration {
   sessionScope: SessionScope;
 }
 
-function registerHandlers(): HandlerRegistration {
+function registerHandlers(
+  initialLineageContext?: LineageContext,
+  allowRootLineage = true,
+): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
   const pi = {
     on: vi.fn((name: string, handler: Function) => {
@@ -41,7 +53,11 @@ function registerHandlers(): HandlerRegistration {
     }),
     sendMessage: vi.fn(),
   };
-  const sessionScope = registerSessionHandlers(pi as any);
+  const sessionScope = registerSessionHandlers(
+    pi as any,
+    initialLineageContext,
+    allowRootLineage,
+  );
   return { handlers, pi, sessionScope };
 }
 
@@ -159,7 +175,86 @@ describe("session handler lifecycle callbacks", () => {
     interactiveSubagentRegistry.clear();
     clearSessionScopes();
     __setTmuxMultiplexer(undefined);
+    resetRuntimeLineageContextForTests();
+    delete process.env[LINEAGE_BOOTSTRAP_ENV];
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("creates root lineage context from session_start without ambient lineage", () => {
+    const registration = registerHandlers();
+
+    startSession(registration, root, "session-a");
+
+    expect(registration.sessionScope.lineageContext).toMatchObject({
+      role: "root",
+      rootId: "session-a",
+      depth: 0,
+    });
+  });
+
+  it("keeps a child without a bootstrap in direct-only mode", () => {
+    const registration = registerHandlers(undefined, false);
+
+    startSession(registration, root, "child-session");
+
+    expect(registration.sessionScope.lineageContext).toBeUndefined();
+  });
+
+  it("preserves a consumed descendant context across session_start", () => {
+    const initial = createDescendantLineageContext(
+      createRootLineageContext("lineage-root", root),
+      "child-agent",
+      join(root, "child-agent"),
+    );
+    const registration = registerHandlers(initial, false);
+
+    startSession(registration, root, "child-session");
+
+    expect(registration.sessionScope.lineageContext).toBe(initial);
+  });
+
+  it("clears descendant authority on a fresh child session", () => {
+    const artifactDir = join(root, "child-agent");
+    const expected = createDescendantLineageContext(
+      createRootLineageContext("lineage-root", root),
+      "child-agent",
+      artifactDir,
+    );
+    process.env[LINEAGE_BOOTSTRAP_ENV] = writeLineageBootstrap(
+      artifactDir,
+      expected,
+    );
+    const initial = acquireRuntimeLineageContext(artifactDir)!;
+    const registration = registerHandlers(initial, false);
+    const ctx = startSession(registration, root, "child-session");
+    const abandonedPath = writeLineageBootstrap(artifactDir, expected);
+
+    registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
+
+    expect(registration.sessionScope.lineageContext).toBeUndefined();
+    expect(acquireRuntimeLineageContext(artifactDir)).toBeUndefined();
+    expect(existsSync(abandonedPath)).toBe(false);
+  });
+
+  it("clears descendant authority on fresh child shutdown", () => {
+    const artifactDir = join(root, "shutdown-child");
+    const expected = createDescendantLineageContext(
+      createRootLineageContext("lineage-root", root),
+      "shutdown-child",
+      artifactDir,
+    );
+    process.env[LINEAGE_BOOTSTRAP_ENV] = writeLineageBootstrap(
+      artifactDir,
+      expected,
+    );
+    const initial = acquireRuntimeLineageContext(artifactDir)!;
+    const registration = registerHandlers(initial, false);
+    const ctx = startSession(registration, root, "child-session");
+
+    registration.handlers.get("session_shutdown")![0]({ reason: "fork" }, ctx);
+
+    expect(registration.sessionScope.lineageContext).toBeUndefined();
+    expect(acquireRuntimeLineageContext(artifactDir)).toBeUndefined();
   });
 
   it("tracks streaming and flush lifecycle state on the exact scope", () => {

@@ -40,7 +40,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
 import {
@@ -85,6 +84,15 @@ import {
   resolveLineageStorePathsSync,
   writeLineageManifestAtomicSync,
 } from "./interactive-lineage";
+import {
+  createDescendantLineageContext,
+  defaultLineageSessionRoot,
+  LINEAGE_BOOTSTRAP_ENV,
+  retireLineageBootstraps,
+  validateLineageContext,
+  writeLineageBootstrap,
+  type LineageContext,
+} from "./lineage-context";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -333,9 +341,7 @@ export function tmuxSetupHint(): string {
 }
 
 function defaultSessionRoot(): string {
-  return process.env.PI_CODING_AGENT_SESSION_DIR
-    ? resolve(process.env.PI_CODING_AGENT_SESSION_DIR)
-    : join(homedir(), ".pi", "agent", "sessions");
+  return defaultLineageSessionRoot();
 }
 
 function sessionDirFor(cwd: string): string {
@@ -508,6 +514,8 @@ export function launchInteractiveSubagent(params: {
   supervisorOwner?: SessionOwnerToken;
   /** Current runtime scope that authoritatively owns the spawned state. */
   sessionScope?: SessionScope;
+  /** Explicit lineage authority; ambient lineage environment is never consulted. */
+  lineageContext?: LineageContext;
   /** Workflow owner for grouping and cancellation. */
   workflowId?: string;
   /** Workflow-managed completions are consumed by the workflow runner. */
@@ -530,37 +538,22 @@ export function launchInteractiveSubagent(params: {
     params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
   const background = params.background !== false; // default true (hidden)
   const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
-  const parentAgentId = process.env.PI_SUBAGENTURA_AGENT_ID;
-  const rootId = process.env.PI_SUBAGENTURA_ROOT_ID ?? params.parentSessionId;
+  const lineageContext = params.lineageContext
+    ? validateLineageContext(params.lineageContext)
+    : undefined;
+  const parentAgentId = lineageContext?.currentAgentId;
+  const rootId = lineageContext?.rootId;
   const sessionRoot =
-    process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT ?? defaultSessionRoot();
-  const currentDepth = Number.parseInt(
-    process.env.PI_SUBAGENTURA_DEPTH ?? "0",
-    10,
-  );
-  const maxDepth = Number.parseInt(
-    process.env.PI_SUBAGENTURA_MAX_DEPTH ?? String(DEFAULT_MAX_DEPTH),
-    10,
-  );
-  const effectiveCurrentDepth = Number.isFinite(currentDepth)
-    ? currentDepth
-    : 0;
-  const effectiveMaxDepth =
-    Number.isFinite(maxDepth) && maxDepth >= 0 ? maxDepth : DEFAULT_MAX_DEPTH;
+    lineageContext?.sessionRoot ?? defaultLineageSessionRoot();
+  const effectiveCurrentDepth = lineageContext?.depth ?? 0;
+  const effectiveMaxDepth = lineageContext?.maxDepth ?? DEFAULT_MAX_DEPTH;
   const nextDepth = effectiveCurrentDepth + 1;
   if (rootId && nextDepth > effectiveMaxDepth) {
     throw new Error(
       `interactive sub-agent depth ${nextDepth} exceeds max ${effectiveMaxDepth}`,
     );
   }
-  const configuredMaxNodes = Number.parseInt(
-    process.env.PI_SUBAGENTURA_MAX_NODES ?? String(DEFAULT_MAX_NODES),
-    10,
-  );
-  const maxNodes =
-    Number.isFinite(configuredMaxNodes) && configuredMaxNodes > 0
-      ? configuredMaxNodes
-      : DEFAULT_MAX_NODES;
+  const maxNodes = lineageContext?.maxNodes ?? DEFAULT_MAX_NODES;
   // The cap applies whenever a lineage root exists, even when this spawn will
   // not persist a manifest of its own — recursion inside a tree still has to be
   // bounded by that tree's budget.
@@ -660,6 +653,7 @@ export function launchInteractiveSubagent(params: {
   });
   let persistedState = false;
   let lineageManifestPath: string | undefined;
+  let lineageBootstrapPath: string | undefined;
   // Persist as soon as the pane is addressable. A crash after this point is
   // recoverable on reload. If persistence itself fails, abort and kill the
   // pane; otherwise the child would be invisible to rehydrate after a restart.
@@ -691,7 +685,7 @@ export function launchInteractiveSubagent(params: {
       throw err;
     }
   }
-  if (rootId && params.parentSessionId) {
+  if (rootId && artifactOwnerSessionId) {
     try {
       lineageManifestPath = writeLineageManifestAtomicSync(
         lineageStore!.nodesDir,
@@ -701,7 +695,7 @@ export function launchInteractiveSubagent(params: {
           ...(parentAgentId ? { parentAgentId } : {}),
           rootId,
           rootHash: hashLineageRoot(rootId),
-          ownerSessionId: params.parentSessionId,
+          ownerSessionId: artifactOwnerSessionId,
           name: params.name,
           taskPreview: params.task.replace(/\s+/g, " ").slice(0, 4096),
           startedAt: new Date().toISOString(),
@@ -738,13 +732,16 @@ export function launchInteractiveSubagent(params: {
       cwd,
       thinkingLevel: params.thinkingLevel,
     });
+    if (lineageContext) {
+      lineageBootstrapPath = writeLineageBootstrap(
+        paths.artifactDir,
+        createDescendantLineageContext(lineageContext, id, paths.artifactDir),
+      );
+    }
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
-      ...(rootId ? { PI_SUBAGENTURA_ROOT_ID: rootId } : {}),
-      ...(rootId ? { PI_SUBAGENTURA_LINEAGE_SESSION_ROOT: sessionRoot } : {}),
-      PI_SUBAGENTURA_AGENT_ID: id,
-      PI_SUBAGENTURA_DEPTH: String(nextDepth),
-      PI_SUBAGENTURA_MAX_DEPTH: String(effectiveMaxDepth),
-      PI_SUBAGENTURA_MAX_NODES: String(maxNodes),
+      ...(lineageBootstrapPath
+        ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
+        : {}),
     });
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
     mux.sendKeys(
@@ -769,6 +766,13 @@ export function launchInteractiveSubagent(params: {
         rmSync(lineageManifestPath, { force: true });
       } catch {
         /* best effort */
+      }
+    }
+    if (lineageBootstrapPath) {
+      try {
+        rmSync(lineageBootstrapPath, { force: true });
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
       }
     }
     mux.killPane(paneId, muxSession);
@@ -1011,6 +1015,7 @@ export function cancelInteractiveSubagent(
   } catch {
     /* best effort — dir may not exist yet if the launch script is still warming up */
   }
+  retireLineageBootstraps(state.artifactDir);
   appendCancellation(state, { origin: source });
 
   // 2. Update the registry. The poller still processes the durable cancellation.
@@ -1098,6 +1103,7 @@ export function cancelInteractiveDescendantByState(
   } catch {
     /* best effort; the owner will reconcile the durable pane state */
   }
+  retireLineageBootstraps(state.artifactDir);
   appendCancellation(state, { origin: "supervisor_descendant" }, false);
   state.status = "cancelled";
   const mux = getMuxForState(state);
@@ -1154,6 +1160,7 @@ export function cancelInteractiveSubagentByState(
   } catch {
     /* best-effort */
   }
+  retireLineageBootstraps(state.artifactDir);
   appendCancellation(state, context);
 
   // A destructive lifecycle transition owns teardown: unless absence is

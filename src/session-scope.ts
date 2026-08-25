@@ -4,6 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
+import type { LineageContext } from "./lineage-context";
 import type { PendingJobDelivery } from "./notifications";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
@@ -28,6 +29,8 @@ export interface SessionScope {
   ui?: ExtensionUIContext;
   lifecycle: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
+  lineageContext?: LineageContext;
+  lineageMode?: "root" | "child";
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
   pendingInProcessDeliveries: PendingJobDelivery[];
@@ -42,6 +45,8 @@ export interface SessionScopeRegistration {
   ui?: ExtensionUIContext;
   lifecycle?: SessionScopeLifecycle;
   sessionManager?: SessionScopeManager;
+  lineageContext?: LineageContext;
+  lineageMode?: "root" | "child";
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
   pendingInProcessDeliveries?: PendingJobDelivery[];
@@ -97,12 +102,18 @@ export function nextSessionScopeId(): number {
   return next;
 }
 
-export function createSessionScope(pi: ExtensionAPI): SessionScope {
+export function createSessionScope(
+  pi: ExtensionAPI,
+  lineageContext?: LineageContext,
+  lineageMode: "root" | "child" = "root",
+): SessionScope {
   return {
     id: nextSessionScopeId(),
     generation: 0,
     lifecycle: "registered",
     pi,
+    lineageContext,
+    lineageMode,
     parentStreaming: false,
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
@@ -144,6 +155,12 @@ export function registerSessionScope(
     if (registration.sessionManager !== undefined) {
       existing.sessionManager = registration.sessionManager;
     }
+    if (Object.hasOwn(registration, "lineageContext")) {
+      existing.lineageContext = registration.lineageContext;
+    }
+    if (registration.lineageMode !== undefined) {
+      existing.lineageMode = registration.lineageMode;
+    }
     if (registration.inProcessJobs !== undefined) {
       existing.inProcessJobs = registration.inProcessJobs;
     }
@@ -166,6 +183,8 @@ export function registerSessionScope(
         ui: registration.ui,
         lifecycle: registration.lifecycle ?? "started",
         sessionManager: registration.sessionManager,
+        lineageContext: registration.lineageContext,
+        lineageMode: registration.lineageMode ?? "root",
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),
         pendingInProcessDeliveries:

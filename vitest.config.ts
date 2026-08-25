@@ -9,6 +9,7 @@ export default defineConfig({
     // tmux server plus a real Pi process down inside afterEach. Left at the 10s
     // default, a genuine failure can surface as a confusing hook timeout.
     hookTimeout: 30_000,
+    setupFiles: ["./tests/setup-lineage-env.ts"],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
