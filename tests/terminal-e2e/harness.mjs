@@ -34,7 +34,7 @@ const sleep = (ms) =>
  * Verified against pi v0.80.6, which is the only SDK leg that runs `test:tui`
  * (see docs/terminal-e2e.md).
  */
-const PI_EDITOR_READY = "ctrl+c/ctrl+d clear/exit";
+const PI_EDITOR_READY = "ctrl+o";
 
 /** `set -g extended-keys on` does not parse before tmux 3.2. */
 const MINIMUM_TMUX = { major: 3, minor: 2 };
@@ -381,6 +381,8 @@ export class TerminalHarness {
     const pi = resolvePi();
     const command = [
       pi,
+      // Keep the startup resource list visible when CI enables quiet startup.
+      "--verbose",
       "--offline",
       "--approve",
       "--api-key",
