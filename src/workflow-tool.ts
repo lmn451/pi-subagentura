@@ -13,6 +13,7 @@ import {
   registerInteractiveSubagentState,
 } from "./interactive-tmux";
 import {
+  DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
   INTERACTIVE_POLL_MS,
   MAX_TOTAL_AGENTS,
@@ -675,7 +676,7 @@ export function registerWorkflowTool(
       const baseOpts = (workflowId: string) => ({
         args: params.args,
         cwd: ctx.cwd,
-        budgetTotal: params.budget ?? null,
+        budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
         runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
       });
@@ -834,7 +835,7 @@ export function registerWorkflowTool(
         const msg = err instanceof Error ? err.message : String(err);
         const usage = workflowErrorUsage(err);
         const usageDetails = usage ? { usage } : {};
-        const budgetTotal = params.budget ?? null;
+        const budgetTotal = params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET;
         return {
           content: [
             {
@@ -1290,7 +1291,7 @@ export function registerWorkflowTool(
         (workflowId) => ({
           args: argsValue,
           cwd: ctx.cwd,
-          budgetTotal: null,
+          budgetTotal: DEFAULT_WORKFLOW_OUTPUT_BUDGET,
           runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
         }),

@@ -8,6 +8,7 @@ import {
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
 import { runWorkflow } from "./workflow-worker";
 import {
+  DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   type RunWorkflowOptions,
   type WorkflowAgentRunner,
   type WorkflowAgentRecord,
@@ -278,7 +279,7 @@ export function startWorkflowJob(
       agentsSpawned: 0,
       errorCount: 0,
       tokensSpent: 0,
-      budgetTotal: opts.budgetTotal ?? null,
+      budgetTotal: opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
       usage: zeroWorkflowUsage(),
       phases: [],
       agentRecords: [],

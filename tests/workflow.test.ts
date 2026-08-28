@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
   WORKFLOW_WALL_TIMEOUT_MS,
   MAX_WORKFLOW_AGENT_RECORDS,
@@ -419,6 +420,20 @@ describe("agent() + budget", () => {
     });
     expect(r.result).toBe("hello");
     expect(r.agentsSpawned).toBe(1);
+  });
+
+  it("uses the finite 100B output budget when omitted", async () => {
+    const result = await runWorkflow(
+      meta + `return { total: budget.total, remaining: budget.remaining() };`,
+      { runAgent: echoRunner() },
+    );
+
+    expect(DEFAULT_WORKFLOW_OUTPUT_BUDGET).toBe(100_000_000_000);
+    expect(Number.isSafeInteger(DEFAULT_WORKFLOW_OUTPUT_BUDGET)).toBe(true);
+    expect(result.result).toEqual({
+      total: DEFAULT_WORKFLOW_OUTPUT_BUDGET,
+      remaining: DEFAULT_WORKFLOW_OUTPUT_BUDGET,
+    });
   });
 
   it("waits for unawaited agent work before completing", async () => {
@@ -2853,6 +2868,7 @@ describe("registerWorkflowTool", () => {
     const job = workflowJobRegistry.get(started.details.workflowId)!;
     expect(started.details.status).toBe("started");
     expect(job.executionMode).toBe("async");
+    expect(job.snapshot.budgetTotal).toBe(DEFAULT_WORKFLOW_OUTPUT_BUDGET);
     await job.promise;
   });
 

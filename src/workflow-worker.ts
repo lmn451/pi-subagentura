@@ -15,6 +15,7 @@ import {
 import { debugLog, usageFromAssistantMessages } from "./helpers";
 import type { SubagentResult, Usage } from "./helpers";
 import {
+  DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   INTERACTIVE_DEAD_GRACE_TICKS,
   INTERACTIVE_POLL_MS,
   MAX_ITEMS_PER_CALL,
@@ -199,7 +200,7 @@ export async function runWorkflow(
     ),
     loadWorkflow: opts.loadWorkflow,
     cwd: opts.cwd ?? process.cwd(),
-    budgetTotal: opts.budgetTotal ?? null,
+    budgetTotal: opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
     counters: {
       agentsSpawned: 0,
       errorCount: 0,

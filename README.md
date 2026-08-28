@@ -96,6 +96,11 @@ results stay in workflow variables outside the parent model context. Only the
 workflow completion enters coordinated parent delivery; the retained final
 result is available through `get_workflow_result`.
 
+An omitted workflow `budget` defaults to the finite `100_000_000_000` completed
+output tokens. This is a high safety ceiling with significant cost/runtime risk,
+not a spending recommendation; use a lower explicit budget when practical.
+Existing agent/item caps, concurrency, timeouts, cancellation, and errors still apply.
+
 Workflow scripts are trusted agent-authored JavaScript. The VM improves
 determinism but is not a security boundary, so never run untrusted JavaScript.
 Background workflow jobs are scoped to the current parent session and are

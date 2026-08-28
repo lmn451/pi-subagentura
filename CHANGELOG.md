@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Workflow output budgets now default to the finite `100_000_000_000` completed output tokens. This is a high safety ceiling with significant cost/runtime risk; existing explicit overrides and independent safeguards are unchanged.
+
 ## [3.4.2] - 2026-08-28
 
 ### Added
