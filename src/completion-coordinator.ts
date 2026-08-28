@@ -65,6 +65,10 @@ export interface CompletionRecord {
   status: CompletionStatus;
   policy: CompletionPolicy;
   groupId?: string;
+  /** Number of registered group members still awaiting terminal completion. */
+  groupRemaining?: number;
+  /** Indicates that this member completed the sealed group barrier. */
+  groupComplete?: boolean;
   references: CompletionReference[];
   completedAt: number;
   /** Monotonic publication sequence used to retire spilled session entries. */
@@ -309,7 +313,24 @@ function normalizeRecord(value: unknown): CompletionRecord {
   if (raw.policy === "group" && !groupId) {
     throw new Error("Grouped completion requires groupId");
   }
-  if (raw.policy === "each" && groupId) {
+  const groupRemaining =
+    typeof raw.groupRemaining === "number" &&
+    Number.isSafeInteger(raw.groupRemaining) &&
+    raw.groupRemaining >= 0 &&
+    raw.groupRemaining <= MAX_GROUP_MEMBERS
+      ? raw.groupRemaining
+      : undefined;
+  if (raw.groupRemaining !== undefined && groupRemaining === undefined) {
+    throw new Error("Invalid grouped completion progress");
+  }
+  const groupComplete = raw.groupComplete === true ? true : undefined;
+  if (raw.groupComplete !== undefined && groupComplete === undefined) {
+    throw new Error("Invalid grouped completion state");
+  }
+  if (
+    raw.policy === "each" &&
+    (groupId || groupRemaining !== undefined || groupComplete !== undefined)
+  ) {
     throw new Error("Independent completion cannot have group metadata");
   }
   const references = Array.isArray(raw.references)
@@ -362,6 +383,8 @@ function normalizeRecord(value: unknown): CompletionRecord {
     status: raw.status,
     policy: raw.policy,
     ...(groupId ? { groupId } : {}),
+    ...(groupRemaining !== undefined ? { groupRemaining } : {}),
+    ...(groupComplete === true ? { groupComplete } : {}),
     references,
     completedAt,
     ...(sequence !== undefined ? { sequence } : {}),
@@ -1611,6 +1634,11 @@ export function registerCompletionCoordinator(
           const identity = record.turnId
             ? `${JSON.stringify(record.sourceId)}, turn ${JSON.stringify(record.turnId)}`
             : JSON.stringify(record.sourceId);
+          const progress = record.groupComplete
+            ? "; group complete"
+            : record.groupRemaining !== undefined
+              ? `; waiting for ${record.groupRemaining} more`
+              : "";
           const details = options.expanded
             ? ` (${identity})\n${record.references
                 .map(
@@ -1622,7 +1650,7 @@ export function registerCompletionCoordinator(
           return new Text(
             theme.fg(
               record.status === "error" ? "error" : "dim",
-              `${formatCompletionMessage(record.label, `${icon} ${record.status}`)}${details}`,
+              `${formatCompletionMessage(record.label, `${icon} ${record.status}${progress}`)}${details}`,
             ),
             0,
             0,
@@ -1871,11 +1899,23 @@ export function publishCompletion(
         group = state.groups.get(record.groupId!);
       }
       if (!group) throw new Error("Completion group registration failed");
+      delete record.groupRemaining;
+      delete record.groupComplete;
       if (group.terminalMembers.has(memberKey)) {
         record = { ...record, policy: "each" };
         delete record.groupId;
+        delete record.groupRemaining;
+        delete record.groupComplete;
       } else {
         group.terminalMembers.add(memberKey);
+        if (groupIsReady(state, record)) {
+          record = { ...record, groupComplete: true };
+        } else {
+          record = {
+            ...record,
+            groupRemaining: group.members.size - group.terminalMembers.size,
+          };
+        }
       }
     } catch (error) {
       debugLog("warn", "completion_publication_rejected", {
