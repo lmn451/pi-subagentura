@@ -20,6 +20,8 @@ export const INTERACTIVE_POLL_MS = 1000;
 export const INTERACTIVE_DEAD_GRACE_TICKS = 3;
 export const WORKFLOW_SYNC_TIMEOUT_MS = 30_000;
 export const WORKFLOW_WALL_TIMEOUT_MS = 100 * 60 * 60_000;
+/** Finite high default; callers should pass lower explicit budgets when practical. */
+export const DEFAULT_WORKFLOW_OUTPUT_BUDGET = 100_000_000_000;
 
 export function defaultConcurrency(): number {
   const n = cpus()?.length ?? 4;
