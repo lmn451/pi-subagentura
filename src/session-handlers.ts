@@ -10,6 +10,7 @@ import {
   removeInteractiveState,
 } from "./artifact";
 import {
+  updateRunningSubagentFooter,
   clearSessionParsers,
   clearSessionScopeUiContributions,
   pollArtifactChanges,
@@ -299,6 +300,7 @@ export function registerSessionHandlers(
     scope.sessionManager = ctx.sessionManager;
     clearFreshChildLineage(scope, event.reason);
     const sessionId = ctx.sessionManager?.getSessionId?.();
+    const orchestratorMode = isOrchestratorMode(pi);
     if (
       allowRootLineage &&
       sessionId &&
@@ -307,7 +309,7 @@ export function registerSessionHandlers(
       scope.spawnTreeContext = createRootSpawnTreeContext(
         sessionId,
         undefined,
-        isOrchestratorMode(pi),
+        orchestratorMode,
       );
     }
     scope.isParentIdle =
@@ -315,6 +317,11 @@ export function registerSessionHandlers(
     scope.parentStreaming = false;
     registerSessionScope(scope);
     setLegacyActiveSessionRefs(scope);
+    const hasFooterIdentity =
+      orchestratorMode || scope.spawnTreeContext?.orchestratorMode === true;
+    if (scope.ui && hasFooterIdentity) {
+      updateRunningSubagentFooter(scope.ui, sessionOwner(scope));
+    }
 
     const shouldRehydrate =
       event.reason === "startup" ||
