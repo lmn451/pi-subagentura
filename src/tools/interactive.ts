@@ -41,15 +41,21 @@ import {
 } from "../completion-coordinator";
 import {
   cancelInteractiveSubagent,
+  disposeWorkflowInteractiveSubagent,
   removeInteractiveSubagentState,
   formatInteractiveState,
   interactiveSubagentRegistry,
+  isReusableWorkflowChildExpired,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
   tmuxSetupHint,
   type InteractiveSubagentState,
 } from "../interactive-tmux";
+import {
+  inspectDirectInteractiveRecovery,
+  recoverDirectInteractiveSubagent,
+} from "../interactive-recovery";
 import { debugLog } from "../helpers";
 import {
   completionTriggersTurn,
@@ -755,6 +761,115 @@ export function registerInteractiveSubagentTools(
     },
   });
 
+  // ── Tool: explicitly recover a dead direct-interactive runtime ───────
+  registerToolWithDefaultGuidance(pi, {
+    name: "recover_interactive_subagent",
+    label: "Recover Interactive Subagent",
+    description: [
+      "Recover a persisted direct interactive child after its tmux pane or Zellij tab was accidentally closed.",
+      "This is incident recovery, not normal spawning or workflow reuse. The recorded pane must be conclusively dead,",
+      "the current parent must still own the exact persisted session/artifact/lineage identity, and no duplicate runtime",
+      "may reference the same child session. The operation shows a native user confirmation before creating a replacement",
+      "pane and rebinds the same child ID without changing delivery cursors, receipts, artifacts, or routing authority.",
+      "Workflow-origin children and in-process/background jobs are intentionally unsupported.",
+    ].join("\n"),
+    parameters: Type.Object({
+      id: Type.String({
+        pattern: "^(?:[a-f0-9]{8}|[a-f0-9]{16})$",
+        description:
+          "Persisted direct interactive child ID whose recorded pane is dead",
+      }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+      const registration = resolveInteractiveToolStates(toolToken);
+      const scope = registration?.scope;
+      const state = registration?.states.get(params.id);
+      if (!scope || !state) {
+        return interactiveRecoveryError(
+          params.id,
+          "not_found",
+          `Interactive sub-agent ${params.id} is not persisted in this parent session.`,
+        );
+      }
+      let plan;
+      try {
+        plan = await inspectDirectInteractiveRecovery({
+          state,
+          scope,
+          parentCwd: ctx.cwd,
+        });
+      } catch (error) {
+        return interactiveRecoveryError(
+          params.id,
+          "preflight_failed",
+          recoveryErrorMessage(error),
+        );
+      }
+      let confirmed = false;
+      try {
+        confirmed = await ctx.ui.confirm(
+          "Recover dead interactive sub-agent?",
+          formatInteractiveRecoveryConfirmation(plan),
+        );
+      } catch (error) {
+        return interactiveRecoveryError(
+          params.id,
+          "confirmation_unavailable",
+          `Recovery requires an interactive confirmation UI: ${recoveryErrorMessage(error)}`,
+        );
+      }
+      if (!confirmed) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Recovery cancelled for interactive sub-agent ${params.id}; no state was changed.`,
+            },
+          ],
+          details: { status: "confirmation_declined", id: params.id },
+        };
+      }
+      try {
+        const recovered = await recoverDirectInteractiveSubagent({
+          state,
+          scope,
+          parentCwd: ctx.cwd,
+          expectedFingerprint: plan.fingerprint,
+        });
+        updateRunningSubagentFooter(ctx.ui, sessionOwner(scope));
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Recovered interactive sub-agent ${params.id} in ${recovered.mux} pane ${recovered.paneId} using Pi session ${plan.piSessionId}. ` +
+                `The same child ID, artifacts, lineage, and delivery state were preserved. Wait until status is idle, then send an explicit child-ID follow-up.`,
+            },
+          ],
+          details: {
+            status: "recovered",
+            id: params.id,
+            piSessionId: plan.piSessionId,
+            paneId: recovered.paneId,
+            mux: recovered.mux,
+            muxSession: recovered.muxSession,
+            runtimeStatus: recovered.status,
+            attachCommand: recovered.attachCommand,
+            focusCommand: recovered.selectPaneCommand,
+            sessionFile: recovered.sessionFile,
+            artifactDir: recovered.artifactDir,
+          },
+        };
+      } catch (error) {
+        return interactiveRecoveryError(
+          params.id,
+          "recovery_failed",
+          recoveryErrorMessage(error),
+        );
+      }
+    },
+  });
+
   // ── Tool 7: inspect attachable tmux-backed sessions ────────────────
   registerToolWithDefaultGuidance(pi, {
     name: "get_interactive_subagent_status",
@@ -906,7 +1021,7 @@ export function registerInteractiveSubagentTools(
     description: [
       "Send a follow-up prompt to a live interactive sub-agent. The message is delivered into the",
       "child's existing REPL via tmux send-keys, so the child's model context is preserved — this",
-      "is a true follow-up turn, not a fresh spawn. A workflow-owned child can accept a follow-up",
+      "is a true follow-up turn, not a fresh spawn. An opted-in reusable workflow child accepts a follow-up",
       "only after its completed turn is idle and its workflow runner has consumed the result. It is",
       "promoted to standalone only after that follow-up is sent successfully. An idle follow-up resets",
       "future completion delivery to independent each; a source can satisfy a group only once, so later",
@@ -986,6 +1101,25 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
+      if (isReusableWorkflowChildExpired(state)) {
+        const disposed = disposeWorkflowInteractiveSubagent(state);
+        return {
+          content: [
+            {
+              type: "text",
+              text: disposed
+                ? `Interactive sub-agent ${params.id} exceeded its reusable workflow-child retention deadline and was disposed.`
+                : `Interactive sub-agent ${params.id} exceeded its reusable workflow-child retention deadline; disposal failed and will be retried.`,
+            },
+          ],
+          details: {
+            id: params.id,
+            status: "workflow_reuse_expired",
+            disposed,
+          },
+          isError: true,
+        };
+      }
       if (
         state.completionOwner === "workflow" &&
         (!state.workflowResultConsumed || state.status !== "idle")
@@ -998,6 +1132,21 @@ export function registerInteractiveSubagentTools(
             },
           ],
           details: { id: params.id, status: "workflow_owned" },
+          isError: true,
+        };
+      }
+      if (
+        state.completionOwner === "workflow" &&
+        state.workflowReusable !== true
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Interactive sub-agent ${params.id} was not opted in for workflow-child reuse and cannot be promoted.`,
+            },
+          ],
+          details: { id: params.id, status: "workflow_not_reusable" },
           isError: true,
         };
       }
@@ -1048,6 +1197,7 @@ export function registerInteractiveSubagentTools(
       ) {
         state.completionOwner = "standalone";
         state.workflowId = undefined;
+        state.workflowReuseExpiresAt = undefined;
       }
       let persistenceWarning: string | undefined;
       if (startsNewTurn) {
@@ -1349,4 +1499,47 @@ export function registerInteractiveSubagentTools(
       };
     },
   });
+}
+
+function formatInteractiveRecoveryConfirmation(
+  plan: Awaited<ReturnType<typeof inspectDirectInteractiveRecovery>>,
+): string {
+  return [
+    `Child runtime ID: ${plan.childId}`,
+    `Pi session ID: ${plan.piSessionId}`,
+    `Backend / old pane: ${plan.mux} ${plan.oldPaneId}`,
+    `Child cwd: ${plan.childCwd}`,
+    `Session JSONL: ${plan.sessionFile}`,
+    `Artifacts: ${plan.artifactDir}`,
+    `Parent owner: ${plan.parentSessionId}`,
+    `Lineage root: ${plan.lineageRootId}`,
+    "",
+    "A new pane/process will reopen the same Pi session and rebind only this dead direct child.",
+    "Child ID, delivery cursors/receipts, artifacts, lineage, and routing authority remain unchanged.",
+  ].join("\n");
+}
+
+function recoveryErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function interactiveRecoveryError(
+  id: string,
+  status:
+    | "not_found"
+    | "preflight_failed"
+    | "confirmation_unavailable"
+    | "recovery_failed",
+  error: string,
+) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Interactive sub-agent ${id} was not recovered: ${error}`,
+      },
+    ],
+    details: { status, id, error },
+    isError: true,
+  };
 }

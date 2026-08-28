@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { JobState } from "./helpers";
 import {
   cancelInteractiveSubagent,
+  deriveWorkflowChildLifecycle,
   interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -61,6 +62,8 @@ export interface InteractiveSupervisorItem extends SupervisorItemBase {
   kind?: "interactive";
   state: InteractiveSubagentState;
   origin?: InteractiveSupervisorOrigin;
+  /** Same-workflow peers from the exact authorized live owner scope. */
+  workflowSiblingIds?: string[];
 }
 
 export interface InProcessSupervisorItem extends SupervisorItemBase {
@@ -695,6 +698,7 @@ function formatInProcessDetails(job: JobState, width: number): string[] {
     `Active tool: ${activeTool}`,
     `Usage: ${job.liveStatus.usage.input} input · ${job.liveStatus.usage.output} output`,
     `Output preview: ${compactText(job.liveStatus.output) || "none yet"}`,
+    "Recovery: session-scoped in-process job; never rehydrated after session replacement or crash",
   ];
   return fields.map((field) => trunc(`│     ${field}`, width));
 }
@@ -722,6 +726,7 @@ function formatWorkflowDetails(job: WorkflowJobState, width: number): string[] {
     ...usageFields,
     ...(usage ? [formatWorkflowUsageLegend(true)] : []),
     `Last activity: ${snapshot.lastMessage ?? "none yet"}`,
+    "Recovery: session-scoped workflow job; never rehydrated after session replacement or crash",
     ...(liveUsage
       ? [`Live usage: ${formatWorkflowUsage(liveUsage, { ascii: true })}`]
       : []),
@@ -749,11 +754,16 @@ function formatInteractiveDetails(
   artifact: SupervisorArtifactDetails | undefined,
 ): string[] {
   const state = item.state;
+  const workflowFields = formatWorkflowRelationship(item);
   // Every interpolated value is compacted: a multi-line task prompt (the common
   // case) would otherwise emit a literal newline inside one row and break the
   // box drawing, since trunc bounds by length only.
   const fields = [
     `Origin: ${formatInteractiveOrigin(item)}`,
+    `Agent state: ${deriveWorkflowChildLifecycle(state) ?? "standalone interactive"}`,
+    ...workflowFields,
+    `Recovery: ${formatInteractiveRecovery(item)}`,
+    `Routing: ${formatInteractiveRouting(state)}`,
     `Task: ${compactText(state.task)}`,
     `Model: ${compactText(state.model ?? "default")}`,
     `Pane: ${compactText(`${state.mux}:${state.paneId}${state.muxSession ? ` session=${state.muxSession}` : ""}`)}`,
@@ -770,6 +780,43 @@ function formatInteractiveDetails(
   fields.push(`Focus: ${compactText(state.selectPaneCommand)}`);
   fields.push(`Return: ${focusReturnHint(state)}`);
   return fields.map((field) => trunc(`│     ${field}`, width));
+}
+
+function formatWorkflowRelationship(item: InteractiveSupervisorItem): string[] {
+  const state = item.state;
+  const workflowId = state.workflowOriginId ?? state.workflowId;
+  if (!workflowId) return [];
+  const name = compactText(state.workflowName ?? "unnamed workflow");
+  const owner =
+    state.completionOwner === "workflow" ? "workflow" : "standalone";
+  const siblings = item.workflowSiblingIds?.join(", ") || "none";
+  const retention = state.workflowReusable
+    ? state.workflowReuseExpiresAt === undefined
+      ? "opted in; deadline starts after workflow result consumption"
+      : `opted in; expires=${new Date(state.workflowReuseExpiresAt).toISOString()}`
+    : "dispose after workflow result consumption";
+  return [
+    `Workflow: ${name} (${compactText(workflowId)}) · owner=${owner}`,
+    `Siblings: ${compactText(siblings)}`,
+    `Retention: ${retention}`,
+  ];
+}
+
+function formatInteractiveRecovery(item: InteractiveSupervisorItem): string {
+  if (item.origin?.source === "lineage") {
+    return "persisted lineage projection; after crash/orphan, liveness does not restore workflow ownership or routing authority";
+  }
+  if (item.state.workflowOriginId ?? item.state.workflowId) {
+    return "same-parent-session only; workflow children are not rehydrated";
+  }
+  return "durable direct interactive; matching-session startup/reload/resume restores it, new/fork does not";
+}
+
+function formatInteractiveRouting(state: InteractiveSubagentState): string {
+  if (state.workflowOriginId ?? state.workflowId) {
+    return "attachable does not imply actionable; explicit child-ID follow-up promotes";
+  }
+  return "attachable does not imply actionable; Orchestratorv2 requires authorized routing metadata";
 }
 
 function formatInteractiveOrigin(item: InteractiveSupervisorItem): string {

@@ -316,6 +316,22 @@ async function executeScript(
     }
     const isolation = agentOpts.isolation ?? "process";
     const isProcess = isolation !== "in-process";
+    if (
+      agentOpts.reusable !== undefined &&
+      typeof agentOpts.reusable !== "boolean"
+    ) {
+      throw new Error("agent() reusable must be a boolean.");
+    }
+    if (agentOpts.reusable && hasSchema) {
+      throw new Error(
+        "agent() reusable cannot be combined with schema because rejected retry attempts cannot retain standalone context safely.",
+      );
+    }
+    if (agentOpts.reusable && !isProcess) {
+      throw new Error(
+        "agent() reusable requires process isolation; in-process context cannot be promoted to a standalone interactive child.",
+      );
+    }
     const sem = isProcess ? engine.processSem : engine.sem;
     const resolvedPhase =
       agentOpts.phase != null ? String(agentOpts.phase) : undefined;
@@ -372,6 +388,7 @@ async function executeScript(
               ...(hasSchema && !isProcess ? { schema: agentOpts.schema } : {}),
               onCancellationSnapshot: engine.onCancellationSnapshot,
               thinkingLevel: agentOpts.thinkingLevel,
+              reusable: agentOpts.reusable,
               onProgress: (ev) => {
                 if (ev.liveUsage) activeRun.liveUsage = { ...ev.liveUsage };
                 if (ev.kind === "phase") {

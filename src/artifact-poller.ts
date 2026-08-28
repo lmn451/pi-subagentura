@@ -30,9 +30,12 @@ import {
 } from "./artifact";
 import {
   deriveInteractiveSubagentStatusFromLifecycle,
+  disposeWorkflowInteractiveSubagent,
   foldInteractiveLifecycle,
-  interactiveSubagentRegistry,
   getInteractivePaneLivenessAsync,
+  hasPersistedDirectRecoveryIdentity,
+  interactiveSubagentRegistry,
+  isWorkflowChildDisposalDue,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { shouldNotify } from "./notifications";
@@ -631,8 +634,16 @@ async function runPollArtifactChanges(
     // Queue state and its advanced byte cursor reach disk atomically. A crash
     // before this write replays the old cursor; deterministic delivery ids dedupe it.
     persistPolledStates(persistedStates);
-    // One clock for both widgets so their coarse elapsed buckets stay aligned.
+    // Reusable workflow children are deliberately runtime-only. Expiry removes
+    // ownership before killing the pane, so liveness can never recreate authority.
     const now = Date.now();
+    for (const state of states) {
+      if (stateMap.get(state.id) !== state) continue;
+      if (!isWorkflowChildDisposalDue(state, now)) continue;
+      destroySessionParser(state);
+      disposeWorkflowInteractiveSubagent(state);
+    }
+    // One clock for widgets and bounded reuse expiry keeps coarse UI state aligned.
     const widgetRows = projectActivityWidgetRows(ui, owner, now);
     flushDeliveries(interactivePi, ui, owner);
     for (const state of states) {
@@ -642,6 +653,7 @@ async function runPollArtifactChanges(
       if (terminal) destroySessionParser(state);
       if (
         terminal &&
+        !hasPersistedDirectRecoveryIdentity(state) &&
         state.parentSessionId &&
         (state.pendingDeliveries?.length ?? 0) === 0
       ) {

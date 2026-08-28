@@ -93,6 +93,7 @@ import {
   writeLineageBootstrap,
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
+import { debugLog } from "./helpers";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -200,12 +201,24 @@ export interface InteractiveSubagentState {
    * session_start. Optional for tests that don't care about reload semantics.
    */
   parentSessionId?: string;
+  /** Runtime owner identity shown in the supervisor; workflow children never persist it. */
+  ownerSessionId?: string;
+  /** Runtime lineage metadata used only for authorized live-registry presentation. */
+  lineageRootId?: string;
+  lineageParentAgentId?: string;
   /** Live supervisor owner; intentionally not persisted for workflow children. */
   supervisorOwner?: SessionOwnerToken;
   /** Exact runtime session generation that owns this state; never persisted. */
   sessionOwner?: SessionOwnerToken;
-  /** Workflow that owns this child, when completion is aggregated by the workflow. */
+  /** Workflow that currently owns this child, when completion is aggregated. */
   workflowId?: string;
+  /** Immutable runtime-only workflow origin retained after standalone promotion. */
+  workflowOriginId?: string;
+  workflowName?: string;
+  /** Explicit opt-in to bounded same-session context reuse. */
+  workflowReusable?: boolean;
+  /** Reuse deadline starts when the workflow consumes the child result. */
+  workflowReuseExpiresAt?: number;
   /** Completion is delivered standalone or consumed by a workflow aggregate. */
   completionOwner?: "standalone" | "workflow";
   /** Workflow-runner acknowledgement that this child's result was consumed; runtime-only and intentionally not persisted. */
@@ -404,7 +417,8 @@ export function buildInteractivePrompt(params: {
 export function buildPiInteractiveCommand(params: {
   sessionFile: string;
   name: string;
-  promptFile: string;
+  /** Omit when reopening an existing child session without submitting a prompt. */
+  promptFile?: string;
   systemPromptFile?: string;
   model?: string;
   cwd: string;
@@ -427,7 +441,7 @@ export function buildPiInteractiveCommand(params: {
   if (params.systemPromptFile) {
     parts.push("--append-system-prompt", escape(params.systemPromptFile));
   }
-  parts.push(escape(`@${params.promptFile}`));
+  if (params.promptFile) parts.push(escape(`@${params.promptFile}`));
   return `cd ${escape(params.cwd)} && ${parts.join(" ")}`;
 }
 
@@ -517,6 +531,10 @@ export function launchInteractiveSubagent(params: {
   spawnTreeContext?: ParsedSpawnTreeContext;
   /** Workflow owner for grouping and cancellation. */
   workflowId?: string;
+  /** User-visible workflow name retained as runtime-only origin metadata. */
+  workflowName?: string;
+  /** Explicit bounded same-session reuse opt-in. */
+  workflowReusable?: boolean;
   /** Workflow-managed completions are consumed by the workflow runner. */
   completionOwner?: "standalone" | "workflow";
   /**
@@ -558,6 +576,8 @@ export function launchInteractiveSubagent(params: {
   const lineageStore = rootId
     ? resolveLineageStorePathsSync(sessionRoot, rootId)
     : undefined;
+  const ownerScope =
+    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
   if (lineageStore) {
     let activeCount = existsSync(lineageStore.nodesDir)
       ? countLineageManifestsSync(lineageStore.nodesDir)
@@ -568,7 +588,12 @@ export function launchInteractiveSubagent(params: {
       // active/non-dead count; unknown panes conservatively consume capacity.
       activeCount = pruneTerminalLineageNodesSync(
         lineageStore.nodesDir,
-        (manifest) => getLineagePaneLiveness(manifest) === "dead",
+        (manifest) => {
+          const direct = ownerScope?.interactiveStates.get(manifest.agentId);
+          if (direct && hasPersistedDirectRecoveryIdentity(direct))
+            return false;
+          return getLineagePaneLiveness(manifest) === "dead";
+        },
       ).active;
     }
     if (activeCount >= maxNodes) {
@@ -699,6 +724,8 @@ export function launchInteractiveSubagent(params: {
           rootHash: hashLineageRoot(rootId),
           ownerSessionId: artifactOwnerSessionId,
           name: params.name,
+          runtimeKind:
+            params.completionOwner === "workflow" ? "workflow" : "direct",
           taskPreview: params.task.replace(/\s+/g, " ").slice(0, 4096),
           startedAt: new Date().toISOString(),
           cwd,
@@ -814,17 +841,20 @@ export function launchInteractiveSubagent(params: {
     completionPolicy: params.completionPolicy,
     completionGroupId: params.completionGroupId,
     parentSessionId: params.parentSessionId,
+    ownerSessionId: artifactOwnerSessionId,
+    lineageRootId: rootId,
+    lineageParentAgentId: parentAgentId,
     supervisorOwner: params.supervisorOwner,
     workflowId: params.workflowId,
+    workflowOriginId: params.workflowId,
+    workflowName: params.workflowName,
+    workflowReusable: params.workflowReusable,
     completionOwner: params.completionOwner,
     eventByteCursor: 0,
     pendingDeliveries: [],
     deliveryReceipts: [],
   };
-  registerInteractiveSubagentState(
-    state,
-    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner),
-  );
+  registerInteractiveSubagentState(state, ownerScope);
   return state;
 }
 
@@ -844,6 +874,93 @@ export function paneRefForState(state: InteractiveSubagentState): PaneRef {
     windowName: state.windowName,
     session: state.muxSession,
   };
+}
+
+export function hasPersistedDirectRecoveryIdentity(
+  state: InteractiveSubagentState,
+): boolean {
+  return (
+    state.parentSessionId !== undefined &&
+    state.status !== "cancelled" &&
+    state.completionOwner !== "workflow" &&
+    state.workflowOriginId === undefined &&
+    state.workflowResultConsumed !== true
+  );
+}
+
+export type WorkflowChildLifecycle =
+  | "running/workflow-owned"
+  | "workflow complete/awaiting idle"
+  | "idle/reusable"
+  | "workflow complete/dispose pending"
+  | "standalone";
+
+export function deriveWorkflowChildLifecycle(
+  state: InteractiveSubagentState,
+): WorkflowChildLifecycle | undefined {
+  if (!state.workflowOriginId && !state.workflowId) return undefined;
+  if (state.completionOwner !== "workflow") return "standalone";
+  if (!state.workflowResultConsumed) return "running/workflow-owned";
+  if (!state.workflowReusable) return "workflow complete/dispose pending";
+  return state.status === "idle"
+    ? "idle/reusable"
+    : "workflow complete/awaiting idle";
+}
+
+export function isReusableWorkflowChildExpired(
+  state: InteractiveSubagentState,
+  now = Date.now(),
+): boolean {
+  return (
+    state.completionOwner === "workflow" &&
+    state.workflowReusable === true &&
+    state.workflowResultConsumed === true &&
+    state.workflowReuseExpiresAt !== undefined &&
+    state.workflowReuseExpiresAt <= now
+  );
+}
+
+export function isWorkflowChildDisposalDue(
+  state: InteractiveSubagentState,
+  now = Date.now(),
+): boolean {
+  return (
+    state.completionOwner === "workflow" &&
+    state.workflowResultConsumed === true &&
+    (state.workflowReusable !== true ||
+      isReusableWorkflowChildExpired(state, now))
+  );
+}
+
+/** Dispose a workflow process child without publishing a second cancellation result. */
+export function disposeWorkflowInteractiveSubagent(
+  state: InteractiveSubagentState,
+): boolean {
+  try {
+    const mux = getMuxForState(state);
+    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+      mux.killPane(state.paneId, state.muxSession);
+    }
+  } catch (error) {
+    debugLog("warn", "workflow_child_dispose_failed", {
+      id: state.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+  removeInteractiveSubagentState(state);
+  if (state.parentSessionId) {
+    try {
+      removeInteractiveState(state.cwd, state.id);
+    } catch (error) {
+      debugLog("warn", "workflow_child_state_remove_failed", {
+        id: state.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  retireLineageBootstraps(state.artifactDir);
+  return true;
 }
 
 export function focusInteractiveSubagent(
@@ -1267,6 +1384,8 @@ export function foldInteractiveLifecycle(
       return;
     }
     case "started": {
+      lifecycle.processStatus = undefined;
+      lifecycle.processExitCode = undefined;
       lifecycle.legacyTerminal = undefined;
       return;
     }

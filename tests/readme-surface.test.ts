@@ -58,7 +58,7 @@ describe("README public surface", () => {
       "#### Coordinated completion delivery",
       "#### Consumption-receipt fallback",
     );
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(24);
     expect(
       tools.filter((name) => name.includes("orchestrator")).sort(),
     ).toEqual(
@@ -95,5 +95,19 @@ describe("README public surface", () => {
     expect(coordinatedDelivery).toContain("sendCompletionTurn");
     expect(coordinatedDelivery).toContain("actual parent streaming state");
     expect(coordinatedDelivery).toContain("Non-v2 modes fall through");
+  });
+
+  it("documents workflow-child lifecycle and the rehydration matrix", () => {
+    expect(README).toContain("## Workflow child lifecycle and recovery");
+    expect(README).toContain(
+      "spawn → running → workflow complete → idle/reusable",
+    );
+    expect(README).toContain("`reusable: true`");
+    expect(README).toContain("explicit child-ID follow-up");
+    expect(README).toMatch(/\|\s+Direct interactive sub-agent\s+\|/);
+    expect(README).toMatch(/\|\s+Reusable workflow process child\s+\|/);
+    expect(README).toMatch(/\|\s+In-process job \/ background workflow\s+\|/);
+    expect(README).toContain("crash/orphan");
+    expect(README).toContain("new/fork");
   });
 });

@@ -183,6 +183,7 @@ async function lineageHarness(rootId: string) {
         paneId: string;
         parentAgentId?: string;
         backend?: string;
+        runtimeKind?: "direct" | "workflow";
       },
     ) {
       await writeLineageManifestAtomic(paths.nodesDir, {
@@ -195,6 +196,7 @@ async function lineageHarness(rootId: string) {
         rootHash: hashLineageRoot(rootId),
         ownerSessionId: rootId,
         name: `agent-${agentId}`,
+        ...(options.runtimeKind ? { runtimeKind: options.runtimeKind } : {}),
         taskPreview: `inspect ${agentId}`,
         startedAt: new Date(Date.now() - 5_000).toISOString(),
         cwd: sessionRoot,
@@ -338,6 +340,82 @@ describe("interactive supervisor", () => {
     component.handleInput("\r");
     expect(component.render(180).join("\n")).toContain(
       "Agent: → running reviewer #1",
+    );
+  });
+
+  it("shows reusable workflow lifecycle, ownership, siblings, and recovery caveats", () => {
+    const owner = { id: 7, generation: 1 };
+    const scope = startedScope(owner, "session-owner");
+    const reusable = state("child-a", {
+      startedAt: 1,
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "workflow-a",
+      workflowOriginId: "workflow-a",
+      workflowName: "review-flow",
+      workflowReusable: true,
+      workflowResultConsumed: true,
+      workflowReuseExpiresAt: Date.now() + 30_000,
+      ownerSessionId: "session-owner",
+      sessionOwner: owner,
+      lineageRootId: "root-session",
+      lineageParentAgentId: "orchestrator-child",
+    });
+    const sibling = state("child-b", {
+      startedAt: 2,
+      workflowId: "workflow-a",
+      workflowOriginId: "workflow-a",
+      workflowName: "review-flow",
+      workflowReusable: true,
+      ownerSessionId: "session-owner",
+      sessionOwner: owner,
+    });
+    scope.interactiveStates.set(reusable.id, reusable);
+    scope.interactiveStates.set(sibling.id, sibling);
+
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      now: () => Date.now(),
+      items: () =>
+        buildAsyncSupervisorItems(
+          directSupervisorItems(undefined, owner),
+          owner,
+        ),
+    });
+    component.handleInput("\r");
+    const rendered = component.render(240).join("\n");
+
+    expect(rendered).toContain("Agent state: idle/reusable");
+    expect(rendered).toContain(
+      "Workflow: review-flow (workflow-a) · owner=workflow",
+    );
+    expect(rendered).toContain("Siblings: child-b");
+    expect(rendered).toContain(
+      "Origin: live registry · owner=session-owner · root=root-session · parent=orchestrator-child",
+    );
+    expect(rendered).toContain(
+      "Recovery: same-parent-session only; workflow children are not rehydrated",
+    );
+    expect(rendered).toContain(
+      "Routing: attachable does not imply actionable; explicit child-ID follow-up promotes",
+    );
+  });
+
+  it("omits workflow sibling relationships without an exact owner scope", () => {
+    const first = state("ownerless-a", {
+      workflowOriginId: "workflow-a",
+    });
+    const second = state("ownerless-b", {
+      workflowOriginId: "workflow-a",
+    });
+    interactiveSubagentRegistry.set(first.id, first);
+    interactiveSubagentRegistry.set(second.id, second);
+
+    const items = directSupervisorItems();
+
+    expect(items).toHaveLength(2);
+    expect(items.every((item) => item.workflowSiblingIds === undefined)).toBe(
+      true,
     );
   });
 
@@ -1172,6 +1250,9 @@ describe("interactive supervisor", () => {
     expect(component.render(160).join("\n")).toContain(
       "Origin: persisted lineage · owner=owner-session · root=root-session · parent=parent-agent",
     );
+    expect(component.render(200).join("\n")).toContain(
+      "Recovery: persisted lineage projection; after crash/orphan, liveness does not restore workflow ownership or routing authority",
+    );
   });
 
   it("uses the direct cancellation path only for x", () => {
@@ -1717,6 +1798,27 @@ describe("interactive supervisor", () => {
     expect(readdirSync(paths.nodesDir)).toContain("external-live-agent.json");
   });
 
+  it("keeps live workflow-origin lineage diagnostic-only", async () => {
+    const harness = await lineageHarness("workflow-orphan-root");
+    await harness.writeNode("workflow-orphan", {
+      paneId: "%workflow",
+      runtimeKind: "workflow",
+    });
+    __setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive",
+      getPaneLiveness: () => "alive",
+      buildAttachCommands: () => ({
+        attachCommand: "tmux attach -t x",
+        focusCommand: "tmux select-window -t x",
+      }),
+    } as never);
+
+    const { rendered } = await harness.open();
+
+    expect(rendered).not.toContain("agent-workflow-orphan");
+    expect(await harness.nodeFiles()).toEqual(["workflow-orphan.json"]);
+  });
+
   it("probes terminal registry nodes and prunes only confirmed-dead panes", async () => {
     const harness = await lineageHarness("terminal-probe-root");
     await harness.writeNode("alive", { paneId: "%alive" });
@@ -1746,6 +1848,32 @@ describe("interactive supervisor", () => {
       expect.arrayContaining(["%alive", "%unknown", "%dead"]),
     );
     expect(await harness.nodeFiles()).toEqual(["alive.json", "unknown.json"]);
+  });
+
+  it("retains dead direct-child lineage while persisted recovery remains possible", async () => {
+    const rootId = "recoverable-root";
+    const harness = await lineageHarness(rootId);
+    await harness.writeNode("recoverable", { paneId: "%dead" });
+    interactiveSubagentRegistry.set(
+      "recoverable",
+      state("recoverable", {
+        status: "exited",
+        parentSessionId: rootId,
+        completionOwner: "standalone",
+      }),
+    );
+    __setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "dead",
+      getPaneLiveness: () => "dead",
+      buildAttachCommands: () => ({
+        attachCommand: "tmux attach -t x",
+        focusCommand: "tmux select-window -t x",
+      }),
+    } as never);
+
+    await harness.open();
+
+    expect(await harness.nodeFiles()).toEqual(["recoverable.json"]);
   });
 
   it("prunes dead lineage manifests while projecting", async () => {

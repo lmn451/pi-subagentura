@@ -211,6 +211,10 @@ describe("send_interactive_subagent_message", () => {
       status: "idle",
       completionOwner: "workflow",
       workflowId: "wf-retained",
+      workflowOriginId: "wf-retained",
+      workflowName: "retained-review",
+      workflowReusable: true,
+      workflowReuseExpiresAt: Date.now() + 30_000,
       workflowResultConsumed: true,
     });
     mockSendCommandToPane.mockImplementation(() => {
@@ -229,6 +233,9 @@ describe("send_interactive_subagent_message", () => {
     expect(result.details.status).toBe("sent");
     expect(state.completionOwner).toBe("standalone");
     expect(state.workflowId).toBeUndefined();
+    expect(state.workflowOriginId).toBe("wf-retained");
+    expect(state.workflowName).toBe("retained-review");
+    expect(state.workflowReuseExpiresAt).toBeUndefined();
     expect(state.completionPolicy).toBe("each");
     expect(state.completionGroupId).toBeUndefined();
   });
@@ -296,6 +303,48 @@ describe("send_interactive_subagent_message", () => {
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(state.completionOwner).toBe("workflow");
     expect(state.workflowId).toBe("wf-unconsumed");
+  });
+
+  it("rejects a consumed idle workflow child without explicit reuse opt-in", async () => {
+    const state = registerState(api.sessionScope, {
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "wf-dispose",
+      workflowResultConsumed: true,
+    });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-not-reusable", {
+      id: state.id,
+      message: "continue anyway",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("workflow_not_reusable");
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+    expect(state.completionOwner).toBe("workflow");
+  });
+
+  it("disposes an expired reusable workflow child before sending", async () => {
+    const state = registerState(api.sessionScope, {
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "wf-expired",
+      workflowReusable: true,
+      workflowResultConsumed: true,
+      workflowReuseExpiresAt: Date.now() - 1,
+    });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-expired", {
+      id: state.id,
+      message: "too late",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("workflow_reuse_expired");
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+    expect(result.details.disposed).toEqual(expect.any(Boolean));
   });
 
   it("rejects follow-ups while a workflow-owned sub-agent is running", async () => {

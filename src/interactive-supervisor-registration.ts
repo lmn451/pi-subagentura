@@ -14,6 +14,7 @@ import {
   cancelInteractiveDescendantByState,
   captureInteractiveSubagent,
   focusInteractiveSubagent,
+  hasPersistedDirectRecoveryIdentity,
   interactiveSubagentHasAttachedClient,
   interactiveSubagentRegistry,
   showInteractiveSubagentNativeViewer,
@@ -92,25 +93,62 @@ function isInteractiveStateActionable(
   );
 }
 
+function workflowSiblingIds(
+  states: readonly InteractiveSubagentState[],
+): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const state of states) {
+    const workflowId = state.workflowOriginId ?? state.workflowId;
+    if (!workflowId) continue;
+    const ids = groups.get(workflowId) ?? [];
+    ids.push(state.id);
+    groups.set(workflowId, ids);
+  }
+  const siblings = new Map<string, string[]>();
+  for (const ids of groups.values()) {
+    ids.sort();
+    for (const id of ids) {
+      siblings.set(
+        id,
+        ids.filter((candidate) => candidate !== id),
+      );
+    }
+  }
+  return siblings;
+}
+
 export function directSupervisorItems(
   sessionId?: string,
   owner?: SessionOwnerToken,
 ): InteractiveSupervisorItem[] {
-  return [...supervisorInteractiveStates(owner).values()]
+  const states = [...supervisorInteractiveStates(owner).values()]
     .filter((state) => interactiveStateBelongsToOwner(state, owner, sessionId))
-    .sort(compareByStartedAt)
-    .map((state) => ({
+    .sort(compareByStartedAt);
+  // Relationship projection is allowed only for an exact live owner scope.
+  const siblingIds = owner ? workflowSiblingIds(states) : new Map();
+  return states.map((state) => {
+    const siblings = siblingIds.get(state.id);
+    const ownerSessionId = state.ownerSessionId ?? state.parentSessionId;
+    return {
       kind: "interactive",
       state,
       // Workflow indentation is decided by buildAsyncSupervisorItems, which is the
       // only place that knows whether the owning workflow row is actually present.
       depth: 0,
       actionable: isInteractiveStateActionable(state),
+      ...(siblings && siblings.length > 0
+        ? { workflowSiblingIds: siblings }
+        : {}),
       origin: {
-        source: "registry",
-        ownerSessionId: state.parentSessionId,
+        source: "registry" as const,
+        ...(ownerSessionId ? { ownerSessionId } : {}),
+        ...(state.lineageRootId ? { rootId: state.lineageRootId } : {}),
+        ...(state.lineageParentAgentId
+          ? { parentAgentId: state.lineageParentAgentId }
+          : {}),
       },
-    }));
+    };
+  });
 }
 
 export function buildAsyncSupervisorItems(
@@ -296,6 +334,8 @@ function stateForNode(
     sessionFile: manifest.childSessionFile ?? "unknown",
     cwd: manifest.cwd,
     parentSessionId: manifest.ownerSessionId,
+    completionOwner:
+      manifest.runtimeKind === "workflow" ? "workflow" : "standalone",
     startedAt: parseStartedAt(manifest.startedAt),
     status:
       paneLiveness === undefined
@@ -360,11 +400,19 @@ async function loadSupervisorProjection(
     basename(paths.treeDir),
     isNodeStale,
   );
-  // Nothing else unlinks a node manifest, so without this sweep the store grows
-  // by one file per spawn forever and the spawn gate eventually refuses every
-  // new agent. Probes are already cached above, so the sweep costs no extra
-  // subprocesses. Best effort: a failed prune is retried on the next refresh.
-  await pruneTerminalLineageNodes(paths.nodesDir, isNodeStale).catch(
+  // Keep a conclusively dead direct child's lineage while its exact persisted
+  // parent-owned registry row remains recoverable. Projection still marks it
+  // non-actionable; only the explicit confirmed recovery tool may rebind it.
+  const staleForPrune = async (manifest: LineageManifest): Promise<boolean> => {
+    const direct = interactiveStates.get(manifest.agentId);
+    const recoveryProtected =
+      sessionId !== undefined &&
+      direct?.parentSessionId === sessionId &&
+      hasPersistedDirectRecoveryIdentity(direct);
+    return recoveryProtected ? false : isNodeStale(manifest);
+  };
+  // Other dead manifests remain bounded so abandoned lineage cannot grow forever.
+  await pruneTerminalLineageNodes(paths.nodesDir, staleForPrune).catch(
     () => undefined,
   );
   const flattened = flattenLineageTree(projection.roots);
@@ -384,7 +432,9 @@ async function loadSupervisorProjection(
         state,
         depth: node.depth,
         actionable:
-          node.state === "actionable" && isInteractiveStateActionable(state),
+          node.manifest.runtimeKind !== "workflow" &&
+          node.state === "actionable" &&
+          isInteractiveStateActionable(state),
         origin: {
           source: "lineage",
           rootId: node.manifest.rootId,

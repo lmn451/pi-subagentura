@@ -274,7 +274,7 @@ describe("published tarball", () => {
     });
   });
 
-  it("contains the workflow guide, examples, and bundled RALPLAN skill", () => {
+  it("contains the workflow guide, examples, and packaged skills", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         "docs/workflows.md",
@@ -285,8 +285,16 @@ describe("published tarball", () => {
         "examples/workflows/ralplan-occ.mjs",
         "examples/workflows/skill-to-workflow.mjs",
         "skills/ralplan/SKILL.md",
+        "skills/pi-session-recovery/SKILL.md",
       ]),
     );
+    const packedPackage = JSON.parse(
+      readFileSync(join(pkgDir, "package.json"), "utf8"),
+    );
+    expect(packedPackage.pi.skills).toEqual([
+      "./skills/ralplan",
+      "./skills/pi-session-recovery",
+    ]);
   });
 
   it("resolves every package-relative source dependency inside the tarball", () => {

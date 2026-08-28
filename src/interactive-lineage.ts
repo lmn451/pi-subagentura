@@ -58,6 +58,8 @@ export interface LineageManifest {
   rootHash: string;
   ownerSessionId: string;
   name: string;
+  /** Runtime origin classification; absent legacy manifests degrade to direct. */
+  runtimeKind?: "direct" | "workflow";
   taskPreview: string;
   startedAt: string;
   cwd: string;
@@ -319,6 +321,7 @@ export function validateLineageManifest(
     "rootHash",
     "ownerSessionId",
     "name",
+    "runtimeKind",
     "taskPreview",
     "startedAt",
     "cwd",
@@ -352,6 +355,16 @@ export function validateLineageManifest(
     "name",
     effectiveBounds.maxStringBytes,
   );
+  const runtimeKind =
+    value.runtimeKind === undefined
+      ? undefined
+      : value.runtimeKind === "direct" || value.runtimeKind === "workflow"
+        ? value.runtimeKind
+        : (() => {
+            throw new Error(
+              'lineage manifest runtimeKind must be "direct" or "workflow"',
+            );
+          })();
   const taskPreview = expectBoundedString(
     value.taskPreview,
     "taskPreview",
@@ -389,6 +402,7 @@ export function validateLineageManifest(
     rootHash,
     ownerSessionId,
     name,
+    ...(runtimeKind === undefined ? {} : { runtimeKind }),
     taskPreview,
     startedAt,
     cwd,

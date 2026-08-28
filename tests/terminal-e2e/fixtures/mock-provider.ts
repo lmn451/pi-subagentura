@@ -713,7 +713,7 @@ function parentTool(marker: string, context: Context): ToolCall {
       ? "[E2E:CHILD_WORKFLOW_PROCESS]"
       : "[E2E:CHILD_WORKFLOW]";
     return toolCall("e2e-workflow-1", "workflow", {
-      script: `export const meta = { name: "e2e-workflow", description: "terminal fixture", phases: [{ title: "phase" }] }; phase("phase"); return await agent("${childMarker} Return the workflow fixture.", { label: "e2e-worker", model: "subagentura-e2e/mock", isolation: "${marker.includes("PROCESS") ? "process" : "in-process"}" });`,
+      script: `export const meta = { name: "e2e-workflow", description: "terminal fixture", phases: [{ title: "phase" }] }; phase("phase"); return await agent("${childMarker} Return the workflow fixture.", { label: "e2e-worker", model: "subagentura-e2e/mock", isolation: "${marker.includes("PROCESS") ? "process" : "in-process"}"${marker.includes("PROCESS") ? ", reusable: true" : ""} });`,
       async: marker.includes("ASYNC"),
     });
   }

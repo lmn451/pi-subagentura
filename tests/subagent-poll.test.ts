@@ -2255,7 +2255,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     ]);
   });
 
-  it("reconciles same-session inject receipt before terminal cleanup", async () => {
+  it("reconciles same-session inject receipt while retaining direct recovery state", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => "",
@@ -2288,7 +2288,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     } as any);
 
     expect(state.pendingDeliveries).toEqual([]);
-    expect(loadInteractiveStates(cwd)?.states[id]).toBeUndefined();
+    expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
   });
 
   it("keeps the state.json entry after delivering a done event when the pane is alive", async () => {
@@ -2352,7 +2352,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
   });
 
-  it("removes state after process_exited even if pane liveness reports true", async () => {
+  it("retains direct recovery state after process_exited", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => Buffer.from("%99\n"),
@@ -2381,7 +2381,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
     expect(state.status).toBe("exited");
-    expect(loadInteractiveStates(cwd)?.states[id]).toBeUndefined();
+    expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
   });
 
   it("keeps error state until the custom-message receipt is visible", async () => {

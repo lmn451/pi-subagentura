@@ -609,7 +609,12 @@ describe("session_shutdown handler", () => {
         registration.scope,
         "workflow-child",
         "running",
-        { completionOwner: "workflow", workflowId: "workflow-a" },
+        {
+          completionOwner: "workflow",
+          workflowId: "workflow-a",
+          workflowOriginId: "workflow-a",
+          workflowReusable: true,
+        },
       );
       const promotedChild = ownedInteractive(
         registration.scope,
@@ -618,6 +623,8 @@ describe("session_shutdown handler", () => {
         {
           completionOwner: "standalone",
           workflowResultConsumed: true,
+          workflowOriginId: "workflow-a",
+          workflowReusable: true,
           workflowId: undefined,
         },
       );

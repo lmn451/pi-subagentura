@@ -151,6 +151,22 @@ export type OrchestratorAgentReason =
   | "routing_metadata_missing"
   | "routing_metadata_untrusted";
 
+export interface OrchestratorWorkflowRelationship {
+  id: string;
+  name?: string;
+  ownership: "workflow" | "standalone";
+  reusable: boolean;
+  resultConsumed: boolean;
+  reuseExpiresAt?: number;
+  siblingIds?: string[];
+}
+
+export interface OrchestratorAgentOwner {
+  sessionId?: string;
+  lineageRootId?: string;
+  lineageParentAgentId?: string;
+}
+
 export interface OrchestratorAgentView {
   childId: string;
   name?: string;
@@ -169,6 +185,8 @@ export interface OrchestratorAgentView {
   focusCommand?: string;
   artifactDir?: string;
   sessionFile?: string;
+  workflow?: OrchestratorWorkflowRelationship;
+  owner?: OrchestratorAgentOwner;
 }
 
 export interface OrchestratorAgentProjection {
@@ -662,6 +680,7 @@ export async function buildOrchestratorAgentProjection(
     (options.untrustedEntries ?? []).map((entry) => [entry.childId, entry]),
   );
   const runtimeIds = [...interactiveStates.keys()].sort();
+  const siblingIds = workflowSiblingIds(interactiveStates);
   const deadlineAt =
     Date.now() +
     Math.max(
@@ -681,6 +700,7 @@ export async function buildOrchestratorAgentProjection(
         options.signal,
         deadlineAt,
         trusted !== undefined || untrusted === undefined,
+        siblingIds.get(childId),
       );
     },
   );
@@ -775,6 +795,7 @@ async function projectOrchestratorAgent(
   signal?: AbortSignal,
   deadlineAt = Number.POSITIVE_INFINITY,
   metadataTrusted = true,
+  siblingIds: readonly string[] = [],
 ): Promise<OrchestratorAgentView> {
   const routingFields = metadata
     ? {
@@ -808,8 +829,12 @@ async function projectOrchestratorAgent(
 
   const liveness = await probeInteractiveLiveness(state, signal, deadlineAt);
   const attachable =
-    isValidOrchestratorChildId(childId) && isRuntimeActionable(state, liveness);
-  const actionable = attachable && metadata !== undefined && metadataTrusted;
+    isValidOrchestratorChildId(childId) && isRuntimeAttachable(state, liveness);
+  const actionable =
+    attachable &&
+    state.completionOwner !== "workflow" &&
+    metadata !== undefined &&
+    metadataTrusted;
   const reason =
     metadata !== undefined && !metadataTrusted
       ? "routing_metadata_untrusted"
@@ -837,6 +862,8 @@ async function projectOrchestratorAgent(
       : {}),
     artifactDir: state.artifactDir,
     sessionFile: state.sessionFile,
+    ...projectWorkflowRelationship(state, siblingIds),
+    ...projectAgentOwner(state),
   };
 }
 
@@ -869,14 +896,13 @@ async function probeInteractiveLiveness(
   });
 }
 
-function isRuntimeActionable(
+function isRuntimeAttachable(
   state: InteractiveSubagentState,
   liveness: PaneLiveness,
 ): boolean {
   return (
     liveness === "alive" &&
-    (state.status === "running" || state.status === "idle") &&
-    !isWorkflowOwnedRuntimeBlocked(state)
+    (state.status === "running" || state.status === "idle")
   );
 }
 
@@ -896,10 +922,96 @@ function orchestratorAgentReason(
 function isWorkflowOwnedRuntimeBlocked(
   state: InteractiveSubagentState,
 ): boolean {
-  return (
-    state.completionOwner === "workflow" &&
-    (!state.workflowResultConsumed || state.status !== "idle")
-  );
+  return state.completionOwner === "workflow";
+}
+
+function workflowSiblingIds(
+  states: ReadonlyMap<string, InteractiveSubagentState>,
+): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const state of states.values()) {
+    const workflowId = state.workflowOriginId ?? state.workflowId;
+    if (!workflowId) continue;
+    const ids = groups.get(workflowId) ?? [];
+    ids.push(state.id);
+    groups.set(workflowId, ids);
+  }
+  const siblings = new Map<string, string[]>();
+  for (const ids of groups.values()) {
+    ids.sort();
+    for (const id of ids)
+      siblings.set(
+        id,
+        ids.filter((candidate) => candidate !== id),
+      );
+  }
+  return siblings;
+}
+
+function projectWorkflowRelationship(
+  state: InteractiveSubagentState,
+  siblingIds: readonly string[],
+): { workflow?: OrchestratorWorkflowRelationship } {
+  const id = state.workflowOriginId ?? state.workflowId;
+  if (!id) return {};
+  return {
+    workflow: {
+      id,
+      ...(state.workflowName
+        ? {
+            name: boundedPreview(
+              state.workflowName,
+              MAX_ORCHESTRATOR_AGENT_NAME_BYTES,
+            ),
+          }
+        : {}),
+      ownership:
+        state.completionOwner === "workflow" ? "workflow" : "standalone",
+      reusable: state.workflowReusable === true,
+      resultConsumed: state.workflowResultConsumed === true,
+      ...(state.workflowReuseExpiresAt === undefined
+        ? {}
+        : { reuseExpiresAt: state.workflowReuseExpiresAt }),
+      ...(siblingIds.length === 0 ? {} : { siblingIds: [...siblingIds] }),
+    },
+  };
+}
+
+function projectAgentOwner(state: InteractiveSubagentState): {
+  owner?: OrchestratorAgentOwner;
+} {
+  const sessionId = state.ownerSessionId ?? state.parentSessionId;
+  if (!sessionId && !state.lineageRootId && !state.lineageParentAgentId) {
+    return {};
+  }
+  return {
+    owner: {
+      ...(sessionId
+        ? {
+            sessionId: boundedPreview(
+              sessionId,
+              MAX_ORCHESTRATOR_AGENT_NAME_BYTES,
+            ),
+          }
+        : {}),
+      ...(state.lineageRootId
+        ? {
+            lineageRootId: boundedPreview(
+              state.lineageRootId,
+              MAX_ORCHESTRATOR_AGENT_NAME_BYTES,
+            ),
+          }
+        : {}),
+      ...(state.lineageParentAgentId
+        ? {
+            lineageParentAgentId: boundedPreview(
+              state.lineageParentAgentId,
+              MAX_ORCHESTRATOR_AGENT_NAME_BYTES,
+            ),
+          }
+        : {}),
+    },
+  };
 }
 
 function boundedPreview(value: string, maxBytes: number): string {

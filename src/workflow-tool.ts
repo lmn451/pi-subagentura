@@ -9,6 +9,7 @@ import {
   type JobState,
 } from "./helpers";
 import {
+  disposeWorkflowInteractiveSubagent,
   launchInteractiveSubagent,
   registerInteractiveSubagentState,
 } from "./interactive-tmux";
@@ -86,6 +87,8 @@ import {
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
+export const WORKFLOW_CHILD_REUSE_TTL_MS = 30 * 60 * 1000;
+export const MAX_REUSABLE_WORKFLOW_CHILDREN = 32;
 
 function workflowNotFoundMessage(workflowId: string): string {
   return (
@@ -181,6 +184,7 @@ export function registerWorkflowTool(
   function makeRunAgent(
     ctx: any,
     ownedWorkflowId: string,
+    workflowName: string,
     supervisorOwner: SessionOwnerToken | undefined,
   ): WorkflowAgentRunner {
     return async ({
@@ -192,6 +196,7 @@ export function registerWorkflowTool(
       label,
       schema,
       thinkingLevel,
+      reusable,
       onProgress,
       onCancellationSnapshot,
     }) => {
@@ -213,9 +218,31 @@ export function registerWorkflowTool(
       };
 
       const tryProcess = isolation !== "in-process";
+      const childScope = resolveLiveSessionScope(supervisorOwner);
+      const reusableChildCount = childScope
+        ? [...childScope.interactiveStates.values()].filter(
+            (state) =>
+              state.workflowReusable === true &&
+              state.completionOwner === "workflow",
+          ).length
+        : 0;
+      if (reusable && !tryProcess) {
+        throw new Error(
+          "Reusable workflow children require process isolation.",
+        );
+      }
+      if (reusable && !childScope) {
+        throw new Error(
+          "Reusable workflow children require a live parent session owner.",
+        );
+      }
+      if (reusable && reusableChildCount >= MAX_REUSABLE_WORKFLOW_CHILDREN) {
+        throw new Error(
+          `At most ${MAX_REUSABLE_WORKFLOW_CHILDREN} reusable workflow children may be retained per parent session. Promote or dispose an existing child first.`,
+        );
+      }
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
-        const childScope = resolveLiveSessionScope(supervisorOwner);
         try {
           state = launchInteractiveSubagent({
             name: (label || "wf-agent").slice(0, 40),
@@ -230,11 +257,16 @@ export function registerWorkflowTool(
             sessionScope: childScope,
             spawnTreeContext: childScope?.spawnTreeContext,
             workflowId: ownedWorkflowId,
+            workflowName,
+            workflowReusable: reusable === true,
             completionOwner: "workflow",
             completionPolicy: "each",
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (reusable) {
+            throw new Error(`Reusable workflow child could not launch: ${msg}`);
+          }
           debugLog("warn", "isolation_process_fallback", { reason: msg });
           onProgress?.({
             kind: "log",
@@ -255,6 +287,12 @@ export function registerWorkflowTool(
             onCancellationSnapshot,
           );
           state.workflowResultConsumed = true;
+          if (reusable && !result.isError && !result.cancelled) {
+            state.workflowReuseExpiresAt =
+              Date.now() + WORKFLOW_CHILD_REUSE_TTL_MS;
+          } else {
+            disposeWorkflowInteractiveSubagent(state);
+          }
           return result;
         }
       }
@@ -504,13 +542,16 @@ export function registerWorkflowTool(
       "",
       "Injected helpers/globals:",
       "  agent(prompt, opts?)   -> spawn one isolated sub-agent. opts: { schema?, label?, phase?,",
-      "                            model?, persona?, isolation?, agentType?, thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
+      "                            model?, persona?, isolation?, agentType?, reusable?, thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
       "                            with schema returns a value validated against the supported JSON Schema",
       "                            subset (type, enum, required/properties, additionalProperties, items,",
       "                            minItems, maxItems), or null after retries. Returns null on error",
       "                            (filter with Boolean).",
       "                            Defaults to tmux/zellij process isolation (attachable);",
-      "                            falls back to in-process if no multiplexer is available.",
+      "                            falls back to in-process if no multiplexer is available. reusable: true",
+      "                            keeps a successful process child for a bounded same-session explicit",
+      "                            child-ID follow-up; it never enables automatic routing or rehydration.",
+      "                            Do not combine reusable with schema validation.",
       "  parallel(thunks)       -> run `() => Promise` thunks concurrently (barrier); failures -> null.",
       "  pipeline(items, ...st) -> stream each item through stages, no barrier between stages.",
       "  workflow(name, args?)  -> run a saved workflow inline (one level deep).",
@@ -672,11 +713,11 @@ export function registerWorkflowTool(
         };
       }
 
-      const baseOpts = (workflowId: string) => ({
+      const baseOpts = (workflowId: string, workflowName: string) => ({
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? null,
-        runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
+        runAgent: makeRunAgent(ctx, workflowId, workflowName, workflowOwner),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
       });
 
@@ -714,7 +755,7 @@ export function registerWorkflowTool(
           job = startWorkflowJob(
             meta.name,
             script,
-            baseOpts,
+            (workflowId) => baseOpts(workflowId, meta.name),
             jobStartedAt,
             notifyWorkflowCompletion,
             workflowOwner,
@@ -784,7 +825,7 @@ export function registerWorkflowTool(
           meta.name,
           script,
           (workflowId) => ({
-            ...baseOpts(workflowId),
+            ...baseOpts(workflowId, meta.name),
             signal,
             onProgress: syncProgress,
           }),
@@ -1291,7 +1332,7 @@ export function registerWorkflowTool(
           args: argsValue,
           cwd: ctx.cwd,
           budgetTotal: null,
-          runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
+          runAgent: makeRunAgent(ctx, workflowId, meta.name, workflowOwner),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
         }),
         Date.now(),

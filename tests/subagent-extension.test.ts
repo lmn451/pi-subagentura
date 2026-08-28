@@ -19,6 +19,7 @@ import {
 const BASE_INTERACTIVE_TOOL_NAMES = [
   "cancel_interactive_subagent",
   "get_interactive_subagent_status",
+  "recover_interactive_subagent",
   "read_subagent_artifact",
   "send_interactive_subagent_message",
   "subagent_interactive",
@@ -188,6 +189,7 @@ describe("extension registration", () => {
     );
     expect(result.systemPrompt).not.toContain("# Orchestrator System Prompt");
     expect(result.systemPrompt).toContain("send_interactive_subagent_message");
+    expect(result.systemPrompt).toContain("recover_interactive_subagent");
     expect(result.systemPrompt).toContain("includeContext");
     expect(result.systemPrompt).toContain("not a security boundary");
     expect(result.systemPrompt).toContain(
@@ -313,6 +315,7 @@ describe("extension registration", () => {
         "list_available_models",
         "list_subagent_artifacts",
         "read_subagent_artifact",
+        "recover_interactive_subagent",
         "send_interactive_subagent_message",
         "subagent_interactive",
       ].sort(),

@@ -45,6 +45,7 @@
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
     "skills/ralplan",
+    "skills/pi-session-recovery",
     "types/workflow.d.ts",
     "src/ndjson.d.ts",
     "src/notifications.ts",
@@ -67,6 +68,7 @@
     "src/tools/interactive.ts",
     "src/tools/orchestrator.ts",
     "src/interactive-tmux.ts",
+    "src/interactive-recovery.ts",
     "src/interactive-supervisor-registration.ts",
     "src/interactive-supervisor-ui.ts",
     "src/interactive-lineage.ts",
@@ -106,6 +108,10 @@
   "pi": {
     "extensions": [
       "./src/subagent.ts"
+    ],
+    "skills": [
+      "./skills/ralplan",
+      "./skills/pi-session-recovery"
     ]
   },
   "scripts": {

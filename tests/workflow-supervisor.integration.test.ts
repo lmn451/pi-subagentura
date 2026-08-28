@@ -65,7 +65,10 @@ import {
   workflowJobRegistry,
   type WorkflowJobState,
 } from "../src/workflow-jobs";
-import { registerWorkflowTool } from "../src/workflow-tool";
+import {
+  MAX_REUSABLE_WORKFLOW_CHILDREN,
+  registerWorkflowTool,
+} from "../src/workflow-tool";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
 const RUNNING_FOOTER_KEY = "subagentura-running";
@@ -203,9 +206,11 @@ function makePi() {
   return { pi, findTool };
 }
 
-const SINGLE_AGENT_SCRIPT = (name: string) =>
+const SINGLE_AGENT_SCRIPT = (name: string, reusable = false) =>
   `export const meta = { name: "${name}", description: "d" };\n` +
-  'return await agent("inspect", { label: "reviewer" });';
+  `return await agent("inspect", { label: "reviewer"${
+    reusable ? ", reusable: true" : ""
+  } });`;
 
 beforeEach(() => {
   clearSessionScopes();
@@ -245,6 +250,9 @@ beforeEach(() => {
       artifactDir: tempDir(),
       supervisorOwner: params.supervisorOwner,
       workflowId: params.workflowId,
+      workflowOriginId: params.workflowId,
+      workflowName: params.workflowName,
+      workflowReusable: params.workflowReusable,
       completionOwner: params.completionOwner,
     };
     interactiveSubagentRegistry.set(state.id, state as never);
@@ -266,7 +274,7 @@ afterEach(() => {
 });
 
 describe("workflow supervisor integration", () => {
-  it("shows a live process child under its tracked sync workflow", async () => {
+  it("retains an opted-in process child after its sync workflow completes", async () => {
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const owner = ownerOf(context);
     const { pi, findTool } = makePi();
@@ -274,7 +282,7 @@ describe("workflow supervisor integration", () => {
 
     const execution = findTool().execute(
       "call-sync",
-      { script: SINGLE_AGENT_SCRIPT("sync-visible"), async: false },
+      { script: SINGLE_AGENT_SCRIPT("sync-visible", true), async: false },
       undefined,
       vi.fn(),
       { cwd: "/tmp", modelRegistry: {} },
@@ -292,10 +300,12 @@ describe("workflow supervisor integration", () => {
         completionOwner: "workflow",
         supervisorOwner: owner,
         workflowId: workflow?.id,
+        workflowName: "sync-visible",
+        workflowReusable: true,
       }),
     );
-    // Workflow children are never persisted, so they carry no parentSessionId —
-    // the reason ownership must be answered by supervisorOwner everywhere.
+    // Workflow children are never persisted or rehydrated across parent-session
+    // replacement, even when same-session reuse is opted in.
     expect(mockLaunch.mock.calls[0]?.[0]?.parentSessionId).toBeUndefined();
 
     const items = buildAsyncSupervisorItems(
@@ -311,23 +321,125 @@ describe("workflow supervisor integration", () => {
     const result = await execution;
 
     expect(result.details.status).toBe("done");
-    // Aggregating the result does not dispose the process pane. The registry keeps
-    // the live state until artifact polling observes completion and transitions it
-    // to idle, preserving the pane for inspection.
-    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(true);
-    expect(
-      (
-        interactiveSubagentRegistry.get(
-          "workflow-child",
-        ) as InteractiveSubagentState & {
-          workflowResultConsumed?: boolean;
-        }
-      ).workflowResultConsumed,
-    ).toBe(true);
+    const retained = interactiveSubagentRegistry.get(
+      "workflow-child",
+    ) as InteractiveSubagentState;
+    expect(retained).toMatchObject({
+      workflowResultConsumed: true,
+      workflowReusable: true,
+      workflowName: "sync-visible",
+      workflowOriginId: workflow!.id,
+      completionOwner: "workflow",
+    });
+    expect(retained.workflowReuseExpiresAt).toBeGreaterThanOrEqual(Date.now());
     expect(killPane).not.toHaveBeenCalled();
-    // A sync workflow returned its result inline, so it must not linger where
-    // get_workflow_result could re-serve it or the supervisor could show it.
+    // A sync workflow returned its result inline, so only the opted-in child
+    // remains discoverable; the aggregate cannot be re-served.
     expect(workflowJobRegistry.has(workflow!.id)).toBe(false);
+  });
+
+  it("disposes a process child by default after consuming its workflow result", async () => {
+    const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const execution = findTool().execute(
+      "call-dispose",
+      { script: SINGLE_AGENT_SCRIPT("dispose-default"), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+
+    releaseAgent(subagentResult("reviewed"));
+    await execution;
+
+    expect(killPane).toHaveBeenCalledWith("%42", undefined);
+    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(false);
+    expect(context.interactiveStates.has("workflow-child")).toBe(false);
+  });
+
+  it("retries default workflow-child disposal after a mux kill failure", async () => {
+    const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    const owner = ownerOf(context);
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+    killPane.mockImplementationOnce(() => {
+      throw new Error("mux temporarily unavailable");
+    });
+
+    const execution = findTool().execute(
+      "call-dispose-retry",
+      { script: SINGLE_AGENT_SCRIPT("dispose-retry"), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+    releaseAgent(subagentResult("reviewed"));
+    await execution;
+
+    expect(context.interactiveStates.has("workflow-child")).toBe(true);
+    await pollArtifactChanges(context.pi, owner);
+
+    expect(killPane).toHaveBeenCalledTimes(2);
+    expect(context.interactiveStates.has("workflow-child")).toBe(false);
+    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(false);
+  });
+
+  it("expires an unpromoted reusable workflow child on a bounded poll", async () => {
+    const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    const owner = ownerOf(context);
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const execution = findTool().execute(
+      "call-expire",
+      { script: SINGLE_AGENT_SCRIPT("expire-child", true), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+    releaseAgent(subagentResult("reviewed"));
+    await execution;
+
+    const retained = context.interactiveStates.get("workflow-child")!;
+    retained.workflowReuseExpiresAt = Date.now() - 1;
+    await pollArtifactChanges(context.pi, owner);
+
+    expect(killPane).toHaveBeenCalledWith("%42", undefined);
+    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(false);
+    expect(context.interactiveStates.has("workflow-child")).toBe(false);
+  });
+
+  it("caps reusable workflow children within the exact parent session", async () => {
+    const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+    for (let index = 0; index < MAX_REUSABLE_WORKFLOW_CHILDREN; index++) {
+      const retained = plainInteractiveState(`retained-${index}`, "session-a");
+      retained.completionOwner = "workflow";
+      retained.workflowReusable = true;
+      context.interactiveStates.set(retained.id, retained);
+      interactiveSubagentRegistry.set(retained.id, retained);
+    }
+
+    const result = await findTool().execute(
+      "call-cap",
+      { script: SINGLE_AGENT_SCRIPT("cap-reuse", true), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details.error).toContain(
+      `${MAX_REUSABLE_WORKFLOW_CHILDREN} reusable workflow children`,
+    );
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(context.interactiveStates.size).toBe(MAX_REUSABLE_WORKFLOW_CHILDREN);
   });
 
   it("counts and lists a workflow child on the owning session's footer and widget", async () => {
@@ -541,7 +653,7 @@ describe("workflow supervisor integration", () => {
       {
         script:
           'export const meta = { name: "failing", description: "d" };\n' +
-          'await agent("inspect", { label: "reviewer" });\n' +
+          'await agent("inspect", { label: "reviewer", reusable: true });\n' +
           'throw new Error("script blew up");',
         async: false,
       },
@@ -560,8 +672,8 @@ describe("workflow supervisor integration", () => {
     const result = await execution;
 
     expect(result.isError).toBe(true);
-    // A later workflow-script error likewise does not dispose the child whose
-    // successful result was already aggregated.
+    // Explicit reuse remains in force even when the workflow later fails after
+    // successfully aggregating this child's result.
     expect(interactiveSubagentRegistry.has("workflow-child")).toBe(true);
     expect(killPane).not.toHaveBeenCalled();
     expect(workflowJobRegistry.has(workflow!.id)).toBe(false);

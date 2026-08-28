@@ -549,6 +549,45 @@ describe("agent() + budget", () => {
     expect(seenIsolation).toBe("process");
   });
 
+  it("forwards explicit workflow-child reuse opt-in", async () => {
+    let seenReusable: boolean | undefined;
+    const runAgent: WorkflowAgentRunner = async ({ reusable }) => {
+      seenReusable = reusable;
+      return ok("done");
+    };
+
+    await runWorkflow(
+      meta + `return await agent("hello", { reusable: true });`,
+      { runAgent },
+    );
+
+    expect(seenReusable).toBe(true);
+  });
+
+  it("rejects reusable schema agents before spawning retry attempts", async () => {
+    const runAgent = vi.fn<WorkflowAgentRunner>();
+    await expect(
+      runWorkflow(
+        meta +
+          `return await agent("hello", { reusable: true, schema: { type: "string" } });`,
+        { runAgent },
+      ),
+    ).rejects.toThrow("reusable cannot be combined with schema");
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects reusable in-process agents before invoking the runner", async () => {
+    const runAgent = vi.fn<WorkflowAgentRunner>();
+    await expect(
+      runWorkflow(
+        meta +
+          `return await agent("hello", { isolation: "in-process", reusable: true });`,
+        { runAgent },
+      ),
+    ).rejects.toThrow("reusable requires process isolation");
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
   it("allows agent isolation to opt out to in-process", async () => {
     let seenIsolation: string | undefined;
     const runAgent: WorkflowAgentRunner = async ({ isolation }) => {

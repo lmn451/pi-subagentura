@@ -47,6 +47,8 @@ export interface WorkflowAgentOptions {
   readonly isolation?: "process" | "in-process";
   readonly agentType?: string;
   readonly thinkingLevel?: WorkflowThinkingLevel;
+  /** Keep a process-backed child for bounded same-session follow-up; cannot be combined with schema. */
+  readonly reusable?: boolean;
 }
 
 export type WorkflowThunk<T> = () => T | PromiseLike<T>;

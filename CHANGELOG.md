@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Workflow `agent()` calls accept `reusable: true` to retain successful process-backed children for bounded, same-parent-session, explicit child-ID follow-up. Supervisor and Orchestratorv2 metadata expose lifecycle, workflow, owner/lineage, sibling, retention, and recovery relationships without granting routing authority from liveness.
+- Added the independently useful packaged `pi-session-recovery` incident runbook for non-destructive Pi JSONL/worktree recovery, identity checks, duplicate-process safeguards, tmux/Zellij guidance, rehydration boundaries, and manual conversation-only fallback.
+- Added user-confirmed `recover_interactive_subagent` recovery for persisted direct children with conclusively dead tmux/Zellij panes. It validates parent/session/artifact/lineage ownership, preserves delivery cursors and authority, and rebinds the same child identity only after a native confirmation.
+
+### Changed
+
+- Process-backed workflow children are disposed after result consumption by default. Opted-in children expire after 30 minutes, are capped at 32 per parent session, never rehydrate across session replacement, and promote to standalone only after a successful consumed-and-idle follow-up.
+
 ## [3.4.0] - 2026-08-27
 
 ### Added

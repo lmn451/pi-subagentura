@@ -260,7 +260,7 @@ describe("Orchestratorv2 compact agent projection", () => {
     expect(projection.agents[0]).not.toHaveProperty("focusCommand");
   });
 
-  it("keeps workflow-owned runtimes non-actionable until their result is consumed and idle", async () => {
+  it("keeps workflow-owned runtimes attachable but non-actionable until explicit promotion", async () => {
     for (const overrides of [
       {
         status: "running" as const,
@@ -273,29 +273,45 @@ describe("Orchestratorv2 compact agent projection", () => {
     ]) {
       const state = runtimeState(CHILD_B, {
         completionOwner: "workflow",
+        workflowId: "workflow-a",
+        workflowOriginId: "workflow-a",
+        workflowName: "review-flow",
+        workflowReusable: true,
         ...overrides,
       });
       const projection = await buildOrchestratorAgentProjection(
-        [],
+        [routingEntry(CHILD_B)],
         new Map([[CHILD_B, state]]),
       );
 
       expect(projection.agents[0]).toMatchObject({
         childId: CHILD_B,
+        attachable: true,
         actionable: false,
         reason: "workflow_owned",
+        attachCommand: `tmux attach -t ${CHILD_B}`,
+        focusCommand: `tmux select-pane -t %${CHILD_B}`,
+        workflow: {
+          id: "workflow-a",
+          name: "review-flow",
+          ownership: "workflow",
+          reusable: true,
+        },
       });
-      expect(projection.agents[0]).not.toHaveProperty("attachCommand");
-      expect(projection.agents[0]).not.toHaveProperty("focusCommand");
     }
 
     const released = runtimeState(CHILD_B, {
       status: "idle",
       completionOwner: "workflow",
+      workflowId: "workflow-a",
+      workflowOriginId: "workflow-a",
+      workflowName: "review-flow",
+      workflowReusable: true,
       workflowResultConsumed: true,
+      workflowReuseExpiresAt: 123_456,
     });
     const projection = await buildOrchestratorAgentProjection(
-      [],
+      [routingEntry(CHILD_B)],
       new Map([[CHILD_B, released]]),
     );
 
@@ -303,9 +319,15 @@ describe("Orchestratorv2 compact agent projection", () => {
       childId: CHILD_B,
       attachable: true,
       actionable: false,
-      reason: "routing_metadata_missing",
-      attachCommand: `tmux attach -t ${CHILD_B}`,
-      focusCommand: `tmux select-pane -t %${CHILD_B}`,
+      reason: "workflow_owned",
+      workflow: {
+        id: "workflow-a",
+        name: "review-flow",
+        ownership: "workflow",
+        reusable: true,
+        resultConsumed: true,
+        reuseExpiresAt: 123_456,
+      },
     });
   });
 

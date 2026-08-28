@@ -162,6 +162,7 @@ The extension registers these public tools for parent agents.
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases        |
 | `subagent_interactive`                  | Launch an attachable Pi session in tmux/Zellij                    |
 | `get_interactive_subagent_status`       | Inspect attachable child sessions                                 |
+| `recover_interactive_subagent`          | Confirm and rebind a persisted direct child whose pane is dead    |
 | `cancel_interactive_subagent`           | Kill an attachable child pane                                     |
 | `send_interactive_subagent_message`     | Send a follow-up while preserving child context                   |
 | `list_subagent_artifacts`               | List durable interactive-agent artifacts                          |
@@ -299,6 +300,55 @@ immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
 
+## Workflow child lifecycle and recovery
+
+Workflow `agent()` calls dispose their process-backed child after consuming its
+result by default. Opt in only when the preserved model context is useful:
+
+```js
+const report = await agent("Review the lifecycle code", {
+  label: "lifecycle-reviewer",
+  reusable: true,
+});
+```
+
+`reusable: true` requires process isolation, a live parent session, and no
+`schema` option. It retains a successful child for at most 30 minutes after
+result consumption, with at most 32 opted-in workflow children per parent
+session. A reusable launch fails rather than silently falling back to an
+in-process agent, because in-process context cannot be promoted safely. Schema
+retries are rejected because retaining discarded attempts would leak panes and
+ambiguous context.
+
+The state flow is: **spawn → running → workflow complete → idle/reusable →
+standalone follow-up or dispose**. The workflow result and an idle pane are both
+required before reuse. `send_interactive_subagent_message` must name the exact
+child ID; only a successful send promotes it to standalone. Until then the child
+remains workflow-owned. Expiry, explicit cancellation, or a parent-session
+transition disposes it. The async supervisor shows this state plus workflow name,
+task, owner/lineage, same-workflow siblings, retention deadline, and recovery
+caveats.
+
+Liveness never grants routing authority. A workflow child may be attachable for
+inspection while remaining non-actionable to Orchestratorv2. Even when it is
+idle/reusable, automatic routing stays disabled. The explicit child-ID follow-up
+promotes it; normal authorized routing metadata rules then apply.
+
+### Rehydration matrix
+
+| Runtime kind                         | startup / reload / resume                                                            | quit then matching-session restart                                           | new/fork                                 | crash/orphan boundary                                                                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direct interactive sub-agent         | Persisted state, lifecycle cursors, delivery state, and matching ownership rehydrate | Pane/state are preserved and rehydrate when `parentSessionId` matches        | Killed and intentionally not restored    | A surviving pane can be recovered from its persisted direct-interactive state; unknown liveness remains non-actionable                             |
+| Reusable workflow process child      | Killed on session replacement; runtime-only workflow ownership is not rehydrated     | Not restored, even if the mux pane physically outlives an abrupt parent exit | Killed and intentionally not restored    | A surviving pane/lineage record is a crash/orphan diagnostic only; it does not regain workflow reuse, delivery, cancellation, or routing authority |
+| In-process job / background workflow | Cancelled and removed with the owning session generation                             | Not restored                                                                 | Cancelled and intentionally not restored | Process-memory state is lost; no job/workflow ownership is reconstructed                                                                           |
+
+`startup`, `reload`, and `resume` rehydrate only persisted direct interactive
+state for the matching parent session. `quit` preserves direct panes/state for a
+later matching-session startup. `new/fork` is always a clean boundary. Workflow
+children deliberately omit `parentSessionId` persistence, so cross-session
+workflow reuse remains disabled until durable ownership, delivery, promotion,
+and cancellation state can be recovered together.
+
 ## Cancellation context snapshots (opt-in)
 
 Cancellation snapshots are **disabled by default**. To enable bounded snapshots before parent-initiated cancellation, set:
@@ -390,9 +440,10 @@ follow-up is needed:
 Background jobs are scoped to the current parent session. This includes both
 `async: true` sub-agent jobs and jobs started by the `workflow` tool. They are
 cancelled on `/reload`, `/resume`, quit, and `/new`; their in-memory registries
-are not rehydrated into the next parent context. Interactive sub-agents are
-different: their mux panes and artifact-backed registry can survive reloads and
-restarts as described in [Interactive Sub-agent Tools](#interactive-sub-agent-tools).
+are not rehydrated into the next parent context. Direct interactive sub-agents
+are different: their mux panes and artifact-backed registry can survive reloads
+and restarts. Workflow-owned process children remain session-scoped as described
+in [Workflow child lifecycle and recovery](#workflow-child-lifecycle-and-recovery).
 
 #### `get_subagent_status`
 
@@ -476,8 +527,10 @@ snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
 output is legacy/staging fallback only. The pane is for live monitoring, and the
 artifact survives parent restarts.
 
-The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
-a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
+A direct interactive sub-agent's **registry state** survives parent reloads and
+restarts. When spawned, a per-(cwd) state file is written to
+`<cwd>/.pi/subagentura-state.json`. Workflow-owned process children deliberately
+do not write this state.
 
 The state file and subagent panes are preserved across these actions:
 
@@ -660,12 +713,12 @@ Persisted pre-coordinator intents may still drain through the bounded legacy
 broker during upgrade recovery, but new API calls cannot select full-output
 injection.
 
-Interactive coordinated policy, group membership, and intents survive
+Direct interactive coordinated policy, group membership, and intents survive
 same-session startup/reload/resume through `.pi/subagentura-state.json` and
 parent session entries. Consumption receipts prefer those entries and use the
-private fallback ledger when needed. In-process jobs and background workflows
-remain parent-session scoped and are retired on session replacement. `new` and
-`fork` do not import prior completion work.
+private fallback ledger when needed. Workflow-owned process children, in-process
+jobs, and background workflows remain parent-session scoped and are retired on
+session replacement. `new` and `fork` do not import prior completion work.
 
 Parent delivery fails closed behind durable notice storage. If `appendEntry`
 fails, the notice remains pending and the manifest is withheld; later coordinator
@@ -694,11 +747,34 @@ later interactive turns. Reconciliation resumes from the bounded high-water
 mark for receipts appended afterward.
 
 Session shutdown clears live coordinator state and records lifecycle
-retirements: non-interactive session-scoped work is retired, while interactive
-state and receipts remain eligible for same-session reload, resume, or restart.
-`/new` and `/fork` also retire interactive work and do not import prior
-completion work. Cleanup does not truncate or delete protected fallback ledgers,
-so old private files can remain after a replacement session starts.
+retirements: workflow-owned and non-interactive work is retired, while direct
+interactive state and receipts remain eligible for same-session reload, resume,
+or restart. `/new` and `/fork` also retire direct interactive work and do not
+import prior completion work. Cleanup does not truncate or delete protected
+fallback ledgers, so old private files can remain after a replacement session
+starts.
+
+#### `recover_interactive_subagent`
+
+Recovers a persisted **direct interactive** child after its recorded tmux pane
+or Zellij tab is conclusively dead. The tool validates the current parent owner,
+runtime and Pi session IDs, JSONL and artifact paths, persisted delivery state,
+lineage parent/root, and duplicate runtime pointers before showing a native
+Yes/No confirmation. It then creates a replacement pane, reopens the exact Pi
+JSONL without submitting a new prompt, renews the same lineage bootstrap, and
+rebinds only pane/runtime pointers. The child ID, delivery cursors/receipts,
+artifacts, and routing authority are preserved.
+
+This is explicit incident recovery, never automatic startup behavior. Live or
+unknown panes, path/owner/lineage mismatches, cancelled children, workflow-origin
+children, and in-process/background jobs fail closed. A cross-system crash during
+mux/state/lineage rebinding can still leave an empty orphan pane; the packaged
+`pi-session-recovery` skill documents non-destructive inspection and manual
+conversation-only fallback.
+
+Parameters:
+
+- `id` — persisted direct interactive child ID whose recorded pane is dead
 
 #### `get_interactive_subagent_status`
 
@@ -735,9 +811,11 @@ completion snapshot. An idle follow-up resets future delivery to independent
 that source/group are also delivered independently as `each`, even when steering
 retained the active turn's persisted group metadata.
 
-Workflow-owned children reject follow-ups until the workflow has consumed the
-current result and the pane is idle. The first successful follow-up then promotes
-the pane to standalone. The child calls `cli.mjs done 0` again when finished.
+Only children spawned with `reusable: true` are eligible for workflow reuse.
+They reject follow-ups until the workflow has consumed the current result and
+the pane is idle. The first successful follow-up then promotes the pane to
+standalone. Expired children are disposed, and failed disposal is retried by the
+bounded artifact poll. The child calls `cli.mjs done 0` again when finished.
 
 The tool refuses to send if the sub-agent is not registered, is neither `running`
 nor `idle`, remains workflow-owned, or the mux rejects the send call. Each failure

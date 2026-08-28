@@ -264,6 +264,8 @@ export interface WorkflowAgentOpts {
   agentType?: string;
   /** Thinking/reasoning level for the sub-agent. Clamped to model capabilities. */
   thinkingLevel?: ThinkingLevel;
+  /** Keep a process-backed child for bounded same-session reuse; incompatible with schema. */
+  reusable?: boolean;
 }
 export type WorkflowAgentProgress =
   | {
@@ -296,6 +298,8 @@ export type WorkflowAgentRunner = (req: {
   schema?: unknown;
   /** Thinking/reasoning for the sub-agent. */
   thinkingLevel?: ThinkingLevel;
+  /** Explicit reuse opt-in; unsupported for in-process or schema agents. */
+  reusable?: boolean;
   /**
    * Optional callback for emitting progress events from inside the runner.
    * Used to surface fallback warnings and forward mid-agent live status.

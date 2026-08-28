@@ -23,9 +23,14 @@ const options = {
   phase: "Scan",
   model: "provider/model",
   persona: "Careful reviewer",
-  isolation: "in-process",
+  isolation: "process",
   agentType: "reviewer",
   thinkingLevel: "high",
+} satisfies WorkflowAgentOptions;
+
+const reusableOptions = {
+  isolation: "process",
+  reusable: true,
 } satisfies WorkflowAgentOptions;
 
 async function authorWorkflow(): Promise<unknown> {
@@ -33,6 +38,7 @@ async function authorWorkflow(): Promise<unknown> {
   log({ cwd, args, remaining: budget.remaining() });
 
   const text = await agent("Inspect the repository", { label: "inspect" });
+  const reusable = await agent("Retain this context", reusableOptions);
   const structured = await agent<{ ok: boolean }>("Return status", options);
   const parallelResults = await parallel([
     () => agent("Task A"),
@@ -45,7 +51,7 @@ async function authorWorkflow(): Promise<unknown> {
   );
   const nested = await workflow("child", { parentCwd: cwd });
 
-  return { text, structured, parallelResults, piped, nested };
+  return { text, reusable, structured, parallelResults, piped, nested };
 }
 
 // @ts-expect-error cwd is an immutable workflow global.
