@@ -40,6 +40,7 @@ const { formatUsageMock, sanitizeOutputMock } = vi.hoisted(() => ({
 vi.mock("@earendil-works/pi-tui", () => ({
   Text: MockText,
   truncateToWidth: truncateToWidthMock,
+  visibleWidth: (text: string) => text.length,
 }));
 
 vi.mock("../src/helpers", () => ({

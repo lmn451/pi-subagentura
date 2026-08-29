@@ -537,8 +537,13 @@ describe("session-log tail-read", () => {
       ([key]) => key === "subagentura-activity",
     );
     expect(activityWidgetCall).toBeDefined();
-    const [, lines, opts] = activityWidgetCall!;
+    const [, factory, opts] = activityWidgetCall!;
     expect(opts).toEqual({ placement: "belowEditor" });
+    expect(factory).toEqual(expect.any(Function));
+    const lines = factory(
+      { terminal: { rows: 24 }, requestRender: vi.fn() },
+      {},
+    ).render(80);
     expect(lines[0]).toContain("Test:");
     expect(lines[0]).toContain("rg TODO src/");
   });

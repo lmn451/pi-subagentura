@@ -1,7 +1,12 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  Text,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@earendil-works/pi-tui";
 import { formatUsage } from "./helpers";
 import type { SubagentDetails } from "./subagent";
 import type { SubagentResult } from "./helpers";
@@ -226,6 +231,130 @@ export function renderSubagentNotify(
   return new Text(line, 0, 0);
 }
 
+// Pi's SelectList starts a secondary column above 40 cells. Forty-four keeps
+// the activity marker, agent name, and beginning of its status readable.
+export const RESPONSIVE_FLOW_MIN_COLUMN_WIDTH = 44;
+export const RESPONSIVE_FLOW_GAP = " │ ";
+
+export interface ResponsiveFlowOptions {
+  prefix?: string;
+  gap?: string;
+  minColumnWidth?: number;
+}
+
+export function responsiveFlowMinimumWidth(
+  columns: number,
+  options: ResponsiveFlowOptions = {},
+): number {
+  const count = positiveInteger(columns);
+  const prefixWidth = visibleWidth(options.prefix ?? "");
+  const gapWidth = visibleWidth(options.gap ?? RESPONSIVE_FLOW_GAP);
+  const minColumnWidth = Math.max(
+    1,
+    options.minColumnWidth ?? RESPONSIVE_FLOW_MIN_COLUMN_WIDTH,
+  );
+  return prefixWidth + count * minColumnWidth + (count - 1) * gapWidth;
+}
+
+export function responsiveFlowColumnCount(
+  width: number,
+  itemCount: number,
+  options: ResponsiveFlowOptions = {},
+): number {
+  const count = Math.max(0, Math.floor(finiteOr(itemCount, 0)));
+  if (count <= 1) return 1;
+  const gapWidth = visibleWidth(options.gap ?? RESPONSIVE_FLOW_GAP);
+  const prefixWidth = visibleWidth(options.prefix ?? "");
+  const minColumnWidth = Math.max(
+    1,
+    options.minColumnWidth ?? RESPONSIVE_FLOW_MIN_COLUMN_WIDTH,
+  );
+  const contentWidth = Math.max(
+    0,
+    Math.floor(finiteOr(width, 0)) - prefixWidth,
+  );
+  const fitting = Math.floor(
+    (contentWidth + gapWidth) / (minColumnWidth + gapWidth),
+  );
+  return Math.max(1, Math.min(count, fitting));
+}
+
+export function responsiveFlowColumnWidths(
+  width: number,
+  columns: number,
+  options: ResponsiveFlowOptions = {},
+): number[] {
+  const count = positiveInteger(columns);
+  const gapWidth = visibleWidth(options.gap ?? RESPONSIVE_FLOW_GAP);
+  const prefixWidth = visibleWidth(options.prefix ?? "");
+  const contentWidth = Math.max(
+    0,
+    Math.floor(finiteOr(width, 0)) - prefixWidth - (count - 1) * gapWidth,
+  );
+  const baseWidth = Math.floor(contentWidth / count);
+  const remainder = contentWidth % count;
+  return Array.from(
+    { length: count },
+    (_, index) => baseWidth + (index < remainder ? 1 : 0),
+  );
+}
+
+export function renderResponsiveFlowRows(
+  rows: readonly string[],
+  width: number,
+  options: ResponsiveFlowOptions = {},
+): string[] {
+  if (rows.length === 0) return [];
+  const prefix = options.prefix ?? "";
+  const gap = options.gap ?? RESPONSIVE_FLOW_GAP;
+  const columns = responsiveFlowColumnCount(width, rows.length, options);
+  const columnWidths = responsiveFlowColumnWidths(width, columns, options);
+  if (columns === 1) {
+    return rows.map((row) => truncateToWidth(row, columnWidths[0]!, "…"));
+  }
+  const rendered: string[] = [];
+  for (let start = 0; start < rows.length; start += columns) {
+    const cells = columnWidths.map((columnWidth, offset) =>
+      truncateToWidth(rows[start + offset] ?? "", columnWidth, "…", true),
+    );
+    rendered.push(`${prefix}${cells.join(gap)}`);
+  }
+  return rendered;
+}
+
+export class ResponsiveFlowComponent implements Component {
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+  private readonly rows: string[];
+
+  constructor(
+    rows: readonly string[],
+    private readonly options: ResponsiveFlowOptions = {},
+  ) {
+    this.rows = [...rows];
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+    this.cachedLines = renderResponsiveFlowRows(this.rows, width, this.options);
+    this.cachedWidth = width;
+    return this.cachedLines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}
+
+function positiveInteger(value: number): number {
+  return Math.max(1, Math.floor(finiteOr(value, 1)));
+}
+
+function finiteOr(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 /**
  * Coarse bucket for widget elapsed clocks.
  *
@@ -235,6 +364,7 @@ export function renderSubagentNotify(
  * without reintroducing a repaint on every 5s tick.
  */
 export const ACTIVITY_ELAPSED_BUCKET_MS = 10_000;
+const ACTIVITY_PREVIEW_MAX_CHARS = 512;
 
 /** Quantize an elapsed duration down to the coarse widget bucket. */
 export function coarseElapsedMs(milliseconds: number): number {
@@ -250,14 +380,23 @@ export function formatActivityRow(
   state: InteractiveSubagentState,
   now: number = Date.now(),
 ): string {
+  const name = compactActivityText(state.name, "subagent");
   if (state.status === "idle") {
-    return `○ ${state.name}: idle — ready for follow-up`;
+    return `○ ${name}: idle — ready for follow-up`;
   }
-  const summary = state.lastToolSummary ?? "starting…";
+  const summary = compactActivityText(state.lastToolSummary ?? "starting…");
   const ago = state.lastActivityAt
     ? ` (${agoStr(coarseElapsedMs(now - state.lastActivityAt))})`
     : "";
-  return `▶ ${state.name}: ${summary}${ago}`;
+  return `▶ ${name}: ${summary}${ago}`;
+}
+
+function compactActivityText(value: unknown, fallback = ""): string {
+  return String(value ?? fallback)
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, ACTIVITY_PREVIEW_MAX_CHARS);
 }
 
 function agoStr(milliseconds: number): string {

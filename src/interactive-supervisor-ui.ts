@@ -3,12 +3,7 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import {
-  Key,
-  matchesKey,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { promises as fs, type promises as fsTypes } from "node:fs";
 import { join } from "node:path";
 import type { JobState } from "./helpers";
@@ -25,6 +20,13 @@ import {
   formatWorkflowUsageLegend,
   presentWorkflowUsage,
 } from "./workflow-core";
+import {
+  RESPONSIVE_FLOW_GAP,
+  RESPONSIVE_FLOW_MIN_COLUMN_WIDTH,
+  responsiveFlowColumnCount,
+  responsiveFlowColumnWidths,
+  responsiveFlowMinimumWidth,
+} from "./rendering";
 
 export const INTERACTIVE_SUPERVISOR_SHORTCUT = "ctrl+alt+a";
 const DEFAULT_REFRESH_INTERVAL_MS = 1_000;
@@ -33,39 +35,25 @@ const DETAIL_EVENTS_MAX_BYTES = 8 * 1024;
 const DETAIL_PREVIEW_MAX_CHARS = 512;
 const DETAIL_EVENT_COUNT = 3;
 const DETAIL_WORKFLOW_AGENT_COUNT = 20;
-// Pi's SelectList starts a secondary column above 40 cells. Forty-four keeps
-// source, status, and the beginning of a label visible before truncation.
-export const INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH = 44;
+export const INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH =
+  RESPONSIVE_FLOW_MIN_COLUMN_WIDTH;
 const SUPERVISOR_GRID_PREFIX = "│ ";
-const SUPERVISOR_GRID_GAP = " │ ";
-const SUPERVISOR_GRID_PREFIX_WIDTH = visibleWidth(SUPERVISOR_GRID_PREFIX);
-const SUPERVISOR_GRID_GAP_WIDTH = visibleWidth(SUPERVISOR_GRID_GAP);
+const SUPERVISOR_GRID_GAP = RESPONSIVE_FLOW_GAP;
+const SUPERVISOR_GRID_OPTIONS = {
+  prefix: SUPERVISOR_GRID_PREFIX,
+  gap: SUPERVISOR_GRID_GAP,
+  minColumnWidth: INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH,
+};
 
 export function interactiveSupervisorMinimumGridWidth(columns: number): number {
-  const count = Math.max(1, Math.floor(Number.isFinite(columns) ? columns : 1));
-  return (
-    SUPERVISOR_GRID_PREFIX_WIDTH +
-    count * INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH +
-    (count - 1) * SUPERVISOR_GRID_GAP_WIDTH
-  );
+  return responsiveFlowMinimumWidth(columns, SUPERVISOR_GRID_OPTIONS);
 }
 
 export function interactiveSupervisorColumnCount(
   width: number,
   itemCount: number,
 ): number {
-  const count = Math.max(
-    0,
-    Math.floor(Number.isFinite(itemCount) ? itemCount : 0),
-  );
-  if (count <= 1) return 1;
-  const safeWidth = Math.max(0, Math.floor(Number.isFinite(width) ? width : 0));
-  const contentWidth = Math.max(0, safeWidth - SUPERVISOR_GRID_PREFIX_WIDTH);
-  const fitting = Math.floor(
-    (contentWidth + SUPERVISOR_GRID_GAP_WIDTH) /
-      (INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH + SUPERVISOR_GRID_GAP_WIDTH),
-  );
-  return Math.max(1, Math.min(count, fitting));
+  return responsiveFlowColumnCount(width, itemCount, SUPERVISOR_GRID_OPTIONS);
 }
 
 export type InteractiveSupervisorAction = { kind: "close" };
@@ -1050,17 +1038,7 @@ function clampIndex(index: number, length: number): number {
 }
 
 function supervisorGridColumnWidths(width: number, columns: number): number[] {
-  const gapWidth = (columns - 1) * SUPERVISOR_GRID_GAP_WIDTH;
-  const contentWidth = Math.max(
-    0,
-    Math.floor(width) - SUPERVISOR_GRID_PREFIX_WIDTH - gapWidth,
-  );
-  const baseWidth = Math.floor(contentWidth / columns);
-  const remainder = contentWidth % columns;
-  return Array.from(
-    { length: columns },
-    (_, index) => baseWidth + (index < remainder ? 1 : 0),
-  );
+  return responsiveFlowColumnWidths(width, columns, SUPERVISOR_GRID_OPTIONS);
 }
 
 function normalizeAvailableHeight(

@@ -152,7 +152,11 @@ function lastWidgetRows(
     ([key]) => key === ACTIVITY_WIDGET_KEY,
   );
   if (calls.length === 0) return "never-painted";
-  return calls.at(-1)?.[1] as string[] | undefined;
+  const content = calls.at(-1)?.[1];
+  if (typeof content !== "function") return content as string[] | undefined;
+  return content({ terminal: { rows: 24 }, requestRender: vi.fn() }, {}).render(
+    80,
+  );
 }
 
 function lastFooter(

@@ -45,7 +45,11 @@ import {
 } from "./delivery";
 import { completionDisplayLabel } from "./completion-presentation";
 import { debugLog, jobRegistry, type JobState } from "./helpers";
-import { coarseElapsedMs, formatActivityRow } from "./rendering";
+import {
+  coarseElapsedMs,
+  formatActivityRow,
+  ResponsiveFlowComponent,
+} from "./rendering";
 import {
   addWorkflowUsage,
   formatWorkflowUsage,
@@ -398,7 +402,13 @@ function updateWidgetRows(
   const rendered = renderedRows.length > 0 ? renderedRows : undefined;
   if (surface.painted && widgetRowsEqual(surface.rendered, rendered)) return;
   try {
-    ui.setWidget(key, rendered, { placement: "belowEditor" });
+    if (key === WIDGET_KEY && rendered) {
+      ui.setWidget(key, () => new ResponsiveFlowComponent(rendered), {
+        placement: "belowEditor",
+      });
+    } else {
+      ui.setWidget(key, rendered, { placement: "belowEditor" });
+    }
     surface.rendered = rendered ? [...rendered] : undefined;
     surface.painted = true;
   } catch {
