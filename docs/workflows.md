@@ -205,6 +205,10 @@ mode-0600 files, canonical-directory revalidation, and static ancestor-symlink
 rejection. These controls prevent accidental/stale writers; they are not an OS
 security boundary against malicious same-UID code, which can race or modify the
 project's files directly.
+Lock metadata is published atomically with a PID. Orphan removal occurs only when
+that PID is absent in the current PID namespace; malformed legacy locks require
+trusted manual inspection/removal. Cross-namespace PID liveness is an operational
+limitation, not an exactly-once or hostile-process security guarantee.
 
 ## Workflow tool pitfalls
 

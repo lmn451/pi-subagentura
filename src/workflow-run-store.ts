@@ -1,10 +1,9 @@
 import {
   chmodSync,
-  closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -14,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { RalplanRunRecord } from "./ralplan-state";
 import type { SessionOwnerToken } from "./session-scope";
 
@@ -99,7 +98,7 @@ function canonicalCwd(cwd: string): string {
   try {
     return realpathSync(absolute);
   } catch {
-    return absolute;
+    throw new Error("Durable execution cwd must already exist");
   }
 }
 
@@ -173,32 +172,53 @@ function withExecutionLock<T>(
   const directory = ensureExecutionDirectory(cwd, true)!;
   assertExecutionDirectoryIdentity(cwd, directory);
   const lockPath = `${runStorePath(cwd, executionId)}.lock`;
-  let descriptor: number;
+  const candidate = `${lockPath}.candidate-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let acquired = false;
   try {
-    descriptor = openSync(lockPath, "wx", 0o600);
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "EEXIST" &&
-      staleLockCanBeRemoved(lockPath)
-    ) {
-      unlinkSync(lockPath);
-      descriptor = openSync(lockPath, "wx", 0o600);
-    } else {
-      throw new Error("Durable execution record is locked by another writer");
+    writeFileSync(candidate, `${process.pid}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    try {
+      linkSync(candidate, lockPath);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "EEXIST" &&
+        staleLockCanBeRemoved(lockPath)
+      ) {
+        unlinkSync(lockPath);
+        linkSync(candidate, lockPath);
+      } else {
+        throw new Error(
+          "Durable execution record is locked by another writer; malformed orphan locks require trusted manual removal",
+        );
+      }
     }
-  }
-  writeFileSync(descriptor, `${process.pid}\n`, { encoding: "utf8" });
-  assertExecutionDirectoryIdentity(cwd, directory);
-  try {
+    acquired = true;
+    assertExecutionDirectoryIdentity(cwd, directory);
     return action();
   } finally {
-    closeSync(descriptor);
+    if (acquired) {
+      try {
+        const candidateStats = lstatSync(candidate);
+        const lockStats = lstatSync(lockPath);
+        if (
+          candidateStats.dev === lockStats.dev &&
+          candidateStats.ino === lockStats.ino
+        ) {
+          unlinkSync(lockPath);
+        }
+      } catch {
+        /* a replaced lock must not be removed by this writer */
+      }
+    }
     try {
-      unlinkSync(lockPath);
+      if (existsSync(candidate)) unlinkSync(candidate);
     } catch {
-      /* lock cleanup is best effort after the descriptor is closed */
+      /* candidate cleanup is best effort */
     }
   }
 }
