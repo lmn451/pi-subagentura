@@ -292,6 +292,9 @@ describe("published tarball", () => {
         "skills/ralplan/prompts/critic.md",
         "src/ralplan-state.ts",
         "src/ralplan-tool.ts",
+        "src/ralplan-execution-tool.ts",
+        "src/workflow-plan-runner.ts",
+        "src/workflow-run-store.ts",
       ]),
     );
   });

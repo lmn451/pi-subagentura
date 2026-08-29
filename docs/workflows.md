@@ -172,6 +172,44 @@ for reload/resume/quit and `cancelled` for new/fork. Capped, failed, and rejecte
 planning exits are inactive. Stale owner generations or parent sessions cannot
 approve, reject, cancel, or recover another run.
 
+## Durable declarative execution
+
+After a RALPLAN record reaches `approved_handoff`, execution remains opt-in and
+uses a second approval boundary:
+
+1. `preview_ralplan_execution` validates and persists 1–32 ordered tasks with
+   stable ids, bounded prompts, and dependencies on earlier tasks only. Preview
+   status is `pending_execution_approval`; no model work starts.
+2. `approve_ralplan_execution` fences approval by execution id, record revision,
+   exact plan digest, owner generation, and parent session. Approval still starts
+   nothing.
+3. `run_ralplan_execution` acquires a persisted owner/epoch lease and runs tasks
+   sequentially. Operation identity is written before model work and bounded
+   outcome evidence/digest is committed afterward.
+4. Status comes from cold mode-0600 records under `.pi/ralplan-executions/`.
+   Committed tasks are replayed from evidence rather than re-executed.
+5. Session transitions abort live runners before marking records interrupted.
+   In-flight operations become `unknown`; no automatic resume or retry occurs.
+   `resolve_ralplan_operation` requires trusted evidence and an explicit retry,
+   accept, or fail decision. `resume_ralplan_execution` only rebinds to the new
+   owner; a separate run call is required.
+
+The runner is agent-task based and exposes no shell/filesystem callback to the
+workflow VM. It does **not** claim exactly-once side effects: a crash after a
+mutation but before outcome commit leaves unknown evidence requiring manual
+resolution. Preview, approval, status, recovery, and execution remain separate
+host actions.
+
+Store mutations use per-record process locks, revision checks, atomic rename,
+mode-0600 files, canonical-directory revalidation, and static ancestor-symlink
+rejection. These controls prevent accidental/stale writers; they are not an OS
+security boundary against malicious same-UID code, which can race or modify the
+project's files directly.
+Lock metadata is published atomically with a PID. Orphan removal occurs only when
+that PID is absent in the current PID namespace; malformed legacy locks require
+trusted manual inspection/removal. Cross-namespace PID liveness is an operational
+limitation, not an exactly-once or hostile-process security guarantee.
+
 ## Workflow tool pitfalls
 
 These are the failure modes we hit while building the converters above. Document them before designing new workflows.

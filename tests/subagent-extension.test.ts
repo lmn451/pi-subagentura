@@ -63,6 +63,16 @@ const RALPLAN_TOOL_NAMES = [
   "reject_ralplan",
 ];
 
+const RALPLAN_EXECUTION_TOOL_NAMES = [
+  "approve_ralplan_execution",
+  "cancel_ralplan_execution",
+  "get_ralplan_execution_status",
+  "preview_ralplan_execution",
+  "resolve_ralplan_operation",
+  "resume_ralplan_execution",
+  "run_ralplan_execution",
+];
+
 function getRegisteredToolNames(api: {
   registerTool: ReturnType<typeof vi.fn>;
 }) {
@@ -112,6 +122,7 @@ describe("extension registration", () => {
         ...ORCHESTRATOR_TOOL_NAMES,
         ...WORKFLOW_TOOL_NAMES,
         ...RALPLAN_TOOL_NAMES,
+        ...RALPLAN_EXECUTION_TOOL_NAMES,
       ].sort(),
     );
     expect(api.registerCommand).toHaveBeenCalledWith(

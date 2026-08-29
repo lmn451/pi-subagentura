@@ -6,3 +6,6 @@ export * from "./workflow-tree-ui";
 export { registerWorkflowTool } from "./workflow-tool";
 export * from "./ralplan-state";
 export { registerRalplanTools } from "./ralplan-tool";
+export * from "./workflow-run-store";
+export * from "./workflow-plan-runner";
+export { registerRalplanExecutionTools } from "./ralplan-execution-tool";

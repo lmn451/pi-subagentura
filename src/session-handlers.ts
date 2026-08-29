@@ -49,6 +49,8 @@ import {
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
 import { interruptRalplanRuns } from "./ralplan-state";
+import { interruptRalplanExecutionJobs } from "./ralplan-execution-tool";
+import { recoverColdExecutionRecords } from "./workflow-run-store";
 import {
   advanceSessionScopeGeneration,
   createSessionScope,
@@ -183,6 +185,15 @@ function cleanupScopeGeneration(
   cleanupWorkflowJobsForOwner(owner);
   const ralplanCwd = scope.cwd ?? ctx?.cwd;
   if (ralplanCwd) {
+    try {
+      interruptRalplanExecutionJobs({
+        cwd: ralplanCwd,
+        owner,
+        lifecycleReason: event?.reason ?? "unknown",
+      });
+    } catch (error) {
+      logSessionError("ralplan_execution_interruption_failed", error);
+    }
     try {
       interruptRalplanRuns({
         cwd: ralplanCwd,
@@ -334,6 +345,14 @@ export function registerSessionHandlers(
       event.reason === "reload" ||
       event.reason === "resume";
     if (shouldRehydrate) {
+      try {
+        recoverColdExecutionRecords({
+          cwd: ctx.cwd,
+          parentSessionId: sessionId,
+        });
+      } catch (error) {
+        logSessionError("ralplan_execution_cold_recovery_failed", error);
+      }
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the

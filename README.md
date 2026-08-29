@@ -161,6 +161,13 @@ The extension registers these public tools for parent agents.
 | `reject_ralplan`                        | Reject a pending RALPLAN run terminally                           |
 | `cancel_ralplan`                        | Cancel the exact active RALPLAN planning workflow                 |
 | `prepare_ralplan_recovery`              | Return same-session interrupted evidence read-only                |
+| `preview_ralplan_execution`             | Persist a bounded non-executing declarative preview               |
+| `approve_ralplan_execution`             | Approve an exact execution revision/digest without starting       |
+| `run_ralplan_execution`                 | Start approved sequential tasks in the background                 |
+| `get_ralplan_execution_status`          | Read durable execution projections from disk                      |
+| `cancel_ralplan_execution`              | Cancel execution and preserve unknown in-flight evidence          |
+| `resolve_ralplan_operation`             | Resolve unknown side effects with evidence                        |
+| `resume_ralplan_execution`              | Rebind an interrupted execution without starting it               |
 | `subagent_with_context`                 | Delegate with the parent conversation                             |
 | `subagent_isolated`                     | Delegate with a fresh context                                     |
 | `get_subagent_status`                   | Inspect an async in-process job                                   |
