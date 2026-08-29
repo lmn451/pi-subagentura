@@ -185,7 +185,7 @@ function mergeFooterContributions(
       total += contribution.count;
       footerLabel ??= contribution.footerLabel;
     }
-    if (total === 0) return undefined;
+    if (total === 0) return footerLabel;
     const label = footerLabel ? ` · ${footerLabel}` : "";
     return `⚡ ${total} sub-agent${total > 1 ? "s" : ""} alive${label}`;
   }
@@ -316,12 +316,13 @@ export function updateRunningSubagentFooter(
   const ownerContext = resolveLiveSessionScope(owner);
   const runningCount =
     owner !== undefined && !ownerContext ? 0 : getRunningSubagentCount([owner]);
+  const footerLabel = footerLabelsForOwner(owner);
   const contribution: SubagentFooterContribution | undefined =
-    runningCount > 0
+    runningCount > 0 || footerLabel !== undefined
       ? {
           kind: "subagent",
           count: runningCount,
-          footerLabel: footerLabelsForOwner(owner),
+          footerLabel,
         }
       : undefined;
   updateFooterStatus(ui, FOOTER_KEY, contribution, owner);

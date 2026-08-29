@@ -49,6 +49,7 @@ interface HandlerRegistration {
 function registerHandlers(
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
+  orchestratorFlag: "orchestrator" | "orchestratorv2" = "orchestratorv2",
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
   const pi = {
@@ -58,7 +59,7 @@ function registerHandlers(
       handlers.set(name, registered);
     }),
     appendEntry: vi.fn(),
-    getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    getFlag: vi.fn((name: string) => name === orchestratorFlag),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
   };
@@ -534,7 +535,7 @@ describe("session handler lifecycle callbacks", () => {
 
     expect(sharedUi.setStatus).toHaveBeenCalledWith(
       "subagentura-running",
-      undefined,
+      "orchestrator",
     );
   });
 
@@ -559,46 +560,53 @@ describe("session handler lifecycle callbacks", () => {
     );
   });
 
-  it("labels a child with its owner and workflow name", () => {
-    const rootContext = createRootSpawnTreeContext(
-      "orchestrator-root",
-      root,
-      true,
-    );
-    const orchestratorContext = createDescendantSpawnTreeContext(
-      rootContext,
-      "orchestrator-agent",
-      join(root, "orchestrator-agent"),
-    );
-    const childContext = createDescendantSpawnTreeContext(
-      orchestratorContext,
-      "child-agent",
-      join(root, "child-agent"),
-    );
-    const registration = registerHandlers(childContext, false);
-    const ui = {
-      setStatus: vi.fn(),
-      setWidget: vi.fn(),
-      notify: vi.fn(),
-    };
-    startSession(registration, root, "session-child", ui);
-    const workflow = ownedWorkflow(
-      registration.sessionScope,
-      "workflow-id",
-    ).workflow;
-    workflow.name = "review-auth";
-    const child = ownedJob(registration.sessionScope, "child-job")
-      .job as JobState;
-    child.workflowId = workflow.id;
-    child.completionOwner = "workflow";
+  it.each(["orchestrator", "orchestratorv2"] as const)(
+    "labels a child with its owner and workflow name in %s mode",
+    (orchestratorFlag) => {
+      const rootContext = createRootSpawnTreeContext(
+        "orchestrator-root",
+        root,
+        true,
+      );
+      const orchestratorContext = createDescendantSpawnTreeContext(
+        rootContext,
+        "orchestrator-agent",
+        join(root, "orchestrator-agent"),
+      );
+      const childContext = createDescendantSpawnTreeContext(
+        orchestratorContext,
+        "child-agent",
+        join(root, "child-agent"),
+      );
+      const registration = registerHandlers(
+        childContext,
+        false,
+        orchestratorFlag,
+      );
+      const ui = {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      };
+      startSession(registration, root, "session-child", ui);
+      const workflow = ownedWorkflow(
+        registration.sessionScope,
+        "workflow-id",
+      ).workflow;
+      workflow.name = "review-auth";
+      const child = ownedJob(registration.sessionScope, "child-job")
+        .job as JobState;
+      child.workflowId = workflow.id;
+      child.completionOwner = "workflow";
 
-    updateRunningSubagentFooter(ui, sessionOwner(registration.sessionScope));
+      updateRunningSubagentFooter(ui, sessionOwner(registration.sessionScope));
 
-    expect(ui.setStatus).toHaveBeenLastCalledWith(
-      "subagentura-running",
-      "⚡ 1 sub-agent alive · subagent of orchestrator orchestrator-agent · workflow review-auth",
-    );
-  });
+      expect(ui.setStatus).toHaveBeenLastCalledWith(
+        "subagentura-running",
+        "⚡ 1 sub-agent alive · subagent of orchestrator orchestrator-agent · workflow review-auth",
+      );
+    },
+  );
 
   it("falls back to the workflow ID when its name is unavailable", () => {
     const registration = registerHandlers();
@@ -675,6 +683,83 @@ describe("session handler lifecycle callbacks", () => {
     expect(footer).toContain("… and 2 more workflows");
     expect(footer).not.toContain("workflow workflow-name-5");
   });
+
+  it.each(["orchestrator", "orchestratorv2"] as const)(
+    "keeps the top-level %s identity with zero children",
+    (orchestratorFlag) => {
+      const registration = registerHandlers(undefined, true, orchestratorFlag);
+      const ui = {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      };
+      const ctx = startSession(
+        registration,
+        root,
+        `session-${orchestratorFlag}`,
+        ui,
+      );
+
+      ui.setStatus("rtk", "advisor");
+      updateRunningSubagentFooter(ui, sessionOwner(registration.sessionScope));
+
+      expect(ui.setStatus).toHaveBeenCalledWith(
+        "subagentura-running",
+        "orchestrator",
+      );
+      registration.handlers.get("session_shutdown")![0](
+        { reason: "quit" },
+        ctx,
+      );
+      expect(ui.setStatus).toHaveBeenCalledWith(
+        "subagentura-running",
+        undefined,
+      );
+      expect(ui.setStatus).toHaveBeenCalledWith("rtk", "advisor");
+    },
+  );
+
+  it.each(["orchestrator", "orchestratorv2"] as const)(
+    "keeps a zero-child descendant identity in %s mode and cleans it up",
+    (orchestratorFlag) => {
+      const rootContext = createRootSpawnTreeContext(
+        "orchestrator-root",
+        root,
+        true,
+      );
+      const childContext = createDescendantSpawnTreeContext(
+        rootContext,
+        "child-agent",
+        join(root, "child-agent"),
+      );
+      const registration = registerHandlers(
+        childContext,
+        false,
+        orchestratorFlag,
+      );
+      const ui = {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      };
+      const ctx = startSession(registration, root, "session-child", ui);
+
+      updateRunningSubagentFooter(ui, sessionOwner(registration.sessionScope));
+      expect(ui.setStatus).toHaveBeenLastCalledWith(
+        "subagentura-running",
+        "subagent of orchestrator orchestrator-root",
+      );
+
+      registration.handlers.get("session_shutdown")![0](
+        { reason: "quit" },
+        ctx,
+      );
+      expect(ui.setStatus).toHaveBeenCalledWith(
+        "subagentura-running",
+        undefined,
+      );
+    },
+  );
 
   it("polls every started scope from one shared interval", async () => {
     const a = registerHandlers();
