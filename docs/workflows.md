@@ -149,6 +149,29 @@ workflow({
   terminal result remains `pending_approval: true` and
   `execution_halted: true`.
 
+## Host-owned RALPLAN state and approval
+
+Canonical RALPLAN workflows launched through the extension's `workflow` tool
+create a bounded mode-0600 `.pi/ralplan-state.json` record before planning
+settles. The record is bound to canonical cwd, exact session owner generation,
+parent session id, workflow id, and a random run id. Verified consensus advances
+to `pending_approval` and stores the exact final-plan digest.
+
+Host tools are explicit:
+
+- `get_ralplan_status` lists exact-owner records and same-parent-session
+  interrupted evidence;
+- `approve_ralplan` requires matching `{runId, planDigest}`, deactivates the
+  record, and returns `approved_handoff` without executing;
+- `reject_ralplan` and `cancel_ralplan` are owner/session-scoped terminal actions;
+- `prepare_ralplan_recovery` returns interrupted evidence read-only and never
+  replays agents or resumes automatically.
+
+Workflow session shutdown cancels live jobs first, then records `interrupted`
+for reload/resume/quit and `cancelled` for new/fork. Capped, failed, and rejected
+planning exits are inactive. Stale owner generations or parent sessions cannot
+approve, reject, cancel, or recover another run.
+
 ## Workflow tool pitfalls
 
 These are the failure modes we hit while building the converters above. Document them before designing new workflows.

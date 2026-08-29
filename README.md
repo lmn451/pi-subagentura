@@ -156,6 +156,11 @@ The extension registers these public tools for parent agents.
 | `get_workflow_status`                   | Inspect a background workflow                                     |
 | `get_workflow_result`                   | Wait for and return a workflow result                             |
 | `cancel_workflow`                       | Cancel a background workflow                                      |
+| `get_ralplan_status`                    | Inspect owner/session-scoped RALPLAN state                        |
+| `approve_ralplan`                       | Approve an exact run and plan digest without executing            |
+| `reject_ralplan`                        | Reject a pending RALPLAN run terminally                           |
+| `cancel_ralplan`                        | Cancel the exact active RALPLAN planning workflow                 |
+| `prepare_ralplan_recovery`              | Return same-session interrupted evidence read-only                |
 | `subagent_with_context`                 | Delegate with the parent conversation                             |
 | `subagent_isolated`                     | Delegate with a fresh context                                     |
 | `get_subagent_status`                   | Inspect an async in-process job                                   |

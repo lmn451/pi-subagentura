@@ -290,6 +290,8 @@ describe("published tarball", () => {
         "skills/ralplan/prompts/planner.md",
         "skills/ralplan/prompts/architect.md",
         "skills/ralplan/prompts/critic.md",
+        "src/ralplan-state.ts",
+        "src/ralplan-tool.ts",
       ]),
     );
   });

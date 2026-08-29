@@ -43,6 +43,7 @@ import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
+import { registerRalplanTools } from "./ralplan-tool";
 import {
   acquireRuntimeSpawnTreeContext,
   LINEAGE_BOOTSTRAP_ENV,
@@ -152,6 +153,7 @@ export default function (pi: ExtensionAPI) {
   registerOrchestratorTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);
   registerWorkflowTool(pi, sessionScope);
+  registerRalplanTools(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);
   registerInProcessMaintenanceTools(pi, sessionScope);
   // ── Cancel-all-flows shortcut and command ──────────────────────

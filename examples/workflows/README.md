@@ -135,6 +135,13 @@ agents because the workflow VM exposes no filesystem API. Actual approval and
 execution routing belong to the host; the VM cannot suspend for user input or
 convert marker text, a digest, or a valid plan into approval.
 
+When launched through the extension's `workflow` tool, canonical RALPLAN runs
+receive a host-owned run id and mode-0600 `.pi/ralplan-state.json` record.
+Use `get_ralplan_status`, `approve_ralplan`, `reject_ralplan`,
+`cancel_ralplan`, and `prepare_ralplan_recovery`. Approval is bound to the
+exact run/digest and records an inactive handoff; no tool in this phase executes
+the plan. Reload/resume/quit preserve interrupted evidence without replay.
+
 ### `ralplan-from-skill.mjs`
 
 A generated, self-contained RALPLAN example derived from the bundled skill.
