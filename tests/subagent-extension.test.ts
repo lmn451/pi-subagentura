@@ -55,6 +55,14 @@ const WORKFLOW_TOOL_NAMES = [
   "workflow",
 ].sort();
 
+const RALPLAN_TOOL_NAMES = [
+  "approve_ralplan",
+  "cancel_ralplan",
+  "get_ralplan_status",
+  "prepare_ralplan_recovery",
+  "reject_ralplan",
+];
+
 function getRegisteredToolNames(api: {
   registerTool: ReturnType<typeof vi.fn>;
 }) {
@@ -103,6 +111,7 @@ describe("extension registration", () => {
         ...IN_PROCESS_TOOL_NAMES,
         ...ORCHESTRATOR_TOOL_NAMES,
         ...WORKFLOW_TOOL_NAMES,
+        ...RALPLAN_TOOL_NAMES,
       ].sort(),
     );
     expect(api.registerCommand).toHaveBeenCalledWith(

@@ -31,6 +31,15 @@ The workflow VM cannot pause for user approval. `interactive` only controls
 non-blocking markers. `executeOnConsensus` is ignored compatibility input. A
 plan, digest, completion marker, or consensus result never authorizes execution.
 
+## Host approval
+
+The extension persists owner/session-scoped state in mode-0600
+`.pi/ralplan-state.json`. Inspect with `get_ralplan_status`; explicitly approve
+an exact `{runId, planDigest}` with `approve_ralplan`, or use
+`reject_ralplan`/`cancel_ralplan`. `prepare_ralplan_recovery` exposes
+same-session interrupted evidence read-only and never auto-resumes work.
+Approval records an inactive `approved_handoff`; it does not execute the plan.
+
 ## Install
 
 ```bash

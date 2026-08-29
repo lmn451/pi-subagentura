@@ -84,6 +84,14 @@ import {
   type ResolvedCompletionPolicy,
   type CompletionGroupReservation,
 } from "./completion-coordinator";
+import {
+  completeRalplanRun,
+  createRalplanRun,
+  failRalplanRun,
+  getRalplanRunForWorkflow,
+  isRalplanWorkflowName,
+  markRalplanReviewing,
+} from "./ralplan-state";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -484,6 +492,107 @@ export function registerWorkflowTool(
     }
   }
 
+  function ralplanParentSessionId(): string | undefined {
+    try {
+      return sessionScope?.sessionManager?.getSessionId?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  function ensureRalplanStart(
+    job: WorkflowJobState,
+    cwd: string,
+    workflowOwner: SessionOwnerToken | undefined,
+  ) {
+    if (!isRalplanWorkflowName(job.name)) return undefined;
+    if (!workflowOwner) {
+      throw new Error("RALPLAN workflows require a live host session owner");
+    }
+    return (
+      getRalplanRunForWorkflow(cwd, job.id) ??
+      createRalplanRun({
+        cwd,
+        workflowId: job.id,
+        workflowName: job.name,
+        owner: workflowOwner,
+        parentSessionId: ralplanParentSessionId(),
+      })
+    );
+  }
+
+  function captureRalplanCompletion(
+    job: WorkflowJobState,
+    cwd: string,
+    workflowOwner: SessionOwnerToken | undefined,
+  ): boolean {
+    if (!isRalplanWorkflowName(job.name)) return true;
+    try {
+      ensureRalplanStart(job, cwd, workflowOwner);
+      if (job.status === "done" && job.result) {
+        completeRalplanRun({
+          cwd,
+          workflowId: job.id,
+          result: job.result.result,
+        });
+      } else {
+        failRalplanRun({
+          cwd,
+          workflowId: job.id,
+          reason: job.error ?? `workflow ${job.status}`,
+          phase: job.status === "cancelled" ? "cancelled" : "failed",
+        });
+      }
+      return true;
+    } catch (error) {
+      debugLog("error", "ralplan_state_capture_failed", {
+        workflowId: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  function captureRalplanProgress(
+    workflowId: string,
+    workflowName: string,
+    cwd: string,
+    progress: WorkflowProgress,
+  ): void {
+    if (
+      !isRalplanWorkflowName(workflowName) ||
+      progress.kind !== "phase" ||
+      !progress.phase ||
+      !/(Architect|Critic|Verify reviews)/i.test(progress.phase)
+    ) {
+      return;
+    }
+    try {
+      markRalplanReviewing({ cwd, workflowId });
+    } catch {
+      /* the start record may not be committed until immediately after spawn */
+    }
+  }
+
+  function notifyCapturedWorkflow(
+    job: WorkflowJobState,
+    cwd: string,
+    workflowOwner: SessionOwnerToken | undefined,
+  ): boolean {
+    if (!captureRalplanCompletion(job, cwd, workflowOwner)) return false;
+    return notifyWorkflowCompletion(job);
+  }
+
+  function ralplanDetails(workflowId: string) {
+    if (!sessionScope?.cwd) return {};
+    try {
+      const record = getRalplanRunForWorkflow(sessionScope.cwd, workflowId);
+      return record ? { ralplanRunId: record.runId } : {};
+    } catch {
+      return {};
+    }
+  }
+
   registerToolWithDefaultGuidance(pi, {
     name: "workflow",
     label: "Workflow",
@@ -673,12 +782,17 @@ export function registerWorkflowTool(
         };
       }
 
-      const baseOpts = (workflowId: string) => ({
+      const baseOpts = (workflowId: string, workflowName?: string) => ({
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
         runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
+        onProgress: (progress: WorkflowProgress) => {
+          if (workflowName) {
+            captureRalplanProgress(workflowId, workflowName, ctx.cwd, progress);
+          }
+        },
       });
 
       // ── Async (background) path — default ──
@@ -715,9 +829,10 @@ export function registerWorkflowTool(
           job = startWorkflowJob(
             meta.name,
             script,
-            baseOpts,
+            (workflowId) => baseOpts(workflowId, meta.name),
             jobStartedAt,
-            notifyWorkflowCompletion,
+            (completedJob) =>
+              notifyCapturedWorkflow(completedJob, ctx.cwd, workflowOwner),
             workflowOwner,
             "async",
           );
@@ -730,7 +845,9 @@ export function registerWorkflowTool(
             isError: true,
           };
         }
+        let ralplanRunId: string | undefined;
         try {
+          ralplanRunId = ensureRalplanStart(job, ctx.cwd, workflowOwner)?.runId;
           configureWorkflowCompletion(
             job,
             completion,
@@ -740,6 +857,24 @@ export function registerWorkflowTool(
         } catch (error) {
           discardWorkflowJob(job);
           releaseCompletionGroup(completionReservation);
+          if (ralplanRunId) {
+            try {
+              failRalplanRun({
+                cwd: ctx.cwd,
+                workflowId: job.id,
+                reason: "workflow startup registration failed",
+                phase: "failed",
+              });
+            } catch (stateError) {
+              debugLog("error", "ralplan_start_rollback_failed", {
+                workflowId: job.id,
+                error:
+                  stateError instanceof Error
+                    ? stateError.message
+                    : String(stateError),
+              });
+            }
+          }
           const msg = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text", text: `Workflow not started: ${msg}` }],
@@ -756,7 +891,12 @@ export function registerWorkflowTool(
                 `Completion coordination will notify the user and resume the parent with a compact result reference; use get_workflow_status / get_workflow_result only for explicit inspection. ${WORKFLOW_SESSION_SCOPE_MESSAGE}`,
             },
           ],
-          details: { status: "started", workflowId: job.id, name: meta.name },
+          details: {
+            status: "started",
+            workflowId: job.id,
+            name: meta.name,
+            ...(ralplanRunId ? { ralplanRunId } : {}),
+          },
         };
       }
 
@@ -785,16 +925,30 @@ export function registerWorkflowTool(
           meta.name,
           script,
           (workflowId) => ({
-            ...baseOpts(workflowId),
+            ...baseOpts(workflowId, meta.name),
             signal,
-            onProgress: syncProgress,
+            onProgress: (progress: WorkflowProgress) => {
+              captureRalplanProgress(workflowId, meta.name, ctx.cwd, progress);
+              syncProgress(progress);
+            },
           }),
           Date.now(),
-          undefined,
+          (completedJob) =>
+            captureRalplanCompletion(completedJob, ctx.cwd, workflowOwner),
           workflowOwner,
           "sync",
         );
+        let ralplanRunId: string | undefined;
+        try {
+          ralplanRunId = ensureRalplanStart(job, ctx.cwd, workflowOwner)?.runId;
+        } catch (error) {
+          discardWorkflowJob(job);
+          throw error;
+        }
         const run = await job.promise;
+        if (!captureRalplanCompletion(job, ctx.cwd, workflowOwner)) {
+          throw new Error("RALPLAN state could not be persisted");
+        }
         const resultText =
           typeof run.result === "string" ? run.result : stringify(run.result);
         const presentation = getWorkflowCompletionPresentation(
@@ -829,6 +983,7 @@ export function registerWorkflowTool(
             usage: run.usage,
             budgetTotal: job.snapshot.budgetTotal,
             phases: run.phases,
+            ...(ralplanRunId ? { ralplanRunId } : {}),
           },
         };
       } catch (err) {
@@ -918,6 +1073,7 @@ export function registerWorkflowTool(
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
           ...st.snapshot,
+          ...ralplanDetails(st.id),
         },
       };
     },
@@ -1062,6 +1218,7 @@ export function registerWorkflowTool(
           usage: run.usage,
           budgetTotal: st.snapshot.budgetTotal,
           phases: run.phases,
+          ...ralplanDetails(st.id),
         },
       };
     },
@@ -1294,17 +1451,26 @@ export function registerWorkflowTool(
           budgetTotal: DEFAULT_WORKFLOW_OUTPUT_BUDGET,
           runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
+          onProgress: (progress: WorkflowProgress) =>
+            captureRalplanProgress(workflowId, meta.name, ctx.cwd, progress),
         }),
         Date.now(),
-        notifyWorkflowCompletion,
+        (completedJob) =>
+          notifyCapturedWorkflow(completedJob, ctx.cwd, workflowOwner),
         workflowOwner,
       );
-      configureWorkflowCompletion(
-        job,
-        sessionScope ? { policy: "each", legacy: false } : { legacy: true },
-        workflowOwner,
-      );
-      return { job, meta };
+      try {
+        const ralplanRun = ensureRalplanStart(job, ctx.cwd, workflowOwner);
+        configureWorkflowCompletion(
+          job,
+          sessionScope ? { policy: "each", legacy: false } : { legacy: true },
+          workflowOwner,
+        );
+        return { job, meta, ralplanRun };
+      } catch (error) {
+        discardWorkflowJob(job);
+        throw error;
+      }
     };
 
     const selectSavedWorkflow = async (

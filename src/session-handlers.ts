@@ -48,6 +48,7 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
+import { interruptRalplanRuns } from "./ralplan-state";
 import {
   advanceSessionScopeGeneration,
   createSessionScope,
@@ -180,6 +181,18 @@ function cleanupScopeGeneration(
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
   snapshotOwnedJobs(scope, sessionId, ctx?.cwd, reason);
   cleanupWorkflowJobsForOwner(owner);
+  const ralplanCwd = scope.cwd ?? ctx?.cwd;
+  if (ralplanCwd) {
+    try {
+      interruptRalplanRuns({
+        cwd: ralplanCwd,
+        owner,
+        lifecycleReason: event?.reason ?? "unknown",
+      });
+    } catch (error) {
+      logSessionError("ralplan_state_interruption_failed", error);
+    }
+  }
   clearInProcessDeliveries(owner);
 
   const destroysStandalonePanes =

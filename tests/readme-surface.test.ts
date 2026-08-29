@@ -58,7 +58,7 @@ describe("README public surface", () => {
       "#### Coordinated completion delivery",
       "#### Consumption-receipt fallback",
     );
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(28);
     expect(
       tools.filter((name) => name.includes("orchestrator")).sort(),
     ).toEqual(

@@ -79,6 +79,8 @@
     "src/session-scope.ts",
     "src/subagent.ts",
     "src/subagent-artifact-cli.ts",
+    "src/ralplan-state.ts",
+    "src/ralplan-tool.ts",
     "src/workflow.ts",
     "src/workflow-core.ts",
     "src/workflow-script.ts",

@@ -103,14 +103,35 @@ local short-prompt heuristic. `interactive` controls only non-blocking
 `executeOnConsensus` is accepted only for compatibility, reported as ignored,
 and never changes approval or execution state.
 
+## Host-owned approval and recovery
+
+The extension persists bounded mode-0600 state at `.pi/ralplan-state.json`,
+keyed to canonical project cwd, exact parent owner generation, and parent
+session id. Workflow start records `planning`; verified consensus records
+`pending_approval` with the exact final-plan digest. Other terminal paths record
+`rejected`, `capped`, `cancelled`, `failed`, or `interrupted` evidence.
+
+Use explicit host tools:
+
+- `get_ralplan_status` — inspect current or same-session interrupted evidence;
+- `approve_ralplan` — approve exactly `{runId, planDigest}`; it deactivates state
+  before returning `approved_handoff` and starts no execution;
+- `reject_ralplan` — reject a pending run terminally;
+- `cancel_ralplan` — cancel the exact owner-scoped planning workflow;
+- `prepare_ralplan_recovery` — return read-only interrupted evidence only.
+
+Reload/resume/quit interrupt active runs; new/fork cancel them. Recovery never
+replays model work or resumes automatically. Stale owners, generations, sessions,
+run IDs, and digest mismatches cannot approve, reject, or cancel a run.
+
 ## Safety boundary
 
 Planning agents may write only the bounded Markdown paths above. They never edit
 source, execute, delegate implementation, commit, or push. Every terminal result
 has `pending_approval: true` and `execution_halted: true`. Missing consensus,
 cap exhaustion, cancellation, or artifact failure has no `ralph`, `team`,
-autopilot, or other executable recommendation. Host-owned approval/state and
-durable execution are separate contracts.
+autopilot, or other executable recommendation. Host approval records only an
+approved handoff; durable declarative execution remains a separate contract.
 
 If the host cannot provide isolated role execution, stop with:
 
