@@ -154,6 +154,7 @@ describe("bundled workflow examples", () => {
         models.set(label ?? "", model);
         if (label === "planner") {
           return json({
+            verdict: "DRAFT_READY",
             principles: ["safe", "small", "tested"],
             decisionDrivers: ["security", "compatibility", "delivery"],
             options: [
@@ -167,6 +168,7 @@ describe("bundled workflow examples", () => {
         }
         if (label === "architect") {
           return json({
+            verdict: "APPROVE",
             summary: "sound",
             steelman: "keep the old design",
             tradeoffTension: "speed versus safety",
@@ -176,7 +178,7 @@ describe("bundled workflow examples", () => {
         }
         if (label === "critic") {
           return json({
-            verdict: "ACCEPT",
+            verdict: "APPROVE",
             summary: "accepted",
             findings: [],
             preMortemStatus: "present-3",
@@ -192,11 +194,12 @@ describe("bundled workflow examples", () => {
       });
 
       expect(run.result).toMatchObject({
-        status: "consensus_approved",
+        status: "consensus",
         iterations: 1,
         artifactPaths: { plan: join(root, "plans", "auth-review.md") },
         pending_approval: true,
         execution_halted: true,
+        executeOnConsensusIgnored: true,
       });
       expect(models.get("architect")).toBe("test/architect");
       expect(models.get("critic")).toBe("test/critic");
