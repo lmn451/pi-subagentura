@@ -118,6 +118,7 @@ export type SubagentEventV2 =
       source: CompletionSource;
       cancellationOrigin?: ParentCancellationOrigin;
       cancellationLifecycleReason?: ParentCancellationLifecycleReason;
+      agentStopReason?: "error" | "aborted";
       output?: OutputSnapshot;
       outputError?: OutputSnapshotError;
       exitCode?: number;
@@ -559,6 +560,7 @@ export function appendCompletionEvent(
     exitCode?: number;
     message?: string;
     errorMessage?: string;
+    agentStopReason?: "error" | "aborted";
     eventId?: string;
     ts?: number;
   },
@@ -588,6 +590,13 @@ export function appendCompletionEvent(
             params.cancellationLifecycleReason,
           )
         : undefined;
+    const agentStopReason =
+      params.source === "agent_settled" &&
+      params.outcome === "error" &&
+      (params.agentStopReason === "error" ||
+        params.agentStopReason === "aborted")
+        ? params.agentStopReason
+        : undefined;
     const event: CompletionEventV2 = {
       version: 2,
       eventId,
@@ -603,6 +612,7 @@ export function appendCompletionEvent(
       ...(errorMessage ? { errorMessage } : {}),
       ...(cancellationOrigin ? { cancellationOrigin } : {}),
       ...(cancellationLifecycleReason ? { cancellationLifecycleReason } : {}),
+      ...(agentStopReason ? { agentStopReason } : {}),
     };
     appendEvent(art, event);
     return event;
@@ -861,6 +871,12 @@ function normalizeEvent(
             obj.cancellationLifecycleReason,
           )
         : undefined;
+    const agentStopReason =
+      obj.source === "agent_settled" &&
+      obj.outcome === "error" &&
+      (obj.agentStopReason === "error" || obj.agentStopReason === "aborted")
+        ? obj.agentStopReason
+        : undefined;
     return {
       event: {
         ...base,
@@ -876,6 +892,7 @@ function normalizeEvent(
         summary,
         cancellationOrigin,
         cancellationLifecycleReason,
+        ...(agentStopReason ? { agentStopReason } : {}),
       },
       legacy: false,
     };

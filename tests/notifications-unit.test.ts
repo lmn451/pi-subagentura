@@ -411,6 +411,45 @@ describe("artifact notification compatibility", () => {
     ).toBe(true);
   });
 
+  it("quietens only aborted child settlement errors", () => {
+    const base = {
+      version: 2 as const,
+      eventId: "event-aborted",
+      turnId: "turn-aborted",
+      ts: 2,
+      type: "completion" as const,
+      status: "error" as const,
+      outcome: "error" as const,
+      source: "agent_settled" as const,
+    };
+
+    expect(shouldNotify({ ...base, agentStopReason: "aborted" })).toBe(false);
+    expect(shouldNotify({ ...base, agentStopReason: "error" })).toBe(true);
+    expect(shouldNotify(base)).toBe(true);
+    expect(
+      shouldNotify({
+        ...base,
+        source: "parent",
+        agentStopReason: "aborted",
+      }),
+    ).toBe(true);
+    expect(
+      shouldNotify({
+        ...base,
+        source: "explicit",
+        agentStopReason: "aborted",
+      }),
+    ).toBe(true);
+    expect(
+      shouldNotify({
+        ...base,
+        type: "completion",
+        source: "process_exit",
+        agentStopReason: "aborted",
+      }),
+    ).toBe(true);
+  });
+
   it("builds and sends pointer notifications for legacy terminal events", () => {
     const sendMessage = vi.fn();
     const pi = { sendMessage };

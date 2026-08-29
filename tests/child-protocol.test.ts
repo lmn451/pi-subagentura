@@ -90,6 +90,7 @@ describe("child protocol lifecycle", () => {
       outcome: "done",
       source: "agent_settled",
     });
+    expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
   it("records an error completion and supports getBranch fallback", () => {
@@ -124,6 +125,45 @@ describe("child protocol lifecycle", () => {
       outcome: "error",
       exitCode: 1,
       errorMessage: "provider failed",
+      agentStopReason: "error",
+    });
+  });
+
+  it("records an aborted assistant settlement as a quietable error", () => {
+    const handlers = registerHandlers();
+    const entries: any[] = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "user-aborted",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+    vi.runAllTimers();
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("agent_end")!(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Operation aborted",
+          },
+        ],
+      },
+      ctx,
+    );
+    handlers.get("agent_settled")!({}, ctx);
+
+    expect(readEvents(artifactPath(root, "child")).at(-1)).toMatchObject({
+      type: "completion",
+      turnId: "user-aborted",
+      outcome: "error",
+      source: "agent_settled",
+      agentStopReason: "aborted",
+      errorMessage: "Operation aborted",
     });
   });
 

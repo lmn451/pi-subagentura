@@ -371,6 +371,54 @@ describe("artifact", () => {
     expect(supervisorEvent).not.toHaveProperty("cancellationLifecycleReason");
   });
 
+  it("preserves valid agent stop reasons only for child settlement errors", () => {
+    const art = artifactPath(root, "agent-stop-reason");
+    const aborted = appendCompletionEvent(art, {
+      turnId: "aborted-turn",
+      outcome: "error",
+      source: "agent_settled",
+      agentStopReason: "aborted",
+    });
+    const providerError = appendCompletionEvent(art, {
+      turnId: "provider-error-turn",
+      outcome: "error",
+      source: "agent_settled",
+      agentStopReason: "error",
+    });
+    const successful = appendCompletionEvent(art, {
+      turnId: "successful-turn",
+      outcome: "done",
+      source: "agent_settled",
+      agentStopReason: "aborted",
+    });
+    const parent = appendCompletionEvent(art, {
+      turnId: "parent-turn",
+      outcome: "cancelled",
+      source: "parent",
+      agentStopReason: "aborted",
+    });
+
+    expect(aborted).toMatchObject({ agentStopReason: "aborted" });
+    expect(providerError).toMatchObject({ agentStopReason: "error" });
+    expect(successful).not.toHaveProperty("agentStopReason");
+    expect(parent).not.toHaveProperty("agentStopReason");
+
+    appendFileSync(
+      art.statusFile,
+      JSON.stringify({
+        version: 2,
+        eventId: "malformed-stop-reason",
+        turnId: "malformed-stop-turn",
+        ts: 3,
+        type: "completion",
+        outcome: "error",
+        source: "agent_settled",
+        agentStopReason: "aborted-by-user",
+      }) + "\n",
+    );
+    expect(readEvents(art).at(-1)).not.toHaveProperty("agentStopReason");
+  });
+
   it("reports one deterministic issue for an oversized physical record", () => {
     const art = artifactPath(root, "ultra-oversized-event");
     ensureArtifactDir(art);
