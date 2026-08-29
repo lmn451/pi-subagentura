@@ -325,6 +325,103 @@ describe("completion coordinator", () => {
     );
   });
 
+  it("renders grouped progress for each terminal member before the final manifest", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "progress-group" };
+    for (const id of ["a", "b", "c"]) {
+      registerCompletionMember(
+        "interactive",
+        id,
+        "group",
+        group.groupId,
+        owner,
+      );
+    }
+    const renderer = setupResult.pi.registerEntryRenderer.mock.calls.find(
+      ([type]) => type === "subagentura-completion",
+    )?.[1];
+    const theme = { fg: (_color: string, text: string) => text };
+    const render = (entry: any) =>
+      renderer(entry, { expanded: false }, theme)
+        .render(200)
+        .join("\n")
+        .trimEnd();
+    scope.parentStreaming = true;
+
+    publishCompletion(record("a", group), owner);
+    const first = userCompletions(setupResult.entries)[0];
+    expect(first.data.groupRemaining).toBe(2);
+    expect(render(first)).toContain(
+      "from: Agent a, ✓ done; waiting for 2 more",
+    );
+
+    publishCompletion(record("b", { ...group, status: "error" }), owner);
+    const second = userCompletions(setupResult.entries)[1];
+    expect(second.data.groupRemaining).toBe(1);
+    expect(render(second)).toContain(
+      "from: Agent b, ✕ error; waiting for 1 more",
+    );
+
+    sealCompletionGroups(owner);
+    publishCompletion(record("c", { ...group, status: "cancelled" }), owner);
+    const final = userCompletions(setupResult.entries)[2];
+    expect(final.data.groupRemaining).toBeUndefined();
+    expect(final.data.groupComplete).toBe(true);
+    expect(render(final)).toBe("from: Agent c, ○ cancelled; group complete");
+
+    scope.parentStreaming = false;
+    flushCompletionManifests(owner);
+    expect(manifests(setupResult.pi)).toHaveLength(1);
+    expect(manifests(setupResult.pi)[0][0].details.groups).toEqual([
+      "progress-group",
+    ]);
+  });
+
+  it("preserves grouped progress across coordinator reload and ignores duplicate terminals", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "reload-group" };
+    for (const id of ["a", "b", "c"]) {
+      registerCompletionMember(
+        "interactive",
+        id,
+        "group",
+        group.groupId,
+        owner,
+      );
+    }
+    publishCompletion(record("a", group), owner);
+    const first = userCompletions(setupResult.entries)[0];
+    expect(first.data.groupRemaining).toBe(2);
+
+    publishCompletion(
+      record("a", {
+        ...group,
+        completionId: "duplicate-a",
+        turnId: "duplicate-a-turn",
+      }),
+      owner,
+    );
+    const duplicate = userCompletions(setupResult.entries)[1];
+    expect(duplicate.data.policy).toBe("each");
+    expect(duplicate.data.groupRemaining).toBeUndefined();
+    expect(duplicate.data.groupComplete).toBeUndefined();
+
+    clearCompletionCoordinator(owner);
+    registerCompletionCoordinator(setupResult.pi as never, scope);
+    registerCompletionMember("interactive", "b", "group", group.groupId, owner);
+    registerCompletionMember("interactive", "c", "group", group.groupId, owner);
+    expect(userCompletions(setupResult.entries)[0].data.groupRemaining).toBe(2);
+
+    publishCompletion(record("b", { ...group, status: "error" }), owner);
+    expect(
+      userCompletions(setupResult.entries).at(-1).data.groupRemaining,
+    ).toBe(1);
+  });
+
   it("marks manually collected results consumed before later publication", () => {
     const setupResult = setup();
     scope = setupResult.scope;
