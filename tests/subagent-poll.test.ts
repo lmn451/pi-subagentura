@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   appendEvent,
   appendCompletionEvent,
@@ -33,6 +34,7 @@ import {
   registerSessionScope,
   removeSessionScope,
 } from "../src/session-scope";
+import { responsiveFlowMinimumWidth } from "../src/rendering";
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
 }
@@ -70,6 +72,26 @@ function installDeliverySpies() {
     setWidget: vi.fn(),
   };
   return sendMessage;
+}
+
+function renderWidgetContent(content: unknown, width: number): string[] {
+  if (typeof content !== "function") return (content as string[]) ?? [];
+  const component = content(
+    { terminal: { rows: 24 }, requestRender: vi.fn() },
+    {},
+  );
+  return component.render(width);
+}
+
+function renderedWidgetRows(
+  setWidget: ReturnType<typeof vi.fn>,
+  key: string,
+  width: number,
+): string[] {
+  const content = setWidget.mock.calls
+    .filter(([candidate]) => candidate === key)
+    .at(-1)?.[1];
+  return renderWidgetContent(content, width);
 }
 
 describe("pollArtifactChanges", () => {
@@ -164,6 +186,55 @@ describe("pollArtifactChanges", () => {
     const sendMessage = installDeliverySpies();
     await mod.pollArtifactChanges({ sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("registers the activity widget as an adaptive grid component", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const setStatus = vi.fn();
+    const setWidget = vi.fn();
+    const ui = { notify: vi.fn(), setStatus, setWidget };
+    for (let index = 0; index < 5; index++) {
+      const item = makeState();
+      item.state.name = index === 0 ? "agent-0\nprimary" : `agent-${index}`;
+      item.state.lastToolSummary =
+        index === 0 ? `${"界🙂 reading ".repeat(80)}\nsecond` : `task-${index}`;
+      mod.interactiveSubagentRegistry.set(item.id, item.state);
+    }
+    (globalThis as any).__piSubagenturaUi = ui;
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive",
+    } as any);
+
+    await mod.pollArtifactChanges({} as any);
+
+    const activityCall = setWidget.mock.calls.find(
+      ([key]) => key === "subagentura-activity",
+    );
+    expect(activityCall?.[1]).toEqual(expect.any(Function));
+    expect(setStatus).toHaveBeenCalledWith(
+      "subagentura-running",
+      "⚡ 5 sub-agents alive · 5 working",
+    );
+
+    const narrowWidth = responsiveFlowMinimumWidth(2) - 1;
+    expect(
+      renderedWidgetRows(setWidget, "subagentura-activity", narrowWidth),
+    ).toHaveLength(5);
+    const wideWidth = responsiveFlowMinimumWidth(3);
+    const wideRows = renderedWidgetRows(
+      setWidget,
+      "subagentura-activity",
+      wideWidth,
+    );
+    expect(wideRows).toHaveLength(2);
+    expect(wideRows[0]).toMatch(/agent-0.*agent-1.*agent-2/);
+    expect(wideRows[1]).toMatch(/agent-3.*agent-4/);
+    expect(wideRows.every((line) => visibleWidth(line) <= wideWidth)).toBe(
+      true,
+    );
+    expect(wideRows.every((line) => !line.includes("\n"))).toBe(true);
   });
 
   it("skips aborted child settlement but delivers the next turn", async () => {
@@ -388,7 +459,11 @@ describe("pollArtifactChanges", () => {
     const widgetCalls = sharedUi.setWidget.mock.calls.filter(
       ([key]) => key === "subagentura-activity",
     );
-    const finalRows = widgetCalls.at(-1)?.[1] as string[] | undefined;
+    const finalRows = renderedWidgetRows(
+      sharedUi.setWidget,
+      "subagentura-activity",
+      80,
+    );
     expect(finalRows).toEqual(
       expect.arrayContaining([expect.stringContaining("agent-a")]),
     );
@@ -605,9 +680,7 @@ describe("pollArtifactChanges", () => {
 
     await mod.pollArtifactChanges({} as any, ownerA);
 
-    const rows = uiA.setWidget.mock.calls
-      .filter(([key]) => key === "subagentura-activity")
-      .at(-1)?.[1] as string[] | undefined;
+    const rows = renderedWidgetRows(uiA.setWidget, "subagentura-activity", 80);
     expect(rows).toEqual(
       expect.arrayContaining([expect.stringContaining("wf-child")]),
     );
@@ -663,12 +736,8 @@ describe("pollArtifactChanges", () => {
     await mod.pollArtifactChanges({} as any, ownerA);
     await mod.pollArtifactChanges({} as any, ownerB);
 
-    const rowsFor = (ui: typeof uiA): string[] => {
-      const calls = ui.setWidget.mock.calls.filter(
-        ([key]) => key === "subagentura-activity",
-      );
-      return calls.at(-1)?.[1] as string[];
-    };
+    const rowsFor = (ui: typeof uiA): string[] =>
+      renderedWidgetRows(ui.setWidget, "subagentura-activity", 80);
     expect(rowsFor(uiA).join("\n")).toContain("agent-a");
     expect(rowsFor(uiA).join("\n")).not.toContain("agent-b");
     expect(rowsFor(uiB).join("\n")).toContain("agent-b");
@@ -767,7 +836,7 @@ describe("pollArtifactChanges", () => {
       ([key]) => key === "subagentura-workflows",
     );
     expect(workflowFooterCalls).toHaveLength(1);
-    expect((activityCalls[0][1] as string[])[0]).toBe(
+    expect(renderWidgetContent(activityCalls[0][1], 80)[0]).toBe(
       "▶ steady-agent: reading src/main.ts (10s ago)",
     );
     expect((workflowWidgetCalls[0][1] as string[])[0]).toContain("0s");
@@ -806,10 +875,10 @@ describe("pollArtifactChanges", () => {
       ([key]) => key === "subagentura-activity",
     );
     expect(activityCalls).toHaveLength(2);
-    expect((activityCalls[0][1] as string[])[0]).toBe(
+    expect(renderWidgetContent(activityCalls[0][1], 80)[0]).toBe(
       "▶ ticking-agent: reading src/main.ts (10s ago)",
     );
-    expect((activityCalls[1][1] as string[])[0]).toBe(
+    expect(renderWidgetContent(activityCalls[1][1], 80)[0]).toBe(
       "▶ ticking-agent: reading src/main.ts (20s ago)",
     );
   });
@@ -928,12 +997,14 @@ describe("pollArtifactChanges", () => {
 
     await mod.pollArtifactChanges({} as any);
 
-    const rowsFor = (key: string): string[] =>
-      ui.setWidget.mock.calls.filter(([name]) => name === key).at(-1)?.[1] ??
-      [];
+    const rowsFor = (key: string, width = 80): string[] =>
+      renderedWidgetRows(ui.setWidget, key, width);
     const activityRows = rowsFor("subagentura-activity");
     expect(activityRows).toHaveLength(11);
     expect(activityRows.at(-1)).toBe("… and 2 more");
+    expect(
+      rowsFor("subagentura-activity", responsiveFlowMinimumWidth(3)),
+    ).toHaveLength(4);
     const workflowRows = rowsFor("subagentura-workflow-activity");
     expect(workflowRows).toHaveLength(6);
     expect(workflowRows.at(-1)).toBe("… and 2 more workflows");
@@ -2051,11 +2122,12 @@ describe("pollArtifactChanges", () => {
       );
       expect(setWidget).toHaveBeenCalledWith(
         "subagentura-activity",
-        expect.any(Array),
+        expect.any(Function),
         { placement: "belowEditor" },
       );
-      const widgetArgs = setWidget.mock.calls[0];
-      expect(widgetArgs[1].length).toBe(2);
+      expect(
+        renderedWidgetRows(setWidget, "subagentura-activity", 80),
+      ).toHaveLength(2);
 
       expect(exited.status).toBe("exited");
       expect(idle.status).toBe("idle");
@@ -2126,7 +2198,11 @@ describe("pollArtifactChanges", () => {
         "subagentura-running",
         "⚡ 1 sub-agent alive",
       );
-      const widgetRows = setWidget.mock.calls[0][1] as string[];
+      const widgetRows = renderedWidgetRows(
+        setWidget,
+        "subagentura-activity",
+        80,
+      );
       expect(widgetRows).toContain(
         "○ rehydrated-idle: idle — ready for follow-up",
       );
@@ -2223,8 +2299,9 @@ describe("pollArtifactChanges", () => {
         "subagentura-running",
         "⚡ 3 sub-agents alive · 3 working",
       );
-      const widgetArgs = setWidget.mock.calls[0];
-      expect(widgetArgs[1].length).toBe(2);
+      expect(
+        renderedWidgetRows(setWidget, "subagentura-activity", 80),
+      ).toHaveLength(2);
 
       delete (globalThis as any).__piSubagenturaUi;
     });
