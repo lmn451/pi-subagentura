@@ -438,6 +438,9 @@ describe("subagent_interactive tool lifecycle", () => {
     );
 
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledWith(
+      expect.objectContaining({ orchestratorV2: true }),
+    );
     expect(mockUpsertOrchestratorRoutingEntry).toHaveBeenCalledWith(
       "/tmp",
       entry,
