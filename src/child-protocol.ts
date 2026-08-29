@@ -179,6 +179,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     const assistant = [...latestAgentMessages]
       .reverse()
       .find((message: any) => message?.role === "assistant") as any;
+    const stopReason = assistant?.stopReason;
     const errorMessage =
       typeof assistant?.errorMessage === "string"
         ? assistant.errorMessage
@@ -194,6 +195,10 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       exitCode: failed ? 1 : 0,
       errorMessage,
       message: errorMessage,
+      agentStopReason:
+        stopReason === "error" || stopReason === "aborted"
+          ? stopReason
+          : undefined,
     });
   });
 }

@@ -166,6 +166,82 @@ describe("pollArtifactChanges", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("skips aborted child settlement but delivers the next turn", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    item.state.parentSessionId = "session-aborted";
+    item.state.cwd = join(item.artifactDir, "..");
+    const art = artifactPath(item.state.cwd, item.id);
+    appendCompletionEvent(art, {
+      turnId: "aborted-turn",
+      outcome: "error",
+      source: "agent_settled",
+      agentStopReason: "aborted",
+    });
+    mod.interactiveSubagentRegistry.set(item.id, item.state);
+
+    const owner = { id: 601, generation: 1 };
+    const sendMessage = vi.fn();
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    };
+    const scope = registerSessionScope({
+      ...owner,
+      pi: { sendMessage } as any,
+      ui: ui as any,
+      sessionManager: {
+        getSessionId: () => "session-aborted",
+        getEntries: () => [],
+      },
+    });
+    scope.interactiveStates.set(item.id, item.state);
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive",
+    } as any);
+
+    const abortedCursor = eventLogEndOffset(art);
+    await mod.pollArtifactChanges({} as any, owner);
+
+    expect(item.state.eventByteCursor).toBe(abortedCursor);
+    expect(item.state.status).toBe("idle");
+    expect(item.state.pendingDeliveries).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(ui.notify).not.toHaveBeenCalled();
+
+    appendEvent(art, {
+      version: 2,
+      eventId: "next-turn-start",
+      turnId: "clarification-turn",
+      ts: 2,
+      type: "turn_started",
+      status: "running",
+    });
+    writeOutput(art, "clarification output");
+    appendCompletionEvent(art, {
+      turnId: "clarification-turn",
+      outcome: "done",
+      source: "agent_settled",
+    });
+
+    await mod.pollArtifactChanges({} as any, owner);
+
+    expect(item.state.eventByteCursor).toBe(eventLogEndOffset(art));
+    expect(item.state.status).toBe("idle");
+    expect(item.state.pendingDeliveries).toHaveLength(1);
+    expect(item.state.pendingDeliveries?.[0]).toMatchObject({
+      turnId: "clarification-turn",
+      status: "done",
+    });
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage.mock.calls[0][0].content).not.toContain("aborted-turn");
+    expect(ui.notify).toHaveBeenCalledOnce();
+    expect(ui.notify.mock.calls[0][0]).not.toContain("aborted");
+  });
+
   it("polls and dispatches only interactive states owned by the supplied context", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
