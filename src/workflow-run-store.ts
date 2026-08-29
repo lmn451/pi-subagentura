@@ -107,6 +107,37 @@ function executionDirectory(cwd: string): string {
   return join(canonicalCwd(cwd), ".pi", "ralplan-executions");
 }
 
+function assertExecutionDirectoryIdentity(
+  cwd: string,
+  directory: string,
+): void {
+  const project = canonicalCwd(cwd);
+  const piDirectory = join(project, ".pi");
+  const expected = join(piDirectory, "ralplan-executions");
+  if (
+    resolve(directory) !== expected ||
+    realpathSync(piDirectory) !== piDirectory ||
+    realpathSync(directory) !== expected
+  ) {
+    throw new Error(
+      "Durable execution directory escaped the canonical project",
+    );
+  }
+}
+
+function staleLockCanBeRemoved(lockPath: string): boolean {
+  const stats = lstatSync(lockPath);
+  if (stats.isSymbolicLink() || !stats.isFile()) return false;
+  const pid = Number.parseInt(readFileSync(lockPath, "utf8"), 10);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ESRCH";
+  }
+}
+
 function ensureExecutionDirectory(
   cwd: string,
   create: boolean,
@@ -130,6 +161,7 @@ function ensureExecutionDirectory(
   if (executionStats.isSymbolicLink() || !executionStats.isDirectory()) {
     throw new Error("Durable execution directory must be a real directory");
   }
+  assertExecutionDirectoryIdentity(cwd, directory);
   return directory;
 }
 
@@ -138,7 +170,8 @@ function withExecutionLock<T>(
   executionId: string,
   action: () => T,
 ): T {
-  ensureExecutionDirectory(cwd, true);
+  const directory = ensureExecutionDirectory(cwd, true)!;
+  assertExecutionDirectoryIdentity(cwd, directory);
   const lockPath = `${runStorePath(cwd, executionId)}.lock`;
   let descriptor: number;
   try {
@@ -148,7 +181,7 @@ function withExecutionLock<T>(
       error instanceof Error &&
       "code" in error &&
       error.code === "EEXIST" &&
-      Date.now() - lstatSync(lockPath).mtimeMs > 30_000
+      staleLockCanBeRemoved(lockPath)
     ) {
       unlinkSync(lockPath);
       descriptor = openSync(lockPath, "wx", 0o600);
@@ -156,6 +189,8 @@ function withExecutionLock<T>(
       throw new Error("Durable execution record is locked by another writer");
     }
   }
+  writeFileSync(descriptor, `${process.pid}\n`, { encoding: "utf8" });
+  assertExecutionDirectoryIdentity(cwd, directory);
   try {
     return action();
   } finally {
@@ -350,6 +385,7 @@ function readRecord(cwd: string, executionId: string): DurableExecutionRecord {
       `Durable execution JSON is invalid: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  assertExecutionDirectoryIdentity(cwd, executionDirectory(cwd));
   return validateRecord(parsed);
 }
 
@@ -358,7 +394,8 @@ function writeRecord(
   record: DurableExecutionRecord,
 ): DurableExecutionRecord {
   validateRecord(record);
-  ensureExecutionDirectory(cwd, true);
+  const directory = ensureExecutionDirectory(cwd, true)!;
+  assertExecutionDirectoryIdentity(cwd, directory);
   const path = runStorePath(cwd, record.executionId);
   const content = `${JSON.stringify(record)}\n`;
   if (Buffer.byteLength(content) > MAX_EXECUTION_RECORD_BYTES) {
@@ -367,9 +404,12 @@ function writeRecord(
   const temp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
     writeFileSync(temp, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    assertExecutionDirectoryIdentity(cwd, directory);
     chmodSync(temp, 0o600);
+    assertExecutionDirectoryIdentity(cwd, directory);
     renameSync(temp, path);
     chmodSync(path, 0o600);
+    assertExecutionDirectoryIdentity(cwd, directory);
   } finally {
     try {
       if (existsSync(temp)) unlinkSync(temp);

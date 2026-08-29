@@ -422,9 +422,13 @@ describe("durable declarative execution store", () => {
       planDigest: "plan-digest",
       tasks: tasks(),
     });
-    writeFileSync(`${runStorePath(cwd, preview.executionId)}.lock`, "held", {
-      mode: 0o600,
-    });
+    writeFileSync(
+      `${runStorePath(cwd, preview.executionId)}.lock`,
+      `${process.pid}\n`,
+      {
+        mode: 0o600,
+      },
+    );
 
     expect(() =>
       approveExecutionPreview({
@@ -437,5 +441,32 @@ describe("durable declarative execution store", () => {
       }),
     ).toThrow(/locked/i);
     expect(getExecutionRecord(cwd, preview.executionId)?.revision).toBe(1);
+  });
+
+  it("recovers an orphaned lock only when its process is gone", () => {
+    const cwd = root();
+    const preview = createExecutionPreview({
+      cwd,
+      ralplan: approvedPlan(cwd),
+      owner: { id: 1, generation: 1 },
+      parentSessionId: "session-a",
+      planDigest: "plan-digest",
+      tasks: tasks(),
+    });
+    writeFileSync(
+      `${runStorePath(cwd, preview.executionId)}.lock`,
+      "99999999\n",
+      { mode: 0o600 },
+    );
+
+    const approved = approveExecutionPreview({
+      cwd,
+      executionId: preview.executionId,
+      expectedRevision: preview.revision,
+      planDigest: "plan-digest",
+      owner: { id: 1, generation: 1 },
+      parentSessionId: "session-a",
+    });
+    expect(approved.status).toBe("approved");
   });
 });

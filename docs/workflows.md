@@ -200,6 +200,12 @@ mutation but before outcome commit leaves unknown evidence requiring manual
 resolution. Preview, approval, status, recovery, and execution remain separate
 host actions.
 
+Store mutations use per-record process locks, revision checks, atomic rename,
+mode-0600 files, canonical-directory revalidation, and static ancestor-symlink
+rejection. These controls prevent accidental/stale writers; they are not an OS
+security boundary against malicious same-UID code, which can race or modify the
+project's files directly.
+
 ## Workflow tool pitfalls
 
 These are the failure modes we hit while building the converters above. Document them before designing new workflows.
