@@ -41,6 +41,7 @@ import {
 } from "../completion-coordinator";
 import {
   cancelInteractiveSubagent,
+  getCurrentPaneActivity,
   removeInteractiveSubagentState,
   formatInteractiveState,
   interactiveSubagentRegistry,
@@ -48,6 +49,7 @@ import {
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
   tmuxSetupHint,
+  type CurrentPaneActivity,
   type InteractiveSubagentState,
 } from "../interactive-tmux";
 import { debugLog } from "../helpers";
@@ -410,6 +412,21 @@ function findOwnedDiskArtifact(
   }
 }
 
+function formatCurrentPaneActivity(activity: CurrentPaneActivity): string {
+  const location = [
+    activity.mux ? `Mux: ${activity.mux}.` : "No mux pane was detected.",
+    activity.paneId ? `Pane: ${activity.paneId}.` : "",
+    activity.session ? `Session: ${activity.session}.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const guidance =
+    activity.status === "active"
+      ? "User attention can be requested in this pane."
+      : "Do not request user attention here; report the decision to the orchestrator.";
+  return `Current pane activity: ${activity.status}. ${guidance} ${location}`;
+}
+
 export function registerInteractiveSubagentTools(
   pi: ExtensionAPI,
   registrationScope?: SessionScope,
@@ -417,7 +434,28 @@ export function registerInteractiveSubagentTools(
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
-  // ── Tool 6: spawn an attachable mux-backed Pi session ──────────────
+
+  registerToolWithDefaultGuidance(pi, {
+    name: "get_current_pane_activity",
+    label: "Current Pane Activity",
+    description:
+      "Check whether this Pi process's tmux or Zellij pane is active in the user's current client before requesting user attention.",
+    promptSnippet:
+      "Check whether the current mux pane is active before requesting user attention",
+    promptGuidelines: [
+      "Use get_current_pane_activity immediately before calling any tool or extension that may wait for user input.",
+      "If get_current_pane_activity reports inactive or unknown, do not open a user-attention prompt in this pane; include the exact decision needed in your result so the orchestrator can ask the user.",
+    ],
+    parameters: Type.Object({}),
+    async execute() {
+      const activity = await getCurrentPaneActivity();
+      return {
+        content: [{ type: "text", text: formatCurrentPaneActivity(activity) }],
+        details: activity,
+      };
+    },
+  });
+  // ── Tool 7: spawn an attachable mux-backed Pi session ──────────────
   registerToolWithDefaultGuidance(pi, {
     name: "subagent_interactive",
     label: "Interactive Subagent",
@@ -755,7 +793,7 @@ export function registerInteractiveSubagentTools(
     },
   });
 
-  // ── Tool 7: inspect attachable tmux-backed sessions ────────────────
+  // ── Tool 8: inspect attachable tmux-backed sessions ────────────────
   registerToolWithDefaultGuidance(pi, {
     name: "get_interactive_subagent_status",
     label: "Get Interactive Subagent Status",
@@ -817,7 +855,7 @@ export function registerInteractiveSubagentTools(
     },
   });
 
-  // ── Tool 8: cancel an attachable tmux-backed session ───────────────
+  // ── Tool 9: cancel an attachable tmux-backed session ───────────────
   registerToolWithDefaultGuidance(pi, {
     name: "cancel_interactive_subagent",
     label: "Cancel Interactive Subagent",

@@ -195,6 +195,20 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
   expect(events).toContain('"outcome":"done"');
 });
 
+test("reports inactive for a pane in a detached session", async () => {
+  const cwd = mkdtempSync(join(tempRoot, "workspace-"));
+  const pane = new TmuxMultiplexer().createPane({
+    name: "Activity child",
+    cwd,
+    background: true,
+    id: "activity-child",
+  });
+
+  await expect(
+    new TmuxMultiplexer().getPaneActivityAsync(pane.paneId, pane.session),
+  ).resolves.toBe("inactive");
+});
+
 test("sends a follow-up message into the same tmux pane", async () => {
   const cwd = mkdtempSync(join(tempRoot, "workspace-"));
 
