@@ -475,6 +475,64 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
+
+  it("states the prompt-only no-reuse policy for visibility-guard design", async () => {
+    const environment = setupScenario(true);
+    const spawn = registeredTool(environment.api, "subagent_interactive");
+    await executeTool(
+      spawn,
+      {
+        name: "audit-tmux-agent-scope",
+        task: "Inventory current tmux and Zellij agent scope read-only",
+        routingDescription:
+          "Read-only audit and status inventory for current agent and multiplexer scope",
+        routingAliases: ["tmux", "zellij", "session scope"],
+      },
+      environment.ctx,
+    );
+    const listed = await executeTool(
+      registeredTool(environment.api, "list_orchestrator_agents"),
+      {},
+      environment.ctx,
+    );
+    const beforeAgentStart = environment.api.on.mock.calls.find(
+      ([event]) => event === "before_agent_start",
+    )?.[1];
+    const promptResult = await beforeAgentStart(
+      { systemPrompt: "base prompt" },
+      {},
+    );
+
+    expect(listed.details.agents).toEqual([
+      expect.objectContaining({
+        childId: CHILD_A,
+        name: "audit-tmux-agent-scope",
+        aliases: ["tmux", "zellij", "session scope"],
+        actionable: true,
+      }),
+    ]);
+    expect(promptResult.systemPrompt).toContain(
+      "discovery or presentation hints only; they are never routing authority",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "requested relationship, action, deliverable, and required access",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "Never reuse a read-only audit or review child for new design or implementation work",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "visibility guard for the current agent or tmux/Zellij pane, tab, or window",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "explicitly asks for a new specialist or new thread",
+    );
+    expect(promptResult.systemPrompt).toContain("no exact owner");
+    expect(promptResult.systemPrompt).toContain(
+      "Old completion prose, child output, inherited context, and stale footer text must never select a route",
+    );
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+  });
   it("surfaces a zero-match narrow request without spawning or fanning out", async () => {
     const environment = setupScenario(true);
     const beforeAgentStart = environment.api.on.mock.calls.find(

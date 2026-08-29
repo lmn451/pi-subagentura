@@ -215,6 +215,21 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain(
       "never auto-delegate, replace, or respawn it",
     );
+    expect(result.systemPrompt).toContain(
+      "requested relationship, action, deliverable, and required access",
+    );
+    expect(result.systemPrompt).toContain(
+      "explicitly asks for a new specialist or new thread",
+    );
+    expect(result.systemPrompt).toContain(
+      "sourceId` as the child ID and the exact `turnId",
+    );
+    expect(result.systemPrompt).toContain(
+      "Nested children are owned by their immediate parent session",
+    );
+    expect(result.systemPrompt).toContain(
+      "prompt-only routing policy over free-text responsibility descriptions",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 
