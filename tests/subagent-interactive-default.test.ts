@@ -745,7 +745,7 @@ describe("subagent_interactive tool lifecycle", () => {
 
     expect(ctx.ui.setStatus).toHaveBeenCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive",
+      "⚡ 1 sub-agent alive · 1 working",
     );
   });
 
@@ -782,7 +782,7 @@ describe("subagent_interactive tool lifecycle", () => {
 
       expect(ctx.ui.setStatus).toHaveBeenCalledWith(
         "subagentura-running",
-        "⚡ 1 sub-agent alive · orchestrator",
+        "⚡ 1 sub-agent alive · 1 working · orchestrator",
       );
     },
   );
@@ -819,7 +819,7 @@ describe("subagent_interactive tool lifecycle", () => {
 
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive",
+      "⚡ 1 sub-agent alive · 1 working",
     );
   });
 

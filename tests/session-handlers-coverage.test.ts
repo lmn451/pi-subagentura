@@ -528,7 +528,7 @@ describe("session handler lifecycle callbacks", () => {
     updateRunningSubagentFooter(sharedUi, sessionOwner(a.sessionScope));
     expect(sharedUi.setStatus).toHaveBeenLastCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive · orchestrator",
+      "⚡ 1 sub-agent alive · 1 working · orchestrator",
     );
 
     a.handlers.get("session_shutdown")![0]({ reason: "quit" }, aCtx);
@@ -556,7 +556,7 @@ describe("session handler lifecycle callbacks", () => {
 
     expect(ui.setStatus).toHaveBeenLastCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive · orchestrator",
+      "⚡ 1 sub-agent alive · 1 working · orchestrator",
     );
   });
 
@@ -603,7 +603,7 @@ describe("session handler lifecycle callbacks", () => {
 
       expect(ui.setStatus).toHaveBeenLastCalledWith(
         "subagentura-running",
-        "⚡ 1 sub-agent alive · subagent of orchestrator orchestrator-agent · workflow review-auth",
+        "⚡ 1 sub-agent alive · 1 working · subagent of orchestrator orchestrator-agent · workflow review-auth",
       );
     },
   );
@@ -630,7 +630,7 @@ describe("session handler lifecycle callbacks", () => {
 
     expect(ui.setStatus).toHaveBeenLastCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive · orchestrator · workflow workflow-id",
+      "⚡ 1 sub-agent alive · 1 working · orchestrator · workflow workflow-id",
     );
   });
 

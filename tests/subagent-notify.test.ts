@@ -408,7 +408,7 @@ describe("notifyOnComplete", () => {
 
           expect(ctx.ui.setStatus).toHaveBeenCalledWith(
             "subagentura-running",
-            "⚡ 1 sub-agent alive",
+            "⚡ 1 sub-agent alive · 1 working",
           );
 
           control.resolve(SUCCESS_RESULT);

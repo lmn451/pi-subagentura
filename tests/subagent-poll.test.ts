@@ -395,7 +395,7 @@ describe("pollArtifactChanges", () => {
     const footerCalls = sharedUi.setStatus.mock.calls.filter(
       ([key]) => key === "subagentura-running",
     );
-    expect(footerCalls.at(-1)?.[1]).toBe("⚡ 1 sub-agent alive");
+    expect(footerCalls.at(-1)?.[1]).toBe("⚡ 1 sub-agent alive · 1 working");
   });
 
   it("aggregates workflow footer contributions across owners sharing one UI", async () => {
@@ -985,7 +985,7 @@ describe("pollArtifactChanges", () => {
 
     expect(setStatus).toHaveBeenCalledWith(
       "subagentura-running",
-      "⚡ 1 sub-agent alive",
+      "⚡ 1 sub-agent alive · 1 working",
     );
   });
 
@@ -2047,7 +2047,7 @@ describe("pollArtifactChanges", () => {
 
       expect(setStatus).toHaveBeenCalledWith(
         "subagentura-running",
-        "⚡ 2 sub-agents alive",
+        "⚡ 2 sub-agents alive · 1 working",
       );
       expect(setWidget).toHaveBeenCalledWith(
         "subagentura-activity",
@@ -2221,7 +2221,7 @@ describe("pollArtifactChanges", () => {
 
       expect(setStatus).toHaveBeenCalledWith(
         "subagentura-running",
-        "⚡ 3 sub-agents alive",
+        "⚡ 3 sub-agents alive · 3 working",
       );
       const widgetArgs = setWidget.mock.calls[0];
       expect(widgetArgs[1].length).toBe(2);
