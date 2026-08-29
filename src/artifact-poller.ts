@@ -88,6 +88,7 @@ interface WidgetSurfaceState {
 interface SubagentFooterContribution {
   kind: "subagent";
   count: number;
+  workingCount: number;
   footerLabel?: string;
 }
 interface WorkflowFooterContribution {
@@ -157,6 +158,23 @@ function getRunningSubagentCount(
   return inProcessCount + interactiveCount;
 }
 
+/**
+ * Count active execution rows, not containers. Workflow-owned children already
+ * live in exactly one child registry, so counting workflow jobs/snapshots here
+ * would count the same work twice.
+ */
+function getWorkingSubagentCount(
+  owners: (SessionOwnerToken | undefined)[],
+): number {
+  const inProcessCount = inProcessJobsForOwners(owners).filter(
+    (job) => job.status === "running",
+  ).length;
+  const interactiveCount = interactiveStatesForOwners(owners).filter(
+    (state) => state.status === "running",
+  ).length;
+  return inProcessCount + interactiveCount;
+}
+
 function addAggregateWorkflowUsage(
   total: WorkflowUsage,
   usage: WorkflowUsage | undefined,
@@ -179,15 +197,18 @@ function mergeFooterContributions(
 ): string | undefined {
   if (key === FOOTER_KEY) {
     let total = 0;
+    let totalWorking = 0;
     let footerLabel: string | undefined;
     for (const contribution of contributions) {
       if (contribution.kind !== "subagent") continue;
       total += contribution.count;
+      totalWorking += contribution.workingCount;
       footerLabel ??= contribution.footerLabel;
     }
     if (total === 0) return footerLabel;
+    const working = totalWorking > 0 ? ` · ${totalWorking} working` : "";
     const label = footerLabel ? ` · ${footerLabel}` : "";
-    return `⚡ ${total} sub-agent${total > 1 ? "s" : ""} alive${label}`;
+    return `⚡ ${total} sub-agent${total > 1 ? "s" : ""} alive${working}${label}`;
   }
   if (key === WORKFLOW_FOOTER_KEY) {
     let total = 0;
@@ -302,26 +323,29 @@ function footerLabelsForOwner(
   return labels.length > 0 ? labels.join(" · ") : undefined;
 }
 /**
- * Repaint the "N sub-agents alive" footer, scoped to `owner` when supplied.
+ * Repaint the "N sub-agents alive · N working" footer, scoped to `owner`.
  *
- * Liveness is decided here rather than at the call sites: callers pass the raw
- * active token, so a token whose lifecycle already ended reads as "this session
- * owns nothing" (count 0) instead of silently falling back to a cross-session
- * global count.
+ * `alive` keeps the established liveness contract: running in-process jobs
+ * plus running, idle, or unknown interactive panes. `working` is the strict
+ * subset currently executing: running in-process jobs and running interactive
+ * turns only. Idle/unknown/terminal rows and workflow containers are excluded.
+ * A stale owner reads as zero instead of falling back to cross-session state.
  */
 export function updateRunningSubagentFooter(
   ui: StatusUi,
   owner?: SessionOwnerToken,
 ): void {
   const ownerContext = resolveLiveSessionScope(owner);
-  const runningCount =
-    owner !== undefined && !ownerContext ? 0 : getRunningSubagentCount([owner]);
+  const staleOwner = owner !== undefined && !ownerContext;
+  const runningCount = staleOwner ? 0 : getRunningSubagentCount([owner]);
+  const workingCount = staleOwner ? 0 : getWorkingSubagentCount([owner]);
   const footerLabel = footerLabelsForOwner(owner);
   const contribution: SubagentFooterContribution | undefined =
     runningCount > 0 || footerLabel !== undefined
       ? {
           kind: "subagent",
           count: runningCount,
+          workingCount,
           footerLabel,
         }
       : undefined;

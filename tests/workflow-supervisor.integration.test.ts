@@ -368,7 +368,7 @@ describe("workflow supervisor integration", () => {
     expect((rows as string[]).join("\n")).toContain("reviewer");
     expect((rows as string[]).join("\n")).not.toContain("sibling-agent");
     expect(lastFooter(a.ui)).toBe(
-      "⚡ 1 sub-agent alive · workflow widget-visible",
+      "⚡ 1 sub-agent alive · 1 working · workflow widget-visible",
     );
     // B's surfaces are untouched by A's tick.
     expect(lastWidgetRows(b.ui)).toBe("never-painted");
