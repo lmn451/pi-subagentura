@@ -3,7 +3,12 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import {
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { promises as fs, type promises as fsTypes } from "node:fs";
 import { join } from "node:path";
 import type { JobState } from "./helpers";
@@ -28,6 +33,40 @@ const DETAIL_EVENTS_MAX_BYTES = 8 * 1024;
 const DETAIL_PREVIEW_MAX_CHARS = 512;
 const DETAIL_EVENT_COUNT = 3;
 const DETAIL_WORKFLOW_AGENT_COUNT = 20;
+// Pi's SelectList starts a secondary column above 40 cells. Forty-four keeps
+// source, status, and the beginning of a label visible before truncation.
+export const INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH = 44;
+const SUPERVISOR_GRID_PREFIX = "│ ";
+const SUPERVISOR_GRID_GAP = " │ ";
+const SUPERVISOR_GRID_PREFIX_WIDTH = visibleWidth(SUPERVISOR_GRID_PREFIX);
+const SUPERVISOR_GRID_GAP_WIDTH = visibleWidth(SUPERVISOR_GRID_GAP);
+
+export function interactiveSupervisorMinimumGridWidth(columns: number): number {
+  const count = Math.max(1, Math.floor(Number.isFinite(columns) ? columns : 1));
+  return (
+    SUPERVISOR_GRID_PREFIX_WIDTH +
+    count * INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH +
+    (count - 1) * SUPERVISOR_GRID_GAP_WIDTH
+  );
+}
+
+export function interactiveSupervisorColumnCount(
+  width: number,
+  itemCount: number,
+): number {
+  const count = Math.max(
+    0,
+    Math.floor(Number.isFinite(itemCount) ? itemCount : 0),
+  );
+  if (count <= 1) return 1;
+  const safeWidth = Math.max(0, Math.floor(Number.isFinite(width) ? width : 0));
+  const contentWidth = Math.max(0, safeWidth - SUPERVISOR_GRID_PREFIX_WIDTH);
+  const fitting = Math.floor(
+    (contentWidth + SUPERVISOR_GRID_GAP_WIDTH) /
+      (INTERACTIVE_SUPERVISOR_MIN_COLUMN_WIDTH + SUPERVISOR_GRID_GAP_WIDTH),
+  );
+  return Math.max(1, Math.min(count, fitting));
+}
 
 export type InteractiveSupervisorAction = { kind: "close" };
 type SupervisorDone = (action: InteractiveSupervisorAction) => void;
@@ -97,6 +136,8 @@ export interface InteractiveSupervisorOptions {
   ) => Promise<boolean | undefined> | boolean | undefined;
   /** Warning/status lines rendered under the list (hidden nodes, refresh failures). */
   status?: () => string[];
+  /** Effective overlay height; absent means the safe height is unknown. */
+  availableHeight?: () => number | undefined;
   refreshIntervalMs?: number;
   now?: () => number;
   items?: () => AsyncSupervisorItem[];
@@ -108,6 +149,7 @@ export class InteractiveSupervisorComponent {
   private selectedKey?: string;
   private expanded = new Set<string>();
   private cachedWidth?: number;
+  private cachedHeight?: number;
   private cachedLines?: string[];
   private readonly timer?: ReturnType<typeof setInterval>;
   private disposed = false;
@@ -130,8 +172,21 @@ export class InteractiveSupervisorComponent {
   }
 
   render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+    const availableHeight = normalizeAvailableHeight(
+      this.opts.availableHeight?.(),
+    );
+    if (
+      this.cachedLines &&
+      this.cachedWidth === width &&
+      this.cachedHeight === availableHeight
+    ) {
+      return this.cachedLines;
+    }
     const items = this.items();
+    const now = this.now();
+    const status = (this.opts.status?.() ?? []).map((line) =>
+      trunc(`│ ${compactText(line)}`, width),
+    );
     const lines = [
       trunc("┌ Async Subagents", width),
       trunc("│ All: ↑↓/jk select · enter/→ details · ← collapse", width),
@@ -145,40 +200,97 @@ export class InteractiveSupervisorComponent {
     if (items.length === 0) {
       lines.push(trunc("│ No async subagents.", width));
     } else {
-      items.forEach((item, index) => {
-        const selected = index === this.selectedIndex;
-        const itemKey = supervisorItemKey(item);
-        const expanded = this.expanded.has(itemKey);
-        const marker = selected ? "▶" : "○";
-        lines.push(
-          trunc(
-            `│ ${"  ".repeat(item.depth)}${marker} ${expanded ? "▾" : "▸"} ${formatAsyncSupervisorSummary(
-              item,
-              this.now(),
-            )}`,
-            width,
-          ),
-        );
-        if (expanded) {
-          lines.push(
-            ...formatAsyncDetails(
-              item,
-              width,
-              this.artifactDetails.get(itemKey),
-            ),
-          );
-        }
-      });
+      const fixedHeight = lines.length + status.length + 1;
+      lines.push(
+        ...this.renderItems(items, width, availableHeight, fixedHeight, now),
+      );
     }
 
-    for (const line of this.opts.status?.() ?? []) {
-      lines.push(trunc(`│ ${compactText(line)}`, width));
-    }
-
+    lines.push(...status);
     lines.push(trunc(`└${"─".repeat(Math.max(0, width - 2))}┘`, width));
     this.cachedWidth = width;
+    this.cachedHeight = availableHeight;
     this.cachedLines = lines;
     return lines;
+  }
+
+  private renderItems(
+    items: AsyncSupervisorItem[],
+    width: number,
+    availableHeight: number | undefined,
+    fixedHeight: number,
+    now: number,
+  ): string[] {
+    const columns = interactiveSupervisorColumnCount(width, items.length);
+    if (columns > 1 && availableHeight !== undefined) {
+      const grid = this.renderGridItems(items, width, columns, now);
+      if (fixedHeight + grid.length <= availableHeight) return grid;
+    }
+    return this.renderLinearItems(items, width, now);
+  }
+
+  private renderLinearItems(
+    items: AsyncSupervisorItem[],
+    width: number,
+    now: number,
+  ): string[] {
+    const lines: string[] = [];
+    items.forEach((item, index) => {
+      const itemKey = supervisorItemKey(item);
+      lines.push(trunc(`│ ${this.summary(item, index, now)}`, width));
+      if (this.expanded.has(itemKey)) {
+        lines.push(
+          ...formatAsyncDetails(item, width, this.artifactDetails.get(itemKey)),
+        );
+      }
+    });
+    return lines;
+  }
+
+  private renderGridItems(
+    items: AsyncSupervisorItem[],
+    width: number,
+    columns: number,
+    now: number,
+  ): string[] {
+    const columnWidths = supervisorGridColumnWidths(width, columns);
+    const lines: string[] = [];
+    for (let start = 0; start < items.length; start += columns) {
+      const cells = columnWidths.map((cellWidth, offset) => {
+        const item = items[start + offset];
+        const summary = item ? this.summary(item, start + offset, now) : "";
+        return truncateToWidth(summary, cellWidth, "…", true);
+      });
+      lines.push(
+        trunc(
+          `${SUPERVISOR_GRID_PREFIX}${cells.join(SUPERVISOR_GRID_GAP)}`,
+          width,
+        ),
+      );
+      // Details retain the original full width instead of becoming unreadable
+      // inside a summary cell. Multiple expansions follow row-major item order.
+      for (let offset = 0; offset < columns; offset++) {
+        const item = items[start + offset];
+        if (!item) continue;
+        const itemKey = supervisorItemKey(item);
+        if (!this.expanded.has(itemKey)) continue;
+        lines.push(
+          ...formatAsyncDetails(item, width, this.artifactDetails.get(itemKey)),
+        );
+      }
+    }
+    return lines;
+  }
+
+  private summary(
+    item: AsyncSupervisorItem,
+    index: number,
+    now: number,
+  ): string {
+    const itemKey = supervisorItemKey(item);
+    const marker = index === this.selectedIndex ? "▶" : "○";
+    const disclosure = this.expanded.has(itemKey) ? "▾" : "▸";
+    return `${"  ".repeat(item.depth)}${marker} ${disclosure} ${formatAsyncSupervisorSummary(item, now)}`;
   }
 
   handleInput(data: string): void {
@@ -256,6 +368,7 @@ export class InteractiveSupervisorComponent {
 
   invalidate(): void {
     this.cachedWidth = undefined;
+    this.cachedHeight = undefined;
     this.cachedLines = undefined;
   }
 
@@ -538,6 +651,7 @@ export async function showInteractiveSupervisor(
           done,
           requestRender: () => tui.requestRender?.(),
           notify: (message, level) => ui.notify(message, level),
+          availableHeight: () => supervisorOverlayHeight(tui.terminal?.rows),
         });
         return component;
       },
@@ -935,9 +1049,34 @@ function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(0, index), Math.max(0, length - 1));
 }
 
+function supervisorGridColumnWidths(width: number, columns: number): number[] {
+  const gapWidth = (columns - 1) * SUPERVISOR_GRID_GAP_WIDTH;
+  const contentWidth = Math.max(
+    0,
+    Math.floor(width) - SUPERVISOR_GRID_PREFIX_WIDTH - gapWidth,
+  );
+  const baseWidth = Math.floor(contentWidth / columns);
+  const remainder = contentWidth % columns;
+  return Array.from(
+    { length: columns },
+    (_, index) => baseWidth + (index < remainder ? 1 : 0),
+  );
+}
+
+function normalizeAvailableHeight(
+  availableHeight: number | undefined,
+): number | undefined {
+  if (availableHeight === undefined || !Number.isFinite(availableHeight)) {
+    return undefined;
+  }
+  return Math.max(1, Math.floor(availableHeight));
+}
+
+function supervisorOverlayHeight(rows: number | undefined): number | undefined {
+  if (rows === undefined || !Number.isFinite(rows)) return undefined;
+  return Math.max(1, Math.floor(rows * 0.85));
+}
+
 function trunc(text: string, width: number): string {
-  if (width <= 0) return "";
-  if (text.length <= width) return text;
-  if (width === 1) return text.slice(0, 1);
-  return `${text.slice(0, width - 1)}…`;
+  return truncateToWidth(text, width, "…");
 }

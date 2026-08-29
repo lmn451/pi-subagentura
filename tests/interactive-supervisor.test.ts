@@ -17,10 +17,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   InteractiveSupervisorComponent,
   closeActiveInteractiveSupervisor,
   formatSupervisorSummary,
+  interactiveSupervisorColumnCount,
+  interactiveSupervisorMinimumGridWidth,
   showInteractiveSupervisor,
 } from "../src/interactive-supervisor-ui";
 import {
@@ -297,8 +300,194 @@ describe("interactive supervisor", () => {
 
     expect(lines.some((line) => line.includes("abcdef12"))).toBe(true);
     expect(lines.some((line) => line.includes("reading"))).toBe(true);
-    expect(lines.every((line) => line.length <= 72)).toBe(true);
+    expect(lines.every((line) => visibleWidth(line) <= 72)).toBe(true);
     expect(formatSupervisorSummary(item, Date.now())).toContain("tmux");
+  });
+
+  it("derives one, two, three, and four columns from readable width", () => {
+    const ids = ["zero", "one", "two", "three", "four", "five", "six"];
+    const items = ids.map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => 40,
+    });
+    const itemRows = (width: number) =>
+      component.render(width).filter((line) => line.includes("[registry]"));
+    const oneColumnWidth = interactiveSupervisorMinimumGridWidth(2) - 1;
+    const twoColumnWidth = interactiveSupervisorMinimumGridWidth(2);
+    const threeColumnWidth = interactiveSupervisorMinimumGridWidth(3);
+    const fourColumnWidth = interactiveSupervisorMinimumGridWidth(4);
+
+    expect(interactiveSupervisorColumnCount(oneColumnWidth, items.length)).toBe(
+      1,
+    );
+    expect(interactiveSupervisorColumnCount(twoColumnWidth, items.length)).toBe(
+      2,
+    );
+    expect(
+      interactiveSupervisorColumnCount(threeColumnWidth, items.length),
+    ).toBe(3);
+    expect(
+      interactiveSupervisorColumnCount(fourColumnWidth, items.length),
+    ).toBe(4);
+    expect(itemRows(oneColumnWidth)).toHaveLength(7);
+    expect(itemRows(twoColumnWidth)).toHaveLength(4);
+    expect(itemRows(threeColumnWidth)).toHaveLength(3);
+    expect(itemRows(fourColumnWidth)).toHaveLength(2);
+    expect(interactiveSupervisorColumnCount(fourColumnWidth, 2)).toBe(2);
+  });
+
+  it("uses row-major order for odd counts, navigation, and resize", () => {
+    const items = ["zero", "one", "two", "three", "four"].map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => 40,
+    });
+    const threeColumnWidth = interactiveSupervisorMinimumGridWidth(3);
+    const twoColumnWidth = interactiveSupervisorMinimumGridWidth(2);
+
+    const itemRows = component
+      .render(threeColumnWidth)
+      .filter((line) => line.includes("[registry]"));
+    expect(itemRows).toHaveLength(2);
+    expect(itemRows[0]).toContain("agent-zero");
+    expect(itemRows[0]).toContain("agent-one");
+    expect(itemRows[0]).toContain("agent-two");
+    expect(itemRows[1]).toContain("agent-three");
+    expect(itemRows[1]).toContain("agent-four");
+
+    component.handleInput("j");
+    component.handleInput("j");
+    component.handleInput("j");
+    expect(
+      component.render(threeColumnWidth).find((line) => line.includes("▶")),
+    ).toMatch(/▶.*agent-three/);
+    expect(
+      component.render(twoColumnWidth).find((line) => line.includes("▶")),
+    ).toMatch(/▶.*agent-three/);
+    component.handleInput("j");
+    expect(
+      component.render(twoColumnWidth).find((line) => line.includes("▶")),
+    ).toMatch(/▶.*agent-four/);
+    component.handleInput("k");
+    expect(
+      component.render(threeColumnWidth).find((line) => line.includes("▶")),
+    ).toMatch(/▶.*agent-three/);
+  });
+
+  it("uses multiple columns only when the complete grid fits the height", () => {
+    const items = ["one", "two"].map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    let availableHeight = 8;
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => availableHeight,
+    });
+    const width = interactiveSupervisorMinimumGridWidth(2);
+    const itemRows = () =>
+      component.render(width).filter((line) => line.includes("[registry]"));
+
+    expect(itemRows()).toHaveLength(2);
+    availableHeight = 9;
+    expect(itemRows()).toHaveLength(1);
+  });
+
+  it("renders expanded loading details full-span with Unicode-safe bounds", () => {
+    const longText = `${"界🙂 long label ".repeat(80)}\nsecond line`;
+    const items = [
+      state("expanded", {
+        name: longText,
+        task: longText,
+        artifactDir: "unknown",
+      }),
+      state("peer"),
+      state("third"),
+    ].map((interactive) => ({
+      kind: "interactive" as const,
+      state: interactive,
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => 40,
+      status: () => [`⚠ ${longText}`],
+    });
+    const width = interactiveSupervisorMinimumGridWidth(3);
+
+    component.handleInput("\r");
+    const lines = component.render(width);
+    const summaryRow = lines.find((line) => line.includes("[registry]"));
+
+    expect(summaryRow).toContain("agent-peer");
+    expect(summaryRow).toContain("agent-third");
+    expect(lines.some((line) => line.includes("Task: 界🙂 long label"))).toBe(
+      true,
+    );
+    expect(lines.some((line) => line.includes("Lifecycle: loading…"))).toBe(
+      true,
+    );
+    expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+  });
+
+  it("keeps the empty state single-span at multi-column widths", () => {
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [],
+      availableHeight: () => 40,
+    });
+
+    const lines = component.render(interactiveSupervisorMinimumGridWidth(4));
+
+    expect(lines).toContain("│ No async subagents.");
+    expect(lines.filter((line) => line.includes("No async subagents"))).toEqual(
+      ["│ No async subagents."],
+    );
+  });
+
+  it("does not refresh async state during repeated navigation", () => {
+    const refresh = vi.fn();
+    const requestRender = vi.fn();
+    const items = ["one", "two"].map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      refresh,
+      requestRender,
+      availableHeight: () => 40,
+      refreshIntervalMs: 0,
+    });
+
+    for (let index = 0; index < 1_000; index++) {
+      component.handleInput(index % 2 === 0 ? "j" : "k");
+    }
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(requestRender).toHaveBeenCalledTimes(1_000);
   });
 
   it("renders in-process, workflow, and interactive async work", () => {
@@ -381,7 +570,7 @@ describe("interactive supervisor", () => {
       true,
     );
     expect(lines.some((line) => line.includes("turns: 2"))).toBe(true);
-    expect(lines.every((line) => line.length <= 60)).toBe(true);
+    expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
   });
 
   it("omits empty provenance-free workflow totals", () => {
