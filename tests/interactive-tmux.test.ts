@@ -1026,6 +1026,22 @@ describe("interactive-tmux", () => {
       expect(protocol).toMatch(/BE BRIEF/);
     });
 
+    it("routes child input requests through the owning parent", async () => {
+      const { buildChildSubagentProtocol } = await importFresh<
+        typeof import("../src/interactive-tmux")
+      >("../src/interactive-tmux");
+      const protocol = buildChildSubagentProtocol(FIXTURE_DIR);
+
+      expect(protocol).toMatch(/child sub-agent.*do not call.*ask_user/is);
+      expect(protocol).toMatch(/do not.*ask the human directly/is);
+      expect(protocol).toMatch(
+        /concise question.*owning orchestrator\/parent.*output\.md/is,
+      );
+      expect(protocol).toMatch(/wait.*orchestrator direction.*follow-up/is);
+      expect(protocol).toMatch(/guidance only.*not a technical guard/is);
+      expect(protocol).toMatch(/parent.*may still use.*ask_user.*human/is);
+    });
+
     it("requires done before the final assistant response on every turn", async () => {
       const { buildChildSubagentProtocol } = await importFresh<
         typeof import("../src/interactive-tmux")

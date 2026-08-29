@@ -123,6 +123,8 @@ export function buildChildSubagentProtocol(artifactDir: string): string {
 
 BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
 
+INPUT REQUESTS ARE ORCHESTRATOR-MEDIATED. As a child sub-agent, do not call the pane-local \`ask_user\` tool or ask the human directly. If you need input or a decision, surface one concise question or decision request to your owning orchestrator/parent in output.md and your final summary, complete the turn through the existing child result and lifecycle path, then wait in the REPL for orchestrator direction, usually via a follow-up. This is guidance only, not a technical guard: a parent or orchestrator session may still use \`ask_user\` to ask the human when appropriate.
+
 COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
 
 Your artifact directory is: ${artifactDir}
