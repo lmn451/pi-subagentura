@@ -139,8 +139,14 @@ When launched through the extension's `workflow` tool, canonical RALPLAN runs
 receive a host-owned run id and mode-0600 `.pi/ralplan-state.json` record.
 Use `get_ralplan_status`, `approve_ralplan`, `reject_ralplan`,
 `cancel_ralplan`, and `prepare_ralplan_recovery`. Approval is bound to the
-exact run/digest and records an inactive handoff; no tool in this phase executes
-the plan. Reload/resume/quit preserve interrupted evidence without replay.
+exact run/digest and records an inactive handoff. Reload/resume/quit preserve
+interrupted evidence without replay.
+
+Optional durable execution requires a separate bounded preview, exact
+revision/digest execution approval, and explicit run call. Its host tools never
+make the workflow script itself executable. Committed task outcomes replay from
+disk; interrupted operations with unknown side effects require manual resolution
+and explicit resume. Side effects are not exactly-once.
 
 ### `ralplan-from-skill.mjs`
 

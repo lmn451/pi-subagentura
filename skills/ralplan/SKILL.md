@@ -124,14 +124,38 @@ Reload/resume/quit interrupt active runs; new/fork cancel them. Recovery never
 replays model work or resumes automatically. Stale owners, generations, sessions,
 run IDs, and digest mismatches cannot approve, reject, or cancel a run.
 
+## Optional durable declarative execution
+
+Execution is a separate, opt-in host protocol after `approved_handoff`:
+
+1. `preview_ralplan_execution` validates 1–32 stable ordered task IDs, prior-only
+   dependencies, bounded prompts, plan digest, owner, and parent session. It
+   persists a mode-0600 preview and starts nothing.
+2. `approve_ralplan_execution` approves the exact execution id, revision, and
+   plan digest but still starts nothing.
+3. `run_ralplan_execution` acquires an owner/epoch/revision-fenced lease and
+   executes tasks sequentially. Each operation is persisted before model work;
+   each committed outcome stores bounded evidence and an output digest.
+4. `get_ralplan_execution_status` reads cold disk projections after restart.
+   `cancel_ralplan_execution` makes in-flight work unknown.
+5. Interrupted runs never auto-resume. Resolve each unknown operation explicitly
+   with `resolve_ralplan_operation` (`retry`, `accept`, or `fail` plus evidence),
+   then use `resume_ralplan_execution` to rebind without starting work. A separate
+   `run_ralplan_execution` call is still required.
+
+Committed outcomes replay without model re-execution. Uncommitted side effects
+are not exactly-once: a crash after a side effect but before outcome persistence
+creates an unknown operation requiring trusted manual resolution. Never claim
+exactly-once semantics or silently retry unknown mutation work.
+
 ## Safety boundary
 
 Planning agents may write only the bounded Markdown paths above. They never edit
 source, execute, delegate implementation, commit, or push. Every terminal result
 has `pending_approval: true` and `execution_halted: true`. Missing consensus,
 cap exhaustion, cancellation, or artifact failure has no `ralph`, `team`,
-autopilot, or other executable recommendation. Host approval records only an
-approved handoff; durable declarative execution remains a separate contract.
+autopilot, or other executable recommendation. Planning approval and execution
+preview approval remain distinct, explicit host actions.
 
 If the host cannot provide isolated role execution, stop with:
 

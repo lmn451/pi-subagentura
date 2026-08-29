@@ -40,6 +40,17 @@ an exact `{runId, planDigest}` with `approve_ralplan`, or use
 same-session interrupted evidence read-only and never auto-resumes work.
 Approval records an inactive `approved_handoff`; it does not execute the plan.
 
+## Durable execution (optional)
+
+After approved handoff, create a non-executing bounded task preview with
+`preview_ralplan_execution`, approve its exact revision/digest with
+`approve_ralplan_execution`, then start it explicitly with
+`run_ralplan_execution`. Status is durable under `.pi/ralplan-executions/`.
+Interrupted in-flight operations become unknown and require evidence-backed
+`resolve_ralplan_operation` before an explicit rebind/resume and separate run.
+Committed outcomes are not re-executed; side effects are explicitly not
+exactly-once.
+
 ## Install
 
 ```bash

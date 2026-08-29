@@ -49,6 +49,7 @@ import {
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
 import { interruptRalplanRuns } from "./ralplan-state";
+import { interruptRalplanExecutionJobs } from "./ralplan-execution-tool";
 import {
   advanceSessionScopeGeneration,
   createSessionScope,
@@ -183,6 +184,15 @@ function cleanupScopeGeneration(
   cleanupWorkflowJobsForOwner(owner);
   const ralplanCwd = scope.cwd ?? ctx?.cwd;
   if (ralplanCwd) {
+    try {
+      interruptRalplanExecutionJobs({
+        cwd: ralplanCwd,
+        owner,
+        lifecycleReason: event?.reason ?? "unknown",
+      });
+    } catch (error) {
+      logSessionError("ralplan_execution_interruption_failed", error);
+    }
     try {
       interruptRalplanRuns({
         cwd: ralplanCwd,
