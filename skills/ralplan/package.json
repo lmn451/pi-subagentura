@@ -1,7 +1,7 @@
 {
   "name": "pi-ralplan-local",
   "version": "0.1.0",
-  "description": "Consensus-driven planning via isolated Planner/Architect/Critic review of one immutable snapshot. Use /ralplan for a pending, execution-halted plan; host approval is required before any later phase.",
+  "description": "Verified immutable-artifact planning via isolated Planner/Architect/Critic review. Results remain pending and execution-halted until host approval.",
   "type": "module",
   "pi": {
     "skills": [

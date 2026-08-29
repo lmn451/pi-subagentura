@@ -95,12 +95,12 @@ records, while `/workflow-tree` displays the latest 20 and reports omissions.
 
 ### `ralplan-consensus.mjs`
 
-A compact SHORT-only Planner → Architect → Critic loop. Architect and Critic
-are isolated sequential reviewers of the same immutable Planner snapshot. Critic
-never receives Architect output and still runs after Architect rejection. Every
-terminal result is pending approval and execution-halted; consensus is not an
-execution recommendation. A final consolidation agent may write Markdown after
-both explicit approvals, but Phase 1 does not verify that artifact.
+A compact SHORT-only Planner → Architect → Critic loop. Every round uses an
+immutable draft/review filename. Read-only verifier agents check exact paths,
+size bounds, headings, round/kind, source identity, and SHA-256. Architect and
+Critic independently review the same verified draft; Critic receives no
+Architect output/path. Final consolidation and verification happen only after
+both explicit approvals. All results remain pending and execution-halted.
 
 | Argument             | Required | Meaning                                 |
 | -------------------- | -------- | --------------------------------------- |
@@ -111,25 +111,29 @@ both explicit approvals, but Phase 1 does not verify that artifact.
 
 ### `ralplan-occ.mjs`
 
-The canonical OCC-facing RALPLAN flow with a short-prompt gate, deliberate-mode
-hard gates, and optional per-reviewer model routing. Both reviewers inspect one
-fixed Planner snapshot independently. It never executes the resulting plan.
+The canonical OCC-facing RALPLAN flow adds a short-prompt gate, DELIBERATE
+artifact gates, optional advisory requirements traceability, and reviewer model
+routing to the same verified immutable-artifact contract. It never executes the
+resulting plan.
 
-| Argument             | Required | Meaning                                                  |
-| -------------------- | -------- | -------------------------------------------------------- |
-| `idea`               | yes      | Planning problem                                         |
-| `gate`               | no       | `false` bypasses the local heuristic; default is enabled |
-| `interactive`        | no       | Controls non-blocking approval marker text; never pauses |
-| `deliberate`         | no       | `true`, `false`, or `"auto"` risk-triggered mode         |
-| `maxIterations`      | no       | Iteration cap clamped to 1–5; defaults to 5              |
-| `artifactsDir`       | no       | Final-plan path prefix; defaults to `.omc/plans`         |
-| `planName`           | no       | Final-plan basename; defaults to `ralplan`               |
-| `architectModel`     | no       | Model id passed to the Architect `agent()` call          |
-| `criticModel`        | no       | Model id passed to the Critic `agent()` call             |
-| `executeOnConsensus` | no       | Deprecated compatibility input; ignored                  |
+| Argument                   | Required | Meaning                                                  |
+| -------------------------- | -------- | -------------------------------------------------------- |
+| `idea`                     | yes      | Planning problem                                         |
+| `gate`                     | no       | `false` bypasses the local heuristic; default is enabled |
+| `interactive`              | no       | Controls non-blocking approval marker text; never pauses |
+| `deliberate`               | no       | `true`, `false`, or `"auto"` risk-triggered mode         |
+| `maxIterations`            | no       | Iteration cap clamped to 1–5; defaults to 5              |
+| `artifactsDir`             | no       | Final-plan path prefix; defaults to `.omc/plans`         |
+| `planName`                 | no       | Safe final-plan basename; defaults to `plan`             |
+| `requirementsTraceability` | no       | Runs advisory Analyst + requires coverage map            |
+| `architectModel`           | no       | Model id passed to the Architect `agent()` call          |
+| `criticModel`              | no       | Model id passed to the Critic `agent()` call             |
+| `executeOnConsensus`       | no       | Deprecated compatibility input; ignored                  |
 
-Actual approval and execution routing belong to the host. The workflow VM cannot
-suspend for user input or convert marker text into approval.
+Artifacts are bounded to 1 MB and validated by dedicated read-only verifier
+agents because the workflow VM exposes no filesystem API. Actual approval and
+execution routing belong to the host; the VM cannot suspend for user input or
+convert marker text, a digest, or a valid plan into approval.
 
 ### `ralplan-from-skill.mjs`
 

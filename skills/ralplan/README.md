@@ -1,73 +1,38 @@
 # pi-ralplan-local
 
-Consensus-driven planning for Pi. The skill defines isolated Planner, Architect,
-and Critic roles that independently review one immutable Planner snapshot.
+Verified consensus planning for Pi. The skill defines isolated Planner,
+Architect, and Critic roles over immutable, bounded Markdown artifacts.
 
-## Safety contract
+## Contract
 
-RALPLAN is planning-only. Every workflow result is `pending_approval: true` and
-`execution_halted: true`; no plan file, marker, `executeOnConsensus` argument,
-or consensus result authorizes source mutation or execution. A separate
-host-controlled approval and handoff is required for any later phase.
+- Planner writes `drafts/<planName>_draft-rN.md`.
+- A read-only verifier checks path, regular-file existence, 1 MB size bound,
+  required headings, round/kind, and SHA-256.
+- Architect and Critic sequentially review that same verified draft and return
+  its digest; Critic receives no Architect output or path.
+- Review artifacts are separately verified before verdicts count.
+- A Consolidator writes `<planName>.md` only after both explicit approvals; the
+  final plan is verified before consensus is reported.
+- Every result remains `pending_approval: true` and `execution_halted: true`.
 
-- Planner returns explicit `DRAFT_READY` structured output.
-- Architect returns explicit `APPROVE` or `REVISION_NEEDED`.
-- Critic returns explicit `APPROVE`, `ITERATE`, or `REJECT`.
-- Architect and Critic run sequentially on the same fixed Planner snapshot;
-  Critic receives neither Architect output nor its path.
-- Critic still runs after Architect rejection or failure.
-- Any non-approval runs a complete loop, capped at five rounds.
-- Missing or failed output is never approval and never receives an executable
-  recommendation.
+`requirementsTraceability: true` enables an advisory Analyst preflight and a
+required Requirement Coverage Map. Analyst is not a consensus role. DELIBERATE
+mode in the canonical OCC workflow requires exactly three pre-mortem scenarios
+plus Unit, Integration, E2E, and Observability coverage.
 
-## Usage
+## Examples
 
-```text
-/ralplan [idea]
-/brainstorm [idea]
-/ralplan:status
-/ralplan:artifacts
-/ralplan:cancel
-```
+- `examples/workflows/ralplan-occ.mjs` — canonical OCC flow with gate,
+  DELIBERATE mode, requirements traceability, and reviewer model overrides.
+- `examples/workflows/ralplan-consensus.mjs` — compact SHORT-only compatibility
+  flow with the same artifact and independent-review guarantees.
 
-Slash/flag invocation is explicit. A bare prose mention does not start a new
-pipeline. Status, artifact, and cancellation commands are host features; the
-workflow VM cannot intercept arbitrary parent text or pause for a user.
-
-## Bundled examples
-
-- `examples/workflows/ralplan-occ.mjs` is the canonical OCC-facing workflow.
-  `gate: false` bypasses its local heuristic. `interactive` only enables
-  non-blocking `[pending approval]` marker text; it does not wait for a user.
-  `executeOnConsensus` is accepted only for compatibility and is ignored.
-- `examples/workflows/ralplan-consensus.mjs` is a compact SHORT-only example.
-  It shares the isolation, fixed-snapshot, verdict, loop, and pending boundary
-  contract but does not advertise DELIBERATE or interactive parity.
-
-## Modes
-
-SHORT is the default. DELIBERATE mode is available in the canonical OCC flow
-and requires exactly three actionable pre-mortem scenarios plus Unit,
-Integration, E2E, and Observability test-plan coverage. Missing sections are a
-non-approval.
-
-## Layout
-
-```text
-ralplan/
-├── SKILL.md
-├── README.md
-├── package.json
-└── prompts/
-    ├── planner.md
-    ├── architect.md
-    └── critic.md
-```
+The workflow VM cannot pause for user approval. `interactive` only controls
+non-blocking markers. `executeOnConsensus` is ignored compatibility input. A
+plan, digest, completion marker, or consensus result never authorizes execution.
 
 ## Install
 
 ```bash
 npm install ./skills/ralplan
 ```
-
-The package registers the skill through its `pi.skills` metadata.

@@ -1,131 +1,117 @@
 ---
 name: ralplan
-description: Consensus-driven implementation planning via isolated Planner, Architect, and Critic reviews of one immutable Planner snapshot. Use when a detailed plan is needed before coding; planning remains pending and read-only until a separate host approval.
+description: Consensus-driven implementation planning via verified immutable Markdown artifacts and isolated Planner, Architect, and Critic reviews. Results remain pending and execution-halted until a separate host approval.
 argument-hint: "[idea]"
 level: intermediate
 ---
 
-# ralplan — Consensus-Driven Implementation Planning
+# ralplan — Verified Consensus Planning
 
-RALPLAN is a planning protocol, not an executor. It produces a bounded plan and
-review evidence while keeping the result **pending approval** and
-**execution-halted**. A workflow result, plan file, marker, or
-`executeOnConsensus` argument is never permission to edit source or invoke an
-executor. Only a separate host-controlled approval and handoff may authorize a
-later phase.
+RALPLAN is a planning protocol, not an executor. It produces bounded, verified
+Markdown artifacts and independent review evidence. A workflow return, artifact
+path, digest, completion marker, or `executeOnConsensus` argument is never
+execution consent.
 
 ## Invocation
 
-Use an explicit invocation:
+Use an explicit `/ralplan [idea]` or `--ralplan [idea]` invocation. Bare prose
+mentions do not start a pipeline. Host commands such as status, approval,
+cancel, or resume require host integration; a workflow body cannot intercept
+arbitrary parent text or suspend for user input.
 
-- `/ralplan [idea]`
-- `--ralplan [idea]`
-- `/brainstorm [idea]` for a host-supported question-elicitation variant
+## Consensus roles
 
-A bare mention of “ralplan” in prose does not start a new pipeline. Status,
-artifact, skip, and cancel commands are host features; a workflow body cannot
-intercept arbitrary parent text or suspend for user input.
+Only three roles determine consensus:
 
-## Hard contract
+1. **Planner** writes an immutable per-round draft.
+2. **Architect** independently reviews that exact verified draft.
+3. **Critic** independently reviews the same verified draft without receiving
+   Architect output or an Architect artifact path.
 
-1. **Isolated roles.** Planner, Architect, and Critic are separate agent
-   invocations. The parent does not impersonate a role and no role approves its
-   own work.
-2. **One fixed snapshot.** After Planner settles, capture one immutable value
-   snapshot. Architect and Critic are awaited sequentially and each receives
-   that same snapshot. Critic receives neither Architect JSON nor an Architect
-   artifact path.
-3. **Explicit verdicts.** Planner returns `DRAFT_READY`; Architect returns
-   `APPROVE` or `REVISION_NEEDED`; Critic returns `APPROVE`, `ITERATE`, or
-   `REJECT`. Never infer approval from an empty violations, issues, gaps, or
-   findings array. Missing, malformed, or failed output is non-approval.
-4. **Complete re-review.** Critic runs after Architect settles, including after
-   `REVISION_NEEDED` or an Architect failure. Any non-approval starts a complete
-   Planner → Architect → Critic round. `maxIterations` is clamped to 1–5.
-5. **Planning boundary.** Every terminal result is pending/read-only and
-   execution-halted. No consensus, cap, null result, cancellation, or failure
-   may recommend `ralph`, `team`, autopilot, or another executable skill.
-6. **Deliberate mode.** When high-risk work requests DELIBERATE mode, Planner
-   must return exactly three actionable pre-mortem scenarios and all four
-   expanded test pillars: unit, integration, e2e, and observability. Missing or
-   weak structured sections are non-approval. SHORT mode does not require them.
+An optional **Analyst** preflight atomizes requirements and open questions. The
+Analyst is advisory and is never a fourth approver.
 
-## Role responsibilities
+Every role is a separate agent invocation. Planner returns `DRAFT_READY`;
+Architect returns `APPROVE` or `REVISION_NEEDED`; Critic returns `APPROVE`,
+`ITERATE`, or `REJECT`. Approval is never inferred from empty findings. Missing,
+malformed, failed, or digest-mismatched output is non-approval.
 
-### Planner
+## Artifact contract
 
-Investigate requirements and codebase facts through available read-only agents,
-then produce a 3–6 step actionable plan. Include:
+Given `artifactsDir`, a safe `planName`, and round `N`, write only:
 
-- RALPLAN-DR: 3–5 principles, the top 3 decision drivers, and at least 2
-  viable options with bounded pros/cons;
-- guardrails, task acceptance criteria, dependencies, risks, and open questions;
-- an ADR with Decision, Drivers, Alternatives Considered, Why Chosen,
-  Consequences, and Follow-ups;
-- DELIBERATE additions when that mode is active.
+- `drafts/<planName>_draft-rN.md`
+- `drafts/architect_review-rN.md`
+- `drafts/critic_review-rN.md`
+- `<planName>.md` only after both independent reviewers explicitly approve
 
-Planner does not implement, commit, push, execute, or approve.
+Each draft/review filename is immutable and round-specific. Never overwrite a
+prior round. A read-only verifier must check the exact claimed path, regular-file
+existence, 1 MB size bound, required headings, round/kind, source-draft identity,
+and SHA-256 before the workflow accepts it. A claimed path alone is not success.
 
-### Architect
+Draft and final plan artifacts require:
 
-Read-only and independent. Review the fixed Planner snapshot for technical
-soundness, alternatives, ownership/lifecycle risks, compatibility, and
-trade-offs. Always provide a steelman antithesis and a real tradeoff tension,
-then return an explicit `APPROVE` or `REVISION_NEEDED` verdict. An empty
-`principleViolations` array is evidence, not a verdict.
+- `## RALPLAN-DR` with 3–5 principles, top 3 decision drivers, and at least 2
+  viable options (or explicit invalidation rationale);
+- `## Architecture Decision Record` with Decision, Drivers, Alternatives
+  Considered, Why Chosen, Consequences, and Follow-ups;
+- `## Task Breakdown` with 3–6 actionable tasks and exact paths;
+- `## Dependency Graph`;
+- `## Acceptance Criteria`;
+- `## Risk Register`;
+- open questions where applicable.
 
-### Critic
+When requirements traceability is requested, the advisory Analyst emits atomic
+`REQ-*` items and the draft/final plan must include `## Requirement Coverage
+Map`. Each requirement maps to covered plan steps and one of `COVERED`,
+`PARTIAL`, `UNCOVERED`, or `SCOPED_OUT`; `SCOPED_OUT` requires rationale.
+Unexplained partial/uncovered/scoped-out items block Critic approval.
 
-Read-only and independent. Review the same fixed Planner snapshot without
-seeing Architect output. Check principle/option consistency, risk mitigation,
-acceptance criteria, verification, missing assumptions, and deliberate-mode
-hard gates. Return an explicit `APPROVE`, `ITERATE`, or `REJECT` verdict.
-
-## Loop and termination
+## Review loop
 
 ```text
-Planner(snapshot N)
-       |
-       +--> Architect(snapshot N) --+
-       |                             |
-       +--> Critic(snapshot N) ------+
-                                      |
-                 both explicit APPROVE and mode gates pass?
-                    yes -> pending consensus result
-                    no  -> Planner(snapshot N+1, with both reviews)
+Analyst? (advisory only)
+  → Planner writes draft-rN
+  → verifier records draft SHA-256
+  → Architect reviews draft-rN + expected digest
+  → Critic reviews draft-rN + expected digest (no Architect input)
+  → verifier validates both review artifacts and source identity
+  → both explicit APPROVE?
+      no: next complete Planner → Architect → Critic round
+      yes: Consolidator writes final plan → verifier validates final plan
 ```
 
-The Critic is not skipped when Architect rejects. The next Planner may receive
-both settled review results, but those results are never passed from Architect
-to Critic. After five rounds, return the best/last draft with `capped: true`,
-`pending_approval: true`, and `execution_halted: true`; require manual review
-and provide no execution recommendation.
+Critic always runs after Architect settles, including Architect rejection or
+failure. Only the next Planner receives both settled review results. Clamp
+`maxIterations` to 1–5. Artifact-validation failures may be corrected by a
+later bounded round; exhaustion returns the best evidence as pending/read-only.
 
-## OCC workflow arguments
+## Modes
 
-The canonical `examples/workflows/ralplan-occ.mjs` accepts `idea`,
-`deliberate`, `maxIterations`, `artifactsDir`, `planName`,
-`architectModel`, and `criticModel`. Its local gate is controlled by `gate`:
-`gate: false` bypasses the heuristic; otherwise an unanchored short prompt may
-return a pending redirect. `interactive` only controls emission of
-non-blocking `[pending approval]` marker text. The workflow VM cannot pause for
-a user, ask a host question, or turn a marker into approval; actual approval
-and invocation routing belong to the host. `executeOnConsensus` is accepted
-only for compatibility, reported as ignored, and never changes safety state.
+SHORT is the default. DELIBERATE mode requires exactly three actionable
+pre-mortem scenarios (trigger, blast radius, early signal, mitigation,
+detection) and concrete Unit, Integration, E2E, and Observability coverage.
+The verifier treats missing sections as invalid. The compact
+`ralplan-consensus.mjs` example remains SHORT-only.
 
-The compact `ralplan-consensus.mjs` example is SHORT-only. It shares the fixed
-snapshot, explicit verdict, unconditional Critic, five-round, and pending
-boundary contract but does not advertise DELIBERATE or interactive parity.
+## OCC workflow semantics
 
-## Artifacts and execution separation
+`examples/workflows/ralplan-occ.mjs` is canonical. `gate: false` bypasses its
+local short-prompt heuristic. `interactive` controls only non-blocking
+`[pending approval]` log markers; the workflow VM cannot wait for a user.
+`executeOnConsensus` is accepted only for compatibility, reported as ignored,
+and never changes approval or execution state.
 
-Planning may produce bounded Markdown evidence only. A claimed path is not
-proof of a valid artifact, and the Phase 1 workflow does not provide a host
-artifact verifier or persisted approval state. Artifact existence/content
-verification and host-owned run/approval state are later phases. Do not treat
-`plans/plan.md`, a completion marker, or a successful workflow return as
-consent to execute.
+## Safety boundary
 
-If the host cannot provide isolated agent invocations, stop with:
+Planning agents may write only the bounded Markdown paths above. They never edit
+source, execute, delegate implementation, commit, or push. Every terminal result
+has `pending_approval: true` and `execution_halted: true`. Missing consensus,
+cap exhaustion, cancellation, or artifact failure has no `ralph`, `team`,
+autopilot, or other executable recommendation. Host-owned approval/state and
+durable execution are separate contracts.
+
+If the host cannot provide isolated role execution, stop with:
 
 > ralplan requires role-isolated agent execution; current host does not support it.
