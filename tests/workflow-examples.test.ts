@@ -48,6 +48,26 @@ function json(value: unknown): SubagentResult {
   return ok(JSON.stringify(value));
 }
 
+function verifiedArtifact(path: string, kind: string) {
+  return {
+    valid: true,
+    path,
+    round: 1,
+    kind,
+    sizeBytes: 512,
+    sha256: `digest-${kind}`,
+    headings: [
+      "RALPLAN-DR",
+      "Architecture Decision Record",
+      "Task Breakdown",
+      "Dependency Graph",
+      "Acceptance Criteria",
+      "Risk Register",
+    ],
+    issues: [],
+  };
+}
+
 function script(name: string): string {
   return readFileSync(join(EXAMPLES, name), "utf8");
 }
@@ -85,38 +105,62 @@ describe("bundled workflow examples", () => {
         maxIterations: 1,
         artifactsDir,
       };
+      const draftPath = join(artifactsDir, "drafts", "plan_draft-r1.md");
+      const architectPath = join(
+        artifactsDir,
+        "drafts",
+        "architect_review-r1.md",
+      );
+      const criticPath = join(artifactsDir, "drafts", "critic_review-r1.md");
+      const finalPath = join(artifactsDir, "plan.md");
       const runner: WorkflowAgentRunner = async ({ label }) => {
         if (label === "planner-1") {
           return json({
             verdict: "DRAFT_READY",
-            path: join(artifactsDir, "drafts", "plan_draft.md"),
-            adrSummary: "ADR",
+            path: draftPath,
+            round: 1,
             summary: "draft",
           });
+        }
+        if (label === "verify-draft-1") {
+          return json(verifiedArtifact(draftPath, "draft"));
         }
         if (label === "architect-1") {
           return json({
             verdict: "APPROVE",
-            issues: [],
+            draftDigest: "digest-draft",
+            reviewPath: architectPath,
             steelman: "alternative",
             tradeoffTension: "speed versus safety",
+            principleViolations: [],
             summary: "approved",
           });
         }
         if (label === "critic-1") {
           return json({
             verdict: "APPROVE",
-            gaps: [],
-            selfAudit: "checked",
+            draftDigest: "digest-draft",
+            reviewPath: criticPath,
+            findings: [],
             summary: "approved",
           });
+        }
+        if (label === "verify-architect-1") {
+          return json(verifiedArtifact(architectPath, "architect-review"));
+        }
+        if (label === "verify-critic-1") {
+          return json(verifiedArtifact(criticPath, "critic-review"));
         }
         if (label === "consolidate") {
           return json({
             verdict: "CONSOLIDATED",
-            path: join(artifactsDir, "plan.md"),
+            path: finalPath,
+            sourceDraftDigest: "digest-draft",
             summary: "done",
           });
+        }
+        if (label === "verify-final") {
+          return json(verifiedArtifact(finalPath, "final-plan"));
         }
         throw new Error(`Unexpected label: ${label}`);
       };
@@ -150,40 +194,60 @@ describe("bundled workflow examples", () => {
         executeOnConsensus: true,
       };
       const models = new Map<string, string | undefined>();
+      const plansDir = join(root, "plans");
+      const draftPath = join(plansDir, "drafts", "auth-review_draft-r1.md");
+      const architectPath = join(plansDir, "drafts", "architect_review-r1.md");
+      const criticPath = join(plansDir, "drafts", "critic_review-r1.md");
+      const finalPath = join(plansDir, "auth-review.md");
       const runner: WorkflowAgentRunner = async ({ label, model }) => {
         models.set(label ?? "", model);
         if (label === "planner") {
           return json({
             verdict: "DRAFT_READY",
-            principles: ["safe", "small", "tested"],
-            decisionDrivers: ["security", "compatibility", "delivery"],
-            options: [
-              { name: "A", pros: ["safe"], cons: ["slow"] },
-              { name: "B", pros: ["fast"], cons: ["risk"] },
-            ],
-            invalidatedOptions: [],
-            planBody: "Plan",
-            openQuestions: [],
+            path: draftPath,
+            round: 1,
+            summary: "draft",
           });
+        }
+        if (label === "verify-draft") {
+          return json(verifiedArtifact(draftPath, "draft"));
         }
         if (label === "architect") {
           return json({
             verdict: "APPROVE",
-            summary: "sound",
+            draftDigest: "digest-draft",
+            reviewPath: architectPath,
             steelman: "keep the old design",
             tradeoffTension: "speed versus safety",
-            synthesis: "stage the change",
             principleViolations: [],
+            summary: "sound",
           });
         }
         if (label === "critic") {
           return json({
             verdict: "APPROVE",
-            summary: "accepted",
+            draftDigest: "digest-draft",
+            reviewPath: criticPath,
             findings: [],
-            preMortemStatus: "present-3",
-            testPlanStatus: "complete",
+            summary: "accepted",
           });
+        }
+        if (label === "verify-architect") {
+          return json(verifiedArtifact(architectPath, "architect-review"));
+        }
+        if (label === "verify-critic") {
+          return json(verifiedArtifact(criticPath, "critic-review"));
+        }
+        if (label === "consolidate") {
+          return json({
+            verdict: "CONSOLIDATED",
+            path: finalPath,
+            sourceDraftDigest: "digest-draft",
+            summary: "done",
+          });
+        }
+        if (label === "verify-final") {
+          return json(verifiedArtifact(finalPath, "final-plan"));
         }
         throw new Error(`Unexpected label: ${label}`);
       };
@@ -194,7 +258,7 @@ describe("bundled workflow examples", () => {
       });
 
       expect(run.result).toMatchObject({
-        status: "consensus",
+        status: "pending_approval",
         iterations: 1,
         artifactPaths: { plan: join(root, "plans", "auth-review.md") },
         pending_approval: true,

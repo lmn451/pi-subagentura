@@ -11,8 +11,20 @@ import type { SubagentResult } from "../src/helpers";
 
 const REPO = resolve(fileURLToPath(import.meta.url), "..", "..");
 const EXAMPLES = join(REPO, "examples", "workflows");
+const HEADINGS = [
+  "RALPLAN-DR",
+  "Architecture Decision Record",
+  "Task Breakdown",
+  "Dependency Graph",
+  "Acceptance Criteria",
+  "Risk Register",
+];
 
-function result(value: unknown): SubagentResult {
+function workflow(name: string): string {
+  return readFileSync(join(EXAMPLES, name), "utf8");
+}
+
+function json(value: unknown): SubagentResult {
   return {
     isError: false,
     output: JSON.stringify(value),
@@ -44,28 +56,33 @@ function failed(): SubagentResult {
   };
 }
 
-function workflow(name: string): string {
-  return readFileSync(join(EXAMPLES, name), "utf8");
+function paths(root: string, round: number) {
+  return {
+    draft: `${root}/drafts/plan_draft-r${round}.md`,
+    architect: `${root}/drafts/architect_review-r${round}.md`,
+    critic: `${root}/drafts/critic_review-r${round}.md`,
+    final: `${root}/plan.md`,
+  };
 }
 
-const draft = {
-  principles: ["safe", "small", "tested"],
-  decisionDrivers: ["safety", "compatibility", "delivery"],
-  options: [
-    { name: "A", pros: ["safe"], cons: ["slow"] },
-    { name: "B", pros: ["fast"], cons: ["risk"] },
-  ],
-  planBody: "immutable snapshot",
-  openQuestions: [],
-};
-
-function planner(): unknown {
-  return { verdict: "DRAFT_READY", draft };
+function verification(path: string, round: number, kind: string, valid = true) {
+  return {
+    valid,
+    path,
+    round,
+    kind,
+    sizeBytes: valid ? 100 : 0,
+    sha256: `digest-${round}-${kind}`,
+    headings: HEADINGS,
+    issues: valid ? [] : ["invalid"],
+  };
 }
 
-function architect(verdict = "APPROVE"): unknown {
+function architect(path: string, round: number, verdict = "APPROVE") {
   return {
     verdict,
+    draftDigest: `digest-${round}-draft`,
+    reviewPath: path,
     steelman: "alternative",
     tradeoffTension: "speed versus safety",
     principleViolations: verdict === "APPROVE" ? [] : ["safety"],
@@ -73,35 +90,87 @@ function architect(verdict = "APPROVE"): unknown {
   };
 }
 
-function critic(verdict = "APPROVE"): unknown {
+function critic(path: string, round: number, verdict = "APPROVE") {
   return {
     verdict,
-    findings:
-      verdict === "APPROVE"
-        ? []
-        : [{ severity: "MAJOR", area: "risk", evidence: "`risk`" }],
+    draftDigest: `digest-${round}-draft`,
+    reviewPath: path,
+    findings: [],
     summary: "critic result",
-    preMortemStatus: "missing",
-    testPlanStatus: "missing",
   };
 }
 
-describe("ralplan Phase 1 contracts", () => {
-  it("reviews one immutable planner snapshot in order without Architect leakage", async () => {
-    const prompts: Record<string, string> = {};
+function occRunner(
+  root: string,
+  options: {
+    architectVerdict?: (round: number) => string;
+    criticVerdict?: (round: number) => string;
+    prompts?: Record<string, string[]>;
+  } = {},
+): WorkflowAgentRunner {
+  let round = 0;
+  return async ({ label, prompt }) => {
+    if (options.prompts) {
+      const promptList = (options.prompts[label ?? ""] ??= []);
+      promptList.push(String(prompt));
+    }
+    if (label === "planner") {
+      round++;
+      return json({
+        verdict: "DRAFT_READY",
+        path: paths(root, round).draft,
+        round,
+        summary: `draft ${round}`,
+      });
+    }
+    if (label === "verify-draft")
+      return json(verification(paths(root, round).draft, round, "draft"));
+    if (label === "architect")
+      return json(
+        architect(
+          paths(root, round).architect,
+          round,
+          options.architectVerdict?.(round) ?? "APPROVE",
+        ),
+      );
+    if (label === "critic")
+      return json(
+        critic(
+          paths(root, round).critic,
+          round,
+          options.criticVerdict?.(round) ?? "APPROVE",
+        ),
+      );
+    if (label === "verify-architect")
+      return json(
+        verification(paths(root, round).architect, round, "architect-review"),
+      );
+    if (label === "verify-critic")
+      return json(
+        verification(paths(root, round).critic, round, "critic-review"),
+      );
+    if (label === "consolidate")
+      return json({
+        verdict: "CONSOLIDATED",
+        path: paths(root, round).final,
+        sourceDraftDigest: `digest-${round}-draft`,
+        summary: "final",
+      });
+    if (label === "verify-final")
+      return json(verification(paths(root, round).final, round, "final-plan"));
+    throw new Error(`Unexpected label: ${label}`);
+  };
+}
+
+describe("ralplan independent review contracts", () => {
+  it("reviews one immutable artifact in order without Architect leakage", async () => {
+    const root = "/repo/plans";
+    const prompts: Record<string, string[]> = {};
     const labels: string[] = [];
-    const runner: WorkflowAgentRunner = async ({ label, prompt }) => {
-      labels.push(label ?? "");
-      if (label === "planner") return result(planner());
-      if (label === "architect") {
-        prompts.architect = String(prompt);
-        return result(architect());
-      }
-      if (label === "critic") {
-        prompts.critic = String(prompt);
-        return result(critic());
-      }
-      throw new Error(`Unexpected label: ${label}`);
+    const base = occRunner(root, { prompts });
+    const runner: WorkflowAgentRunner = async (input) => {
+      labels.push(input.label ?? "");
+      return base(input);
     };
 
     const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
@@ -109,41 +178,47 @@ describe("ralplan Phase 1 contracts", () => {
         idea: "force: review src/auth.ts",
         gate: false,
         maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
       },
       runAgent: runner,
     });
 
-    expect(labels).toEqual(["planner", "architect", "critic"]);
-    expect(prompts.architect).toContain("immutable snapshot");
-    expect(prompts.critic).toContain("immutable snapshot");
-    expect(prompts.critic).not.toContain("ARCHITECT REVIEW");
-    expect(prompts.critic).not.toContain("architect result");
+    expect(labels).toEqual([
+      "planner",
+      "verify-draft",
+      "architect",
+      "critic",
+      "verify-architect",
+      "verify-critic",
+      "consolidate",
+      "verify-final",
+    ]);
+    expect(prompts.architect[0]).toContain("plan_draft-r1.md");
+    expect(prompts.critic[0]).toContain("plan_draft-r1.md");
+    expect(prompts.critic[0]).not.toContain("architect_review-r1.md");
+    expect(prompts.critic[0]).not.toContain("architect result");
     expect(run.result).toMatchObject({
-      status: "consensus",
-      iterations: 1,
+      status: "pending_approval",
+      consensus: true,
       pending_approval: true,
       execution_halted: true,
     });
     expect(run.result).not.toHaveProperty("recommendedExecution");
   });
 
-  it("runs Critic after Architect revision and re-reviews on the next round", async () => {
+  it("runs Critic after Architect revision and re-reviews the next round", async () => {
+    const root = "/repo/plans";
+    const prompts: Record<string, string[]> = {};
     const labels: string[] = [];
-    const plannerPrompts: string[] = [];
-    let plannerCalls = 0;
-    const runner: WorkflowAgentRunner = async ({ label, prompt }) => {
-      labels.push(label ?? "");
-      if (label === "planner") {
-        plannerCalls++;
-        plannerPrompts.push(String(prompt));
-        return result(planner());
-      }
-      if (label === "architect")
-        return result(
-          architect(plannerCalls === 1 ? "REVISION_NEEDED" : "APPROVE"),
-        );
-      if (label === "critic") return result(critic());
-      throw new Error(`Unexpected label: ${label}`);
+    const base = occRunner(root, {
+      prompts,
+      architectVerdict: (round) =>
+        round === 1 ? "REVISION_NEEDED" : "APPROVE",
+    });
+    const runner: WorkflowAgentRunner = async (input) => {
+      labels.push(input.label ?? "");
+      return base(input);
     };
 
     const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
@@ -151,31 +226,52 @@ describe("ralplan Phase 1 contracts", () => {
         idea: "force: review src/auth.ts",
         gate: false,
         maxIterations: 2,
+        artifactsDir: root,
+        planName: "plan",
       },
       runAgent: runner,
     });
 
-    expect(labels).toEqual([
-      "planner",
-      "architect",
-      "critic",
-      "planner",
-      "architect",
-      "critic",
-    ]);
-    expect(run.result).toMatchObject({ status: "consensus", iterations: 2 });
-    expect(plannerPrompts[0]).not.toContain("architect result");
-    expect(plannerPrompts[1]).toContain("architect result");
-    expect(plannerPrompts[1]).toContain("critic result");
+    expect(labels.filter((label) => label === "critic")).toHaveLength(2);
+    expect(prompts.planner[0]).not.toContain("architect result");
+    expect(prompts.planner[1]).toContain("architect result");
+    expect(prompts.planner[1]).toContain("critic result");
+    expect(run.result).toMatchObject({ consensus: true, iterations: 2 });
   });
 
-  it("treats missing reviewers as non-approval and clamps rounds to five", async () => {
+  it("treats reviewer errors as non-approval and clamps rounds to five", async () => {
+    const root = "/repo/plans";
+    let round = 0;
     const labels: string[] = [];
     const runner: WorkflowAgentRunner = async ({ label }) => {
       labels.push(label ?? "");
-      if (label === "planner") return result(planner());
+      if (label === "planner") {
+        round++;
+        return json({
+          verdict: "DRAFT_READY",
+          path: paths(root, round).draft,
+          round,
+          summary: "draft",
+        });
+      }
+      if (label === "verify-draft")
+        return json(verification(paths(root, round).draft, round, "draft"));
       if (label === "architect") return failed();
-      if (label === "critic") return result(critic("REJECT"));
+      if (label === "critic")
+        return json(critic(paths(root, round).critic, round, "REJECT"));
+      if (label === "verify-architect")
+        return json(
+          verification(
+            paths(root, round).architect,
+            round,
+            "architect-review",
+            false,
+          ),
+        );
+      if (label === "verify-critic")
+        return json(
+          verification(paths(root, round).critic, round, "critic-review"),
+        );
       throw new Error(`Unexpected label: ${label}`);
     };
 
@@ -184,31 +280,60 @@ describe("ralplan Phase 1 contracts", () => {
         idea: "force: review src/auth.ts",
         gate: false,
         maxIterations: 99,
+        artifactsDir: root,
+        planName: "plan",
         executeOnConsensus: true,
       },
       runAgent: runner,
     });
 
-    expect(labels).toHaveLength(15);
+    expect(labels.filter((label) => label === "planner")).toHaveLength(5);
+    expect(labels.filter((label) => label === "critic")).toHaveLength(5);
     expect(run.result).toMatchObject({
-      status: "no_consensus",
+      consensus: false,
       iterations: 5,
       capped: true,
+      status: "artifact_validation_failed",
       pending_approval: true,
       execution_halted: true,
+      executeOnConsensusIgnored: true,
     });
     expect(run.result).not.toHaveProperty("recommendedExecution");
-    expect(run.result).toHaveProperty("executeOnConsensusIgnored", true);
   });
 
   it("does not infer approval when a reviewer omits its verdict", async () => {
+    const root = "/repo/plans";
+    let round = 0;
     const labels: string[] = [];
     const runner: WorkflowAgentRunner = async ({ label }) => {
       labels.push(label ?? "");
-      if (label === "planner") return result(planner());
-      if (label === "architect")
-        return result({ steelman: "missing explicit verdict" });
-      if (label === "critic") return result(critic());
+      if (label === "planner") {
+        round++;
+        return json({
+          verdict: "DRAFT_READY",
+          path: paths(root, round).draft,
+          round,
+          summary: "draft",
+        });
+      }
+      if (label === "verify-draft")
+        return json(verification(paths(root, round).draft, round, "draft"));
+      if (label === "architect") return json({ steelman: "missing verdict" });
+      if (label === "critic")
+        return json(critic(paths(root, round).critic, round));
+      if (label === "verify-architect")
+        return json(
+          verification(
+            paths(root, round).architect,
+            round,
+            "architect-review",
+            false,
+          ),
+        );
+      if (label === "verify-critic")
+        return json(
+          verification(paths(root, round).critic, round, "critic-review"),
+        );
       throw new Error(`Unexpected label: ${label}`);
     };
 
@@ -217,23 +342,28 @@ describe("ralplan Phase 1 contracts", () => {
         idea: "force: review src/auth.ts",
         gate: false,
         maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
       },
       runAgent: runner,
     });
 
     expect(labels).toContain("critic");
     expect(run.result).toMatchObject({
-      status: "no_consensus",
-      lastVerdict: { architect: "MISSING", critic: "APPROVE" },
+      consensus: false,
+      status: "artifact_validation_failed",
       pending_approval: true,
       execution_halted: true,
     });
   });
 
-  it("halts without consensus when Planner output is missing", async () => {
+  it("clamps zero rounds to one and rejects missing Planner artifacts", async () => {
+    const root = "/repo/plans";
     const labels: string[] = [];
     const runner: WorkflowAgentRunner = async ({ label }) => {
       labels.push(label ?? "");
+      if (label === "verify-draft")
+        return json(verification(paths(root, 1).draft, 1, "draft", false));
       return failed();
     };
 
@@ -242,121 +372,130 @@ describe("ralplan Phase 1 contracts", () => {
         idea: "force: review src/auth.ts",
         gate: false,
         maxIterations: 0,
+        artifactsDir: root,
+        planName: "plan",
       },
       runAgent: runner,
     });
 
-    expect(labels).toEqual(["planner"]);
+    expect(labels.filter((label) => label === "verify-draft")).toHaveLength(1);
     expect(run.result).toMatchObject({
-      status: "no_planner_output",
+      consensus: false,
       iterations: 1,
+      status: "artifact_validation_failed",
       pending_approval: true,
       execution_halted: true,
     });
-    expect(run.result).not.toHaveProperty("recommendedExecution");
   });
 
-  it("keeps deliberate-mode hard gates in structured Planner output", async () => {
-    const runner: WorkflowAgentRunner = async ({ label }) => {
-      if (label === "planner") return result(planner());
-      if (label === "architect") return result(architect());
-      if (label === "critic") return result(critic());
-      throw new Error(`Unexpected label: ${label}`);
-    };
-
+  it("enforces deliberate artifact sections", async () => {
+    const root = "/repo/plans";
+    const runner = occRunner(root);
     const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
         deliberate: true,
         maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
       },
       runAgent: runner,
     });
 
     expect(run.result).toMatchObject({
-      status: "no_consensus",
+      consensus: false,
+      status: "artifact_validation_failed",
       pending_approval: true,
       execution_halted: true,
-      deliberate: { valid: false },
     });
   });
 
   it("honors gate false and makes interactive markers non-blocking", async () => {
-    const runner: WorkflowAgentRunner = async ({ label }) => {
-      if (label === "planner") return result(planner());
-      if (label === "architect") return result(architect());
-      if (label === "critic") return result(critic());
-      throw new Error(`Unexpected label: ${label}`);
-    };
-
+    const root = "/repo/plans";
     const bypassed = await runWorkflow(workflow("ralplan-occ.mjs"), {
       args: {
         idea: "plan something",
         gate: false,
         interactive: false,
         maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
       },
-      runAgent: runner,
+      runAgent: occRunner(root),
     });
     const gated = await runWorkflow(workflow("ralplan-occ.mjs"), {
-      args: {
-        idea: "plan something",
-        gate: true,
-        interactive: true,
-        maxIterations: 1,
+      args: { idea: "plan something", gate: true, interactive: true },
+      runAgent: async () => {
+        throw new Error("gate should not spawn agents");
       },
-      runAgent: runner,
     });
 
     expect(bypassed.result).toMatchObject({
       gate: { enabled: false },
-      interactive: { enabled: false },
+      interactive: { enabled: false, blocking: false },
     });
     expect(gated.result).toMatchObject({
       gated: true,
+      interactive: { enabled: true, blocking: false },
       pending_approval: true,
       execution_halted: true,
     });
-    expect(gated.result).not.toHaveProperty("recommendedExecution");
   });
 
-  it("keeps the smaller consensus example independent and pending", async () => {
+  it("keeps the compact example independent, verified, and pending", async () => {
+    const root = "/repo/plans";
     const prompts: Record<string, string> = {};
     const runner: WorkflowAgentRunner = async ({ label, prompt }) => {
+      prompts[label ?? ""] = String(prompt);
       if (label === "planner-1")
-        return result({ verdict: "DRAFT_READY", draft });
-      if (label === "architect-1") {
-        prompts.architect = String(prompt);
-        return result(architect());
-      }
-      if (label === "critic-1") {
-        prompts.critic = String(prompt);
-        return result(critic());
-      }
-      if (label === "consolidate") {
-        return result({
-          verdict: "CONSOLIDATED",
-          path: "plans/plan.md",
-          summary: "done",
+        return json({
+          verdict: "DRAFT_READY",
+          path: paths(root, 1).draft,
+          round: 1,
+          summary: "draft",
         });
-      }
+      if (label === "verify-draft-1")
+        return json(verification(paths(root, 1).draft, 1, "draft"));
+      if (label === "architect-1")
+        return json(architect(paths(root, 1).architect, 1));
+      if (label === "critic-1") return json(critic(paths(root, 1).critic, 1));
+      if (label === "verify-architect-1")
+        return json(
+          verification(paths(root, 1).architect, 1, "architect-review"),
+        );
+      if (label === "verify-critic-1")
+        return json(verification(paths(root, 1).critic, 1, "critic-review"));
+      if (label === "consolidate")
+        return json({
+          verdict: "CONSOLIDATED",
+          path: paths(root, 1).final,
+          sourceDraftDigest: "digest-1-draft",
+          summary: "final",
+        });
+      if (label === "verify-final")
+        return json(verification(paths(root, 1).final, 1, "final-plan"));
       throw new Error(`Unexpected label: ${label}`);
     };
 
     const run = await runWorkflow(workflow("ralplan-consensus.mjs"), {
-      args: { idea: "review src/auth.ts", maxIterations: 1 },
+      args: {
+        idea: "review src/auth.ts",
+        maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
+      },
       runAgent: runner,
     });
 
-    expect(prompts.critic).toContain("immutable snapshot");
-    expect(prompts.critic).not.toContain("ARCHITECT REVIEW");
+    expect(prompts["critic-1"]).toContain("plan_draft-r1.md");
+    expect(prompts["critic-1"]).not.toContain("architect_review-r1.md");
     expect(run.result).toMatchObject({
       consensus: true,
+      status: "pending_approval",
       pending_approval: true,
       execution_halted: true,
     });
-    expect(run.result).not.toHaveProperty("recommendedExecution");
   });
 
   it("remains parseable", () => {

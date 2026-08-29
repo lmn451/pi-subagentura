@@ -1,55 +1,32 @@
 // ralplan-occ — canonical OCC-facing RALPLAN workflow
-// Planner, Architect, and Critic are isolated role invocations. This workflow
-// produces planning evidence only; it never executes, commits, or mutates code.
+// Planning agents may write bounded Markdown artifacts only. The workflow never
+// edits source, executes a plan, commits, pushes, or treats consensus as consent.
 export const meta = {
   name: "ralplan-occ",
   description:
-    "Canonical OCC RALPLAN consensus: isolated Planner/Architect/Critic review of one fixed snapshot, bounded to five rounds, always pending approval and execution-halted.",
+    "Canonical OCC RALPLAN: verified immutable artifacts, isolated same-snapshot reviews, requirements traceability, five-round cap, and pending host approval.",
   phases: [
     { title: "Gate" },
-    { title: "Ralplan consensus" },
+    { title: "Requirements" },
     { title: "Round N - Planner" },
+    { title: "Round N - Verify draft" },
     { title: "Round N - Architect" },
     { title: "Round N - Critic" },
+    { title: "Round N - Verify reviews" },
+    { title: "Consolidate" },
+    { title: "Verify final plan" },
   ],
 };
 
-function parseWorkflowArgs(raw) {
-  if (raw == null) return {};
-  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed
-        : {};
-    } catch {
-      return {};
-    }
-  }
-  return {};
-}
-
-const workflowArgs = parseWorkflowArgs(args);
-const PLANNER_PERSONA = `You are the isolated Planner in a RALPLAN workflow.
-Create or revise a plan; never implement code, execute a skill, commit, push, or
-approve your own work. Return structured JSON only. Include RALPLAN-DR:
-3-5 principles, exactly 3 decision drivers, at least 2 viable options with
-bounded pros/cons, and an actionable 3-6 step plan with acceptance criteria.
-The host workflow, not the Planner, owns approval and execution routing.`;
-const ARCHITECT_PERSONA = `You are the isolated Architect, a read-only technical
-reviewer. Review only the Planner snapshot supplied in this prompt. You are not
-the Planner or Critic, and you must not implement changes. Independently state
-the strongest steelman antithesis, a meaningful tradeoff tension, and explicit
-architectural principle violations. Approval is never inferred from an empty
-violations list: return exactly one explicit verdict, APPROVE or REVISION_NEEDED.`;
-const CRITIC_PERSONA = `You are the isolated Critic and final quality gate. Review
-only the fixed Planner snapshot supplied in this prompt, independently of every
-other review. You do not receive or rely on Architect output. Check alternatives,
-risk mitigation, acceptance criteria, verification, gaps, and deliberate-mode
-requirements. Return exactly one explicit verdict: APPROVE, ITERATE, or REJECT.
-Missing, invalid, or uncertain evidence is non-approval.`;
-
+const MAX_ARTIFACT_BYTES = 1_000_000;
+const REQUIRED_PLAN_HEADINGS = [
+  "RALPLAN-DR",
+  "Architecture Decision Record",
+  "Task Breakdown",
+  "Dependency Graph",
+  "Acceptance Criteria",
+  "Risk Register",
+];
 const HIGH_RISK_TRIGGERS = [
   "auth",
   "security",
@@ -78,16 +55,58 @@ const EXECUTION_KEYWORDS = [
   "ultrapilot",
 ];
 
+function parseWorkflowArgs(raw) {
+  if (raw == null) return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function clampRounds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 5;
+  return Math.min(Math.max(Math.floor(numeric), 1), 5);
+}
+
+function safeArtifactsDir(value) {
+  const candidate = typeof value === "string" ? value.trim() : ".omc/plans";
+  if (!candidate || candidate.includes("\0") || /[\r\n]/.test(candidate)) {
+    throw new Error("artifactsDir must be a non-empty single-line path");
+  }
+  return candidate.replace(/\/+$/, "");
+}
+
+function safePlanName(value) {
+  const candidate = typeof value === "string" && value ? value : "plan";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(candidate)) {
+    throw new Error(
+      "planName must start with an alphanumeric and contain only alphanumerics, dot, underscore, or dash (max 64)",
+    );
+  }
+  return candidate;
+}
+
 function checkGate(idea) {
   const text = String(idea || "");
   const lower = text.toLowerCase();
   const words = text.trim().split(/\s+/).filter(Boolean);
   for (const prefix of ["force:", "!"]) {
-    if (lower.startsWith(prefix))
+    if (lower.startsWith(prefix)) {
       return { gated: false, reason: "escape prefix " + prefix };
+    }
   }
-  if (words.length > 15)
+  if (words.length > 15) {
     return { gated: false, reason: "word count above threshold" };
+  }
   const anchors = [
     /\.\w{1,8}(?:\/\S+)?/,
     /#\d+/,
@@ -98,23 +117,21 @@ function checkGate(idea) {
     /```/,
     /\b(?:do:|acceptance criteria:)\b/i,
     /^\s*\d+\.\s/m,
-    /\b(?:TypeError|ReferenceError|SyntaxError|ENOENT|EACCES)\b/,
   ];
-  for (const anchor of anchors) {
-    if (anchor.test(text))
-      return { gated: false, reason: "concrete anchor present" };
+  if (anchors.some((anchor) => anchor.test(text))) {
+    return { gated: false, reason: "concrete anchor present" };
   }
   const matched = EXECUTION_KEYWORDS.filter((keyword) =>
     new RegExp("\\b" + keyword + "\\b").test(lower),
   );
-  const reason = matched.length
-    ? "prompt has " +
-      words.length +
-      " words and execution keyword (" +
-      matched.join(",") +
-      ")"
-    : "prompt has " + words.length + " words and no concrete anchors";
-  return { gated: true, reason };
+  return {
+    gated: true,
+    reason: matched.length
+      ? "short unanchored prompt contains execution keyword (" +
+        matched.join(",") +
+        ")"
+      : "short prompt has no concrete anchor",
+  };
 }
 
 function isDeliberate(idea, input) {
@@ -126,181 +143,12 @@ function isDeliberate(idea, input) {
   return false;
 }
 
-function clampRounds(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 5;
-  return Math.min(Math.max(Math.floor(numeric), 1), 5);
-}
-
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-function freezeDeep(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value))
-    return value;
-  for (const child of Object.values(value)) freezeDeep(child);
-  return Object.freeze(value);
-}
-
-function nonEmpty(value) {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function deliberateValidation(draft, mode) {
-  if (mode !== "DELIBERATE") return { valid: true, issues: [] };
-  const issues = [];
-  const scenarios = draft && draft.preMortem;
-  if (!Array.isArray(scenarios) || scenarios.length !== 3) {
-    issues.push("preMortem must contain exactly 3 scenarios");
-  } else {
-    const fields = [
-      "trigger",
-      "blastRadius",
-      "earlySignal",
-      "mitigation",
-      "detection",
-    ];
-    scenarios.forEach((scenario, index) => {
-      for (const field of fields) {
-        if (!scenario || !nonEmpty(scenario[field]))
-          issues.push("preMortem[" + index + "]." + field + " is required");
-      }
-    });
-  }
-  const testPlan = draft && draft.expandedTestPlan;
-  for (const pillar of ["unit", "integration", "e2e", "observability"]) {
-    if (
-      !testPlan ||
-      !Array.isArray(testPlan[pillar]) ||
-      testPlan[pillar].length === 0 ||
-      testPlan[pillar].some((item) => !nonEmpty(item))
-    ) {
-      issues.push(
-        "expandedTestPlan." + pillar + " must contain actionable entries",
-      );
-    }
-  }
-  return { valid: issues.length === 0, issues };
-}
-
-function plannerSnapshot(output) {
-  if (!output || typeof output !== "object") return null;
-  if (output.draft && typeof output.draft === "object") {
-    const draft = clone(output.draft);
-    return Object.keys(draft).length > 0 ? draft : null;
-  }
-  const draft = clone(output);
-  delete draft.verdict;
-  return Object.keys(draft).length > 0 ? draft : null;
-}
-
-function buildPlannerPrompt(idea, mode, feedback, round, maxRounds) {
-  const prior = feedback.length
-    ? "\n\nPRIOR ROUND REVIEWS (address both independently):\n" +
-      JSON.stringify(feedback, null, 2)
-    : "";
-  const deliberate =
-    mode === "DELIBERATE"
-      ? "\nDELIBERATE HARD REQUIREMENTS: preMortem must have exactly 3 actionable scenarios with trigger, blastRadius, earlySignal, mitigation, detection. expandedTestPlan must contain non-empty unit, integration, e2e, and observability arrays."
-      : "";
-  return (
-    PLANNER_PERSONA +
-    "\n\nTASK\nIdea: " +
-    idea +
-    "\nMode: " +
-    mode +
-    "\nRound: " +
-    round +
-    " of " +
-    maxRounds +
-    prior +
-    deliberate +
-    '\nReturn JSON {verdict:"DRAFT_READY", draft:{principles, decisionDrivers, options, planBody, openQuestions, ...}} only.'
-  );
-}
-
-function buildArchitectPrompt(snapshot, mode) {
-  const deliberate =
-    mode === "DELIBERATE"
-      ? "\nIn DELIBERATE mode, treat missing or weak preMortem/test-plan fields as explicit principle violations."
-      : "";
-  return (
-    ARCHITECT_PERSONA +
-    "\n\nFIXED PLANNER SNAPSHOT (read-only; do not alter):\n" +
-    JSON.stringify(snapshot, null, 2) +
-    deliberate +
-    "\nReturn JSON {verdict, steelman, tradeoffTension, synthesis, principleViolations, summary} only."
-  );
-}
-
-function buildCriticPrompt(snapshot, mode) {
-  const deliberate =
-    mode === "DELIBERATE"
-      ? "\nDELIBERATE HARD GATES: reject missing/weak preMortem or any missing unit, integration, e2e, or observability test pillar."
-      : "";
-  return (
-    CRITIC_PERSONA +
-    "\n\nFIXED PLANNER SNAPSHOT (read-only; same value reviewed by Architect):\n" +
-    JSON.stringify(snapshot, null, 2) +
-    deliberate +
-    "\nReturn JSON {verdict, findings, summary, preMortemStatus, testPlanStatus} only."
-  );
-}
-
-const PLANNER_SCHEMA = {
-  type: "object",
-  required: ["verdict"],
-  properties: {
-    verdict: { type: "string", enum: ["DRAFT_READY"] },
-    draft: { type: "object" },
-    principles: { type: "array", items: { type: "string" } },
-    decisionDrivers: { type: "array", items: { type: "string" } },
-    options: { type: "array" },
-    planBody: { type: "string" },
-    openQuestions: { type: "array", items: { type: "string" } },
-  },
-};
-const ARCHITECT_SCHEMA = {
-  type: "object",
-  required: ["verdict", "steelman", "tradeoffTension", "principleViolations"],
-  properties: {
-    verdict: { type: "string", enum: ["APPROVE", "REVISION_NEEDED"] },
-    steelman: { type: "string" },
-    tradeoffTension: { type: "string" },
-    synthesis: { type: "string" },
-    principleViolations: { type: "array", items: { type: "string" } },
-    summary: { type: "string" },
-  },
-};
-const CRITIC_SCHEMA = {
-  type: "object",
-  required: ["verdict", "findings", "summary"],
-  properties: {
-    verdict: { type: "string", enum: ["APPROVE", "ITERATE", "REJECT"] },
-    findings: { type: "array" },
-    summary: { type: "string" },
-    preMortemStatus: { type: "string" },
-    testPlanStatus: { type: "string" },
-  },
-};
-
-const idea = String(workflowArgs.idea || "");
-const interactive = workflowArgs.interactive !== false;
-const gateEnabled = workflowArgs.gate !== false;
-const mode = isDeliberate(idea, workflowArgs) ? "DELIBERATE" : "SHORT";
-const maxRounds = clampRounds(workflowArgs.maxIterations);
-const ignoredExecuteOnConsensus = Object.prototype.hasOwnProperty.call(
-  workflowArgs,
-  "executeOnConsensus",
-);
-
 function pendingFields() {
   return {
     pending_approval: true,
     execution_halted: true,
     statusLine:
-      "Status: pending approval — workflow is read-only and halted before execution",
+      "Status: pending approval — verified planning artifacts are not execution consent",
     awaitingApproval: {
       draftReview: true,
       finalApproval: true,
@@ -309,81 +157,242 @@ function pendingFields() {
   };
 }
 
-function emitCheckpoint(message) {
-  if (interactive) log("[pending approval] " + message);
-}
-
-function emptyResult(status, extra) {
+function pathSet(artifactsDir, planName, round) {
+  const drafts = artifactsDir + "/drafts";
   return {
-    status,
-    consensus: false,
-    algorithm: "ralplan-occ-v1",
-    mode,
-    iterations: 0,
-    capped: false,
-    gate: {
-      enabled: gateEnabled,
-      triggered: false,
-      reason: "gate bypassed or passed",
-    },
-    interactive: { enabled: interactive, markersEmitted: interactive },
-    ...pendingFields(),
-    ...(ignoredExecuteOnConsensus ? { executeOnConsensusIgnored: true } : {}),
-    ...extra,
+    draft: drafts + "/" + planName + "_draft-r" + round + ".md",
+    architect: drafts + "/architect_review-r" + round + ".md",
+    critic: drafts + "/critic_review-r" + round + ".md",
+    final: artifactsDir + "/" + planName + ".md",
   };
 }
 
-phase("Gate");
-if (!idea.trim()) {
-  log("no idea provided; planning cannot proceed");
-  return emptyResult("no_idea", {
-    gate: {
-      enabled: gateEnabled,
-      triggered: false,
-      reason: "idea is required",
+function requiredHeadings(mode, requirementsTraceability) {
+  const headings = REQUIRED_PLAN_HEADINGS.slice();
+  if (mode === "DELIBERATE") {
+    headings.push("Pre-Mortem", "Expanded Test Plan");
+  }
+  if (requirementsTraceability) headings.push("Requirement Coverage Map");
+  return headings;
+}
+
+function analystPrompt(idea) {
+  return `You are an advisory requirements Analyst, not a consensus approver.
+Atomize the request below into stable requirement IDs. Do not plan, review, edit
+source, or authorize execution.
+
+REQUEST:
+${idea}
+
+Return only structured JSON with requirements [{id,text}] and openQuestions.`;
+}
+
+function plannerPrompt(input) {
+  const prior = input.feedback.length
+    ? "\n\nPRIOR COMPLETE ROUND FEEDBACK:\n" +
+      JSON.stringify(input.feedback, null, 2)
+    : "";
+  const requirements = input.requirements
+    ? "\n\nADVISORY REQUIREMENTS (not approvals):\n" +
+      JSON.stringify(input.requirements, null, 2) +
+      "\nInclude a Requirement Coverage Map with COVERED, PARTIAL, UNCOVERED, or SCOPED_OUT and rationale."
+    : "";
+  const deliberate =
+    input.mode === "DELIBERATE"
+      ? "\nDELIBERATE mode requires exactly 3 actionable pre-mortem scenarios and concrete Unit, Integration, E2E, and Observability test coverage."
+      : "";
+  return `You are the isolated Planner. Create a bounded Markdown plan artifact;
+do not implement, edit source, execute, commit, push, or self-approve.
+
+REQUEST: ${input.idea}
+MODE: ${input.mode}
+ROUND: ${input.round} of ${input.maxRounds}
+WRITE EXACTLY: ${input.path}
+
+The immutable draft must include RALPLAN-DR, an Architecture Decision Record,
+3-6 tasks with exact paths and acceptance criteria, a dependency graph, risks,
+and open questions.${requirements}${deliberate}${prior}
+
+Do not overwrite an earlier round. Return only {verdict:"DRAFT_READY",path,round,summary}.`;
+}
+
+function verifierPrompt(input) {
+  return `You are a read-only artifact verifier. Do not write or modify anything.
+Inspect the exact claimed Markdown artifact with file/stat/hash tools.
+
+EXPECTED PATH: ${input.path}
+EXPECTED KIND: ${input.kind}
+EXPECTED ROUND: ${input.round}
+MAX BYTES: ${MAX_ARTIFACT_BYTES}
+REQUIRED HEADINGS: ${JSON.stringify(input.headings)}
+${input.sourceDigest ? "REQUIRED SOURCE DRAFT SHA-256: " + input.sourceDigest : ""}
+
+Reject missing/non-regular files, symbolic links, paths that differ from
+EXPECTED PATH, wrong round/kind, empty or oversized files, missing required
+headings, malformed Markdown structure, or source-digest mismatch. Compute SHA-256 from file bytes.
+Return only {valid,path,round,kind,sizeBytes,sha256,headings,issues}.`;
+}
+
+function architectPrompt(input) {
+  return `You are the isolated read-only Architect. Review only the immutable
+Planner draft below. Do not read a Critic review or edit source.
+
+DRAFT PATH: ${input.draftPath}
+EXPECTED DRAFT SHA-256: ${input.draftDigest}
+WRITE REVIEW EXACTLY: ${input.reviewPath}
+ROUND: ${input.round}
+MODE: ${input.mode}
+
+Read the draft, recompute its digest, inspect referenced source read-only, then
+write bounded Markdown review evidence. Return explicit APPROVE or
+REVISION_NEEDED plus steelman, tradeoff tension, principle violations, the
+recomputed draftDigest, and reviewPath. Never infer approval from empty issues.`;
+}
+
+function criticPrompt(input) {
+  const requirements = input.requirementsTraceability
+    ? " Verify requirements coverage and reject unexplained PARTIAL, UNCOVERED, or SCOPED_OUT entries."
+    : "";
+  return `You are the isolated read-only Critic. Independently review only the
+same immutable Planner draft. You receive neither Architect output nor its path.
+
+DRAFT PATH: ${input.draftPath}
+EXPECTED DRAFT SHA-256: ${input.draftDigest}
+WRITE REVIEW EXACTLY: ${input.reviewPath}
+ROUND: ${input.round}
+MODE: ${input.mode}
+
+Recompute the draft digest, run gap/feasibility/risk/verification checks, and
+write bounded Markdown review evidence.${requirements} Return explicit APPROVE,
+ITERATE, or REJECT with findings, draftDigest, reviewPath, and summary.`;
+}
+
+function consolidatePrompt(input) {
+  return `You are a planning Consolidator. Both independent reviewers explicitly
+approved the verified immutable draft. Write Markdown only; never edit source or
+start execution.
+
+DRAFT: ${input.draftPath}
+DRAFT SHA-256: ${input.draftDigest}
+ARCHITECT REVIEW: ${input.architectPath}
+CRITIC REVIEW: ${input.criticPath}
+WRITE FINAL EXACTLY: ${input.finalPath}
+ROUND: ${input.round}
+
+Preserve RALPLAN-DR, ADR, 3-6 tasks with exact paths, dependency graph,
+acceptance criteria, risk register, requirements coverage when present, and
+DELIBERATE sections when present. Return only
+{verdict:"CONSOLIDATED",path,sourceDraftDigest,summary}.`;
+}
+
+const ANALYST_SCHEMA = {
+  type: "object",
+  required: ["requirements", "openQuestions"],
+  properties: {
+    requirements: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["id", "text"],
+        properties: { id: { type: "string" }, text: { type: "string" } },
+      },
     },
-  });
-}
-const gateResult = gateEnabled
-  ? checkGate(idea)
-  : { gated: false, reason: "gate disabled by caller" };
-if (gateResult.gated) {
-  emitCheckpoint(
-    "gate requires explicit planning invocation: " + gateResult.reason,
+    openQuestions: { type: "array", items: { type: "string" } },
+  },
+};
+const PLANNER_SCHEMA = {
+  type: "object",
+  required: ["verdict", "path", "round", "summary"],
+  properties: {
+    verdict: { type: "string", enum: ["DRAFT_READY"] },
+    path: { type: "string" },
+    round: { type: "integer" },
+    summary: { type: "string" },
+  },
+};
+const VERIFIER_SCHEMA = {
+  type: "object",
+  required: [
+    "valid",
+    "path",
+    "round",
+    "kind",
+    "sizeBytes",
+    "sha256",
+    "headings",
+    "issues",
+  ],
+  properties: {
+    valid: { type: "boolean" },
+    path: { type: "string" },
+    round: { type: "integer" },
+    kind: { type: "string" },
+    sizeBytes: { type: "integer" },
+    sha256: { type: "string" },
+    headings: { type: "array", items: { type: "string" } },
+    issues: { type: "array", items: { type: "string" } },
+  },
+};
+const ARCHITECT_SCHEMA = {
+  type: "object",
+  required: [
+    "verdict",
+    "draftDigest",
+    "reviewPath",
+    "steelman",
+    "tradeoffTension",
+    "principleViolations",
+    "summary",
+  ],
+  properties: {
+    verdict: { type: "string", enum: ["APPROVE", "REVISION_NEEDED"] },
+    draftDigest: { type: "string" },
+    reviewPath: { type: "string" },
+    steelman: { type: "string" },
+    tradeoffTension: { type: "string" },
+    principleViolations: { type: "array", items: { type: "string" } },
+    summary: { type: "string" },
+  },
+};
+const CRITIC_SCHEMA = {
+  type: "object",
+  required: ["verdict", "draftDigest", "reviewPath", "findings", "summary"],
+  properties: {
+    verdict: { type: "string", enum: ["APPROVE", "ITERATE", "REJECT"] },
+    draftDigest: { type: "string" },
+    reviewPath: { type: "string" },
+    findings: { type: "array" },
+    summary: { type: "string" },
+  },
+};
+const CONSOLIDATE_SCHEMA = {
+  type: "object",
+  required: ["verdict", "path", "sourceDraftDigest", "summary"],
+  properties: {
+    verdict: { type: "string", enum: ["CONSOLIDATED"] },
+    path: { type: "string" },
+    sourceDraftDigest: { type: "string" },
+    summary: { type: "string" },
+  },
+};
+
+function artifactValid(report, expected) {
+  return Boolean(
+    report &&
+    report.valid === true &&
+    report.path === expected.path &&
+    report.round === expected.round &&
+    report.kind === expected.kind &&
+    Number.isInteger(report.sizeBytes) &&
+    report.sizeBytes > 0 &&
+    report.sizeBytes <= MAX_ARTIFACT_BYTES &&
+    typeof report.sha256 === "string" &&
+    report.sha256.length > 0 &&
+    Array.isArray(report.issues) &&
+    report.issues.length === 0 &&
+    expected.headings.every((heading) => report.headings.includes(heading)),
   );
-  return emptyResult("gated", {
-    gated: true,
-    redirect: "ralplan",
-    gate: { enabled: true, triggered: true, reason: gateResult.reason },
-    mode: "SHORT",
-    interactive: { enabled: interactive, markersEmitted: interactive },
-    statusLine:
-      "Status: pending approval — gate redirected to explicit RALPLAN invocation",
-  });
 }
-
-phase("Ralplan consensus");
-if (interactive) {
-  emitCheckpoint("draft review checkpoint is non-blocking in the workflow VM");
-  emitCheckpoint("final approval and execution routing belong to the host");
-}
-log(
-  "mode=" +
-    mode +
-    "; maxRounds=" +
-    maxRounds +
-    "; gate=" +
-    (gateEnabled ? "enabled" : "disabled"),
-);
-
-const feedback = [];
-let lastDraft = null;
-let lastArchitect = null;
-let lastCritic = null;
-let lastRoundReached = 0;
-let consensusReached = false;
-let deliberateResult = { valid: mode !== "DELIBERATE", issues: [] };
-let plannerError = null;
 
 async function callAgent(prompt, options) {
   try {
@@ -395,37 +404,162 @@ async function callAgent(prompt, options) {
   }
 }
 
+const workflowArgs = parseWorkflowArgs(args);
+const idea = String(workflowArgs.idea || "");
+const interactive = workflowArgs.interactive !== false;
+const gateEnabled = workflowArgs.gate !== false;
+const mode = isDeliberate(idea, workflowArgs) ? "DELIBERATE" : "SHORT";
+const maxRounds = clampRounds(workflowArgs.maxIterations);
+const artifactsDir = safeArtifactsDir(workflowArgs.artifactsDir);
+const planName = safePlanName(workflowArgs.planName);
+const requirementsTraceability = workflowArgs.requirementsTraceability === true;
+const ignoredExecuteOnConsensus = Object.prototype.hasOwnProperty.call(
+  workflowArgs,
+  "executeOnConsensus",
+);
+
+function terminal(status, extra) {
+  return {
+    status,
+    consensus: false,
+    mode,
+    iterations: 0,
+    capped: false,
+    artifactPaths: {
+      plan: pathSet(artifactsDir, planName, 1).final,
+      drafts: [],
+      architectReviews: [],
+      criticReviews: [],
+    },
+    interactive: {
+      enabled: interactive,
+      markersEmitted: interactive,
+      blocking: false,
+    },
+    ...pendingFields(),
+    ...(ignoredExecuteOnConsensus ? { executeOnConsensusIgnored: true } : {}),
+    ...extra,
+  };
+}
+
+phase("Gate");
+if (!idea.trim()) return terminal("no_idea", {});
+const gateResult = gateEnabled
+  ? checkGate(idea)
+  : { gated: false, reason: "gate disabled by caller" };
+if (gateResult.gated) {
+  if (interactive)
+    log("[pending approval] explicit RALPLAN invocation required");
+  return terminal("gated", {
+    gated: true,
+    redirect: "ralplan",
+    gate: { enabled: true, triggered: true, reason: gateResult.reason },
+  });
+}
+
+let analyst = null;
+if (requirementsTraceability) {
+  phase("Requirements");
+  analyst = await callAgent(analystPrompt(idea), {
+    schema: ANALYST_SCHEMA,
+    label: "analyst",
+    phase: "Requirements",
+  });
+  if (!analyst) {
+    return terminal("requirements_analysis_failed", {
+      gate: {
+        enabled: gateEnabled,
+        triggered: false,
+        reason: gateResult.reason,
+      },
+    });
+  }
+}
+
+if (interactive) {
+  log("[pending approval] markers are non-blocking; host approval is required");
+}
+
+const feedback = [];
+const drafts = [];
+const architectReviews = [];
+const criticReviews = [];
+let lastDraft = null;
+let lastDraftVerification = null;
+let lastArchitect = null;
+let lastCritic = null;
+let lastRound = 0;
+let reviewConsensus = false;
+let artifactFailure = null;
+const artifactFailures = [];
+
 for (let round = 1; round <= maxRounds; round++) {
-  lastRoundReached = round;
+  lastRound = round;
+  artifactFailure = null;
+  const paths = pathSet(artifactsDir, planName, round);
+
   phase("Round " + round + " - Planner");
-  const plannerOut = await callAgent(
-    buildPlannerPrompt(idea, mode, feedback, round, maxRounds),
+  const planner = await callAgent(
+    plannerPrompt({
+      idea,
+      mode,
+      feedback,
+      round,
+      maxRounds,
+      path: paths.draft,
+      requirements: analyst,
+    }),
     {
       schema: PLANNER_SCHEMA,
-      phase: "Round " + round + " - Planner",
       label: "planner",
+      phase: "Round " + round + " - Planner",
     },
   );
-  const snapshot = plannerSnapshot(plannerOut);
-  if (!snapshot) {
-    plannerError =
-      "Planner returned no schema-valid snapshot on round " + round;
+  lastDraft = planner;
+
+  phase("Round " + round + " - Verify draft");
+  const draftExpected = {
+    path: paths.draft,
+    round,
+    kind: "draft",
+    headings: requiredHeadings(mode, requirementsTraceability),
+  };
+  const draftVerification = await callAgent(verifierPrompt(draftExpected), {
+    schema: VERIFIER_SCHEMA,
+    label: "verify-draft",
+    phase: "Round " + round + " - Verify draft",
+  });
+  lastDraftVerification = draftVerification;
+  if (
+    !planner ||
+    planner.path !== paths.draft ||
+    planner.round !== round ||
+    !artifactValid(draftVerification, draftExpected)
+  ) {
+    artifactFailure = {
+      stage: "draft",
+      round,
+      expectedPath: paths.draft,
+      claimedPath: planner && planner.path,
+      verification: draftVerification,
+    };
+    artifactFailures.push(artifactFailure);
     feedback.push({
       round,
-      role: "planner",
-      verdict: "MISSING",
-      summary: plannerError,
+      role: "artifact-verifier",
+      verdict: "INVALID",
+      summary: "Draft artifact validation failed",
+      issues: (draftVerification && draftVerification.issues) || [],
     });
     continue;
   }
-  lastDraft = snapshot;
-  deliberateResult = deliberateValidation(snapshot, mode);
+  drafts.push(paths.draft);
 
   phase("Round " + round + " - Architect");
   const architectOptions = {
     schema: ARCHITECT_SCHEMA,
-    phase: "Round " + round + " - Architect",
     label: "architect",
+    phase: "Round " + round + " - Architect",
   };
   if (
     typeof workflowArgs.architectModel === "string" &&
@@ -433,35 +567,23 @@ for (let round = 1; round <= maxRounds; round++) {
   ) {
     architectOptions.model = workflowArgs.architectModel;
   }
-  const immutableSnapshot = freezeDeep(clone(snapshot));
-  const architectOut = await callAgent(
-    buildArchitectPrompt(immutableSnapshot, mode),
+  const architect = await callAgent(
+    architectPrompt({
+      draftPath: paths.draft,
+      draftDigest: draftVerification.sha256,
+      reviewPath: paths.architect,
+      round,
+      mode,
+    }),
     architectOptions,
   );
-  lastArchitect = architectOut;
-  const architectApproval = Boolean(
-    architectOut && architectOut.verdict === "APPROVE",
-  );
-  const architectFeedback = architectOut
-    ? {
-        round,
-        role: "architect",
-        verdict: architectOut.verdict,
-        summary: architectOut.summary || "",
-        issues: architectOut.principleViolations || [],
-      }
-    : {
-        round,
-        role: "architect",
-        verdict: "MISSING",
-        summary: "Architect returned no schema-valid result",
-      };
+  lastArchitect = architect;
 
   phase("Round " + round + " - Critic");
   const criticOptions = {
     schema: CRITIC_SCHEMA,
-    phase: "Round " + round + " - Critic",
     label: "critic",
+    phase: "Round " + round + " - Critic",
   };
   if (
     typeof workflowArgs.criticModel === "string" &&
@@ -469,85 +591,214 @@ for (let round = 1; round <= maxRounds; round++) {
   ) {
     criticOptions.model = workflowArgs.criticModel;
   }
-  // Deliberately pass only the immutable Planner snapshot. Architect output is
-  // recorded for the next Planner, never used as Critic input.
-  const criticOut = await callAgent(
-    buildCriticPrompt(immutableSnapshot, mode),
+  const critic = await callAgent(
+    criticPrompt({
+      draftPath: paths.draft,
+      draftDigest: draftVerification.sha256,
+      reviewPath: paths.critic,
+      round,
+      mode,
+      requirementsTraceability,
+    }),
     criticOptions,
   );
-  lastCritic = criticOut;
-  const criticApproval = Boolean(criticOut && criticOut.verdict === "APPROVE");
-  const criticFeedback = criticOut
-    ? {
-        round,
-        role: "critic",
-        verdict: criticOut.verdict,
-        summary: criticOut.summary || "",
-        findings: criticOut.findings || [],
-      }
-    : {
-        round,
-        role: "critic",
-        verdict: "MISSING",
-        summary: "Critic returned no schema-valid result",
-      };
+  lastCritic = critic;
 
-  if (architectApproval && criticApproval && deliberateResult.valid) {
-    consensusReached = true;
-    log("explicit Architect and Critic approval reached on round " + round);
+  phase("Round " + round + " - Verify reviews");
+  const architectExpected = {
+    path: paths.architect,
+    round,
+    kind: "architect-review",
+    headings: [],
+  };
+  const architectVerification = await callAgent(
+    verifierPrompt({
+      ...architectExpected,
+      sourceDigest: draftVerification.sha256,
+    }),
+    {
+      schema: VERIFIER_SCHEMA,
+      label: "verify-architect",
+      phase: "Round " + round + " - Verify reviews",
+    },
+  );
+  const criticExpected = {
+    path: paths.critic,
+    round,
+    kind: "critic-review",
+    headings: [],
+  };
+  const criticVerification = await callAgent(
+    verifierPrompt({
+      ...criticExpected,
+      sourceDigest: draftVerification.sha256,
+    }),
+    {
+      schema: VERIFIER_SCHEMA,
+      label: "verify-critic",
+      phase: "Round " + round + " - Verify reviews",
+    },
+  );
+
+  if (
+    !architect ||
+    !critic ||
+    architect.reviewPath !== paths.architect ||
+    critic.reviewPath !== paths.critic ||
+    architect.draftDigest !== draftVerification.sha256 ||
+    critic.draftDigest !== draftVerification.sha256 ||
+    !artifactValid(architectVerification, architectExpected) ||
+    !artifactValid(criticVerification, criticExpected)
+  ) {
+    artifactFailure = {
+      stage: "reviews",
+      round,
+      architectVerification,
+      criticVerification,
+    };
+    artifactFailures.push(artifactFailure);
+    feedback.push(
+      {
+        round,
+        role: "architect",
+        verdict: architect ? architect.verdict : "MISSING",
+        summary: architect ? architect.summary : "Architect output missing",
+      },
+      {
+        round,
+        role: "critic",
+        verdict: critic ? critic.verdict : "MISSING",
+        summary: critic ? critic.summary : "Critic output missing",
+      },
+    );
+    continue;
+  }
+  architectReviews.push(paths.architect);
+  criticReviews.push(paths.critic);
+
+  if (architect.verdict === "APPROVE" && critic.verdict === "APPROVE") {
+    reviewConsensus = true;
     break;
   }
-  feedback.push(architectFeedback, criticFeedback);
-  if (round < maxRounds)
-    log("non-approval; starting complete Planner → Architect → Critic round");
+  feedback.push(
+    {
+      round,
+      role: "architect",
+      verdict: architect.verdict,
+      summary: architect.summary,
+      issues: architect.principleViolations,
+    },
+    {
+      round,
+      role: "critic",
+      verdict: critic.verdict,
+      summary: critic.summary,
+      findings: critic.findings,
+    },
+  );
 }
 
-const capped = !consensusReached && lastRoundReached >= maxRounds;
-const status = consensusReached
-  ? "consensus"
-  : lastDraft
-    ? "no_consensus"
-    : "no_planner_output";
-const result = {
-  status,
-  consensus: consensusReached,
-  algorithm: "ralplan-occ-v1",
+const artifactPaths = {
+  plan: pathSet(artifactsDir, planName, Math.max(lastRound, 1)).final,
+  drafts,
+  architectReviews,
+  criticReviews,
+};
+if (artifactFailure) {
+  return terminal("artifact_validation_failed", {
+    iterations: lastRound,
+    capped: lastRound >= maxRounds,
+    artifactPaths,
+    artifactFailure,
+    artifactFailures,
+    gate: { enabled: gateEnabled, triggered: false, reason: gateResult.reason },
+  });
+}
+if (!reviewConsensus || !lastDraft || !lastDraftVerification) {
+  return terminal("no_consensus", {
+    iterations: lastRound,
+    capped: lastRound >= maxRounds,
+    artifactPaths,
+    draft: lastDraft,
+    architect: lastArchitect || { verdict: "MISSING" },
+    critic: lastCritic || { verdict: "MISSING" },
+    cappedReason:
+      lastRound >= maxRounds
+        ? "five-round safety cap reached; manual review required and execution unavailable"
+        : undefined,
+    gate: { enabled: gateEnabled, triggered: false, reason: gateResult.reason },
+  });
+}
+
+phase("Consolidate");
+const finalPath = artifactPaths.plan;
+const consolidated = await callAgent(
+  consolidatePrompt({
+    draftPath: lastDraft.path,
+    draftDigest: lastDraftVerification.sha256,
+    architectPath: lastArchitect.reviewPath,
+    criticPath: lastCritic.reviewPath,
+    finalPath,
+    round: lastRound,
+  }),
+  {
+    schema: CONSOLIDATE_SCHEMA,
+    label: "consolidate",
+    phase: "Consolidate",
+  },
+);
+
+phase("Verify final plan");
+const finalExpected = {
+  path: finalPath,
+  round: lastRound,
+  kind: "final-plan",
+  headings: requiredHeadings(mode, requirementsTraceability),
+  sourceDigest: lastDraftVerification.sha256,
+};
+const finalVerification = await callAgent(verifierPrompt(finalExpected), {
+  schema: VERIFIER_SCHEMA,
+  label: "verify-final",
+  phase: "Verify final plan",
+});
+if (
+  !consolidated ||
+  consolidated.path !== finalPath ||
+  consolidated.sourceDraftDigest !== lastDraftVerification.sha256 ||
+  !artifactValid(finalVerification, finalExpected)
+) {
+  return terminal("artifact_validation_failed", {
+    iterations: lastRound,
+    artifactPaths,
+    artifactFailure: {
+      stage: "final",
+      round: lastRound,
+      verification: finalVerification,
+    },
+    gate: { enabled: gateEnabled, triggered: false, reason: gateResult.reason },
+  });
+}
+
+return {
+  status: "pending_approval",
+  consensus: true,
   mode,
-  iterations: lastRoundReached,
-  capped,
+  iterations: lastRound,
+  capped: false,
+  draft: lastDraft,
+  architect: lastArchitect,
+  critic: lastCritic,
+  analyst,
+  artifactPaths,
+  planDigest: finalVerification.sha256,
+  sourceDraftDigest: lastDraftVerification.sha256,
+  artifactVerification: finalVerification,
   gate: { enabled: gateEnabled, triggered: false, reason: gateResult.reason },
-  interactive: { enabled: interactive, markersEmitted: interactive },
-  draft: lastDraft || {},
-  architect: lastArchitect || { verdict: "MISSING", principleViolations: [] },
-  critic: lastCritic || { verdict: "MISSING", findings: [] },
-  deliberate: deliberateResult,
-  artifactPaths: {
-    plan:
-      (workflowArgs.artifactsDir || ".omc/plans") +
-      "/" +
-      (workflowArgs.planName || "ralplan") +
-      ".md",
-    drafts: [],
+  interactive: {
+    enabled: interactive,
+    markersEmitted: interactive,
+    blocking: false,
   },
   ...pendingFields(),
   ...(ignoredExecuteOnConsensus ? { executeOnConsensusIgnored: true } : {}),
-  fidelityGaps: {
-    interactiveCheckpointsUnsupported: true,
-    hostApprovalRequired: true,
-    note: "interactive markers are non-blocking; the workflow VM cannot suspend for user input or invoke execution skills",
-  },
 };
-if (plannerError) result.plannerError = plannerError;
-if (!consensusReached) {
-  result.lastVerdict = {
-    architect:
-      lastArchitect && lastArchitect.verdict
-        ? lastArchitect.verdict
-        : "MISSING",
-    critic: lastCritic && lastCritic.verdict ? lastCritic.verdict : "MISSING",
-  };
-  if (capped)
-    result.cappedReason =
-      "five-round safety cap reached; manual review required and execution unavailable";
-}
-return result;

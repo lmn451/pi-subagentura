@@ -285,6 +285,11 @@ describe("published tarball", () => {
         "examples/workflows/ralplan-occ.mjs",
         "examples/workflows/skill-to-workflow.mjs",
         "skills/ralplan/SKILL.md",
+        "skills/ralplan/README.md",
+        "skills/ralplan/package.json",
+        "skills/ralplan/prompts/planner.md",
+        "skills/ralplan/prompts/architect.md",
+        "skills/ralplan/prompts/critic.md",
       ]),
     );
   });
