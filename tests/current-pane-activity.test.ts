@@ -76,6 +76,25 @@ describe("current pane activity", () => {
     });
   });
 
+  it("returns unknown when the tmux activity probe fails", async () => {
+    process.env.TMUX = "/tmp/tmux.sock,123,0";
+    process.env.TMUX_PANE = "%42";
+    installMockChildProcess((args) => {
+      if (args[0] === "display-message") throw new Error("tmux unavailable");
+      return "";
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
+      mux: "tmux",
+      paneId: "%42",
+    });
+  });
+
   it("reports zellij activity for the current session and pane", async () => {
     process.env.ZELLIJ = "0";
     process.env.ZELLIJ_SESSION_NAME = "main";
@@ -148,6 +167,31 @@ describe("current pane activity", () => {
 
     await expect(getCurrentPaneActivity()).resolves.toMatchObject({
       status: "inactive",
+      mux: "zellij",
+      paneId: "42",
+      session: "main",
+    });
+  });
+
+  it("returns unknown when the zellij activity payload is malformed", async () => {
+    process.env.ZELLIJ = "0";
+    process.env.ZELLIJ_SESSION_NAME = "main";
+    process.env.ZELLIJ_PANE_ID = "42";
+    installMockChildProcess((args) => {
+      if (args.includes("list-clients")) {
+        return "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\nclient-1 42 pi\n";
+      }
+      if (args.includes("list-tabs")) return "not-json";
+      if (args.includes("list-panes")) return "[]";
+      return "";
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
       mux: "zellij",
       paneId: "42",
       session: "main",
