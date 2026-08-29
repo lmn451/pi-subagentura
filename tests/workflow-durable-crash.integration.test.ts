@@ -8,7 +8,7 @@ import {
   clearExecutionBindingsForTests,
   createExecutionPreview,
   getExecutionRecord,
-  interruptExecutionsForOwner,
+  recoverColdExecutionRecords,
   resolveUnknownExecutionOperation,
   resumeExecutionRecord,
   startExecutionRecord,
@@ -102,12 +102,11 @@ describe("durable crash-prefix recovery", () => {
       owner: { id: 4, generation: 1 },
     })!;
 
-    interruptExecutionsForOwner({
-      cwd,
-      owner: { id: 4, generation: 1 },
-      lifecycleReason: "quit",
-    });
     clearExecutionBindingsForTests();
+    recoverColdExecutionRecords({
+      cwd,
+      parentSessionId: "session-a",
+    });
     const cold = getExecutionRecord(cwd, preview.executionId)!;
     expect(cold.taskStates[0]).toMatchObject({
       status: "unknown",

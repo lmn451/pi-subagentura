@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -270,6 +277,19 @@ describe("durable declarative execution store", () => {
       }),
     ).toThrow(/unknown/i);
 
+    expect(() =>
+      resolveUnknownExecutionOperation({
+        cwd,
+        executionId: preview.executionId,
+        expectedRevision: interrupted.revision,
+        operationId: operation.operationId,
+        parentSessionId: "session-a",
+        owner: { id: 2, generation: 1 },
+        resolution: "retry",
+        evidence: "wrong owner",
+      }),
+    ).toThrow(/owner identity/i);
+
     const resolved = resolveUnknownExecutionOperation({
       cwd,
       executionId: preview.executionId,
@@ -373,5 +393,49 @@ describe("durable declarative execution store", () => {
         ],
       }),
     ).toThrow(/too large/i);
+  });
+
+  it("rejects a symlinked project .pi directory", () => {
+    const cwd = root();
+    const outside = root();
+    symlinkSync(outside, join(cwd, ".pi"));
+
+    expect(() =>
+      createExecutionPreview({
+        cwd,
+        ralplan: approvedPlan(cwd),
+        owner: { id: 1, generation: 1 },
+        parentSessionId: "session-a",
+        planDigest: "plan-digest",
+        tasks: tasks(),
+      }),
+    ).toThrow(/real directory/i);
+  });
+
+  it("serializes mutations with a per-record lock", () => {
+    const cwd = root();
+    const preview = createExecutionPreview({
+      cwd,
+      ralplan: approvedPlan(cwd),
+      owner: { id: 1, generation: 1 },
+      parentSessionId: "session-a",
+      planDigest: "plan-digest",
+      tasks: tasks(),
+    });
+    writeFileSync(`${runStorePath(cwd, preview.executionId)}.lock`, "held", {
+      mode: 0o600,
+    });
+
+    expect(() =>
+      approveExecutionPreview({
+        cwd,
+        executionId: preview.executionId,
+        expectedRevision: preview.revision,
+        planDigest: "plan-digest",
+        owner: { id: 1, generation: 1 },
+        parentSessionId: "session-a",
+      }),
+    ).toThrow(/locked/i);
+    expect(getExecutionRecord(cwd, preview.executionId)?.revision).toBe(1);
   });
 });

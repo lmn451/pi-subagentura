@@ -186,4 +186,92 @@ describe("RALPLAN durable execution tools", () => {
     expect(preview.isError).toBe(true);
     expect(runTask).not.toHaveBeenCalled();
   });
+
+  it("reports stale start fencing as an error instead of a false start", async () => {
+    const cwd = root();
+    const plan = approvedPlan(cwd);
+    const { tools, runTask } = setup(cwd);
+    const preview = await tools.preview_ralplan_execution.execute("preview", {
+      runId: plan.runId,
+      planDigest: "plan-digest",
+      tasks,
+    });
+    await tools.approve_ralplan_execution.execute("approve", {
+      executionId: preview.details.executionId,
+      expectedRevision: preview.details.revision,
+      planDigest: "plan-digest",
+    });
+
+    const started = await tools.run_ralplan_execution.execute(
+      "run",
+      {
+        executionId: preview.details.executionId,
+        expectedRevision: preview.details.revision,
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    expect(started.isError).toBe(true);
+    expect(executionJobsForTests().has(preview.details.executionId)).toBe(
+      false,
+    );
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it("does not abort live work for a stale cancellation revision", async () => {
+    const cwd = root();
+    const plan = approvedPlan(cwd);
+    const runTask = vi.fn(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            { once: true },
+          );
+        }),
+    );
+    const { tools } = setup(cwd, runTask);
+    const preview = await tools.preview_ralplan_execution.execute("preview", {
+      runId: plan.runId,
+      planDigest: "plan-digest",
+      tasks,
+    });
+    const approved = await tools.approve_ralplan_execution.execute("approve", {
+      executionId: preview.details.executionId,
+      expectedRevision: preview.details.revision,
+      planDigest: "plan-digest",
+    });
+    await tools.run_ralplan_execution.execute(
+      "run",
+      {
+        executionId: preview.details.executionId,
+        expectedRevision: approved.details.revision,
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    const live = executionJobsForTests().get(preview.details.executionId)!;
+    const stale = await tools.cancel_ralplan_execution.execute("cancel", {
+      executionId: preview.details.executionId,
+      expectedRevision: approved.details.revision,
+      reason: "stale",
+    });
+
+    expect(stale.isError).toBe(true);
+    expect(live.abort.signal.aborted).toBe(false);
+    const status = await tools.get_ralplan_execution_status.execute("status", {
+      executionId: preview.details.executionId,
+    });
+    const currentRevision = status.details.records[0].revision;
+    const cancelled = await tools.cancel_ralplan_execution.execute("cancel", {
+      executionId: preview.details.executionId,
+      expectedRevision: currentRevision,
+      reason: "operator cancel",
+    });
+    expect(cancelled.details.status).toBe("cancelled");
+    expect(live.abort.signal.aborted).toBe(true);
+  });
 });

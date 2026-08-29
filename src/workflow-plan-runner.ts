@@ -32,7 +32,7 @@ export function digestExecutionOutput(output: string): string {
   return createHash("sha256").update(output).digest("hex");
 }
 
-export async function runDurableExecution(input: {
+export interface DurableExecutionInput {
   cwd: string;
   executionId: string;
   expectedRevision: number;
@@ -40,14 +40,26 @@ export async function runDurableExecution(input: {
   parentSessionId?: string;
   runTask: ExecutionTaskRunner;
   signal?: AbortSignal;
-}): Promise<DurableExecutionRecord> {
-  let current = startExecutionRecord({
+}
+
+export function runDurableExecution(
+  input: DurableExecutionInput,
+): Promise<DurableExecutionRecord> {
+  const started = startExecutionRecord({
     cwd: input.cwd,
     executionId: input.executionId,
     expectedRevision: input.expectedRevision,
     owner: input.owner,
     parentSessionId: input.parentSessionId,
   });
+  return runStartedExecution(input, started);
+}
+
+async function runStartedExecution(
+  input: DurableExecutionInput,
+  started: DurableExecutionRecord,
+): Promise<DurableExecutionRecord> {
+  let current = started;
   const leaseEpoch = current.lease!.epoch;
 
   while (true) {

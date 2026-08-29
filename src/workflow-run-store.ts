@@ -1,8 +1,10 @@
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -103,6 +105,67 @@ function canonicalCwd(cwd: string): string {
 
 function executionDirectory(cwd: string): string {
   return join(canonicalCwd(cwd), ".pi", "ralplan-executions");
+}
+
+function ensureExecutionDirectory(
+  cwd: string,
+  create: boolean,
+): string | undefined {
+  const project = canonicalCwd(cwd);
+  const piDirectory = join(project, ".pi");
+  if (!existsSync(piDirectory)) {
+    if (!create) return undefined;
+    mkdirSync(piDirectory, { recursive: false, mode: 0o700 });
+  }
+  const piStats = lstatSync(piDirectory);
+  if (piStats.isSymbolicLink() || !piStats.isDirectory()) {
+    throw new Error("Durable execution .pi path must be a real directory");
+  }
+  const directory = join(piDirectory, "ralplan-executions");
+  if (!existsSync(directory)) {
+    if (!create) return undefined;
+    mkdirSync(directory, { recursive: false, mode: 0o700 });
+  }
+  const executionStats = lstatSync(directory);
+  if (executionStats.isSymbolicLink() || !executionStats.isDirectory()) {
+    throw new Error("Durable execution directory must be a real directory");
+  }
+  return directory;
+}
+
+function withExecutionLock<T>(
+  cwd: string,
+  executionId: string,
+  action: () => T,
+): T {
+  ensureExecutionDirectory(cwd, true);
+  const lockPath = `${runStorePath(cwd, executionId)}.lock`;
+  let descriptor: number;
+  try {
+    descriptor = openSync(lockPath, "wx", 0o600);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "EEXIST" &&
+      Date.now() - lstatSync(lockPath).mtimeMs > 30_000
+    ) {
+      unlinkSync(lockPath);
+      descriptor = openSync(lockPath, "wx", 0o600);
+    } else {
+      throw new Error("Durable execution record is locked by another writer");
+    }
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(descriptor);
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* lock cleanup is best effort after the descriptor is closed */
+    }
+  }
 }
 
 function validateExecutionId(executionId: string): void {
@@ -265,6 +328,9 @@ function validateRecord(value: unknown): DurableExecutionRecord {
 }
 
 function readRecord(cwd: string, executionId: string): DurableExecutionRecord {
+  if (!ensureExecutionDirectory(cwd, false)) {
+    throw new Error("Durable execution record not found");
+  }
   const path = runStorePath(cwd, executionId);
   if (!existsSync(path)) throw new Error("Durable execution record not found");
   if (lstatSync(path).isSymbolicLink()) {
@@ -292,12 +358,8 @@ function writeRecord(
   record: DurableExecutionRecord,
 ): DurableExecutionRecord {
   validateRecord(record);
+  ensureExecutionDirectory(cwd, true);
   const path = runStorePath(cwd, record.executionId);
-  const directory = dirname(path);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (lstatSync(directory).isSymbolicLink()) {
-    throw new Error("Durable execution directory must not be a symbolic link");
-  }
   const content = `${JSON.stringify(record)}\n`;
   if (Buffer.byteLength(content) > MAX_EXECUTION_RECORD_BYTES) {
     throw new Error("Durable execution record exceeds bounded size");
@@ -325,13 +387,15 @@ function mutateRecord(
   expectedRevision: number,
   mutate: (record: DurableExecutionRecord) => DurableExecutionRecord,
 ): DurableExecutionRecord {
-  const record = readRecord(cwd, executionId);
-  if (record.revision !== expectedRevision) {
-    throw new Error(
-      `Durable execution revision mismatch: expected ${expectedRevision}, current ${record.revision}`,
-    );
-  }
-  return writeRecord(cwd, mutate(record));
+  return withExecutionLock(cwd, executionId, () => {
+    const record = readRecord(cwd, executionId);
+    if (record.revision !== expectedRevision) {
+      throw new Error(
+        `Durable execution revision mismatch: expected ${expectedRevision}, current ${record.revision}`,
+      );
+    }
+    return writeRecord(cwd, mutate(record));
+  });
 }
 
 function requireOwnerSession(
@@ -442,11 +506,8 @@ export function listExecutionRecords(
   cwd: string,
   access: { owner?: SessionOwnerToken; parentSessionId?: string },
 ): DurableExecutionRecord[] {
-  const directory = executionDirectory(cwd);
-  if (!existsSync(directory)) return [];
-  if (lstatSync(directory).isSymbolicLink()) {
-    throw new Error("Durable execution directory must not be a symbolic link");
-  }
+  const directory = ensureExecutionDirectory(cwd, false);
+  if (!directory) return [];
   const records = readdirSync(directory)
     .filter((name) => /^rx_[a-f0-9]{20}\.json$/.test(name))
     .slice(0, 256)
@@ -758,31 +819,115 @@ export function interruptExecutionsForOwner(input: {
 }): DurableExecutionRecord[] {
   const records = listExecutionRecords(input.cwd, {});
   const changed: DurableExecutionRecord[] = [];
-  for (const record of records) {
-    if (!record.active || !exactOwner(record.owner, input.owner)) continue;
-    const taskStates = record.taskStates.map((state) =>
-      state.status === "running"
-        ? {
-            ...state,
-            status: "unknown" as const,
-            evidence: `interrupted by session ${input.lifecycleReason}`,
-          }
-        : state,
-    );
-    changed.push(
-      writeRecord(input.cwd, {
-        ...record,
-        status: "interrupted",
-        active: false,
-        lease: undefined,
-        taskStates,
-        revision: record.revision + 1,
-        updatedAt: input.now ?? Date.now(),
-        terminalReason: `session ${input.lifecycleReason}`,
-      }),
-    );
+  for (const initial of records) {
+    let current = initial;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!current.active || !exactOwner(current.owner, input.owner)) break;
+      try {
+        const updated = mutateRecord(
+          input.cwd,
+          current.executionId,
+          current.revision,
+          (record) => {
+            if (!record.active || !exactOwner(record.owner, input.owner)) {
+              return record;
+            }
+            const taskStates = record.taskStates.map((state) =>
+              state.status === "running"
+                ? {
+                    ...state,
+                    status: "unknown" as const,
+                    evidence: `interrupted by session ${input.lifecycleReason}`,
+                  }
+                : state,
+            );
+            return {
+              ...record,
+              status: "interrupted",
+              active: false,
+              lease: undefined,
+              taskStates,
+              revision: record.revision + 1,
+              updatedAt: input.now ?? Date.now(),
+              terminalReason: `session ${input.lifecycleReason}`,
+            };
+          },
+        );
+        if (updated.status === "interrupted") changed.push(updated);
+        break;
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/revision mismatch/.test(error.message)
+        ) {
+          throw error;
+        }
+        current = readRecord(input.cwd, current.executionId);
+      }
+    }
   }
   return changed;
+}
+
+export function recoverColdExecutionRecords(input: {
+  cwd: string;
+  parentSessionId?: string;
+  now?: number;
+}): DurableExecutionRecord[] {
+  const records = listExecutionRecords(input.cwd, {});
+  const recovered: DurableExecutionRecord[] = [];
+  for (const initial of records) {
+    if (!initial.active || initial.parentSessionId !== input.parentSessionId)
+      continue;
+    let current = initial;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const updated = mutateRecord(
+          input.cwd,
+          current.executionId,
+          current.revision,
+          (record) => {
+            if (
+              !record.active ||
+              record.parentSessionId !== input.parentSessionId
+            ) {
+              return record;
+            }
+            const taskStates = record.taskStates.map((state) =>
+              state.status === "running"
+                ? {
+                    ...state,
+                    status: "unknown" as const,
+                    evidence: "recovered from a cold process boundary",
+                  }
+                : state,
+            );
+            return {
+              ...record,
+              status: "interrupted",
+              active: false,
+              lease: undefined,
+              taskStates,
+              revision: record.revision + 1,
+              updatedAt: input.now ?? Date.now(),
+              terminalReason: "cold startup recovery",
+            };
+          },
+        );
+        if (updated.status === "interrupted") recovered.push(updated);
+        break;
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/revision mismatch/.test(error.message)
+        ) {
+          throw error;
+        }
+        current = readRecord(input.cwd, current.executionId);
+      }
+    }
+  }
+  return recovered;
 }
 
 export function resolveUnknownExecutionOperation(input: {
@@ -807,6 +952,9 @@ export function resolveUnknownExecutionOperation(input: {
     (record) => {
       if (record.parentSessionId !== input.parentSessionId) {
         throw new Error("Execution parent session mismatch");
+      }
+      if (record.owner.id !== input.owner.id) {
+        throw new Error("Execution owner identity mismatch");
       }
       if (record.status !== "interrupted") {
         throw new Error(
@@ -879,6 +1027,9 @@ export function resumeExecutionRecord(input: {
     (record) => {
       if (record.parentSessionId !== input.parentSessionId) {
         throw new Error("Execution parent session mismatch");
+      }
+      if (record.owner.id !== input.owner.id) {
+        throw new Error("Execution owner identity mismatch");
       }
       if (record.status !== "interrupted") {
         throw new Error("Only interrupted execution can be resumed");

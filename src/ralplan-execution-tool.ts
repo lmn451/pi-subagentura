@@ -367,11 +367,11 @@ export function registerRalplanExecutionTools(
     async execute(_id: string, params: any): Promise<any> {
       try {
         const current = context(scope);
+        const record = cancelExecutionRecord({ ...current, ...params });
         executionJobs
           .get(params.executionId)
           ?.abort.abort(new Error(params.reason));
         executionJobs.delete(params.executionId);
-        const record = cancelExecutionRecord({ ...current, ...params });
         return {
           content: [{ type: "text", text: `${summarize(record)}\nCancelled.` }],
           details: {

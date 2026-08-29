@@ -50,6 +50,7 @@ import {
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
 import { interruptRalplanRuns } from "./ralplan-state";
 import { interruptRalplanExecutionJobs } from "./ralplan-execution-tool";
+import { recoverColdExecutionRecords } from "./workflow-run-store";
 import {
   advanceSessionScopeGeneration,
   createSessionScope,
@@ -344,6 +345,14 @@ export function registerSessionHandlers(
       event.reason === "reload" ||
       event.reason === "resume";
     if (shouldRehydrate) {
+      try {
+        recoverColdExecutionRecords({
+          cwd: ctx.cwd,
+          parentSessionId: sessionId,
+        });
+      } catch (error) {
+        logSessionError("ralplan_execution_cold_recovery_failed", error);
+      }
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the
