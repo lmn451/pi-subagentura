@@ -57,6 +57,7 @@ import {
   sanitizeOutput,
 } from "../notifications";
 import { isOrchestratorV2Enabled } from "../completion-turn";
+import { completionDisplayLabel } from "../completion-presentation";
 import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
   MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
@@ -1076,12 +1077,15 @@ export function registerInteractiveSubagentTools(
       const messagePreview = formatFollowupPreview(params.message);
       const messageTruncated =
         params.message.length > MAX_FOLLOWUP_PREVIEW_CHARS;
+      const recipientLabel = isOrchestratorV2Enabled(pi)
+        ? completionDisplayLabel(state.name, "interactive sub-agent")
+        : `interactive sub-agent ${params.id}`;
       return {
         content: [
           {
             type: "text",
             text:
-              `Sent follow-up to interactive sub-agent ${params.id} (${params.message.length} chars) in pane ${state.paneId}.` +
+              `Sent follow-up to ${recipientLabel} (${params.message.length} chars) in pane ${state.paneId}.` +
               `\n\nMessage sent:\n${messagePreview}` +
               (persistenceWarning ? `\n\nWarning: ${persistenceWarning}` : ""),
           },

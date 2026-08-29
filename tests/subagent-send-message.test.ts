@@ -114,7 +114,7 @@ describe("send_interactive_subagent_message", () => {
     expect(toolDef).toBeDefined();
   });
 
-  it("sends the message to the pane and returns success details", async () => {
+  it("keeps the legacy id-based success result unchanged", async () => {
     registerState(api.sessionScope);
     mockSendCommandToPane.mockReturnValue(undefined);
 
@@ -139,8 +139,82 @@ describe("send_interactive_subagent_message", () => {
     expect(result.content[0].text).toContain(
       "Sent follow-up to interactive sub-agent abc12345def67890",
     );
+    expect(result.content[0].text).not.toContain("Test");
     expect(result.content[0].text).toContain("pane %99");
     expect(result.content[0].text).toContain("Message sent:\nnow do step 2");
+  });
+
+  it("identifies an Orchestratorv2 recipient by display name while retaining its id", async () => {
+    registerState(api.sessionScope, { name: "Release verification" });
+    mockSendCommandToPane.mockReturnValue(undefined);
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-v2", {
+      id: "abc12345def67890",
+      message: "check the tarball",
+    });
+
+    expect(result.content[0].text).toContain(
+      "Sent follow-up to Release verification (17 chars) in pane %99.",
+    );
+    expect(result.content[0].text).not.toContain("abc12345def67890");
+    expect(result.details).toMatchObject({
+      id: "abc12345def67890",
+      status: "sent",
+    });
+    expect(mockSendCommandToPane).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "abc12345def67890",
+        name: "Release verification",
+      }),
+      expect.stringMatching(
+        /^check the tarball \[MANDATORY COMPLETION PROTOCOL/,
+      ),
+    );
+  });
+
+  it("does not accept an Orchestratorv2 display name as a routing key", async () => {
+    registerState(api.sessionScope, { name: "deadbeefcafebabe" });
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-v2-name", {
+      id: "deadbeefcafebabe",
+      message: "route by name",
+    });
+
+    expect(result.details).toMatchObject({
+      id: "deadbeefcafebabe",
+      status: "not_found",
+    });
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+  });
+
+  it("uses a safe bounded Orchestratorv2 fallback and display label", async () => {
+    const state = registerState(api.sessionScope, {
+      name: undefined as unknown as string,
+    });
+    mockSendCommandToPane.mockReturnValue(undefined);
+    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+
+    const fallbackResult = await toolDef.execute("call-v2-fallback", {
+      id: state.id,
+      message: "continue",
+    });
+    expect(fallbackResult.content[0].text).toContain(
+      "Sent follow-up to interactive sub-agent (8 chars) in pane %99.",
+    );
+
+    state.name = `line one\n${"x".repeat(500)}`;
+    const boundedResult = await toolDef.execute("call-v2-bounded", {
+      id: state.id,
+      message: "continue safely",
+    });
+    const firstLine = (boundedResult.content[0].text as string).split("\n")[0];
+    expect(firstLine).toContain(`line one ${"x".repeat(151)} (15 chars)`);
+    expect(firstLine).not.toContain("x".repeat(152));
   });
 
   it("appends the mandatory done reminder to every follow-up turn", async () => {
