@@ -5,9 +5,12 @@ import {
   createTelemetrySession,
   MAX_TELEMETRY_DEDUPE_KEYS,
   resolveTelemetryMode,
+  retireTelemetrySession,
   sanitizeTelemetryModel,
   TELEMETRY_ENDPOINT,
+  telemetryDepth,
   telemetryDepthBucket,
+  telemetryDurationMs,
   telemetryDurationBucket,
 } from "../src/telemetry";
 import {
@@ -60,12 +63,13 @@ describe("anonymous product telemetry", () => {
       event: "session_started",
     });
     const agent = buildTelemetryPayload(session, {
-      event: "agent_started",
+      event: "task_started",
       execution: "in-process",
       unit: "job",
       invocation_source: "workflow",
       model: "openai/gpt-5.6-sol",
       async: true,
+      depth: 2,
       depth_bucket: "2",
       completion_policy: "each",
     });
@@ -76,8 +80,9 @@ describe("anonymous product telemetry", () => {
     expect(started.properties).toMatchObject({
       $process_person_profile: false,
       $geoip_disable: true,
+      $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 1,
+      schema_version: 2,
       mode: "orchestrator_v2",
     });
     expect(agent.properties).toMatchObject({
@@ -86,6 +91,7 @@ describe("anonymous product telemetry", () => {
       invocation_source: "workflow",
       model: "openai/gpt-5.6-sol",
       async: true,
+      depth: 2,
       depth_bucket: "2",
       completion_policy: "each",
     });
@@ -99,19 +105,21 @@ describe("anonymous product telemetry", () => {
 
   it("allows only a valid bootstrap correlation id", () => {
     const expected = "123e4567-e89b-42d3-a456-426614174000";
-    expect(createTelemetrySession(true, "manual", expected).correlationId).toBe(
-      expected,
-    );
     expect(
-      createTelemetrySession(true, "manual", "raw-pi-session-id").correlationId,
+      createTelemetrySession(true, "straight", expected).correlationId,
+    ).toBe(expected);
+    expect(
+      createTelemetrySession(true, "straight", "raw-pi-session-id")
+        .correlationId,
     ).not.toBe("raw-pi-session-id");
   });
 
   it("uses closed modes with V2 precedence", () => {
-    expect(resolveTelemetryMode(false, false)).toBe("manual");
+    expect(resolveTelemetryMode(false, false)).toBe("straight");
     expect(resolveTelemetryMode(true, false)).toBe("orchestrator");
     expect(resolveTelemetryMode(false, true)).toBe("orchestrator_v2");
     expect(resolveTelemetryMode(true, true)).toBe("orchestrator_v2");
+    expect(createTelemetrySession(true, "manual").mode).toBe("straight");
   });
 
   it("sanitizes models and buckets numeric values", () => {
@@ -128,44 +136,93 @@ describe("anonymous product telemetry", () => {
     expect(telemetryDepthBucket(4)).toBe("4-7");
     expect(telemetryDepthBucket(99)).toBe("8+");
     expect(telemetryDepthBucket(undefined)).toBe("unknown");
+    expect(telemetryDepth(4)).toBe(4);
+    expect(telemetryDepth(65)).toBeUndefined();
     expect(telemetryDurationBucket(4_999)).toBe("1-5s");
     expect(telemetryDurationBucket(700_000)).toBe("10m+");
+    expect(telemetryDurationMs(12_345)).toBe(12_300);
+    expect(telemetryDurationMs(Number.POSITIVE_INFINITY)).toBeUndefined();
+  });
+
+  it("distinguishes one created agent from its delegated tasks", () => {
+    const session = createTelemetrySession(true, "straight");
+    const created = buildTelemetryPayload(session, {
+      event: "agent_created",
+      execution: "interactive",
+      invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: 3,
+      depth_bucket: "3",
+      completion_policy: "each",
+    });
+    const task = buildTelemetryPayload(session, {
+      event: "task_started",
+      execution: "interactive",
+      unit: "turn",
+      invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: 3,
+      depth_bucket: "3",
+      completion_policy: "each",
+    });
+
+    expect(created.event).toBe("pi_subagentura_agent_created");
+    expect(task.event).toBe("pi_subagentura_task_started");
+    expect(created.properties).toMatchObject({
+      execution: "interactive",
+      depth: 3,
+      depth_bucket: "3",
+    });
+    expect(task.properties.unit).toBe("turn");
   });
 
   it("contains only documented bounded lifecycle properties", () => {
     const session = createTelemetrySession(true);
     const completed = buildTelemetryPayload(session, {
-      event: "agent_completed",
+      event: "task_completed",
       execution: "interactive",
       unit: "turn",
       invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: 1,
+      depth_bucket: "1",
       completion_policy: "each",
       status: "success",
       duration_ms: 12_345,
-      message_count: 50_000,
+      child_conversation_message_count: 50_000,
     });
 
     expect(Object.keys(completed.properties).sort()).toEqual(
       [
         "$geoip_disable",
+        "$ip",
         "$lib",
         "$lib_version",
         "$process_person_profile",
+        "async",
+        "child_conversation_message_count",
+        "completion_policy",
+        "depth",
+        "depth_bucket",
         "duration_bucket",
+        "duration_ms",
         "execution",
         "invocation_source",
-        "message_count",
+        "model",
         "mode",
-        "completion_policy",
         "schema_version",
         "status",
         "telemetry_session_id",
         "unit",
       ].sort(),
     );
-    expect(completed.properties.message_count).toBe(1_000);
+    expect(completed.properties.child_conversation_message_count).toBe(1_000);
+    expect(completed.properties.duration_ms).toBe(12_300);
     expect(JSON.stringify(completed)).not.toMatch(
-      /task|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
+      /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
     );
   });
 
@@ -193,7 +250,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("fails closed when the bounded dedupe cache is full", () => {
+  it("evicts the oldest dedupe key without dropping new lifecycle events", () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValue(new Response(null, { status: 204 }));
@@ -213,7 +270,46 @@ describe("anonymous product telemetry", () => {
       { dedupeKey: "overflow", fetchImpl },
     );
 
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(session.capturedKeys.has("existing:0")).toBe(false);
+    expect(session.capturedKeys.has("overflow")).toBe(true);
+    expect(session.capturedKeys).toHaveLength(MAX_TELEMETRY_DEDUPE_KEYS);
+  });
+
+  it("allows only an explicitly terminal capture after session retirement", () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const session = createTelemetrySession(true);
+    retireTelemetrySession(session);
+
+    captureTelemetry(session, { event: "session_started" }, { fetchImpl });
+    captureTelemetry(
+      session,
+      {
+        event: "task_completed",
+        execution: "in-process",
+        unit: "job",
+        invocation_source: "isolated",
+        model: "default",
+        async: true,
+        depth: 1,
+        depth_bucket: "1",
+        completion_policy: "each",
+        status: "cancelled",
+        duration_ms: 1_000,
+        child_conversation_message_count: 0,
+      },
+      { allowInactive: true, fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(
+      JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body)),
+    ).toMatchObject({
+      event: "pi_subagentura_task_completed",
+      properties: { status: "cancelled" },
+    });
   });
 
   it.each([

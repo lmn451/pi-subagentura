@@ -296,6 +296,7 @@ export function rehydrateInteractiveSubagents(
       telemetryInvocationSource: entry.telemetry?.invocationSource,
       telemetryCompletionPolicy: entry.telemetry?.completionPolicy,
       telemetryAsync: entry.telemetry?.async,
+      telemetryDepth: entry.telemetry?.depth,
       telemetryDepthBucket: entry.telemetry?.depthBucket,
       telemetryModel: entry.telemetry?.model,
       // Legacy timestamp fields remain for API compatibility only.

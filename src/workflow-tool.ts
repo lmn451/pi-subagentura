@@ -1050,18 +1050,18 @@ export function registerWorkflowTool(
         run.errorCount,
       );
       const usage = presentWorkflowUsage(run.usage);
+      const firstResultRead = !st.resultRetrieved;
       st.resultRetrieved = true;
       consumeCompletionSource(
         pi,
         { source: "workflow", sourceId: st.id },
         workflowOwner,
       );
-      if (st.status === "done" && resultText.length > 0) {
-        captureTelemetry(
-          resolveLiveSessionScope(workflowOwner)?.telemetry,
-          { event: "result_consumed", source: "workflow" },
-          { dedupeKey: `result-consumed:workflow:${st.id}` },
-        );
+      if (firstResultRead && st.status === "done" && resultText.length > 0) {
+        captureTelemetry(resolveLiveSessionScope(workflowOwner)?.telemetry, {
+          event: "result_consumed",
+          source: "workflow",
+        });
       }
       return {
         content: [

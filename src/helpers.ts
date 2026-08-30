@@ -49,6 +49,7 @@ import {
 } from "./session-scope";
 import {
   captureTelemetry,
+  telemetryDepth,
   telemetryDepthBucket,
   type AgentTelemetryContext,
   type TelemetryAgentStatus,
@@ -1155,20 +1156,24 @@ export async function startSubagentJob(
     if (started || disposedBeforeStart) return;
     started = true;
     telemetryStartedAt = Date.now();
-    captureTelemetry(
-      telemetry?.session,
-      {
-        event: "agent_started",
-        execution: "in-process",
-        unit: "job",
-        invocation_source: telemetry?.invocationSource ?? "isolated",
-        model: modelLabel,
-        async: telemetry?.async ?? false,
-        depth_bucket: telemetryDepthBucket(telemetry?.depth),
-        completion_policy: telemetry?.completionPolicy ?? "inline",
-      },
-      { dedupeKey: `agent-started:in-process:${jobId}` },
-    );
+    const telemetryAgentDimensions = {
+      execution: "in-process" as const,
+      invocation_source: telemetry?.invocationSource ?? ("isolated" as const),
+      model: modelLabel,
+      async: telemetry?.async ?? false,
+      depth: telemetryDepth(telemetry?.depth),
+      depth_bucket: telemetryDepthBucket(telemetry?.depth),
+      completion_policy: telemetry?.completionPolicy ?? ("inline" as const),
+    };
+    captureTelemetry(telemetry?.session, {
+      event: "agent_created",
+      ...telemetryAgentDimensions,
+    });
+    captureTelemetry(telemetry?.session, {
+      event: "task_started",
+      ...telemetryAgentDimensions,
+      unit: "job",
+    });
     startGateResolve();
   };
   const disposePreparedSession = (): void => {
@@ -1336,19 +1341,24 @@ export async function startSubagentJob(
         captureTelemetry(
           telemetry?.session,
           {
-            event: "agent_completed",
+            event: "task_completed",
             execution: "in-process",
             unit: "job",
             invocation_source: telemetry?.invocationSource ?? "isolated",
+            model: modelLabel,
+            async: telemetry?.async ?? false,
+            depth: telemetryDepth(telemetry?.depth),
+            depth_bucket: telemetryDepthBucket(telemetry?.depth),
             completion_policy: telemetry?.completionPolicy ?? "inline",
             status,
             duration_ms:
               telemetryStartedAt === undefined
                 ? undefined
                 : Date.now() - telemetryStartedAt,
-            message_count: session.agent.state.messages.length,
+            child_conversation_message_count:
+              session.agent.state.messages.length,
           },
-          { dedupeKey: `agent-completed:in-process:${jobId}` },
+          { allowInactive: true },
         );
       }
       debugLog("info", "job_complete", {

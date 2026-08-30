@@ -9,6 +9,7 @@ import {
   deleteInteractiveStatesFile,
   loadInteractiveStates,
   removeInteractiveState,
+  updateInteractiveStates,
   updatePersistedTelemetrySession,
 } from "./artifact";
 import {
@@ -184,6 +185,76 @@ function cancellationLifecycleReason(reason: string | undefined) {
   }
 }
 
+function captureInteractiveLifecycleCancellation(
+  scope: SessionScope,
+  state: InteractiveSubagentState,
+): void {
+  const telemetry = scope.telemetry;
+  const turnId = state.telemetryActiveTurnId;
+  if (
+    !turnId ||
+    !telemetry ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const turnStartedAt = state.telemetryTurnStartedAt;
+  const messageCount = state.telemetryTurnMessageCounts?.get(turnId);
+  state.telemetryActiveTurnId = undefined;
+  state.telemetryTurnStartedAt = undefined;
+  state.telemetryTurnMessageCounts?.delete(turnId);
+  if (state.telemetryMessageTurnId === turnId) {
+    state.telemetryMessageTurnId = undefined;
+  }
+  try {
+    updateInteractiveStates(state.cwd, [
+      {
+        id: state.id,
+        update: (entry) => {
+          if (
+            entry.telemetry?.correlationId !== telemetry.correlationId ||
+            entry.telemetry.activeTurnId !== turnId
+          ) {
+            return;
+          }
+          delete entry.telemetry.activeTurnId;
+          delete entry.telemetry.turnStartedAt;
+          if (entry.telemetry.messageCounts) {
+            delete entry.telemetry.messageCounts[turnId];
+            if (Object.keys(entry.telemetry.messageCounts).length === 0) {
+              delete entry.telemetry.messageCounts;
+            }
+          }
+        },
+      },
+    ]);
+  } catch {
+    /* best effort; lifecycle cleanup must continue if state persistence fails */
+  }
+  captureTelemetry(
+    telemetry,
+    {
+      event: "task_completed",
+      execution: "interactive",
+      unit: "turn",
+      invocation_source: state.telemetryInvocationSource ?? "interactive",
+      model: state.telemetryModel,
+      async: state.telemetryAsync ?? true,
+      depth: state.telemetryDepth,
+      depth_bucket: state.telemetryDepthBucket ?? "unknown",
+      completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+      status: "cancelled",
+      duration_ms:
+        turnStartedAt === undefined ? undefined : Date.now() - turnStartedAt,
+      child_conversation_message_count: messageCount,
+    },
+    {
+      allowInactive: true,
+      dedupeKey: `task-completed:interactive:${state.id}:${turnId}`,
+    },
+  );
+}
+
 function clearFreshChildLineage(
   scope: SessionScope,
   reason: string | undefined,
@@ -214,14 +285,19 @@ function cleanupScopeGeneration(
   const destroysStandalonePanes =
     event?.reason === "new" || event?.reason === "fork";
   for (const state of [...scope.interactiveStates.values()]) {
-    removeInteractiveSubagentState(state);
-    if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
-    if (
-      (destroysStandalonePanes || isInMemoryWorkflowPane(state)) &&
+    const destroysPane =
+      destroysStandalonePanes || isInMemoryWorkflowPane(state);
+    const cancelsActivePane =
+      destroysPane &&
       (state.status === "running" ||
         state.status === "idle" ||
-        state.status === "unknown")
-    ) {
+        state.status === "unknown");
+    if (destroysPane) {
+      captureInteractiveLifecycleCancellation(scope, state);
+    }
+    removeInteractiveSubagentState(state);
+    if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
+    if (cancelsActivePane) {
       try {
         cancelInteractiveSubagentByState(state, {
           origin: lifecycleOrigin,
@@ -371,7 +447,7 @@ export function registerSessionHandlers(
     const mode =
       recoveredTelemetry?.mode ??
       (isChild
-        ? (activeSpawnTelemetry?.mode ?? "manual")
+        ? (activeSpawnTelemetry?.mode ?? "straight")
         : resolveTelemetryMode(orchestratorMode, orchestratorV2Mode));
     scope.telemetry = createTelemetrySession(
       isTelemetryEnabled(pi),

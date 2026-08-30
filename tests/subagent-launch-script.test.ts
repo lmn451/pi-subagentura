@@ -31,6 +31,7 @@ import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { createTelemetrySession } from "../src/telemetry";
+import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -290,6 +291,8 @@ describe("spawn-time state persistence", () => {
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
     vi.doUnmock("node:child_process");
+    vi.unstubAllGlobals();
+    clearSessionScopes();
     for (const name of SPAWN_ENV_NAMES) {
       const value = savedEnv[name];
       if (value === undefined) delete process.env[name];
@@ -315,6 +318,66 @@ describe("spawn-time state persistence", () => {
     // accept an unintended sibling such as `${cwd}-other/...`.
     expect(relative(cwd, state.artifactDir).split(sep)[0]).not.toBe("..");
     expect(isAbsolute(relative(cwd, state.artifactDir))).toBe(false);
+  });
+
+  it("records one created agent when an interactive pane launches", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const spawnTreeContext = createRootSpawnTreeContext(
+      SESSION,
+      cwd,
+      false,
+      true,
+      4,
+    );
+    const scope = registerSessionScope({
+      id: 777,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as never,
+      telemetry: createTelemetrySession(true, "orchestrator_v2"),
+      spawnTreeContext,
+    });
+    const { launchInteractiveSubagent } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "never sent to telemetry",
+      cwd,
+      parentSessionId: SESSION,
+      sessionScope: scope,
+      spawnTreeContext,
+      telemetryInvocationSource: "interactive",
+      telemetryAsync: true,
+      completionPolicy: "each",
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      event: "pi_subagentura_agent_created",
+      properties: {
+        mode: "orchestrator_v2",
+        execution: "interactive",
+        invocation_source: "interactive",
+        depth: 1,
+        completion_policy: "each",
+      },
+    });
+    expect(JSON.stringify(payloads)).not.toContain("never sent to telemetry");
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({ depth: 1, depthBucket: "1" });
   });
 
   it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {

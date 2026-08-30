@@ -1021,6 +1021,29 @@ describe("persisted interactive state helpers", () => {
     });
   });
 
+  it("normalizes the pre-v2 telemetry mode name during recovery", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        telemetry: {
+          correlationId: "11111111-1111-4111-8111-111111111111",
+          mode: "manual",
+        },
+        states: {},
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(loadInteractiveStates(root)?.telemetry).toEqual({
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      mode: "straight",
+    });
+  });
+
   it("loadInteractiveStates migrates a file with schemaVersion -1", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });

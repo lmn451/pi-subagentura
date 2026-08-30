@@ -190,6 +190,7 @@ describe("session-log tail-read", () => {
     state.telemetryInvocationSource = "interactive";
     state.telemetryCompletionPolicy = "each";
     state.telemetryAsync = true;
+    state.telemetryDepth = 1;
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(state.id, state);
@@ -243,10 +244,10 @@ describe("session-log tail-read", () => {
     await mod.pollArtifactChanges({} as any, sessionOwner(scope));
 
     const starts = payloads.filter(
-      (payload) => payload.event === "pi_subagentura_agent_started",
+      (payload) => payload.event === "pi_subagentura_task_started",
     );
     const completions = payloads.filter(
-      (payload) => payload.event === "pi_subagentura_agent_completed",
+      (payload) => payload.event === "pi_subagentura_task_completed",
     );
     expect(starts).toHaveLength(2);
     expect(completions).toHaveLength(2);
@@ -255,7 +256,9 @@ describe("session-log tail-read", () => {
       "turn",
     ]);
     expect(
-      completions.map(({ properties }) => properties.message_count),
+      completions.map(
+        ({ properties }) => properties.child_conversation_message_count,
+      ),
     ).toEqual([2, 3]);
   });
 
@@ -289,6 +292,7 @@ describe("session-log tail-read", () => {
       telemetryInvocationSource: "interactive",
       telemetryCompletionPolicy: "each",
       telemetryAsync: true,
+      telemetryDepth: 1,
       telemetryDepthBucket: "1",
       telemetryModel: "default",
       telemetryTurnMessageCounts: new Map(),
@@ -312,6 +316,7 @@ describe("session-log tail-read", () => {
         correlationId,
         invocationSource: "interactive",
         async: true,
+        depth: 1,
         depthBucket: "1",
         completionPolicy: "each",
         model: "default",
@@ -376,14 +381,15 @@ describe("session-log tail-read", () => {
     await mod.pollArtifactChanges({} as any, sessionOwner(recoveredScope));
 
     expect(
-      payloads.filter(({ event }) => event === "pi_subagentura_agent_started"),
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
     ).toHaveLength(1);
     const completions = payloads.filter(
-      ({ event }) => event === "pi_subagentura_agent_completed",
+      ({ event }) => event === "pi_subagentura_task_completed",
     );
     expect(completions).toHaveLength(1);
     expect(completions[0]?.properties).toMatchObject({
-      message_count: 3,
+      child_conversation_message_count: 3,
+      duration_ms: 100,
       duration_bucket: "<1s",
     });
   });

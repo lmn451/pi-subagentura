@@ -957,9 +957,13 @@ describe("get_subagent_result tool", () => {
   });
 
   it("records only the first successful output-bearing result read", async () => {
+    const telemetryPayloads: Array<{ event?: string }> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(null, { status: 200 })),
+      vi.fn(async (_input, init) => {
+        telemetryPayloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
     );
     const scoped = setupScopedExtension(713);
     scoped.scope.telemetry = createTelemetrySession(true);
@@ -986,11 +990,6 @@ describe("get_subagent_result tool", () => {
       undefined,
       undefined,
     );
-    expect(
-      scoped.scope.telemetry.capturedKeys.has(
-        `result-consumed:in-process:${failed.id}`,
-      ),
-    ).toBe(false);
 
     const cancelledResult: SubagentResult = {
       ...defaultSuccessResult,
@@ -1010,11 +1009,6 @@ describe("get_subagent_result tool", () => {
       undefined,
       undefined,
     );
-    expect(
-      scoped.scope.telemetry.capturedKeys.has(
-        `result-consumed:in-process:${cancelled.id}`,
-      ),
-    ).toBe(false);
 
     const successful = createJobState({
       id: "successful-read",
@@ -1037,8 +1031,8 @@ describe("get_subagent_result tool", () => {
     );
 
     expect(
-      [...scoped.scope.telemetry.capturedKeys].filter(
-        (key) => key === `result-consumed:in-process:${successful.id}`,
+      telemetryPayloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_consumed",
       ),
     ).toHaveLength(1);
   });
