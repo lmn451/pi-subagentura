@@ -99,7 +99,7 @@
     "src/cancellation-snapshots.ts"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.23.2"
   },
   "publishConfig": {
     "access": "public"
@@ -111,11 +111,14 @@
   },
   "scripts": {
     "test": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test:random": "npm test -- --sequence.shuffle --sequence.seed=424242",
     "test:unit": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/pi-session-delivery.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test:property": "vitest run tests/property",
     "test:pi": "vitest run tests/pi-session-delivery.integration.test.ts",
     "test:tmux": "vitest run tests/tmux.integration.test.ts",
     "test:zellij": "vitest run tests/zellij.integration.test.ts",
     "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "mutation:pilot": "stryker run",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -144,8 +147,10 @@
     "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6",
+    "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.0",
+    "fast-check": "^4.9.0",
     "lint-staged": "^17.0.7",
     "prettier": "^3.9.0",
     "simple-git-hooks": "^2.13.1",

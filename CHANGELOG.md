@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Workflow output budgets now default to the finite `100_000_000_000` completed output tokens. This is a high safety ceiling with significant cost/runtime risk; existing explicit overrides and independent safeguards are unchanged.
+- The minimum supported Node.js runtime is now 22.23.2, the current Node 22 LTS patch.
 
 ## [3.4.2] - 2026-08-28
 

@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": ["src/completion-presentation.ts"],
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "npx --no-install vitest run --config vitest.mutation.config.ts"
+  },
+  "coverageAnalysis": "off",
+  "tsconfigFile": ".stryker-unused-tsconfig.json",
+  "tsconfigFile_comment": "TypeScript 7 exposes no legacy compiler API; Vitest transpiles this TS-only pilot.",
+  "reporters": ["clear-text", "progress"],
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": null
+  },
+  "concurrency": 2,
+  "cleanTempDir": "always"
+}

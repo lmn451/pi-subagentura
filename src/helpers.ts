@@ -690,7 +690,6 @@ export function scheduleJobCleanup(
 
 /** Generate a unique job ID (16 hex chars from crypto.randomBytes) */
 export function generateJobId(): string {
-  // Uses randomBytes for Node 18 compatibility (randomUUID needs Node 19+)
   return randomBytes(8).toString("hex");
 }
 

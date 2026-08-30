@@ -1,8 +1,31 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type * as InteractiveTools from "../src/tools/interactive";
 import type * as InteractiveTmux from "../src/interactive-tmux";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
+
+const PANE_ENVIRONMENT_KEYS = [
+  "TMUX",
+  "TMUX_PANE",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+  "PI_SUBAGENTURA_CHILD",
+] as const;
+const originalPaneEnvironment = new Map(
+  PANE_ENVIRONMENT_KEYS.map((key) => [key, process.env[key]] as const),
+);
+
+function clearPaneEnvironment(): void {
+  for (const key of PANE_ENVIRONMENT_KEYS) delete process.env[key];
+}
+
+function restorePaneEnvironment(): void {
+  clearPaneEnvironment();
+  for (const [key, value] of originalPaneEnvironment) {
+    if (value !== undefined) process.env[key] = value;
+  }
+}
 
 function installMockChildProcess(scenario: (args: string[]) => string): void {
   vi.resetModules();
@@ -25,14 +48,11 @@ function installMockChildProcess(scenario: (args: string[]) => string): void {
 }
 
 describe("current pane activity", () => {
+  beforeEach(clearPaneEnvironment);
+
   afterEach(() => {
     vi.doUnmock("node:child_process");
-    delete process.env.TMUX;
-    delete process.env.TMUX_PANE;
-    delete process.env.ZELLIJ;
-    delete process.env.ZELLIJ_SESSION_NAME;
-    delete process.env.ZELLIJ_PANE_ID;
-    delete process.env.PI_SUBAGENTURA_CHILD;
+    restorePaneEnvironment();
   });
 
   it("reports an active tmux pane when the user's window has focus", async () => {
