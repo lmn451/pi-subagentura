@@ -158,6 +158,7 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
     "is-path-inside": "^4.0.0",
     "ndjson": "^2.0.0"

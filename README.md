@@ -257,10 +257,24 @@ project-local routing cache.
 
 ### Extension settings
 
-The extension exposes these validated flags for advanced configurations:
+Install the optional settings panel once with:
+
+```bash
+pi install npm:@juanibiapina/pi-extension-settings
+```
+
+Then use `/extension-settings` for global settings or
+`/extension-settings-local` for the current project; a project value overrides
+the global value. The
+`hide-agent-list` setting defaults to `false` and only hides the compact
+per-agent activity widget rows. The running footer, list/status tools, and
+visual agent supervisor remain available.
+
+The extension also exposes these validated launch flags for advanced
+configurations:
 
 - `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
-- `--subagentura-hide-agent-list` — hide only the compact per-agent activity widget rows; the running footer, list/status tools, and visual agent supervisor remain available. It defaults to `false`.
+- `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global or project setting. It also works without the optional settings panel.
 
 #### See the thin-router flow
 
