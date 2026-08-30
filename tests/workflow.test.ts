@@ -66,6 +66,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTelemetrySession } from "../src/telemetry";
 
 // ── Mock sub-agent runner ────────────────────────────────────────────
 function ok(output: string, outTokens = 0): SubagentResult {
@@ -3941,6 +3942,7 @@ it("formats USD usage without floating-point artifacts", () => {
 });
 
 it("includes accumulated usage in async workflow error results", async () => {
+  clearSessionScopes();
   const tools: Array<{ name: string; execute: Function }> = [];
   const pi = {
     registerTool: vi.fn((def: any) => tools.push(def)),
@@ -3948,12 +3950,22 @@ it("includes accumulated usage in async workflow error results", async () => {
     registerCommand: vi.fn(),
     on: vi.fn(),
   };
-  registerWorkflowTool(pi as any);
+  const scope = registerSessionScope({
+    id: 994,
+    generation: 1,
+    lifecycle: "started",
+    pi: pi as never,
+    telemetry: createTelemetrySession(true),
+  });
+  registerWorkflowTool(pi as any, scope);
   const job = startWorkflowJob(
     "late-error",
     `export const meta = { name: "late-error", description: "d" };\n` +
       `await agent("hello"); throw new Error("later failure");`,
     { runAgent: async ({ prompt }) => richOk(prompt), budgetTotal: 20 },
+    undefined,
+    undefined,
+    sessionOwner(scope),
   );
   try {
     await expect(job.promise).rejects.toThrow("later failure");
@@ -3980,8 +3992,12 @@ it("includes accumulated usage in async workflow error results", async () => {
     });
     expect(result.content[0].text).toContain("↓7/20");
     expect(result.details.budgetTotal).toBe(20);
+    expect(
+      scope.telemetry?.capturedKeys.has(`result-consumed:workflow:${job.id}`),
+    ).toBe(false);
   } finally {
     workflowJobRegistry.delete(job.id);
+    clearSessionScopes();
   }
 });
 

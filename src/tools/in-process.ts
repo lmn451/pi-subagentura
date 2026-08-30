@@ -74,6 +74,12 @@ import {
   ResultParams,
   StatusParams,
 } from "../schemas";
+import {
+  captureTelemetry,
+  type AgentTelemetryContext,
+  type TelemetryCompletionPolicy,
+  type TelemetryInvocationSource,
+} from "../telemetry";
 
 interface RunningFooterContext {
   cwd?: string;
@@ -142,6 +148,29 @@ function resolveExecutionOwner(
   // A supplied token must never fall back to whichever peer registered last.
   if (token || getStartedSessionScopes().length > 0) return undefined;
   return {};
+}
+
+function telemetryForAgent(
+  owner: SessionOwnerToken | undefined,
+  invocationSource: TelemetryInvocationSource,
+  async: boolean,
+  depth: number | undefined,
+  completion: ResolvedCompletionPolicy,
+): AgentTelemetryContext | undefined {
+  const session = owner ? resolveLiveSessionScope(owner)?.telemetry : undefined;
+  if (!session) return undefined;
+  const completionPolicy: TelemetryCompletionPolicy = async
+    ? completion.legacy
+      ? "legacy"
+      : (completion.policy ?? "each")
+    : "inline";
+  return {
+    session,
+    invocationSource,
+    async,
+    depth,
+    completionPolicy,
+  };
 }
 
 function captureDeliveryOwner(
@@ -455,6 +484,7 @@ async function runSubagent(
   depth?: number,
   rootSessionId?: string,
   owner?: SessionOwnerToken,
+  telemetry?: AgentTelemetryContext,
 ): Promise<SubagentResult> {
   try {
     const { jobPromise, modelWarning, start } = await startSubagentJob({
@@ -471,6 +501,7 @@ async function runSubagent(
       depth,
       rootSessionId,
       owner,
+      telemetry,
     });
     start?.();
     const result = await jobPromise;
@@ -619,6 +650,13 @@ function registerSubagentWithContextTool(
           depth: spawn.childDepth,
           rootSessionId: spawn.rootSessionId,
           owner,
+          telemetry: telemetryForAgent(
+            owner,
+            "with_context",
+            true,
+            spawn.childDepth,
+            completion,
+          ),
         }).catch((error) => {
           releaseCompletionGroup(completionReservation);
           throw error;
@@ -739,6 +777,13 @@ function registerSubagentWithContextTool(
         spawn.childDepth,
         spawn.rootSessionId,
         owner,
+        telemetryForAgent(
+          owner,
+          "with_context",
+          false,
+          spawn.childDepth,
+          completion,
+        ),
       );
 
       if (result.cancelled) {
@@ -877,6 +922,13 @@ function registerSubagentIsolatedTool(
           depth: spawn.childDepth,
           rootSessionId: spawn.rootSessionId,
           owner,
+          telemetry: telemetryForAgent(
+            owner,
+            "isolated",
+            true,
+            spawn.childDepth,
+            completion,
+          ),
         }).catch((error) => {
           releaseCompletionGroup(completionReservation);
           throw error;
@@ -985,6 +1037,13 @@ function registerSubagentIsolatedTool(
         spawn.childDepth,
         spawn.rootSessionId,
         owner,
+        telemetryForAgent(
+          owner,
+          "isolated",
+          false,
+          spawn.childDepth,
+          completion,
+        ),
       );
 
       if (result.cancelled) {
@@ -1303,6 +1362,19 @@ function registerGetSubagentResultTool(
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
         };
+      }
+      if (
+        !result.isError &&
+        !result.cancelled &&
+        result.output !== "(no output)"
+      ) {
+        captureTelemetry(
+          execution.owner
+            ? resolveLiveSessionScope(execution.owner)?.telemetry
+            : undefined,
+          { event: "result_consumed", source: "in-process" },
+          { dedupeKey: `result-consumed:in-process:${job.id}` },
+        );
       }
       const usageStr = formatUsage(result.usage, result.model);
       const details: InProcessSubagentDetails = {

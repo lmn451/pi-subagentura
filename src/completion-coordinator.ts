@@ -20,6 +20,7 @@ import {
 } from "./session-scope";
 import { debugLog } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
+import { captureTelemetry } from "./telemetry";
 
 export const COMPLETION_ENTRY_TYPE = "subagentura-completion";
 export const COMPLETION_CONSUMED_ENTRY_TYPE = "subagentura-completion-consumed";
@@ -2112,6 +2113,17 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
     scheduleManifestRetry(state);
     return;
   }
+  captureTelemetry(
+    resolveLiveSessionScope(state.owner)?.telemetry,
+    {
+      event: "completion_delivered",
+      delivery: "manifest",
+      count: message.details.completionIds.length,
+    },
+    {
+      dedupeKey: `manifest:${message.details.completionIds.join(":")}`,
+    },
+  );
   state.manifestRetryAttempt = 0;
   state.manifestRetryExhausted = false;
   if (message.details.overflowPath === state.overflow.path) {

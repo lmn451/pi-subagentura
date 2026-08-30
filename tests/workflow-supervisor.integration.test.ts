@@ -66,6 +66,8 @@ import {
   type WorkflowJobState,
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
+import { createTelemetrySession } from "../src/telemetry";
+import { registerCompletionCoordinator } from "../src/completion-coordinator";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
 const RUNNING_FOOTER_KEY = "subagentura-running";
@@ -125,6 +127,7 @@ function liveSessionContext(options: {
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
+    telemetry: createTelemetrySession(true),
   };
   registerSessionScope(context);
   setLegacyActiveSessionRefs(context);
@@ -270,6 +273,65 @@ afterEach(() => {
 });
 
 describe("workflow supervisor integration", () => {
+  it.each([
+    [{ async: true }, "each"],
+    [
+      {
+        async: true,
+        completionPolicy: "group",
+        completionGroupId: "analytics-group",
+      },
+      "group",
+    ],
+  ] as const)(
+    "threads the resolved background policy to process children (%s)",
+    async (params, expectedPolicy) => {
+      const { context } = liveSessionContext({
+        id: expectedPolicy === "each" ? 41 : 42,
+        sessionId: `session-${expectedPolicy}`,
+      });
+      const { pi, findTool } = makePi();
+      context.pi = pi as never;
+      registerCompletionCoordinator(pi as never, context);
+      registerWorkflowTool(pi as never, context);
+
+      await findTool().execute(
+        `call-${expectedPolicy}`,
+        { script: SINGLE_AGENT_SCRIPT(`policy-${expectedPolicy}`), ...params },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+
+      expect(mockLaunch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          telemetryCompletionPolicy: expectedPolicy,
+        }),
+      );
+      releaseAgent(subagentResult("done"));
+    },
+  );
+
+  it("threads legacy policy to an ownerless background process child", async () => {
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never);
+
+    await findTool().execute(
+      "call-legacy",
+      { script: SINGLE_AGENT_SCRIPT("policy-legacy"), async: true },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+
+    expect(mockLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryCompletionPolicy: "legacy" }),
+    );
+    releaseAgent(subagentResult("done"));
+  });
+
   it("shows a live process child under its tracked sync workflow", async () => {
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const owner = ownerOf(context);
@@ -296,6 +358,7 @@ describe("workflow supervisor integration", () => {
         completionOwner: "workflow",
         supervisorOwner: owner,
         workflowId: workflow?.id,
+        telemetryCompletionPolicy: "inline",
       }),
     );
     // Workflow children are never persisted, so they carry no parentSessionId —
@@ -412,6 +475,11 @@ describe("workflow supervisor integration", () => {
     );
 
     await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: expect.objectContaining({ completionPolicy: "inline" }),
+      }),
+    );
     const childJob = jobRegistry.get("fallback-child");
     expect(childJob).toBeDefined();
     expect(childJob?.status).toBe("running");

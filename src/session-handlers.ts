@@ -7,7 +7,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
+  loadInteractiveStates,
   removeInteractiveState,
+  updatePersistedTelemetrySession,
 } from "./artifact";
 import {
   updateRunningSubagentFooter,
@@ -70,6 +72,13 @@ import {
   settleCompletionTurnWake,
 } from "./completion-turn";
 import { readExtensionSettings } from "./settings";
+import { isTelemetryEnabled } from "./settings";
+import {
+  captureTelemetry,
+  createTelemetrySession,
+  retireTelemetrySession,
+  resolveTelemetryMode,
+} from "./telemetry";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -79,6 +88,23 @@ function logSessionError(event: string, error: unknown): void {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   debugLog("error", event, { error: message });
+}
+
+function recordPreparedManifest(
+  scope: SessionScope,
+  message: { details?: { completionIds?: string[] } },
+): void {
+  const completionIds = message.details?.completionIds ?? [];
+  if (completionIds.length === 0) return;
+  captureTelemetry(
+    scope.telemetry,
+    {
+      event: "completion_delivered",
+      delivery: "manifest",
+      count: completionIds.length,
+    },
+    { dedupeKey: `manifest:${completionIds.join(":")}` },
+  );
 }
 
 function isInMemoryWorkflowPane(state: InteractiveSubagentState): boolean {
@@ -260,6 +286,7 @@ export function registerSessionHandlers(
     markCompletionTurnWakeStarted(pi, event.prompt);
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
+    if (message) recordPreparedManifest(scope, message);
     return message ? { message } : undefined;
   });
   pi.on("agent_start", () => {
@@ -282,8 +309,14 @@ export function registerSessionHandlers(
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
     clearCompletionTurnWake(pi);
+    const continuityReason =
+      event.reason === "startup" ||
+      event.reason === "reload" ||
+      event.reason === "resume";
+    const previousTelemetry = scope.telemetry;
     if (scope.lifecycle === "started") {
       const previousOwner = sessionOwner(scope);
+      retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(previousOwner);
       clearSessionParsers(previousOwner);
       cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
@@ -304,6 +337,66 @@ export function registerSessionHandlers(
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const orchestratorMode = isOrchestratorMode(pi);
     const orchestratorV2Mode = isOrchestratorV2Enabled(pi);
+    const isChild =
+      !allowRootLineage || process.env.PI_SUBAGENTURA_CHILD === "1";
+    const persisted =
+      allowRootLineage && continuityReason
+        ? loadInteractiveStates(ctx.cwd)
+        : undefined;
+    const persistedTelemetry =
+      persisted && sessionId && persisted.parent === sessionId
+        ? persisted.telemetry
+        : undefined;
+    const activeSpawnTelemetry =
+      scope.spawnTreeContext?.role === "descendant"
+        ? {
+            correlationId: scope.spawnTreeContext.telemetrySessionId,
+            mode: scope.spawnTreeContext.telemetryMode,
+          }
+        : undefined;
+    const recoveredTelemetry = continuityReason
+      ? previousTelemetry?.correlationId
+        ? {
+            correlationId: previousTelemetry.correlationId,
+            mode: previousTelemetry.mode,
+          }
+        : (persistedTelemetry ??
+          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+            ? {
+                correlationId: activeSpawnTelemetry.correlationId,
+                mode: activeSpawnTelemetry.mode,
+              }
+            : undefined))
+      : undefined;
+    const mode =
+      recoveredTelemetry?.mode ??
+      (isChild
+        ? (activeSpawnTelemetry?.mode ?? "manual")
+        : resolveTelemetryMode(orchestratorMode, orchestratorV2Mode));
+    scope.telemetry = createTelemetrySession(
+      isTelemetryEnabled(pi),
+      mode,
+      recoveredTelemetry?.correlationId,
+    );
+    if (!isChild && recoveredTelemetry === undefined) {
+      captureTelemetry(scope.telemetry, { event: "session_started" });
+    }
+    if (allowRootLineage && sessionId) {
+      try {
+        updatePersistedTelemetrySession(
+          ctx.cwd,
+          sessionId,
+          scope.telemetry.enabled
+            ? {
+                correlationId: scope.telemetry.correlationId,
+                mode: scope.telemetry.mode,
+              }
+            : undefined,
+        );
+      } catch (error) {
+        logSessionError("telemetry_session_persist_failed", error);
+      }
+    }
     if (
       allowRootLineage &&
       sessionId &&
@@ -316,6 +409,8 @@ export function registerSessionHandlers(
         orchestratorMode,
         orchestratorV2Mode,
         maxDepth,
+        scope.telemetry.enabled ? scope.telemetry.correlationId : undefined,
+        scope.telemetry.mode,
       );
     }
     scope.isParentIdle =
@@ -372,6 +467,7 @@ export function registerSessionHandlers(
       if (scope.lifecycle !== "started") return;
 
       const owner = sessionOwner(scope);
+      retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
       cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
