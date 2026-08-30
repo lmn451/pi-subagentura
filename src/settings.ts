@@ -10,7 +10,14 @@ export const HIDE_AGENT_LIST_FLAG = "subagentura-hide-agent-list";
 export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 2;
 const MAX_CONFIGURED_DEPTH = 64;
 const SETTINGS_EXTENSION_NAME = "pi-subagentura";
+const MAX_DEPTH_SETTING = "max-depth";
 const HIDE_AGENT_LIST_SETTING = "hide-agent-list";
+const MAX_DEPTH_DEFINITION = {
+  id: MAX_DEPTH_SETTING,
+  label: "Maximum depth",
+  description: `Maximum Orchestratorv2 lineage depth (0-${MAX_CONFIGURED_DEPTH})`,
+  defaultValue: String(DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH),
+} satisfies SettingDefinition;
 const HIDE_AGENT_LIST_DEFINITION = {
   id: HIDE_AGENT_LIST_SETTING,
   label: "Hide agent list",
@@ -29,7 +36,6 @@ export function registerExtensionSettings(pi: ExtensionAPI): void {
     description:
       "Maximum Orchestratorv2 lineage depth (default: 2; legacy stays at 8)",
     type: "string",
-    default: String(DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH),
   });
   pi.registerFlag(HIDE_AGENT_LIST_FLAG, {
     description: "Hide compact per-agent activity widget rows",
@@ -44,7 +50,7 @@ export function emitExtensionSettingsRegistration(pi: ExtensionAPI): void {
   if (events && typeof events.emit === "function") {
     events.emit("pi-extension-settings:register", {
       name: SETTINGS_EXTENSION_NAME,
-      settings: [HIDE_AGENT_LIST_DEFINITION],
+      settings: [MAX_DEPTH_DEFINITION, HIDE_AGENT_LIST_DEFINITION],
     });
   }
 }
@@ -55,8 +61,18 @@ export function readExtensionSettings(
 ): ExtensionSettings {
   const maxDepthValue = readFlag(pi, MAX_DEPTH_FLAG);
   const hideAgentListValue = readFlag(pi, HIDE_AGENT_LIST_FLAG);
+  const persistedMaxDepthValue = getSetting(
+    SETTINGS_EXTENSION_NAME,
+    MAX_DEPTH_SETTING,
+    MAX_DEPTH_DEFINITION.defaultValue,
+    storageOptions,
+  );
   return {
-    maxDepth: parseMaxDepth(maxDepthValue),
+    maxDepth: parseMaxDepth(
+      maxDepthValue === undefined || maxDepthValue === false
+        ? persistedMaxDepthValue
+        : maxDepthValue,
+    ),
     hideAgentList:
       parseHideAgentList(hideAgentListValue) ||
       parsePersistedHideAgentList(
