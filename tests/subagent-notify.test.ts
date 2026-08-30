@@ -1850,11 +1850,14 @@ describe("read_subagent_artifact (output reporting)", () => {
             "../src/subagent",
           );
         const readTool = makeReadTool(mod, state);
-        const telemetry = createTelemetrySession(true);
-        getSessionScopes().at(-1)!.telemetry = telemetry;
+        getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
+        const telemetryPayloads: Array<{ event?: string }> = [];
         vi.stubGlobal(
           "fetch",
-          vi.fn(async () => new Response(null, { status: 200 })),
+          vi.fn(async (_input, init) => {
+            telemetryPayloads.push(JSON.parse(String(init?.body)));
+            return new Response(null, { status: 200 });
+          }),
         );
 
         await readTool.execute(
@@ -1866,16 +1869,68 @@ describe("read_subagent_artifact (output reporting)", () => {
         );
 
         expect(
-          telemetry.capturedKeys.has(
-            `result-consumed:interactive:${id}:${outcome}-turn`,
+          telemetryPayloads.filter(
+            (payload) => payload.event === "pi_subagentura_result_consumed",
           ),
-        ).toBe(false);
+        ).toHaveLength(0);
       } finally {
         vi.unstubAllGlobals();
         rmSync(parent, { recursive: true, force: true });
       }
     },
   );
+
+  it("reports a successful interactive result only on its first read", async () => {
+    const id = "ab12cd3800000014";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false);
+      writeOutput(art, "successful output");
+      appendCompletionEvent(art, {
+        turnId: "successful-turn",
+        eventId: "successful-event",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
+      const telemetryPayloads: Array<{ event?: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input, init) => {
+          telemetryPayloads.push(JSON.parse(String(init?.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+
+      await readTool.execute(
+        "read-first",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      await readTool.execute(
+        "read-again",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(
+        telemetryPayloads.filter(
+          (payload) => payload.event === "pi_subagentura_result_consumed",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 
   it("reads the latest terminal snapshot instead of active staging output", async () => {
     const id = "ab12cd3800000011";

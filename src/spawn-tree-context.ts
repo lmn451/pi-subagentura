@@ -169,10 +169,11 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   ) {
     throw new Error("Invalid lineage bootstrap telemetrySessionId");
   }
-  const telemetryMode = raw.telemetryMode;
+  const telemetryMode =
+    raw.telemetryMode === "manual" ? "straight" : raw.telemetryMode;
   if (
     telemetryMode !== undefined &&
-    telemetryMode !== "manual" &&
+    telemetryMode !== "straight" &&
     telemetryMode !== "orchestrator" &&
     telemetryMode !== "orchestrator_v2"
   ) {

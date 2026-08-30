@@ -30,6 +30,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 });
 
 import { jobRegistry, startSubagentJob } from "../src/helpers";
+import {
+  createTelemetrySession,
+  retireTelemetrySession,
+} from "../src/telemetry";
 
 function createSession(thinkingLevel: string) {
   return {
@@ -84,6 +88,121 @@ describe("startSubagentJob effective thinking level", () => {
     expect(started.thinkingLevel).toBe("low");
     expect(started.liveStatus.thinkingLevel).toBe("low");
     expect(result.thinkingLevel).toBe("low");
+  });
+
+  it("records one created agent and one delegated task per started job", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const session = createSession("low");
+    session.agent.state.messages.push(
+      { role: "user", content: "redacted before telemetry" } as never,
+      { role: "assistant", content: "also redacted" } as never,
+    );
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        telemetry: {
+          session: createTelemetrySession(true, "orchestrator_v2"),
+          invocationSource: "workflow",
+          async: true,
+          depth: 2,
+          completionPolicy: "group",
+        },
+      });
+      started.start();
+      await started.jobPromise;
+
+      expect(payloads.map(({ event }) => event)).toEqual([
+        "pi_subagentura_agent_created",
+        "pi_subagentura_task_started",
+        "pi_subagentura_task_completed",
+      ]);
+      expect(payloads[2]?.properties).toMatchObject({
+        mode: "orchestrator_v2",
+        invocation_source: "workflow",
+        depth: 2,
+        status: "success",
+        child_conversation_message_count: 2,
+      });
+      expect(JSON.stringify(payloads)).not.toContain(
+        "redacted before telemetry",
+      );
+      expect(JSON.stringify(payloads)).not.toContain("also redacted");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("records cancellation after lifecycle cleanup retires the session", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const controller = new AbortController();
+    let releasePrompt = (): void => undefined;
+    const session = {
+      ...createSession("low"),
+      prompt: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releasePrompt = resolve;
+          }),
+      ),
+      abort: vi.fn(async () => releasePrompt()),
+    };
+    mockCreateAgentSession.mockResolvedValue({ session });
+    const telemetrySession = createTelemetrySession(true, "orchestrator_v2");
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        signal: controller.signal,
+        telemetry: {
+          session: telemetrySession,
+          invocationSource: "workflow",
+          async: true,
+          depth: 2,
+          completionPolicy: "group",
+        },
+      });
+      started.start();
+      await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+      retireTelemetrySession(telemetrySession);
+      controller.abort("session reload");
+      const result = await started.jobPromise;
+
+      expect(result.cancelled).toBe(true);
+      expect(
+        payloads.filter(
+          ({ event }) => event === "pi_subagentura_task_completed",
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          properties: expect.objectContaining({ status: "cancelled" }),
+        }),
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps thinking-level details omitted when the request omits it", async () => {

@@ -3,13 +3,15 @@ import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 1;
+export const TELEMETRY_SCHEMA_VERSION = 2;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
 export const MAX_TELEMETRY_DEDUPE_KEYS = 2_048;
+const MAX_TELEMETRY_DEPTH = 64;
+const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
-export type TelemetryMode = "manual" | "orchestrator" | "orchestrator_v2";
+export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryInvocationSource =
   "with_context" | "isolated" | "interactive" | "workflow";
@@ -21,33 +23,32 @@ export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
   "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
 
+interface TelemetryAgentDimensions {
+  execution: TelemetryExecution;
+  invocation_source: TelemetryInvocationSource;
+  model: string | undefined;
+  async: boolean;
+  depth: number | undefined;
+  depth_bucket: TelemetryDepthBucket;
+  completion_policy: TelemetryCompletionPolicy;
+}
+
 export type TelemetryEvent =
   | { event: "session_started" }
-  | {
-      event: "agent_started";
-      execution: TelemetryExecution;
-      unit: "job" | "turn";
-      invocation_source: TelemetryInvocationSource;
-      model: string | undefined;
-      async: boolean;
-      depth_bucket: TelemetryDepthBucket;
-      completion_policy: TelemetryCompletionPolicy;
-    }
+  | ({ event: "agent_created" } & TelemetryAgentDimensions)
+  | ({ event: "task_started"; unit: "job" | "turn" } & TelemetryAgentDimensions)
   | {
       event: "interactive_message_sent";
       direction: "parent_to_child";
       count: number;
     }
-  | {
-      event: "agent_completed";
-      execution: TelemetryExecution;
+  | ({
+      event: "task_completed";
       unit: "job" | "turn";
-      invocation_source: TelemetryInvocationSource;
-      completion_policy: TelemetryCompletionPolicy;
       status: TelemetryAgentStatus;
       duration_ms: number | undefined;
-      message_count: number | undefined;
-    }
+      child_conversation_message_count: number | undefined;
+    } & TelemetryAgentDimensions)
   | {
       event: "completion_delivered";
       delivery: TelemetryDelivery;
@@ -72,6 +73,7 @@ export interface AgentTelemetryContext {
 }
 
 interface CaptureOptions {
+  allowInactive?: boolean;
   dedupeKey?: string;
   fetchImpl?: typeof fetch;
 }
@@ -110,12 +112,12 @@ function validCorrelationId(value: string | undefined): string | undefined {
 
 export function createTelemetrySession(
   enabled: boolean,
-  mode: TelemetryMode = "manual",
+  mode: TelemetryMode | "manual" = "straight",
   inheritedCorrelationId?: string,
 ): TelemetrySession {
   return {
     enabled,
-    mode,
+    mode: mode === "manual" ? "straight" : mode,
     correlationId: validCorrelationId(inheritedCorrelationId) ?? randomUUID(),
     capturedKeys: new Set(),
     active: true,
@@ -127,7 +129,7 @@ export function resolveTelemetryMode(
   orchestratorV2Mode: boolean,
 ): TelemetryMode {
   if (orchestratorV2Mode) return "orchestrator_v2";
-  return orchestratorMode ? "orchestrator" : "manual";
+  return orchestratorMode ? "orchestrator" : "straight";
 }
 
 export function retireTelemetrySession(
@@ -170,6 +172,15 @@ export function telemetryDepthBucket(
   return depth <= 7 ? "4-7" : "8+";
 }
 
+export function telemetryDepth(depth: number | undefined): number | undefined {
+  return Number.isSafeInteger(depth) &&
+    depth !== undefined &&
+    depth >= 1 &&
+    depth <= MAX_TELEMETRY_DEPTH
+    ? depth
+    : undefined;
+}
+
 export function telemetryDurationBucket(
   durationMs: number | undefined,
 ): TelemetryDurationBucket {
@@ -188,6 +199,35 @@ export function telemetryDurationBucket(
   return "10m+";
 }
 
+/** Round away meaningless precision and cap pathological or corrupt timers. */
+export function telemetryDurationMs(
+  durationMs: number | undefined,
+): number | undefined {
+  if (
+    durationMs === undefined ||
+    !Number.isFinite(durationMs) ||
+    durationMs < 0
+  ) {
+    return undefined;
+  }
+  return Math.min(
+    Math.round(durationMs / 100) * 100,
+    MAX_TELEMETRY_DURATION_MS,
+  );
+}
+
+function depthProperty(depth: number | undefined): { depth?: number } {
+  const boundedDepth = telemetryDepth(depth);
+  return boundedDepth === undefined ? {} : { depth: boundedDepth };
+}
+
+function durationProperty(durationMs: number | undefined): {
+  duration_ms?: number;
+} {
+  const boundedDuration = telemetryDurationMs(durationMs);
+  return boundedDuration === undefined ? {} : { duration_ms: boundedDuration };
+}
+
 function boundedCount(value: number | undefined, max: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(Math.max(Math.trunc(value!), 0), max);
@@ -200,6 +240,7 @@ export function buildTelemetryPayload(
   const common = {
     $process_person_profile: false,
     $geoip_disable: true,
+    $ip: "0.0.0.0",
     $lib: "pi-subagentura",
     $lib_version: packageVersion,
     schema_version: TELEMETRY_SCHEMA_VERSION,
@@ -211,7 +252,19 @@ export function buildTelemetryPayload(
     case "session_started":
       properties = common;
       break;
-    case "agent_started":
+    case "agent_created":
+      properties = {
+        ...common,
+        execution: event.execution,
+        invocation_source: event.invocation_source,
+        model: sanitizeTelemetryModel(event.model),
+        async: event.async,
+        ...depthProperty(event.depth),
+        depth_bucket: event.depth_bucket,
+        completion_policy: event.completion_policy,
+      };
+      break;
+    case "task_started":
       properties = {
         ...common,
         execution: event.execution,
@@ -219,6 +272,7 @@ export function buildTelemetryPayload(
         invocation_source: event.invocation_source,
         model: sanitizeTelemetryModel(event.model),
         async: event.async,
+        ...depthProperty(event.depth),
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
       };
@@ -230,18 +284,28 @@ export function buildTelemetryPayload(
         count: boundedCount(event.count, 128),
       };
       break;
-    case "agent_completed":
+    case "task_completed":
       properties = {
         ...common,
         execution: event.execution,
         unit: event.unit,
         invocation_source: event.invocation_source,
+        model: sanitizeTelemetryModel(event.model),
+        async: event.async,
+        ...depthProperty(event.depth),
+        depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
         status: event.status,
         duration_bucket: telemetryDurationBucket(event.duration_ms),
-        ...(event.message_count === undefined
+        ...durationProperty(event.duration_ms),
+        ...(event.child_conversation_message_count === undefined
           ? {}
-          : { message_count: boundedCount(event.message_count, 1_000) }),
+          : {
+              child_conversation_message_count: boundedCount(
+                event.child_conversation_message_count,
+                1_000,
+              ),
+            }),
       };
       break;
     case "completion_delivered":
@@ -267,13 +331,15 @@ export function captureTelemetry(
   event: TelemetryEvent,
   options: CaptureOptions = {},
 ): void {
-  if (!session?.enabled || !session.active) return;
+  if (!session?.enabled || (!session.active && !options.allowInactive)) return;
   if (options.dedupeKey) {
     if (session.capturedKeys.has(options.dedupeKey)) return;
-    // Preserve first-capture semantics under the memory bound. Once the cache
-    // is full, dropping keyed analytics is safer than allowing repeated reads
-    // or delivery retries to inflate the data.
-    if (session.capturedKeys.size >= MAX_TELEMETRY_DEDUPE_KEYS) return;
+    // Retain recent retry protection without making a long session stop
+    // reporting authoritative lifecycle events after the memory bound.
+    if (session.capturedKeys.size >= MAX_TELEMETRY_DEDUPE_KEYS) {
+      const oldest = session.capturedKeys.values().next().value;
+      if (oldest !== undefined) session.capturedKeys.delete(oldest);
+    }
     session.capturedKeys.add(options.dedupeKey);
   }
   const fetchImpl = options.fetchImpl ?? fetch;

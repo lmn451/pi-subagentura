@@ -660,18 +660,19 @@ async function runPollArtifactChanges(
             captureTelemetry(
               ownerContext?.telemetry,
               {
-                event: "agent_started",
+                event: "task_started",
                 execution: "interactive",
                 unit: "turn",
                 invocation_source:
                   state.telemetryInvocationSource ?? "interactive",
                 model: state.telemetryModel,
                 async: state.telemetryAsync ?? true,
+                depth: state.telemetryDepth,
                 depth_bucket: state.telemetryDepthBucket ?? "unknown",
                 completion_policy: state.telemetryCompletionPolicy ?? "legacy",
               },
               {
-                dedupeKey: `agent-started:interactive:${state.id}:${ev.eventId}`,
+                dedupeKey: `task-started:interactive:${state.id}:${ev.eventId}`,
               },
             );
           }
@@ -686,21 +687,26 @@ async function runPollArtifactChanges(
           captureTelemetry(
             ownerContext?.telemetry,
             {
-              event: "agent_completed",
+              event: "task_completed",
               execution: "interactive",
               unit: "turn",
               invocation_source:
                 state.telemetryInvocationSource ?? "interactive",
+              model: state.telemetryModel,
+              async: state.telemetryAsync ?? true,
+              depth: state.telemetryDepth,
+              depth_bucket: state.telemetryDepthBucket ?? "unknown",
               completion_policy: state.telemetryCompletionPolicy ?? "legacy",
               status: status === "done" ? "success" : status,
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
                   : ev.ts - state.telemetryTurnStartedAt,
-              message_count: state.telemetryTurnMessageCounts?.get(ev.turnId),
+              child_conversation_message_count:
+                state.telemetryTurnMessageCounts?.get(ev.turnId),
             },
             {
-              dedupeKey: `agent-completed:interactive:${state.id}:${"eventId" in ev ? ev.eventId : record.startOffset}`,
+              dedupeKey: `task-completed:interactive:${state.id}:${ev.turnId}`,
             },
           );
           state.telemetryActiveTurnId = undefined;

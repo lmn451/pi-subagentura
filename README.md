@@ -854,25 +854,46 @@ unrelated anonymous correlation rather than reconstructing identity.
 
 The payload schema is versioned and contains these events:
 
-| Event                      | Properties                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_started`          | package version; `manual`, `orchestrator`, or `orchestrator_v2` mode                                                                                                            |
-| `agent_started`            | `in-process` or `interactive`; `job` or `turn` unit; closed invocation source; built-in public model id, `custom`, or `default`; async boolean; depth bucket; completion policy |
-| `interactive_message_sent` | `parent_to_child` direction and bounded count only                                                                                                                              |
-| `agent_completed`          | execution kind; `job` or `turn` unit; `success`, `error`, or `cancelled`; duration bucket; per-unit bounded message count when observable                                       |
-| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                            |
-| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                          |
+| Event                      | Properties                                                                                                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                           |
+| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
+| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed agent dimensions and adds `job` or `turn`                                                                 |
+| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                     |
+| `task_completed`           | repeated closed dimensions; `success`, `error`, or `cancelled`; rounded/capped numeric duration plus bucket; bounded child-conversation message count when observable                            |
+| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                             |
+| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                           |
 
-All events include the closed root mode and set `$process_person_profile: false`
-and `$geoip_disable: true`. Terminal agent events also repeat the closed
+All events include the closed root mode and set `$process_person_profile: false`,
+`$geoip_disable: true`, and `$ip: "0.0.0.0"`. Terminal task events repeat the closed
 invocation source and completion policy so completion rates need no identifier
 join.
 They contain only closed enums, booleans, bounded counts, the package version,
 and the random runtime correlation UUID. The extension does **not** send tasks,
-personas, prompts, messages, outputs, error text, names, group ids, paths,
+personas, prompts, message content, outputs, error text, names, group ids, paths,
 repositories, artifact/agent/Pi session ids, token usage, cost, or a persistent
 installation id. PostHog can still observe the connection's source IP while
-handling the HTTP request, but GeoIP-derived event properties are disabled.
+handling the HTTP request. The project-level **Discard client IP data** setting
+should also be enabled; direct ingestion cannot prevent PostHog's network edge
+from receiving the connection itself.
+
+In PostHog, group or filter events by `telemetry_session_id` to inspect one
+anonymous session. The intended aggregates are:
+
+- agents created: count `agent_created`
+- delegated tasks: count `task_started`
+- maximum depth: maximum numeric `depth`
+- outcomes: count `task_completed`, broken down by `status`
+- task time: average, percentile, or sum of `task_completed.duration_ms`
+- child conversation traffic: sum
+  `task_completed.child_conversation_message_count`
+- explicit interactive follow-ups: sum `interactive_message_sent.count`
+- delivery/collection reliability: compare completed tasks with
+  `completion_delivered` and `result_consumed`
+
+The observed session span is the time from `session_started` to its last event.
+There is deliberately no shutdown-only summary: crashes can skip shutdown, and
+reload/resume lifecycle transitions can occur inside one logical session.
 
 Capture is fire-and-forget with a 1.5-second timeout. Event payloads are not
 queued, persisted, or retried; only the random active-session correlation and

@@ -442,14 +442,19 @@ describe("completion coordinator", () => {
     const setupResult = setup();
     scope = setupResult.scope;
 
-    for (let index = 0; index < 2; index++) {
-      consumeCompletionSource(
-        setupResult.pi as never,
-        { source: "interactive", sourceId: "a", turnId: "turn-a" },
-        sessionOwner(scope),
-      );
-    }
+    const first = consumeCompletionSource(
+      setupResult.pi as never,
+      { source: "interactive", sourceId: "a", turnId: "turn-a" },
+      sessionOwner(scope),
+    );
+    const repeated = consumeCompletionSource(
+      setupResult.pi as never,
+      { source: "interactive", sourceId: "a", turnId: "turn-a" },
+      sessionOwner(scope),
+    );
 
+    expect(first).toBe(true);
+    expect(repeated).toBe(false);
     expect(
       setupResult.entries.filter(
         (entry) =>

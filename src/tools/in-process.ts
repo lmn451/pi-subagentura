@@ -1340,6 +1340,7 @@ function registerGetSubagentResultTool(
       }
       const result = waitResult.value!;
       // Only set resultRetrieved after successful completion (not on abort)
+      const firstResultRead = !job.resultRetrieved;
       job.resultRetrieved = true;
       consumeCompletionSource(
         pi,
@@ -1364,6 +1365,7 @@ function registerGetSubagentResultTool(
         };
       }
       if (
+        firstResultRead &&
         !result.isError &&
         !result.cancelled &&
         result.output !== "(no output)"
@@ -1373,7 +1375,6 @@ function registerGetSubagentResultTool(
             ? resolveLiveSessionScope(execution.owner)?.telemetry
             : undefined,
           { event: "result_consumed", source: "in-process" },
-          { dedupeKey: `result-consumed:in-process:${job.id}` },
         );
       }
       const usageStr = formatUsage(result.usage, result.model);

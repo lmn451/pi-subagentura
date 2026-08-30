@@ -96,7 +96,9 @@ import {
 } from "./spawn-tree-context";
 import { TELEMETRY_ENV } from "./settings";
 import {
+  captureTelemetry,
   sanitizeTelemetryModel,
+  telemetryDepth,
   telemetryDepthBucket,
   type TelemetryCompletionPolicy,
   type TelemetryDepthBucket,
@@ -240,6 +242,7 @@ export interface InteractiveSubagentState {
   telemetryInvocationSource?: TelemetryInvocationSource;
   telemetryCompletionPolicy?: TelemetryCompletionPolicy;
   telemetryAsync?: boolean;
+  telemetryDepth?: number;
   telemetryDepthBucket?: TelemetryDepthBucket;
   telemetryModel?: string;
   model?: string;
@@ -595,6 +598,7 @@ export function launchInteractiveSubagent(params: {
         invocationSource:
           params.telemetryInvocationSource ?? ("interactive" as const),
         async: params.telemetryAsync ?? true,
+        depth: telemetryDepth(nextDepth),
         depthBucket: telemetryDepthBucket(nextDepth),
         completionPolicy:
           params.telemetryCompletionPolicy ??
@@ -888,10 +892,23 @@ export function launchInteractiveSubagent(params: {
     telemetryInvocationSource: telemetryMetadata?.invocationSource,
     telemetryCompletionPolicy: telemetryMetadata?.completionPolicy,
     telemetryAsync: telemetryMetadata?.async,
+    telemetryDepth: telemetryMetadata?.depth,
     telemetryDepthBucket: telemetryMetadata?.depthBucket,
     telemetryModel: telemetryMetadata?.model,
   };
   registerInteractiveSubagentState(state, liveScope);
+  if (telemetryMetadata) {
+    captureTelemetry(telemetry, {
+      event: "agent_created",
+      execution: "interactive",
+      invocation_source: telemetryMetadata.invocationSource,
+      model: telemetryMetadata.model,
+      async: telemetryMetadata.async,
+      depth: telemetryMetadata.depth,
+      depth_bucket: telemetryMetadata.depthBucket,
+      completion_policy: telemetryMetadata.completionPolicy,
+    });
+  }
   return state;
 }
 

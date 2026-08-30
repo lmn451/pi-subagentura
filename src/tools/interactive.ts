@@ -1316,7 +1316,7 @@ export function registerInteractiveSubagentTools(
               .join(", ")}\n`
           : "";
       if (wantsOutput && output !== null && selectedCompletion) {
-        consumeCompletionSource(
+        const firstConsumption = consumeCompletionSource(
           pi,
           {
             source: "interactive",
@@ -1325,14 +1325,15 @@ export function registerInteractiveSubagentTools(
           },
           registration?.scope ? sessionOwner(registration.scope) : undefined,
         );
-        if (output.length > 0 && selectedCompletion.outcome === "done") {
-          captureTelemetry(
-            registration?.scope?.telemetry,
-            { event: "result_consumed", source: "interactive" },
-            {
-              dedupeKey: `result-consumed:interactive:${params.id}:${selectedCompletion.turnId}`,
-            },
-          );
+        if (
+          firstConsumption &&
+          output.length > 0 &&
+          selectedCompletion.outcome === "done"
+        ) {
+          captureTelemetry(registration?.scope?.telemetry, {
+            event: "result_consumed",
+            source: "interactive",
+          });
         }
       }
       return {

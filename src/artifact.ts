@@ -1403,6 +1403,7 @@ export interface PersistedInteractiveTelemetry {
   correlationId: string;
   invocationSource: "with_context" | "isolated" | "interactive" | "workflow";
   async: boolean;
+  depth?: number;
   depthBucket: "1" | "2" | "3" | "4-7" | "8+" | "unknown";
   completionPolicy: "inline" | "each" | "group" | "legacy";
   model: string;
@@ -1413,7 +1414,7 @@ export interface PersistedInteractiveTelemetry {
 
 export interface PersistedTelemetrySession {
   correlationId: string;
-  mode: "manual" | "orchestrator" | "orchestrator_v2";
+  mode: "straight" | "orchestrator" | "orchestrator_v2";
 }
 
 export interface PersistedDeliveryIntent {
@@ -1542,18 +1543,20 @@ function migrateStatePayload(
     !Array.isArray(obj.telemetry)
       ? (obj.telemetry as Record<string, unknown>)
       : undefined;
+  const rawTelemetryMode =
+    rawTelemetry?.mode === "manual" ? "straight" : rawTelemetry?.mode;
   const telemetry: PersistedTelemetrySession | undefined =
     rawTelemetry &&
     typeof rawTelemetry.correlationId === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       rawTelemetry.correlationId,
     ) &&
-    (rawTelemetry.mode === "manual" ||
-      rawTelemetry.mode === "orchestrator" ||
-      rawTelemetry.mode === "orchestrator_v2")
+    (rawTelemetryMode === "straight" ||
+      rawTelemetryMode === "orchestrator" ||
+      rawTelemetryMode === "orchestrator_v2")
       ? {
           correlationId: rawTelemetry.correlationId.toLowerCase(),
-          mode: rawTelemetry.mode,
+          mode: rawTelemetryMode,
         }
       : undefined;
 
@@ -1797,6 +1800,12 @@ function migrateStatePayload(
               correlationId: rawEntryTelemetry.correlationId.toLowerCase(),
               invocationSource: rawEntryTelemetry.invocationSource,
               async: rawEntryTelemetry.async,
+              ...(typeof rawEntryTelemetry.depth === "number" &&
+              Number.isSafeInteger(rawEntryTelemetry.depth) &&
+              rawEntryTelemetry.depth >= 1 &&
+              rawEntryTelemetry.depth <= 64
+                ? { depth: rawEntryTelemetry.depth }
+                : {}),
               depthBucket: rawEntryTelemetry.depthBucket,
               completionPolicy: rawEntryTelemetry.completionPolicy,
               model: sanitizeTelemetryModel(rawEntryTelemetry.model),

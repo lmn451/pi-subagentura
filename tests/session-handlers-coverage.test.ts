@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,13 +29,18 @@ import {
 } from "../src/spawn-tree-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
 import {
+  appendInteractiveState,
   appendEvent,
   artifactPath,
+  eventLogEndOffset,
   loadInteractiveStates,
   updatePersistedTelemetrySession,
 } from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
-import { updateRunningSubagentFooter } from "../src/artifact-poller";
+import {
+  pollArtifactChanges,
+  updateRunningSubagentFooter,
+} from "../src/artifact-poller";
 import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
@@ -44,6 +49,7 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { publishCompletion } from "../src/completion-coordinator";
+import { createTelemetrySession } from "../src/telemetry";
 
 interface HandlerRegistration {
   handlers: Map<string, Function[]>;
@@ -567,6 +573,138 @@ describe("session handler lifecycle callbacks", () => {
       (globalThis as any).__piSubagenturaInteractivePollerHandle,
     ).toBeUndefined();
   });
+
+  it.each([
+    ["fresh shutdown", "new", false, "running"],
+    ["workflow-pane shutdown", "reload", true, "running"],
+    ["fresh shutdown after manual cancellation", "new", false, "cancelled"],
+  ] as const)(
+    "balances an active interactive task during %s",
+    async (_label, reason, workflowOwned, status) => {
+      vi.setSystemTime(5_000);
+      const telemetryPayloads: Array<{
+        event?: string;
+        properties?: Record<string, unknown>;
+      }> = [];
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (_input, init) => {
+          telemetryPayloads.push(JSON.parse(String(init?.body)));
+          return new Response(null, { status: 200 });
+        });
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      registration.sessionScope.telemetry = createTelemetrySession(
+        true,
+        "orchestrator_v2",
+      );
+      const state = ownedInteractive(
+        registration.sessionScope,
+        root,
+        "active-state",
+        "session-a",
+      );
+      state.status = status;
+      state.telemetryEligible = true;
+      state.telemetryCorrelationId =
+        registration.sessionScope.telemetry.correlationId;
+      state.telemetryActiveTurnId = "active-turn";
+      state.telemetryTurnStartedAt = 1_000;
+      state.telemetryTurnMessageCounts = new Map([["active-turn", 6]]);
+      state.telemetryInvocationSource = "interactive";
+      state.telemetryCompletionPolicy = "each";
+      state.telemetryAsync = true;
+      state.telemetryDepth = 3;
+      state.telemetryDepthBucket = "3";
+      state.telemetryModel = "default";
+      if (workflowOwned) {
+        state.completionOwner = "workflow";
+        const art = artifactPath(root, state.id);
+        appendEvent(art, {
+          version: 2,
+          eventId: "active-turn-start",
+          turnId: "active-turn",
+          ts: 1_000,
+          type: "turn_started",
+          status: "running",
+        });
+        writeFileSync(
+          join(state.artifactDir, "active-turn.json"),
+          JSON.stringify({ turnId: "active-turn" }),
+        );
+        appendInteractiveState(root, {
+          id: state.id,
+          paneId: state.paneId,
+          mux: "tmux",
+          artifactDir: state.artifactDir,
+          sessionFile: state.sessionFile,
+          parentSessionId: "session-a",
+          eventByteCursor: eventLogEndOffset(art),
+          sessionByteCursor: 0,
+          pendingDeliveries: [],
+          deliveryReceipts: [],
+          telemetry: {
+            correlationId: state.telemetryCorrelationId!,
+            invocationSource: "interactive",
+            async: true,
+            depth: 3,
+            depthBucket: "3",
+            completionPolicy: "each",
+            model: "default",
+            activeTurnId: "active-turn",
+            turnStartedAt: 1_000,
+            messageCounts: { "active-turn": 6 },
+          },
+        });
+      }
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "dead",
+        getPaneLivenessAsync: async () => "dead",
+      } as any);
+
+      registration.handlers.get("session_shutdown")![0]({ reason }, ctx);
+
+      if (workflowOwned) {
+        const persisted = loadInteractiveStates(root);
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "activeTurnId",
+        );
+        registration.handlers.get("session_start")![0](
+          { reason: "reload" },
+          ctx,
+        );
+        const recoveredCorrelation =
+          registration.sessionScope.telemetry?.correlationId;
+        registration.sessionScope.telemetry = createTelemetrySession(
+          true,
+          "orchestrator_v2",
+          recoveredCorrelation,
+        );
+        await pollArtifactChanges(
+          registration.pi,
+          sessionOwner(registration.sessionScope),
+        );
+      }
+
+      expect(
+        telemetryPayloads.filter(
+          (payload) => payload.event === "pi_subagentura_task_completed",
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            status: "cancelled",
+            execution: "interactive",
+            unit: "turn",
+            depth: 3,
+            duration_ms: 4_000,
+            child_conversation_message_count: 6,
+          }),
+        }),
+      ]);
+      fetchMock.mockRestore();
+    },
+  );
   it.each([
     ["A-first", "a"],
     ["B-first", "b"],

@@ -1949,9 +1949,9 @@ export function consumeCompletionSource(
   pi: ExtensionAPI,
   selector: CompletionConsumptionSelector,
   owner?: SessionOwnerToken,
-): void {
+): boolean {
   const state = getState(owner);
-  if (!state || state.pi !== pi) return;
+  if (!state || state.pi !== pi) return false;
   reconcileState(state);
   const normalizedSourceId = selector.sourceId.slice(0, MAX_SOURCE_ID_LENGTH);
   const normalizedSelector: CompletionConsumptionSelector =
@@ -1968,13 +1968,14 @@ export function consumeCompletionSource(
             turnId: selector.turnId.slice(0, MAX_TURN_ID_LENGTH),
           }
       : { source: selector.source, sourceId: normalizedSourceId };
-  if (fallbackConsumptionMatches(state, normalizedSelector)) return;
+  if (fallbackConsumptionMatches(state, normalizedSelector)) return false;
   appendConsumption(state, {
     schemaVersion: COMPLETION_RECORD_SCHEMA_VERSION,
     ...normalizedSelector,
     consumedAt: Date.now(),
     reason: "manual",
   });
+  return true;
 }
 
 export function markCompletionHumanInput(owner?: SessionOwnerToken): void {

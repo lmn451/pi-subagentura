@@ -3942,6 +3942,14 @@ it("formats USD usage without floating-point artifacts", () => {
 });
 
 it("includes accumulated usage in async workflow error results", async () => {
+  const telemetryPayloads: Array<{ event?: string }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      telemetryPayloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    }),
+  );
   clearSessionScopes();
   const tools: Array<{ name: string; execute: Function }> = [];
   const pi = {
@@ -3993,9 +4001,67 @@ it("includes accumulated usage in async workflow error results", async () => {
     expect(result.content[0].text).toContain("↓7/20");
     expect(result.details.budgetTotal).toBe(20);
     expect(
-      scope.telemetry?.capturedKeys.has(`result-consumed:workflow:${job.id}`),
-    ).toBe(false);
+      telemetryPayloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_consumed",
+      ),
+    ).toHaveLength(0);
   } finally {
+    vi.unstubAllGlobals();
+    workflowJobRegistry.delete(job.id);
+    clearSessionScopes();
+  }
+});
+
+it("records only the first successful workflow result read", async () => {
+  clearSessionScopes();
+  const telemetryPayloads: Array<{ event?: string }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      telemetryPayloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    }),
+  );
+  const tools: Array<{ name: string; execute: Function }> = [];
+  const pi = {
+    registerTool: vi.fn((def: any) => tools.push(def)),
+    registerFlag: vi.fn(),
+    registerCommand: vi.fn(),
+    on: vi.fn(),
+  };
+  const scope = registerSessionScope({
+    id: 995,
+    generation: 1,
+    lifecycle: "started",
+    pi: pi as never,
+    telemetry: createTelemetrySession(true),
+  });
+  registerWorkflowTool(pi as any, scope);
+  const job = startWorkflowJob(
+    "successful-result",
+    `export const meta = { name: "successful-result", description: "d" };\n` +
+      `return "workflow output";`,
+    { runAgent: echoRunner() },
+    undefined,
+    undefined,
+    sessionOwner(scope),
+  );
+  try {
+    await job.promise;
+    const getResult = tools.find(
+      (tool) => tool.name === "get_workflow_result",
+    )!;
+
+    await getResult.execute("first", { workflowId: job.id });
+    await getResult.execute("again", { workflowId: job.id });
+
+    expect(
+      telemetryPayloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_consumed",
+      ),
+    ).toHaveLength(1);
+  } finally {
+    vi.unstubAllGlobals();
     workflowJobRegistry.delete(job.id);
     clearSessionScopes();
   }
