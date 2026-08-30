@@ -14,6 +14,53 @@ npm test
 npm run pack:check
 ```
 
+## Property and mutation testing
+
+Property tests run as part of `npm test`; use the focused command while
+developing them:
+
+```bash
+npm run test:property
+```
+
+The suite defaults to 100 runs with fixed seed `424242`. This keeps routine
+runs deterministic and bounded. Override `FC_NUM_RUNS` (maximum 10,000) or
+`FC_SEED` when exploring. When fast-check reports a failing seed and path,
+replay only the named property so the path is not applied to unrelated
+properties:
+
+```bash
+FC_SEED=123 FC_PATH="0:1:0" npm run test:property -- -t "property name"
+```
+
+The standard test suite can also run with files and tests shuffled.
+The focused script uses a fixed seed so failures replay exactly:
+
+```bash
+npm run test:random
+```
+
+Explore another order by omitting the seed, and replay a reported order by
+passing it explicitly:
+
+```bash
+npm test -- --sequence.shuffle
+npm test -- --sequence.shuffle --sequence.seed=123
+```
+
+The Stryker pilot is non-gating and can be run locally:
+
+```bash
+npm run mutation:pilot
+```
+
+It mutates only `src/completion-presentation.ts` and runs that module's direct
+unit and property tests. The pilot excludes integration, process, multiplexer,
+and TUI suites and has no breaking score threshold. CI runs it with
+`continue-on-error` only on the pinned SDK leg, so mutation results never gate a
+pull request. Local configuration or test-runner failures still return a
+non-zero exit code.
+
 ## Provider list
 
 `resolveModel()` in `helpers.ts` dynamically queries all providers via `getProviders()` from the Pi SDK — no hardcoded list. When Pi adds new providers, bare model IDs resolve automatically without code changes.
