@@ -189,6 +189,7 @@ export function createRootSpawnTreeContext(
   rootId: string,
   sessionRoot = defaultSpawnTreeSessionRoot(),
   orchestratorMode = false,
+  orchestratorV2Mode = false,
 ): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
@@ -197,7 +198,7 @@ export function createRootSpawnTreeContext(
     sessionRoot,
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
     depth: 0,
-    maxDepth: DEFAULT_MAX_DEPTH,
+    maxDepth: orchestratorV2Mode ? 2 : DEFAULT_MAX_DEPTH,
     maxNodes: DEFAULT_MAX_NODES,
   });
 }

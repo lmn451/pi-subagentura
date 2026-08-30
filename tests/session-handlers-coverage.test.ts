@@ -203,6 +203,22 @@ describe("session handler lifecycle callbacks", () => {
     });
   });
 
+  it.each([
+    ["orchestratorv2", 2],
+    ["orchestrator", 8],
+  ] as const)(
+    "applies the mode-specific root maxDepth on session_start (%s)",
+    (flag, maxDepth) => {
+      const registration = registerHandlers(undefined, true, flag);
+      startSession(registration, root, `${flag}-session`);
+
+      expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+        role: "root",
+        maxDepth,
+      });
+    },
+  );
+
   it("keeps a child without a bootstrap in direct-only mode", () => {
     const registration = registerHandlers(undefined, false);
 

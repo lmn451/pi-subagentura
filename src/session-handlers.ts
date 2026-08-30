@@ -64,6 +64,7 @@ import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
 import {
   clearCompletionTurnWake,
   isOrchestratorMode,
+  isOrchestratorV2Enabled,
   markCompletionTurnWakeStarted,
   recoverCompletionTurnWakes,
   settleCompletionTurnWake,
@@ -301,6 +302,7 @@ export function registerSessionHandlers(
     clearFreshChildLineage(scope, event.reason);
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const orchestratorMode = isOrchestratorMode(pi);
+    const orchestratorV2Mode = isOrchestratorV2Enabled(pi);
     if (
       allowRootLineage &&
       sessionId &&
@@ -310,6 +312,7 @@ export function registerSessionHandlers(
         sessionId,
         undefined,
         orchestratorMode,
+        orchestratorV2Mode,
       );
     }
     scope.isParentIdle =
