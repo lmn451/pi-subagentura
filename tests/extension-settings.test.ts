@@ -64,7 +64,6 @@ describe("generic extension settings", () => {
     expect(api.registerFlag).toHaveBeenCalledWith(MAX_DEPTH_FLAG, {
       description: expect.stringContaining("Orchestratorv2"),
       type: "string",
-      default: "2",
     });
     expect(api.registerFlag).toHaveBeenCalledWith(HIDE_AGENT_LIST_FLAG, {
       description: expect.stringContaining("activity widget"),
@@ -76,6 +75,12 @@ describe("generic extension settings", () => {
       {
         name: "pi-subagentura",
         settings: [
+          {
+            id: "max-depth",
+            label: "Maximum depth",
+            description: expect.stringContaining("0-64"),
+            defaultValue: "2",
+          },
           {
             id: "hide-agent-list",
             label: "Hide agent list",
@@ -161,7 +166,7 @@ describe("generic extension settings", () => {
     expect(custom).toHaveBeenCalledOnce();
   });
 
-  it("reads global and project-local hide-agent-list settings", () => {
+  it("reads global and project-local extension settings", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
@@ -172,22 +177,52 @@ describe("generic extension settings", () => {
       writeFileSync(
         join(agentDir, "settings-extensions.json"),
         JSON.stringify({
-          "pi-subagentura": { "hide-agent-list": "true" },
+          "pi-subagentura": {
+            "max-depth": "5",
+            "hide-agent-list": "true",
+          },
         }),
       );
       expect(
         readExtensionSettings(mockApi() as any, { agentDir, cwd }),
-      ).toMatchObject({ hideAgentList: true });
+      ).toEqual({ maxDepth: 5, hideAgentList: true });
 
       writeFileSync(
         join(cwd, ".pi", "settings-extensions.json"),
         JSON.stringify({
-          "pi-subagentura": { "hide-agent-list": "false" },
+          "pi-subagentura": {
+            "max-depth": "3",
+            "hide-agent-list": "false",
+          },
         }),
       );
       expect(
         readExtensionSettings(mockApi() as any, { agentDir, cwd }),
-      ).toMatchObject({ hideAgentList: false });
+      ).toEqual({ maxDepth: 3, hideAgentList: false });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets the CLI max-depth flag override the persisted setting", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "max-depth": "6" },
+        }),
+      );
+      const api = mockApi((name) =>
+        name === MAX_DEPTH_FLAG ? "4" : undefined,
+      );
+      expect(
+        readExtensionSettings(api as any, { agentDir, cwd }),
+      ).toMatchObject({ maxDepth: 4 });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -226,6 +261,27 @@ describe("generic extension settings", () => {
       expect(() => readExtensionSettings(api as any)).toThrow(/max depth/i);
     },
   );
+
+  it("validates persisted max-depth with the same bounds", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "max-depth": "65" },
+        }),
+      );
+      expect(() =>
+        readExtensionSettings(mockApi() as any, { agentDir, cwd }),
+      ).toThrow(/max depth/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it("rejects invalid hide-agent-list values", () => {
     const api = mockApi((name) =>
@@ -273,7 +329,7 @@ describe("generic extension settings", () => {
       typeof registerExtension
     >[0];
     registerExtension(extensionApi);
-    expect(flags.get(MAX_DEPTH_FLAG)).toBe("2");
+    expect(flags.get(MAX_DEPTH_FLAG)).toBeUndefined();
 
     flags.set(MAX_DEPTH_FLAG, "4");
     flags.set("orchestratorv2", true);

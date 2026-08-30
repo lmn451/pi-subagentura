@@ -265,10 +265,10 @@ pi install npm:@juanibiapina/pi-extension-settings
 
 Then use `/extension-settings` for global settings or
 `/extension-settings-local` for the current project; a project value overrides
-the global value. The
-`hide-agent-list` setting defaults to `false` and only hides the compact
-per-agent activity widget rows. The running footer, list/status tools, and
-visual agent supervisor remain available.
+the global value. `max-depth` controls Orchestratorv2 lineage depth and defaults
+to `2`; `hide-agent-list` defaults to `false` and only hides the compact
+per-agent activity widget rows. The running footer, list/status tools, and visual
+agent supervisor remain available.
 
 The same setting can be configured without the panel by creating either the
 global file `~/.pi/agent/settings-extensions.json` or the project-local file
@@ -278,6 +278,7 @@ and overrides the global value:
 ```json
 {
   "pi-subagentura": {
+    "max-depth": "4",
     "hide-agent-list": "true"
   }
 }
@@ -286,7 +287,7 @@ and overrides the global value:
 The extension also exposes these validated launch flags for advanced
 configurations:
 
-- `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
+- `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`.
 - `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global or project setting. It also works without the optional settings panel.
 
 #### See the thin-router flow
