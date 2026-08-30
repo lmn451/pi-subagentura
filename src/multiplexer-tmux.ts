@@ -27,6 +27,7 @@ import type {
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
+  PaneActivity,
   PaneLiveness,
   PaneRef,
 } from "./multiplexer";
@@ -405,6 +406,57 @@ export class TmuxMultiplexer implements Multiplexer {
     if (!/^%\d+$/.test(paneId)) return "unknown";
     const panes = await this.listPanesAsync();
     return panes ? (panes.has(paneId) ? "alive" : "dead") : "unknown";
+  }
+
+  /**
+   * Probe whether a pane is focused in an attached tmux client's active
+   * window. Tmux's pane ids are server-global, so the session is unused.
+   */
+  getPaneActivityAsync(
+    paneId: string,
+    _session?: string,
+  ): Promise<PaneActivity> {
+    if (!/^%\d+$/.test(paneId)) return Promise.resolve("unknown");
+    return new Promise((resolve) => {
+      try {
+        execFile(
+          "tmux",
+          withTmuxSocket([
+            "display-message",
+            "-p",
+            "-t",
+            paneId,
+            "#{window_active_clients}\t#{pane_active}\t#{pane_dead}",
+          ]),
+          { encoding: "utf8", timeout: 5000 },
+          (error, stdout) => {
+            if (error) {
+              resolve("unknown");
+              return;
+            }
+            const fields = stdout.trim().split("\t");
+            const clients = Number(fields[0]);
+            if (
+              fields.length !== 3 ||
+              !Number.isSafeInteger(clients) ||
+              clients < 0 ||
+              !/^[01]$/.test(fields[1] ?? "") ||
+              !/^[01]$/.test(fields[2] ?? "")
+            ) {
+              resolve("unknown");
+              return;
+            }
+            resolve(
+              clients > 0 && fields[1] === "1" && fields[2] === "0"
+                ? "active"
+                : "inactive",
+            );
+          },
+        );
+      } catch {
+        resolve("unknown");
+      }
+    });
   }
 
   sendKeys(paneId: string, text: string): void {

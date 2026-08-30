@@ -163,6 +163,7 @@ The extension registers these public tools for parent agents.
 | `cancel_subagent`                       | Cancel an async job                                               |
 | `prune_subagent_jobs`                   | Remove completed and failed jobs                                  |
 | `list_available_models`                 | List configured model identifiers                                 |
+| `get_current_pane_activity`             | Check whether this Pi pane is active for user attention           |
 | `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers |
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases        |
 | `subagent_interactive`                  | Launch an attachable Pi session in tmux/Zellij                    |
@@ -490,6 +491,12 @@ The sub-agent's artifact contains `events.ndjson` lifecycle records, mutable
 snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
 output is legacy/staging fallback only. The pane is for live monitoring, and the
 artifact survives parent restarts.
+
+Interactive children also have `get_current_pane_activity`, which reports
+whether their tmux/Zellij pane is active for the user's current client. The child
+protocol instructs them to check it immediately before tools or extensions that
+may wait for user input; inactive or unknown panes should report the decision to
+the orchestrator instead of opening a hidden prompt.
 
 The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.

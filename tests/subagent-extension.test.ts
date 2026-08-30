@@ -19,6 +19,7 @@ import {
 const BASE_INTERACTIVE_TOOL_NAMES = [
   "cancel_interactive_subagent",
   "get_interactive_subagent_status",
+  "get_current_pane_activity",
   "read_subagent_artifact",
   "send_interactive_subagent_message",
   "subagent_interactive",
@@ -310,6 +311,7 @@ describe("extension registration", () => {
         "cancel_interactive_subagent",
         "cleanup_subagent_artifacts",
         "get_interactive_subagent_status",
+        "get_current_pane_activity",
         "list_available_models",
         "list_subagent_artifacts",
         "read_subagent_artifact",

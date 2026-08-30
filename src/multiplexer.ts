@@ -8,7 +8,7 @@
  * implementation behind the same interface.
  *
  * Backends that participate MUST:
- *   - implement the 8 methods below with the documented semantics;
+ *   - implement the methods below with the documented semantics;
  *   - stringify any internal numeric pane id to match `paneId: string` on
  *     `InteractiveSubagentState`;
  *   - be safe to instantiate cheaply (the resolver holds a long-lived instance
@@ -32,6 +32,8 @@ import { assertNever } from "./artifact";
 export type MuxName = "tmux" | "zellij";
 /** Result of a backend pane-listing liveness probe. */
 export type PaneLiveness = "alive" | "dead" | "unknown";
+/** Result of a pane-focus activity probe for the user's mux client. */
+export type PaneActivity = "active" | "inactive" | "unknown";
 
 /** Backend-neutral structured reference to a durable mux pane. */
 export interface PaneRef {
@@ -187,6 +189,13 @@ export interface Multiplexer {
 
   /** Asynchronously perform the same tri-state pane-listing probe. */
   getPaneLivenessAsync(paneId: string, session?: string): Promise<PaneLiveness>;
+
+  /**
+   * Probe whether the pane is focused in the user's currently attached mux
+   * client. `inactive` includes a detached session or an unfocused pane;
+   * command, setup, timeout, and parse failures return `unknown`.
+   */
+  getPaneActivityAsync(paneId: string, session?: string): Promise<PaneActivity>;
 
   /**
    * Send literal text to the pane's shell input buffer, character-by-character.

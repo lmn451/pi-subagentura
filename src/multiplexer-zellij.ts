@@ -33,6 +33,7 @@ import type {
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
+  PaneActivity,
   PaneLiveness,
   PaneRef,
 } from "./multiplexer";
@@ -61,6 +62,18 @@ interface ZellijPaneRow {
   readonly id: number | string;
   readonly is_plugin?: boolean;
   readonly exited?: boolean;
+  readonly is_focused?: boolean;
+  readonly is_floating?: boolean;
+  readonly is_suppressed?: boolean;
+  readonly tab_id?: number | string;
+  readonly tab_position?: number;
+}
+
+function isNonNegativeInteger(value: unknown): boolean {
+  return (
+    (typeof value === "number" && Number.isInteger(value) && value >= 0) ||
+    (typeof value === "string" && /^\d+$/.test(value))
+  );
 }
 
 function parsePaneListing(output: string): ZellijPaneRow[] {
@@ -73,20 +86,103 @@ function parsePaneListing(output: string): ZellijPaneRow[] {
       throw new Error("Malformed zellij pane listing row");
     }
     const pane = row as Record<string, unknown>;
-    const validId =
-      (typeof pane.id === "number" &&
-        Number.isInteger(pane.id) &&
-        pane.id >= 0) ||
-      (typeof pane.id === "string" && /^\d+$/.test(pane.id));
+    const validId = isNonNegativeInteger(pane.id);
+    const validTabId =
+      pane.tab_id === undefined || isNonNegativeInteger(pane.tab_id);
+    const validTabPosition =
+      pane.tab_position === undefined ||
+      (typeof pane.tab_position === "number" &&
+        Number.isInteger(pane.tab_position) &&
+        pane.tab_position >= 0);
     if (
       !validId ||
+      !validTabId ||
+      !validTabPosition ||
       (pane.is_plugin !== undefined && typeof pane.is_plugin !== "boolean") ||
-      (pane.exited !== undefined && typeof pane.exited !== "boolean")
+      (pane.exited !== undefined && typeof pane.exited !== "boolean") ||
+      (pane.is_focused !== undefined && typeof pane.is_focused !== "boolean") ||
+      (pane.is_floating !== undefined &&
+        typeof pane.is_floating !== "boolean") ||
+      (pane.is_suppressed !== undefined &&
+        typeof pane.is_suppressed !== "boolean")
     ) {
       throw new Error("Malformed zellij pane listing row");
     }
   }
   return parsed as ZellijPaneRow[];
+}
+
+interface ZellijTabRow {
+  readonly position?: number;
+  readonly tab_id?: number | string;
+  readonly active?: boolean;
+  readonly are_floating_panes_visible?: boolean;
+}
+
+function parseTabListing(output: string): ZellijTabRow[] {
+  const parsed: unknown = JSON.parse(output);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Malformed zellij tab listing");
+  }
+  for (const row of parsed) {
+    if (row === null || typeof row !== "object") {
+      throw new Error("Malformed zellij tab listing row");
+    }
+    const tab = row as Record<string, unknown>;
+    const validPosition =
+      typeof tab.position === "number" &&
+      Number.isInteger(tab.position) &&
+      tab.position >= 0;
+    const validId =
+      tab.tab_id === undefined || isNonNegativeInteger(tab.tab_id);
+    if (
+      !validPosition ||
+      !validId ||
+      (tab.active !== undefined && typeof tab.active !== "boolean") ||
+      (tab.are_floating_panes_visible !== undefined &&
+        typeof tab.are_floating_panes_visible !== "boolean")
+    ) {
+      throw new Error("Malformed zellij tab listing row");
+    }
+  }
+  return parsed as ZellijTabRow[];
+}
+
+function paneBelongsToTab(pane: ZellijPaneRow, tab: ZellijTabRow): boolean {
+  if (pane.tab_id !== undefined && tab.tab_id !== undefined) {
+    return String(pane.tab_id) === String(tab.tab_id);
+  }
+  return (
+    pane.tab_position !== undefined &&
+    tab.position !== undefined &&
+    pane.tab_position === tab.position
+  );
+}
+
+function isFocusedVisibleFloatingPane(
+  pane: ZellijPaneRow,
+  tab: ZellijTabRow,
+): boolean {
+  return (
+    paneBelongsToTab(pane, tab) &&
+    pane.is_floating === true &&
+    pane.is_focused === true &&
+    pane.is_suppressed !== true &&
+    tab.are_floating_panes_visible !== false
+  );
+}
+
+const ZELLIJ_CLIENT_HEADER = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
+
+function parseClientListing(output: string): boolean {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0 || lines[0] !== ZELLIJ_CLIENT_HEADER) {
+    throw new Error("Malformed zellij client listing");
+  }
+  return lines.length > 1;
 }
 
 class BoundedByteTail {
@@ -470,6 +566,94 @@ export class ZellijMultiplexer implements Multiplexer {
     return panes.some((pane) => this.paneRowMatches(pane, target))
       ? "alive"
       : "dead";
+  }
+
+  private runActionAsync(
+    session: string | undefined,
+    args: readonly string[],
+  ): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      try {
+        execFile(
+          "zellij",
+          [...this.sessionFlag(session), "action", ...args],
+          { encoding: "utf8", timeout: 5000 },
+          (error, stdout) => {
+            resolve(error ? undefined : stdout);
+          },
+        );
+      } catch {
+        resolve(undefined);
+      }
+    });
+  }
+
+  /**
+   * Probe whether a pane is focused in the user's attached zellij client.
+   * A detached session has no listed clients and is therefore inactive.
+   */
+  async getPaneActivityAsync(
+    paneId: string,
+    session?: string,
+  ): Promise<PaneActivity> {
+    const target = normalizePaneId(paneId);
+    if (!/^\d+$/.test(target)) return "unknown";
+
+    const [clientsOutput, tabsOutput, panesOutput] = await Promise.all([
+      this.runActionAsync(session, ["list-clients"]),
+      this.runActionAsync(session, ["list-tabs", "--json"]),
+      this.runActionAsync(session, [
+        "list-panes",
+        "--all",
+        "--state",
+        "--tab",
+        "--json",
+      ]),
+    ]);
+    if (
+      clientsOutput === undefined ||
+      tabsOutput === undefined ||
+      panesOutput === undefined
+    ) {
+      return "unknown";
+    }
+
+    let attached: boolean;
+    let tabs: ZellijTabRow[];
+    let panes: ZellijPaneRow[];
+    try {
+      attached = parseClientListing(clientsOutput);
+      tabs = parseTabListing(tabsOutput);
+      panes = parsePaneListing(panesOutput);
+    } catch {
+      return "unknown";
+    }
+    if (!attached) return "inactive";
+
+    const pane = panes.find(
+      (candidate) => !candidate.is_plugin && String(candidate.id) === target,
+    );
+    if (!pane || pane.exited === true) return "inactive";
+    if (
+      pane.is_focused === undefined ||
+      pane.is_floating === undefined ||
+      pane.is_suppressed === undefined ||
+      (pane.tab_id === undefined && pane.tab_position === undefined)
+    ) {
+      return "unknown";
+    }
+
+    const tab = tabs.find((candidate) => paneBelongsToTab(pane, candidate));
+    if (!tab || tab.active === undefined) return "unknown";
+    if (tab.active !== true || pane.is_suppressed) return "inactive";
+    if (!pane.is_focused) return "inactive";
+    if (
+      pane.is_floating !== true &&
+      panes.some((candidate) => isFocusedVisibleFloatingPane(candidate, tab))
+    ) {
+      return "inactive";
+    }
+    return "active";
   }
 
   /**
