@@ -1,4 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import registerSettingsPanel from "@juanibiapina/pi-extension-settings";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
 import {
   HIDE_AGENT_LIST_FLAG,
@@ -6,9 +16,26 @@ import {
   readExtensionSettings,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
-import { getSessionScopes } from "../src/session-scope";
+import { clearSessionScopes, getSessionScopes } from "../src/session-scope";
 
-function mockApi(getFlag: (name: string) => unknown = () => undefined) {
+function sharedEventBus() {
+  const handlers = new Map<string, Array<(data: unknown) => void>>();
+  return {
+    emit: vi.fn((name: string, data: unknown) => {
+      for (const handler of handlers.get(name) ?? []) handler(data);
+    }),
+    on: vi.fn((name: string, handler: (data: unknown) => void) => {
+      const registered = handlers.get(name) ?? [];
+      registered.push(handler);
+      handlers.set(name, registered);
+    }),
+  };
+}
+
+function mockApi(
+  getFlag: (name: string) => unknown = () => undefined,
+  events = sharedEventBus(),
+) {
   return {
     registerTool: vi.fn(),
     registerMessageRenderer: vi.fn(),
@@ -17,6 +44,7 @@ function mockApi(getFlag: (name: string) => unknown = () => undefined) {
     registerShortcut: vi.fn(),
     getFlag: vi.fn(getFlag),
     on: vi.fn(),
+    events,
   };
 }
 
@@ -25,6 +53,10 @@ function registeredTools(api: ReturnType<typeof mockApi>): string[] {
 }
 
 describe("generic extension settings", () => {
+  afterEach(() => {
+    clearSessionScopes();
+  });
+
   it("registers validated settings with V2-safe defaults", () => {
     const api = mockApi();
     registerExtension(api as any);
@@ -39,10 +71,150 @@ describe("generic extension settings", () => {
       type: "boolean",
       default: false,
     });
+    expect(api.events.emit).toHaveBeenCalledWith(
+      "pi-extension-settings:register",
+      {
+        name: "pi-subagentura",
+        settings: [
+          {
+            id: "hide-agent-list",
+            label: "Hide agent list",
+            description: expect.stringContaining("activity widget"),
+            defaultValue: "false",
+            values: ["false", "true"],
+          },
+        ],
+      },
+    );
     expect(readExtensionSettings(api as any)).toEqual({
       maxDepth: 2,
       hideAgentList: false,
     });
+  });
+
+  it("depends on the settings helpers without autoloading the panel", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest.dependencies).toMatchObject({
+      "@juanibiapina/pi-extension-settings": "^0.9.1",
+    });
+    expect(manifest.bundledDependencies).toBeUndefined();
+    expect(manifest.pi.extensions).toEqual(["./src/subagent.ts"]);
+  });
+
+  it.each([
+    ["panel before consumer", true],
+    ["panel after consumer", false],
+  ])("registers a non-empty schema with the %s", async (_name, panelFirst) => {
+    const events = sharedEventBus();
+    const panelApi = mockApi(() => undefined, events);
+    const sessionHandlers = new Map<string, Function[]>();
+    const rootApi = {
+      ...mockApi(() => false, events),
+      on: vi.fn((name: string, handler: Function) => {
+        const registered = sessionHandlers.get(name) ?? [];
+        registered.push(handler);
+        sessionHandlers.set(name, registered);
+      }),
+    };
+
+    if (panelFirst) registerSettingsPanel(panelApi as any);
+    registerExtension(rootApi as any);
+    if (!panelFirst) registerSettingsPanel(panelApi as any);
+
+    const ctx = {
+      cwd: process.cwd(),
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      },
+      sessionManager: {
+        getSessionId: () => undefined,
+        getEntries: () => [],
+        getBranch: () => [],
+      },
+      isIdle: () => true,
+    };
+    for (const handler of sessionHandlers.get("session_start") ?? []) {
+      await handler({ reason: "new" }, ctx);
+    }
+
+    const panelCommands = panelApi.registerCommand.mock.calls.filter(
+      ([name]) =>
+        name === "extension-settings" || name === "extension-settings-local",
+    );
+    expect(panelCommands.map(([name]) => name)).toEqual([
+      "extension-settings",
+      "extension-settings-local",
+    ]);
+
+    const notify = vi.fn();
+    const custom = vi.fn(async () => undefined);
+    const globalCommand = panelCommands.find(
+      ([name]) => name === "extension-settings",
+    )?.[1];
+    await globalCommand.handler("", { ui: { notify, custom } });
+    expect(notify).not.toHaveBeenCalled();
+    expect(custom).toHaveBeenCalledOnce();
+  });
+
+  it("reads global and project-local hide-agent-list settings", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "hide-agent-list": "true" },
+        }),
+      );
+      expect(
+        readExtensionSettings(mockApi() as any, { agentDir, cwd }),
+      ).toMatchObject({ hideAgentList: true });
+
+      writeFileSync(
+        join(cwd, ".pi", "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "hide-agent-list": "false" },
+        }),
+      );
+      expect(
+        readExtensionSettings(mockApi() as any, { agentDir, cwd }),
+      ).toMatchObject({ hideAgentList: false });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets the legacy flag force a persisted false setting on for one run", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "hide-agent-list": "false" },
+        }),
+      );
+      const api = mockApi((name) =>
+        name === HIDE_AGENT_LIST_FLAG ? true : undefined,
+      );
+      expect(
+        readExtensionSettings(api as any, { agentDir, cwd }),
+      ).toMatchObject({ hideAgentList: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it.each(["", "-1", "1.5", "nope", "65", true])(

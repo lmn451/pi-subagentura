@@ -69,7 +69,10 @@ import {
   recoverCompletionTurnWakes,
   settleCompletionTurnWake,
 } from "./completion-turn";
-import { readExtensionSettings } from "./settings";
+import {
+  emitExtensionSettingsRegistration,
+  readExtensionSettings,
+} from "./settings";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -279,6 +282,7 @@ export function registerSessionHandlers(
   });
 
   pi.on("session_start", (event, ctx) => {
+    if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
     clearCompletionTurnWake(pi);

@@ -195,6 +195,52 @@ describe("pollArtifactChanges", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("does not read hide-agent-list settings when there are no activity rows", async () => {
+    const root = makeTmp();
+    const agentDir = join(root, "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(
+      join(agentDir, "settings-extensions.json"),
+      JSON.stringify({
+        "pi-subagentura": { "hide-agent-list": "invalid" },
+      }),
+    );
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+
+    try {
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const setWidget = vi.fn();
+      const owner = { id: 700, generation: 1 };
+      const pi = { getFlag: () => false } as any;
+      registerSessionScope({
+        ...owner,
+        pi,
+        ui: {
+          notify: vi.fn(),
+          setStatus: vi.fn(),
+          setWidget,
+        } as any,
+      });
+
+      await mod.pollArtifactChanges(pi, owner);
+
+      expect(setWidget).toHaveBeenCalledWith(
+        "subagentura-activity",
+        undefined,
+        { placement: "belowEditor" },
+      );
+    } finally {
+      if (previousAgentDir === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("registers the activity widget as an adaptive grid component", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
