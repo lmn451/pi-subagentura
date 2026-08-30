@@ -101,43 +101,45 @@ const UpdateOrchestratorAgentDescriptionParams = Type.Object({
 export function registerOrchestratorTools(
   pi: ExtensionAPI,
   registrationScope?: SessionScope,
+  hideAgentsList = false,
 ): void {
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
-
-  registerToolWithDefaultGuidance(pi, {
-    name: "list_orchestrator_agents",
-    label: "List Orchestrator Agents",
-    description:
-      "List the bounded Orchestratorv2 routing overlay joined to this parent session's current interactive runtimes. Returns metadata, status, liveness, attach/focus commands, and artifact pointers without child transcripts or output.",
-    parameters: ListOrchestratorAgentsParams,
-    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-      const scope = resolveToolSessionScope(toolToken);
-      if (!scope) return sessionUnavailableResult();
-      try {
-        const projection = await loadOrchestratorAgentRegistryView(
-          ctx.cwd,
-          scope.interactiveStates,
-          {
-            signal,
-            authorityEntries: parentBranchEntries(ctx),
-          },
-        );
-        return {
-          content: [
+  if (!hideAgentsList) {
+    registerToolWithDefaultGuidance(pi, {
+      name: "list_orchestrator_agents",
+      label: "List Orchestrator Agents",
+      description:
+        "List the bounded Orchestratorv2 routing overlay joined to this parent session's current interactive runtimes. Returns metadata, status, liveness, attach/focus commands, and artifact pointers without child transcripts or output.",
+      parameters: ListOrchestratorAgentsParams,
+      async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+        const scope = resolveToolSessionScope(toolToken);
+        if (!scope) return sessionUnavailableResult();
+        try {
+          const projection = await loadOrchestratorAgentRegistryView(
+            ctx.cwd,
+            scope.interactiveStates,
             {
-              type: "text",
-              text: JSON.stringify(projection, null, 2),
+              signal,
+              authorityEntries: parentBranchEntries(ctx),
             },
-          ],
-          details: { status: "ok", ...projection },
-        };
-      } catch (error) {
-        return routingErrorResult(error);
-      }
-    },
-  });
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(projection, null, 2),
+              },
+            ],
+            details: { status: "ok", ...projection },
+          };
+        } catch (error) {
+          return routingErrorResult(error);
+        }
+      },
+    });
+  }
 
   registerToolWithDefaultGuidance(pi, {
     name: "update_orchestrator_agent_description",

@@ -72,6 +72,7 @@ import {
   type SessionOwnerToken,
   resolveLiveSessionScope,
 } from "./session-scope";
+import { isAgentsListHidden } from "./settings";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -340,6 +341,10 @@ export function updateRunningSubagentFooter(
   owner?: SessionOwnerToken,
 ): void {
   const ownerContext = resolveLiveSessionScope(owner);
+  if (ownerContext && isAgentsListHidden(ownerContext.pi)) {
+    updateFooterStatus(ui, FOOTER_KEY, undefined, owner);
+    return;
+  }
   const staleOwner = owner !== undefined && !ownerContext;
   const runningCount = staleOwner ? 0 : getRunningSubagentCount([owner]);
   const workingCount = staleOwner ? 0 : getWorkingSubagentCount([owner]);
@@ -764,8 +769,11 @@ async function runPollArtifactChanges(
 
     // Paint footer + widget. Both are TUI surfaces that never reach the LLM.
     if (ui) {
+      const ownerContext = resolveLiveSessionScope(owner);
+      const hideAgentsList =
+        ownerContext !== undefined && isAgentsListHidden(ownerContext.pi);
       updateRunningSubagentFooter(ui, owner);
-      updateWidgetRows(ui, WIDGET_KEY, widgetRows, owner);
+      updateWidgetRows(ui, WIDGET_KEY, hideAgentsList ? [] : widgetRows, owner);
       // Workflow TUI footer + widget: show running async workflows.
       try {
         const wfCount = getRunningWorkflowCount(owner);

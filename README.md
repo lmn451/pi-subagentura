@@ -252,6 +252,13 @@ directs the parent to delegate only through attachable interactive children and
 use the parent session's authoritative routing ledger together with the
 project-local routing cache.
 
+### Extension settings
+
+The extension exposes these validated flags for advanced configurations:
+
+- `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
+- `--subagentura-hide-agents-list` — hide agent-list tools and the visual agent-list/status supervisor. It defaults to `false` and does not disable spawning, cancellation, or result tools.
+
 #### See the thin-router flow
 
 > **A small real-session story:** [open the parent replay](https://htmlpreview.github.io/?https://gist.githubusercontent.com/lmn451/7da0271b7e863c1a215e2b7aec822c18/raw/index.html) to see one user talking with a lightweight Orchestratorv2 parent while it fans work out to many attachable child sessions. The highlighted spawn point shows the thin router creating a second Pi session for the reusable workflow-child work.

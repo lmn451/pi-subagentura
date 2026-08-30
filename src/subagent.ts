@@ -43,6 +43,7 @@ import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
+import { registerExtensionSettings, readExtensionSettings } from "./settings";
 import {
   acquireRuntimeSpawnTreeContext,
   LINEAGE_BOOTSTRAP_ENV,
@@ -123,6 +124,8 @@ export default function (pi: ExtensionAPI) {
       "pi-subagentura requires Pi >= 0.80.6 with agent_settled and custom message renderer support",
     );
   }
+  registerExtensionSettings(pi);
+  const settings = readExtensionSettings(pi);
   pi.registerFlag("orchestrator", {
     description: "Append the bundled orchestration system prompt",
     type: "boolean",
@@ -147,10 +150,15 @@ export default function (pi: ExtensionAPI) {
     };
   });
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
-  const sessionScope = registerSessionHandlers(pi);
-  registerInteractiveSubagentTools(pi, sessionScope);
-  registerOrchestratorTools(pi, sessionScope);
-  registerInteractiveSupervisor(pi, sessionScope);
+  const sessionScope = registerSessionHandlers(pi, undefined, true, settings);
+  registerInteractiveSubagentTools(pi, sessionScope, settings.hideAgentsList);
+  registerOrchestratorTools(pi, sessionScope, settings.hideAgentsList);
+  registerInteractiveSupervisor(
+    pi,
+    sessionScope,
+    undefined,
+    settings.hideAgentsList,
+  );
   registerWorkflowTool(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);
   registerInProcessMaintenanceTools(pi, sessionScope);
