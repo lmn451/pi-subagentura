@@ -117,12 +117,18 @@ export { readPaneExitCode } from "./multiplexer-tmux";
  * script, but the `write` tool treats its `path` argument as a literal string,
  * so we must give it the absolute path up front.
  */
-export function buildChildSubagentProtocol(artifactDir: string): string {
+export function buildChildSubagentProtocol(
+  artifactDir: string,
+  orchestratorV2 = false,
+): string {
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
+  const humanAttentionGuidance = orchestratorV2
+    ? `\n\nHUMAN ATTENTION IS ORCHESTRATOR-MEDIATED. As a child sub-agent, do not call the pane-local \`ask_user\` tool, ask the human directly, or otherwise solicit human attention from your pane. This covers any clarification, decision or tradeoff, approval or confirmation, missing requirement or data, permission or credential, external choice, blocker, or any other human action needed to proceed. Instead, surface one concise human-attention request to your owning orchestrator/parent in output.md and your final summary, explaining what is needed and why. Complete the turn through the existing child result and lifecycle path, then wait in the REPL for orchestrator direction, usually via a follow-up. This is guidance only, not a technical guard: a parent or orchestrator session may still use the host \`ask_user\` tool to ask the human when appropriate.`
+    : "";
   return `You are running inside a Pi sub-agent launched by a parent agent. The parent agent reads your work from two files in your artifact directory and from one CLI command. You MUST follow this protocol or your work will be lost.
 
-BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
+BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.${humanAttentionGuidance}
 
 COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
 
@@ -518,6 +524,8 @@ export function launchInteractiveSubagent(params: {
   sessionScope?: SessionScope;
   /** Explicit lineage authority; ambient lineage environment is never consulted. */
   spawnTreeContext?: ParsedSpawnTreeContext;
+  /** Whether this child is launched directly by an Orchestratorv2 session. */
+  orchestratorV2?: boolean;
   /** Workflow owner for grouping and cancellation. */
   workflowId?: string;
   /** Workflow-managed completions are consumed by the workflow runner. */
@@ -614,7 +622,10 @@ export function launchInteractiveSubagent(params: {
   // parent-child notification loop working — is the most recent instruction
   // the LLM reads. A persona that says "ignore the protocol" is a known LLM
   // footgun, and placing the protocol last makes it stick.
-  const protocol = buildChildSubagentProtocol(paths.artifactDir);
+  const protocol = buildChildSubagentProtocol(
+    paths.artifactDir,
+    params.orchestratorV2 === true,
+  );
   const systemPromptContent = params.persona
     ? `# Persona\n\n${params.persona}\n\n${protocol}`
     : protocol;

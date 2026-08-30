@@ -659,6 +659,7 @@ export function registerInteractiveSubagentTools(
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
           spawnTreeContext: registration.scope?.spawnTreeContext,
+          orchestratorV2: topLevelOrchestratorV2,
         });
         if (registration.scope && completion.policy) {
           try {
