@@ -430,6 +430,7 @@ function formatCurrentPaneActivity(activity: CurrentPaneActivity): string {
 export function registerInteractiveSubagentTools(
   pi: ExtensionAPI,
   registrationScope?: SessionScope,
+  hideAgentsList = false,
 ): void {
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
@@ -1331,61 +1332,69 @@ export function registerInteractiveSubagentTools(
     },
   });
 
-  // ── Tool: list known interactive sub-agent artifacts ─────────────
-  registerToolWithDefaultGuidance(pi, {
-    name: "list_subagent_artifacts",
-    label: "List Subagent Artifacts",
-    description: [
-      "List interactive sub-agent artifacts visible to this parent session.",
-      "Returns id, name, status, and last-update time. Use read_subagent_artifact",
-      "to fetch a specific one.",
-    ].join("\n"),
-    parameters: Type.Object({}),
+  if (!hideAgentsList) {
+    // ── Tool: list known interactive sub-agent artifacts ─────────────
+    registerToolWithDefaultGuidance(pi, {
+      name: "list_subagent_artifacts",
+      label: "List Subagent Artifacts",
+      description: [
+        "List interactive sub-agent artifacts visible to this parent session.",
+        "Returns id, name, status, and last-update time. Use read_subagent_artifact",
+        "to fetch a specific one.",
+      ].join("\n"),
+      parameters: Type.Object({}),
 
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<any> {
-      const registration = resolveInteractiveToolStates(toolToken);
-      const visibleStates = registration?.states;
-      if (visibleStates) {
-        pruneDeadInteractiveSubagents(visibleStates.values());
-        updateRunningSubagentFooter(
-          ctx.ui,
-          registration.scope ? sessionOwner(registration.scope) : undefined,
-        );
-      }
-      const states = visibleStates ? [...visibleStates.values()] : [];
-      const summary = states.map((s) => {
-        const art = getArtifactForState(s);
-        const last = lastEvent(art);
+      async execute(
+        _toolCallId,
+        _params,
+        _signal,
+        _onUpdate,
+        ctx,
+      ): Promise<any> {
+        const registration = resolveInteractiveToolStates(toolToken);
+        const visibleStates = registration?.states;
+        if (visibleStates) {
+          pruneDeadInteractiveSubagents(visibleStates.values());
+          updateRunningSubagentFooter(
+            ctx.ui,
+            registration.scope ? sessionOwner(registration.scope) : undefined,
+          );
+        }
+        const states = visibleStates ? [...visibleStates.values()] : [];
+        const summary = states.map((s) => {
+          const art = getArtifactForState(s);
+          const last = lastEvent(art);
+          return {
+            id: s.id,
+            name: s.name,
+            task: s.task,
+            status: s.status,
+            lastEvent: last,
+            lastUpdate: last?.ts,
+            artifactDir: s.artifactDir,
+          };
+        });
+        if (summary.length === 0) {
+          return {
+            content: [
+              { type: "text", text: "No interactive sub-agents are tracked." },
+            ],
+            details: { count: 0, subagents: [] },
+          };
+        }
+        const lines = summary.map((s) => {
+          const ev = s.lastEvent;
+          const taskPreview = (s.task ?? "").replace(/\s+/g, " ").slice(0, 60);
+          const evStr = ev
+            ? `last: ${ev.type}${ev.message ? ` (${ev.message.slice(0, 60)})` : ""}`
+            : "no events yet";
+          return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${evStr}`;
+        });
         return {
-          id: s.id,
-          name: s.name,
-          task: s.task,
-          status: s.status,
-          lastEvent: last,
-          lastUpdate: last?.ts,
-          artifactDir: s.artifactDir,
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: { count: summary.length, subagents: summary },
         };
-      });
-      if (summary.length === 0) {
-        return {
-          content: [
-            { type: "text", text: "No interactive sub-agents are tracked." },
-          ],
-          details: { count: 0, subagents: [] },
-        };
-      }
-      const lines = summary.map((s) => {
-        const ev = s.lastEvent;
-        const taskPreview = (s.task ?? "").replace(/\s+/g, " ").slice(0, 60);
-        const evStr = ev
-          ? `last: ${ev.type}${ev.message ? ` (${ev.message.slice(0, 60)})` : ""}`
-          : "no events yet";
-        return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${evStr}`;
-      });
-      return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        details: { count: summary.length, subagents: summary },
-      };
-    },
-  });
+      },
+    });
+  }
 }

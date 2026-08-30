@@ -64,10 +64,12 @@ import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
 import {
   clearCompletionTurnWake,
   isOrchestratorMode,
+  isOrchestratorV2Enabled,
   markCompletionTurnWakeStarted,
   recoverCompletionTurnWakes,
   settleCompletionTurnWake,
 } from "./completion-turn";
+import type { ExtensionSettings } from "./settings";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -235,6 +237,7 @@ export function registerSessionHandlers(
   pi: ExtensionAPI,
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
+  settings?: ExtensionSettings,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
@@ -301,6 +304,7 @@ export function registerSessionHandlers(
     clearFreshChildLineage(scope, event.reason);
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const orchestratorMode = isOrchestratorMode(pi);
+    const orchestratorV2Mode = isOrchestratorV2Enabled(pi);
     if (
       allowRootLineage &&
       sessionId &&
@@ -310,6 +314,8 @@ export function registerSessionHandlers(
         sessionId,
         undefined,
         orchestratorMode,
+        orchestratorV2Mode,
+        settings?.maxDepth,
       );
     }
     scope.isParentIdle =
