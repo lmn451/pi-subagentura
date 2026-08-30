@@ -21,13 +21,13 @@ function minimumNodeJob(): string {
 
 describe("Node support policy", () => {
   it("declares the Pi SDK minimum Node runtime", () => {
-    expect(packageJson.engines?.node).toBe(">=22.19.0");
+    expect(packageJson.engines?.node).toBe(">=22.23.2");
   });
 
   it("smoke-tests the exact minimum without changing the Pi SDK matrix", () => {
     const job = minimumNodeJob();
 
-    expect(job).toContain("node-version: 22.19.0");
+    expect(job).toContain("node-version: 22.23.2");
     expect(job).toContain("npm ci");
     expect(job).toContain("PI_OFFLINE=1 npx --no-install pi");
     expect(ciWorkflow).toContain('pi-version: ["0.80.6", "latest"]');

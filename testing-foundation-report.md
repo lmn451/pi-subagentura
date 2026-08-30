@@ -9,7 +9,7 @@ mutation-testing pilot. Work remains isolated in
 
 The implementation adds `fast-check@^4.9.0` and
 `@stryker-mutator/core@^10.0.0` as development dependencies. The package now
-requires Node.js 22.19.0 or newer, matching the minimum supported Pi SDK peers.
+requires Node.js 22.23.2 or newer, the current official Node 22 LTS patch.
 
 ## Review findings and changes
 
@@ -25,7 +25,7 @@ requires Node.js 22.19.0 or newer, matching the minimum supported Pi SDK peers.
 - Pull-request mutation results are non-blocking: CI runs the pilot only on the
   pinned SDK leg with `continue-on-error: true`, and Stryker has
   `thresholds.break: null`.
-- CI has a dedicated Node 22.19.0 minimum-runtime smoke job; the existing Pi SDK
+- CI has a dedicated Node 22.23.2 minimum-runtime smoke job; the existing Pi SDK
   `0.80.6`/`latest` compatibility matrix remains unchanged on Node 24.
 - Review found no production behavior defect requiring a source change. The
   sole surviving mutant is classified instead of forcing an implementation-coupled
@@ -105,7 +105,7 @@ All requested checks pass:
 | Command                  | Result                                                 |
 | ------------------------ | ------------------------------------------------------ |
 | `npm run typecheck`      | Passed                                                 |
-| Node 22.19 smoke         | Typecheck, properties, extension load, and pack passed |
+| Node 22.23.2 smoke       | Typecheck, properties, extension load, and pack passed |
 | `npm test`               | 78 files, 1,752 tests passed                           |
 | `npm run test:random`    | Seed 424242; 78 files, 1,752 tests passed              |
 | `npm run format:check`   | Passed                                                 |

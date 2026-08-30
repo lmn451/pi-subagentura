@@ -4,7 +4,7 @@ Thanks for contributing to `pi-subagentura`.
 
 ## Local development
 
-Node.js 22.19.0 or newer is required for local development.
+Node.js 22.23.2 or newer is required for local development.
 
 ```bash
 npm install

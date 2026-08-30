@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   minimum-node:
-    name: Minimum Node 22.19
+    name: Minimum Node 22.23.2
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -22,7 +22,7 @@ jobs:
       - name: Setup minimum Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.19.0
+          node-version: 22.23.2
           cache: npm
 
       - name: Install dependencies
