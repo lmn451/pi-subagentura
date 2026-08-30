@@ -343,7 +343,66 @@ describe("interactive supervisor", () => {
     expect(interactiveSupervisorColumnCount(fourColumnWidth, 2)).toBe(2);
   });
 
-  it("uses row-major order for odd counts, navigation, and resize", () => {
+  it("navigates grid items by visual column in both directions", () => {
+    const items = ["zero", "one", "two", "three", "four", "five"].map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => 40,
+    });
+    const width = interactiveSupervisorMinimumGridWidth(2);
+    const selected = () =>
+      component.render(width).find((line) => line.includes("▶"));
+    const expected = [
+      "agent-zero",
+      "agent-two",
+      "agent-four",
+      "agent-one",
+      "agent-three",
+      "agent-five",
+    ];
+
+    for (const name of expected) {
+      expect(selected()).toMatch(new RegExp(`▶.*${name}`));
+      component.handleInput("\x1b[B");
+    }
+    for (const name of [...expected].reverse()) {
+      expect(selected()).toMatch(new RegExp(`▶.*${name}`));
+      component.handleInput("\x1b[A");
+    }
+  });
+
+  it("opens and collapses details with right and left arrows", () => {
+    const item = state("right-arrow");
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
+    });
+    const width = 120;
+    component.render(width);
+    component.handleInput("\x1b[C");
+
+    const rendered = component.render(width);
+    expect(rendered.find((line) => line.includes("▶"))).toContain(
+      "agent-right-arrow",
+    );
+    expect(rendered.join("\n")).toContain("Task: inspect right-arrow");
+    component.handleInput("\x1b[D");
+    const collapsed = component.render(width);
+    expect(collapsed.find((line) => line.includes("▶"))).toContain(
+      "agent-right-arrow",
+    );
+    expect(collapsed.join("\n")).not.toContain("Task: inspect right-arrow");
+  });
+
+  it("uses row-major rendering and column-major navigation across resize", () => {
     const items = ["zero", "one", "two", "three", "four"].map((id) => ({
       kind: "interactive" as const,
       state: state(id),
@@ -373,18 +432,18 @@ describe("interactive supervisor", () => {
     component.handleInput("j");
     expect(
       component.render(threeColumnWidth).find((line) => line.includes("▶")),
-    ).toMatch(/▶.*agent-three/);
-    expect(
-      component.render(twoColumnWidth).find((line) => line.includes("▶")),
-    ).toMatch(/▶.*agent-three/);
-    component.handleInput("j");
+    ).toMatch(/▶.*agent-four/);
     expect(
       component.render(twoColumnWidth).find((line) => line.includes("▶")),
     ).toMatch(/▶.*agent-four/);
+    component.handleInput("j");
+    expect(
+      component.render(twoColumnWidth).find((line) => line.includes("▶")),
+    ).toMatch(/▶.*agent-one/);
     component.handleInput("k");
     expect(
       component.render(threeColumnWidth).find((line) => line.includes("▶")),
-    ).toMatch(/▶.*agent-three/);
+    ).toMatch(/▶.*agent-four/);
   });
 
   it("uses multiple columns only when the complete grid fits the height", () => {
@@ -481,6 +540,8 @@ describe("interactive supervisor", () => {
       availableHeight: () => 40,
       refreshIntervalMs: 0,
     });
+
+    component.render(interactiveSupervisorMinimumGridWidth(2));
 
     for (let index = 0; index < 1_000; index++) {
       component.handleInput(index % 2 === 0 ? "j" : "k");

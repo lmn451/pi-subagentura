@@ -134,6 +134,9 @@ export interface InteractiveSupervisorOptions {
 
 export class InteractiveSupervisorComponent {
   private selectedIndex = 0;
+  // Match vertical movement to the layout the user last saw. Before the first
+  // render, and whenever the list falls back to one column, movement is linear.
+  private renderedColumns = 1;
   private selectedKey?: string;
   private expanded = new Set<string>();
   private cachedWidth?: number;
@@ -186,6 +189,7 @@ export class InteractiveSupervisorComponent {
     ];
 
     if (items.length === 0) {
+      this.renderedColumns = 1;
       lines.push(trunc("│ No async subagents.", width));
     } else {
       const fixedHeight = lines.length + status.length + 1;
@@ -212,8 +216,12 @@ export class InteractiveSupervisorComponent {
     const columns = interactiveSupervisorColumnCount(width, items.length);
     if (columns > 1 && availableHeight !== undefined) {
       const grid = this.renderGridItems(items, width, columns, now);
-      if (fixedHeight + grid.length <= availableHeight) return grid;
+      if (fixedHeight + grid.length <= availableHeight) {
+        this.renderedColumns = columns;
+        return grid;
+      }
     }
+    this.renderedColumns = 1;
     return this.renderLinearItems(items, width, now);
   }
 
@@ -293,12 +301,12 @@ export class InteractiveSupervisorComponent {
 
     const items = this.items();
     if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
-      this.selectIndex(items, this.selectedIndex - 1);
+      this.selectIndex(items, this.moveSelectionIndex(items.length, -1));
       this.changed();
       return;
     }
     if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
-      this.selectIndex(items, this.selectedIndex + 1);
+      this.selectIndex(items, this.moveSelectionIndex(items.length, 1));
       this.changed();
       return;
     }
@@ -392,6 +400,16 @@ export class InteractiveSupervisorComponent {
     this.selectedKey = items[this.selectedIndex]
       ? supervisorItemKey(items[this.selectedIndex])
       : undefined;
+  }
+
+  private moveSelectionIndex(length: number, delta: -1 | 1): number {
+    if (this.renderedColumns <= 1) return this.selectedIndex + delta;
+    return moveGridIndex(
+      this.selectedIndex,
+      length,
+      this.renderedColumns,
+      delta,
+    );
   }
 
   private toggle(id: string): void {
@@ -1035,6 +1053,45 @@ function formatElapsed(milliseconds: number): string {
 
 function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(0, index), Math.max(0, length - 1));
+}
+
+function moveGridIndex(
+  index: number,
+  length: number,
+  columns: number,
+  delta: -1 | 1,
+): number {
+  const count = Math.max(0, Math.floor(length));
+  const columnCount = Math.max(1, Math.min(Math.floor(columns), count));
+  if (count <= 1 || columnCount <= 1) {
+    return clampIndex(index + delta, count);
+  }
+  const rowCount = Math.ceil(count / columnCount);
+  const remainder = count % columnCount;
+  const currentIndex = clampIndex(index, count);
+  const column = currentIndex % columnCount;
+  const row = Math.floor(currentIndex / columnCount);
+  const fullColumns = remainder === 0 ? column : Math.min(column, remainder);
+  const shortColumns = remainder === 0 ? 0 : Math.max(0, column - remainder);
+  const currentRank =
+    fullColumns * rowCount + shortColumns * (rowCount - 1) + row;
+  const targetRank = clampIndex(currentRank + delta, count);
+  if (remainder === 0) {
+    const targetColumn = Math.floor(targetRank / rowCount);
+    const targetRow = targetRank % rowCount;
+    return targetRow * columnCount + targetColumn;
+  }
+  const fullRank = remainder * rowCount;
+  if (targetRank < fullRank) {
+    const targetColumn = Math.floor(targetRank / rowCount);
+    const targetRow = targetRank % rowCount;
+    return targetRow * columnCount + targetColumn;
+  }
+  const shortRowCount = rowCount - 1;
+  const remainingRank = targetRank - fullRank;
+  const targetColumn = remainder + Math.floor(remainingRank / shortRowCount);
+  const targetRow = remainingRank % shortRowCount;
+  return targetRow * columnCount + targetColumn;
 }
 
 function supervisorGridColumnWidths(width: number, columns: number): number[] {
