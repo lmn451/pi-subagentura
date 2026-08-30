@@ -92,12 +92,15 @@ async function waitFor(
  * until the pane is reported alive.
  */
 async function spawnPane(mux: ZellijMultiplexer, name: string) {
-  const id = `it${process.pid}x${spawnCounter++}`;
   const cwd = mkdtempSync(join(tempRoot, "ws-"));
   let created: ReturnType<ZellijMultiplexer["createPane"]> | undefined;
-  // `attach --create-background` returns before the server is guaranteed to
-  // have materialized the session's panes, so retry the whole create.
+  // A failed create can leave the background session behind (for example,
+  // when zellij accepts attach but is not ready for the first action). Use a
+  // fresh session per attempt and register it before calling createPane so a
+  // failed attempt is still cleaned up by afterEach.
   await waitFor(() => {
+    const id = `it${process.pid}x${spawnCounter++}`;
+    sessions.push(`pi-subagent-${id}`);
     try {
       created = mux.createPane({ name, cwd, background: true, id });
       return true;
@@ -106,7 +109,8 @@ async function spawnPane(mux: ZellijMultiplexer, name: string) {
     }
   }, `timed out creating a zellij pane for ${name}`);
   const pane = created!;
-  if (pane.session) sessions.push(pane.session);
+  if (pane.session && !sessions.includes(pane.session))
+    sessions.push(pane.session);
   await waitFor(
     () => mux.getPaneLiveness(pane.paneId, pane.session) === "alive",
     `pane ${pane.paneId} never reported alive in ${pane.session}`,
