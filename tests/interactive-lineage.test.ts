@@ -448,6 +448,22 @@ describe("interactive lineage node cap", () => {
     expect(projection.manifests).toEqual([unsupported]);
   });
 
+  it("keeps Herdr lineage nodes actionable", async () => {
+    const herdr = manifest("herdr-agent", {
+      pane: {
+        backend: "herdr",
+        paneId: "w1:p2",
+        muxSession: "/tmp/herdr.sock",
+      },
+    });
+
+    const projection = await projectManifests([herdr], rootHash, () => false, {
+      maxNodes: 1,
+    });
+    expect(projection.roots[0]?.state).toBe("actionable");
+    expect(projection.roots[0]?.manifest).toBe(herdr);
+  });
+
   it("reads manifests newest-first so the read window follows a live tree", async () => {
     const dir = await tempDir();
     const nodesDir = path.join(dir, "nodes");

@@ -436,7 +436,7 @@ export function registerInteractiveSubagentTools(
     name: "get_current_pane_activity",
     label: "Current Pane Activity",
     description:
-      "Report whether this Pi process's tmux or Zellij pane is active in the user's current client.",
+      "Report whether this Pi process's tmux, Zellij, or Herdr pane is active in the user's current client.",
     parameters: Type.Object({}),
     async execute() {
       const activity = await getCurrentPaneActivity();
@@ -456,9 +456,9 @@ export function registerInteractiveSubagentTools(
     name: "subagent_interactive",
     label: "Interactive Subagent",
     description: [
-      "Spawn a separate Pi process in a tmux/zellij pane and return immediately.",
+      "Spawn a separate Pi process in a tmux, Zellij, or Herdr pane and return immediately.",
       "Use this when the user wants to attach to the sub-agent session and continue follow-ups there.",
-      "Works inside tmux or zellij. The tool returns attach/focus commands and the child session file.",
+      "Works inside tmux, Zellij, or Herdr. The tool returns attach/focus commands and the child session file.",
       "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
       "Completion coordination defaults to each: every terminal turn creates one TUI-only notice, while safely-idle results are coalesced into a compact immutable-reference manifest that resumes the parent.",
       "Use completionPolicy=group with a shared completionGroupId for related agents; the parent resumes once the spawning turn settles and every registered member is terminal.",

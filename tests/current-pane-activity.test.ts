@@ -10,6 +10,9 @@ const PANE_ENVIRONMENT_KEYS = [
   "ZELLIJ",
   "ZELLIJ_SESSION_NAME",
   "ZELLIJ_PANE_ID",
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
   "PI_SUBAGENTURA_CHILD",
 ] as const;
 const originalPaneEnvironment = new Map(
@@ -155,6 +158,36 @@ describe("current pane activity", () => {
       mux: "zellij",
       paneId: "42",
       session: "main",
+    });
+  });
+
+  it("prefers Herdr activity over inherited outer mux markers", async () => {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
+    process.env.HERDR_PANE_ID = "w1:p2";
+    process.env.ZELLIJ = "0";
+    process.env.TMUX = "/tmp/tmux.sock,123,0";
+    installMockChildProcess((args) => {
+      if (args[0] === "api" && args[1] === "snapshot") {
+        return JSON.stringify({
+          id: "snapshot",
+          result: {
+            snapshot: { focused_pane_id: "w1:p2" },
+          },
+        });
+      }
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "active",
+      mux: "herdr",
+      paneId: "w1:p2",
+      session: "/tmp/herdr.sock",
     });
   });
 

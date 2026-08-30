@@ -246,6 +246,7 @@ function inProcessSupervisorDepth(
 function muxNameForManifest(manifest: LineageManifest): MuxName | undefined {
   if (manifest.pane.backend === "tmux") return "tmux";
   if (manifest.pane.backend === "zellij") return "zellij";
+  if (manifest.pane.backend === "herdr") return "herdr";
   return undefined;
 }
 
@@ -339,7 +340,8 @@ async function loadSupervisorProjection(
     if (cached !== undefined) return cached === "dead";
     if (
       manifest.pane.backend !== "tmux" &&
-      manifest.pane.backend !== "zellij"
+      manifest.pane.backend !== "zellij" &&
+      manifest.pane.backend !== "herdr"
     ) {
       paneLivenessById.set(manifest.agentId, "unknown");
       return false;

@@ -1,5 +1,5 @@
 /**
- * Interactive sub-agent orchestrator (tmux/zellij).
+ * Interactive sub-agent multiplexer orchestrator.
  *
  * PR #1 refactor: this file used to do all tmux exec calls inline. Those
  * moved to `multiplexer-tmux.ts` behind the `Multiplexer` interface in
@@ -15,8 +15,9 @@
  * No tmux-specific `execFileSync("tmux", ...)` calls remain in this file —
  * the new home for them is `multiplexer-tmux.ts`. The PR also relaxes the
  * spawn check: a child can be created even when the parent is not in a
- * tmux/zellij session (a new detached session is created on the fly; the
- * user attaches via the returned `attachCommand`).
+ * tmux/Zellij session (a new detached session is created on the fly; the user
+ * attaches via the returned `attachCommand`). Herdr is selected only from a
+ * Herdr-managed pane and targets that pane's persisted socket path.
  *
  * The exports kept here are the public surface consumed by `subagent.ts`
  * and the test suite. Their signatures are preserved verbatim so the rest
@@ -342,9 +343,10 @@ export function isTmuxAvailable(): boolean {
 /** Setup hint shown to the user when no mux is available. Mux-agnostic. */
 export function tmuxSetupHint(): string {
   return (
-    "Start pi inside tmux or zellij, for example:\n" +
+    "Start pi inside tmux, zellij, or Herdr, for example:\n" +
     "  tmux new -A -s pi 'pi'\n" +
-    "  zellij --session pi  (or just start pi inside an existing zellij session)"
+    "  zellij --session pi\n" +
+    "  herdr  (then start pi in a Herdr pane)"
   );
 }
 
@@ -458,8 +460,8 @@ export function writeLaunchScript(
   //    - exports ARTIFACT_DIR so the child inherits it;
   //    - calls `cli.mjs start` to record the started event;
   //    - traps EXIT to record process exit and, when needed, one lock-protected completion;
-  //    - also writes the @pi-exit-code pane option for the readPaneExitCode fallback
-  //      (tmux-only; the `2>/dev/null || true` makes it a silent no-op on other muxes).
+  //    - also writes the @pi-exit-code pane option for the readPaneExitCode
+  //      fallback when the selected backend is tmux.
   const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
   // The grep pattern is single-quoted (so bash's quoting preserves the JSON quotes), but a
   // single-quoted string inside another single-quoted string (the trap body) terminates the outer one
@@ -481,7 +483,7 @@ export function writeLaunchScript(
     "    rc=$?",
     "    trap - EXIT",
     `    ${escape(cliPath)} process-exit "$rc" || true`,
-    '    tmux set-option -p -t "$TMUX_PANE" @pi-exit-code "$rc" 2>/dev/null || true',
+    '    if [ "${PI_SUBAGENTURA_MUX:-tmux}" = tmux ]; then tmux set-option -p -t "$TMUX_PANE" @pi-exit-code "$rc" 2>/dev/null || true; fi',
     '    exit "$rc"',
     "}",
     "trap on_exit EXIT",
@@ -511,7 +513,7 @@ export function launchInteractiveSubagent(params: {
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
   /** Mux preference — passed to getMux(). "auto" (default) = env-var heuristic. */
-  muxPreference?: "auto" | "tmux" | "zellij";
+  muxPreference?: "auto" | "tmux" | "zellij" | "herdr";
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
    * so a parent reload can rehydrate the sub-agent. If omitted, persistence is
@@ -659,7 +661,8 @@ export function launchInteractiveSubagent(params: {
     name: params.name,
     cwd,
     background,
-    parentPane: process.env.TMUX_PANE,
+    parentPane:
+      mux.name === "herdr" ? process.env.HERDR_PANE_ID : process.env.TMUX_PANE,
     windowName: safeSegment(params.name),
     id,
   });
@@ -759,6 +762,7 @@ export function launchInteractiveSubagent(params: {
       );
     }
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
+      PI_SUBAGENTURA_MUX: mux.name,
       ...(lineageBootstrapPath
         ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
         : {}),
@@ -866,6 +870,13 @@ interface CurrentPaneTarget {
 }
 
 function currentPaneTarget(): CurrentPaneTarget | undefined {
+  if (process.env.HERDR_ENV === "1") {
+    return {
+      mux: "herdr",
+      paneId: process.env.HERDR_PANE_ID,
+      session: process.env.HERDR_SOCKET_PATH,
+    };
+  }
   if (process.env.ZELLIJ) {
     return {
       mux: "zellij",
@@ -966,7 +977,9 @@ export function getLineagePaneLiveness(
   manifest: LineageManifest,
 ): PaneLiveness {
   const backend = manifest.pane.backend;
-  if (backend !== "tmux" && backend !== "zellij") return "unknown";
+  if (backend !== "tmux" && backend !== "zellij" && backend !== "herdr") {
+    return "unknown";
+  }
   try {
     return getMux({ preference: backend }).getPaneLiveness(
       manifest.pane.paneId,

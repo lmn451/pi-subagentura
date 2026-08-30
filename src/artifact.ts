@@ -1535,7 +1535,7 @@ function migrateStatePayload(
         basename(raw.artifactDir) !== id ||
         typeof raw.paneId !== "string" ||
         typeof raw.sessionFile !== "string" ||
-        (raw.mux !== "tmux" && raw.mux !== "zellij")
+        (raw.mux !== "tmux" && raw.mux !== "zellij" && raw.mux !== "herdr")
       ) {
         continue;
       }
