@@ -346,6 +346,7 @@ describe("subagent_interactive tool lifecycle", () => {
       rootId: "test-session-id",
     });
     expect(callArgs.contextText).toBeNull();
+    expect(callArgs.requireActivePaneForUserAttention).toBe(false);
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("notify the user immediately");
     expect(result.content[0].text).toContain(
@@ -438,6 +439,10 @@ describe("subagent_interactive tool lifecycle", () => {
     );
 
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
+    expect(
+      mockLaunchInteractiveSubagent.mock.calls[0][0]
+        .requireActivePaneForUserAttention,
+    ).toBe(true);
     expect(mockUpsertOrchestratorRoutingEntry).toHaveBeenCalledWith(
       "/tmp",
       entry,

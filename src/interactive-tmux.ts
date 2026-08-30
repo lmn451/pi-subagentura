@@ -117,16 +117,22 @@ export { readPaneExitCode } from "./multiplexer-tmux";
  * script, but the `write` tool treats its `path` argument as a literal string,
  * so we must give it the absolute path up front.
  */
-export function buildChildSubagentProtocol(artifactDir: string): string {
+export function buildChildSubagentProtocol(
+  artifactDir: string,
+  requireActivePaneForUserAttention = false,
+): string {
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
+  const userAttentionGuidance = requireActivePaneForUserAttention
+    ? "USER ATTENTION AND PANE ACTIVITY. Before calling any tool or extension that may wait for user input, call get_current_pane_activity immediately first. If it reports active, continue with the user-attention call in this pane. If it reports inactive or unknown, do not open a prompt here; include the exact decision needed in your result so the orchestrator can ask the user."
+    : "";
   return `You are running inside a Pi sub-agent launched by a parent agent. The parent agent reads your work from two files in your artifact directory and from one CLI command. You MUST follow this protocol or your work will be lost.
 
 BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
 
 COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
 
-USER ATTENTION AND PANE ACTIVITY. Before calling any tool or extension that may wait for user input, call get_current_pane_activity immediately first. If it reports active, continue with the user-attention call in this pane. If it reports inactive or unknown, do not open a prompt here; include the exact decision needed in your result so the orchestrator can ask the user.
+${userAttentionGuidance}
 
 Your artifact directory is: ${artifactDir}
 
@@ -522,6 +528,8 @@ export function launchInteractiveSubagent(params: {
   workflowId?: string;
   /** Workflow-managed completions are consumed by the workflow runner. */
   completionOwner?: "standalone" | "workflow";
+  /** Install user-attention activity gating in an Orchestrator v2 child. */
+  requireActivePaneForUserAttention?: boolean;
   /**
    * The parent session's working directory, used for the state file location.
    * If omitted, falls back to `cwd` (backward-compatible for tests).
@@ -614,7 +622,10 @@ export function launchInteractiveSubagent(params: {
   // parent-child notification loop working — is the most recent instruction
   // the LLM reads. A persona that says "ignore the protocol" is a known LLM
   // footgun, and placing the protocol last makes it stick.
-  const protocol = buildChildSubagentProtocol(paths.artifactDir);
+  const protocol = buildChildSubagentProtocol(
+    paths.artifactDir,
+    params.requireActivePaneForUserAttention,
+  );
   const systemPromptContent = params.persona
     ? `# Persona\n\n${params.persona}\n\n${protocol}`
     : protocol;
