@@ -420,11 +420,7 @@ function formatCurrentPaneActivity(activity: CurrentPaneActivity): string {
   ]
     .filter(Boolean)
     .join(" ");
-  const guidance =
-    activity.status === "active"
-      ? "User attention can be requested in this pane."
-      : "Do not request user attention here; report the decision to the orchestrator.";
-  return `Current pane activity: ${activity.status}. ${guidance} ${location}`;
+  return `Current pane activity: ${activity.status}. ${location}`;
 }
 
 export function registerInteractiveSubagentTools(
@@ -440,18 +436,17 @@ export function registerInteractiveSubagentTools(
     name: "get_current_pane_activity",
     label: "Current Pane Activity",
     description:
-      "Check whether this Pi process's tmux or Zellij pane is active in the user's current client before requesting user attention.",
-    promptSnippet:
-      "Check whether the current mux pane is active before requesting user attention",
-    promptGuidelines: [
-      "Use get_current_pane_activity immediately before calling any tool or extension that may wait for user input.",
-      "If get_current_pane_activity reports inactive or unknown, do not open a user-attention prompt in this pane; include the exact decision needed in your result so the orchestrator can ask the user.",
-    ],
+      "Report whether this Pi process's tmux or Zellij pane is active in the user's current client.",
     parameters: Type.Object({}),
     async execute() {
       const activity = await getCurrentPaneActivity();
       return {
-        content: [{ type: "text", text: formatCurrentPaneActivity(activity) }],
+        content: [
+          {
+            type: "text",
+            text: formatCurrentPaneActivity(activity),
+          },
+        ],
         details: activity,
       };
     },
@@ -660,7 +655,7 @@ export function registerInteractiveSubagentTools(
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
           spawnTreeContext: registration.scope?.spawnTreeContext,
-          orchestratorV2: topLevelOrchestratorV2,
+          requireActivePaneForUserAttention: topLevelOrchestratorV2,
         });
         if (registration.scope && completion.policy) {
           try {

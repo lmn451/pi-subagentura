@@ -1,3 +1,6 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type * as InteractiveTools from "../src/tools/interactive";
+import type * as InteractiveTmux from "../src/interactive-tmux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
 
@@ -29,6 +32,7 @@ describe("current pane activity", () => {
     delete process.env.ZELLIJ;
     delete process.env.ZELLIJ_SESSION_NAME;
     delete process.env.ZELLIJ_PANE_ID;
+    delete process.env.PI_SUBAGENTURA_CHILD;
   });
 
   it("reports an active tmux pane when the user's window has focus", async () => {
@@ -215,34 +219,68 @@ describe("current pane activity", () => {
     expect(calls).toEqual([]);
   });
 
-  it("registers activity guidance for child agents", async () => {
-    const api = { registerTool: vi.fn() };
+  it("keeps activity guidance neutral for non-v2 child agents", async () => {
+    process.env.PI_SUBAGENTURA_CHILD = "1";
+    const registerTool = vi.fn();
+    // This test exercises only tool registration from the Pi API surface.
+    const api = { registerTool } as unknown as ExtensionAPI;
     const { registerInteractiveSubagentTools } = await importFresh<
-      typeof import("../src/tools/interactive")
+      typeof InteractiveTools
     >("../src/tools/interactive");
 
-    registerInteractiveSubagentTools(api as any);
-    const tool = api.registerTool.mock.calls
+    registerInteractiveSubagentTools(api);
+    const tool = registerTool.mock.calls
       .map(([definition]) => definition)
       .find((definition) => definition.name === "get_current_pane_activity");
+    const result = await tool.execute();
 
     expect(tool).toBeDefined();
-    expect(tool.description).toMatch(/user attention/i);
-    expect(tool.promptGuidelines).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/get_current_pane_activity/),
-      ]),
+    expect(tool.description).not.toMatch(/before requesting user attention/i);
+    expect(tool.promptSnippet).toBeUndefined();
+    expect(tool.promptGuidelines).toBeUndefined();
+    expect(result.content[0].text).not.toMatch(
+      /do not request user attention|orchestrator/i,
     );
   });
 
-  it("includes pane activity guidance in the child protocol", async () => {
-    const { buildChildSubagentProtocol } = await importFresh<
-      typeof import("../src/interactive-tmux")
-    >("../src/interactive-tmux");
-    const protocol = buildChildSubagentProtocol("/tmp/artifacts");
+  it("keeps parent user attention available when pane activity is unknown", async () => {
+    const registerTool = vi.fn();
+    // This test exercises only tool registration from the Pi API surface.
+    const api = { registerTool } as unknown as ExtensionAPI;
+    const { registerInteractiveSubagentTools } = await importFresh<
+      typeof InteractiveTools
+    >("../src/tools/interactive");
 
-    expect(protocol).toContain("get_current_pane_activity");
-    expect(protocol).toMatch(/If it reports active, continue/);
-    expect(protocol).toMatch(/inactive or unknown, do not open a prompt here/);
+    registerInteractiveSubagentTools(api);
+    const tool = registerTool.mock.calls
+      .map(([definition]) => definition)
+      .find((definition) => definition.name === "get_current_pane_activity");
+    const result = await tool.execute();
+
+    expect(tool.promptSnippet).toBeUndefined();
+    expect(tool.description).not.toMatch(/before requesting user attention/i);
+    expect(tool.promptGuidelines).toBeUndefined();
+    expect(result.content[0].text).toContain("Current pane activity: unknown.");
+    expect(result.content[0].text).not.toMatch(
+      /do not request user attention|orchestrator/i,
+    );
+  });
+
+  it("limits user-attention guidance to Orchestrator v2 children", async () => {
+    const { buildChildSubagentProtocol } = await importFresh<
+      typeof InteractiveTmux
+    >("../src/interactive-tmux");
+    const genericProtocol = buildChildSubagentProtocol("/tmp/artifacts");
+    const orchestratorV2Protocol = buildChildSubagentProtocol(
+      "/tmp/artifacts",
+      true,
+    );
+
+    expect(genericProtocol).not.toContain("get_current_pane_activity");
+    expect(orchestratorV2Protocol).toContain("get_current_pane_activity");
+    expect(orchestratorV2Protocol).toMatch(/If it reports active, continue/);
+    expect(orchestratorV2Protocol).toMatch(
+      /inactive or unknown, do not open a prompt here/,
+    );
   });
 });

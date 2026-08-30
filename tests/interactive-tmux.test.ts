@@ -1,3 +1,4 @@
+import type * as InteractiveTmux from "../src/interactive-tmux";
 import {
   afterAll,
   afterEach,
@@ -1026,49 +1027,27 @@ describe("interactive-tmux", () => {
       expect(protocol).toMatch(/BE BRIEF/);
     });
 
-    it("routes all child human-attention requests through the owning parent", async () => {
+    it("gates Orchestratorv2 child attention by pane activity", async () => {
       const { buildChildSubagentProtocol } = await importFresh<
-        typeof import("../src/interactive-tmux")
+        typeof InteractiveTmux
       >("../src/interactive-tmux");
       const protocol = buildChildSubagentProtocol(FIXTURE_DIR, true);
 
-      expect(protocol).toMatch(/child sub-agent.*do not call.*ask_user/is);
-      expect(protocol).toMatch(/do not.*ask the human directly/is);
-      for (const attentionKind of [
-        "clarification",
-        "decision or tradeoff",
-        "approval or confirmation",
-        "missing requirement or data",
-        "permission or credential",
-        "external choice",
-        "blocker",
-        "any other human action needed to proceed",
-      ]) {
-        expect(protocol).toContain(attentionKind);
-      }
+      expect(protocol).toContain("get_current_pane_activity");
+      expect(protocol).toMatch(/If it reports active, continue/);
       expect(protocol).toMatch(
-        /concise human-attention request.*owning orchestrator\/parent/is,
+        /inactive or unknown, do not open a prompt here/,
       );
-      expect(protocol).toMatch(
-        /output\.md.*final summary.*existing child result and lifecycle path/is,
-      );
-      expect(protocol).toMatch(/wait.*orchestrator direction.*follow-up/is);
-      expect(protocol).toMatch(/guidance only.*not a technical guard/is);
-      expect(protocol).toMatch(
-        /parent.*may still use.*host.*ask_user.*human/is,
-      );
+      expect(protocol).toMatch(/orchestrator can ask the user/);
     });
 
-    it("omits human-attention guidance outside Orchestratorv2", async () => {
+    it("omits pane-activity guidance outside Orchestratorv2", async () => {
       const { buildChildSubagentProtocol } = await importFresh<
-        typeof import("../src/interactive-tmux")
+        typeof InteractiveTmux
       >("../src/interactive-tmux");
       const protocol = buildChildSubagentProtocol(FIXTURE_DIR);
 
-      expect(protocol).not.toContain(
-        "HUMAN ATTENTION IS ORCHESTRATOR-MEDIATED",
-      );
-      expect(protocol).not.toMatch(/pane-local.*ask_user/is);
+      expect(protocol).not.toContain("get_current_pane_activity");
     });
 
     it("requires done before the final assistant response on every turn", async () => {
@@ -1164,11 +1143,11 @@ describe("interactive-tmux", () => {
       // The system prompt must match the protocol function output for the
       // sub-agent's resolved artifactDir (the literal absolute path).
       expect(content).toBe(buildChildSubagentProtocol(state.artifactDir));
-      expect(content).not.toContain("HUMAN ATTENTION IS ORCHESTRATOR-MEDIATED");
+      expect(content).not.toContain("get_current_pane_activity");
       expect(statSync(sysFile).mode & 0o777).toBe(0o600);
     });
 
-    it("writes human-attention guidance for Orchestratorv2 children", async () => {
+    it("writes pane-activity guidance for Orchestratorv2 children", async () => {
       const tmp = makeTmp();
       process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
       process.env.TMUX = makeArgs().TMUX;
@@ -1191,7 +1170,7 @@ describe("interactive-tmux", () => {
         name: "Orchestrated",
         task: "x",
         cwd: tmp,
-        orchestratorV2: true,
+        requireActivePaneForUserAttention: true,
       });
       const sysFile = join(state.artifactDir, "orchestrated-system.md");
 

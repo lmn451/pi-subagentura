@@ -500,10 +500,11 @@ output is legacy/staging fallback only. The pane is for live monitoring, and the
 artifact survives parent restarts.
 
 Interactive children also have `get_current_pane_activity`, which reports
-whether their tmux/Zellij pane is active for the user's current client. The child
-protocol instructs them to check it immediately before tools or extensions that
-may wait for user input; inactive or unknown panes should report the decision to
-the orchestrator instead of opening a hidden prompt.
+whether their tmux/Zellij pane is active for the user's current client. Only
+children launched directly by a top-level Orchestratorv2 session receive
+protocol guidance to check it before tools or extensions that may wait for user
+input. Other children and parent sessions receive the neutral activity result
+without changing their user-attention behavior.
 
 The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
