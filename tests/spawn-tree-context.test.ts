@@ -44,6 +44,31 @@ afterEach(() => {
 });
 
 describe("explicit lineage context", () => {
+  it("uses maxDepth 2 for Orchestrator V2 roots", () => {
+    const root = createRootSpawnTreeContext(
+      "orchestrator-root",
+      tempDir(),
+      true,
+      true,
+    );
+
+    expect(root.maxDepth).toBe(2);
+  });
+
+  it("keeps the default maxDepth for legacy roots", () => {
+    expect(createRootSpawnTreeContext("legacy-root", tempDir()).maxDepth).toBe(
+      8,
+    );
+    expect(
+      createRootSpawnTreeContext("legacy-root-explicit", tempDir(), false)
+        .maxDepth,
+    ).toBe(8);
+    expect(
+      createRootSpawnTreeContext("legacy-orchestrator", tempDir(), true)
+        .maxDepth,
+    ).toBe(8);
+  });
+
   it("consumes a one-use bootstrap and retains context only in this process", () => {
     const root = tempDir();
     const artifactDir = join(root, "child-agent");

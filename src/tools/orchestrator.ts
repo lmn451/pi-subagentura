@@ -105,7 +105,6 @@ export function registerOrchestratorTools(
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
-
   registerToolWithDefaultGuidance(pi, {
     name: "list_orchestrator_agents",
     label: "List Orchestrator Agents",

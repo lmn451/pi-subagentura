@@ -165,6 +165,13 @@ describe.skipIf(!hasZellij)("zellij backend against the real binary", () => {
     ).resolves.toBe("alive");
   });
 
+  it("reports inactive for a pane in a detached session", async () => {
+    const pane = await spawnPane(mux, "Activity child");
+    await expect(
+      mux.getPaneActivityAsync(pane.paneId, pane.session),
+    ).resolves.toBe("inactive");
+  });
+
   it("reports dead for an id the session never had", async () => {
     const pane = await spawnPane(mux, "Liveness child");
     expect(mux.getPaneLiveness("99999", pane.session)).toBe("dead");

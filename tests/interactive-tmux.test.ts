@@ -1,3 +1,4 @@
+import type * as InteractiveTmux from "../src/interactive-tmux";
 import {
   afterAll,
   afterEach,
@@ -1026,6 +1027,29 @@ describe("interactive-tmux", () => {
       expect(protocol).toMatch(/BE BRIEF/);
     });
 
+    it("gates Orchestratorv2 child attention by pane activity", async () => {
+      const { buildChildSubagentProtocol } = await importFresh<
+        typeof InteractiveTmux
+      >("../src/interactive-tmux");
+      const protocol = buildChildSubagentProtocol(FIXTURE_DIR, true);
+
+      expect(protocol).toContain("get_current_pane_activity");
+      expect(protocol).toMatch(/If it reports active, continue/);
+      expect(protocol).toMatch(
+        /inactive or unknown, do not open a prompt here/,
+      );
+      expect(protocol).toMatch(/orchestrator can ask the user/);
+    });
+
+    it("omits pane-activity guidance outside Orchestratorv2", async () => {
+      const { buildChildSubagentProtocol } = await importFresh<
+        typeof InteractiveTmux
+      >("../src/interactive-tmux");
+      const protocol = buildChildSubagentProtocol(FIXTURE_DIR);
+
+      expect(protocol).not.toContain("get_current_pane_activity");
+    });
+
     it("requires done before the final assistant response on every turn", async () => {
       const { buildChildSubagentProtocol } = await importFresh<
         typeof import("../src/interactive-tmux")
@@ -1107,6 +1131,10 @@ describe("interactive-tmux", () => {
         name: "NoPersona",
         task: "x",
         cwd: tmp,
+        // Legacy orchestrator lineage alone must not enable V2 guidance.
+        spawnTreeContext: syntheticSpawnTreeContext(tmp, {
+          orchestratorMode: true,
+        }),
       });
       const sysFile = join(state.artifactDir, "nopersona-system.md");
 
@@ -1115,7 +1143,40 @@ describe("interactive-tmux", () => {
       // The system prompt must match the protocol function output for the
       // sub-agent's resolved artifactDir (the literal absolute path).
       expect(content).toBe(buildChildSubagentProtocol(state.artifactDir));
+      expect(content).not.toContain("get_current_pane_activity");
       expect(statSync(sysFile).mode & 0o777).toBe(0o600);
+    });
+
+    it("writes pane-activity guidance for Orchestratorv2 children", async () => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+
+      installMockExec((_f, args) => {
+        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const { buildChildSubagentProtocol } = await importFresh<
+        typeof import("../src/interactive-tmux")
+      >("../src/interactive-tmux");
+      const state = mod.launchInteractiveSubagent({
+        name: "Orchestrated",
+        task: "x",
+        cwd: tmp,
+        requireActivePaneForUserAttention: true,
+      });
+      const sysFile = join(state.artifactDir, "orchestrated-system.md");
+
+      expect(readFileSync(sysFile, "utf8")).toBe(
+        buildChildSubagentProtocol(state.artifactDir, true),
+      );
     });
 
     it("places the persona ABOVE the protocol (recency favors the protocol)", async () => {

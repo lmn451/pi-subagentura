@@ -15,6 +15,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type {
+  ExtensionAPI,
+  ExtensionUIContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   appendEvent,
   appendCompletionEvent,
@@ -27,6 +31,7 @@ import {
   readEventRecords,
   writeOutput,
 } from "../src/artifact";
+import type { Multiplexer } from "../src/multiplexer";
 import { importFresh } from "./test-utils";
 import {
   advanceSessionScopeGeneration,
@@ -35,6 +40,8 @@ import {
   removeSessionScope,
 } from "../src/session-scope";
 import { responsiveFlowMinimumWidth } from "../src/rendering";
+import { HIDE_AGENT_LIST_FLAG } from "../src/settings";
+
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
 }
@@ -235,6 +242,59 @@ describe("pollArtifactChanges", () => {
       true,
     );
     expect(wideRows.every((line) => !line.includes("\n"))).toBe(true);
+  });
+
+  it("hides owner-scoped activity rows while keeping the running footer", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    item.state.name = "hidden-agent";
+    item.state.parentSessionId = "session-hidden";
+    const setStatus = vi.fn();
+    const setWidget = vi.fn();
+    const pi = {
+      sendMessage: vi.fn(),
+      getFlag: (name: string) =>
+        name === HIDE_AGENT_LIST_FLAG ? true : undefined,
+    } as unknown as ExtensionAPI;
+    const ui = {
+      notify: vi.fn(),
+      setStatus,
+      setWidget,
+    } as unknown as ExtensionUIContext;
+    const scope = registerSessionScope({
+      id: 505,
+      generation: 1,
+      pi,
+      ui,
+      sessionManager: {
+        getSessionId: () => "session-hidden",
+        getEntries: () => [],
+      },
+    });
+    scope.interactiveStates.set(item.id, item.state);
+    const livenessMux = {
+      getPaneLivenessAsync: async () => "alive" as const,
+    } satisfies Pick<Multiplexer, "getPaneLivenessAsync">;
+    // The poller exercises only liveness; the remaining mux methods are irrelevant here.
+    multiplexer.__setTmuxMultiplexer(livenessMux as unknown as Multiplexer);
+
+    await mod.pollArtifactChanges(pi, {
+      id: scope.id,
+      generation: scope.generation,
+    });
+
+    expect(setStatus).toHaveBeenCalledWith(
+      "subagentura-running",
+      "⚡ 1 sub-agent alive · 1 working",
+    );
+    expect(setWidget).toHaveBeenCalledWith("subagentura-activity", undefined, {
+      placement: "belowEditor",
+    });
+    expect(renderedWidgetRows(setWidget, "subagentura-activity", 80)).toEqual(
+      [],
+    );
   });
 
   it("skips aborted child settlement but delivers the next turn", async () => {
