@@ -123,6 +123,7 @@ import {
   setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
+import { createTelemetrySession } from "../src/telemetry";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -274,6 +275,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   jobRegistry.clear();
   clearSessionScopes();
 });
@@ -952,6 +954,93 @@ describe("get_subagent_result tool", () => {
     expect(result.isError).toBeFalsy();
     // resultRetrieved should have been set
     expect(job.resultRetrieved).toBe(true);
+  });
+
+  it("records only the first successful output-bearing result read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+    const scoped = setupScopedExtension(713);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, "get_subagent_result");
+    const owner = sessionOwner(scoped.scope);
+    const failedResult: SubagentResult = {
+      output: "failure details",
+      isError: true,
+      errorMessage: "failed",
+      usage: defaultSuccessResult.usage,
+      model: undefined,
+    };
+    const failed = createJobState({
+      id: "failed-read",
+      status: "done",
+      result: failedResult,
+      promise: Promise.resolve(failedResult),
+    });
+    registerInProcessJob(failed, owner);
+
+    await scopedTool.execute(
+      "failed",
+      { jobId: failed.id },
+      undefined,
+      undefined,
+    );
+    expect(
+      scoped.scope.telemetry.capturedKeys.has(
+        `result-consumed:in-process:${failed.id}`,
+      ),
+    ).toBe(false);
+
+    const cancelledResult: SubagentResult = {
+      ...defaultSuccessResult,
+      output: "Sub-agent cancelled before completion",
+      cancelled: true,
+    };
+    const cancelled = createJobState({
+      id: "cancelled-read",
+      status: "cancelled",
+      result: cancelledResult,
+      promise: Promise.resolve(cancelledResult),
+    });
+    registerInProcessJob(cancelled, owner);
+    await scopedTool.execute(
+      "cancelled",
+      { jobId: cancelled.id },
+      undefined,
+      undefined,
+    );
+    expect(
+      scoped.scope.telemetry.capturedKeys.has(
+        `result-consumed:in-process:${cancelled.id}`,
+      ),
+    ).toBe(false);
+
+    const successful = createJobState({
+      id: "successful-read",
+      status: "done",
+      result: defaultSuccessResult,
+      promise: Promise.resolve(defaultSuccessResult),
+    });
+    registerInProcessJob(successful, owner);
+    await scopedTool.execute(
+      "success-1",
+      { jobId: successful.id },
+      undefined,
+      undefined,
+    );
+    await scopedTool.execute(
+      "success-2",
+      { jobId: successful.id },
+      undefined,
+      undefined,
+    );
+
+    expect(
+      [...scoped.scope.telemetry.capturedKeys].filter(
+        (key) => key === `result-consumed:in-process:${successful.id}`,
+      ),
+    ).toHaveLength(1);
   });
   it("keeps a grouped result through TTL, prune, and cap pressure until collection", async () => {
     vi.useFakeTimers();

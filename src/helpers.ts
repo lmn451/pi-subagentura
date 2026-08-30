@@ -47,6 +47,12 @@ import {
   ownerlessEntitiesVisible,
   type SessionOwnerToken,
 } from "./session-scope";
+import {
+  captureTelemetry,
+  telemetryDepthBucket,
+  type AgentTelemetryContext,
+  type TelemetryAgentStatus,
+} from "./telemetry";
 // ── Debug Logging ─────────────────────────────────────────────────
 
 const DEBUG_LOG_DIR = process.env.SUBAGENT_DEBUG_LOG_DIR
@@ -805,6 +811,8 @@ export interface StartSubagentJobParams {
   rootSessionId?: string;
   /** Exact parent lifecycle owning registry capacity for this prepared job. */
   owner?: SessionOwnerToken;
+  /** Anonymous lifecycle metadata resolved at the invoking tool boundary. */
+  telemetry?: AgentTelemetryContext;
 }
 
 export interface StartSubagentJobResult {
@@ -852,6 +860,7 @@ export async function startSubagentJob(
     depth,
     rootSessionId,
     owner,
+    telemetry,
   } = params;
 
   // Enforce the cap within this exact scope; peer sessions never evict each other.
@@ -1137,6 +1146,7 @@ export async function startSubagentJob(
   // register the job before any model or tool side effects are possible.
   let startGateResolve!: () => void;
   let started = false;
+  let telemetryStartedAt: number | undefined;
   let disposedBeforeStart = false;
   const startGate = new Promise<void>((resolve) => {
     startGateResolve = resolve;
@@ -1144,6 +1154,21 @@ export async function startSubagentJob(
   const start = (): void => {
     if (started || disposedBeforeStart) return;
     started = true;
+    telemetryStartedAt = Date.now();
+    captureTelemetry(
+      telemetry?.session,
+      {
+        event: "agent_started",
+        execution: "in-process",
+        unit: "job",
+        invocation_source: telemetry?.invocationSource ?? "isolated",
+        model: modelLabel,
+        async: telemetry?.async ?? false,
+        depth_bucket: telemetryDepthBucket(telemetry?.depth),
+        completion_policy: telemetry?.completionPolicy ?? "inline",
+      },
+      { dedupeKey: `agent-started:in-process:${jobId}` },
+    );
     startGateResolve();
   };
   const disposePreparedSession = (): void => {
@@ -1302,6 +1327,30 @@ export async function startSubagentJob(
         errorMessage: msg,
       });
     } finally {
+      if (started) {
+        const status: TelemetryAgentStatus = result.cancelled
+          ? "cancelled"
+          : result.isError
+            ? "error"
+            : "success";
+        captureTelemetry(
+          telemetry?.session,
+          {
+            event: "agent_completed",
+            execution: "in-process",
+            unit: "job",
+            invocation_source: telemetry?.invocationSource ?? "isolated",
+            completion_policy: telemetry?.completionPolicy ?? "inline",
+            status,
+            duration_ms:
+              telemetryStartedAt === undefined
+                ? undefined
+                : Date.now() - telemetryStartedAt,
+            message_count: session.agent.state.messages.length,
+          },
+          { dedupeKey: `agent-completed:in-process:${jobId}` },
+        );
+      }
       debugLog("info", "job_complete", {
         jobId,
         outputLength: result.output.length,

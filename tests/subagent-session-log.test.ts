@@ -21,8 +21,21 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, artifactPath, readEvents } from "../src/artifact";
+import {
+  appendEvent,
+  appendInteractiveState,
+  artifactPath,
+  readEvents,
+  updatePersistedTelemetrySession,
+} from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
+import { createTelemetrySession } from "../src/telemetry";
+import { rehydrateInteractiveSubagents } from "../src/rehydrate";
 import { importFresh } from "./test-utils";
 
 function makeTmp(): string {
@@ -85,6 +98,8 @@ describe("session-log tail-read", () => {
   });
 
   afterEach(() => {
+    clearSessionScopes();
+    vi.unstubAllGlobals();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -145,6 +160,232 @@ describe("session-log tail-read", () => {
     expect(event.status).toBe("running");
     // Cursor advanced.
     expect(state.lastDeliveredSessionByte).toBeGreaterThan(0);
+  });
+
+  it("pairs telemetry starts and completions for every interactive turn", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const scope = registerSessionScope({
+      id: 901,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(state.id, state);
+    const art = artifactPath(join(artifactDir, ".."), state.id);
+
+    for (const [index, messages] of [
+      [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "first result" },
+      ],
+      [
+        { role: "user", content: "follow-up" },
+        { role: "assistant", content: "working" },
+        { role: "assistant", content: "follow-up result" },
+      ],
+    ].entries()) {
+      appendFileSync(
+        state.sessionFile,
+        messages
+          .map((message, messageIndex) =>
+            JSON.stringify({
+              id:
+                message.role === "user"
+                  ? `turn-${index}`
+                  : `assistant-${index}-${messageIndex}`,
+              type: "message",
+              message,
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      appendEvent(art, {
+        version: 2,
+        eventId: `start-${index}`,
+        turnId: `turn-${index}`,
+        ts: 1_000 + index * 100,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: `done-${index}`,
+        turnId: `turn-${index}`,
+        ts: 1_050 + index * 100,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "agent_settled",
+      });
+    }
+    await mod.pollArtifactChanges({} as any, sessionOwner(scope));
+
+    const starts = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_started",
+    );
+    const completions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_completed",
+    );
+    expect(starts).toHaveLength(2);
+    expect(completions).toHaveLength(2);
+    expect(starts.map(({ properties }) => properties.unit)).toEqual([
+      "turn",
+      "turn",
+    ]);
+    expect(
+      completions.map(({ properties }) => properties.message_count),
+    ).toEqual([2, 3]);
+  });
+
+  it("preserves active-turn telemetry progress across rehydrate", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const cwd = join(artifactDir, "..");
+    const correlationId = "66666666-6666-4666-8666-666666666666";
+    const telemetry = createTelemetrySession(
+      true,
+      "orchestrator",
+      correlationId,
+    );
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    Object.assign(state, {
+      cwd,
+      parentSessionId: "pi",
+      telemetryEligible: true,
+      telemetryCorrelationId: correlationId,
+      telemetryInvocationSource: "interactive",
+      telemetryCompletionPolicy: "each",
+      telemetryAsync: true,
+      telemetryDepthBucket: "1",
+      telemetryModel: "default",
+      telemetryTurnMessageCounts: new Map(),
+    });
+    updatePersistedTelemetrySession(cwd, "pi", {
+      correlationId,
+      mode: "orchestrator",
+    });
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      parentSessionId: "pi",
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      telemetry: {
+        correlationId,
+        invocationSource: "interactive",
+        async: true,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "default",
+      },
+    });
+    const firstScope = registerSessionScope({
+      id: 902,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry,
+    });
+    firstScope.interactiveStates.set(state.id, state);
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-mid", role: "user", content: "begin" },
+        { id: "assistant-1", role: "assistant", content: "working" },
+        { id: "assistant-2", role: "assistant", content: "still working" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    const art = artifactPath(cwd, state.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-mid",
+      turnId: "turn-mid",
+      ts: 1_000,
+      type: "turn_started",
+      status: "running",
+    });
+
+    await mod.pollArtifactChanges({} as any, sessionOwner(firstScope));
+    clearSessionScopes();
+    const recoveredTelemetry = createTelemetrySession(
+      true,
+      "orchestrator",
+      correlationId,
+    );
+    const recoveredScope = registerSessionScope({
+      id: 903,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry: recoveredTelemetry,
+    });
+    rehydrateInteractiveSubagents(cwd, "pi", [], recoveredScope);
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-mid",
+      turnId: "turn-mid",
+      ts: 1_050,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+
+    await mod.pollArtifactChanges({} as any, sessionOwner(recoveredScope));
+
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_agent_started"),
+    ).toHaveLength(1);
+    const completions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_agent_completed",
+    );
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.properties).toMatchObject({
+      message_count: 3,
+      duration_bucket: "<1s",
+    });
   });
 
   it("appends tool_activity for write, edit, read with file paths", async () => {

@@ -4,6 +4,7 @@ import {
   HIDE_AGENT_LIST_FLAG,
   MAX_DEPTH_FLAG,
   readExtensionSettings,
+  TELEMETRY_FLAG,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { getSessionScopes } from "../src/session-scope";
@@ -38,6 +39,11 @@ describe("generic extension settings", () => {
       description: expect.stringContaining("activity widget"),
       type: "boolean",
       default: false,
+    });
+    expect(api.registerFlag).toHaveBeenCalledWith(TELEMETRY_FLAG, {
+      description: expect.stringContaining("anonymous"),
+      type: "boolean",
+      default: true,
     });
     expect(readExtensionSettings(api as any)).toEqual({
       maxDepth: 2,

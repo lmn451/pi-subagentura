@@ -84,6 +84,7 @@ import {
   type ResolvedCompletionPolicy,
   type CompletionGroupReservation,
 } from "./completion-coordinator";
+import { captureTelemetry, type TelemetryCompletionPolicy } from "./telemetry";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -183,6 +184,8 @@ export function registerWorkflowTool(
     ctx: any,
     ownedWorkflowId: string,
     supervisorOwner: SessionOwnerToken | undefined,
+    workflowAsync: boolean,
+    telemetryCompletionPolicy: TelemetryCompletionPolicy,
   ): WorkflowAgentRunner {
     return async ({
       prompt,
@@ -213,10 +216,10 @@ export function registerWorkflowTool(
         }
       };
 
+      const childScope = resolveLiveSessionScope(supervisorOwner);
       const tryProcess = isolation !== "in-process";
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
-        const childScope = resolveLiveSessionScope(supervisorOwner);
         try {
           state = launchInteractiveSubagent({
             name: (label || "wf-agent").slice(0, 40),
@@ -233,6 +236,9 @@ export function registerWorkflowTool(
             workflowId: ownedWorkflowId,
             completionOwner: "workflow",
             completionPolicy: "each",
+            telemetryInvocationSource: "workflow",
+            telemetryAsync: workflowAsync,
+            telemetryCompletionPolicy,
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -300,6 +306,15 @@ export function registerWorkflowTool(
         cancellationSource: "workflow",
         thinkingLevel,
         owner: childOwner,
+        telemetry: childScope?.telemetry
+          ? {
+              session: childScope.telemetry,
+              invocationSource: "workflow",
+              async: workflowAsync,
+              depth: 1,
+              completionPolicy: telemetryCompletionPolicy,
+            }
+          : undefined,
         ...(isolation === "in-process" && schema !== undefined
           ? { workflowStructuredOutputSchema: schema }
           : {}),
@@ -677,7 +692,17 @@ export function registerWorkflowTool(
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
-        runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
+        runAgent: makeRunAgent(
+          ctx,
+          workflowId,
+          workflowOwner,
+          params.async !== false,
+          params.async === false
+            ? "inline"
+            : completion.legacy
+              ? "legacy"
+              : (completion.policy ?? "each"),
+        ),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
       });
 
@@ -1031,6 +1056,13 @@ export function registerWorkflowTool(
         { source: "workflow", sourceId: st.id },
         workflowOwner,
       );
+      if (st.status === "done" && resultText.length > 0) {
+        captureTelemetry(
+          resolveLiveSessionScope(workflowOwner)?.telemetry,
+          { event: "result_consumed", source: "workflow" },
+          { dedupeKey: `result-consumed:workflow:${st.id}` },
+        );
+      }
       return {
         content: [
           {
@@ -1292,7 +1324,13 @@ export function registerWorkflowTool(
           args: argsValue,
           cwd: ctx.cwd,
           budgetTotal: DEFAULT_WORKFLOW_OUTPUT_BUDGET,
-          runAgent: makeRunAgent(ctx, workflowId, workflowOwner),
+          runAgent: makeRunAgent(
+            ctx,
+            workflowId,
+            workflowOwner,
+            true,
+            sessionScope ? "each" : "legacy",
+          ),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
         }),
         Date.now(),

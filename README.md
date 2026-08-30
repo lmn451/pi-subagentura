@@ -261,6 +261,7 @@ The extension exposes these validated flags for advanced configurations:
 
 - `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
 - `--subagentura-hide-agent-list` — hide only the compact per-agent activity widget rows; the running footer, list/status tools, and visual agent supervisor remain available. It defaults to `false`.
+- `--subagentura-telemetry` — anonymous product analytics, enabled by default; pass `--no-subagentura-telemetry` to disable it. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
 
 #### See the thin-router flow
 
@@ -829,6 +830,65 @@ Parameters:
 - “Start an interactive sub-agent in tmux for investigating the auth bug; give me the attach command.”
 - “Open an interactive sub-agent in a visible zellij pane so I can watch its tool calls live.”
 - “Attach to the existing interactive sub-agent and send it a follow-up without losing context.”
+
+## Anonymous product telemetry
+
+Anonymous product telemetry is enabled by default. The extension sends
+best-effort lifecycle events directly to PostHog's public capture endpoint so
+the maintainers can understand which execution modes are useful and where
+sub-agent completion or collection breaks down.
+
+Each logical root Pi session/tree receives one random UUID. It is not derived
+from Pi's session id and is never a stable installation, machine, user,
+repository, or project identity. The UUID and closed mode are stored only in the
+existing active-session `.pi/subagentura-state.json` file so live starts and
+later completions remain correlated across reload, resume, and matching startup
+recovery after quit. Fresh `new` and `fork` sessions replace or clear it.
+Bounded active-turn progress (closed dimensions, turn timestamps, and message
+counts) may be stored there for the same recovery purpose; prompt and output
+content is never included. Recursive interactive children receive correlation
+only through the existing mode-0600, one-use lineage bootstrap—not through
+ambient identity environment variables—and never read or write the root state
+file's telemetry metadata. A child without that explicit context starts an
+unrelated anonymous correlation rather than reconstructing identity.
+
+The payload schema is versioned and contains these events:
+
+| Event                      | Properties                                                                                                                                                                      |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_started`          | package version; `manual`, `orchestrator`, or `orchestrator_v2` mode                                                                                                            |
+| `agent_started`            | `in-process` or `interactive`; `job` or `turn` unit; closed invocation source; built-in public model id, `custom`, or `default`; async boolean; depth bucket; completion policy |
+| `interactive_message_sent` | `parent_to_child` direction and bounded count only                                                                                                                              |
+| `agent_completed`          | execution kind; `job` or `turn` unit; `success`, `error`, or `cancelled`; duration bucket; per-unit bounded message count when observable                                       |
+| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                            |
+| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                          |
+
+All events include the closed root mode and set `$process_person_profile: false`
+and `$geoip_disable: true`. Terminal agent events also repeat the closed
+invocation source and completion policy so completion rates need no identifier
+join.
+They contain only closed enums, booleans, bounded counts, the package version,
+and the random runtime correlation UUID. The extension does **not** send tasks,
+personas, prompts, messages, outputs, error text, names, group ids, paths,
+repositories, artifact/agent/Pi session ids, token usage, cost, or a persistent
+installation id. PostHog can still observe the connection's source IP while
+handling the HTTP request, but GeoIP-derived event properties are disabled.
+
+Capture is fire-and-forget with a 1.5-second timeout. Event payloads are not
+queued, persisted, or retried; only the random active-session correlation and
+bounded recovery metadata described above are stored locally. Telemetry failures
+never affect extension behavior.
+Disable it with any of:
+
+```bash
+pi --no-subagentura-telemetry
+PI_SUBAGENTURA_TELEMETRY=0 pi
+DO_NOT_TRACK=1 pi
+PI_OFFLINE=1 pi
+```
+
+Telemetry is also disabled automatically under `PI_OFFLINE`, `CI`, `VITEST`,
+or `NODE_ENV=test`. The opt-out is inherited by recursive interactive children.
 
 ## Development
 

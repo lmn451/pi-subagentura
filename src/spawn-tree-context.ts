@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { debugLog } from "./helpers";
 import { DEFAULT_MAX_DEPTH, DEFAULT_MAX_NODES } from "./interactive-lineage";
+import type { TelemetryMode } from "./telemetry";
 
 export const LINEAGE_BOOTSTRAP_SCHEMA_VERSION = 1;
 export const LINEAGE_BOOTSTRAP_ENV = "PI_SUBAGENTURA_LINEAGE_BOOTSTRAP";
@@ -37,6 +38,10 @@ export interface SpawnTreeContext {
   artifactDir?: string;
   /** Whether this lineage belongs to an orchestrator-mode parent. */
   orchestratorMode?: boolean;
+  /** Anonymous session correlation carried only by the one-use bootstrap. */
+  telemetrySessionId?: string;
+  /** Closed analytics mode propagated with the explicit correlation context. */
+  telemetryMode?: TelemetryMode;
   currentAgentId?: string;
   parentAgentId?: string;
   depth: number;
@@ -152,6 +157,27 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   if (orchestratorMode !== undefined && typeof orchestratorMode !== "boolean") {
     throw new Error("Invalid lineage bootstrap orchestratorMode");
   }
+  const telemetrySessionId =
+    raw.telemetrySessionId === undefined
+      ? undefined
+      : boundedString(raw.telemetrySessionId, "telemetrySessionId");
+  if (
+    telemetrySessionId !== undefined &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      telemetrySessionId,
+    )
+  ) {
+    throw new Error("Invalid lineage bootstrap telemetrySessionId");
+  }
+  const telemetryMode = raw.telemetryMode;
+  if (
+    telemetryMode !== undefined &&
+    telemetryMode !== "manual" &&
+    telemetryMode !== "orchestrator" &&
+    telemetryMode !== "orchestrator_v2"
+  ) {
+    throw new Error("Invalid lineage bootstrap telemetryMode");
+  }
   const depth = boundedInteger(raw.depth, "depth", 0, MAX_CONTEXT_DEPTH);
   const maxDepth = boundedInteger(
     raw.maxDepth,
@@ -170,6 +196,10 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
     sessionRoot,
     ...(artifactDir ? { artifactDir } : {}),
     ...(orchestratorMode ? { orchestratorMode } : {}),
+    ...(telemetrySessionId
+      ? { telemetrySessionId: telemetrySessionId.toLowerCase() }
+      : {}),
+    ...(telemetryMode ? { telemetryMode } : {}),
     ...(currentAgentId ? { currentAgentId } : {}),
     ...(parentAgentId ? { parentAgentId } : {}),
     depth,
@@ -191,6 +221,8 @@ export function createRootSpawnTreeContext(
   orchestratorMode = false,
   orchestratorV2Mode = false,
   configuredMaxDepth?: number,
+  telemetrySessionId?: string,
+  telemetryMode?: TelemetryMode,
 ): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
@@ -198,6 +230,8 @@ export function createRootSpawnTreeContext(
     rootId,
     sessionRoot,
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
+    ...(telemetrySessionId ? { telemetrySessionId } : {}),
+    ...(telemetryMode ? { telemetryMode } : {}),
     depth: 0,
     maxDepth: orchestratorV2Mode
       ? (configuredMaxDepth ?? 2)

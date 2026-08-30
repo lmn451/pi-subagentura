@@ -44,6 +44,7 @@ import {
 } from "./session-scope";
 import { inProcessJobOwner, inProcessJobsForOwner } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
+import { captureTelemetry } from "./telemetry";
 
 export const MAX_DELIVERY_RECORDS = 32;
 export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
@@ -504,6 +505,15 @@ export function flushDeliveries(
   } catch {
     return;
   }
+  captureTelemetry(
+    resolveLiveSessionScope(owner)?.telemetry,
+    {
+      event: "completion_delivered",
+      delivery: "notification",
+      count: deliveryIds.length,
+    },
+    { dedupeKey: `notification:${deliveryIds.join(":")}` },
+  );
   notifyCompletionDelivery(
     ui,
     selected.map(({ state, intent }) => ({

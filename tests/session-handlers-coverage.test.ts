@@ -28,7 +28,12 @@ import {
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
-import { appendEvent, artifactPath } from "../src/artifact";
+import {
+  appendEvent,
+  artifactPath,
+  loadInteractiveStates,
+  updatePersistedTelemetrySession,
+} from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import { updateRunningSubagentFooter } from "../src/artifact-poller";
 import {
@@ -59,7 +64,9 @@ function registerHandlers(
       handlers.set(name, registered);
     }),
     appendEntry: vi.fn(),
-    getFlag: vi.fn((name: string) => name === orchestratorFlag),
+    getFlag: vi.fn((name: string) =>
+      name === orchestratorFlag ? true : undefined,
+    ),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
   };
@@ -76,6 +83,7 @@ function startSession(
   root: string,
   sessionId: string,
   ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+  reason = "startup",
 ) {
   const sessionManager = {
     getSessionId: () => sessionId,
@@ -83,7 +91,7 @@ function startSession(
     getBranch: () => [],
   };
   const ctx = { cwd: root, ui, sessionManager };
-  registration.handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+  registration.handlers.get("session_start")![0]({ reason }, ctx);
   return ctx;
 }
 
@@ -203,6 +211,98 @@ describe("session handler lifecycle callbacks", () => {
     });
   });
 
+  it.each(["reload", "resume"] as const)(
+    "preserves one telemetry session across %s without another root start",
+    (reason) => {
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      const initialId = registration.sessionScope.telemetry?.correlationId;
+
+      registration.handlers.get("session_start")![0]({ reason }, ctx);
+
+      expect(registration.sessionScope.telemetry?.correlationId).toBe(
+        initialId,
+      );
+      expect(registration.sessionScope.telemetry?.mode).toBe("orchestrator_v2");
+    },
+  );
+
+  it("emits session_started once across continuity lifecycle hooks", () => {
+    const previous = {
+      VITEST: process.env.VITEST,
+      CI: process.env.CI,
+      NODE_ENV: process.env.NODE_ENV,
+    };
+    delete process.env.VITEST;
+    delete process.env.CI;
+    delete process.env.NODE_ENV;
+    const captures: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        captures.push(JSON.parse(String(init.body)).event);
+        return new Response(null, { status: 200 });
+      }),
+    );
+    try {
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      registration.handlers.get("session_start")![0]({ reason: "reload" }, ctx);
+      registration.handlers.get("session_start")![0]({ reason: "resume" }, ctx);
+
+      expect(
+        captures.filter((event) => event === "pi_subagentura_session_started"),
+      ).toHaveLength(1);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("recovers persisted telemetry only for the matching startup session", () => {
+    const correlationId = "11111111-1111-4111-8111-111111111111";
+    updatePersistedTelemetrySession(root, "session-a", {
+      correlationId,
+      mode: "orchestrator",
+    });
+    const matching = registerHandlers();
+
+    startSession(matching, root, "session-a");
+
+    expect(matching.sessionScope.telemetry).toMatchObject({
+      correlationId,
+      mode: "orchestrator",
+    });
+
+    const mismatching = registerHandlers();
+    startSession(mismatching, root, "session-b");
+    expect(mismatching.sessionScope.telemetry?.correlationId).not.toBe(
+      correlationId,
+    );
+  });
+
+  it.each(["new", "fork"] as const)(
+    "replaces stale persisted telemetry on fresh %s",
+    (reason) => {
+      const staleId = "22222222-2222-4222-8222-222222222222";
+      updatePersistedTelemetrySession(root, "session-a", {
+        correlationId: staleId,
+        mode: "orchestrator",
+      });
+      const registration = registerHandlers();
+
+      startSession(registration, root, "session-b", undefined, reason);
+
+      expect(registration.sessionScope.telemetry?.correlationId).not.toBe(
+        staleId,
+      );
+      expect(loadInteractiveStates(root)?.telemetry).toBeUndefined();
+    },
+  );
+
   it.each([
     ["orchestratorv2", 2],
     ["orchestrator", 8],
@@ -240,10 +340,52 @@ describe("session handler lifecycle callbacks", () => {
     expect(registration.sessionScope.spawnTreeContext).toBe(initial);
   });
 
+  it("keeps child telemetry bootstrap separate from root persisted state", () => {
+    const rootCorrelation = "44444444-4444-4444-8444-444444444444";
+    const childCorrelation = "55555555-5555-4555-8555-555555555555";
+    updatePersistedTelemetrySession(root, "root-session", {
+      correlationId: rootCorrelation,
+      mode: "orchestrator_v2",
+    });
+    const initial = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext(
+        "root-session",
+        root,
+        false,
+        false,
+        8,
+        childCorrelation,
+        "orchestrator",
+      ),
+      "child-agent",
+      join(root, "child-agent"),
+    );
+    const registration = registerHandlers(initial, false);
+
+    startSession(registration, root, "child-session");
+
+    expect(registration.sessionScope.telemetry).toMatchObject({
+      correlationId: childCorrelation,
+      mode: "orchestrator",
+    });
+    expect(loadInteractiveStates(root)).toMatchObject({
+      parent: "root-session",
+      telemetry: { correlationId: rootCorrelation },
+    });
+  });
+
   it("clears descendant authority on a fresh child session", () => {
     const artifactDir = join(root, "child-agent");
     const expected = createDescendantSpawnTreeContext(
-      createRootSpawnTreeContext("lineage-root", root),
+      createRootSpawnTreeContext(
+        "lineage-root",
+        root,
+        false,
+        false,
+        8,
+        "33333333-3333-4333-8333-333333333333",
+        "orchestrator",
+      ),
       "child-agent",
       artifactDir,
     );
@@ -254,11 +396,17 @@ describe("session handler lifecycle callbacks", () => {
     const initial = acquireRuntimeSpawnTreeContext(artifactDir)!;
     const registration = registerHandlers(initial, false);
     const ctx = startSession(registration, root, "child-session");
+    expect(registration.sessionScope.telemetry?.correlationId).toBe(
+      "33333333-3333-4333-8333-333333333333",
+    );
     const abandonedPath = writeLineageBootstrap(artifactDir, expected);
 
     registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
 
     expect(registration.sessionScope.spawnTreeContext).toBeUndefined();
+    expect(registration.sessionScope.telemetry?.correlationId).not.toBe(
+      "33333333-3333-4333-8333-333333333333",
+    );
     expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
     expect(existsSync(abandonedPath)).toBe(false);
   });

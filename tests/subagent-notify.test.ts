@@ -26,6 +26,7 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { settleCompletionParentTurn } from "../src/completion-coordinator";
+import { createTelemetrySession } from "../src/telemetry";
 
 // ── Hoisted mock: startSubagentJob must be mocked before any imports ──────
 const { mockStartSubagentJob } = vi.hoisted(() => ({
@@ -1828,6 +1829,53 @@ describe("read_subagent_artifact (output reporting)", () => {
       rmSync(parent, { recursive: true, force: true });
     }
   });
+
+  it.each(["error", "cancelled"] as const)(
+    "does not report an inspected %s snapshot as a successful telemetry consumption",
+    async (outcome) => {
+      const id = outcome === "error" ? "ab12cd3800000012" : "ab12cd3800000013";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(id, parent, false);
+        writeOutput(art, `${outcome} diagnostic output`);
+        appendCompletionEvent(art, {
+          turnId: `${outcome}-turn`,
+          eventId: `${outcome}-event`,
+          outcome,
+          source: "agent_settled",
+          ts: 2,
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const telemetry = createTelemetrySession(true);
+        getSessionScopes().at(-1)!.telemetry = telemetry;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => new Response(null, { status: 200 })),
+        );
+
+        await readTool.execute(
+          `read-${outcome}`,
+          { id },
+          undefined,
+          undefined,
+          {} as any,
+        );
+
+        expect(
+          telemetry.capturedKeys.has(
+            `result-consumed:interactive:${id}:${outcome}-turn`,
+          ),
+        ).toBe(false);
+      } finally {
+        vi.unstubAllGlobals();
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("reads the latest terminal snapshot instead of active staging output", async () => {
     const id = "ab12cd3800000011";
