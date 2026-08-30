@@ -111,6 +111,7 @@
   },
   "scripts": {
     "test": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test:random": "npm test -- --sequence.shuffle --sequence.seed=424242",
     "test:unit": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/pi-session-delivery.integration.test.ts --exclude 'tests/terminal-e2e/**'",
     "test:property": "vitest run tests/property",
     "test:pi": "vitest run tests/pi-session-delivery.integration.test.ts",
