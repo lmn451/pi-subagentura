@@ -25,6 +25,8 @@ out of the parent context.
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.
 
+Node.js 22.19.0 or newer is required, matching the minimum supported Pi SDK.
+
 Install globally:
 
 ```bash

@@ -11,6 +11,33 @@ permissions:
   contents: read
 
 jobs:
+  minimum-node:
+    name: Minimum Node 22.19
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup minimum Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Run property tests
+        run: npm run test:property
+      - name: Verify extension loads
+        run: >-
+          PI_OFFLINE=1 npx --no-install pi --offline --no-session
+          -e ./src/subagent.ts --help
+      - name: Verify package can be packed
+        run: npm run pack:check
+
   test:
     name: Test (Pi ${{ matrix.pi-version }})
     runs-on: ubuntu-latest
