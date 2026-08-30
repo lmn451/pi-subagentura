@@ -270,6 +270,19 @@ the global value. The
 per-agent activity widget rows. The running footer, list/status tools, and
 visual agent supervisor remain available.
 
+The same setting can be configured without the panel by creating either the
+global file `~/.pi/agent/settings-extensions.json` or the project-local file
+`<project>/.pi/settings-extensions.json`. The project-local value is read first
+and overrides the global value:
+
+```json
+{
+  "pi-subagentura": {
+    "hide-agent-list": "true"
+  }
+}
+```
+
 The extension also exposes these validated launch flags for advanced
 configurations:
 
