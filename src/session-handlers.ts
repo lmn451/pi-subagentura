@@ -69,7 +69,7 @@ import {
   recoverCompletionTurnWakes,
   settleCompletionTurnWake,
 } from "./completion-turn";
-import type { ExtensionSettings } from "./settings";
+import { readExtensionSettings } from "./settings";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -237,7 +237,6 @@ export function registerSessionHandlers(
   pi: ExtensionAPI,
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
-  settings?: ExtensionSettings,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
@@ -310,12 +309,13 @@ export function registerSessionHandlers(
       sessionId &&
       scope.spawnTreeContext?.role !== "descendant"
     ) {
+      const maxDepth = readExtensionSettings(pi).maxDepth;
       scope.spawnTreeContext = createRootSpawnTreeContext(
         sessionId,
         undefined,
         orchestratorMode,
         orchestratorV2Mode,
-        settings?.maxDepth,
+        maxDepth,
       );
     }
     scope.isParentIdle =

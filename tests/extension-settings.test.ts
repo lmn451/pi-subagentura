@@ -6,6 +6,7 @@ import {
   readExtensionSettings,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
+import { getSessionScopes } from "../src/session-scope";
 
 function mockApi(getFlag: (name: string) => unknown = () => undefined) {
   return {
@@ -78,6 +79,56 @@ describe("generic extension settings", () => {
         settings.maxDepth,
       ).maxDepth,
     ).toBe(8);
+  });
+
+  it("honors a CLI max-depth override applied before session_start", () => {
+    const flags = new Map<string, unknown>();
+    const handlers = new Map<string, Function[]>();
+    const api = {
+      ...mockApi(),
+      registerFlag: vi.fn((name: string, options: { default?: unknown }) => {
+        flags.set(name, options.default);
+      }),
+      getFlag: vi.fn((name: string) => flags.get(name)),
+      on: vi.fn((name: string, handler: Function) => {
+        const registered = handlers.get(name) ?? [];
+        registered.push(handler);
+        handlers.set(name, registered);
+      }),
+    };
+
+    const extensionApi = api as unknown as Parameters<
+      typeof registerExtension
+    >[0];
+    registerExtension(extensionApi);
+    expect(flags.get(MAX_DEPTH_FLAG)).toBe("2");
+
+    flags.set(MAX_DEPTH_FLAG, "4");
+    flags.set("orchestratorv2", true);
+    const ctx = {
+      cwd: process.cwd(),
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      },
+      sessionManager: {
+        getSessionId: () => "late-depth-session",
+        getEntries: () => [],
+        getBranch: () => [],
+      },
+    };
+    handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+
+    const scope = getSessionScopes().find(
+      (candidate) => candidate.pi === extensionApi,
+    );
+    expect(scope?.spawnTreeContext).toMatchObject({
+      role: "root",
+      maxDepth: 4,
+    });
+
+    handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
   });
 
   it("keeps list/status tools and the visual supervisor available when the widget is hidden", () => {
