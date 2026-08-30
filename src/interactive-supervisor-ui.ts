@@ -911,6 +911,11 @@ function focusReturnHint(state: InteractiveSubagentState): string {
       ? "tmux prefix + l (last window)"
       : "tmux prefix + ; (last pane)";
   }
+  if (state.mux === "herdr") {
+    return state.windowName
+      ? "Herdr prefix + p/n (tab navigation)"
+      : "Herdr prefix + h/j/k/l (pane navigation)";
+  }
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"
     : "Ctrl+p, then p (previous pane)";

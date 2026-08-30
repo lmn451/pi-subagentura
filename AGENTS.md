@@ -40,7 +40,7 @@ The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`
 | `src/delivery.ts`               | Bounded durable trigger-aware delivery queue and deterministic delivery IDs.                                                                                                                                      |
 | `src/completion-coordinator.ts` | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and triggered parent continuation.                                                                      |
 | `src/interactive-tmux.ts`       | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
-| `src/multiplexer*.ts`           | Pluggable multiplexer interface + tmux and zellij backends. Registry auto-detects available backend at runtime.                                                                                                   |
+| `src/multiplexer*.ts`           | Pluggable multiplexer interface + tmux, Zellij, and Herdr backends. Registry auto-detects available backend at runtime.                                                                                           |
 | `src/subagent-artifact-cli.ts`  | Tiny `cli.mjs` wrapper called by the child: `cli.mjs done N` / `cli.mjs error "msg"`.                                                                                                                             |
 | `src/notifications.ts`          | Upgrade-only legacy in-process delivery broker and output sanitization.                                                                                                                                           |
 | `src/rendering.ts`              | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
@@ -259,7 +259,7 @@ src/
   helpers.ts                       # startSubagentJob, resolveModel, job registry
   artifact.ts                      # v2 events, immutable outputs, state migration
   interactive-tmux.ts              # InteractiveSubagentState, registry, mux dispatch
-  multiplexer{,-tmux,-zellij}.ts   # mux backend abstraction (tmux + zellij)
+  multiplexer{,-tmux,-zellij,-herdr}.ts # mux backend abstraction (tmux + Zellij + Herdr)
   subagent-artifact-cli.ts         # cli.mjs wrapper
   notifications.ts                 # upgrade-only legacy completion broker
   rendering.ts                     # TUI render helpers

@@ -957,6 +957,22 @@ describe("persisted interactive state helpers", () => {
     });
   });
 
+  it("round-trips the Herdr socket target used for rehydration", () => {
+    const herdrState: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      paneId: "w1:p2",
+      mux: "herdr",
+      muxSession: "/tmp/herdr-session.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { abc12345: herdrState },
+    });
+
+    expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
+  });
+
   it("loadInteractiveStates returns null when the file is missing", () => {
     expect(loadInteractiveStates(root)).toBeNull();
   });

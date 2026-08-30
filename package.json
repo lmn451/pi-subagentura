@@ -74,6 +74,7 @@
     "src/multiplexer.ts",
     "src/multiplexer-tmux.ts",
     "src/multiplexer-zellij.ts",
+    "src/multiplexer-herdr.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
     "src/session-scope.ts",

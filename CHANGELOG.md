@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Interactive sub-agents and process-backed workflow agents now support Herdr
+  alongside tmux and Zellij, including pane creation, messaging, focus,
+  bounded capture, alias-aware liveness and cancellation, stable direct attach,
+  and reload-safe socket targeting. Herdr activity remains unknown when no
+  attached-client proof is available.
+
 ## [3.5.0] - 2026-08-30
 
 ### Added

@@ -757,7 +757,8 @@ export async function projectManifests(
     }
     if (
       manifest.pane.backend !== "tmux" &&
-      manifest.pane.backend !== "zellij"
+      manifest.pane.backend !== "zellij" &&
+      manifest.pane.backend !== "herdr"
     ) {
       issues.push({
         kind: "malformed",
