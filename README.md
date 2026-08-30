@@ -258,7 +258,7 @@ project-local routing cache.
 The extension exposes these validated flags for advanced configurations:
 
 - `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
-- `--subagentura-hide-agents-list` — hide agent-list tools and the visual agent-list/status supervisor. It defaults to `false` and does not disable spawning, cancellation, or result tools.
+- `--subagentura-hide-agent-list` — hide only the compact per-agent activity widget rows; the running footer, list/status tools, and visual agent supervisor remain available. It defaults to `false`.
 
 #### See the thin-router flow
 

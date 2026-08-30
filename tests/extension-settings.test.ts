@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
 import {
-  HIDE_AGENTS_LIST_FLAG,
+  HIDE_AGENT_LIST_FLAG,
   MAX_DEPTH_FLAG,
   readExtensionSettings,
 } from "../src/settings";
@@ -33,14 +33,14 @@ describe("generic extension settings", () => {
       type: "string",
       default: "2",
     });
-    expect(api.registerFlag).toHaveBeenCalledWith(HIDE_AGENTS_LIST_FLAG, {
-      description: expect.stringContaining("agent list"),
+    expect(api.registerFlag).toHaveBeenCalledWith(HIDE_AGENT_LIST_FLAG, {
+      description: expect.stringContaining("activity widget"),
       type: "boolean",
       default: false,
     });
     expect(readExtensionSettings(api as any)).toEqual({
       maxDepth: 2,
-      hideAgentsList: false,
+      hideAgentList: false,
     });
   });
 
@@ -54,13 +54,11 @@ describe("generic extension settings", () => {
     },
   );
 
-  it("rejects invalid hide-agents-list values", () => {
+  it("rejects invalid hide-agent-list values", () => {
     const api = mockApi((name) =>
-      name === HIDE_AGENTS_LIST_FLAG ? "true" : undefined,
+      name === HIDE_AGENT_LIST_FLAG ? "true" : undefined,
     );
-    expect(() => readExtensionSettings(api as any)).toThrow(
-      /hide agents list/i,
-    );
+    expect(() => readExtensionSettings(api as any)).toThrow(/hide agent list/i);
   });
 
   it("uses the configured depth only for V2 roots", () => {
@@ -82,23 +80,24 @@ describe("generic extension settings", () => {
     ).toBe(8);
   });
 
-  it("hides list tools and the visual supervisor without hiding operations", () => {
+  it("keeps list/status tools and the visual supervisor available when the widget is hidden", () => {
     const api = mockApi((name) =>
-      name === HIDE_AGENTS_LIST_FLAG ? true : undefined,
+      name === HIDE_AGENT_LIST_FLAG ? true : undefined,
     );
     registerExtension(api as any);
     const tools = registeredTools(api);
 
-    expect(tools).not.toContain("list_orchestrator_agents");
-    expect(tools).not.toContain("list_subagent_artifacts");
+    expect(tools).toContain("list_orchestrator_agents");
+    expect(tools).toContain("list_subagent_artifacts");
+    expect(tools).toContain("get_interactive_subagent_status");
     expect(tools).toContain("subagent_interactive");
     expect(tools).toContain("cancel_interactive_subagent");
     expect(tools).toContain("read_subagent_artifact");
-    expect(api.registerCommand).not.toHaveBeenCalledWith(
+    expect(api.registerCommand).toHaveBeenCalledWith(
       "subagents",
       expect.anything(),
     );
-    expect(api.registerShortcut).not.toHaveBeenCalledWith(
+    expect(api.registerShortcut).toHaveBeenCalledWith(
       "ctrl+alt+a",
       expect.anything(),
     );

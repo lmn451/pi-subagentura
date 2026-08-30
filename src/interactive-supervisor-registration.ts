@@ -459,7 +459,6 @@ export function registerInteractiveSupervisor(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
   explicitSpawnTreeContext?: ParsedSpawnTreeContext,
-  explicitHideAgentsList = false,
 ): void {
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
@@ -642,7 +641,6 @@ export function registerInteractiveSupervisor(
     );
   };
 
-  if (explicitHideAgentsList) return;
   if (typeof pi.registerShortcut === "function") {
     pi.registerShortcut(INTERACTIVE_SUPERVISOR_SHORTCUT, {
       description: "Open the async subagent supervisor",

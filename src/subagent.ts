@@ -151,14 +151,9 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi, undefined, true, settings);
-  registerInteractiveSubagentTools(pi, sessionScope, settings.hideAgentsList);
-  registerOrchestratorTools(pi, sessionScope, settings.hideAgentsList);
-  registerInteractiveSupervisor(
-    pi,
-    sessionScope,
-    undefined,
-    settings.hideAgentsList,
-  );
+  registerInteractiveSubagentTools(pi, sessionScope);
+  registerOrchestratorTools(pi, sessionScope);
+  registerInteractiveSupervisor(pi, sessionScope);
   registerWorkflowTool(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);
   registerInProcessMaintenanceTools(pi, sessionScope);
