@@ -112,6 +112,7 @@
   "scripts": {
     "test": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude 'tests/terminal-e2e/**'",
     "test:unit": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/pi-session-delivery.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test:property": "vitest run tests/property",
     "test:pi": "vitest run tests/pi-session-delivery.integration.test.ts",
     "test:tmux": "vitest run tests/tmux.integration.test.ts",
     "test:zellij": "vitest run tests/zellij.integration.test.ts",
@@ -146,6 +147,7 @@
     "@earendil-works/pi-tui": "0.80.6",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.0",
+    "fast-check": "^4.9.0",
     "lint-staged": "^17.0.7",
     "prettier": "^3.9.0",
     "simple-git-hooks": "^2.13.1",
