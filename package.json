@@ -1,6 +1,6 @@
 {
   "name": "pi-subagentura",
-  "version": "3.4.2",
+  "version": "3.5.0",
   "description": "Reusable agent workflows and observable, attachable sub-agents for the Pi coding agent",
   "author": "lmn451",
   "license": "MIT",

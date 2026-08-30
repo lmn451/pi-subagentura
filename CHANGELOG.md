@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-08-30
+
+### Added
+
+- Added `--subagentura-max-depth` and `--subagentura-hide-agent-list` settings for Orchestratorv2 lineage and compact activity-widget control.
+- Added pane-activity detection and targeted Orchestratorv2 child guidance so tools that may wait for user input can tell whether their pane currently has attention.
+- Added adaptive supervisor-popup and activity-widget grids, including top-to-bottom keyboard navigation across grid columns.
+- Added grouped-completion progress, running sub-agent counts in the footer, and recipient labels for orchestrator follow-up turns.
+
 ### Changed
 
 - Workflow output budgets now default to the finite `100_000_000_000` completed output tokens. This is a high safety ceiling with significant cost/runtime risk; existing explicit overrides and independent safeguards are unchanged.
 - The minimum supported Node.js runtime is now 22.23.2, the current Node 22 LTS patch.
+- Direct Orchestratorv2 children now continue user-attention calls locally when their pane is active and route inactive or unknown decisions through the parent.
+
+### Fixed
+
+- Tightened prompt-only Orchestratorv2 route matching and capped root lineage at the configured depth.
+- Quieted directly aborted child turns and preserved orchestrator footer identity across updates.
+- Scoped agent-list hiding to compact activity rows and prevented mid-session setting changes from altering the active lineage limit.
 
 ## [3.4.2] - 2026-08-28
 
@@ -175,7 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.4.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...HEAD
+[3.5.0]: https://github.com/lmn451/pi-subagentura/compare/v3.4.2...v3.5.0
+[3.4.2]: https://github.com/lmn451/pi-subagentura/compare/v3.4.0...v3.4.2
 [3.4.0]: https://github.com/lmn451/pi-subagentura/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/lmn451/pi-subagentura/compare/v3.3.0...v3.3.1
 [3.3.0]: https://github.com/lmn451/pi-subagentura/compare/v3.2.0...v3.3.0
