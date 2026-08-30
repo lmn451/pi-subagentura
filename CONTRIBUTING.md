@@ -14,6 +14,23 @@ npm test
 npm run pack:check
 ```
 
+## CI workflow and merge gates
+
+Pull requests are validated by the `pull_request` workflow trigger; branch pushes
+run automatically only for `master`. A newer commit cancels only the superseded
+run for the same pull request. Scheduled and manual runs retain the deeper
+random-order and mutation checks.
+
+The `Protect master` repository ruleset must require these stable CI check names:
+
+- `Minimum Node 22.23.2`
+- `Test (Pi 0.80.6)`
+- `Test (Pi latest)`
+
+The separate minimum-Node check makes runtime support visible rather than hiding
+it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
+coordinated ruleset update by a repository administrator.
+
 ## Property and mutation testing
 
 Property tests run as part of `npm test`; use the focused command while
@@ -33,8 +50,9 @@ properties:
 FC_SEED=123 FC_PATH="0:1:0" npm run test:property -- -t "property name"
 ```
 
-The standard test suite can also run with files and tests shuffled.
-The focused script uses a fixed seed so failures replay exactly:
+The standard test suite can also run with files and tests shuffled. CI runs this
+extra pass only on scheduled and manual workflows. The focused script uses a
+fixed seed so failures replay exactly:
 
 ```bash
 npm run test:random
@@ -56,10 +74,10 @@ npm run mutation:pilot
 
 It mutates only `src/completion-presentation.ts` and runs that module's direct
 unit and property tests. The pilot excludes integration, process, multiplexer,
-and TUI suites and has no breaking score threshold. CI runs it with
-`continue-on-error` only on the pinned SDK leg, so mutation results never gate a
-pull request. Local configuration or test-runner failures still return a
-non-zero exit code.
+and TUI suites and has no breaking score threshold. CI runs it only on scheduled
+and manual workflows, with `continue-on-error` on the pinned SDK leg, so mutation
+results never gate a pull request. Local configuration or test-runner failures
+still return a non-zero exit code.
 
 ## Provider list
 

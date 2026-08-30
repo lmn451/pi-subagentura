@@ -2,15 +2,24 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+# A PR keeps one concurrency slot; newer commits cancel only the superseded PR run.
+# Non-PR runs use their unique run ID, so master, scheduled, and manual runs do
+# perform work independently.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
+  # Required check name: keep in sync with the Protect master ruleset.
   minimum-node:
     name: Minimum Node 22.23.2
     runs-on: ubuntu-latest
@@ -43,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     # Per-test bounds exist, but nothing the runner enforces bounds vitest worker
     # shutdown or a wedged tmux server; without this a hang burns the 360 min
-    # default across both matrix legs on every push and pull_request.
+    # default across both required matrix legs.
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -63,6 +72,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Check formatting
+        if: matrix.pi-version == '0.80.6'
         run: npm run format:check
 
       - name: Install selected Pi SDK
@@ -114,17 +124,39 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
+
+      # Coverage runs the same unit/property/Pi-session set on the pinned SDK.
+      # The latest SDK leg runs that set normally, preserving SDK compatibility
+      # without executing either set twice on the same leg.
       - name: Run unit tests
+        if: matrix.pi-version == 'latest'
         run: npm run test:unit
 
-      # Keep the first pure-file mutation slice visible without making its score
-      # a pull-request gate. The floating SDK leg would only duplicate the signal.
-      - name: Run non-blocking mutation pilot
+      - name: Run Pi session integration tests
+        if: matrix.pi-version == 'latest'
+        run: npm run test:pi
+      - name: Run unit and Pi session tests with coverage thresholds
         if: matrix.pi-version == '0.80.6'
+        run: npm run coverage:check
+
+      # Shuffle only on nightly/manual runs. The fixed script seed makes failures
+      # replayable without adding a duplicate PR test pass.
+      - name: Run randomized-order tests
+        if: >-
+          matrix.pi-version == '0.80.6' &&
+          (github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch')
+        run: npm run test:random
+
+      # Mutation is exploratory: schedule/manual only, pinned SDK only, and never
+      # a blocking signal. The script remains available for local investigation.
+      - name: Run non-blocking mutation pilot
+        if: >-
+          matrix.pi-version == '0.80.6' &&
+          (github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch')
         continue-on-error: true
         run: npm run mutation:pilot
-      - name: Run Pi session integration tests
-        run: npm run test:pi
 
       - name: Run tmux integration tests
         run: npm run test:tmux
@@ -137,12 +169,9 @@ jobs:
         env:
           TERM: xterm-256color
 
-      # Decision (was deferred): the terminal E2E suite runs on every push, pull
-      # request and the nightly cron, but only on the PINNED SDK leg. It asserts
-      # on Pi's TUI paint ("Async Subagents", "Model: subagentura-e2e/mock",
-      # 'Workflow "e2e-workflow" complete'), so on the floating `latest` leg any
-      # cosmetic upstream change would turn master red with no local change and
-      # read as a flake. Unit/integration coverage stays strict on both legs.
+      # The terminal E2E suite stays on the pinned SDK leg. It asserts on Pi's
+      # TUI paint, so a cosmetic floating-SDK change must not turn master red.
+      # Unit and integration coverage remains strict on both SDK legs.
       - name: Run terminal visual E2E tests
         if: matrix.pi-version == '0.80.6'
         timeout-minutes: 8
@@ -153,21 +182,14 @@ jobs:
           SUBAGENTURA_E2E_DIAGNOSTICS: ${{ runner.temp }}/subagentura-e2e
         run: npm run test:tui
       - name: Upload terminal E2E diagnostics
-        if: failure()
+        if: failure() && matrix.pi-version == '0.80.6'
         uses: actions/upload-artifact@v6
         with:
           name: terminal-e2e-${{ matrix.pi-version }}
           path: ${{ runner.temp }}/subagentura-e2e
           if-no-files-found: ignore
 
-      - name: Format check
-        run: npm run format:check
-
-      - name: Run tests with coverage thresholds
-        run: npm run coverage:check
-
+      # Packaging is SDK-independent, so run each packaging check once.
       - name: "Verify published tarball is loadable (regression: v2.0.0 missing helpers.ts)"
+        if: matrix.pi-version == '0.80.6'
         run: npx vitest run published-tarball.test.ts
-
-      - name: Verify package can be packed
-        run: npm run pack:check
