@@ -40,10 +40,26 @@ import {
   removeSessionScope,
 } from "../src/session-scope";
 import { responsiveFlowMinimumWidth } from "../src/rendering";
-import { HIDE_AGENT_LIST_FLAG } from "../src/settings";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
+}
+
+interface SessionSettingsSandbox {
+  root: string;
+  cwd: string;
+}
+
+let temporarySettingsRoot: string | undefined;
+let temporaryProcessCwd: string | undefined;
+let temporaryAgentDir: string | undefined;
+let previousAgentDir: string | undefined;
+
+function makeSessionSettingsSandbox(root = makeTmp()): SessionSettingsSandbox {
+  const cwd = join(root, "project");
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  temporarySettingsRoot = root;
+  return { root, cwd };
 }
 
 function makeState(): {
@@ -111,6 +127,12 @@ describe("pollArtifactChanges", () => {
     g.__piSubagenturaUi = undefined;
     g.__piSubagenturaParentStreaming = false;
     clearSessionScopes();
+    temporarySettingsRoot = undefined;
+    temporaryProcessCwd = makeTmp();
+    vi.spyOn(process, "cwd").mockReturnValue(temporaryProcessCwd);
+    temporaryAgentDir = makeTmp();
+    previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = temporaryAgentDir;
   });
 
   afterEach(() => {
@@ -119,6 +141,18 @@ describe("pollArtifactChanges", () => {
     delete process.env.SUBAGENT_DEBUG_LOG_DIR;
     vi.doUnmock("node:child_process");
     vi.useRealTimers();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    vi.restoreAllMocks();
+    if (temporarySettingsRoot !== undefined) {
+      rmSync(temporarySettingsRoot, { recursive: true, force: true });
+    }
+    if (temporaryProcessCwd !== undefined) {
+      rmSync(temporaryProcessCwd, { recursive: true, force: true });
+    }
+    if (temporaryAgentDir !== undefined) {
+      rmSync(temporaryAgentDir, { recursive: true, force: true });
+    }
   });
 
   async function pollUntilOwnerInvalidation(
@@ -290,19 +324,29 @@ describe("pollArtifactChanges", () => {
     expect(wideRows.every((line) => !line.includes("\n"))).toBe(true);
   });
 
-  it("hides owner-scoped activity rows while keeping the running footer", async () => {
+  it("hides owner-scoped activity rows using the session cwd", async () => {
+    const item = makeState();
+    const testRoot = join(item.artifactDir, "..");
+    const settings = makeSessionSettingsSandbox(testRoot);
+    writeFileSync(
+      join(settings.cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({
+        "pi-subagentura": { "hide-agent-list": "true" },
+      }),
+    );
+    expect(settings.cwd).not.toBe(process.cwd());
+
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const multiplexer = await import("../src/multiplexer");
-    const item = makeState();
     item.state.name = "hidden-agent";
     item.state.parentSessionId = "session-hidden";
+    item.state.cwd = testRoot;
     const setStatus = vi.fn();
     const setWidget = vi.fn();
     const pi = {
       sendMessage: vi.fn(),
-      getFlag: (name: string) =>
-        name === HIDE_AGENT_LIST_FLAG ? true : undefined,
+      getFlag: () => undefined,
     } as unknown as ExtensionAPI;
     const ui = {
       notify: vi.fn(),
@@ -314,6 +358,7 @@ describe("pollArtifactChanges", () => {
       generation: 1,
       pi,
       ui,
+      cwd: settings.cwd,
       sessionManager: {
         getSessionId: () => "session-hidden",
         getEntries: () => [],

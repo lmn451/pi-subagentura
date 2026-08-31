@@ -769,7 +769,7 @@ async function runPollArtifactChanges(
       const hideAgentList =
         widgetRows.length > 0 &&
         ownerContext !== undefined &&
-        isAgentListHidden(ownerContext.pi);
+        isAgentListHidden(ownerContext.pi, { cwd: ownerContext.cwd });
       updateRunningSubagentFooter(ui, owner);
       updateWidgetRows(ui, WIDGET_KEY, hideAgentList ? [] : widgetRows, owner);
       // Workflow TUI footer + widget: show running async workflows.

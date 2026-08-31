@@ -125,6 +125,9 @@ function parsePersistedHideAgentList(value: string | undefined): boolean {
   );
 }
 
-export function isAgentListHidden(pi: ExtensionAPI): boolean {
-  return readExtensionSettings(pi).hideAgentList;
+export function isAgentListHidden(
+  pi: ExtensionAPI,
+  storageOptions: SettingStorageOptions = {},
+): boolean {
+  return readExtensionSettings(pi, storageOptions).hideAgentList;
 }
