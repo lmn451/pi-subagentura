@@ -912,9 +912,7 @@ function focusReturnHint(state: InteractiveSubagentState): string {
       : "tmux prefix + ; (last pane)";
   }
   if (state.mux === "herdr") {
-    return state.windowName
-      ? "Herdr prefix + p/n (tab navigation)"
-      : "Herdr prefix + h/j/k/l (pane navigation)";
+    return "Herdr native pane focus; use the terminal attach command above";
   }
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"

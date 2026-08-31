@@ -33,6 +33,7 @@ import {
   MAX_EVENT_TEXT_LENGTH,
   MAX_EVENT_BATCH_BYTES,
   MAX_OUTPUT_SNAPSHOT_BYTES,
+  MAX_MUX_TERMINAL_ID_BYTES,
   MAX_TOOL_NAME_LENGTH,
   outputPathForTurn,
   readEvents,
@@ -1163,6 +1164,43 @@ describe("persisted interactive state helpers", () => {
     expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).not.toHaveProperty(
       "completionGroupId",
     );
+  });
+
+  it("bounds and drops malformed persisted mux terminal identities", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const oversized = {
+      ...SAMPLE,
+      id: "oversized",
+      artifactDir: "/tmp/artifacts/oversized",
+      mux: "herdr" as const,
+      muxTerminalId: "x".repeat(MAX_MUX_TERMINAL_ID_BYTES + 1),
+    };
+    const valid = {
+      ...SAMPLE,
+      id: "valid123",
+      artifactDir: "/tmp/artifacts/valid123",
+      mux: "herdr" as const,
+      muxTerminalId: "terminal-42",
+    };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: { ...SAMPLE, mux: "herdr", muxTerminalId: "" },
+          oversized,
+          [valid.id]: valid,
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const states = loadInteractiveStates(root)?.states;
+    expect(states?.[SAMPLE.id]).not.toHaveProperty("muxTerminalId");
+    expect(states?.oversized).not.toHaveProperty("muxTerminalId");
+    expect(states?.valid123?.muxTerminalId).toBe("terminal-42");
   });
 
   it("skips malformed v2 state and intent shapes without throwing", () => {

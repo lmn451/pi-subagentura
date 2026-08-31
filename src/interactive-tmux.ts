@@ -182,6 +182,8 @@ export interface InteractiveSubagentState {
   name: string;
   task: string;
   paneId: string;
+  /** Stable backend terminal identity (Herdr); absent for tmux and Zellij. */
+  muxTerminalId?: string;
   /** tmux window name / zellij tab name (set when spawned in background mode via new-window -n / new-tab). */
   windowName?: string;
   /**
@@ -655,6 +657,7 @@ export function launchInteractiveSubagent(params: {
   // to). If any later step throws, try to kill the orphan pane and rethrow.
   const {
     paneId,
+    muxTerminalId,
     windowName,
     session: muxSession,
   } = mux.createPane({
@@ -677,6 +680,7 @@ export function launchInteractiveSubagent(params: {
       appendInteractiveState(stateCwd, {
         id,
         paneId,
+        ...(muxTerminalId ? { muxTerminalId } : {}),
         windowName,
         mux: mux.name,
         muxSession,
@@ -721,6 +725,7 @@ export function launchInteractiveSubagent(params: {
           cwd,
           pane: {
             backend: mux.name,
+            ...(muxTerminalId ? { muxTerminalId } : {}),
             paneId,
             ...(muxSession ? { muxSession } : {}),
             ...(windowName ? { windowName } : {}),
@@ -741,6 +746,7 @@ export function launchInteractiveSubagent(params: {
       throw err;
     }
   }
+  let attach: { attachCommand: string; focusCommand: string };
   try {
     const command = buildPiInteractiveCommand({
       sessionFile: paths.sessionFile,
@@ -774,6 +780,12 @@ export function launchInteractiveSubagent(params: {
       muxSession,
     );
     mux.sendEnter(paneId, muxSession);
+    attach = mux.buildAttachCommands({
+      paneId,
+      terminalId: muxTerminalId,
+      windowName,
+      session: muxSession,
+    });
   } catch (err) {
     // Orphan-pane guard. If writeLaunchScript or sendKeys throws after
     // the pane was created, kill the pane before rethrowing so we don't
@@ -803,15 +815,11 @@ export function launchInteractiveSubagent(params: {
     throw err;
   }
 
-  const attach = mux.buildAttachCommands({
-    paneId,
-    windowName,
-    session: muxSession,
-  });
   const state: InteractiveSubagentState = {
     id,
     name: params.name,
     task: params.task,
+    ...(muxTerminalId ? { muxTerminalId } : {}),
     paneId,
     windowName,
     mux: mux.name,
@@ -918,6 +926,7 @@ export async function getCurrentPaneActivity(): Promise<CurrentPaneActivity> {
 export function paneRefForState(state: InteractiveSubagentState): PaneRef {
   return {
     paneId: state.paneId,
+    ...(state.muxTerminalId ? { muxTerminalId: state.muxTerminalId } : {}),
     windowName: state.windowName,
     session: state.muxSession,
   };
@@ -1035,11 +1044,12 @@ export function sendCommandToPane(
 export function buildAttachCommandsForState(
   state: Pick<
     InteractiveSubagentState,
-    "paneId" | "windowName" | "mux" | "muxSession"
+    "paneId" | "muxTerminalId" | "windowName" | "mux" | "muxSession"
   >,
 ): { attachCommand: string; focusCommand: string } {
   return getMuxForState(state as InteractiveSubagentState).buildAttachCommands({
     paneId: state.paneId,
+    terminalId: state.muxTerminalId,
     windowName: state.windowName,
     session: state.muxSession,
   });

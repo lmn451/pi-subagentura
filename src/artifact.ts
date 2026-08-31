@@ -273,6 +273,7 @@ export const MAX_TURN_ID_LENGTH = 256;
 export const MAX_EVENT_TEXT_LENGTH = 2_000;
 export const MAX_TOOL_NAME_LENGTH = 128;
 export const MAX_OUTPUT_SNAPSHOT_BYTES = 1024 * 1024;
+export const MAX_MUX_TERMINAL_ID_BYTES = 256;
 
 export function boundedOptionalEventText(
   value: unknown,
@@ -1374,6 +1375,9 @@ export interface InteractiveSubagentPersistedStateV1 {
 
   paneId: string;
 
+  /** Stable mux terminal identity (Herdr); absent for tmux/Zellij and legacy states. */
+  muxTerminalId?: string;
+
   windowName?: string;
 
   mux: MuxName;
@@ -1539,6 +1543,16 @@ function migrateStatePayload(
       ) {
         continue;
       }
+      const terminalIdCandidate = raw.muxTerminalId;
+      const muxTerminalId =
+        typeof terminalIdCandidate === "string" &&
+        terminalIdCandidate.length > 0 &&
+        terminalIdCandidate.trim() === terminalIdCandidate &&
+        !terminalIdCandidate.includes("\0") &&
+        Buffer.byteLength(terminalIdCandidate, "utf8") <=
+          MAX_MUX_TERMINAL_ID_BYTES
+          ? terminalIdCandidate
+          : undefined;
       const entry = raw as unknown as InteractiveSubagentPersistedStateV1 &
         Partial<InteractiveSubagentPersistedStateV2>;
       const art = artifactPath(
@@ -1723,6 +1737,7 @@ function migrateStatePayload(
       migrated[id] = {
         id,
         paneId: entry.paneId,
+        ...(muxTerminalId ? { muxTerminalId } : {}),
         ...(typeof entry.windowName === "string"
           ? { windowName: entry.windowName }
           : {}),
