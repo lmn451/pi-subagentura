@@ -261,7 +261,8 @@ The extension exposes these validated flags for advanced configurations:
 
 - `--subagentura-max-depth <n>` — Orchestratorv2 lineage depth, default `2`; legacy orchestration keeps its existing depth of `8`.
 - `--subagentura-hide-agent-list` — hide only the compact per-agent activity widget rows; the running footer, list/status tools, and visual agent supervisor remain available. It defaults to `false`.
-- `--subagentura-telemetry` — anonymous product analytics, enabled by default; pass `--no-subagentura-telemetry` to disable it. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
+- `--subagentura-telemetry` — anonymous product analytics, enabled by default. Extension booleans are presence-only; `--subagentura-telemetry=false` is not an opt-out.
+- `--no-subagentura-telemetry` — presence-only opt-out for anonymous product analytics. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
 
 #### See the thin-router flow
 
@@ -854,15 +855,15 @@ unrelated anonymous correlation rather than reconstructing identity.
 
 The payload schema is versioned and contains these events:
 
-| Event                      | Properties                                                                                                                                                                                       |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                           |
-| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
-| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed agent dimensions and adds `job` or `turn`                                                                 |
-| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                     |
-| `task_completed`           | repeated closed dimensions; `success`, `error`, or `cancelled`; rounded/capped numeric duration plus bucket; bounded child-conversation message count when observable                            |
-| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                             |
-| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                           |
+| Event                      | Properties                                                                                                                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                              |
+| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
+| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `job` or `turn`                                                                                                        |
+| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                        |
+| `task_completed`           | repeated closed execution and mux dimensions; `success`, `error`, or `cancelled`; rounded/capped numeric duration plus bucket; bounded child-conversation message count when observable                                                             |
+| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                                                                                |
+| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                                                                              |
 
 All events include the closed root mode and set `$process_person_profile: false`,
 `$geoip_disable: true`, and `$ip: "0.0.0.0"`. Terminal task events repeat the closed
@@ -884,6 +885,7 @@ anonymous session. The intended aggregates are:
 - delegated tasks: count `task_started`
 - maximum depth: maximum numeric `depth`
 - outcomes: count `task_completed`, broken down by `status`
+- execution/mux mix: count lifecycle events by the closed execution and mux dimensions
 - task time: average, percentile, or sum of `task_completed.duration_ms`
 - child conversation traffic: sum
   `task_completed.child_conversation_message_count`

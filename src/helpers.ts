@@ -1158,6 +1158,7 @@ export async function startSubagentJob(
     telemetryStartedAt = Date.now();
     const telemetryAgentDimensions = {
       execution: "in-process" as const,
+      mux: "none" as const,
       invocation_source: telemetry?.invocationSource ?? ("isolated" as const),
       model: modelLabel,
       async: telemetry?.async ?? false,
@@ -1343,6 +1344,7 @@ export async function startSubagentJob(
           {
             event: "task_completed",
             execution: "in-process",
+            mux: "none",
             unit: "job",
             invocation_source: telemetry?.invocationSource ?? "isolated",
             model: modelLabel,

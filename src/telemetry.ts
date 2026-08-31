@@ -13,6 +13,7 @@ const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetryExecution = "in-process" | "interactive";
+export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
 export type TelemetryInvocationSource =
   "with_context" | "isolated" | "interactive" | "workflow";
 export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
@@ -25,6 +26,7 @@ export type TelemetryDurationBucket =
 
 interface TelemetryAgentDimensions {
   execution: TelemetryExecution;
+  mux: TelemetryMux;
   invocation_source: TelemetryInvocationSource;
   model: string | undefined;
   async: boolean;
@@ -256,6 +258,7 @@ export function buildTelemetryPayload(
       properties = {
         ...common,
         execution: event.execution,
+        mux: event.mux,
         invocation_source: event.invocation_source,
         model: sanitizeTelemetryModel(event.model),
         async: event.async,
@@ -268,6 +271,7 @@ export function buildTelemetryPayload(
       properties = {
         ...common,
         execution: event.execution,
+        mux: event.mux,
         unit: event.unit,
         invocation_source: event.invocation_source,
         model: sanitizeTelemetryModel(event.model),
@@ -288,6 +292,7 @@ export function buildTelemetryPayload(
       properties = {
         ...common,
         execution: event.execution,
+        mux: event.mux,
         unit: event.unit,
         invocation_source: event.invocation_source,
         model: sanitizeTelemetryModel(event.model),

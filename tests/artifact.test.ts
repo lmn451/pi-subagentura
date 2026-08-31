@@ -985,6 +985,76 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)).toBeNull();
   });
 
+  it("migrates safe telemetry dimensions and message-turn IDs", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const telemetry = {
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      invocationSource: "interactive",
+      mux: "tmux",
+      async: true,
+      depth: 1,
+      depthBucket: "1",
+      completionPolicy: "each",
+      model: "default",
+      activeTurnId: "2",
+      turnStartedAt: 1_000,
+      messageTurnId: "2",
+      messageCounts: { "10": 1, "2": 2 },
+    };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { abc12345: { ...SAMPLE, telemetry } },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).toMatchObject({
+      mux: "tmux",
+      messageTurnId: "2",
+      messageCounts: { "10": 1, "2": 2 },
+    });
+
+    const { mux: legacyMux, ...legacyTelemetry } = telemetry;
+    void legacyMux;
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { abc12345: { ...SAMPLE, telemetry: legacyTelemetry } },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).toMatchObject({
+      mux: "tmux",
+    });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          abc12345: {
+            ...SAMPLE,
+            telemetry: { ...telemetry, messageTurnId: "unsafe/turn" },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).not.toHaveProperty("messageTurnId");
+  });
+
   it("loadInteractiveStates migrates a file with no schemaVersion field", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });

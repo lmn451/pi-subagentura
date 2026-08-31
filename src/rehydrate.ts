@@ -253,6 +253,10 @@ export function rehydrateInteractiveSubagents(
       telemetryEligible && entry.telemetry?.turnStartedAt !== undefined
         ? entry.telemetry.activeTurnId
         : undefined;
+    const telemetryMessageTurnId =
+      telemetryActiveTurnId === undefined
+        ? undefined
+        : (entry.telemetry?.messageTurnId ?? telemetryActiveTurnId);
     const rehydrated: InteractiveSubagentState = {
       id: entry.id,
       name: recoveredName,
@@ -292,7 +296,7 @@ export function rehydrateInteractiveSubagents(
       telemetryTurnMessageCounts: telemetryEligible
         ? new Map(Object.entries(entry.telemetry?.messageCounts ?? {}))
         : undefined,
-      telemetryMessageTurnId: telemetryActiveTurnId,
+      telemetryMessageTurnId,
       telemetryInvocationSource: entry.telemetry?.invocationSource,
       telemetryCompletionPolicy: entry.telemetry?.completionPolicy,
       telemetryAsync: entry.telemetry?.async,

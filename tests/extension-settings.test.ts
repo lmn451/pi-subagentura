@@ -1,13 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import { parseArgs } from "@earendil-works/pi-coding-agent";
 import {
   HIDE_AGENT_LIST_FLAG,
   MAX_DEPTH_FLAG,
+  isTelemetryEnabled,
   readExtensionSettings,
   TELEMETRY_FLAG,
+  TELEMETRY_OPT_OUT_FLAG,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
-import { getSessionScopes } from "../src/session-scope";
+import { getSessionScopes, clearSessionScopes } from "../src/session-scope";
+import { createPiSessionHarness } from "./helpers/pi-session-harness";
+
+const repoRoot = new URL("..", import.meta.url).pathname;
 
 function mockApi(getFlag: (name: string) => unknown = () => undefined) {
   return {
@@ -20,6 +26,10 @@ function mockApi(getFlag: (name: string) => unknown = () => undefined) {
     on: vi.fn(),
   };
 }
+
+afterEach(() => {
+  clearSessionScopes();
+});
 
 function registeredTools(api: ReturnType<typeof mockApi>): string[] {
   return api.registerTool.mock.calls.map(([tool]: any[]) => tool.name);
@@ -45,10 +55,58 @@ describe("generic extension settings", () => {
       type: "boolean",
       default: true,
     });
+    expect(api.registerFlag).toHaveBeenCalledWith(TELEMETRY_OPT_OUT_FLAG, {
+      description: expect.stringContaining("Disable anonymous"),
+      type: "boolean",
+    });
     expect(readExtensionSettings(api as any)).toEqual({
       maxDepth: 2,
       hideAgentList: false,
     });
+  });
+
+  it("applies CLI telemetry opt-out through the Pi flag harness", async () => {
+    const names = [
+      "CI",
+      "DO_NOT_TRACK",
+      "NODE_ENV",
+      "PI_OFFLINE",
+      "VITEST",
+      "PI_SUBAGENTURA_TELEMETRY",
+    ];
+    const previous = new Map(
+      names.map((name) => [name, process.env[name]] as const),
+    );
+    for (const name of names) delete process.env[name];
+
+    const parsed = parseArgs(["--no-subagentura-telemetry"]);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.unknownFlags).toEqual(
+      new Map([["no-subagentura-telemetry", true]]),
+    );
+    let harness: Awaited<ReturnType<typeof createPiSessionHarness>> | undefined;
+    try {
+      harness = await createPiSessionHarness(repoRoot, {
+        extensionFlags: Object.fromEntries(parsed.unknownFlags),
+      });
+      const scopes = getSessionScopes();
+      const scope =
+        scopes.find(
+          (candidate) => candidate.sessionManager === harness?.sessionManager,
+        ) ?? (scopes.length === 1 ? scopes[0] : undefined);
+      expect(scope).toBeDefined();
+      if (!scope) throw new Error("harness extension has no session scope");
+      expect(scope.pi.getFlag("no-subagentura-telemetry")).toBe(true);
+      expect(scope.pi.getFlag(TELEMETRY_FLAG)).toBe(true);
+      expect(isTelemetryEnabled(scope.pi)).toBe(false);
+    } finally {
+      harness?.dispose();
+      for (const name of names) {
+        const value = previous.get(name);
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   it.each(["", "-1", "1.5", "nope", "65", true])(

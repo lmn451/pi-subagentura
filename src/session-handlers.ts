@@ -199,13 +199,19 @@ function captureInteractiveLifecycleCancellation(
     return;
   }
   const turnStartedAt = state.telemetryTurnStartedAt;
-  const messageCount = state.telemetryTurnMessageCounts?.get(turnId);
+  const messageTurnId = state.telemetryMessageTurnId;
+  const messageCount =
+    state.telemetryTurnMessageCounts?.get(turnId) ??
+    (messageTurnId === undefined
+      ? undefined
+      : state.telemetryTurnMessageCounts?.get(messageTurnId));
   state.telemetryActiveTurnId = undefined;
   state.telemetryTurnStartedAt = undefined;
   state.telemetryTurnMessageCounts?.delete(turnId);
-  if (state.telemetryMessageTurnId === turnId) {
-    state.telemetryMessageTurnId = undefined;
+  if (messageTurnId !== undefined && messageTurnId !== turnId) {
+    state.telemetryTurnMessageCounts?.delete(messageTurnId);
   }
+  state.telemetryMessageTurnId = undefined;
   try {
     updateInteractiveStates(state.cwd, [
       {
@@ -219,8 +225,12 @@ function captureInteractiveLifecycleCancellation(
           }
           delete entry.telemetry.activeTurnId;
           delete entry.telemetry.turnStartedAt;
+          delete entry.telemetry.messageTurnId;
           if (entry.telemetry.messageCounts) {
             delete entry.telemetry.messageCounts[turnId];
+            if (messageTurnId !== undefined && messageTurnId !== turnId) {
+              delete entry.telemetry.messageCounts[messageTurnId];
+            }
             if (Object.keys(entry.telemetry.messageCounts).length === 0) {
               delete entry.telemetry.messageCounts;
             }
@@ -236,6 +246,7 @@ function captureInteractiveLifecycleCancellation(
     {
       event: "task_completed",
       execution: "interactive",
+      mux: state.mux,
       unit: "turn",
       invocation_source: state.telemetryInvocationSource ?? "interactive",
       model: state.telemetryModel,

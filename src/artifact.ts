@@ -37,7 +37,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
-import { sanitizeTelemetryModel } from "./telemetry";
+import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -1403,12 +1403,14 @@ export interface PersistedInteractiveTelemetry {
   correlationId: string;
   invocationSource: "with_context" | "isolated" | "interactive" | "workflow";
   async: boolean;
+  mux: TelemetryMux;
   depth?: number;
   depthBucket: "1" | "2" | "3" | "4-7" | "8+" | "unknown";
   completionPolicy: "inline" | "each" | "group" | "legacy";
   model: string;
   activeTurnId?: string;
   turnStartedAt?: number;
+  messageTurnId?: string;
   messageCounts?: Record<string, number>;
 }
 
@@ -1773,6 +1775,15 @@ function migrateStatePayload(
         !Array.isArray(entry.telemetry)
           ? (entry.telemetry as unknown as Record<string, unknown>)
           : undefined;
+      const telemetryMux: TelemetryMux =
+        rawEntryTelemetry?.mux === "none" ||
+        rawEntryTelemetry?.mux === "tmux" ||
+        rawEntryTelemetry?.mux === "zellij" ||
+        rawEntryTelemetry?.mux === "herdr"
+          ? rawEntryTelemetry.mux
+          : entry.mux === "tmux" || entry.mux === "zellij"
+            ? entry.mux
+            : "none";
       const entryTelemetry: PersistedInteractiveTelemetry | undefined =
         rawEntryTelemetry &&
         typeof rawEntryTelemetry.correlationId === "string" &&
@@ -1800,6 +1811,7 @@ function migrateStatePayload(
               correlationId: rawEntryTelemetry.correlationId.toLowerCase(),
               invocationSource: rawEntryTelemetry.invocationSource,
               async: rawEntryTelemetry.async,
+              mux: telemetryMux,
               ...(typeof rawEntryTelemetry.depth === "number" &&
               Number.isSafeInteger(rawEntryTelemetry.depth) &&
               rawEntryTelemetry.depth >= 1 &&
@@ -1819,6 +1831,12 @@ function migrateStatePayload(
               Number.isFinite(rawEntryTelemetry.turnStartedAt) &&
               rawEntryTelemetry.turnStartedAt >= 0
                 ? { turnStartedAt: rawEntryTelemetry.turnStartedAt }
+                : {}),
+              ...(typeof rawEntryTelemetry.messageTurnId === "string" &&
+              rawEntryTelemetry.messageTurnId.length > 0 &&
+              rawEntryTelemetry.messageTurnId.length <= MAX_TURN_ID_LENGTH &&
+              /^[A-Za-z0-9._:-]+$/.test(rawEntryTelemetry.messageTurnId)
+                ? { messageTurnId: rawEntryTelemetry.messageTurnId }
                 : {}),
               ...(rawEntryTelemetry.messageCounts &&
               typeof rawEntryTelemetry.messageCounts === "object" &&

@@ -128,9 +128,15 @@ describe("startSubagentJob effective thinking level", () => {
         "pi_subagentura_task_started",
         "pi_subagentura_task_completed",
       ]);
+      expect(payloads.map(({ properties }) => properties.mux)).toEqual([
+        "none",
+        "none",
+        "none",
+      ]);
       expect(payloads[2]?.properties).toMatchObject({
         mode: "orchestrator_v2",
         invocation_source: "workflow",
+        mux: "none",
         depth: 2,
         status: "success",
         child_conversation_message_count: 2,
@@ -197,7 +203,10 @@ describe("startSubagentJob effective thinking level", () => {
         ),
       ).toEqual([
         expect.objectContaining({
-          properties: expect.objectContaining({ status: "cancelled" }),
+          properties: expect.objectContaining({
+            status: "cancelled",
+            mux: "none",
+          }),
         }),
       ]);
     } finally {

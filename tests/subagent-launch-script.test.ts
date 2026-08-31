@@ -369,6 +369,7 @@ describe("spawn-time state persistence", () => {
       properties: {
         mode: "orchestrator_v2",
         execution: "interactive",
+        mux: "tmux",
         invocation_source: "interactive",
         depth: 1,
         completion_policy: "each",
@@ -377,7 +378,7 @@ describe("spawn-time state persistence", () => {
     expect(JSON.stringify(payloads)).not.toContain("never sent to telemetry");
     expect(
       loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
-    ).toMatchObject({ depth: 1, depthBucket: "1" });
+    ).toMatchObject({ depth: 1, depthBucket: "1", mux: "tmux" });
   });
 
   it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {

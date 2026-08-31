@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const MAX_DEPTH_FLAG = "subagentura-max-depth";
 export const HIDE_AGENT_LIST_FLAG = "subagentura-hide-agent-list";
 export const TELEMETRY_FLAG = "subagentura-telemetry";
+export const TELEMETRY_OPT_OUT_FLAG = "no-subagentura-telemetry";
 export const TELEMETRY_ENV = "PI_SUBAGENTURA_TELEMETRY";
 export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 2;
 const MAX_CONFIGURED_DEPTH = 64;
@@ -28,6 +29,10 @@ export function registerExtensionSettings(pi: ExtensionAPI): void {
     description: "Send anonymous session-level product analytics",
     type: "boolean",
     default: true,
+  });
+  pi.registerFlag(TELEMETRY_OPT_OUT_FLAG, {
+    description: "Disable anonymous session-level product analytics",
+    type: "boolean",
   });
 }
 
@@ -89,5 +94,6 @@ export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
   if (envDisablesTelemetry("CI")) return false;
   if (envDisablesTelemetry("VITEST")) return false;
   if (process.env.NODE_ENV === "test") return false;
+  if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
   return readFlag(pi, TELEMETRY_FLAG) !== false;
 }

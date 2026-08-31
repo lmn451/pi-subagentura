@@ -17,6 +17,7 @@ import {
   isTelemetryEnabled,
   TELEMETRY_ENV,
   TELEMETRY_FLAG,
+  TELEMETRY_OPT_OUT_FLAG,
 } from "../src/settings";
 
 const originalEnvironment = {
@@ -65,6 +66,7 @@ describe("anonymous product telemetry", () => {
     const agent = buildTelemetryPayload(session, {
       event: "task_started",
       execution: "in-process",
+      mux: "none",
       unit: "job",
       invocation_source: "workflow",
       model: "openai/gpt-5.6-sol",
@@ -87,6 +89,7 @@ describe("anonymous product telemetry", () => {
     });
     expect(agent.properties).toMatchObject({
       execution: "in-process",
+      mux: "none",
       unit: "job",
       invocation_source: "workflow",
       model: "openai/gpt-5.6-sol",
@@ -149,6 +152,7 @@ describe("anonymous product telemetry", () => {
     const created = buildTelemetryPayload(session, {
       event: "agent_created",
       execution: "interactive",
+      mux: "tmux",
       invocation_source: "interactive",
       model: "default",
       async: true,
@@ -159,6 +163,7 @@ describe("anonymous product telemetry", () => {
     const task = buildTelemetryPayload(session, {
       event: "task_started",
       execution: "interactive",
+      mux: "tmux",
       unit: "turn",
       invocation_source: "interactive",
       model: "default",
@@ -172,6 +177,7 @@ describe("anonymous product telemetry", () => {
     expect(task.event).toBe("pi_subagentura_task_started");
     expect(created.properties).toMatchObject({
       execution: "interactive",
+      mux: "tmux",
       depth: 3,
       depth_bucket: "3",
     });
@@ -183,6 +189,7 @@ describe("anonymous product telemetry", () => {
     const completed = buildTelemetryPayload(session, {
       event: "task_completed",
       execution: "interactive",
+      mux: "tmux",
       unit: "turn",
       invocation_source: "interactive",
       model: "default",
@@ -210,6 +217,7 @@ describe("anonymous product telemetry", () => {
         "duration_bucket",
         "duration_ms",
         "execution",
+        "mux",
         "invocation_source",
         "model",
         "mode",
@@ -289,6 +297,7 @@ describe("anonymous product telemetry", () => {
       {
         event: "task_completed",
         execution: "in-process",
+        mux: "none",
         unit: "job",
         invocation_source: "isolated",
         model: "default",
@@ -336,5 +345,13 @@ describe("anonymous product telemetry", () => {
         getFlag: vi.fn((name) => (name === TELEMETRY_FLAG ? false : undefined)),
       } as any),
     ).toBe(false);
+    const optedOutPi = {
+      getFlag: vi.fn((name) =>
+        name === TELEMETRY_FLAG || name === TELEMETRY_OPT_OUT_FLAG
+          ? true
+          : undefined,
+      ),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(optedOutPi)).toBe(false);
   });
 });
