@@ -268,6 +268,7 @@ function stateForNode(
   let attach = { attachCommand: "unavailable", focusCommand: "unavailable" };
   try {
     attach = getMux({ preference: mux }).buildAttachCommands({
+      terminalId: manifest.pane.muxTerminalId,
       paneId: manifest.pane.paneId,
       windowName: manifest.pane.windowName,
       session: manifest.pane.muxSession,
@@ -291,6 +292,9 @@ function stateForNode(
     name: manifest.name,
     task: manifest.taskPreview,
     paneId: manifest.pane.paneId,
+    ...(manifest.pane.muxTerminalId
+      ? { muxTerminalId: manifest.pane.muxTerminalId }
+      : {}),
     windowName: manifest.pane.windowName,
     mux,
     muxSession: manifest.pane.muxSession,

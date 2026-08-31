@@ -184,7 +184,7 @@ describe("current pane activity", () => {
     >("../src/interactive-tmux");
 
     await expect(getCurrentPaneActivity()).resolves.toMatchObject({
-      status: "active",
+      status: "unknown",
       mux: "herdr",
       paneId: "w1:p2",
       session: "/tmp/herdr.sock",

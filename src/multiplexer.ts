@@ -39,6 +39,8 @@ export type PaneActivity = "active" | "inactive" | "unknown";
 /** Backend-neutral structured reference to a durable mux pane. */
 export interface PaneRef {
   readonly paneId: string;
+  /** Stable backend terminal identity when the backend exposes one (Herdr). */
+  readonly muxTerminalId?: string;
   readonly windowName?: string;
   readonly session?: string;
 }
@@ -164,6 +166,10 @@ export interface Multiplexer {
    *                           format is backend-specific (tmux uses `%N`,
    *                           zellij uses `terminal_N` or just an integer
    *                           stringified).
+   * @returns muxTerminalId    Optional stable backend terminal identity. Herdr
+   *                           returns this so persisted states never need to
+   *                           rediscover an attach target from a transient
+   *                           pane id; tmux and zellij leave it undefined.
    * @returns windowName       The actual window/tab name used (for
    *                           `attachCommand` formatting). Always defined
    *                           for background mode, undefined for visible
@@ -180,7 +186,12 @@ export interface Multiplexer {
     windowName?: string;
     /** Unique id (8 hex) for naming the new session when parent is not in a mux. */
     id?: string;
-  }): { paneId: string; windowName?: string; session?: string };
+  }): {
+    paneId: string;
+    muxTerminalId?: string;
+    windowName?: string;
+    session?: string;
+  };
 
   /**
    * Probe whether the pane is still known to the backend.
@@ -272,6 +283,8 @@ export interface Multiplexer {
    */
   buildAttachCommands(opts: {
     paneId: string;
+    /** Stable backend terminal identity, when available. */
+    terminalId?: string;
     windowName?: string;
     session?: string;
   }): {

@@ -502,12 +502,14 @@ snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
 output is legacy/staging fallback only. The pane is for live monitoring, and the
 artifact survives parent restarts.
 
-Interactive children also have `get_current_pane_activity`, which reports
-whether their tmux/Zellij/Herdr pane is active for the user's current client. Only
-children launched directly by a top-level Orchestratorv2 session receive
-protocol guidance to check it before tools or extensions that may wait for user
-input. Other children and parent sessions receive the neutral activity result
-without changing their user-attention behavior.
+- Interactive children also have `get_current_pane_activity`, which reports
+  whether their tmux or Zellij pane is active for the user's current client.
+  Herdr exposes server-global focus but no stable public attached-client proof,
+  so its activity result remains neutral `unknown` rather than claiming user
+  attention. Only children launched directly by a top-level Orchestratorv2
+  session receive protocol guidance to check this before tools or extensions
+  that may wait for user input. Other children and parent sessions receive the
+  neutral activity result without changing their user-attention behavior.
 
 The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
@@ -574,8 +576,8 @@ The overlay supports these controls:
 | `x`                    | Cancel the selected running item; workflow and in-process cancellation propagates to owned agents                  |
 | `v`                    | For interactive agents, capture a bounded terminal snapshot through tmux/Zellij/Herdr                              |
 | `n`                    | For interactive agents, open the optional native tmux popup or Zellij floating viewer; Herdr has no native overlay |
-| `f`                    | For interactive agents, focus the persisted pane/window; warns when no client is attached                          |
-| `a`                    | For interactive agents, show the attach command                                                                    |
+| `f`                    | For interactive agents, focus the persisted pane/window; Herdr uses native `pane.focus`                            |
+| `a`                    | For interactive agents, show the terminal-scoped attach command; Herdr uses `herdr terminal attach <terminal-id>`  |
 | `X`                    | For interactive agents, confirm and cancel an actionable subtree deepest-first                                     |
 | `r`                    | Refresh registries, lineage, and pane liveness                                                                     |
 | `q`/`Esc`/`Ctrl+Alt+A` | Close the overlay without stopping agents                                                                          |
@@ -584,8 +586,9 @@ The overlay supports these controls:
 arbitrary content in a Herdr-native overlay. Herdr currently exposes overlay and
 popup panes through installed plugin entrypoints rather than a generic public
 viewer API, so pi-subagentura does not add a hidden plugin dependency. Bounded
-capture (`v`), pane focus (`f`), attach commands, messaging, status, and
-cancellation continue to work normally.
+capture (`v`), native pane focus (`f`), terminal attach commands, messaging,
+status, and cancellation continue to work normally. Herdr's returned focus and
+attach commands use the stable terminal ID rather than a transient pane ID.
 
 Interactive row prefixes identify whether the item came from the live `[registry]`
 or persisted `[lineage]`. Expanding a row shows its owner, root and parent IDs, cwd,
@@ -594,9 +597,9 @@ artifact directory, and Pi session file. A cancelled row disappears immediately.
 Before pressing `f`, expand the selected interactive row to see its native return
 hint. With default keymaps, tmux uses prefix + `;` for a split pane or prefix +
 `l` for a detached window. Zellij uses `Ctrl+p`, then `p` for a split pane or
-`Ctrl+t`, then `Tab` for a named tab. Herdr uses prefix + `h/j/k/l` for pane
-navigation and prefix + `p/n` for tab navigation. Customized multiplexer
-keymaps may differ.
+`Ctrl+t`, then `Tab` for a named tab. Herdr's supervisor `f` uses the native
+`pane.focus` API; its returned focus/attach command is the truthful
+`herdr terminal attach <terminal-id>` command.
 
 Terminal capture is bounded by both bytes and lines. Expanded interactive
 artifact details read only regular files and bound lifecycle-event reads to 8

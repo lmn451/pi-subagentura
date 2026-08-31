@@ -241,7 +241,7 @@ export function rehydrateInteractiveSubagents(
       try {
         return buildAttachCommandsForState(entry);
       } catch {
-        return { attachCommand: "", focusCommand: "" };
+        return { attachCommand: "unavailable", focusCommand: "unavailable" };
       }
     })();
 
@@ -250,6 +250,7 @@ export function rehydrateInteractiveSubagents(
       name: recoveredName,
       task: "",
       paneId: entry.paneId,
+      ...(entry.muxTerminalId ? { muxTerminalId: entry.muxTerminalId } : {}),
       windowName: entry.windowName,
       mux: entry.mux,
       muxSession: entry.muxSession,
