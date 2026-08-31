@@ -503,6 +503,11 @@ function persistPolledState(
       delete entry.telemetry.activeTurnId;
       delete entry.telemetry.turnStartedAt;
     }
+    if (state.telemetryMessageTurnId) {
+      entry.telemetry.messageTurnId = state.telemetryMessageTurnId;
+    } else {
+      delete entry.telemetry.messageTurnId;
+    }
     const messageCounts = [...(state.telemetryTurnMessageCounts ?? [])].slice(
       -32,
     );
@@ -532,6 +537,31 @@ function persistPolledStates(
       })),
     );
   }
+}
+
+/**
+ * Pi keeps Enter-during-streaming steering inside one agent run, but the child
+ * protocol gives each persisted user entry a fresh turn id. Keep that run as
+ * one telemetry task until the next persisted user entry advances it.
+ */
+function rebindTelemetryTurn(
+  state: InteractiveSubagentState,
+  nextTurnId: string,
+): void {
+  const previousTurnId = state.telemetryActiveTurnId;
+  if (previousTurnId !== undefined && previousTurnId !== nextTurnId) {
+    const counts = state.telemetryTurnMessageCounts;
+    const previousCount = counts?.get(previousTurnId);
+    if (counts && previousCount !== undefined) {
+      const nextCount = counts.get(nextTurnId) ?? 0;
+      counts.set(nextTurnId, Math.min(previousCount + nextCount, 1_000));
+      counts.delete(previousTurnId);
+    }
+    if (state.telemetryMessageTurnId === previousTurnId) {
+      state.telemetryMessageTurnId = nextTurnId;
+    }
+  }
+  state.telemetryActiveTurnId = nextTurnId;
 }
 
 /**
@@ -655,26 +685,33 @@ async function runPollArtifactChanges(
             state.telemetryCorrelationId ===
               ownerContext?.telemetry?.correlationId;
           if (telemetryEligible) {
-            state.telemetryActiveTurnId = ev.turnId;
-            state.telemetryTurnStartedAt = ev.ts;
-            captureTelemetry(
-              ownerContext?.telemetry,
-              {
-                event: "task_started",
-                execution: "interactive",
-                unit: "turn",
-                invocation_source:
-                  state.telemetryInvocationSource ?? "interactive",
-                model: state.telemetryModel,
-                async: state.telemetryAsync ?? true,
-                depth: state.telemetryDepth,
-                depth_bucket: state.telemetryDepthBucket ?? "unknown",
-                completion_policy: state.telemetryCompletionPolicy ?? "legacy",
-              },
-              {
-                dedupeKey: `task-started:interactive:${state.id}:${ev.eventId}`,
-              },
-            );
+            if (state.telemetryActiveTurnId !== undefined) {
+              rebindTelemetryTurn(state, ev.turnId);
+            } else {
+              state.telemetryActiveTurnId = ev.turnId;
+              state.telemetryTurnStartedAt = ev.ts;
+              state.telemetryMessageTurnId = ev.turnId;
+              captureTelemetry(
+                ownerContext?.telemetry,
+                {
+                  event: "task_started",
+                  execution: "interactive",
+                  mux: state.mux,
+                  unit: "turn",
+                  invocation_source:
+                    state.telemetryInvocationSource ?? "interactive",
+                  model: state.telemetryModel,
+                  async: state.telemetryAsync ?? true,
+                  depth: state.telemetryDepth,
+                  depth_bucket: state.telemetryDepthBucket ?? "unknown",
+                  completion_policy:
+                    state.telemetryCompletionPolicy ?? "legacy",
+                },
+                {
+                  dedupeKey: `task-started:interactive:${state.id}:${ev.eventId}`,
+                },
+              );
+            }
           }
         }
         if (
@@ -684,11 +721,23 @@ async function runPollArtifactChanges(
             ownerContext?.telemetry?.correlationId
         ) {
           const status = deliveryStatusFromEvent(ev);
+          const messageTurnId = state.telemetryMessageTurnId;
+          const directMessageCount = state.telemetryTurnMessageCounts?.get(
+            ev.turnId,
+          );
+          const fallbackMessageCount =
+            directMessageCount === undefined &&
+            messageTurnId !== undefined &&
+            messageTurnId !== ev.turnId
+              ? state.telemetryTurnMessageCounts?.get(messageTurnId)
+              : undefined;
+          const messageCount = directMessageCount ?? fallbackMessageCount;
           captureTelemetry(
             ownerContext?.telemetry,
             {
               event: "task_completed",
               execution: "interactive",
+              mux: state.mux,
               unit: "turn",
               invocation_source:
                 state.telemetryInvocationSource ?? "interactive",
@@ -702,8 +751,7 @@ async function runPollArtifactChanges(
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
                   : ev.ts - state.telemetryTurnStartedAt,
-              child_conversation_message_count:
-                state.telemetryTurnMessageCounts?.get(ev.turnId),
+              child_conversation_message_count: messageCount,
             },
             {
               dedupeKey: `task-completed:interactive:${state.id}:${ev.turnId}`,
@@ -711,8 +759,20 @@ async function runPollArtifactChanges(
           );
           state.telemetryActiveTurnId = undefined;
           state.telemetryTurnStartedAt = undefined;
-          state.telemetryTurnMessageCounts?.delete(ev.turnId);
-          if (state.telemetryMessageTurnId === ev.turnId) {
+          if (directMessageCount !== undefined) {
+            state.telemetryTurnMessageCounts?.delete(ev.turnId);
+          } else if (
+            messageTurnId !== undefined &&
+            messageTurnId !== ev.turnId &&
+            fallbackMessageCount !== undefined
+          ) {
+            state.telemetryTurnMessageCounts?.delete(messageTurnId);
+          }
+          if (
+            messageTurnId === ev.turnId ||
+            (directMessageCount === undefined &&
+              fallbackMessageCount !== undefined)
+          ) {
             state.telemetryMessageTurnId = undefined;
           }
         }
@@ -1146,10 +1206,30 @@ function processSessionLogEntry(
         : undefined;
     if (turnId) {
       const counts = (state.telemetryTurnMessageCounts ??= new Map());
-      if (!counts.has(turnId) && counts.size >= 32) {
-        counts.delete(counts.keys().next().value!);
+      if (
+        state.telemetryActiveTurnId === turnId &&
+        state.telemetryMessageTurnId !== turnId
+      ) {
+        // Steering reuses the active agent run but persists a fresh user entry.
+        const previousTurnId = state.telemetryMessageTurnId;
+        const previousCount = previousTurnId
+          ? (counts.get(previousTurnId) ?? 0)
+          : 0;
+        const nextCount = counts.get(turnId) ?? 0;
+        counts.set(turnId, Math.min(previousCount + nextCount + 1, 1_000));
+        if (previousTurnId) counts.delete(previousTurnId);
+      } else if (state.telemetryActiveTurnId === turnId) {
+        // A rebind may have carried an earlier turn's count into this user id.
+        if (!counts.has(turnId) && counts.size >= 32) {
+          counts.delete(counts.keys().next().value!);
+        }
+        counts.set(turnId, Math.min((counts.get(turnId) ?? 0) + 1, 1_000));
+      } else {
+        if (!counts.has(turnId) && counts.size >= 32) {
+          counts.delete(counts.keys().next().value!);
+        }
+        counts.set(turnId, 1);
       }
-      counts.set(turnId, 1);
       state.telemetryMessageTurnId = turnId;
     }
   } else if (state.telemetryEligible && state.telemetryMessageTurnId) {

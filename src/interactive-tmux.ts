@@ -591,22 +591,7 @@ export function launchInteractiveSubagent(params: {
   const nextDepth = effectiveCurrentDepth + 1;
   const liveScope =
     params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
-  const telemetry = liveScope?.telemetry;
-  const telemetryMetadata = telemetry?.enabled
-    ? {
-        correlationId: telemetry.correlationId,
-        invocationSource:
-          params.telemetryInvocationSource ?? ("interactive" as const),
-        async: params.telemetryAsync ?? true,
-        depth: telemetryDepth(nextDepth),
-        depthBucket: telemetryDepthBucket(nextDepth),
-        completionPolicy:
-          params.telemetryCompletionPolicy ??
-          params.completionPolicy ??
-          ("legacy" as const),
-        model: sanitizeTelemetryModel(params.model),
-      }
-    : undefined;
+
   if (rootId && nextDepth > effectiveMaxDepth) {
     throw new Error(
       `interactive sub-agent depth ${nextDepth} exceeds max ${effectiveMaxDepth}`,
@@ -698,6 +683,24 @@ export function launchInteractiveSubagent(params: {
     }
     throw err;
   }
+
+  const telemetry = liveScope?.telemetry;
+  const telemetryMetadata = telemetry?.enabled
+    ? {
+        correlationId: telemetry.correlationId,
+        mux: mux.name,
+        invocationSource:
+          params.telemetryInvocationSource ?? ("interactive" as const),
+        async: params.telemetryAsync ?? true,
+        depth: telemetryDepth(nextDepth),
+        depthBucket: telemetryDepthBucket(nextDepth),
+        completionPolicy:
+          params.telemetryCompletionPolicy ??
+          params.completionPolicy ??
+          ("legacy" as const),
+        model: sanitizeTelemetryModel(params.model),
+      }
+    : undefined;
 
   // Create the pane FIRST (so we have a target for the launch script to attach
   // to). If any later step throws, try to kill the orphan pane and rethrow.
@@ -901,6 +904,7 @@ export function launchInteractiveSubagent(params: {
     captureTelemetry(telemetry, {
       event: "agent_created",
       execution: "interactive",
+      mux: telemetryMetadata.mux,
       invocation_source: telemetryMetadata.invocationSource,
       model: telemetryMetadata.model,
       async: telemetryMetadata.async,

@@ -610,7 +610,11 @@ describe("session handler lifecycle callbacks", () => {
         registration.sessionScope.telemetry.correlationId;
       state.telemetryActiveTurnId = "active-turn";
       state.telemetryTurnStartedAt = 1_000;
-      state.telemetryTurnMessageCounts = new Map([["active-turn", 6]]);
+      state.telemetryMessageTurnId = "active-message";
+      state.telemetryTurnMessageCounts = new Map([
+        ["active-message", 4],
+        ["active-turn", 6],
+      ]);
       state.telemetryInvocationSource = "interactive";
       state.telemetryCompletionPolicy = "each";
       state.telemetryAsync = true;
@@ -646,6 +650,7 @@ describe("session handler lifecycle callbacks", () => {
           telemetry: {
             correlationId: state.telemetryCorrelationId!,
             invocationSource: "interactive",
+            mux: "tmux",
             async: true,
             depth: 3,
             depthBucket: "3",
@@ -653,7 +658,8 @@ describe("session handler lifecycle callbacks", () => {
             model: "default",
             activeTurnId: "active-turn",
             turnStartedAt: 1_000,
-            messageCounts: { "active-turn": 6 },
+            messageTurnId: "active-message",
+            messageCounts: { "active-message": 4, "active-turn": 6 },
           },
         });
       }
@@ -668,6 +674,12 @@ describe("session handler lifecycle callbacks", () => {
         const persisted = loadInteractiveStates(root);
         expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
           "activeTurnId",
+        );
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "messageTurnId",
+        );
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "messageCounts",
         );
         registration.handlers.get("session_start")![0](
           { reason: "reload" },
@@ -695,6 +707,7 @@ describe("session handler lifecycle callbacks", () => {
           properties: expect.objectContaining({
             status: "cancelled",
             execution: "interactive",
+            mux: "tmux",
             unit: "turn",
             depth: 3,
             duration_ms: 4_000,
