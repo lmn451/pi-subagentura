@@ -263,9 +263,14 @@ Install the optional settings panel once with:
 pi install npm:@juanibiapina/pi-extension-settings
 ```
 
-Then use `/extension-settings` for global settings or
-`/extension-settings-local` for the current project; a project value overrides
-the global value. `max-depth` controls Orchestratorv2 lineage depth and defaults
+Use `/extension-settings` for global settings; a project value overrides
+the global value when read from the Pi session's authoritative cwd. The optional
+package's `/extension-settings-local` command is not session-cwd-correct in the
+pinned `@juanibiapina/pi-extension-settings@0.9.1`: it resolves local settings
+from Node's process cwd instead of Pi's command context. Do not use that command
+for cross-project sessions. For a session-local value, edit
+`<session-cwd>/.pi/settings-extensions.json` manually, using the exact cwd of
+the Pi session. `max-depth` controls Orchestratorv2 lineage depth and defaults
 to `2`; `hide-agent-list` defaults to `false` and only hides the compact
 per-agent activity widget rows. The running footer, list/status tools, and visual
 agent supervisor remain available.

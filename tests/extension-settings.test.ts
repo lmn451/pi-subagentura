@@ -8,7 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import registerSettingsPanel from "@juanibiapina/pi-extension-settings";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
 import {
   HIDE_AGENT_LIST_FLAG,
@@ -17,6 +17,33 @@ import {
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { clearSessionScopes, getSessionScopes } from "../src/session-scope";
+
+interface SettingsSandbox {
+  root: string;
+  cwd: string;
+  agentDir: string;
+}
+
+function makeSettingsSandbox(): SettingsSandbox {
+  const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  return { root, cwd, agentDir };
+}
+
+let settingsSandbox!: SettingsSandbox;
+let previousAgentDir: string | undefined;
+
+function readTestSettings(
+  pi: Parameters<typeof readExtensionSettings>[0],
+): ReturnType<typeof readExtensionSettings> {
+  return readExtensionSettings(pi, {
+    cwd: settingsSandbox.cwd,
+    agentDir: settingsSandbox.agentDir,
+  });
+}
 
 function sharedEventBus() {
   const handlers = new Map<string, Array<(data: unknown) => void>>();
@@ -53,8 +80,21 @@ function registeredTools(api: ReturnType<typeof mockApi>): string[] {
 }
 
 describe("generic extension settings", () => {
+  beforeEach(() => {
+    settingsSandbox = makeSettingsSandbox();
+    vi.spyOn(process, "cwd").mockReturnValue(
+      join(settingsSandbox.root, "ambient"),
+    );
+    previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = settingsSandbox.agentDir;
+  });
+
   afterEach(() => {
     clearSessionScopes();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    vi.restoreAllMocks();
+    rmSync(settingsSandbox.root, { recursive: true, force: true });
   });
 
   it("registers validated settings with V2-safe defaults", () => {
@@ -91,7 +131,7 @@ describe("generic extension settings", () => {
         ],
       },
     );
-    expect(readExtensionSettings(api as any)).toEqual({
+    expect(readTestSettings(api as any)).toEqual({
       maxDepth: 2,
       hideAgentList: false,
     });
@@ -130,7 +170,7 @@ describe("generic extension settings", () => {
     if (!panelFirst) registerSettingsPanel(panelApi as any);
 
     const ctx = {
-      cwd: process.cwd(),
+      cwd: settingsSandbox.cwd,
       ui: {
         setStatus: vi.fn(),
         setWidget: vi.fn(),
@@ -258,7 +298,7 @@ describe("generic extension settings", () => {
       const api = mockApi((name) =>
         name === MAX_DEPTH_FLAG ? value : undefined,
       );
-      expect(() => readExtensionSettings(api as any)).toThrow(/max depth/i);
+      expect(() => readTestSettings(api as any)).toThrow(/max depth/i);
     },
   );
 
@@ -287,12 +327,12 @@ describe("generic extension settings", () => {
     const api = mockApi((name) =>
       name === HIDE_AGENT_LIST_FLAG ? "true" : undefined,
     );
-    expect(() => readExtensionSettings(api as any)).toThrow(/hide agent list/i);
+    expect(() => readTestSettings(api as any)).toThrow(/hide agent list/i);
   });
 
   it("uses the configured depth only for V2 roots", () => {
     const api = mockApi((name) => (name === MAX_DEPTH_FLAG ? "4" : undefined));
-    const settings = readExtensionSettings(api as any);
+    const settings = readTestSettings(api as any);
 
     expect(
       createRootSpawnTreeContext("v2", "/tmp", false, true, settings.maxDepth)
@@ -334,7 +374,7 @@ describe("generic extension settings", () => {
     flags.set(MAX_DEPTH_FLAG, "4");
     flags.set("orchestratorv2", true);
     const ctx = {
-      cwd: process.cwd(),
+      cwd: settingsSandbox.cwd,
       ui: {
         setStatus: vi.fn(),
         setWidget: vi.fn(),
@@ -354,6 +394,55 @@ describe("generic extension settings", () => {
     expect(scope?.spawnTreeContext).toMatchObject({
       role: "root",
       maxDepth: 4,
+    });
+
+    handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+  });
+
+  it("resolves max-depth from the resumed session cwd", () => {
+    expect(settingsSandbox.cwd).not.toBe(process.cwd());
+    writeFileSync(
+      join(settingsSandbox.cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({
+        "pi-subagentura": { "max-depth": "7" },
+      }),
+    );
+
+    const handlers = new Map<string, Function[]>();
+    const api = {
+      ...mockApi((name) => name === "orchestratorv2"),
+      on: vi.fn((name: string, handler: Function) => {
+        const registered = handlers.get(name) ?? [];
+        registered.push(handler);
+        handlers.set(name, registered);
+      }),
+    };
+    const extensionApi = api as unknown as Parameters<
+      typeof registerExtension
+    >[0];
+    registerExtension(extensionApi);
+
+    const ctx = {
+      cwd: settingsSandbox.cwd,
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn(),
+      },
+      sessionManager: {
+        getSessionId: () => "resumed-project-session",
+        getEntries: () => [],
+        getBranch: () => [],
+      },
+    };
+    handlers.get("session_start")![0]({ reason: "resume" }, ctx);
+
+    const scope = getSessionScopes().find(
+      (candidate) => candidate.pi === extensionApi,
+    );
+    expect(scope?.spawnTreeContext).toMatchObject({
+      role: "root",
+      maxDepth: 7,
     });
 
     handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);

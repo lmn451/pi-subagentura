@@ -313,7 +313,7 @@ export function registerSessionHandlers(
       sessionId &&
       scope.spawnTreeContext?.role !== "descendant"
     ) {
-      const maxDepth = readExtensionSettings(pi).maxDepth;
+      const maxDepth = readExtensionSettings(pi, { cwd: ctx.cwd }).maxDepth;
       scope.spawnTreeContext = createRootSpawnTreeContext(
         sessionId,
         undefined,
