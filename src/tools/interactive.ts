@@ -1099,7 +1099,10 @@ export function registerInteractiveSubagentTools(
           direction: "parent_to_child",
           count: 1,
         },
-        { dedupeKey: `interactive-message:${_toolCallId}` },
+        // Without a usable tool-call id every send collapses onto one constant
+        // key and only the first is ever recorded. Retry protection is worth
+        // having when the id exists and is worth losing when it does not.
+        _toolCallId ? { dedupeKey: `interactive-message:${_toolCallId}` } : {},
       );
       // Reaching the send proves both workflow release conditions held at the guard above.
       if (
@@ -1113,7 +1116,10 @@ export function registerInteractiveSubagentTools(
       let persistenceWarning: string | undefined;
       if (startsNewTurn) {
         state.completionPolicy = "each";
-        state.telemetryCompletionPolicy = "each";
+        // `state.telemetryCompletionPolicy` is deliberately left alone. It is an
+        // agent-creation dimension already reported by `agent_created`, and
+        // re-stamping it here would make one agent id report two values across
+        // its own lifecycle events.
         state.completionGroupId = undefined;
         state.notifyOnComplete = undefined;
         state.triggerTurnOnComplete = undefined;
@@ -1124,7 +1130,6 @@ export function registerInteractiveSubagentTools(
               delete entry.completionGroupId;
               delete entry.notifyOnComplete;
               delete entry.triggerTurnOnComplete;
-              if (entry.telemetry) entry.telemetry.completionPolicy = "each";
             });
           } catch (error) {
             persistenceWarning =

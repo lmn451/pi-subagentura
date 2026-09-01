@@ -61,6 +61,11 @@ function registerHandlers(
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
   orchestratorFlag: "orchestrator" | "orchestratorv2" = "orchestratorv2",
+  /**
+   * `isTelemetryEnabled` is unconditionally false under vitest, so the enabled
+   * branches of session_start are unreachable without this injection seam.
+   */
+  telemetryEnabled?: boolean,
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
   const pi = {
@@ -80,6 +85,7 @@ function registerHandlers(
     pi as any,
     initialSpawnTreeContext,
     allowRootLineage,
+    telemetryEnabled === undefined ? undefined : () => telemetryEnabled,
   );
   return { handlers, pi, sessionScope };
 }
@@ -266,6 +272,147 @@ describe("session handler lifecycle callbacks", () => {
       }
       vi.unstubAllGlobals();
     }
+  });
+
+  describe("with telemetry enabled", () => {
+    let captured: Array<Record<string, any>>;
+
+    beforeEach(() => {
+      captured = [];
+      // These tests deliberately take the enabled path, so the transport has to
+      // be stubbed or the suite would post to the real endpoint.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("reports the session start against the persisted correlation", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({
+        event: "pi_subagentura_session_started",
+        distinct_id: loadInteractiveStates(root)?.telemetry?.correlationId,
+        properties: { mode: "orchestrator_v2" },
+      });
+    });
+
+    it("persists the correlation id and its owning session", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      const correlationId = registration.sessionScope.telemetry?.correlationId;
+      expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(loadInteractiveStates(root)).toMatchObject({
+        parent: "session-a",
+        telemetry: { correlationId, mode: "orchestrator_v2" },
+      });
+    });
+
+    it("hands the same correlation to the root lineage bootstrap", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      // The root's children inherit correlation only through this context, so
+      // a mismatch here silently splits one logical session into two.
+      expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+        role: "root",
+        rootId: "session-a",
+        telemetrySessionId:
+          registration.sessionScope.telemetry?.correlationId ?? "missing",
+        telemetryMode: "orchestrator_v2",
+      });
+    });
+
+    it.each(["reload", "resume"] as const)(
+      "reuses the persisted correlation across %s",
+      (reason) => {
+        const registration = registerHandlers(
+          undefined,
+          true,
+          "orchestratorv2",
+          true,
+        );
+        const ctx = startSession(registration, root, "session-a");
+        const initial = registration.sessionScope.telemetry?.correlationId;
+
+        registration.handlers.get("session_start")![0]({ reason }, ctx);
+
+        expect(registration.sessionScope.telemetry?.correlationId).toBe(
+          initial,
+        );
+        expect(loadInteractiveStates(root)?.telemetry?.correlationId).toBe(
+          initial,
+        );
+        expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+          telemetrySessionId: initial,
+        });
+      },
+    );
+  });
+
+  describe("with telemetry disabled", () => {
+    it("writes nothing at all when there is no correlation to clear", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(registration.sessionScope.telemetry?.enabled).toBe(false);
+      // The opt-out must be inert: no `.pi/`, no state lock, no state file.
+      expect(existsSync(join(root, ".pi"))).toBe(false);
+      expect(registration.sessionScope.spawnTreeContext).not.toHaveProperty(
+        "telemetrySessionId",
+      );
+    });
+
+    it("clears a correlation an earlier opted-in run left behind", () => {
+      updatePersistedTelemetrySession(root, "session-a", {
+        correlationId: "33333333-3333-4333-8333-333333333333",
+        mode: "orchestrator",
+      });
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(loadInteractiveStates(root)?.telemetry).toBeUndefined();
+    });
   });
 
   it("recovers persisted telemetry only for the matching startup session", () => {

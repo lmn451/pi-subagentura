@@ -173,6 +173,28 @@ function telemetryForAgent(
   };
 }
 
+/**
+ * A synchronous spawn hands its output straight back to the caller and is never
+ * collected through `get_subagent_result`, so the only honest place to record
+ * consumption is the return path itself. Without this, collection rates read as
+ * zero for every inline job.
+ */
+function captureSyncResultConsumed(
+  owner: SessionOwnerToken | undefined,
+  result: SubagentResult,
+): void {
+  if (result.isError || result.cancelled || result.output === "(no output)") {
+    return;
+  }
+  captureTelemetry(
+    owner ? resolveLiveSessionScope(owner)?.telemetry : undefined,
+    {
+      event: "result_consumed",
+      source: "in-process",
+    },
+  );
+}
+
 function captureDeliveryOwner(
   pi: ExtensionAPI,
   ctx: SpawnContext,
@@ -793,6 +815,7 @@ function registerSubagentWithContextTool(
         };
       }
 
+      captureSyncResultConsumed(owner, result);
       const usageStr = formatUsage(result.usage, result.model);
       const details: InProcessSubagentDetails = {
         status: result.isError ? "error" : "done",
@@ -1053,6 +1076,7 @@ function registerSubagentIsolatedTool(
         };
       }
 
+      captureSyncResultConsumed(owner, result);
       const usageStr = formatUsage(result.usage, result.model);
       const details: InProcessSubagentDetails = {
         status: result.isError ? "error" : "done",

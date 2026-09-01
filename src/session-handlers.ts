@@ -7,6 +7,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
+  hasPersistedTelemetryField,
   loadInteractiveStates,
   removeInteractiveState,
   updateInteractiveStates,
@@ -58,6 +59,7 @@ import {
   getStartedSessionScopes,
   registerSessionScope,
   removeSessionScope,
+  resolveLiveSessionScope,
   sessionOwner,
   setLegacyActiveSessionRefs,
   type SessionOwnerToken,
@@ -77,6 +79,7 @@ import { isTelemetryEnabled } from "./settings";
 import {
   captureTelemetry,
   createTelemetrySession,
+  manifestDeliveryDedupeKey,
   retireTelemetrySession,
   resolveTelemetryMode,
 } from "./telemetry";
@@ -97,14 +100,17 @@ function recordPreparedManifest(
 ): void {
   const completionIds = message.details?.completionIds ?? [];
   if (completionIds.length === 0) return;
+  // The completion coordinator emits the same event for the same manifest.
+  // Both sites must resolve the live scope the same way, or the shared dedupe
+  // key lands in two different key sets and one delivery is counted twice.
   captureTelemetry(
-    scope.telemetry,
+    resolveLiveSessionScope(sessionOwner(scope))?.telemetry,
     {
       event: "completion_delivered",
       delivery: "manifest",
       count: completionIds.length,
     },
-    { dedupeKey: `manifest:${completionIds.join(":")}` },
+    { dedupeKey: manifestDeliveryDedupeKey(completionIds) },
   );
 }
 
@@ -255,6 +261,10 @@ function captureInteractiveLifecycleCancellation(
       depth_bucket: state.telemetryDepthBucket ?? "unknown",
       completion_policy: state.telemetryCompletionPolicy ?? "legacy",
       status: "cancelled",
+      // `turnStartedAt` is an event-log `ts`, which the child writes from the
+      // same epoch clock, so this subtraction stays in one clock domain. A
+      // recovered timestamp from an old run can still be arbitrarily stale;
+      // `telemetryDurationMs` drops the result instead of reporting it.
       duration_ms:
         turnStartedAt === undefined ? undefined : Date.now() - turnStartedAt,
       child_conversation_message_count: messageCount,
@@ -350,6 +360,13 @@ export function registerSessionHandlers(
   pi: ExtensionAPI,
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
+  /**
+   * Injection seam for the opt-in decision. Production always resolves it from
+   * settings; tests override it because `isTelemetryEnabled` is unconditionally
+   * false under vitest, which would otherwise leave every enabled-telemetry
+   * branch below unreachable.
+   */
+  resolveTelemetryEnabled: (pi: ExtensionAPI) => boolean = isTelemetryEnabled,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
@@ -461,14 +478,22 @@ export function registerSessionHandlers(
         ? (activeSpawnTelemetry?.mode ?? "straight")
         : resolveTelemetryMode(orchestratorMode, orchestratorV2Mode));
     scope.telemetry = createTelemetrySession(
-      isTelemetryEnabled(pi),
+      resolveTelemetryEnabled(pi),
       mode,
       recoveredTelemetry?.correlationId,
     );
     if (!isChild && recoveredTelemetry === undefined) {
       captureTelemetry(scope.telemetry, { event: "session_started" });
     }
-    if (allowRootLineage && sessionId) {
+    // With telemetry off there is nothing to persist, so touching `.pi/`, the
+    // state lock, and the state file would make the opt-out observable. The one
+    // exception is a correlation an earlier opted-in run left behind: that has
+    // to be cleared.
+    if (
+      allowRootLineage &&
+      sessionId &&
+      (scope.telemetry.enabled || hasPersistedTelemetryField(ctx.cwd))
+    ) {
       try {
         updatePersistedTelemetrySession(
           ctx.cwd,

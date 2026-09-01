@@ -20,7 +20,7 @@ import {
 } from "./session-scope";
 import { debugLog } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
-import { captureTelemetry } from "./telemetry";
+import { captureTelemetry, manifestDeliveryDedupeKey } from "./telemetry";
 
 export const COMPLETION_ENTRY_TYPE = "subagentura-completion";
 export const COMPLETION_CONSUMED_ENTRY_TYPE = "subagentura-completion-consumed";
@@ -2122,7 +2122,7 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
       count: message.details.completionIds.length,
     },
     {
-      dedupeKey: `manifest:${message.details.completionIds.join(":")}`,
+      dedupeKey: manifestDeliveryDedupeKey(message.details.completionIds),
     },
   );
   state.manifestRetryAttempt = 0;
