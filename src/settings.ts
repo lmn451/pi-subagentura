@@ -137,13 +137,14 @@ function readPersistedMaxDepth(
   storageOptions: SettingStorageOptions,
   onInvalidSetting?: InvalidSettingReporter,
 ): number {
-  const raw = getSetting(
-    SETTINGS_EXTENSION_NAME,
-    MAX_DEPTH_SETTING,
-    MAX_DEPTH_DEFINITION.defaultValue,
-    resolveStorageOptions(storageOptions),
-  );
+  let raw: unknown = undefined;
   try {
+    raw = getSetting(
+      SETTINGS_EXTENSION_NAME,
+      MAX_DEPTH_SETTING,
+      MAX_DEPTH_DEFINITION.defaultValue,
+      resolveStorageOptions(storageOptions),
+    );
     return parseMaxDepth(raw);
   } catch {
     reportInvalidPersistedSetting(
@@ -165,12 +166,23 @@ function readPersistedHideAgentList(
   storageOptions: SettingStorageOptions,
   onInvalidSetting?: InvalidSettingReporter,
 ): boolean {
-  const raw = getSetting(
-    SETTINGS_EXTENSION_NAME,
-    HIDE_AGENT_LIST_SETTING,
-    HIDE_AGENT_LIST_DEFINITION.defaultValue,
-    { ...storageOptions, scope: "global" },
-  );
+  let raw: unknown = undefined;
+  try {
+    raw = getSetting(
+      SETTINGS_EXTENSION_NAME,
+      HIDE_AGENT_LIST_SETTING,
+      HIDE_AGENT_LIST_DEFINITION.defaultValue,
+      { ...storageOptions, scope: "global" },
+    );
+  } catch {
+    reportInvalidPersistedSetting(
+      HIDE_AGENT_LIST_SETTING,
+      raw,
+      'must be either "true" or "false"; using "false"',
+      onInvalidSetting,
+    );
+    return false;
+  }
   if (raw === "true") return true;
   if (raw === "false" || raw === undefined) return false;
   reportInvalidPersistedSetting(

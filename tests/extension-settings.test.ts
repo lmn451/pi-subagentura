@@ -15,6 +15,8 @@ import {
   isAgentListHidden,
   MAX_DEPTH_FLAG,
   readExtensionSettings,
+  type ExtensionSettings,
+  type InvalidSettingReporter,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import {
@@ -43,11 +45,16 @@ let previousAgentDir: string | undefined;
 
 function readTestSettings(
   pi: Parameters<typeof readExtensionSettings>[0],
-): ReturnType<typeof readExtensionSettings> {
-  return readExtensionSettings(pi, {
-    cwd: settingsSandbox.cwd,
-    agentDir: settingsSandbox.agentDir,
-  });
+  onInvalidSetting?: InvalidSettingReporter,
+): ExtensionSettings {
+  return readExtensionSettings(
+    pi,
+    {
+      cwd: settingsSandbox.cwd,
+      agentDir: settingsSandbox.agentDir,
+    },
+    onInvalidSetting,
+  );
 }
 
 function sharedEventBus() {
@@ -461,68 +468,110 @@ describe("generic extension settings", () => {
     }
   });
 
-  it("keeps session_start functional when persisted settings are malformed", () => {
-    writeFileSync(
-      join(settingsSandbox.agentDir, "settings-extensions.json"),
+  it.each([
+    ["a top-level null", "null"],
+    ["a primitive extension value", '{"pi-subagentura":"bad"}'],
+  ])(
+    "falls back to defaults and reports structurally malformed settings (%s)",
+    (_description, settingsDocument) => {
+      writeFileSync(
+        join(settingsSandbox.agentDir, "settings-extensions.json"),
+        settingsDocument,
+      );
+      const onInvalid = vi.fn();
+      let settings: ExtensionSettings | undefined;
+
+      expect(() => {
+        settings = readTestSettings(
+          mockApi() as unknown as Parameters<typeof readExtensionSettings>[0],
+          onInvalid,
+        );
+      }).not.toThrow();
+      expect(settings).toEqual({
+        maxDepth: 2,
+        hideAgentList: false,
+      });
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("max-depth"),
+      );
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("hide-agent-list"),
+      );
+    },
+  );
+
+  it.each([
+    [
+      "malformed values",
       JSON.stringify({
         "pi-subagentura": {
           "max-depth": "not-a-number",
           "hide-agent-list": "sometimes",
         },
       }),
-    );
+    ],
+    ["a top-level null", "null"],
+    ["a primitive extension value", '{"pi-subagentura":"bad"}'],
+  ])(
+    "keeps session_start functional when persisted settings are %s",
+    (_description, settingsDocument) => {
+      writeFileSync(
+        join(settingsSandbox.agentDir, "settings-extensions.json"),
+        settingsDocument,
+      );
 
-    const handlers = new Map<string, Function[]>();
-    const api = {
-      ...mockApi((name) => name === "orchestratorv2"),
-      on: vi.fn((name: string, handler: Function) => {
-        const registered = handlers.get(name) ?? [];
-        registered.push(handler);
-        handlers.set(name, registered);
-      }),
-    };
-    const extensionApi = api as unknown as Parameters<
-      typeof registerExtension
-    >[0];
-    registerExtension(extensionApi);
+      const handlers = new Map<string, Function[]>();
+      const api = {
+        ...mockApi((name) => name === "orchestratorv2"),
+        on: vi.fn((name: string, handler: Function) => {
+          const registered = handlers.get(name) ?? [];
+          registered.push(handler);
+          handlers.set(name, registered);
+        }),
+      };
+      const extensionApi = api as unknown as Parameters<
+        typeof registerExtension
+      >[0];
+      registerExtension(extensionApi);
 
-    const notify = vi.fn();
-    const ctx = {
-      cwd: settingsSandbox.cwd,
-      ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify },
-      sessionManager: {
-        getSessionId: () => "malformed-settings-session",
-        getEntries: () => [],
-        getBranch: () => [],
-      },
-    };
+      const notify = vi.fn();
+      const ctx = {
+        cwd: settingsSandbox.cwd,
+        ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify },
+        sessionManager: {
+          getSessionId: () => "malformed-settings-session",
+          getEntries: () => [],
+          getBranch: () => [],
+        },
+      };
 
-    expect(() =>
-      handlers.get("session_start")![0]({ reason: "startup" }, ctx),
-    ).not.toThrow();
+      expect(() =>
+        handlers.get("session_start")![0]({ reason: "startup" }, ctx),
+      ).not.toThrow();
 
-    const scope = getSessionScopes().find(
-      (candidate) => candidate.pi === extensionApi,
-    );
-    // Init completed past the settings read: scope registered and live.
-    expect(scope?.lifecycle).toBe("started");
-    expect(scope?.ui).toBe(ctx.ui);
-    expect(scope?.spawnTreeContext).toMatchObject({
-      role: "root",
-      maxDepth: 2,
-    });
-    expect(getActiveSessionScopeId()).toBe(scope?.id);
-    expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining("max-depth"),
-      "warning",
-    );
-    expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining("hide-agent-list"),
-      "warning",
-    );
+      const scope = getSessionScopes().find(
+        (candidate) => candidate.pi === extensionApi,
+      );
+      // Init completed past the settings read: scope registered and live.
+      expect(scope?.lifecycle).toBe("started");
+      expect(scope?.ui).toBe(ctx.ui);
+      expect(scope?.spawnTreeContext).toMatchObject({
+        role: "root",
+        maxDepth: 2,
+      });
+      expect(getActiveSessionScopeId()).toBe(scope?.id);
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining("max-depth"),
+        "warning",
+      );
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining("hide-agent-list"),
+        "warning",
+      );
 
-    handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
-  });
+      handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+    },
+  );
 
   it("rejects invalid hide-agent-list values", () => {
     const api = mockApi((name) =>
