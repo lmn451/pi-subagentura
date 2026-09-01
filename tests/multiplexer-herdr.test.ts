@@ -78,13 +78,14 @@ function isCommandProbe(file: string, args: readonly string[]): boolean {
 }
 
 /**
- * First positional argument of a herdr invocation, i.e. the one after the `--`
- * flag terminator. Every pane-addressed herdr command terminates its flags, so
- * scenarios must not read the target off a fixed index.
+ * Addressed Herdr commands take the pane id as their first positional
+ * argument. Keep the fallback for fixtures that model the pre-0.8.2
+ * `--`-terminated form while assertions pin the current direct-positional
+ * argv.
  */
 function paneTarget(args: readonly string[]): string | undefined {
   const terminator = args.indexOf("--");
-  return terminator < 0 ? undefined : args[terminator + 1];
+  return terminator >= 0 ? args[terminator + 1] : args[2];
 }
 
 /**
@@ -425,7 +426,7 @@ describe("multiplexer-herdr", () => {
       expect(mod.interactiveSubagentRegistry.get(state.id)).toMatchObject({
         muxTerminalId: "terminal-w1:p2",
         attachCommand: expect.stringContaining(
-          "herdr terminal attach -- 'terminal-w1:p2'",
+          "herdr terminal attach 'terminal-w1:p2'",
         ),
       });
       expect(
@@ -496,7 +497,7 @@ describe("multiplexer-herdr", () => {
     ).toThrow("stable terminal_id");
     expect(calls).toContainEqual(
       expect.objectContaining({
-        args: ["pane", "close", "--", "w1:p2"],
+        args: ["pane", "close", "w1:p2"],
       }),
     );
   });
@@ -526,7 +527,7 @@ describe("multiplexer-herdr", () => {
     ).toThrow("stable terminal_id");
     expect(calls).toContainEqual(
       expect.objectContaining({
-        args: ["pane", "close", "--", "w1:p3"],
+        args: ["pane", "close", "w1:p3"],
       }),
     );
   });
@@ -586,7 +587,7 @@ describe("multiplexer-herdr", () => {
     expect(mux.getPaneLiveness("w1:p1")).toBe("alive");
     mux.killPane("w1:p1");
 
-    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w2:p1"]);
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "w2:p1"]);
   });
 
   it("returns unknown when an authoritative pane record is malformed", async () => {
@@ -620,26 +621,18 @@ describe("multiplexer-herdr", () => {
     >("../src/multiplexer-herdr");
     const mux = new HerdrMultiplexer();
 
-    mux.sendKeys("w1:p2", "-n literal\ntext", "/tmp/other.sock");
+    mux.sendKeys("w1:p2", "literal\ntext", "/tmp/other.sock");
     mux.sendEnter("w1:p2", "/tmp/other.sock");
-    // `--` terminates flag parsing. Agent follow-up text is user/model
-    // controlled, and text starting with `-` would otherwise be parsed as a
-    // send-text flag and fail the whole delivery — the same guard tmux's
-    // `send-keys ... -- <text>` and zellij's `write-chars -- <text>` carry.
+    // Herdr 0.8.2 rejects the generic `--` terminator for positional
+    // handlers, so pane ids and literal text stay direct positional args.
+    // This is the same argv shape used by the real 0.8.2 CLI.
     expect(calls[0]!.args).toEqual([
       "pane",
       "send-text",
-      "--",
       "w1:p2",
-      "-n literal\ntext",
+      "literal\ntext",
     ]);
-    expect(calls[1]!.args).toEqual([
-      "pane",
-      "send-keys",
-      "--",
-      "w1:p2",
-      "enter",
-    ]);
+    expect(calls[1]!.args).toEqual(["pane", "send-keys", "w1:p2", "enter"]);
   });
 
   it("messages a moved pane through its canonical id", async () => {
@@ -669,18 +662,183 @@ describe("multiplexer-herdr", () => {
     expect(calls.at(-2)!.args).toEqual([
       "pane",
       "send-text",
-      "--",
       "w2:p7",
       "follow-up",
     ]);
-    expect(calls.at(-1)!.args).toEqual([
-      "pane",
-      "send-keys",
-      "--",
-      "w2:p7",
-      "enter",
-    ]);
+    expect(calls.at(-1)!.args).toEqual(["pane", "send-keys", "w2:p7", "enter"]);
   });
+
+  it("retires a stale canonical alias and retries delivery with the caller id", async () => {
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      const target = paneTarget(call.args);
+      if (call.args[0] === "pane" && call.args[1] === "get") {
+        return success({
+          pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+        });
+      }
+      if (call.args[0] === "pane" && call.args[1] === "send-text") {
+        if (target === "w2:p7") {
+          throw Object.assign(new Error("pane not found"), {
+            status: 2,
+            stderr: JSON.stringify({
+              id: "test",
+              error: { code: "pane_not_found", message: "missing" },
+            }),
+          });
+        }
+        if (target === "w1:p2") return "";
+      }
+      if (
+        call.args[0] === "pane" &&
+        call.args[1] === "send-keys" &&
+        target === "w1:p2"
+      ) {
+        return "";
+      }
+      throw new Error(`unexpected command: ${call.args.join(" ")}`);
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    // Resolve the caller id onto the server's current canonical id.
+    expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+
+    // The canonical id is now stale. Delivery must retry once under the id
+    // returned by createPane, then keep using that id on later sends.
+    expect(() => mux.sendKeys("w1:p2", "first")).not.toThrow();
+    expect(() => mux.sendKeys("w1:p2", "second")).not.toThrow();
+    expect(() => mux.sendEnter("w1:p2")).not.toThrow();
+
+    expect(
+      calls
+        .filter(
+          (call) =>
+            call.args[0] === "pane" &&
+            (call.args[1] === "send-text" || call.args[1] === "send-keys"),
+        )
+        .map((call) => paneTarget(call.args)),
+    ).toEqual(["w2:p7", "w1:p2", "w1:p2", "w1:p2"]);
+  });
+
+  it.each([
+    [
+      "the error message",
+      Object.assign(new Error("unrelated transport pane_not_found mention"), {
+        stderr: "",
+      }),
+    ],
+    [
+      "plain diagnostics",
+      Object.assign(new Error("unrelated transport failure"), {
+        stderr: "not-json diagnostics mention pane_not_found incidentally",
+      }),
+    ],
+  ] as const)(
+    "propagates a canonical delivery failure when %s merely mentions pane_not_found",
+    async (_location, deliveryError) => {
+      const calls = installMockExec((call) => {
+        if (isCommandProbe(call.file, call.args)) return "";
+        const target = paneTarget(call.args);
+        if (call.args[0] === "pane" && call.args[1] === "get") {
+          return success({
+            pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+          });
+        }
+        if (call.args[0] === "pane" && call.args[1] === "send-text") {
+          if (target === "w2:p7") throw deliveryError;
+          throw new Error(`unexpected caller-id retry: ${target}`);
+        }
+        throw new Error(`unexpected command: ${call.args.join(" ")}`);
+      });
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      const mux = new HerdrMultiplexer();
+
+      // Seed the cached original -> canonical alias before delivery fails.
+      expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+
+      let firstError: unknown;
+      try {
+        mux.sendKeys("w1:p2", "first");
+      } catch (error) {
+        firstError = error;
+      }
+      let secondError: unknown;
+      try {
+        mux.sendKeys("w1:p2", "second");
+      } catch (error) {
+        secondError = error;
+      }
+
+      // The command wrapper must preserve the original delivery failure.
+      expect(firstError).toMatchObject({ cause: deliveryError });
+      expect(secondError).toMatchObject({ cause: deliveryError });
+      // Both sends stay on the cached canonical id: no retry and no retirement.
+      expect(
+        calls
+          .filter(
+            (call) => call.args[0] === "pane" && call.args[1] === "send-text",
+          )
+          .map((call) => paneTarget(call.args)),
+      ).toEqual(["w2:p7", "w2:p7"]);
+    },
+  );
+
+  it.each(["sync", "async"] as const)(
+    "freshly re-probes the original id after a stale canonical alias on the %s path",
+    async (path) => {
+      let originalLookups = 0;
+      const calls = installMockExec((call) => {
+        if (isCommandProbe(call.file, call.args)) return "";
+        if (call.args[0] === "pane" && call.args[1] === "get") {
+          const target = paneTarget(call.args)!;
+          if (target === "w1:p2" && originalLookups++ === 0) {
+            return success({
+              pane: {
+                ...pane("w2:p7"),
+                workspace_id: "w2",
+                tab_id: "w2:t1",
+              },
+            });
+          }
+          if (target === "w1:p2" || target === "w2:p7") {
+            throw Object.assign(new Error("pane not found"), {
+              code: "pane_not_found",
+              stderr: JSON.stringify({
+                id: "test",
+                error: { code: "pane_not_found", message: "missing" },
+              }),
+            });
+          }
+        }
+        throw new Error(`unexpected command: ${call.args.join(" ")}`);
+      });
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      const mux = new HerdrMultiplexer();
+
+      if (path === "sync") {
+        expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+        expect(mux.getPaneLiveness("w1:p2")).toBe("dead");
+      } else {
+        await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("alive");
+        await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("dead");
+      }
+
+      // The fallback must be a fresh third lookup, not the original cached
+      // found result that named the now-retired canonical id.
+      expect(
+        calls
+          .filter((call) => call.args[0] === "pane" && call.args[1] === "get")
+          .map((call) => paneTarget(call.args)),
+      ).toEqual(["w1:p2", "w2:p7", "w1:p2"]);
+    },
+  );
 
   it("rejects pane ids that could be read as flags or carry argv metacharacters", async () => {
     const calls = installMockExec(() => success({ ok: true }));
@@ -787,7 +945,7 @@ describe("multiplexer-herdr", () => {
     // missing. The pane is still reachable under the caller's own id, so it
     // must not be declared dead.
     expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
-    expect(probedIds()).toEqual(["w1:p2", "w2:p7"]);
+    expect(probedIds()).toEqual(["w1:p2", "w2:p7", "w1:p2"]);
 
     // ...and the retry must CONVERGE. The record naming w2:p7 is still cached
     // and still being read, so a retirement that lasted only for this call
@@ -907,7 +1065,7 @@ describe("multiplexer-herdr", () => {
     // entry. This is also what proves the alias was installed at all: the
     // second call addresses cp0, which nothing had probed before.
     expect(probed("cp0")).toBe(false);
-    expect(mux.getPaneLiveness("p0")).toBe("alive");
+    mux.sendKeys("p0", "touch");
     expect(probed("cp0")).toBe(true);
 
     // Push 200 more panes (400 entries) through the bound, evicting the
@@ -941,12 +1099,12 @@ describe("multiplexer-herdr", () => {
 
     expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
     mux.killPane("w1:p2");
-    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w2:p7"]);
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "w2:p7"]);
 
     // A pane id reused after the close must not resolve onto the dead alias,
     // and the cached "alive" probe must not answer for it either.
     mux.killPane("w1:p2");
-    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w1:p2"]);
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "w1:p2"]);
   });
 
   it("focuses a pane through Herdr's agent-independent control socket", async () => {
@@ -1366,7 +1524,7 @@ describe("multiplexer-herdr", () => {
 
     expect(() => mux.killPane("w1:p2")).not.toThrow();
     await expect(mux.showNativeViewer("title", "content")).resolves.toBe(false);
-    expect(calls[0]!.args).toEqual(["pane", "close", "--", "w1:p2"]);
+    expect(calls[0]!.args).toEqual(["pane", "close", "w1:p2"]);
   });
 
   it("builds terminal-scoped focus and attach commands", async () => {
@@ -1390,10 +1548,10 @@ describe("multiplexer-herdr", () => {
       session: "/tmp/session's.sock",
     });
     const expected =
-      "HERDR_SOCKET_PATH='/tmp/session'\\''s.sock' herdr terminal attach -- 'terminal-42'";
+      "HERDR_SOCKET_PATH='/tmp/session'\\''s.sock' herdr terminal attach 'terminal-42'";
     expect(commands.focusCommand).toBe(expected);
     expect(commands.attachCommand).toBe(expected);
-    expect(calls[0]!.args).toEqual(["pane", "get", "--", "w1:p2"]);
+    expect(calls[0]!.args).toEqual(["pane", "get", "w1:p2"]);
   });
 
   it("uses a persisted terminal identity without rediscovering the pane", async () => {
@@ -1410,9 +1568,27 @@ describe("multiplexer-herdr", () => {
       session: "/tmp/herdr.sock",
     });
     expect(commands.attachCommand).toContain(
-      "herdr terminal attach -- 'terminal-42'",
+      "herdr terminal attach 'terminal-42'",
     );
     expect(commands.focusCommand).toBe(commands.attachCommand);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects terminal ids that would be parsed as Herdr options", async () => {
+    const calls = installMockExec(() => {
+      throw new Error("terminal attach must not be attempted");
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    expect(() =>
+      new HerdrMultiplexer().buildAttachCommands({
+        paneId: "w1:p2",
+        terminalId: "--takeover",
+        session: "/tmp/herdr.sock",
+      }),
+    ).toThrow("stable terminal_id");
     expect(calls).toHaveLength(0);
   });
 

@@ -10,9 +10,9 @@
  * asserted the broken argv was correct while every real capture failed.
  *
  * These tests therefore pin Herdr's real contract for the operations the
- * overlay depends on: pane create, control-socket `pane.focus`, control-socket
- * `pane.read` bounding (including its trailing-newline behavior), flag-
- * terminated `pane send-text` delivery, liveness, and attach-command shape.
+ * overlay depends on: pane create, control-socket `pane.focus`, `pane.read`
+ * bounding (including its trailing-newline behavior), direct-positional
+ * `pane send-text` delivery, liveness, and attach-command shape.
  *
  * Excluded from the default `test` script (see `package.json`); run via
  * `npm run test:herdr`. Skipped entirely when herdr is not installed or when
@@ -266,9 +266,9 @@ describe.skipIf(!hasHerdr)("herdr backend against the real binary", () => {
     expect(exact.output.split("\n")).toHaveLength(lines.length);
   });
 
-  it("sendKeys delivers text starting with a dash (flag terminator works)", async () => {
-    // Without `--`, a leading-dash follow-up is parsed as a herdr flag and the
-    // whole delivery fails: the agent silently never receives the message.
+  it("sendKeys delivers text starting with a dash as a positional argument", async () => {
+    // Herdr 0.8.2 accepts leading-dash text after a validated pane id, so
+    // literal follow-up text does not need a flag terminator.
     const pane = await spawnPane(mux, "Dash child");
     const marker = `DASH_OK_${process.pid}`;
 

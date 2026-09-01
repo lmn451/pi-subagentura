@@ -140,6 +140,7 @@ function isStableTerminalId(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
+    !value.startsWith("-") &&
     value.trim() === value &&
     !value.includes("\0") &&
     Buffer.byteLength(value, "utf8") <= MAX_HERDR_TERMINAL_ID_BYTES
@@ -180,22 +181,6 @@ function herdrEnv(session?: string): NodeJS.ProcessEnv {
 }
 
 /**
- * Argv for a Herdr subcommand whose trailing arguments are positional.
- *
- * `--` terminates flag parsing. Pane ids and agent follow-up text are
- * user/model controlled, and a value starting with `-` would otherwise be
- * read as a flag and fail (or worse, silently alter) the command — the same
- * guard tmux's `send-keys ... -- <text>` and zellij's `write-chars -- <text>`
- * already carry.
- */
-function herdrArgs(
-  flags: readonly string[],
-  positionals: readonly string[],
-): string[] {
-  return [...flags, "--", ...positionals];
-}
-
-/**
  * Insert into a pure cache, evicting the least recently used entry once the
  * map is full.
  *
@@ -217,7 +202,7 @@ function boundedSet<V>(cache: Map<string, V>, key: string, value: V): void {
 
 function closeCreatedPaneBestEffort(paneId: string, session: string): void {
   try {
-    execFileSync("herdr", herdrArgs(["pane", "close"], [paneId]), {
+    execFileSync("herdr", ["pane", "close", requirePaneId(paneId)], {
       stdio: "ignore",
       timeout: HERDR_TIMEOUT_MS,
       env: herdrEnv(session),
@@ -294,10 +279,30 @@ function isPaneNotFoundResponse(result: HerdrCommandResult): boolean {
   return (
     parseErrorCode(result.stdout) === "pane_not_found" ||
     parseErrorCode(result.stderr) === "pane_not_found" ||
-    (isRecord(result.error) && result.error.code === "pane_not_found") ||
-    (result.error instanceof Error &&
-      result.error.message.includes("pane_not_found"))
+    (isRecord(result.error) && result.error.code === "pane_not_found")
   );
+}
+
+function isPaneNotFoundError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<object>();
+  while (current !== undefined && current !== null) {
+    if (isRecord(current)) {
+      if (seen.has(current)) break;
+      seen.add(current);
+    }
+    if (
+      isPaneNotFoundResponse({
+        error: current,
+        stdout: commandErrorOutput(current, "stdout"),
+        stderr: commandErrorOutput(current, "stderr"),
+      })
+    ) {
+      return true;
+    }
+    current = isRecord(current) ? current.cause : undefined;
+  }
+  return false;
 }
 
 function paneLookupFromCommand(result: HerdrCommandResult): PaneLookupResult {
@@ -560,10 +565,8 @@ export class HerdrMultiplexer implements Multiplexer {
       : baseName;
     const parentPane = opts.parentPane ?? process.env.HERDR_PANE_ID;
     if (!parentPane) throw new Error("Herdr did not provide HERDR_PANE_ID");
-    // `pane split` takes this id as a bare positional BEFORE its flags, so it
-    // is the one pane argv that cannot be `--`-terminated. Bind the validated
-    // value and use only that binding below — this guard is the whole of its
-    // argv safety.
+    // `pane split` takes this id as its first positional, before its flags.
+    // Validate it once and use only that binding for the command below.
     const parentPaneId = requirePaneId(parentPane);
     if (opts.background) {
       const parent = this.lookupPaneSync(parentPaneId, session);
@@ -613,8 +616,7 @@ export class HerdrMultiplexer implements Multiplexer {
       [
         "pane",
         "split",
-        // Validated by `requirePaneId` above: this positional precedes the
-        // flags, so `--` cannot protect it.
+        // This positional was validated by `requirePaneId` above.
         parentPaneId,
         "--direction",
         "right",
@@ -708,9 +710,12 @@ export class HerdrMultiplexer implements Multiplexer {
     staleTarget: string,
     session: string | undefined,
   ): void {
-    this.paneAliases.delete(this.paneAliasKey(paneId, session));
+    const callerKey = this.paneAliasKey(paneId, session);
+    this.paneAliases.delete(callerKey);
     this.livenessProbes.delete(this.paneAliasKey(staleTarget, session));
-    this.livenessProbe(paneId, session).retiredCanonical = staleTarget;
+    this.livenessProbes.delete(callerKey);
+    const callerProbe = this.livenessProbe(paneId, session);
+    callerProbe.retiredCanonical = staleTarget;
   }
 
   /**
@@ -797,7 +802,8 @@ export class HerdrMultiplexer implements Multiplexer {
     paneId: string,
     session?: string,
   ): Promise<PaneLookupResult> {
-    return this.runAsync(herdrArgs(["pane", "get"], [paneId]), session).then(
+    const target = requirePaneId(paneId);
+    return this.runAsync(["pane", "get", target], session).then(
       paneLookupFromCommand,
     );
   }
@@ -845,32 +851,58 @@ export class HerdrMultiplexer implements Multiplexer {
    * a retired id silently drops the agent's follow-up instead of delivering it.
    */
   sendKeys(paneId: string, text: string, session?: string): void {
-    const target = requirePaneId(this.canonicalPaneId(paneId, session));
-    execMuxOrThrow(
-      "herdr",
-      "pane send-text",
-      "herdr",
-      herdrArgs(["pane", "send-text"], [target, text]),
-      { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
-    );
+    this.sendPaneDelivery(paneId, text, "send-text", "pane send-text", session);
   }
 
   sendEnter(paneId: string, session?: string): void {
-    const target = requirePaneId(this.canonicalPaneId(paneId, session));
-    execMuxOrThrow(
-      "herdr",
+    this.sendPaneDelivery(
+      paneId,
+      "enter",
+      "send-keys",
       "pane send-keys enter",
-      "herdr",
-      herdrArgs(["pane", "send-keys"], [target, "enter"]),
-      { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
+      session,
     );
+  }
+
+  private sendPaneDelivery(
+    paneId: string,
+    value: string,
+    command: "send-text" | "send-keys",
+    operation: string,
+    session?: string,
+  ): void {
+    const requestedPaneId = requirePaneId(paneId);
+    const target = requirePaneId(
+      this.canonicalPaneId(requestedPaneId, session),
+    );
+    try {
+      execMuxOrThrow(
+        "herdr",
+        operation,
+        "herdr",
+        ["pane", command, target, value],
+        { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
+      );
+    } catch (error) {
+      if (target === requestedPaneId || !isPaneNotFoundError(error)) {
+        throw error;
+      }
+      this.retireCanonical(requestedPaneId, target, session);
+      execMuxOrThrow(
+        "herdr",
+        operation,
+        "herdr",
+        ["pane", command, requestedPaneId, value],
+        { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
+      );
+    }
   }
 
   killPane(paneId: string, session?: string): void {
     if (!isHerdrPaneId(paneId)) return;
-    const target = this.canonicalPaneId(paneId, session);
+    const target = requirePaneId(this.canonicalPaneId(paneId, session));
     try {
-      execFileSync("herdr", herdrArgs(["pane", "close"], [target]), {
+      execFileSync("herdr", ["pane", "close", target], {
         stdio: "ignore",
         timeout: HERDR_TIMEOUT_MS,
         env: herdrEnv(session),
@@ -972,15 +1004,12 @@ export class HerdrMultiplexer implements Multiplexer {
         `Herdr pane ${opts.paneId} did not include a stable terminal_id`,
       );
     }
-    // `--` for the same reason every pane argv carries one: `isStableTerminalId`
-    // deliberately permits a leading `-` (Herdr owns this id's format, and
-    // rejecting a shape it may legitimately mint would strand the attach path),
-    // so the terminator is what keeps the id a positional. This string is
-    // pasted into a shell by the user, which is also why the id is
-    // `shellEscape`d rather than merely validated.
+    // Herdr 0.8.2 accepts terminal ids only as direct positionals. Validate
+    // before shell escaping so a server-provided option-like id cannot be
+    // interpreted as a CLI flag; shellEscape protects shell metacharacters.
     const command = `HERDR_SOCKET_PATH=${shellEscape(
       socketPathFor(opts.session),
-    )} herdr terminal attach -- ${shellEscape(terminalId)}`;
+    )} herdr terminal attach ${shellEscape(terminalId)}`;
     return { attachCommand: command, focusCommand: command };
   }
 
@@ -997,7 +1026,11 @@ export class HerdrMultiplexer implements Multiplexer {
   }
 
   private canonicalPaneId(paneId: string, session?: string): string {
-    return this.paneAliases.get(this.paneAliasKey(paneId, session)) ?? paneId;
+    const key = this.paneAliasKey(paneId, session);
+    const canonical = this.paneAliases.get(key);
+    if (canonical === undefined) return paneId;
+    boundedSet(this.paneAliases, key, canonical);
+    return canonical;
   }
 
   private paneAliasKey(paneId: string, session?: string): string {
@@ -1035,17 +1068,14 @@ export class HerdrMultiplexer implements Multiplexer {
   }
 
   private lookupPaneSync(paneId: string, session?: string): PaneLookupResult {
+    const target = requirePaneId(paneId);
     try {
-      const output = execFileSync(
-        "herdr",
-        herdrArgs(["pane", "get"], [paneId]),
-        {
-          encoding: "utf8",
-          timeout: HERDR_TIMEOUT_MS,
-          maxBuffer: MAX_CAPTURE_READ_BYTES,
-          env: herdrEnv(session),
-        },
-      );
+      const output = execFileSync("herdr", ["pane", "get", target], {
+        encoding: "utf8",
+        timeout: HERDR_TIMEOUT_MS,
+        maxBuffer: MAX_CAPTURE_READ_BYTES,
+        env: herdrEnv(session),
+      });
       return paneLookupFromCommand({
         error: undefined,
         stdout: stringFromUnknown(output),
