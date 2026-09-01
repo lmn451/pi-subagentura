@@ -569,18 +569,18 @@ descendant past the depth or node cap is still cancelled and reported.
 
 The overlay supports these controls:
 
-| Key                    | Action                                                                                                               |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `↑`/`↓`, `j`/`k`       | Select an async job, workflow, or interactive lineage node                                                           |
-| `Enter`/`→`            | Expand type-specific activity, usage, agent records, or bounded artifact details                                     |
-| `x`                    | Cancel the selected running item; workflow and in-process cancellation propagates to owned agents                    |
-| `v`                    | For interactive agents, capture a bounded terminal snapshot through tmux/Zellij/Herdr                                |
-| `n`                    | For interactive agents, open the optional native tmux popup or Zellij floating viewer; Herdr has no native overlay   |
-| `f`                    | For interactive agents, focus the persisted pane/window; Herdr uses native `pane.focus`                              |
-| `a`                    | For interactive agents, show the terminal-scoped attach command; Herdr uses `herdr terminal attach -- <terminal-id>` |
-| `X`                    | For interactive agents, confirm and cancel an actionable subtree deepest-first                                       |
-| `r`                    | Refresh registries, lineage, and pane liveness                                                                       |
-| `q`/`Esc`/`Ctrl+Alt+A` | Close the overlay without stopping agents                                                                            |
+| Key                    | Action                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `↑`/`↓`, `j`/`k`       | Select an async job, workflow, or interactive lineage node                                                         |
+| `Enter`/`→`            | Expand type-specific activity, usage, agent records, or bounded artifact details                                   |
+| `x`                    | Cancel the selected running item; workflow and in-process cancellation propagates to owned agents                  |
+| `v`                    | For interactive agents, capture a bounded terminal snapshot through tmux/Zellij/Herdr                              |
+| `n`                    | For interactive agents, open the optional native tmux popup or Zellij floating viewer; Herdr has no native overlay |
+| `f`                    | For interactive agents, focus the persisted pane/window; Herdr uses native `pane.focus`                            |
+| `a`                    | For interactive agents, show the terminal-scoped attach command; Herdr uses `herdr terminal attach <terminal-id>`  |
+| `X`                    | For interactive agents, confirm and cancel an actionable subtree deepest-first                                     |
+| `r`                    | Refresh registries, lineage, and pane liveness                                                                     |
+| `q`/`Esc`/`Ctrl+Alt+A` | Close the overlay without stopping agents                                                                          |
 
 **Known Herdr limitation:** the supervisor's optional `n` action cannot open
 arbitrary content in a Herdr-native overlay. Herdr currently exposes overlay and
@@ -599,7 +599,7 @@ hint. With default keymaps, tmux uses prefix + `;` for a split pane or prefix +
 `l` for a detached window. Zellij uses `Ctrl+p`, then `p` for a split pane or
 `Ctrl+t`, then `Tab` for a named tab. Herdr's supervisor `f` uses the native
 `pane.focus` API; its returned focus/attach command is the truthful
-`herdr terminal attach -- <terminal-id>` command.
+`herdr terminal attach <terminal-id>` command.
 
 Terminal capture is bounded by both bytes and lines. Expanded interactive
 artifact details read only regular files and bound lifecycle-event reads to 8
