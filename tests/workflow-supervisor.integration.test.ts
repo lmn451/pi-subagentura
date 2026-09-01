@@ -471,13 +471,27 @@ describe("workflow supervisor integration", () => {
       { script: SINGLE_AGENT_SCRIPT("fallback"), async: false },
       undefined,
       vi.fn(),
-      { cwd: "/tmp", modelRegistry: {} },
+      {
+        cwd: "/tmp",
+        modelRegistry: {},
+        sessionManager: { getSessionId: () => "session-a" },
+      },
     );
 
     await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(mockStartSubagentJob).toHaveBeenCalledWith(
       expect.objectContaining({
-        telemetry: expect.objectContaining({ completionPolicy: "inline" }),
+        telemetry: expect.objectContaining({
+          completionPolicy: "inline",
+          depth: 1,
+        }),
+        // The runtime depth must match the reported one. Left unset, the child
+        // bound depth 0, so its own nested spawns reported depth 1 — the same
+        // as their parent — and never counted against the depth cap.
+        depth: 1,
+        // No ambient orchestration context here, so the child's logs are
+        // attributed through the parent's own session id.
+        rootSessionId: "session-a",
       }),
     );
     const childJob = jobRegistry.get("fallback-child");
@@ -603,6 +617,46 @@ describe("workflow supervisor integration", () => {
     expect(result.details.status).toBe("done");
     expect(result.content[0]?.text).toContain("unowned complete");
     expect(jobRegistry.size).toBe(0);
+  });
+
+  it("leaves a workflow child unattributed when the caller has no session id", async () => {
+    const { context } = liveSessionContext({ id: 11, sessionId: "session-a" });
+    const start = vi.fn();
+    let releaseChild!: (result: SubagentResult) => void;
+    mockLaunch.mockImplementationOnce(() => {
+      throw new Error("mux unavailable");
+    });
+    mockStartSubagentJob.mockResolvedValueOnce({
+      jobId: "unattributed-child",
+      jobPromise: new Promise<SubagentResult>((resolve) => {
+        releaseChild = resolve;
+      }),
+      liveStatus: { turn: 0, output: "", usage: {} },
+      session: { abort: vi.fn() },
+      modelLabel: "test/model",
+      thinkingLevel: "medium",
+      start,
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const execution = findTool().execute(
+      "call-unattributed",
+      { script: SINGLE_AGENT_SCRIPT("unattributed"), async: false },
+      undefined,
+      vi.fn(),
+      // No ambient orchestration context and no session manager to fall back
+      // on: the child runs, it just carries no root attribution.
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({ depth: 1, rootSessionId: undefined }),
+    );
+
+    releaseChild(subagentResult("unattributed complete"));
+    await execution;
   });
 
   it("retains a completed interactive child when the workflow later fails", async () => {
