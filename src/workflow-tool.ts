@@ -63,6 +63,7 @@ import { cancellationSnapshotsEnabled } from "./cancellation-snapshots";
 import {
   getOrchestrationContext,
   resolveSpawnDepth,
+  type SpawnDepthDecision,
 } from "./orchestration-context";
 import {
   getActiveSessionOwner,
@@ -105,6 +106,27 @@ function workflowTelemetryCompletionPolicy(
   if (!runAsync) return "inline";
   if (completion.legacy) return "legacy";
   return completion.policy ?? "each";
+}
+
+/**
+ * Resolve the depth a workflow's children occupy, plus the root session id for
+ * their logs. Mirrors `resolveSpawn` in the in-process tools: the ambient
+ * orchestration context is authoritative, and the parent's own session id is
+ * the fallback when there is no ambient context to inherit from.
+ */
+function resolveWorkflowSpawn(ctx: {
+  sessionManager?: { getSessionId?: () => string };
+}): SpawnDepthDecision {
+  const spawn = resolveSpawnDepth();
+  if (spawn.rootSessionId) return spawn;
+  let rootSessionId: string | undefined;
+  try {
+    rootSessionId = ctx.sessionManager?.getSessionId?.();
+  } catch {
+    // A stale parent context has no reliable session identity.
+    rootSessionId = undefined;
+  }
+  return { ...spawn, rootSessionId };
 }
 
 function workflowNotFoundMessage(workflowId: string): string {
@@ -204,6 +226,12 @@ export function registerWorkflowTool(
     supervisorOwner: SessionOwnerToken | undefined,
     workflowAsync: boolean,
     telemetryCompletionPolicy: TelemetryCompletionPolicy,
+    /**
+     * Resolved by the caller rather than here: agents are launched later from a
+     * worker message handler, where the ambient orchestration context of the
+     * originating tool call is already gone.
+     */
+    spawn: SpawnDepthDecision,
   ): WorkflowAgentRunner {
     return async ({
       prompt,
@@ -293,10 +321,6 @@ export function registerWorkflowTool(
       // it from `supervisorOwner` instead drops every child event whenever the
       // workflow tool was registered without a session scope.
       const childTelemetry = resolveLiveSessionScope(childOwner)?.telemetry;
-      // Workflow children are not always the root's direct children; a workflow
-      // started from inside a sub-agent sits deeper. Derive it the way the
-      // in-process spawn paths do instead of asserting depth 1.
-      const childDepth = resolveSpawnDepth().childDepth;
 
       // Own the child session so its parent abort cascades to it and exact-scope
       // shutdown can drain it from the authoritative job map.
@@ -331,13 +355,20 @@ export function registerWorkflowTool(
         onCancellationSnapshot,
         cancellationSource: "workflow",
         thinkingLevel,
+        // The child binds this depth into its own orchestration context, so a
+        // sub-agent it spawns counts from here. Left unset, the child bound
+        // depth 0 and its own children reported depth 1 — the same value as
+        // their parent — so the dimension was non-monotone within one spawn
+        // tree and the depth cap never saw a workflow grandchild.
+        depth: spawn.childDepth,
+        rootSessionId: spawn.rootSessionId,
         owner: childOwner,
         telemetry: childTelemetry
           ? {
               session: childTelemetry,
               invocationSource: "workflow",
               async: workflowAsync,
-              depth: childDepth,
+              depth: spawn.childDepth,
               completionPolicy: telemetryCompletionPolicy,
             }
           : undefined,
@@ -714,6 +745,13 @@ export function registerWorkflowTool(
         };
       }
 
+      // Resolved here, inside the tool call, while the caller's orchestration
+      // context and session manager are both still reachable. The guard above
+      // refuses a workflow started from inside an in-process sub-agent (issue
+      // #62), so today the depth is always the root's own and the session id
+      // always comes from the fallback; resolving both properly keeps the
+      // values correct if that restriction is ever lifted.
+      const spawn = resolveWorkflowSpawn(ctx);
       const baseOpts = (workflowId: string) => ({
         args: params.args,
         cwd: ctx.cwd,
@@ -724,6 +762,7 @@ export function registerWorkflowTool(
           workflowOwner,
           params.async !== false,
           workflowTelemetryCompletionPolicy(params.async !== false, completion),
+          spawn,
         ),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
       });
@@ -1344,6 +1383,9 @@ export function registerWorkflowTool(
       const commandCompletion: ResolvedCompletionPolicy = sessionScope
         ? { policy: "each", legacy: false }
         : { legacy: true };
+      // A slash command runs at the prompt, so this is the root's own depth,
+      // and the root's own session id is the only attribution available.
+      const spawn = resolveWorkflowSpawn(ctx);
       const job = startWorkflowJob(
         meta.name,
         script,
@@ -1357,6 +1399,7 @@ export function registerWorkflowTool(
             workflowOwner,
             true,
             workflowTelemetryCompletionPolicy(true, commandCompletion),
+            spawn,
           ),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
         }),

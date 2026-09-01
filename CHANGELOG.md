@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Workflow children now bind their real orchestration depth (1) instead of 0, so an in-process spawn chain started under a workflow agent has one fewer nesting level available before `SUBAGENTURA_MAX_ORCHESTRATION_DEPTH` refuses it. Previously a workflow grandchild reported the same depth as its parent and never counted against the cap. Direct workflow children are unaffected.
+
 ## [3.5.0] - 2026-08-30
 
 ### Added
