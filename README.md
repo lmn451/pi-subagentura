@@ -855,15 +855,15 @@ unrelated anonymous correlation rather than reconstructing identity.
 
 The payload schema is versioned and contains these events:
 
-| Event                      | Properties                                                                                                                                                                                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                              |
-| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
-| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `job` or `turn`                                                                                                        |
-| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                        |
-| `task_completed`           | repeated closed execution and mux dimensions; `success`, `error`, or `cancelled`; rounded/capped numeric duration plus bucket; bounded child-conversation message count when observable                                                             |
-| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                                                                                |
-| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                                                                              |
+| Event                      | Properties                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                             |
+| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, or `zellij`; `herdr` is reserved and starts being recorded when herdr support lands), closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
+| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `job` or `turn`                                                                                                                                                                       |
+| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                       |
+| `task_completed`           | repeated closed execution and mux dimensions; `success`, `error`, or `cancelled`; rounded numeric duration plus bucket, both reported as unknown when the measured span is implausible; bounded child-conversation message count when observable                                                                   |
+| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                                                                                                                                               |
+| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                                                                                                                                             |
 
 All events include the closed root mode and set `$process_person_profile: false`,
 `$geoip_disable: true`, and `$ip: "0.0.0.0"`. Terminal task events repeat the closed
@@ -912,6 +912,33 @@ PI_OFFLINE=1 pi
 
 Telemetry is also disabled automatically under `PI_OFFLINE`, `CI`, `VITEST`,
 or `NODE_ENV=test`. The opt-out is inherited by recursive interactive children.
+
+For every switch below except `NODE_ENV`, surrounding whitespace and letter case
+never change how the value is read, and an unset or empty variable is never a
+decision. `NODE_ENV` is the exception: it is compared literally, so only the
+exact lower-case `test` counts. Which values mean "false" depends on which way
+the switch points:
+
+| Variable                   | Disables telemetry when                                     | Does **not** disable telemetry when        |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------ |
+| `PI_SUBAGENTURA_TELEMETRY` | set to `0`, `false`, `off`, or `no`                         | set to anything else, or unset             |
+| `DO_NOT_TRACK`             | set to anything except `0` or `false` (`1`, `off`, `no`, …) | unset, empty, `0`, or `false`              |
+| `PI_OFFLINE`               | set to anything except `0` or `false` (`1`, `off`, `no`, …) | unset, empty, `0`, or `false`              |
+| `CI`, `VITEST`             | set to anything except `0`, `false`, `off`, or `no`         | unset, empty, `0`, `false`, `off`, or `no` |
+| `NODE_ENV`                 | exactly `test` (compared literally)                         | any other value                            |
+
+The asymmetry is deliberate. `DO_NOT_TRACK` and `PI_OFFLINE` are opt-out
+requests, so setting them to a value this code does not recognize keeps
+telemetry off — `DO_NOT_TRACK=off` and `DO_NOT_TRACK=no` still opt out, and only
+the unambiguous `DO_NOT_TRACK=false` or `DO_NOT_TRACK=0` cancels the request.
+`CI` and `VITEST` merely describe an environment, so `CI=off` reads as "not CI"
+and leaves telemetry enabled. To turn telemetry off without ambiguity, use
+`pi --no-subagentura-telemetry` or `PI_SUBAGENTURA_TELEMETRY=0`.
+
+With telemetry disabled the extension performs no telemetry-related writes: it
+does not create `.pi/`, take the state lock, or touch
+`.pi/subagentura-state.json` — except once, to clear a correlation an earlier
+opted-in run left behind.
 
 ## Development
 

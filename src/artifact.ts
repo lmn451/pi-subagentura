@@ -2249,6 +2249,26 @@ export function appendInteractiveState(
   });
 }
 
+/**
+ * Read-only probe for a telemetry field on disk. Opt-out must be inert: with
+ * telemetry disabled the extension must not create `.pi/`, take the state lock,
+ * or rewrite the state file — it only has work to do when a previous run left a
+ * correlation behind to clear.
+ */
+export function hasPersistedTelemetryField(cwd: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(stateFilePath(cwd), "utf8"));
+  } catch {
+    return false;
+  }
+  return (
+    !!parsed &&
+    typeof parsed === "object" &&
+    (parsed as Record<string, unknown>).telemetry !== undefined
+  );
+}
+
 /** Persist or clear the random logical-session telemetry correlation. */
 export function updatePersistedTelemetrySession(
   cwd: string,

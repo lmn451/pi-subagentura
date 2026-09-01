@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 
@@ -8,6 +8,7 @@ const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
 export const MAX_TELEMETRY_DEDUPE_KEYS = 2_048;
+const MAX_TELEMETRY_DEDUPE_KEY_LENGTH = 128;
 const MAX_TELEMETRY_DEPTH = 64;
 const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -134,6 +135,22 @@ export function resolveTelemetryMode(
   return orchestratorMode ? "orchestrator" : "straight";
 }
 
+/**
+ * One dedupe key for a manifest delivery, shared by every emit site so two
+ * callers cannot double-count the same manifest, and hashed past a bound so a
+ * large manifest cannot grow the retained key set without limit.
+ */
+export function manifestDeliveryDedupeKey(
+  completionIds: readonly string[],
+): string {
+  const joined = completionIds.join(":");
+  if (joined.length <= MAX_TELEMETRY_DEDUPE_KEY_LENGTH) {
+    return `manifest:${joined}`;
+  }
+  const digest = createHash("sha256").update(joined).digest("hex");
+  return `manifest:${completionIds.length}:${digest}`;
+}
+
 export function retireTelemetrySession(
   session: TelemetrySession | undefined,
 ): void {
@@ -158,8 +175,15 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
     const modelId = model.slice(separator + 1);
     return builtInModel(provider, modelId) ? model : "custom";
   }
-  for (const provider of getProviders()) {
-    if (builtInModel(provider, model)) return model;
+  // Provider enumeration reaches registry code owned by the host agent. A throw
+  // there must degrade the dimension, never fail the sub-agent launch that only
+  // wanted to label a model.
+  try {
+    for (const provider of getProviders()) {
+      if (builtInModel(provider, model)) return model;
+    }
+  } catch {
+    return "custom";
   }
   return "custom";
 }
@@ -189,7 +213,8 @@ export function telemetryDurationBucket(
   if (
     durationMs === undefined ||
     !Number.isFinite(durationMs) ||
-    durationMs < 0
+    durationMs < 0 ||
+    durationMs > MAX_TELEMETRY_DURATION_MS
   ) {
     return "unknown";
   }
@@ -201,21 +226,23 @@ export function telemetryDurationBucket(
   return "10m+";
 }
 
-/** Round away meaningless precision and cap pathological or corrupt timers. */
+/**
+ * Round away meaningless precision and drop implausible timers. A recovered or
+ * corrupt start timestamp produces a duration no analysis should trust, so it
+ * is reported as unknown rather than clamped to a bogus-but-plausible number.
+ */
 export function telemetryDurationMs(
   durationMs: number | undefined,
 ): number | undefined {
   if (
     durationMs === undefined ||
     !Number.isFinite(durationMs) ||
-    durationMs < 0
+    durationMs < 0 ||
+    durationMs > MAX_TELEMETRY_DURATION_MS
   ) {
     return undefined;
   }
-  return Math.min(
-    Math.round(durationMs / 100) * 100,
-    MAX_TELEMETRY_DURATION_MS,
-  );
+  return Math.round(durationMs / 100) * 100;
 }
 
 function depthProperty(depth: number | undefined): { depth?: number } {
@@ -348,19 +375,29 @@ export function captureTelemetry(
     session.capturedKeys.add(options.dedupeKey);
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  let request: Promise<Response>;
+  // An unref'd controller instead of AbortSignal.timeout: a pending capture must
+  // never hold the event loop open for up to 1.5s while the process is exiting.
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    TELEMETRY_TIMEOUT_MS,
+  ) as ReturnType<typeof setTimeout> & { unref?: () => void };
+  timeout.unref?.();
   try {
-    request = fetchImpl(TELEMETRY_ENDPOINT, {
+    const request = fetchImpl(TELEMETRY_ENDPOINT, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(buildTelemetryPayload(session, event)),
-      signal: AbortSignal.timeout(TELEMETRY_TIMEOUT_MS),
+      signal: controller.signal,
     });
+    // Promise.resolve tolerates a patched fetch that returns a non-thenable, and
+    // the attach stays inside the guard so no rejection escapes to the caller.
+    // Offline, blocked, and timed-out requests are intentionally not retried.
+    void Promise.resolve(request)
+      .catch(() => {})
+      .finally(() => clearTimeout(timeout));
   } catch {
     // Best-effort analytics must never affect extension behavior.
-    return;
+    clearTimeout(timeout);
   }
-  void request.catch(() => {
-    // Offline, blocked, and timed-out requests are intentionally not retried.
-  });
 }

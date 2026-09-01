@@ -616,6 +616,116 @@ describe("subagent_isolated tool", () => {
   });
 });
 
+// ── synchronous result consumption ───────────────────────────────────
+
+/**
+ * A synchronous spawn hands its output straight back to the caller, so there is
+ * no later `get_subagent_result` for `result_consumed` to be emitted from. Both
+ * sync tools take their own return path, so both are exercised here.
+ */
+describe("synchronous in-process result consumption", () => {
+  const SYNC_TOOLS = [
+    ["subagent_isolated", () => mockCtx()],
+    [
+      "subagent_with_context",
+      // with_context bails out early unless the branch has a message to inherit.
+      () =>
+        mockCtx({
+          sessionManager: {
+            getBranch: vi
+              .fn()
+              .mockReturnValue([
+                { type: "message", message: { role: "user", content: "hi" } },
+              ]),
+            getSessionId: vi.fn().mockReturnValue("test-session"),
+          },
+        }),
+    ],
+  ] as const;
+
+  interface TelemetryPost {
+    event?: string;
+    properties?: Record<string, unknown>;
+  }
+
+  function captureTelemetryPosts(): TelemetryPost[] {
+    const payloads: TelemetryPost[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    return payloads;
+  }
+
+  function consumedEvents(payloads: readonly TelemetryPost[]) {
+    return payloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_consumed",
+    );
+  }
+
+  it.each(SYNC_TOOLS)("records consumption for %s", async (name, makeCtx) => {
+    const payloads = captureTelemetryPosts();
+    const scoped = setupScopedExtension(714);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, name);
+
+    const result = await scopedTool.execute(
+      "sync-consumed",
+      { task: "analyze code", async: false },
+      undefined,
+      undefined,
+      makeCtx(),
+    );
+
+    expect(result.details.status).toBe("done");
+    await vi.waitFor(() => expect(consumedEvents(payloads)).toHaveLength(1));
+    expect(consumedEvents(payloads)[0]?.properties?.source).toBe("in-process");
+  });
+
+  it.each(
+    SYNC_TOOLS.flatMap(([name, makeCtx]) =>
+      (
+        [
+          [
+            "a failed run",
+            { ...defaultSuccessResult, isError: true, errorMessage: "boom" },
+          ],
+          [
+            "a cancelled run",
+            { ...defaultSuccessResult, cancelled: true, output: "cancelled" },
+          ],
+          ["an empty run", { ...defaultSuccessResult, output: "(no output)" }],
+        ] as const
+      ).map(([label, jobResult]) => [name, label, jobResult, makeCtx] as const),
+    ),
+  )(
+    "records no consumption for %s on %s",
+    async (name, _label, jobResult, makeCtx) => {
+      const payloads = captureTelemetryPosts();
+      mockStartSubagentJob.mockResolvedValue({
+        ...defaultStartSubagentJobResult,
+        jobPromise: Promise.resolve(jobResult),
+      });
+      const scoped = setupScopedExtension(715);
+      scoped.scope.telemetry = createTelemetrySession(true);
+      const scopedTool = getToolDef(scoped.api, name);
+
+      await scopedTool.execute(
+        "sync-not-consumed",
+        { task: "analyze code", async: false },
+        undefined,
+        undefined,
+        makeCtx(),
+      );
+
+      expect(consumedEvents(payloads)).toHaveLength(0);
+    },
+  );
+});
+
 // ── get_subagent_status ──────────────────────────────────────────────
 
 describe("get_subagent_status tool", () => {

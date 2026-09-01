@@ -60,7 +60,10 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { cancellationSnapshotsEnabled } from "./cancellation-snapshots";
-import { getOrchestrationContext } from "./orchestration-context";
+import {
+  getOrchestrationContext,
+  resolveSpawnDepth,
+} from "./orchestration-context";
 import {
   getActiveSessionOwner,
   isSessionOwnerLive,
@@ -88,6 +91,21 @@ import { captureTelemetry, type TelemetryCompletionPolicy } from "./telemetry";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
+
+/**
+ * One derivation of the reported completion-policy dimension for every workflow
+ * entry point. Each caller already knows the coordination settings it is about
+ * to install, so deriving here keeps a saved-workflow command from reporting a
+ * policy the run does not actually use.
+ */
+function workflowTelemetryCompletionPolicy(
+  runAsync: boolean,
+  completion: ResolvedCompletionPolicy,
+): TelemetryCompletionPolicy {
+  if (!runAsync) return "inline";
+  if (completion.legacy) return "legacy";
+  return completion.policy ?? "each";
+}
 
 function workflowNotFoundMessage(workflowId: string): string {
   return (
@@ -271,6 +289,14 @@ export function registerWorkflowTool(
       // and session shutdown skips it outright. Prefer the live owner, and leave
       // the child unregistered rather than create an unreachable registry row.
       const childOwner = supervisorOwner ?? getActiveSessionOwner();
+      // Telemetry has to name the scope the job actually registers under. Reading
+      // it from `supervisorOwner` instead drops every child event whenever the
+      // workflow tool was registered without a session scope.
+      const childTelemetry = resolveLiveSessionScope(childOwner)?.telemetry;
+      // Workflow children are not always the root's direct children; a workflow
+      // started from inside a sub-agent sits deeper. Derive it the way the
+      // in-process spawn paths do instead of asserting depth 1.
+      const childDepth = resolveSpawnDepth().childDepth;
 
       // Own the child session so its parent abort cascades to it and exact-scope
       // shutdown can drain it from the authoritative job map.
@@ -306,12 +332,12 @@ export function registerWorkflowTool(
         cancellationSource: "workflow",
         thinkingLevel,
         owner: childOwner,
-        telemetry: childScope?.telemetry
+        telemetry: childTelemetry
           ? {
-              session: childScope.telemetry,
+              session: childTelemetry,
               invocationSource: "workflow",
               async: workflowAsync,
-              depth: 1,
+              depth: childDepth,
               completionPolicy: telemetryCompletionPolicy,
             }
           : undefined,
@@ -697,11 +723,7 @@ export function registerWorkflowTool(
           workflowId,
           workflowOwner,
           params.async !== false,
-          params.async === false
-            ? "inline"
-            : completion.legacy
-              ? "legacy"
-              : (completion.policy ?? "each"),
+          workflowTelemetryCompletionPolicy(params.async !== false, completion),
         ),
         loadWorkflow: (n: string) => loadWorkflowScript(n),
       });
@@ -1317,6 +1339,11 @@ export function registerWorkflowTool(
           "Workflow command registration is no longer attached to a live session.",
         );
       }
+      // One completion decision drives both the coordination that is installed
+      // and the dimension that is reported, so the two cannot drift apart.
+      const commandCompletion: ResolvedCompletionPolicy = sessionScope
+        ? { policy: "each", legacy: false }
+        : { legacy: true };
       const job = startWorkflowJob(
         meta.name,
         script,
@@ -1329,7 +1356,7 @@ export function registerWorkflowTool(
             workflowId,
             workflowOwner,
             true,
-            sessionScope ? "each" : "legacy",
+            workflowTelemetryCompletionPolicy(true, commandCompletion),
           ),
           loadWorkflow: (n: string) => loadWorkflowScript(n),
         }),
@@ -1337,11 +1364,7 @@ export function registerWorkflowTool(
         notifyWorkflowCompletion,
         workflowOwner,
       );
-      configureWorkflowCompletion(
-        job,
-        sessionScope ? { policy: "each", legacy: false } : { legacy: true },
-        workflowOwner,
-      );
+      configureWorkflowCompletion(job, commandCompletion, workflowOwner);
       return { job, meta };
     };
 

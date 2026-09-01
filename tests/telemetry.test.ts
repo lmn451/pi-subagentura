@@ -3,6 +3,7 @@ import {
   buildTelemetryPayload,
   captureTelemetry,
   createTelemetrySession,
+  manifestDeliveryDedupeKey,
   MAX_TELEMETRY_DEDUPE_KEYS,
   resolveTelemetryMode,
   retireTelemetrySession,
@@ -145,6 +146,139 @@ describe("anonymous product telemetry", () => {
     expect(telemetryDurationBucket(700_000)).toBe("10m+");
     expect(telemetryDurationMs(12_345)).toBe(12_300);
     expect(telemetryDurationMs(Number.POSITIVE_INFINITY)).toBeUndefined();
+  });
+
+  it("reports an implausible span as unknown instead of a capped number", () => {
+    const beyondBound = 31 * 24 * 60 * 60 * 1_000;
+
+    expect(telemetryDurationMs(beyondBound)).toBeUndefined();
+    expect(telemetryDurationBucket(beyondBound)).toBe("unknown");
+
+    const completed = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "task_completed",
+      execution: "interactive",
+      mux: "tmux",
+      unit: "turn",
+      invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: 1,
+      depth_bucket: "1",
+      completion_policy: "each",
+      status: "success",
+      // A start timestamp recovered from a previous run yields a span no
+      // analysis should trust; a clamped value would look plausible.
+      duration_ms: beyondBound,
+      child_conversation_message_count: undefined,
+    });
+
+    expect(completed.properties).not.toHaveProperty("duration_ms");
+    expect(completed.properties.duration_bucket).toBe("unknown");
+  });
+
+  it("shares one bounded manifest dedupe key across both delivery sites", () => {
+    expect(manifestDeliveryDedupeKey(["a", "b"])).toBe("manifest:a:b");
+
+    const many = Array.from(
+      { length: 64 },
+      (_, index) => `completion-${index}`,
+    );
+    const key = manifestDeliveryDedupeKey(many);
+
+    expect(key.length).toBeLessThan(many.join(":").length);
+    expect(key).toBe(manifestDeliveryDedupeKey([...many]));
+    expect(key).not.toBe(manifestDeliveryDedupeKey(many.slice(0, 63)));
+  });
+
+  it("bounds the interactive_message_sent payload to closed dimensions", () => {
+    const session = createTelemetrySession(true, "orchestrator");
+    const payload = buildTelemetryPayload(session, {
+      event: "interactive_message_sent",
+      direction: "parent_to_child",
+      count: 5_000,
+    });
+
+    expect(payload.event).toBe("pi_subagentura_interactive_message_sent");
+    expect(Object.keys(payload.properties).sort()).toEqual(
+      [
+        "$geoip_disable",
+        "$ip",
+        "$lib",
+        "$lib_version",
+        "$process_person_profile",
+        "count",
+        "direction",
+        "mode",
+        "schema_version",
+        "telemetry_session_id",
+      ].sort(),
+    );
+    expect(payload.properties).toMatchObject({
+      direction: "parent_to_child",
+      count: 128,
+      mode: "orchestrator",
+      telemetry_session_id: session.correlationId,
+    });
+  });
+
+  it("bounds the completion_delivered payload to closed dimensions", () => {
+    const session = createTelemetrySession(true);
+    const payload = buildTelemetryPayload(session, {
+      event: "completion_delivered",
+      delivery: "manifest",
+      count: 900,
+    });
+
+    expect(payload.event).toBe("pi_subagentura_completion_delivered");
+    expect(Object.keys(payload.properties).sort()).toEqual(
+      [
+        "$geoip_disable",
+        "$ip",
+        "$lib",
+        "$lib_version",
+        "$process_person_profile",
+        "count",
+        "delivery",
+        "mode",
+        "schema_version",
+        "telemetry_session_id",
+      ].sort(),
+    );
+    expect(payload.properties).toMatchObject({
+      delivery: "manifest",
+      count: 128,
+    });
+  });
+
+  it.each([
+    [Number.NaN, 0],
+    [-7, 0],
+    [1.9, 1],
+    [128, 128],
+    [129, 128],
+  ])("clamps a bounded count of %s to %s", (count, expected) => {
+    expect(
+      buildTelemetryPayload(createTelemetrySession(true), {
+        event: "completion_delivered",
+        delivery: "notification",
+        count: count as number,
+      }).properties.count,
+    ).toBe(expected);
+  });
+
+  it("carries exactly the documented top-level payload fields", () => {
+    const payload = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "session_started",
+    });
+
+    expect(Object.keys(payload).sort()).toEqual([
+      "api_key",
+      "distinct_id",
+      "event",
+      "properties",
+    ]);
+    expect(typeof payload.api_key).toBe("string");
+    expect(payload.api_key.length).toBeGreaterThan(0);
   });
 
   it("distinguishes one created agent from its delegated tasks", () => {
@@ -322,17 +456,139 @@ describe("anonymous product telemetry", () => {
   });
 
   it.each([
+    [
+      "a fetch that throws synchronously",
+      () => {
+        throw new TypeError("fetch is not available");
+      },
+    ],
+    ["a fetch that rejects", () => Promise.reject(new Error("offline"))],
+    ["a patched fetch that returns a non-thenable", () => undefined],
+    ["a patched fetch that returns null", () => null],
+  ])("keeps the caller unaffected by %s", async (_label, impl) => {
+    const session = createTelemetrySession(true);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      expect(() =>
+        captureTelemetry(
+          session,
+          { event: "session_started" },
+          { fetchImpl: impl as unknown as typeof fetch },
+        ),
+      ).not.toThrow();
+      // A rejection attached outside the guard would surface a turn later.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("unrefs its abort timer so a pending capture cannot delay shutdown", () => {
+    // A capture in flight must never be the reason the process stays alive.
+    const unrefs: string[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      ...args: Parameters<typeof setTimeout>
+    ) => {
+      const handle = realSetTimeout(...args);
+      const unref = handle.unref.bind(handle);
+      handle.unref = () => {
+        unrefs.push("unref");
+        return unref();
+      };
+      return handle;
+    }) as typeof setTimeout);
+    try {
+      captureTelemetry(
+        createTelemetrySession(true),
+        { event: "session_started" },
+        {
+          fetchImpl: vi.fn<typeof fetch>(() => new Promise<Response>(() => {})),
+        },
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(unrefs).toEqual(["unref"]);
+  });
+
+  it("clears its abort timer as soon as the capture settles", async () => {
+    const clear = vi.spyOn(globalThis, "clearTimeout");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+
+    try {
+      captureTelemetry(
+        createTelemetrySession(true),
+        { event: "session_started" },
+        { fetchImpl },
+      );
+
+      await vi.waitFor(() => expect(clear).toHaveBeenCalled());
+    } finally {
+      clear.mockRestore();
+    }
+  });
+
+  it.each([
+    // The product switch points at telemetry, so every common spelling of
+    // "false" turns it off.
     [TELEMETRY_ENV, "0"],
+    [TELEMETRY_ENV, "0 "],
+    [TELEMETRY_ENV, "false"],
+    [TELEMETRY_ENV, "FALSE"],
+    [TELEMETRY_ENV, "off"],
+    [TELEMETRY_ENV, "no"],
+    // The opt-out switches point the other way and fail closed: only `0` and
+    // `false` cancel the request, so `off`/`no` still opt out.
     ["DO_NOT_TRACK", "1"],
+    ["DO_NOT_TRACK", "off"],
+    ["DO_NOT_TRACK", "no"],
+    ["DO_NOT_TRACK", "NO"],
     ["PI_OFFLINE", "true"],
+    ["PI_OFFLINE", "off"],
+    ["PI_OFFLINE", "no"],
+    // Environment probes.
     ["CI", "1"],
     ["VITEST", "1"],
     ["NODE_ENV", "test"],
-  ])("honors the %s opt-out", (name, value) => {
+  ])("honors the %s=%s opt-out", (name, value) => {
     clearTelemetryOptOuts();
     process.env[name] = value;
     const pi = { getFlag: vi.fn(() => true) };
     expect(isTelemetryEnabled(pi as any)).toBe(false);
+  });
+
+  it.each([
+    // A probe that says "not this environment" is permissive: `off` and `no`
+    // read as false because guessing wrong only costs an event.
+    ["CI", "false"],
+    ["CI", "0"],
+    ["CI", "OFF"],
+    ["CI", "no"],
+    ["VITEST", "false"],
+    ["VITEST", "off"],
+    // Cancelling an opt-out request must be unambiguous.
+    ["DO_NOT_TRACK", "0"],
+    ["DO_NOT_TRACK", "false"],
+    ["DO_NOT_TRACK", "FALSE"],
+    ["DO_NOT_TRACK", ""],
+    ["PI_OFFLINE", "0"],
+    ["PI_OFFLINE", "false"],
+    ["PI_OFFLINE", "  "],
+    ["PI_OFFLINE", ""],
+    ["NODE_ENV", "production"],
+    [TELEMETRY_ENV, "1"],
+  ])("leaves telemetry enabled for %s=%s", (name, value) => {
+    clearTelemetryOptOuts();
+    process.env[name] = value;
+    expect(isTelemetryEnabled({ getFlag: vi.fn(() => undefined) } as any)).toBe(
+      true,
+    );
   });
 
   it("supports the default-on flag and explicit CLI opt-out", () => {

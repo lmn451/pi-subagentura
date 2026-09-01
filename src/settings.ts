@@ -80,19 +80,48 @@ export function isAgentListHidden(pi: ExtensionAPI): boolean {
   return readExtensionSettings(pi).hideAgentList;
 }
 
-function envDisablesTelemetry(name: string): boolean {
+/**
+ * Reads as "false" for switches where a false answer costs nothing: the product
+ * switch (`PI_SUBAGENTURA_TELEMETRY`, where false means "do not send") and the
+ * environment probes (`CI`, `VITEST`, where false only means "not that
+ * environment"). Being generous here makes the opt-out easier to hit and the
+ * environment detection harder to trip by accident.
+ */
+const PERMISSIVE_FALSY_VALUES = new Set(["0", "false", "off", "no"]);
+
+/**
+ * `DO_NOT_TRACK` and `PI_OFFLINE` have the opposite polarity: setting them IS
+ * the opt-out, so a value this code fails to recognize must keep telemetry off,
+ * not turn it on. Only the two unambiguous negations cancel them — reading
+ * `DO_NOT_TRACK=off` as "do track" would silently convert a privacy request
+ * into consent.
+ */
+const OPT_OUT_FALSY_VALUES = new Set(["0", "false"]);
+
+/** Normalized switch value; unset and empty are both "no decision". */
+function envSwitchValue(name: string): string | undefined {
   const value = process.env[name]?.trim().toLowerCase();
-  return (
-    value !== undefined && value !== "" && value !== "0" && value !== "false"
-  );
+  return value === undefined || value === "" ? undefined : value;
+}
+
+/** True when the switch is set to anything outside its own falsy vocabulary. */
+function envSwitchIsTruthy(name: string, falsy: ReadonlySet<string>): boolean {
+  const value = envSwitchValue(name);
+  return value !== undefined && !falsy.has(value);
 }
 
 export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
-  if (process.env[TELEMETRY_ENV] === "0") return false;
-  if (envDisablesTelemetry("DO_NOT_TRACK")) return false;
-  if (envDisablesTelemetry("PI_OFFLINE")) return false;
-  if (envDisablesTelemetry("CI")) return false;
-  if (envDisablesTelemetry("VITEST")) return false;
+  const productSwitch = envSwitchValue(TELEMETRY_ENV);
+  if (
+    productSwitch !== undefined &&
+    PERMISSIVE_FALSY_VALUES.has(productSwitch)
+  ) {
+    return false;
+  }
+  if (envSwitchIsTruthy("DO_NOT_TRACK", OPT_OUT_FALSY_VALUES)) return false;
+  if (envSwitchIsTruthy("PI_OFFLINE", OPT_OUT_FALSY_VALUES)) return false;
+  if (envSwitchIsTruthy("CI", PERMISSIVE_FALSY_VALUES)) return false;
+  if (envSwitchIsTruthy("VITEST", PERMISSIVE_FALSY_VALUES)) return false;
   if (process.env.NODE_ENV === "test") return false;
   if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
   return readFlag(pi, TELEMETRY_FLAG) !== false;
