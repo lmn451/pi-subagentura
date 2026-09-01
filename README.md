@@ -263,22 +263,22 @@ Install the optional settings panel once with:
 pi install npm:@juanibiapina/pi-extension-settings
 ```
 
-Use `/extension-settings` for global settings; a project value overrides
-the global value when read from the Pi session's authoritative cwd. The optional
-package's `/extension-settings-local` command is not session-cwd-correct in the
-pinned `@juanibiapina/pi-extension-settings@0.9.1`: it resolves local settings
-from Node's process cwd instead of Pi's command context. Do not use that command
-for cross-project sessions. For a session-local value, edit
-`<session-cwd>/.pi/settings-extensions.json` manually, using the exact cwd of
-the Pi session. `max-depth` controls Orchestratorv2 lineage depth and defaults
-to `2`; `hide-agent-list` defaults to `false` and only hides the compact
-per-agent activity widget rows. The running footer, list/status tools, and visual
-agent supervisor remain available.
+Use `/extension-settings` for global settings. Whether a project value can
+override the global one is per-setting — see the scope rules below; only
+`max-depth` is project-overridable. The optional package's
+`/extension-settings-local` command is not session-cwd-correct in the pinned
+`@juanibiapina/pi-extension-settings@0.9.1`: it resolves local settings from
+Node's process cwd instead of Pi's command context. Do not use that command for
+cross-project sessions. It also still renders a `hide-agent-list` row, but
+setting it there is a no-op because that setting is global-only. For a
+session-local `max-depth`, edit `<session-cwd>/.pi/settings-extensions.json`
+manually, using the exact cwd of the Pi session. `max-depth` controls
+Orchestratorv2 lineage depth and defaults to `2`; `hide-agent-list` defaults to
+`false` and only hides the compact per-agent activity widget rows. The running
+footer, list/status tools, and visual agent supervisor remain available.
 
-The same setting can be configured without the panel by creating either the
-global file `~/.pi/agent/settings-extensions.json` or the project-local file
-`<project>/.pi/settings-extensions.json`. The project-local value is read first
-and overrides the global value:
+Both settings can also be configured without the panel. The global file
+`~/.pi/agent/settings-extensions.json` accepts either key:
 
 ```json
 {
@@ -289,11 +289,34 @@ and overrides the global value:
 }
 ```
 
+The project-local file `<project>/.pi/settings-extensions.json` is read for
+`max-depth` only:
+
+```json
+{
+  "pi-subagentura": {
+    "max-depth": "6"
+  }
+}
+```
+
+Scope rules:
+
+- `max-depth` is read project-local first, with the global file as fallback.
+- `hide-agent-list` is read **only** from the global file. A checked-out
+  repository must not be able to hide agent activity from whoever opens it, so a
+  project-local `hide-agent-list` is ignored.
+
+An invalid persisted value never aborts a session: the extension keeps the
+documented default (`max-depth` `2`, `hide-agent-list` `false`) and reports the
+ignored value in the TUI at the start of a root session, and to the debug log
+otherwise.
+
 The extension also exposes these validated launch flags for advanced
 configurations:
 
-- `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`.
-- `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global or project setting. It also works without the optional settings panel.
+- `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`. Unlike the persisted setting, an invalid value here fails fast.
+- `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global setting. It also works without the optional settings panel. The flag is on-only: it cannot override a persisted `hide-agent-list` of `true`, so to show the rows again clear the global setting.
 
 #### See the thin-router flow
 

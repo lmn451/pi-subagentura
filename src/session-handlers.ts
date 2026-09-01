@@ -313,7 +313,9 @@ export function registerSessionHandlers(
       sessionId &&
       scope.spawnTreeContext?.role !== "descendant"
     ) {
-      const maxDepth = readExtensionSettings(pi, { cwd: ctx.cwd }).maxDepth;
+      const maxDepth = readExtensionSettings(pi, { cwd: ctx.cwd }, (message) =>
+        ctx.ui?.notify?.(message, "warning"),
+      ).maxDepth;
       scope.spawnTreeContext = createRootSpawnTreeContext(
         sessionId,
         undefined,
