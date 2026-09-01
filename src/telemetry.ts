@@ -393,7 +393,10 @@ export function captureTelemetry(
     // Promise.resolve tolerates a patched fetch that returns a non-thenable, and
     // the attach stays inside the guard so no rejection escapes to the caller.
     // Offline, blocked, and timed-out requests are intentionally not retried.
+    // Telemetry never consumes the payload, so release the unused response body
+    // before considering the capture settled. Missing bodies are harmless.
     void Promise.resolve(request)
+      .then((response) => response?.body?.cancel())
       .catch(() => {})
       .finally(() => clearTimeout(timeout));
   } catch {
