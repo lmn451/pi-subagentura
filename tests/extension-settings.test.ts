@@ -12,11 +12,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
 import {
   HIDE_AGENT_LIST_FLAG,
+  isAgentListHidden,
   MAX_DEPTH_FLAG,
   readExtensionSettings,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
-import { clearSessionScopes, getSessionScopes } from "../src/session-scope";
+import {
+  clearSessionScopes,
+  getActiveSessionScopeId,
+  getSessionScopes,
+} from "../src/session-scope";
 
 interface SettingsSandbox {
   root: string;
@@ -131,6 +136,16 @@ describe("generic extension settings", () => {
         ],
       },
     );
+    const flagDescription = (name: string): string =>
+      api.registerFlag.mock.calls.find(([flag]) => flag === name)?.[1]
+        .description ?? "";
+    // registerFlag no longer supplies a default, so the text must not claim one.
+    expect(flagDescription(MAX_DEPTH_FLAG)).not.toMatch(/default/i);
+    // The boolean flag is on-only; say so where operators read it.
+    expect(flagDescription(HIDE_AGENT_LIST_FLAG)).toMatch(
+      /cannot override a persisted/i,
+    );
+
     expect(readTestSettings(api as any)).toEqual({
       maxDepth: 2,
       hideAgentList: false,
@@ -206,7 +221,7 @@ describe("generic extension settings", () => {
     expect(custom).toHaveBeenCalledOnce();
   });
 
-  it("reads global and project-local extension settings", () => {
+  it("reads global settings and lets a project override max-depth only", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
@@ -236,9 +251,68 @@ describe("generic extension settings", () => {
           },
         }),
       );
+      // max-depth follows the project; hide-agent-list stays global-only.
       expect(
         readExtensionSettings(mockApi() as any, { agentDir, cwd }),
-      ).toEqual({ maxDepth: 3, hideAgentList: false });
+      ).toEqual({ maxDepth: 3, hideAgentList: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a repo-controlled project-local hide-agent-list", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(cwd, ".pi", "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "hide-agent-list": "true" },
+        }),
+      );
+
+      expect(
+        readExtensionSettings(mockApi() as any, { agentDir, cwd }),
+      ).toMatchObject({ hideAgentList: false });
+      expect(isAgentListHidden(mockApi() as any, { agentDir, cwd })).toBe(
+        false,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the global file when no session cwd is known", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const ambientCwd = join(root, "ambient");
+    mkdirSync(join(ambientCwd, ".pi"), { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+    vi.spyOn(process, "cwd").mockReturnValue(ambientCwd);
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "max-depth": "5" },
+        }),
+      );
+      // The ambient process cwd must not leak into a cwd-less read.
+      writeFileSync(
+        join(ambientCwd, ".pi", "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "max-depth": "9" },
+        }),
+      );
+
+      expect(readExtensionSettings(mockApi() as any, { agentDir })).toEqual({
+        maxDepth: 5,
+        hideAgentList: false,
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -302,7 +376,35 @@ describe("generic extension settings", () => {
     },
   );
 
-  it("validates persisted max-depth with the same bounds", () => {
+  it.each(["", "-1", "1.5", "nope", "65"])(
+    "degrades a malformed persisted max-depth %p to the default",
+    (value) => {
+      const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+      const agentDir = join(root, "agent");
+      const cwd = join(root, "project");
+      mkdirSync(agentDir, { recursive: true });
+
+      try {
+        writeFileSync(
+          join(agentDir, "settings-extensions.json"),
+          JSON.stringify({
+            "pi-subagentura": { "max-depth": value },
+          }),
+        );
+        const onInvalid = vi.fn();
+        expect(
+          readExtensionSettings(mockApi() as any, { agentDir, cwd }, onInvalid),
+        ).toEqual({ maxDepth: 2, hideAgentList: false });
+        expect(onInvalid).toHaveBeenCalledWith(
+          expect.stringContaining("max-depth"),
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("degrades a malformed persisted hide-agent-list to false", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
@@ -312,15 +414,114 @@ describe("generic extension settings", () => {
       writeFileSync(
         join(agentDir, "settings-extensions.json"),
         JSON.stringify({
-          "pi-subagentura": { "max-depth": "65" },
+          "pi-subagentura": { "hide-agent-list": "yes please" },
         }),
       );
-      expect(() =>
-        readExtensionSettings(mockApi() as any, { agentDir, cwd }),
-      ).toThrow(/max depth/i);
+      const onInvalid = vi.fn();
+      expect(
+        readExtensionSettings(mockApi() as any, { agentDir, cwd }, onInvalid),
+      ).toEqual({ maxDepth: 2, hideAgentList: false });
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("hide-agent-list"),
+      );
+      expect(isAgentListHidden(mockApi() as any, { agentDir, cwd })).toBe(
+        false,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("validates a malformed persisted hide-agent-list even when the flag is set", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+
+    try {
+      writeFileSync(
+        join(agentDir, "settings-extensions.json"),
+        JSON.stringify({
+          "pi-subagentura": { "hide-agent-list": "yes please" },
+        }),
+      );
+      const api = mockApi((name) =>
+        name === HIDE_AGENT_LIST_FLAG ? true : undefined,
+      );
+      const onInvalid = vi.fn();
+      // The flag wins, but the persisted value is still parsed and reported.
+      expect(
+        readExtensionSettings(api as any, { agentDir, cwd }, onInvalid),
+      ).toMatchObject({ hideAgentList: true });
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("hide-agent-list"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps session_start functional when persisted settings are malformed", () => {
+    writeFileSync(
+      join(settingsSandbox.agentDir, "settings-extensions.json"),
+      JSON.stringify({
+        "pi-subagentura": {
+          "max-depth": "not-a-number",
+          "hide-agent-list": "sometimes",
+        },
+      }),
+    );
+
+    const handlers = new Map<string, Function[]>();
+    const api = {
+      ...mockApi((name) => name === "orchestratorv2"),
+      on: vi.fn((name: string, handler: Function) => {
+        const registered = handlers.get(name) ?? [];
+        registered.push(handler);
+        handlers.set(name, registered);
+      }),
+    };
+    const extensionApi = api as unknown as Parameters<
+      typeof registerExtension
+    >[0];
+    registerExtension(extensionApi);
+
+    const notify = vi.fn();
+    const ctx = {
+      cwd: settingsSandbox.cwd,
+      ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify },
+      sessionManager: {
+        getSessionId: () => "malformed-settings-session",
+        getEntries: () => [],
+        getBranch: () => [],
+      },
+    };
+
+    expect(() =>
+      handlers.get("session_start")![0]({ reason: "startup" }, ctx),
+    ).not.toThrow();
+
+    const scope = getSessionScopes().find(
+      (candidate) => candidate.pi === extensionApi,
+    );
+    // Init completed past the settings read: scope registered and live.
+    expect(scope?.lifecycle).toBe("started");
+    expect(scope?.ui).toBe(ctx.ui);
+    expect(scope?.spawnTreeContext).toMatchObject({
+      role: "root",
+      maxDepth: 2,
+    });
+    expect(getActiveSessionScopeId()).toBe(scope?.id);
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("max-depth"),
+      "warning",
+    );
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("hide-agent-list"),
+      "warning",
+    );
+
+    handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
   });
 
   it("rejects invalid hide-agent-list values", () => {

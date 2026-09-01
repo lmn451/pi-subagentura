@@ -769,6 +769,9 @@ async function runPollArtifactChanges(
       const hideAgentList =
         widgetRows.length > 0 &&
         ownerContext !== undefined &&
+        // Pass the session cwd, if any, and let the setting own its scope:
+        // hide-agent-list is read globally, so a missing cwd never degrades
+        // into a lookup against Node's process cwd.
         isAgentListHidden(ownerContext.pi, { cwd: ownerContext.cwd });
       updateRunningSubagentFooter(ui, owner);
       updateWidgetRows(ui, WIDGET_KEY, hideAgentList ? [] : widgetRows, owner);
