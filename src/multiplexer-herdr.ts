@@ -33,6 +33,48 @@ const MAX_HERDR_SOCKET_PATH_LENGTH = 4096;
 const MAX_HERDR_RESPONSE_BYTES = MAX_CAPTURE_READ_BYTES * 6 + 64 * 1024;
 const MAX_HERDR_READ_LINES = 4096;
 const MAX_HERDR_TERMINAL_ID_BYTES = 256;
+const MAX_HERDR_PANE_ID_LENGTH = 128;
+const PANE_LIVENESS_CACHE_MS = 500;
+/**
+ * Upper bound on the alias/probe caches. Both are pure caches keyed by
+ * `session\npaneId`, and a long-lived Pi can accumulate an entry per pane per
+ * workspace move, so cap them and evict the least recently written entry.
+ */
+const MAX_HERDR_PANE_CACHE_ENTRIES = 512;
+
+/**
+ * Conservative shape guard for Herdr pane ids, applied before an id reaches
+ * argv — the counterpart to tmux's `/^%\d+$/` and zellij's `/^\d+$/`.
+ *
+ * Herdr's public ids are workspace-scoped tokens (`w1:p2`, the shape Herdr
+ * injects as `HERDR_PANE_ID`). The pattern stays deliberately wider than that
+ * one format so a Herdr id-scheme change does not silently disable the
+ * backend, while still guaranteeing the two properties argv safety needs: the
+ * first character is alphanumeric (an id can never be mistaken for a flag) and
+ * the token carries no whitespace, quotes, or control characters.
+ */
+const HERDR_PANE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
+
+function isHerdrPaneId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_HERDR_PANE_ID_LENGTH &&
+    HERDR_PANE_ID_PATTERN.test(value)
+  );
+}
+
+function requirePaneId(paneId: string): string {
+  if (!isHerdrPaneId(paneId)) {
+    // The rejected value is exactly the untrusted input the guard exists to
+    // stop, and this message lands in the TUI and the debug log. Quote and
+    // truncate it so raw control bytes or an ESC sequence cannot repaint the
+    // surface that reports the rejection.
+    throw new Error(
+      `Unexpected Herdr pane id: ${JSON.stringify(String(paneId).slice(0, 64))}`,
+    );
+  }
+  return paneId;
+}
 
 interface HerdrPaneInfo {
   readonly pane_id: string;
@@ -109,7 +151,7 @@ function parseCreatedPane(
   field: "pane" | "root_pane",
 ): { paneId: string; terminalId: unknown } {
   const value = parseResult(output)[field];
-  if (!isRecord(value) || typeof value.pane_id !== "string" || !value.pane_id) {
+  if (!isRecord(value) || !isHerdrPaneId(value.pane_id)) {
     throw new Error("Malformed herdr pane id");
   }
   return { paneId: value.pane_id, terminalId: value.terminal_id };
@@ -137,9 +179,45 @@ function herdrEnv(session?: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Argv for a Herdr subcommand whose trailing arguments are positional.
+ *
+ * `--` terminates flag parsing. Pane ids and agent follow-up text are
+ * user/model controlled, and a value starting with `-` would otherwise be
+ * read as a flag and fail (or worse, silently alter) the command — the same
+ * guard tmux's `send-keys ... -- <text>` and zellij's `write-chars -- <text>`
+ * already carry.
+ */
+function herdrArgs(
+  flags: readonly string[],
+  positionals: readonly string[],
+): string[] {
+  return [...flags, "--", ...positionals];
+}
+
+/**
+ * Insert into a pure cache, evicting the least recently used entry once the
+ * map is full.
+ *
+ * Callers must route reads through this too (re-inserting the value they
+ * found), because the recency order is the Map's own insertion order: a read
+ * that bypasses it leaves the entry where it was and the cache degrades to
+ * FIFO, evicting the pane being actively polled ahead of one nothing has asked
+ * about in minutes.
+ */
+function boundedSet<V>(cache: Map<string, V>, key: string, value: V): void {
+  cache.delete(key);
+  while (cache.size >= MAX_HERDR_PANE_CACHE_ENTRIES) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+  cache.set(key, value);
+}
+
 function closeCreatedPaneBestEffort(paneId: string, session: string): void {
   try {
-    execFileSync("herdr", ["pane", "close", paneId], {
+    execFileSync("herdr", herdrArgs(["pane", "close"], [paneId]), {
       stdio: "ignore",
       timeout: HERDR_TIMEOUT_MS,
       env: herdrEnv(session),
@@ -359,6 +437,9 @@ function requestHerdrSocket(
   deadline = setTimeout(() => {
     finishError(new Error(`Herdr ${method} timed out`));
   }, HERDR_TIMEOUT_MS);
+  // Symmetric with zellij's capture timers: a pending deadline must not keep
+  // the Pi process alive past the work it is guarding.
+  deadline.unref?.();
 
   try {
     socket = createConnection({ path: socketPath });
@@ -409,10 +490,37 @@ function requestHerdrSocket(
   return promise;
 }
 
+/**
+ * Cached `herdr pane get` outcome for a single pane, with in-flight dedup.
+ *
+ * Herdr deliberately has no pane-list command in the liveness path (a list
+ * cannot distinguish "the server does not know this pane" from "the server is
+ * unreachable"), so liveness costs one process spawn per pane. The 500ms TTL
+ * matches `PANE_LIVENESS_CACHE_MS` in the tmux and zellij backends and keeps a
+ * supervisor refresh over N panes to N spawns instead of N per redraw.
+ */
+interface HerdrPaneProbe {
+  cachedAt?: number;
+  /** Issue order of the observation in `result`; see `commitProbe`. */
+  cachedSeq?: number;
+  result?: PaneLookupResult;
+  inFlight?: Promise<PaneLookupResult>;
+  /**
+   * A canonical id this pane's record used to name and that the server has
+   * since reported missing. Kept so the remap is not re-trusted the moment the
+   * (still cached, still stale) record is read again; see `livenessFrom`.
+   */
+  retiredCanonical?: string;
+}
+
+/** Monotonic issue counter used to order concurrent probes of one pane. */
+let nextProbeSeq = 0;
+
 export class HerdrMultiplexer implements Multiplexer {
   readonly name = "herdr" as const;
   readonly capabilities = MUX_CAPABILITIES.herdr;
   private readonly paneAliases = new Map<string, string>();
+  private readonly livenessProbes = new Map<string, HerdrPaneProbe>();
 
   /** Herdr control is intentionally scoped to the session hosting this Pi. */
   isAvailable(): boolean {
@@ -442,22 +550,34 @@ export class HerdrMultiplexer implements Multiplexer {
       );
     }
     const session = currentSocketPath();
-    const windowName = opts.windowName ?? safeSegment(opts.name);
+    // Tab labels are what the user reads in the Herdr tab strip, and
+    // `safeSegment(name)` alone collides whenever two sub-agents share a name
+    // ("review" twice). Disambiguate with the caller's unique sub-agent id, the
+    // same way tmux and zellij derive `pi-subagent-<id>` for their sessions.
+    const baseName = opts.windowName ?? safeSegment(opts.name);
+    const windowName = opts.id
+      ? `${baseName}-${safeSegment(opts.id)}`
+      : baseName;
     const parentPane = opts.parentPane ?? process.env.HERDR_PANE_ID;
     if (!parentPane) throw new Error("Herdr did not provide HERDR_PANE_ID");
+    // `pane split` takes this id as a bare positional BEFORE its flags, so it
+    // is the one pane argv that cannot be `--`-terminated. Bind the validated
+    // value and use only that binding below — this guard is the whole of its
+    // argv safety.
+    const parentPaneId = requirePaneId(parentPane);
     if (opts.background) {
-      const parent = this.lookupPaneSync(parentPane, session);
+      const parent = this.lookupPaneSync(parentPaneId, session);
       if (parent.kind !== "found") {
         throw new Error(
           parent.kind === "missing"
-            ? `Herdr pane ${parentPane} is no longer available`
-            : `Unable to resolve Herdr pane ${parentPane}`,
+            ? `Herdr pane ${parentPaneId} is no longer available`
+            : `Unable to resolve Herdr pane ${parentPaneId}`,
         );
       }
       const workspaceId = parent.pane.workspace_id;
       if (!workspaceId) {
         throw new Error(
-          `Herdr pane ${parentPane} did not include its workspace_id`,
+          `Herdr pane ${parentPaneId} did not include its workspace_id`,
         );
       }
       const output = execMuxOrThrow(
@@ -493,7 +613,9 @@ export class HerdrMultiplexer implements Multiplexer {
       [
         "pane",
         "split",
-        parentPane,
+        // Validated by `requirePaneId` above: this positional precedes the
+        // flags, so `--` cannot protect it.
+        parentPaneId,
         "--direction",
         "right",
         "--cwd",
@@ -508,41 +630,176 @@ export class HerdrMultiplexer implements Multiplexer {
   }
 
   getPaneLiveness(paneId: string, session?: string): PaneLiveness {
-    if (!paneId) return "unknown";
-    const result = this.lookupPaneSync(
-      this.canonicalPaneId(paneId, session),
-      session,
-    );
-    if (result.kind === "found") {
-      this.rememberPane(paneId, session, result.pane);
-      return "alive";
+    if (!isHerdrPaneId(paneId)) return "unknown";
+    const target = this.canonicalPaneId(paneId, session);
+    const result = this.probeLivenessSync(target, session);
+    if (result.kind === "missing" && target !== paneId) {
+      this.retireCanonical(paneId, target, session);
+      return this.livenessFrom(
+        paneId,
+        session,
+        this.probeLivenessSync(paneId, session),
+      );
     }
-    return result.kind === "missing" ? "dead" : "unknown";
-  }
-
-  private lookupPaneAsync(
-    paneId: string,
-    session?: string,
-  ): Promise<PaneLookupResult> {
-    return this.runAsync(["pane", "get", paneId], session).then(
-      paneLookupFromCommand,
-    );
+    return this.livenessFrom(paneId, session, result);
   }
 
   async getPaneLivenessAsync(
     paneId: string,
     session?: string,
   ): Promise<PaneLiveness> {
-    if (!paneId) return "unknown";
-    const result = await this.lookupPaneAsync(
-      this.canonicalPaneId(paneId, session),
-      session,
-    );
+    if (!isHerdrPaneId(paneId)) return "unknown";
+    const target = this.canonicalPaneId(paneId, session);
+    const result = await this.probeLivenessAsync(target, session);
+    if (result.kind === "missing" && target !== paneId) {
+      this.retireCanonical(paneId, target, session);
+      return this.livenessFrom(
+        paneId,
+        session,
+        await this.probeLivenessAsync(paneId, session),
+      );
+    }
+    return this.livenessFrom(paneId, session, result);
+  }
+
+  private livenessFrom(
+    paneId: string,
+    session: string | undefined,
+    result: PaneLookupResult,
+  ): PaneLiveness {
     if (result.kind === "found") {
-      this.rememberPane(paneId, session, result.pane);
+      // Do not re-trust a remap onto an id the server has reported missing.
+      // The record naming it is cached and keeps being read, so without this
+      // the alias would be reinstalled on the very next call, retired again on
+      // the one after, and the pair would oscillate — a spawn every other call
+      // forever, for a pane that answers perfectly well under its own id.
+      if (
+        result.pane.pane_id !== this.retiredCanonicalFor(paneId, session) &&
+        result.pane.pane_id !== paneId
+      ) {
+        this.rememberPane(paneId, session, result.pane);
+      }
       return "alive";
     }
     return result.kind === "missing" ? "dead" : "unknown";
+  }
+
+  private retiredCanonicalFor(
+    paneId: string,
+    session: string | undefined,
+  ): string | undefined {
+    return this.livenessProbes.get(this.paneAliasKey(paneId, session))
+      ?.retiredCanonical;
+  }
+
+  /**
+   * A cached canonical id is itself a snapshot: a pane moved twice leaves the
+   * first remap pointing at an id the server has already retired. Drop the
+   * stale mapping so the caller's own id gets one more chance before the pane
+   * is reported dead and the supervisor tears the sub-agent down, and record
+   * the retirement so the same remap is not adopted again on the next read.
+   *
+   * The record is bounded: it lives on the pane's own probe entry and is
+   * discarded with it, on eviction or on `killPane`. A genuine later move to a
+   * different id still aliases normally.
+   */
+  private retireCanonical(
+    paneId: string,
+    staleTarget: string,
+    session: string | undefined,
+  ): void {
+    this.paneAliases.delete(this.paneAliasKey(paneId, session));
+    this.livenessProbes.delete(this.paneAliasKey(staleTarget, session));
+    this.livenessProbe(paneId, session).retiredCanonical = staleTarget;
+  }
+
+  /**
+   * The probe entry for a pane, created on first use. Reads go through
+   * `boundedSet` so a pane under active polling refreshes its recency instead
+   * of aging out ahead of one nothing has asked about; the entry's identity is
+   * preserved, because `probeLivenessAsync` mutates it after an await.
+   */
+  private livenessProbe(paneId: string, session?: string): HerdrPaneProbe {
+    const key = this.paneAliasKey(paneId, session);
+    const probe = this.livenessProbes.get(key) ?? {};
+    boundedSet(this.livenessProbes, key, probe);
+    return probe;
+  }
+
+  private isProbeFresh(probe: HerdrPaneProbe): boolean {
+    return (
+      probe.result !== undefined &&
+      probe.cachedAt !== undefined &&
+      Date.now() - probe.cachedAt < PANE_LIVENESS_CACHE_MS
+    );
+  }
+
+  /**
+   * Commit a probe result unless a NEWER observation already landed.
+   *
+   * Ordering is by issue sequence, not by clock: `Date.now()` has millisecond
+   * resolution, so two probes issued in the same millisecond are
+   * indistinguishable by time, and a slow async probe would be free to
+   * overwrite the fresher sync result that raced past it — restamped `cachedAt:
+   * now`, so a pane observed dead would keep reporting alive for another full
+   * TTL.
+   */
+  private commitProbe(
+    probe: HerdrPaneProbe,
+    issuedSeq: number,
+    result: PaneLookupResult,
+  ): void {
+    if (probe.cachedSeq !== undefined && probe.cachedSeq >= issuedSeq) return;
+    probe.cachedSeq = issuedSeq;
+    probe.cachedAt = Date.now();
+    probe.result = result;
+  }
+
+  private probeLivenessSync(
+    paneId: string,
+    session?: string,
+  ): PaneLookupResult {
+    const probe = this.livenessProbe(paneId, session);
+    if (this.isProbeFresh(probe)) return probe.result!;
+    const issuedSeq = nextProbeSeq++;
+    const result = this.lookupPaneSync(paneId, session);
+    this.commitProbe(probe, issuedSeq, result);
+    return result;
+  }
+
+  private probeLivenessAsync(
+    paneId: string,
+    session?: string,
+  ): Promise<PaneLookupResult> {
+    const probe = this.livenessProbe(paneId, session);
+    if (this.isProbeFresh(probe)) return Promise.resolve(probe.result!);
+    if (probe.inFlight) return probe.inFlight;
+    const issuedSeq = nextProbeSeq++;
+    const request = this.lookupPaneAsync(paneId, session);
+    probe.inFlight = request;
+    void request
+      .then((result) => this.commitProbe(probe, issuedSeq, result))
+      // A rejected probe commits nothing and leaves the previous observation
+      // standing; the caller sees the rejection on `request` itself. Swallowed
+      // here only so the bookkeeping chain cannot become an unhandled
+      // rejection.
+      .catch(() => {})
+      .finally(() => {
+        // Must run on rejection too, or a single failed probe would pin
+        // `inFlight` forever and every later call would await a settled,
+        // rejected promise instead of retrying.
+        if (probe.inFlight === request) probe.inFlight = undefined;
+      });
+    return request;
+  }
+
+  private lookupPaneAsync(
+    paneId: string,
+    session?: string,
+  ): Promise<PaneLookupResult> {
+    return this.runAsync(herdrArgs(["pane", "get"], [paneId]), session).then(
+      paneLookupFromCommand,
+    );
   }
 
   private runAsync(
@@ -582,41 +839,53 @@ export class HerdrMultiplexer implements Multiplexer {
     return "unknown";
   }
 
+  /**
+   * Send literal text to the pane. Resolves the alias first: after a workspace
+   * move the caller still holds the pane id `createPane` returned, and messaging
+   * a retired id silently drops the agent's follow-up instead of delivering it.
+   */
   sendKeys(paneId: string, text: string, session?: string): void {
+    const target = requirePaneId(this.canonicalPaneId(paneId, session));
     execMuxOrThrow(
       "herdr",
       "pane send-text",
       "herdr",
-      ["pane", "send-text", paneId, text],
+      herdrArgs(["pane", "send-text"], [target, text]),
       { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
     );
   }
 
   sendEnter(paneId: string, session?: string): void {
+    const target = requirePaneId(this.canonicalPaneId(paneId, session));
     execMuxOrThrow(
       "herdr",
       "pane send-keys enter",
       "herdr",
-      ["pane", "send-keys", paneId, "enter"],
+      herdrArgs(["pane", "send-keys"], [target, "enter"]),
       { encoding: "utf8", timeout: HERDR_TIMEOUT_MS, env: herdrEnv(session) },
     );
   }
 
   killPane(paneId: string, session?: string): void {
+    if (!isHerdrPaneId(paneId)) return;
     const target = this.canonicalPaneId(paneId, session);
     try {
-      execFileSync("herdr", ["pane", "close", target], {
+      execFileSync("herdr", herdrArgs(["pane", "close"], [target]), {
         stdio: "ignore",
         timeout: HERDR_TIMEOUT_MS,
         env: herdrEnv(session),
       });
     } catch {
       // Best effort — the pane may already have exited or the server may be gone.
+    } finally {
+      // The id is retired either way; keeping the alias would resolve a future
+      // pane id onto a dead one and keeping the probe would report it alive.
+      this.forgetPane(paneId, target, session);
     }
   }
 
   async focusPane(ref: PaneRef): Promise<void> {
-    const target = this.canonicalPaneId(ref.paneId, ref.session);
+    const target = requirePaneId(this.canonicalPaneId(ref.paneId, ref.session));
     const response = await requestHerdrSocket(ref.session, "pane.focus", {
       pane_id: target,
     });
@@ -645,7 +914,7 @@ export class HerdrMultiplexer implements Multiplexer {
     const boundedMaxBytes = Math.min(maxBytes, MAX_CAPTURE_READ_BYTES);
     const requestedLines = Math.min(maxLines + 1, MAX_HERDR_READ_LINES);
     const response = await requestHerdrSocket(ref.session, "pane.read", {
-      pane_id: this.canonicalPaneId(ref.paneId, ref.session),
+      pane_id: requirePaneId(this.canonicalPaneId(ref.paneId, ref.session)),
       source: "recent_unwrapped",
       lines: requestedLines,
       format: "text",
@@ -656,7 +925,13 @@ export class HerdrMultiplexer implements Multiplexer {
     }
     const read = parsePaneRead(response.result);
     this.rememberPane(ref.paneId, ref.session, read.pane);
-    const bounded = boundCaptureOutput(read.text, {
+    // Herdr terminates the last row with `\n`. `boundCaptureOutput` splits on
+    // "\n", so that terminator counts as an extra, empty line — it would spend
+    // the `maxLines + 1` truncation-probe slot and make an exactly-`maxLines`
+    // capture drop its oldest real line while reporting `truncated: true`.
+    // Strip exactly one (a genuinely blank final row keeps its own newline).
+    const text = read.text.endsWith("\n") ? read.text.slice(0, -1) : read.text;
+    const bounded = boundCaptureOutput(text, {
       maxLines: boundedMaxLines,
       maxBytes: boundedMaxBytes,
     });
@@ -678,7 +953,9 @@ export class HerdrMultiplexer implements Multiplexer {
   }): { attachCommand: string; focusCommand: string } {
     let terminalId = opts.terminalId;
     if (terminalId === undefined) {
-      const target = this.canonicalPaneId(opts.paneId, opts.session);
+      const target = requirePaneId(
+        this.canonicalPaneId(opts.paneId, opts.session),
+      );
       const result = this.lookupPaneSync(target, opts.session);
       if (result.kind !== "found") {
         throw new Error(
@@ -695,9 +972,15 @@ export class HerdrMultiplexer implements Multiplexer {
         `Herdr pane ${opts.paneId} did not include a stable terminal_id`,
       );
     }
+    // `--` for the same reason every pane argv carries one: `isStableTerminalId`
+    // deliberately permits a leading `-` (Herdr owns this id's format, and
+    // rejecting a shape it may legitimately mint would strand the attach path),
+    // so the terminator is what keeps the id a positional. This string is
+    // pasted into a shell by the user, which is also why the id is
+    // `shellEscape`d rather than merely validated.
     const command = `HERDR_SOCKET_PATH=${shellEscape(
       socketPathFor(opts.session),
-    )} herdr terminal attach ${shellEscape(terminalId)}`;
+    )} herdr terminal attach -- ${shellEscape(terminalId)}`;
     return { attachCommand: command, focusCommand: command };
   }
 
@@ -726,24 +1009,43 @@ export class HerdrMultiplexer implements Multiplexer {
     session: string | undefined,
     pane: HerdrPaneInfo,
   ): void {
-    this.paneAliases.set(
+    if (!isHerdrPaneId(pane.pane_id)) return;
+    boundedSet(
+      this.paneAliases,
       this.paneAliasKey(requestedPaneId, session),
       pane.pane_id,
     );
-    this.paneAliases.set(
+    boundedSet(
+      this.paneAliases,
       this.paneAliasKey(pane.pane_id, session),
       pane.pane_id,
     );
   }
 
+  private forgetPane(
+    requestedPaneId: string,
+    canonicalPaneId: string,
+    session: string | undefined,
+  ): void {
+    for (const id of new Set([requestedPaneId, canonicalPaneId])) {
+      const key = this.paneAliasKey(id, session);
+      this.paneAliases.delete(key);
+      this.livenessProbes.delete(key);
+    }
+  }
+
   private lookupPaneSync(paneId: string, session?: string): PaneLookupResult {
     try {
-      const output = execFileSync("herdr", ["pane", "get", paneId], {
-        encoding: "utf8",
-        timeout: HERDR_TIMEOUT_MS,
-        maxBuffer: MAX_CAPTURE_READ_BYTES,
-        env: herdrEnv(session),
-      });
+      const output = execFileSync(
+        "herdr",
+        herdrArgs(["pane", "get"], [paneId]),
+        {
+          encoding: "utf8",
+          timeout: HERDR_TIMEOUT_MS,
+          maxBuffer: MAX_CAPTURE_READ_BYTES,
+          env: herdrEnv(session),
+        },
+      );
       return paneLookupFromCommand({
         error: undefined,
         stdout: stringFromUnknown(output),

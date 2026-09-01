@@ -167,15 +167,13 @@ describe("current pane activity", () => {
     process.env.HERDR_PANE_ID = "w1:p2";
     process.env.ZELLIJ = "0";
     process.env.TMUX = "/tmp/tmux.sock,123,0";
+    // No mock branch for a Herdr probe on purpose: Herdr's focus is
+    // server-global and proves nothing about an attached client, so
+    // `getPaneActivityAsync` answers "unknown" WITHOUT issuing any command.
+    // Any spawn here is the regression.
+    const commands: string[][] = [];
     installMockChildProcess((args) => {
-      if (args[0] === "api" && args[1] === "snapshot") {
-        return JSON.stringify({
-          id: "snapshot",
-          result: {
-            snapshot: { focused_pane_id: "w1:p2" },
-          },
-        });
-      }
+      commands.push([...args]);
       throw new Error(`unexpected command: ${args.join(" ")}`);
     });
 
@@ -189,6 +187,9 @@ describe("current pane activity", () => {
       paneId: "w1:p2",
       session: "/tmp/herdr.sock",
     });
+    // Herdr wins the backend race over the inherited TMUX/ZELLIJ markers, so
+    // neither of those backends gets probed either.
+    expect(commands).toEqual([]);
   });
 
   it("reports zellij inactive when no client is attached", async () => {
