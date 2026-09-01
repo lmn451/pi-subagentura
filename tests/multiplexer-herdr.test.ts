@@ -77,10 +77,48 @@ function isCommandProbe(file: string, args: readonly string[]): boolean {
   return file === "/bin/sh" && args[0] === "-c";
 }
 
+/**
+ * First positional argument of a herdr invocation, i.e. the one after the `--`
+ * flag terminator. Every pane-addressed herdr command terminates its flags, so
+ * scenarios must not read the target off a fixed index.
+ */
+function paneTarget(args: readonly string[]): string | undefined {
+  const terminator = args.indexOf("--");
+  return terminator < 0 ? undefined : args[terminator + 1];
+}
+
+/**
+ * How the fake socket puts a serialized response on the wire. The default
+ * writes the whole newline-delimited frame in one chunk; tests that exercise
+ * the framing reader supply their own split.
+ */
+type SocketDelivery = (
+  line: string,
+  emit: (chunk: Buffer) => void,
+) => void | Promise<void>;
+
+const deliverWholeFrame: SocketDelivery = (line, emit) => {
+  emit(Buffer.from(line + "\n"));
+};
+
+/**
+ * When true, `execFile` callbacks are parked in `pendingExec` instead of
+ * firing, so a test can hold an async probe in flight while other work runs
+ * and then land it with `flushPendingExec()`. Reset in `beforeEach`.
+ */
+let deferExec = false;
+const pendingExec: (() => void)[] = [];
+
+function flushPendingExec(): void {
+  const queued = pendingExec.splice(0, pendingExec.length);
+  for (const run of queued) run();
+}
+
 function installMockExec(
   scenario: (call: ExecCall) => string,
   socketScenario: SocketScenario = defaultSocketScenario,
   socketBehavior: SocketBehavior = "respond",
+  deliver: SocketDelivery = deliverWholeFrame,
 ): ExecCall[] {
   const calls: ExecCall[] = [];
   vi.resetModules();
@@ -102,11 +140,18 @@ function installMockExec(
     ) => {
       const call = { file, args: [...args], options: options ?? {} };
       calls.push(call);
+      // Run the scenario NOW and defer only the delivery, so a parked probe
+      // reports the world as it was when the process was spawned — which is
+      // the whole point of modelling a slow probe.
+      let deliverResult: () => void;
       try {
-        callback(null, scenario(call), "");
+        const stdout = scenario(call);
+        deliverResult = () => callback(null, stdout, "");
       } catch (error) {
-        callback(error as Error, "", "");
+        deliverResult = () => callback(error as Error, "", "");
       }
+      if (deferExec) pendingExec.push(deliverResult);
+      else deliverResult();
     },
   }));
   vi.doMock("node:net", () => ({
@@ -136,9 +181,9 @@ function installMockExec(
               ? { ...response, id: request.id }
               : response;
           queueMicrotask(() => {
-            listeners.get("data")?.(
-              Buffer.from(JSON.stringify(payload) + "\n"),
-            );
+            void deliver(JSON.stringify(payload), (chunk) => {
+              listeners.get("data")?.(chunk);
+            });
           });
           return true;
         },
@@ -157,6 +202,8 @@ describe("multiplexer-herdr", () => {
   let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
+    deferExec = false;
+    pendingExec.length = 0;
     originalEnv = { ...process.env };
     process.env.HERDR_ENV = "1";
     process.env.HERDR_SOCKET_PATH = "/tmp/herdr-test.sock";
@@ -230,6 +277,36 @@ describe("multiplexer-herdr", () => {
       "/tmp/herdr-test.sock",
     );
   });
+  it("disambiguates same-named background tabs with the sub-agent id", async () => {
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      if (call.args[0] === "pane" && call.args[1] === "get") {
+        return success({ pane: pane("w1:p1") });
+      }
+      if (call.args[0] === "tab") {
+        return success({ root_pane: createdPane("w1:p2") });
+      }
+      throw new Error(`unexpected command: ${call.args.join(" ")}`);
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    // Two agents named "review" must not present as two identical tabs.
+    const created = new HerdrMultiplexer().createPane({
+      name: "review",
+      cwd: "/repo",
+      background: true,
+      id: "a1b2c3d4",
+    });
+    expect(created.windowName).toBe("review-a1b2c3d4");
+    const create = calls.find((call) => call.args[0] === "tab")!;
+    expect(create.args).toContain("review-a1b2c3d4");
+    expect(create.args[create.args.indexOf("--label") + 1]).toBe(
+      "review-a1b2c3d4",
+    );
+  });
+
   it("resolves the background workspace from the current pane record", async () => {
     process.env.HERDR_WORKSPACE_ID = "stale-workspace";
 
@@ -316,7 +393,7 @@ describe("multiplexer-herdr", () => {
       const calls = installMockExec((call) => {
         if (isCommandProbe(call.file, call.args)) return "";
         if (call.args[0] === "pane" && call.args[1] === "get") {
-          return success({ pane: pane(call.args[2] ?? "w1:p1") });
+          return success({ pane: pane(paneTarget(call.args) ?? "w1:p1") });
         }
         if (call.args[0] === "tab") {
           return success({ root_pane: createdPane("w1:p2") });
@@ -348,7 +425,7 @@ describe("multiplexer-herdr", () => {
       expect(mod.interactiveSubagentRegistry.get(state.id)).toMatchObject({
         muxTerminalId: "terminal-w1:p2",
         attachCommand: expect.stringContaining(
-          "herdr terminal attach 'terminal-w1:p2'",
+          "herdr terminal attach -- 'terminal-w1:p2'",
         ),
       });
       expect(
@@ -419,7 +496,7 @@ describe("multiplexer-herdr", () => {
     ).toThrow("stable terminal_id");
     expect(calls).toContainEqual(
       expect.objectContaining({
-        args: ["pane", "close", "w1:p2"],
+        args: ["pane", "close", "--", "w1:p2"],
       }),
     );
   });
@@ -449,7 +526,7 @@ describe("multiplexer-herdr", () => {
     ).toThrow("stable terminal_id");
     expect(calls).toContainEqual(
       expect.objectContaining({
-        args: ["pane", "close", "w1:p3"],
+        args: ["pane", "close", "--", "w1:p3"],
       }),
     );
   });
@@ -457,7 +534,7 @@ describe("multiplexer-herdr", () => {
     const calls = installMockExec((call) => {
       if (isCommandProbe(call.file, call.args)) return "";
       if (call.args[0] === "pane" && call.args[1] === "get") {
-        const target = call.args[2]!;
+        const target = paneTarget(call.args)!;
         if (target === "w1:p8") {
           throw Object.assign(new Error("pane not found"), {
             stderr: JSON.stringify({
@@ -509,7 +586,7 @@ describe("multiplexer-herdr", () => {
     expect(mux.getPaneLiveness("w1:p1")).toBe("alive");
     mux.killPane("w1:p1");
 
-    expect(calls.at(-1)!.args).toEqual(["pane", "close", "w2:p1"]);
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w2:p1"]);
   });
 
   it("returns unknown when an authoritative pane record is malformed", async () => {
@@ -545,13 +622,331 @@ describe("multiplexer-herdr", () => {
 
     mux.sendKeys("w1:p2", "-n literal\ntext", "/tmp/other.sock");
     mux.sendEnter("w1:p2", "/tmp/other.sock");
+    // `--` terminates flag parsing. Agent follow-up text is user/model
+    // controlled, and text starting with `-` would otherwise be parsed as a
+    // send-text flag and fail the whole delivery — the same guard tmux's
+    // `send-keys ... -- <text>` and zellij's `write-chars -- <text>` carry.
     expect(calls[0]!.args).toEqual([
       "pane",
       "send-text",
+      "--",
       "w1:p2",
       "-n literal\ntext",
     ]);
-    expect(calls[1]!.args).toEqual(["pane", "send-keys", "w1:p2", "enter"]);
+    expect(calls[1]!.args).toEqual([
+      "pane",
+      "send-keys",
+      "--",
+      "w1:p2",
+      "enter",
+    ]);
+  });
+
+  it("messages a moved pane through its canonical id", async () => {
+    // Regression guard: sendKeys/sendEnter were the only pane ops that skipped
+    // alias resolution, so after a workspace move every follow-up message went
+    // to the retired id and was silently dropped.
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      if (call.args[0] === "pane" && call.args[1] === "get") {
+        return success({
+          pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+        });
+      }
+      return success({ ok: true });
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    // The move: liveness resolves the caller's id onto the server's new one.
+    expect(mux.getPaneLiveness("w1:p2", "/tmp/other.sock")).toBe("alive");
+
+    mux.sendKeys("w1:p2", "follow-up", "/tmp/other.sock");
+    mux.sendEnter("w1:p2", "/tmp/other.sock");
+
+    expect(calls.at(-2)!.args).toEqual([
+      "pane",
+      "send-text",
+      "--",
+      "w2:p7",
+      "follow-up",
+    ]);
+    expect(calls.at(-1)!.args).toEqual([
+      "pane",
+      "send-keys",
+      "--",
+      "w2:p7",
+      "enter",
+    ]);
+  });
+
+  it("rejects pane ids that could be read as flags or carry argv metacharacters", async () => {
+    const calls = installMockExec(() => success({ ok: true }));
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    for (const bad of ["-n", "--force", "w1 p2", "w1:p2\n", "w1:p2\0", ""]) {
+      expect(() => mux.sendKeys(bad, "text")).toThrow("pane id");
+      expect(() => mux.sendEnter(bad)).toThrow("pane id");
+      expect(mux.getPaneLiveness(bad)).toBe("unknown");
+      await expect(mux.getPaneLivenessAsync(bad)).resolves.toBe("unknown");
+      // killPane stays best-effort: a bad id is a no-op, never a throw.
+      expect(() => mux.killPane(bad)).not.toThrow();
+      await expect(
+        mux.capturePane({ paneId: bad }, { maxLines: 5, maxBytes: 4096 }),
+      ).rejects.toThrow("pane id");
+      await expect(mux.focusPane({ paneId: bad })).rejects.toThrow("pane id");
+    }
+    expect(calls.filter((call) => call.file === "herdr")).toHaveLength(0);
+  });
+
+  it("caches pane liveness probes for 500ms and dedups concurrent ones", async () => {
+    // Herdr has no pane list in the liveness path, so every probe is a process
+    // spawn. Without the tmux/zellij 500ms TTL a supervisor refresh over N
+    // panes paid N spawns per redraw.
+    vi.useFakeTimers();
+    try {
+      const calls = installMockExec((call) => {
+        if (isCommandProbe(call.file, call.args)) return "";
+        return success({ pane: pane(paneTarget(call.args) ?? "w1:p2") });
+      });
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      const mux = new HerdrMultiplexer();
+      const paneGets = () =>
+        calls.filter((call) => call.args[1] === "get").length;
+
+      expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+      expect(paneGets()).toBe(1);
+      expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+      await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("alive");
+      expect(paneGets()).toBe(1);
+
+      // A second pane is a separate cache entry.
+      expect(mux.getPaneLiveness("w1:p3")).toBe("alive");
+      expect(paneGets()).toBe(2);
+
+      // In-flight dedup: concurrent async probes share one spawn.
+      await vi.advanceTimersByTimeAsync(600);
+      const [a, b] = await Promise.all([
+        mux.getPaneLivenessAsync("w1:p2"),
+        mux.getPaneLivenessAsync("w1:p2"),
+      ]);
+      expect([a, b]).toEqual(["alive", "alive"]);
+      expect(paneGets()).toBe(3);
+
+      // Past the TTL the probe runs again.
+      await vi.advanceTimersByTimeAsync(600);
+      expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+      expect(paneGets()).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries the caller's own id when a cached canonical id has gone stale", async () => {
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      const target = paneTarget(call.args);
+      if (call.args[0] === "pane" && call.args[1] === "get") {
+        if (target === "w2:p7") {
+          throw Object.assign(new Error("pane not found"), {
+            stderr: JSON.stringify({
+              id: "test",
+              error: { code: "pane_not_found", message: "missing" },
+            }),
+          });
+        }
+        return success({
+          pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+        });
+      }
+      throw new Error(`unexpected command: ${call.args.join(" ")}`);
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    const probedIds = () =>
+      calls
+        .filter((call) => call.args[1] === "get")
+        .map((call) => paneTarget(call.args));
+
+    // Call 1 has no alias yet: it probes the caller's id and the server's
+    // record remaps it to w2:p7.
+    expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+    expect(probedIds()).toEqual(["w1:p2"]);
+
+    // Call 2 follows the alias to w2:p7, which the scenario now reports
+    // missing. The pane is still reachable under the caller's own id, so it
+    // must not be declared dead.
+    expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+    expect(probedIds()).toEqual(["w1:p2", "w2:p7"]);
+
+    // ...and the retry must CONVERGE. The record naming w2:p7 is still cached
+    // and still being read, so a retirement that lasted only for this call
+    // would reinstall the alias on the next one and retire it again on the one
+    // after — a spawn every other call, forever, for a pane that answers
+    // perfectly well under its own id.
+    const settled = probedIds().length;
+    for (let i = 0; i < 5; i++) {
+      expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+    }
+    expect(probedIds()).toHaveLength(settled);
+  });
+
+  it("does not let a slow async probe overwrite a newer sync observation", async () => {
+    // Ordering is by issue sequence, not by clock: both probes here are issued
+    // within the same millisecond, so a `Date.now()` comparison could not tell
+    // them apart and the stale async result would win — restamped fresh, so a
+    // pane already observed dead would keep reporting alive for a full TTL.
+    let paneGone = false;
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      if (call.args[0] === "pane" && call.args[1] === "get") {
+        if (paneGone) {
+          throw Object.assign(new Error("pane not found"), {
+            stderr: JSON.stringify({
+              id: "test",
+              error: { code: "pane_not_found", message: "missing" },
+            }),
+          });
+        }
+        return success({ pane: pane("w1:p2") });
+      }
+      throw new Error(`unexpected command: ${call.args.join(" ")}`);
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    // Issue the async probe against a live pane, but hold its callback.
+    deferExec = true;
+    const pending = mux.getPaneLivenessAsync("w1:p2");
+
+    // The pane dies, and a sync probe observes that first.
+    paneGone = true;
+    deferExec = false;
+    expect(mux.getPaneLiveness("w1:p2")).toBe("dead");
+
+    // Now the older async probe lands. It must not resurrect the pane.
+    flushPendingExec();
+    await expect(pending).resolves.toBe("alive");
+    expect(mux.getPaneLiveness("w1:p2")).toBe("dead");
+    await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("dead");
+  });
+
+  it("clears the in-flight probe when a probe rejects", async () => {
+    // A rejected probe that leaves `inFlight` pinned would make every later
+    // call await the same settled, rejected promise instead of retrying.
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      return success({ pane: pane("w1:p2") });
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+    const rejection = new Error("probe exploded");
+    const lookup = vi
+      .spyOn(
+        mux as unknown as {
+          lookupPaneAsync: (id: string, session?: string) => Promise<unknown>;
+        },
+        "lookupPaneAsync",
+      )
+      .mockRejectedValueOnce(rejection);
+
+    await expect(mux.getPaneLivenessAsync("w1:p2")).rejects.toThrow(
+      "probe exploded",
+    );
+
+    // The next call must issue a fresh probe rather than re-awaiting the
+    // rejected one.
+    lookup.mockRestore();
+    await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("alive");
+  });
+
+  it("bounds the alias cache and keeps recently used entries", async () => {
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      if (call.args[1] === "close") return "";
+      const target = paneTarget(call.args)!;
+      return success({
+        pane: pane(target.startsWith("c") ? target : `c${target}`),
+      });
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+    const probed = (id: string) =>
+      calls.some((call) => paneTarget(call.args) === id);
+    // `killPane` resolves the alias and always spawns, so unlike a liveness
+    // call it reveals the mapping without the probe cache answering first.
+    const closedTarget = (id: string) => {
+      mux.killPane(id);
+      return paneTarget(calls.at(-1)!.args);
+    };
+
+    // Every pane reports a canonical id distinct from the requested one, so
+    // each install writes two alias entries (requested -> canonical and
+    // canonical -> canonical): 256 panes exactly fill the 512-entry bound.
+    for (let i = 0; i < 256; i++) {
+      expect(mux.getPaneLiveness(`p${i}`)).toBe("alive");
+    }
+
+    // Re-touch p0 through its alias so it becomes the most recently used
+    // entry. This is also what proves the alias was installed at all: the
+    // second call addresses cp0, which nothing had probed before.
+    expect(probed("cp0")).toBe(false);
+    expect(mux.getPaneLiveness("p0")).toBe("alive");
+    expect(probed("cp0")).toBe(true);
+
+    // Push 200 more panes (400 entries) through the bound, evicting the
+    // oldest 400 — everything up to and including p200's pair.
+    for (let i = 256; i < 456; i++) {
+      expect(mux.getPaneLiveness(`p${i}`)).toBe("alive");
+    }
+
+    // p1 was never re-touched, so its alias aged out and the id now resolves
+    // to itself.
+    expect(closedTarget("p1")).toBe("p1");
+    // p0 sat at the same age as p1 until the re-touch moved it to the front,
+    // so it survived the identical eviction pressure.
+    expect(closedTarget("p0")).toBe("cp0");
+    // A pane from the newest batch is obviously still aliased.
+    expect(closedTarget("p455")).toBe("cp455");
+  });
+
+  it("drops alias and probe state when a pane is closed", async () => {
+    const calls = installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      if (call.args[1] === "close") return "";
+      return success({
+        pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+      });
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    expect(mux.getPaneLiveness("w1:p2")).toBe("alive");
+    mux.killPane("w1:p2");
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w2:p7"]);
+
+    // A pane id reused after the close must not resolve onto the dead alias,
+    // and the cached "alive" probe must not answer for it either.
+    mux.killPane("w1:p2");
+    expect(calls.at(-1)!.args).toEqual(["pane", "close", "--", "w1:p2"]);
   });
 
   it("focuses a pane through Herdr's agent-independent control socket", async () => {
@@ -610,6 +1005,133 @@ describe("multiplexer-herdr", () => {
       }),
     ).rejects.toThrow("pane.focus response");
   });
+  it("reassembles a Herdr response split across socket chunks", async () => {
+    // The multi-chunk branch of the framing reader: a socket read boundary can
+    // land anywhere, including mid-JSON and mid-UTF-8 sequence.
+    const marker = "é中\u{1f4a1}"; // 2-, 3- and 4-byte code points.
+    installMockExec(
+      () => "",
+      () =>
+        socketSuccess({
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            text: `before-${marker}-after`,
+            revision: 11,
+            truncated: false,
+          },
+        }),
+      "respond",
+      (line, emit) => {
+        const frame = Buffer.from(line + "\n", "utf8");
+        // Split inside the multibyte marker so no single chunk decodes alone.
+        const mid = frame.indexOf(Buffer.from(marker, "utf8")) + 1;
+        emit(frame.subarray(0, 7));
+        emit(frame.subarray(7, mid));
+        emit(frame.subarray(mid, frame.length - 3));
+        emit(frame.subarray(frame.length - 3));
+      },
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().capturePane(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        { maxLines: 5, maxBytes: 4096 },
+      ),
+    ).resolves.toEqual({
+      output: `before-${marker}-after`,
+      truncated: false,
+    });
+  });
+
+  it("surfaces a structured Herdr socket error with its code and message", async () => {
+    installMockExec(
+      () => "",
+      () => ({
+        error: { code: "pane_not_found", message: "no such pane" },
+      }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().focusPane({
+        paneId: "w1:p2",
+        session: "/tmp/other.sock",
+      }),
+    ).rejects.toThrow("pane focus failed (pane_not_found): no such pane");
+  });
+
+  it("rejects a Herdr socket error payload with a malformed shape", async () => {
+    installMockExec(
+      () => "",
+      () => ({ error: { code: 7, message: "no such pane" } }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().focusPane({
+        paneId: "w1:p2",
+        session: "/tmp/other.sock",
+      }),
+    ).rejects.toThrow("Malformed herdr socket error");
+  });
+
+  it("aborts a Herdr socket response that never stops growing", async () => {
+    // An unframed or hostile server must not be able to buffer Pi to death:
+    // the reader gives up once the response passes MAX_HERDR_RESPONSE_BYTES.
+    installMockExec(
+      () => "",
+      () => socketSuccess({ type: "ok" }),
+      "respond",
+      (_line, emit) => {
+        // 1 MiB per chunk, no newline ever — the byte cap must fire first.
+        const chunk = Buffer.alloc(1024 * 1024, 0x61);
+        for (let sent = 0; sent < 64; sent++) emit(chunk);
+      },
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().focusPane({
+        paneId: "w1:p2",
+        session: "/tmp/other.sock",
+      }),
+    ).rejects.toThrow("exceeded the byte limit");
+  });
+
+  it("is unavailable when the herdr binary is missing", async () => {
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) {
+        throw new Error("command not found: herdr");
+      }
+      throw new Error(`unexpected command: ${call.args.join(" ")}`);
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+
+    // Env markers alone are not enough — a Herdr-managed pane whose binary is
+    // off PATH must fall through to another backend, not throw at spawn time.
+    expect(mux.isAvailable()).toBe(false);
+    expect(() =>
+      mux.createPane({ name: "no-binary", cwd: "/repo", background: true }),
+    ).toThrow("Herdr is not available");
+  });
+
   it("enforces an absolute deadline while the Herdr socket stays connected", async () => {
     vi.useFakeTimers();
     try {
@@ -737,6 +1259,101 @@ describe("multiplexer-herdr", () => {
     expect(calls.some((call) => call.file === "node:net")).toBe(true);
   });
 
+  it("does not spend the truncation probe slot on a trailing newline", async () => {
+    // Herdr terminates the last row with `\n`. Counted as a line it consumed
+    // the `maxLines + 1` probe slot, so an exactly-`maxLines` capture dropped
+    // its oldest real line AND reported a truncation that never happened.
+    const calls = installMockExec(
+      () => "",
+      () =>
+        socketSuccess({
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            text: "a\nb\nc\n",
+            revision: 3,
+            truncated: false,
+          },
+        }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().capturePane(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        { maxLines: 3, maxBytes: 4096 },
+      ),
+    ).resolves.toEqual({ output: "a\nb\nc", truncated: false });
+    // One line over the bound still reports truncation.
+    expect(calls.some((call) => call.file === "node:net")).toBe(true);
+  });
+
+  it("still reports truncation past maxLines with a trailing newline", async () => {
+    installMockExec(
+      () => "",
+      () =>
+        socketSuccess({
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            text: "a\nb\nc\nd\n",
+            revision: 4,
+            truncated: false,
+          },
+        }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().capturePane(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        { maxLines: 3, maxBytes: 4096 },
+      ),
+    ).resolves.toEqual({ output: "b\nc\nd", truncated: true });
+  });
+
+  it("preserves a genuinely blank trailing row", async () => {
+    installMockExec(
+      () => "",
+      () =>
+        socketSuccess({
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            text: "a\nb\n\n",
+            revision: 5,
+            truncated: false,
+          },
+        }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().capturePane(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        { maxLines: 3, maxBytes: 4096 },
+      ),
+    ).resolves.toEqual({ output: "a\nb\n", truncated: false });
+  });
+
   it("closes panes best-effort and declines unsupported native overlays", async () => {
     const calls = installMockExec((call) => {
       if (call.args[1] === "close") throw new Error("already gone");
@@ -749,7 +1366,7 @@ describe("multiplexer-herdr", () => {
 
     expect(() => mux.killPane("w1:p2")).not.toThrow();
     await expect(mux.showNativeViewer("title", "content")).resolves.toBe(false);
-    expect(calls[0]!.args).toEqual(["pane", "close", "w1:p2"]);
+    expect(calls[0]!.args).toEqual(["pane", "close", "--", "w1:p2"]);
   });
 
   it("builds terminal-scoped focus and attach commands", async () => {
@@ -773,10 +1390,10 @@ describe("multiplexer-herdr", () => {
       session: "/tmp/session's.sock",
     });
     const expected =
-      "HERDR_SOCKET_PATH='/tmp/session'\\''s.sock' herdr terminal attach 'terminal-42'";
+      "HERDR_SOCKET_PATH='/tmp/session'\\''s.sock' herdr terminal attach -- 'terminal-42'";
     expect(commands.focusCommand).toBe(expected);
     expect(commands.attachCommand).toBe(expected);
-    expect(calls[0]!.args).toEqual(["pane", "get", "w1:p2"]);
+    expect(calls[0]!.args).toEqual(["pane", "get", "--", "w1:p2"]);
   });
 
   it("uses a persisted terminal identity without rediscovering the pane", async () => {
@@ -793,7 +1410,7 @@ describe("multiplexer-herdr", () => {
       session: "/tmp/herdr.sock",
     });
     expect(commands.attachCommand).toContain(
-      "herdr terminal attach 'terminal-42'",
+      "herdr terminal attach -- 'terminal-42'",
     );
     expect(commands.focusCommand).toBe(commands.attachCommand);
     expect(calls).toHaveLength(0);

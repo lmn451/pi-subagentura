@@ -71,8 +71,19 @@ export interface MultiplexerCapabilities {
  * entry directly from a `MuxName` (e.g. `InteractiveSubagentState.mux`) without
  * resolving a backend instance or paying an availability probe.
  *
- * The tmux/Zellij flags are asserted against real binaries in their integration
- * suites. Herdr's public CLI contract is covered in `multiplexer-herdr.test.ts`.
+ * Every flag below is asserted against the real `tmux` / `zellij` / `herdr`
+ * binaries in `tests/tmux.integration.test.ts`,
+ * `tests/zellij.integration.test.ts` and `tests/herdr.integration.test.ts` —
+ * flipping one to `true` without a passing real-binary assertion is how the
+ * broken zellij `dump-screen` argv shipped green.
+ *
+ * Caveat on the Herdr row, stated plainly because a half-kept invariant is
+ * worse than none: that suite is wired into CI but SELF-SKIPS on every runner
+ * today. Herdr has no headless Linux install and its backend only operates
+ * from inside a Herdr-managed pane, so the assertions run only where such an
+ * environment exists — `npm run test:herdr` on a Herdr machine. Until a runner
+ * can host Herdr, treat the Herdr flags as asserted-on-demand rather than
+ * asserted-per-commit, and run that suite by hand when changing them.
  */
 export const MUX_CAPABILITIES: Readonly<
   Record<MuxName, MultiplexerCapabilities>
@@ -95,9 +106,11 @@ export const MUX_CAPABILITIES: Readonly<
     nativeOverlay: true,
   },
   herdr: {
-    // `agent focus <pane-id>` targets the Pi process occupying the pane.
+    // Control-socket `pane.focus { pane_id }`: pane ids are server-scoped and
+    // the response echoes the pane's workspace/tab, so focus is verifiable.
     structuredFocus: true,
-    // `pane read --source recent-unwrapped --lines <n>` is server-bounded.
+    // Control-socket `pane.read { source: "recent_unwrapped", lines }` is
+    // server-bounded, and the reply carries its own `truncated` flag.
     boundedCapture: true,
     // Herdr has no generic transient content overlay in its public CLI.
     nativeOverlay: false,
@@ -386,12 +399,6 @@ export function __setZellijMultiplexer(impl: Multiplexer | undefined): void {
   else instances.delete("zellij");
 }
 
-/** Test seam: replace the cached Herdr backend. Pass `undefined` to restore. */
-export function __setHerdrMultiplexer(impl: Multiplexer | undefined): void {
-  if (impl) instances.set("herdr", impl);
-  else instances.delete("herdr");
-}
-
 /** Test seam: clear all cached backend instances (forces re-instantiation). */
 export function __resetMuxInstances(): void {
   instances.clear();
@@ -548,9 +555,9 @@ export function shellEscape(value: string): string {
  * and relevant stderr/stdout/exit-status details from the underlying exec
  * failure. The original error is preserved as `cause`.
  *
- * @param muxName   Backend name ("tmux" or "zellij") — identifies the tool in the error.
+ * @param muxName   Backend name ("tmux", "zellij", or "herdr") — identifies the tool in the error.
  * @param operation Human-readable description (e.g. "new-window", "send-keys").
- * @param cmd       The command binary (e.g. "tmux", "zellij").
+ * @param cmd       The command binary (e.g. "tmux", "zellij", "herdr").
  * @param args      Command arguments (passed through to execFileSync).
  * @param options   execFileSync options (e.g. `{ encoding: "utf8", timeout: 5000 }`).
  * @returns The stdout as a string.

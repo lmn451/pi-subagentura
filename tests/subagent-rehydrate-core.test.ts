@@ -121,6 +121,46 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(rehydrated?.selectPaneCommand).toContain("tmux select-window");
   });
 
+  it("substitutes a non-command placeholder when attach rebuilding fails", async () => {
+    // Rehydration must never throw, so an unresolvable pane falls back to a
+    // placeholder — but it is rendered where the UI promises a copy-pasteable
+    // command ("Attach: <cmd>"). The old bare "unavailable" read as one; the
+    // replacement must be unmistakably not a command, for every backend.
+    vi.doMock("../src/multiplexer", () => ({
+      getMux: () => ({
+        name: "tmux",
+        getPaneLiveness: () => "dead",
+        buildAttachCommands: () => {
+          throw new Error("pane is gone");
+        },
+      }),
+      NoMultiplexerAvailableError: class extends Error {},
+    }));
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { ATTACH_UNAVAILABLE } =
+      await importFresh<typeof import("../src/rehydrate")>("../src/rehydrate");
+    const state = makeState(cwd, "abc12345");
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      windowName: state.windowName,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+    });
+
+    expect(mod.rehydrateInteractiveSubagents(cwd).total).toBe(1);
+
+    const rehydrated = mod.interactiveSubagentRegistry.get("abc12345");
+    expect(rehydrated?.attachCommand).toBe(ATTACH_UNAVAILABLE);
+    expect(rehydrated?.selectPaneCommand).toBe(ATTACH_UNAVAILABLE);
+    // A shell would run the old value as a command name; this one cannot be
+    // mistaken for one.
+    expect(ATTACH_UNAVAILABLE).toMatch(/^\(.*\)$/);
+    expect(ATTACH_UNAVAILABLE).not.toBe("unavailable");
+  });
+
   it("is a no-op when the registry already has the id (idempotent)", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
