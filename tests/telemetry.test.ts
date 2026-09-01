@@ -534,6 +534,53 @@ describe("anonymous product telemetry", () => {
     }
   });
 
+  it("keeps its abort deadline armed until an unused response body settles", async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    let resolveBodyCleanup!: () => void;
+    const bodyCleanup = new Promise<void>((resolve) => {
+      resolveBodyCleanup = resolve;
+    });
+    const bodyCancel = vi.fn(() => bodyCleanup);
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel: () => bodyCancel(),
+      }),
+    );
+    let resolveHeaders!: (value: Response) => void;
+    const headers = new Promise<Response>((resolve) => {
+      resolveHeaders = resolve;
+    });
+    const fetchImpl = vi.fn<typeof fetch>(() => headers);
+
+    try {
+      captureTelemetry(
+        createTelemetrySession(true),
+        { event: "session_started" },
+        { fetchImpl },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Fetch has resolved its headers, but cancelling the unused body remains
+      // pending. The timeout must stay armed through that cleanup.
+      resolveHeaders(response);
+      await Promise.resolve();
+      expect(bodyCancel).toHaveBeenCalledOnce();
+      expect(clearTimeoutSpy).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      resolveBodyCleanup();
+      await vi.waitFor(() => expect(clearTimeoutSpy).toHaveBeenCalledOnce());
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resolveBodyCleanup();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     // The product switch points at telemetry, so every common spelling of
     // "false" turns it off.
