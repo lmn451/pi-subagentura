@@ -169,6 +169,18 @@ jobs:
         env:
           TERM: xterm-256color
 
+      # Herdr has no headless install for Linux runners and its backend only
+      # operates from inside a Herdr-managed pane, so this suite self-skips
+      # here today. It is wired up anyway: the step is what makes the
+      # real-binary assertions behind `MUX_CAPABILITIES.herdr` run the moment a
+      # runner can host Herdr, and it keeps the file from silently rotting.
+      # Developers on a Herdr machine get the real coverage via `npm run
+      # test:herdr`.
+      - name: Run herdr integration tests
+        run: npm run test:herdr
+        env:
+          TERM: xterm-256color
+
       # The terminal E2E suite stays on the pinned SDK leg. It asserts on Pi's
       # TUI paint, so a cosmetic floating-SDK change must not turn master red.
       # Unit and integration coverage remains strict on both SDK legs.

@@ -246,6 +246,7 @@ function inProcessSupervisorDepth(
 function muxNameForManifest(manifest: LineageManifest): MuxName | undefined {
   if (manifest.pane.backend === "tmux") return "tmux";
   if (manifest.pane.backend === "zellij") return "zellij";
+  if (manifest.pane.backend === "herdr") return "herdr";
   return undefined;
 }
 
@@ -263,25 +264,30 @@ function stateForNode(
   // tmux's buildAttachCommands resolves the pane's window via execMuxOrThrow,
   // which THROWS for a dead pane. It runs for every projected node, so one
   // finished tmux agent used to make the whole projection reject and the overlay
-  // silently degrade to registry-only. Fall back to a session-less string.
-  let attach = { attachCommand: "unavailable", focusCommand: "unavailable" };
-  try {
-    attach = getMux({ preference: mux }).buildAttachCommands({
-      paneId: manifest.pane.paneId,
-      windowName: manifest.pane.windowName,
-      session: manifest.pane.muxSession,
-    });
-  } catch {
-    const target = manifest.pane.windowName ?? manifest.pane.paneId;
-    const detail =
-      paneLiveness === "dead"
-        ? `pane ${target} is gone`
-        : `pane ${target} could not be resolved`;
-    attach = {
-      attachCommand: `unavailable (${detail})`,
-      focusCommand: `unavailable (${detail})`,
-    };
-  }
+  // silently degrade to registry-only. Fall back to a placeholder instead.
+  //
+  // The placeholder is rendered where the UI promises a copy-pasteable command
+  // ("Attach: <cmd>"), so it is fully parenthesized — the same convention as
+  // `ATTACH_UNAVAILABLE` in `rehydrate.ts`. The old `unavailable (<detail>)`
+  // shape led with a bare word that read as the command itself.
+  const attach = (() => {
+    try {
+      return getMux({ preference: mux }).buildAttachCommands({
+        terminalId: manifest.pane.muxTerminalId,
+        paneId: manifest.pane.paneId,
+        windowName: manifest.pane.windowName,
+        session: manifest.pane.muxSession,
+      });
+    } catch {
+      const target = manifest.pane.windowName ?? manifest.pane.paneId;
+      const detail =
+        paneLiveness === "dead"
+          ? `pane ${target} is gone`
+          : `pane ${target} could not be resolved`;
+      const placeholder = `(attach command unavailable - ${detail})`;
+      return { attachCommand: placeholder, focusCommand: placeholder };
+    }
+  })();
   // Liveness comes from the pane probe, not from `node.state`. Deriving it from
   // the same field the actionable gate then tests made that gate a tautology
   // for lineage-only nodes, and mislabelled a live pane hidden for a cycle.
@@ -290,6 +296,9 @@ function stateForNode(
     name: manifest.name,
     task: manifest.taskPreview,
     paneId: manifest.pane.paneId,
+    ...(manifest.pane.muxTerminalId
+      ? { muxTerminalId: manifest.pane.muxTerminalId }
+      : {}),
     windowName: manifest.pane.windowName,
     mux,
     muxSession: manifest.pane.muxSession,
@@ -339,7 +348,8 @@ async function loadSupervisorProjection(
     if (cached !== undefined) return cached === "dead";
     if (
       manifest.pane.backend !== "tmux" &&
-      manifest.pane.backend !== "zellij"
+      manifest.pane.backend !== "zellij" &&
+      manifest.pane.backend !== "herdr"
     ) {
       paneLivenessById.set(manifest.agentId, "unknown");
       return false;

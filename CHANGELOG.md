@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Interactive sub-agents and process-backed workflow agents now support Herdr
+  alongside tmux and Zellij, including pane creation, messaging, focus,
+  bounded capture, alias-aware liveness and cancellation, stable direct attach,
+  and reload-safe socket targeting. Herdr activity remains unknown when no
+  attached-client proof is available.
+
 ### Changed
 
 - Workflow children now bind their real orchestration depth (1) instead of 0, so an in-process spawn chain started under a workflow agent has one fewer nesting level available before `SUBAGENTURA_MAX_ORCHESTRATION_DEPTH` refuses it. Previously a workflow grandchild reported the same depth as its parent and never counted against the cap. Direct workflow children are unaffected.
