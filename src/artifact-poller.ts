@@ -767,7 +767,12 @@ async function runPollArtifactChanges(
     if (ui) {
       const ownerContext = resolveLiveSessionScope(owner);
       const hideAgentList =
-        ownerContext !== undefined && isAgentListHidden(ownerContext.pi);
+        widgetRows.length > 0 &&
+        ownerContext !== undefined &&
+        // Pass the session cwd, if any, and let the setting own its scope:
+        // hide-agent-list is read globally, so a missing cwd never degrades
+        // into a lookup against Node's process cwd.
+        isAgentListHidden(ownerContext.pi, { cwd: ownerContext.cwd });
       updateRunningSubagentFooter(ui, owner);
       updateWidgetRows(ui, WIDGET_KEY, hideAgentList ? [] : widgetRows, owner);
       // Workflow TUI footer + widget: show running async workflows.
