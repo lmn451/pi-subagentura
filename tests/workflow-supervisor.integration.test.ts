@@ -66,6 +66,8 @@ import {
   type WorkflowJobState,
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
+import { createTelemetrySession } from "../src/telemetry";
+import { registerCompletionCoordinator } from "../src/completion-coordinator";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
 const RUNNING_FOOTER_KEY = "subagentura-running";
@@ -125,6 +127,7 @@ function liveSessionContext(options: {
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
+    telemetry: createTelemetrySession(true),
   };
   registerSessionScope(context);
   setLegacyActiveSessionRefs(context);
@@ -270,6 +273,65 @@ afterEach(() => {
 });
 
 describe("workflow supervisor integration", () => {
+  it.each([
+    [{ async: true }, "each"],
+    [
+      {
+        async: true,
+        completionPolicy: "group",
+        completionGroupId: "analytics-group",
+      },
+      "group",
+    ],
+  ] as const)(
+    "threads the resolved background policy to process children (%s)",
+    async (params, expectedPolicy) => {
+      const { context } = liveSessionContext({
+        id: expectedPolicy === "each" ? 41 : 42,
+        sessionId: `session-${expectedPolicy}`,
+      });
+      const { pi, findTool } = makePi();
+      context.pi = pi as never;
+      registerCompletionCoordinator(pi as never, context);
+      registerWorkflowTool(pi as never, context);
+
+      await findTool().execute(
+        `call-${expectedPolicy}`,
+        { script: SINGLE_AGENT_SCRIPT(`policy-${expectedPolicy}`), ...params },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+
+      expect(mockLaunch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          telemetryCompletionPolicy: expectedPolicy,
+        }),
+      );
+      releaseAgent(subagentResult("done"));
+    },
+  );
+
+  it("threads legacy policy to an ownerless background process child", async () => {
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never);
+
+    await findTool().execute(
+      "call-legacy",
+      { script: SINGLE_AGENT_SCRIPT("policy-legacy"), async: true },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+
+    expect(mockLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryCompletionPolicy: "legacy" }),
+    );
+    releaseAgent(subagentResult("done"));
+  });
+
   it("shows a live process child under its tracked sync workflow", async () => {
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const owner = ownerOf(context);
@@ -296,6 +358,7 @@ describe("workflow supervisor integration", () => {
         completionOwner: "workflow",
         supervisorOwner: owner,
         workflowId: workflow?.id,
+        telemetryCompletionPolicy: "inline",
       }),
     );
     // Workflow children are never persisted, so they carry no parentSessionId —
@@ -408,10 +471,29 @@ describe("workflow supervisor integration", () => {
       { script: SINGLE_AGENT_SCRIPT("fallback"), async: false },
       undefined,
       vi.fn(),
-      { cwd: "/tmp", modelRegistry: {} },
+      {
+        cwd: "/tmp",
+        modelRegistry: {},
+        sessionManager: { getSessionId: () => "session-a" },
+      },
     );
 
     await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: expect.objectContaining({
+          completionPolicy: "inline",
+          depth: 1,
+        }),
+        // The runtime depth must match the reported one. Left unset, the child
+        // bound depth 0, so its own nested spawns reported depth 1 — the same
+        // as their parent — and never counted against the depth cap.
+        depth: 1,
+        // No ambient orchestration context here, so the child's logs are
+        // attributed through the parent's own session id.
+        rootSessionId: "session-a",
+      }),
+    );
     const childJob = jobRegistry.get("fallback-child");
     expect(childJob).toBeDefined();
     expect(childJob?.status).toBe("running");
@@ -535,6 +617,46 @@ describe("workflow supervisor integration", () => {
     expect(result.details.status).toBe("done");
     expect(result.content[0]?.text).toContain("unowned complete");
     expect(jobRegistry.size).toBe(0);
+  });
+
+  it("leaves a workflow child unattributed when the caller has no session id", async () => {
+    const { context } = liveSessionContext({ id: 11, sessionId: "session-a" });
+    const start = vi.fn();
+    let releaseChild!: (result: SubagentResult) => void;
+    mockLaunch.mockImplementationOnce(() => {
+      throw new Error("mux unavailable");
+    });
+    mockStartSubagentJob.mockResolvedValueOnce({
+      jobId: "unattributed-child",
+      jobPromise: new Promise<SubagentResult>((resolve) => {
+        releaseChild = resolve;
+      }),
+      liveStatus: { turn: 0, output: "", usage: {} },
+      session: { abort: vi.fn() },
+      modelLabel: "test/model",
+      thinkingLevel: "medium",
+      start,
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const execution = findTool().execute(
+      "call-unattributed",
+      { script: SINGLE_AGENT_SCRIPT("unattributed"), async: false },
+      undefined,
+      vi.fn(),
+      // No ambient orchestration context and no session manager to fall back
+      // on: the child runs, it just carries no root attribution.
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({ depth: 1, rootSessionId: undefined }),
+    );
+
+    releaseChild(subagentResult("unattributed complete"));
+    await execution;
   });
 
   it("retains a completed interactive child when the workflow later fails", async () => {

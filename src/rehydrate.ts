@@ -245,6 +245,18 @@ export function rehydrateInteractiveSubagents(
       }
     })();
 
+    const telemetryEligible =
+      entry.telemetry !== undefined &&
+      payload.telemetry?.correlationId === entry.telemetry.correlationId &&
+      scope?.telemetry?.correlationId === entry.telemetry.correlationId;
+    const telemetryActiveTurnId =
+      telemetryEligible && entry.telemetry?.turnStartedAt !== undefined
+        ? entry.telemetry.activeTurnId
+        : undefined;
+    const telemetryMessageTurnId =
+      telemetryActiveTurnId === undefined
+        ? undefined
+        : (entry.telemetry?.messageTurnId ?? telemetryActiveTurnId);
     const rehydrated: InteractiveSubagentState = {
       id: entry.id,
       name: recoveredName,
@@ -275,6 +287,22 @@ export function rehydrateInteractiveSubagents(
       pendingDeliveries: [...entry.pendingDeliveries],
       deliveryReceipts: [...entry.deliveryReceipts],
       lifecycle: entry.lifecycle ? { ...entry.lifecycle } : {},
+      telemetryCorrelationId: entry.telemetry?.correlationId,
+      telemetryEligible,
+      telemetryActiveTurnId,
+      telemetryTurnStartedAt: telemetryActiveTurnId
+        ? entry.telemetry?.turnStartedAt
+        : undefined,
+      telemetryTurnMessageCounts: telemetryEligible
+        ? new Map(Object.entries(entry.telemetry?.messageCounts ?? {}))
+        : undefined,
+      telemetryMessageTurnId,
+      telemetryInvocationSource: entry.telemetry?.invocationSource,
+      telemetryCompletionPolicy: entry.telemetry?.completionPolicy,
+      telemetryAsync: entry.telemetry?.async,
+      telemetryDepth: entry.telemetry?.depth,
+      telemetryDepthBucket: entry.telemetry?.depthBucket,
+      telemetryModel: entry.telemetry?.model,
       // Legacy timestamp fields remain for API compatibility only.
       lastDeliveredEventTs: undefined,
       lastInjectedEventTs: undefined,

@@ -79,6 +79,7 @@ import {
   type SessionScope,
   type SessionToolToken,
 } from "../session-scope";
+import { captureTelemetry } from "../telemetry";
 
 function isValidSubagentId(id: string): boolean {
   return isValidOrchestratorChildId(id);
@@ -328,6 +329,7 @@ function getArtifactForState(
 interface SelectedCompletion {
   turnId: string;
   protocolV2: boolean;
+  outcome: "done" | "error" | "cancelled";
 }
 
 function completionForRead(
@@ -359,8 +361,21 @@ function completionForRead(
       : completions.at(-1);
   if (!selected) return undefined;
   return selected.event.type === "completion"
-    ? { turnId: selected.event.turnId, protocolV2: true }
-    : { turnId: `legacy-${selected.startOffset}`, protocolV2: false };
+    ? {
+        turnId: selected.event.turnId,
+        protocolV2: true,
+        outcome: selected.event.outcome,
+      }
+    : {
+        turnId: `legacy-${selected.startOffset}`,
+        protocolV2: false,
+        outcome:
+          selected.event.type === "error"
+            ? "error"
+            : selected.event.type === "cancelled"
+              ? "cancelled"
+              : "done",
+      };
 }
 
 function resolveInteractiveToolStates(token: SessionToolToken | undefined):
@@ -656,6 +671,8 @@ export function registerInteractiveSubagentTools(
           sessionScope: registration.scope,
           spawnTreeContext: registration.scope?.spawnTreeContext,
           requireActivePaneForUserAttention: topLevelOrchestratorV2,
+          telemetryInvocationSource: "interactive",
+          telemetryAsync: true,
         });
         if (registration.scope && completion.policy) {
           try {
@@ -1075,6 +1092,18 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
+      captureTelemetry(
+        registration?.scope?.telemetry,
+        {
+          event: "interactive_message_sent",
+          direction: "parent_to_child",
+          count: 1,
+        },
+        // Without a usable tool-call id every send collapses onto one constant
+        // key and only the first is ever recorded. Retry protection is worth
+        // having when the id exists and is worth losing when it does not.
+        _toolCallId ? { dedupeKey: `interactive-message:${_toolCallId}` } : {},
+      );
       // Reaching the send proves both workflow release conditions held at the guard above.
       if (
         state.completionOwner === "workflow" &&
@@ -1087,6 +1116,10 @@ export function registerInteractiveSubagentTools(
       let persistenceWarning: string | undefined;
       if (startsNewTurn) {
         state.completionPolicy = "each";
+        // `state.telemetryCompletionPolicy` is deliberately left alone. It is an
+        // agent-creation dimension already reported by `agent_created`, and
+        // re-stamping it here would make one agent id report two values across
+        // its own lifecycle events.
         state.completionGroupId = undefined;
         state.notifyOnComplete = undefined;
         state.triggerTurnOnComplete = undefined;
@@ -1288,7 +1321,7 @@ export function registerInteractiveSubagentTools(
               .join(", ")}\n`
           : "";
       if (wantsOutput && output !== null && selectedCompletion) {
-        consumeCompletionSource(
+        const firstConsumption = consumeCompletionSource(
           pi,
           {
             source: "interactive",
@@ -1297,6 +1330,16 @@ export function registerInteractiveSubagentTools(
           },
           registration?.scope ? sessionOwner(registration.scope) : undefined,
         );
+        if (
+          firstConsumption &&
+          output.length > 0 &&
+          selectedCompletion.outcome === "done"
+        ) {
+          captureTelemetry(registration?.scope?.telemetry, {
+            event: "result_consumed",
+            source: "interactive",
+          });
+        }
       }
       return {
         content: [

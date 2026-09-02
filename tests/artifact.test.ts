@@ -22,6 +22,7 @@ import {
   deleteInteractiveStatesFile,
   ensureArtifactDir,
   eventLogEndOffset,
+  hasPersistedTelemetryField,
   isArtifactOutputSettled,
   isCompletionEvent,
   isTurnTerminal,
@@ -34,6 +35,7 @@ import {
   MAX_EVENT_BATCH_BYTES,
   MAX_OUTPUT_SNAPSHOT_BYTES,
   MAX_TOOL_NAME_LENGTH,
+  MAX_TURN_ID_LENGTH,
   outputPathForTurn,
   readEvents,
   readEventBatch,
@@ -47,6 +49,7 @@ import {
   writeOutput,
   withInteractiveStateLock,
   updateInteractiveStates,
+  updatePersistedTelemetrySession,
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
 } from "../src/artifact";
@@ -985,6 +988,198 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)).toBeNull();
   });
 
+  it("migrates safe telemetry dimensions and message-turn IDs", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const telemetry = {
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      invocationSource: "interactive",
+      mux: "tmux",
+      async: true,
+      depth: 1,
+      depthBucket: "1",
+      completionPolicy: "each",
+      model: "default",
+      activeTurnId: "2",
+      turnStartedAt: 1_000,
+      messageTurnId: "2",
+      messageCounts: { "10": 1, "2": 2 },
+    };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { abc12345: { ...SAMPLE, telemetry } },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).toMatchObject({
+      mux: "tmux",
+      messageTurnId: "2",
+      messageCounts: { "10": 1, "2": 2 },
+    });
+
+    const { mux: legacyMux, ...legacyTelemetry } = telemetry;
+    void legacyMux;
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { abc12345: { ...SAMPLE, telemetry: legacyTelemetry } },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).toMatchObject({
+      mux: "tmux",
+    });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          abc12345: {
+            ...SAMPLE,
+            telemetry: { ...telemetry, messageTurnId: "unsafe/turn" },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.telemetry,
+    ).not.toHaveProperty("messageTurnId");
+  });
+
+  describe("entry telemetry migration against a tampered state file", () => {
+    const VALID = {
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      invocationSource: "interactive",
+      mux: "tmux",
+      async: true,
+      depth: 2,
+      depthBucket: "2",
+      completionPolicy: "each",
+      model: "default",
+    };
+
+    function migrate(telemetry: unknown) {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        file,
+        JSON.stringify({
+          schemaVersion: 2,
+          parent: "pi",
+          states: { abc12345: { ...SAMPLE, telemetry } },
+        }),
+        { mode: 0o600 },
+      );
+      return loadInteractiveStates(root)?.states.abc12345.telemetry;
+    }
+
+    it.each([
+      ["a non-UUID correlation id", { correlationId: "not-a-uuid" }],
+      [
+        "a v1 UUID correlation id",
+        { correlationId: "11111111-1111-1111-8111-111111111111" },
+      ],
+      ["a missing correlation id", { correlationId: undefined }],
+      ["an unknown invocation source", { invocationSource: "sneaky" }],
+      ["a non-boolean async flag", { async: "yes" }],
+      ["an unknown depth bucket", { depthBucket: "0" }],
+      ["an unknown completion policy", { completionPolicy: "immediate" }],
+      ["a non-string model", { model: 7 }],
+      ["an over-long model", { model: "m".repeat(129) }],
+    ])("drops the whole record for %s", (_label, override) => {
+      expect(migrate({ ...VALID, ...override })).toBeUndefined();
+    });
+
+    it.each([
+      ["an array", []],
+      ["a string", "telemetry"],
+      ["a number", 3],
+      ["null", null],
+    ])("drops telemetry stored as %s", (_label, telemetry) => {
+      expect(migrate(telemetry)).toBeUndefined();
+    });
+
+    it("lowercases an upper-case correlation id it accepts", () => {
+      expect(
+        migrate({
+          ...VALID,
+          correlationId: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+        }),
+      ).toMatchObject({
+        correlationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      });
+    });
+
+    it.each([0, -1, 65, 1.5, Number.NaN, "2"])(
+      "keeps the record but omits an out-of-range depth of %s",
+      (depth) => {
+        const migrated = migrate({ ...VALID, depth });
+        expect(migrated).toBeDefined();
+        expect(migrated).not.toHaveProperty("depth");
+        expect(migrated?.depthBucket).toBe("2");
+      },
+    );
+
+    it.each([
+      ["a known mux", "zellij", "zellij"],
+      ["the reserved herdr mux", "herdr", "herdr"],
+      ["an unknown mux", "screen", "tmux"],
+      ["a missing mux", undefined, "tmux"],
+    ])("resolves %s to %s", (_label, mux, expected) => {
+      expect(migrate({ ...VALID, mux })?.mux).toBe(expected);
+    });
+
+    it("truncates and clamps a hostile messageCounts map", () => {
+      const messageCounts: Record<string, unknown> = {};
+      for (let index = 0; index < 40; index++) {
+        messageCounts[`t-${index}`] = 5_000;
+      }
+      messageCounts["unsafe/turn"] = 1;
+      messageCounts["negative"] = -1;
+      messageCounts["fractional"] = 1.5;
+
+      const migrated = migrate({ ...VALID, messageCounts });
+      const counts = migrated?.messageCounts ?? {};
+
+      expect(Object.keys(counts)).toHaveLength(32);
+      expect(counts).not.toHaveProperty("unsafe/turn");
+      expect(counts).not.toHaveProperty("negative");
+      expect(counts).not.toHaveProperty("fractional");
+      expect(counts["t-0"]).toBeUndefined();
+      expect(counts["t-39"]).toBe(1_000);
+    });
+
+    it.each(["", "unsafe/turn", "x".repeat(MAX_TURN_ID_LENGTH + 1)])(
+      "omits an unsafe active turn id of %s",
+      (activeTurnId) => {
+        const migrated = migrate({ ...VALID, activeTurnId });
+        expect(migrated).toBeDefined();
+        expect(migrated).not.toHaveProperty("activeTurnId");
+      },
+    );
+
+    it.each([-1, "1000", Number.NaN])(
+      "omits an implausible turnStartedAt of %s",
+      (turnStartedAt) => {
+        const migrated = migrate({ ...VALID, turnStartedAt });
+        expect(migrated).toBeDefined();
+        expect(migrated).not.toHaveProperty("turnStartedAt");
+      },
+    );
+  });
+
   it("loadInteractiveStates migrates a file with no schemaVersion field", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
@@ -1018,6 +1213,85 @@ describe("persisted interactive state helpers", () => {
       schemaVersion: 2,
       parent: "pi",
       states: { abc12345: SAMPLE },
+    });
+  });
+
+  describe("hasPersistedTelemetryField", () => {
+    function writeRaw(body: string): void {
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(stateFilePath(root), body, { mode: 0o600 });
+    }
+
+    it("reports nothing to clear when no state file exists", () => {
+      expect(hasPersistedTelemetryField(root)).toBe(false);
+      // The probe must stay read-only, or the opt-out it guards is not inert.
+      expect(existsSync(join(root, ".pi"))).toBe(false);
+    });
+
+    it.each([
+      ["corrupt JSON", "{not json"],
+      ["an empty file", ""],
+      ["a JSON array", "[]"],
+      ["a JSON scalar", '"telemetry"'],
+      ["JSON null", "null"],
+      ["a file with no telemetry key", '{"schemaVersion":2,"states":{}}'],
+    ])("reports nothing to clear for %s", (_label, body) => {
+      writeRaw(body);
+      expect(hasPersistedTelemetryField(root)).toBe(false);
+    });
+
+    it.each([
+      ["null", '{"schemaVersion":2,"states":{},"telemetry":null}'],
+      [
+        "a garbage string",
+        '{"schemaVersion":2,"states":{},"telemetry":"junk"}',
+      ],
+      ["an array", '{"schemaVersion":2,"states":{},"telemetry":[1,2]}'],
+      [
+        "an object the migration rejects",
+        '{"schemaVersion":2,"states":{},"telemetry":{"correlationId":"nope"}}',
+      ],
+      [
+        "a valid record",
+        '{"schemaVersion":2,"states":{},"telemetry":{"correlationId":"11111111-1111-4111-8111-111111111111","mode":"straight"}}',
+      ],
+    ])("reports a field to clear when telemetry is %s", (_label, body) => {
+      writeRaw(body);
+      // A value the migration drops still has to be erased from disk, so the
+      // probe looks at the raw key rather than the migrated result.
+      expect(hasPersistedTelemetryField(root)).toBe(true);
+    });
+
+    it("goes quiet after exactly one clearing write", () => {
+      writeRaw('{"schemaVersion":2,"states":{},"telemetry":"junk"}');
+      expect(hasPersistedTelemetryField(root)).toBe(true);
+
+      updatePersistedTelemetrySession(root, "session-a", undefined);
+
+      expect(hasPersistedTelemetryField(root)).toBe(false);
+    });
+  });
+
+  it("normalizes the pre-v2 telemetry mode name during recovery", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        telemetry: {
+          correlationId: "11111111-1111-4111-8111-111111111111",
+          mode: "manual",
+        },
+        states: {},
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(loadInteractiveStates(root)?.telemetry).toEqual({
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      mode: "straight",
     });
   });
 

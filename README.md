@@ -317,6 +317,8 @@ configurations:
 
 - `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`. Unlike the persisted setting, an invalid value here fails fast.
 - `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global setting. It also works without the optional settings panel. The flag is on-only: it cannot override a persisted `hide-agent-list` of `true`, so to show the rows again clear the global setting.
+- `--subagentura-telemetry` — anonymous product analytics, enabled by default. Extension booleans are presence-only; `--subagentura-telemetry=false` is not an opt-out.
+- `--no-subagentura-telemetry` — presence-only opt-out for anonymous product analytics. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
 
 #### See the thin-router flow
 
@@ -885,6 +887,114 @@ Parameters:
 - “Start an interactive sub-agent in tmux for investigating the auth bug; give me the attach command.”
 - “Open an interactive sub-agent in a visible zellij pane so I can watch its tool calls live.”
 - “Attach to the existing interactive sub-agent and send it a follow-up without losing context.”
+
+## Anonymous product telemetry
+
+Anonymous product telemetry is enabled by default. The extension sends
+best-effort lifecycle events directly to PostHog's public capture endpoint so
+the maintainers can understand which execution modes are useful and where
+sub-agent completion or collection breaks down.
+
+Each logical root Pi session/tree receives one random UUID. It is not derived
+from Pi's session id and is never a stable installation, machine, user,
+repository, or project identity. The UUID and closed mode are stored only in the
+existing active-session `.pi/subagentura-state.json` file so live starts and
+later completions remain correlated across reload, resume, and matching startup
+recovery after quit. Fresh `new` and `fork` sessions replace or clear it.
+Bounded active-turn progress (closed dimensions, turn timestamps, and message
+counts) may be stored there for the same recovery purpose; prompt and output
+content is never included. Recursive interactive children receive correlation
+only through the existing mode-0600, one-use lineage bootstrap—not through
+ambient identity environment variables—and never read or write the root state
+file's telemetry metadata. A child without that explicit context starts an
+unrelated anonymous correlation rather than reconstructing identity.
+
+The payload schema is versioned and contains these events:
+
+| Event                      | Properties                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                             |
+| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, or `zellij`; `herdr` is reserved and starts being recorded when herdr support lands), closed invocation source, public/sanitized model, async, exact bounded depth plus bucket, and completion policy |
+| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `job` or `turn`                                                                                                                                                                       |
+| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                       |
+| `task_completed`           | repeated closed execution and mux dimensions; `success`, `error`, or `cancelled`; rounded numeric duration plus bucket, both reported as unknown when the measured span is implausible; bounded child-conversation message count when observable                                                                   |
+| `completion_delivered`     | manifest or compatibility notification kind and bounded record count                                                                                                                                                                                                                                               |
+| `result_consumed`          | `in-process`, `interactive`, or `workflow` result kind                                                                                                                                                                                                                                                             |
+
+All events include the closed root mode and set `$process_person_profile: false`,
+`$geoip_disable: true`, and `$ip: "0.0.0.0"`. Terminal task events repeat the closed
+invocation source and completion policy so completion rates need no identifier
+join.
+They contain only closed enums, booleans, bounded counts, the package version,
+and the random runtime correlation UUID. The extension does **not** send tasks,
+personas, prompts, message content, outputs, error text, names, group ids, paths,
+repositories, artifact/agent/Pi session ids, token usage, cost, or a persistent
+installation id. PostHog can still observe the connection's source IP while
+handling the HTTP request. The project-level **Discard client IP data** setting
+should also be enabled; direct ingestion cannot prevent PostHog's network edge
+from receiving the connection itself.
+
+In PostHog, group or filter events by `telemetry_session_id` to inspect one
+anonymous session. The intended aggregates are:
+
+- agents created: count `agent_created`
+- delegated tasks: count `task_started`
+- maximum depth: maximum numeric `depth`
+- outcomes: count `task_completed`, broken down by `status`
+- execution/mux mix: count lifecycle events by the closed execution and mux dimensions
+- task time: average, percentile, or sum of `task_completed.duration_ms`
+- child conversation traffic: sum
+  `task_completed.child_conversation_message_count`
+- explicit interactive follow-ups: sum `interactive_message_sent.count`
+- delivery/collection reliability: compare completed tasks with
+  `completion_delivered` and `result_consumed`
+
+The observed session span is the time from `session_started` to its last event.
+There is deliberately no shutdown-only summary: crashes can skip shutdown, and
+reload/resume lifecycle transitions can occur inside one logical session.
+
+Capture is fire-and-forget with a 1.5-second timeout. Event payloads are not
+queued, persisted, or retried; only the random active-session correlation and
+bounded recovery metadata described above are stored locally. Telemetry failures
+never affect extension behavior.
+Disable it with any of:
+
+```bash
+pi --no-subagentura-telemetry
+PI_SUBAGENTURA_TELEMETRY=0 pi
+DO_NOT_TRACK=1 pi
+PI_OFFLINE=1 pi
+```
+
+Telemetry is also disabled automatically under `PI_OFFLINE`, `CI`, `VITEST`,
+or `NODE_ENV=test`. The opt-out is inherited by recursive interactive children.
+
+For every switch below except `NODE_ENV`, surrounding whitespace and letter case
+never change how the value is read, and an unset or empty variable is never a
+decision. `NODE_ENV` is the exception: it is compared literally, so only the
+exact lower-case `test` counts. Which values mean "false" depends on which way
+the switch points:
+
+| Variable                   | Disables telemetry when                                     | Does **not** disable telemetry when        |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------ |
+| `PI_SUBAGENTURA_TELEMETRY` | set to `0`, `false`, `off`, or `no`                         | set to anything else, or unset             |
+| `DO_NOT_TRACK`             | set to anything except `0` or `false` (`1`, `off`, `no`, …) | unset, empty, `0`, or `false`              |
+| `PI_OFFLINE`               | set to anything except `0` or `false` (`1`, `off`, `no`, …) | unset, empty, `0`, or `false`              |
+| `CI`, `VITEST`             | set to anything except `0`, `false`, `off`, or `no`         | unset, empty, `0`, `false`, `off`, or `no` |
+| `NODE_ENV`                 | exactly `test` (compared literally)                         | any other value                            |
+
+The asymmetry is deliberate. `DO_NOT_TRACK` and `PI_OFFLINE` are opt-out
+requests, so setting them to a value this code does not recognize keeps
+telemetry off — `DO_NOT_TRACK=off` and `DO_NOT_TRACK=no` still opt out, and only
+the unambiguous `DO_NOT_TRACK=false` or `DO_NOT_TRACK=0` cancels the request.
+`CI` and `VITEST` merely describe an environment, so `CI=off` reads as "not CI"
+and leaves telemetry enabled. To turn telemetry off without ambiguity, use
+`pi --no-subagentura-telemetry` or `PI_SUBAGENTURA_TELEMETRY=0`.
+
+With telemetry disabled the extension performs no telemetry-related writes: it
+does not create `.pi/`, take the state lock, or touch
+`.pi/subagentura-state.json` — except once, to clear a correlation an earlier
+opted-in run left behind.
 
 ## Development
 

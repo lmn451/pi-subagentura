@@ -123,6 +123,7 @@ import {
   setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
+import { createTelemetrySession } from "../src/telemetry";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -274,6 +275,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   jobRegistry.clear();
   clearSessionScopes();
 });
@@ -614,6 +616,116 @@ describe("subagent_isolated tool", () => {
   });
 });
 
+// ── synchronous result consumption ───────────────────────────────────
+
+/**
+ * A synchronous spawn hands its output straight back to the caller, so there is
+ * no later `get_subagent_result` for `result_consumed` to be emitted from. Both
+ * sync tools take their own return path, so both are exercised here.
+ */
+describe("synchronous in-process result consumption", () => {
+  const SYNC_TOOLS = [
+    ["subagent_isolated", () => mockCtx()],
+    [
+      "subagent_with_context",
+      // with_context bails out early unless the branch has a message to inherit.
+      () =>
+        mockCtx({
+          sessionManager: {
+            getBranch: vi
+              .fn()
+              .mockReturnValue([
+                { type: "message", message: { role: "user", content: "hi" } },
+              ]),
+            getSessionId: vi.fn().mockReturnValue("test-session"),
+          },
+        }),
+    ],
+  ] as const;
+
+  interface TelemetryPost {
+    event?: string;
+    properties?: Record<string, unknown>;
+  }
+
+  function captureTelemetryPosts(): TelemetryPost[] {
+    const payloads: TelemetryPost[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    return payloads;
+  }
+
+  function consumedEvents(payloads: readonly TelemetryPost[]) {
+    return payloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_consumed",
+    );
+  }
+
+  it.each(SYNC_TOOLS)("records consumption for %s", async (name, makeCtx) => {
+    const payloads = captureTelemetryPosts();
+    const scoped = setupScopedExtension(714);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, name);
+
+    const result = await scopedTool.execute(
+      "sync-consumed",
+      { task: "analyze code", async: false },
+      undefined,
+      undefined,
+      makeCtx(),
+    );
+
+    expect(result.details.status).toBe("done");
+    await vi.waitFor(() => expect(consumedEvents(payloads)).toHaveLength(1));
+    expect(consumedEvents(payloads)[0]?.properties?.source).toBe("in-process");
+  });
+
+  it.each(
+    SYNC_TOOLS.flatMap(([name, makeCtx]) =>
+      (
+        [
+          [
+            "a failed run",
+            { ...defaultSuccessResult, isError: true, errorMessage: "boom" },
+          ],
+          [
+            "a cancelled run",
+            { ...defaultSuccessResult, cancelled: true, output: "cancelled" },
+          ],
+          ["an empty run", { ...defaultSuccessResult, output: "(no output)" }],
+        ] as const
+      ).map(([label, jobResult]) => [name, label, jobResult, makeCtx] as const),
+    ),
+  )(
+    "records no consumption for %s on %s",
+    async (name, _label, jobResult, makeCtx) => {
+      const payloads = captureTelemetryPosts();
+      mockStartSubagentJob.mockResolvedValue({
+        ...defaultStartSubagentJobResult,
+        jobPromise: Promise.resolve(jobResult),
+      });
+      const scoped = setupScopedExtension(715);
+      scoped.scope.telemetry = createTelemetrySession(true);
+      const scopedTool = getToolDef(scoped.api, name);
+
+      await scopedTool.execute(
+        "sync-not-consumed",
+        { task: "analyze code", async: false },
+        undefined,
+        undefined,
+        makeCtx(),
+      );
+
+      expect(consumedEvents(payloads)).toHaveLength(0);
+    },
+  );
+});
+
 // ── get_subagent_status ──────────────────────────────────────────────
 
 describe("get_subagent_status tool", () => {
@@ -952,6 +1064,87 @@ describe("get_subagent_result tool", () => {
     expect(result.isError).toBeFalsy();
     // resultRetrieved should have been set
     expect(job.resultRetrieved).toBe(true);
+  });
+
+  it("records only the first successful output-bearing result read", async () => {
+    const telemetryPayloads: Array<{ event?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        telemetryPayloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const scoped = setupScopedExtension(713);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, "get_subagent_result");
+    const owner = sessionOwner(scoped.scope);
+    const failedResult: SubagentResult = {
+      output: "failure details",
+      isError: true,
+      errorMessage: "failed",
+      usage: defaultSuccessResult.usage,
+      model: undefined,
+    };
+    const failed = createJobState({
+      id: "failed-read",
+      status: "done",
+      result: failedResult,
+      promise: Promise.resolve(failedResult),
+    });
+    registerInProcessJob(failed, owner);
+
+    await scopedTool.execute(
+      "failed",
+      { jobId: failed.id },
+      undefined,
+      undefined,
+    );
+
+    const cancelledResult: SubagentResult = {
+      ...defaultSuccessResult,
+      output: "Sub-agent cancelled before completion",
+      cancelled: true,
+    };
+    const cancelled = createJobState({
+      id: "cancelled-read",
+      status: "cancelled",
+      result: cancelledResult,
+      promise: Promise.resolve(cancelledResult),
+    });
+    registerInProcessJob(cancelled, owner);
+    await scopedTool.execute(
+      "cancelled",
+      { jobId: cancelled.id },
+      undefined,
+      undefined,
+    );
+
+    const successful = createJobState({
+      id: "successful-read",
+      status: "done",
+      result: defaultSuccessResult,
+      promise: Promise.resolve(defaultSuccessResult),
+    });
+    registerInProcessJob(successful, owner);
+    await scopedTool.execute(
+      "success-1",
+      { jobId: successful.id },
+      undefined,
+      undefined,
+    );
+    await scopedTool.execute(
+      "success-2",
+      { jobId: successful.id },
+      undefined,
+      undefined,
+    );
+
+    expect(
+      telemetryPayloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_consumed",
+      ),
+    ).toHaveLength(1);
   });
   it("keeps a grouped result through TTL, prune, and cap pressure until collection", async () => {
     vi.useFakeTimers();

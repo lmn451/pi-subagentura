@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,9 +28,19 @@ import {
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 import { workflowJobRegistry } from "../src/workflow-jobs";
-import { appendEvent, artifactPath } from "../src/artifact";
+import {
+  appendInteractiveState,
+  appendEvent,
+  artifactPath,
+  eventLogEndOffset,
+  loadInteractiveStates,
+  updatePersistedTelemetrySession,
+} from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
-import { updateRunningSubagentFooter } from "../src/artifact-poller";
+import {
+  pollArtifactChanges,
+  updateRunningSubagentFooter,
+} from "../src/artifact-poller";
 import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
@@ -39,6 +49,7 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { publishCompletion } from "../src/completion-coordinator";
+import { createTelemetrySession } from "../src/telemetry";
 
 interface HandlerRegistration {
   handlers: Map<string, Function[]>;
@@ -50,6 +61,11 @@ function registerHandlers(
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
   orchestratorFlag: "orchestrator" | "orchestratorv2" = "orchestratorv2",
+  /**
+   * `isTelemetryEnabled` is unconditionally false under vitest, so the enabled
+   * branches of session_start are unreachable without this injection seam.
+   */
+  telemetryEnabled?: boolean,
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
   const pi = {
@@ -59,7 +75,9 @@ function registerHandlers(
       handlers.set(name, registered);
     }),
     appendEntry: vi.fn(),
-    getFlag: vi.fn((name: string) => name === orchestratorFlag),
+    getFlag: vi.fn((name: string) =>
+      name === orchestratorFlag ? true : undefined,
+    ),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
   };
@@ -67,6 +85,7 @@ function registerHandlers(
     pi as any,
     initialSpawnTreeContext,
     allowRootLineage,
+    telemetryEnabled === undefined ? undefined : () => telemetryEnabled,
   );
   return { handlers, pi, sessionScope };
 }
@@ -76,6 +95,7 @@ function startSession(
   root: string,
   sessionId: string,
   ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+  reason = "startup",
 ) {
   const sessionManager = {
     getSessionId: () => sessionId,
@@ -83,7 +103,7 @@ function startSession(
     getBranch: () => [],
   };
   const ctx = { cwd: root, ui, sessionManager };
-  registration.handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+  registration.handlers.get("session_start")![0]({ reason }, ctx);
   return ctx;
 }
 
@@ -203,6 +223,239 @@ describe("session handler lifecycle callbacks", () => {
     });
   });
 
+  it.each(["reload", "resume"] as const)(
+    "preserves one telemetry session across %s without another root start",
+    (reason) => {
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      const initialId = registration.sessionScope.telemetry?.correlationId;
+
+      registration.handlers.get("session_start")![0]({ reason }, ctx);
+
+      expect(registration.sessionScope.telemetry?.correlationId).toBe(
+        initialId,
+      );
+      expect(registration.sessionScope.telemetry?.mode).toBe("orchestrator_v2");
+    },
+  );
+
+  it("emits session_started once across continuity lifecycle hooks", () => {
+    const previous = {
+      VITEST: process.env.VITEST,
+      CI: process.env.CI,
+      NODE_ENV: process.env.NODE_ENV,
+    };
+    delete process.env.VITEST;
+    delete process.env.CI;
+    delete process.env.NODE_ENV;
+    const captures: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        captures.push(JSON.parse(String(init.body)).event);
+        return new Response(null, { status: 200 });
+      }),
+    );
+    try {
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      registration.handlers.get("session_start")![0]({ reason: "reload" }, ctx);
+      registration.handlers.get("session_start")![0]({ reason: "resume" }, ctx);
+
+      expect(
+        captures.filter((event) => event === "pi_subagentura_session_started"),
+      ).toHaveLength(1);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      vi.unstubAllGlobals();
+    }
+  });
+
+  describe("with telemetry enabled", () => {
+    let captured: Array<Record<string, any>>;
+
+    beforeEach(() => {
+      captured = [];
+      // These tests deliberately take the enabled path, so the transport has to
+      // be stubbed or the suite would post to the real endpoint.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("reports the session start against the persisted correlation", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({
+        event: "pi_subagentura_session_started",
+        distinct_id: loadInteractiveStates(root)?.telemetry?.correlationId,
+        properties: { mode: "orchestrator_v2" },
+      });
+    });
+
+    it("persists the correlation id and its owning session", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      const correlationId = registration.sessionScope.telemetry?.correlationId;
+      expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(loadInteractiveStates(root)).toMatchObject({
+        parent: "session-a",
+        telemetry: { correlationId, mode: "orchestrator_v2" },
+      });
+    });
+
+    it("hands the same correlation to the root lineage bootstrap", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+
+      startSession(registration, root, "session-a");
+
+      // The root's children inherit correlation only through this context, so
+      // a mismatch here silently splits one logical session into two.
+      expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+        role: "root",
+        rootId: "session-a",
+        telemetrySessionId:
+          registration.sessionScope.telemetry?.correlationId ?? "missing",
+        telemetryMode: "orchestrator_v2",
+      });
+    });
+
+    it.each(["reload", "resume"] as const)(
+      "reuses the persisted correlation across %s",
+      (reason) => {
+        const registration = registerHandlers(
+          undefined,
+          true,
+          "orchestratorv2",
+          true,
+        );
+        const ctx = startSession(registration, root, "session-a");
+        const initial = registration.sessionScope.telemetry?.correlationId;
+
+        registration.handlers.get("session_start")![0]({ reason }, ctx);
+
+        expect(registration.sessionScope.telemetry?.correlationId).toBe(
+          initial,
+        );
+        expect(loadInteractiveStates(root)?.telemetry?.correlationId).toBe(
+          initial,
+        );
+        expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+          telemetrySessionId: initial,
+        });
+      },
+    );
+  });
+
+  describe("with telemetry disabled", () => {
+    it("writes nothing at all when there is no correlation to clear", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(registration.sessionScope.telemetry?.enabled).toBe(false);
+      // The opt-out must be inert: no `.pi/`, no state lock, no state file.
+      expect(existsSync(join(root, ".pi"))).toBe(false);
+      expect(registration.sessionScope.spawnTreeContext).not.toHaveProperty(
+        "telemetrySessionId",
+      );
+    });
+
+    it("clears a correlation an earlier opted-in run left behind", () => {
+      updatePersistedTelemetrySession(root, "session-a", {
+        correlationId: "33333333-3333-4333-8333-333333333333",
+        mode: "orchestrator",
+      });
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+
+      startSession(registration, root, "session-a");
+
+      expect(loadInteractiveStates(root)?.telemetry).toBeUndefined();
+    });
+  });
+
+  it("recovers persisted telemetry only for the matching startup session", () => {
+    const correlationId = "11111111-1111-4111-8111-111111111111";
+    updatePersistedTelemetrySession(root, "session-a", {
+      correlationId,
+      mode: "orchestrator",
+    });
+    const matching = registerHandlers();
+
+    startSession(matching, root, "session-a");
+
+    expect(matching.sessionScope.telemetry).toMatchObject({
+      correlationId,
+      mode: "orchestrator",
+    });
+
+    const mismatching = registerHandlers();
+    startSession(mismatching, root, "session-b");
+    expect(mismatching.sessionScope.telemetry?.correlationId).not.toBe(
+      correlationId,
+    );
+  });
+
+  it.each(["new", "fork"] as const)(
+    "replaces stale persisted telemetry on fresh %s",
+    (reason) => {
+      const staleId = "22222222-2222-4222-8222-222222222222";
+      updatePersistedTelemetrySession(root, "session-a", {
+        correlationId: staleId,
+        mode: "orchestrator",
+      });
+      const registration = registerHandlers();
+
+      startSession(registration, root, "session-b", undefined, reason);
+
+      expect(registration.sessionScope.telemetry?.correlationId).not.toBe(
+        staleId,
+      );
+      expect(loadInteractiveStates(root)?.telemetry).toBeUndefined();
+    },
+  );
+
   it.each([
     ["orchestratorv2", 2],
     ["orchestrator", 8],
@@ -240,10 +493,52 @@ describe("session handler lifecycle callbacks", () => {
     expect(registration.sessionScope.spawnTreeContext).toBe(initial);
   });
 
+  it("keeps child telemetry bootstrap separate from root persisted state", () => {
+    const rootCorrelation = "44444444-4444-4444-8444-444444444444";
+    const childCorrelation = "55555555-5555-4555-8555-555555555555";
+    updatePersistedTelemetrySession(root, "root-session", {
+      correlationId: rootCorrelation,
+      mode: "orchestrator_v2",
+    });
+    const initial = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext(
+        "root-session",
+        root,
+        false,
+        false,
+        8,
+        childCorrelation,
+        "orchestrator",
+      ),
+      "child-agent",
+      join(root, "child-agent"),
+    );
+    const registration = registerHandlers(initial, false);
+
+    startSession(registration, root, "child-session");
+
+    expect(registration.sessionScope.telemetry).toMatchObject({
+      correlationId: childCorrelation,
+      mode: "orchestrator",
+    });
+    expect(loadInteractiveStates(root)).toMatchObject({
+      parent: "root-session",
+      telemetry: { correlationId: rootCorrelation },
+    });
+  });
+
   it("clears descendant authority on a fresh child session", () => {
     const artifactDir = join(root, "child-agent");
     const expected = createDescendantSpawnTreeContext(
-      createRootSpawnTreeContext("lineage-root", root),
+      createRootSpawnTreeContext(
+        "lineage-root",
+        root,
+        false,
+        false,
+        8,
+        "33333333-3333-4333-8333-333333333333",
+        "orchestrator",
+      ),
       "child-agent",
       artifactDir,
     );
@@ -254,11 +549,17 @@ describe("session handler lifecycle callbacks", () => {
     const initial = acquireRuntimeSpawnTreeContext(artifactDir)!;
     const registration = registerHandlers(initial, false);
     const ctx = startSession(registration, root, "child-session");
+    expect(registration.sessionScope.telemetry?.correlationId).toBe(
+      "33333333-3333-4333-8333-333333333333",
+    );
     const abandonedPath = writeLineageBootstrap(artifactDir, expected);
 
     registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
 
     expect(registration.sessionScope.spawnTreeContext).toBeUndefined();
+    expect(registration.sessionScope.telemetry?.correlationId).not.toBe(
+      "33333333-3333-4333-8333-333333333333",
+    );
     expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
     expect(existsSync(abandonedPath)).toBe(false);
   });
@@ -419,6 +720,151 @@ describe("session handler lifecycle callbacks", () => {
       (globalThis as any).__piSubagenturaInteractivePollerHandle,
     ).toBeUndefined();
   });
+
+  it.each([
+    ["fresh shutdown", "new", false, "running"],
+    ["workflow-pane shutdown", "reload", true, "running"],
+    ["fresh shutdown after manual cancellation", "new", false, "cancelled"],
+  ] as const)(
+    "balances an active interactive task during %s",
+    async (_label, reason, workflowOwned, status) => {
+      vi.setSystemTime(5_000);
+      const telemetryPayloads: Array<{
+        event?: string;
+        properties?: Record<string, unknown>;
+      }> = [];
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (_input, init) => {
+          telemetryPayloads.push(JSON.parse(String(init?.body)));
+          return new Response(null, { status: 200 });
+        });
+      const registration = registerHandlers();
+      const ctx = startSession(registration, root, "session-a");
+      registration.sessionScope.telemetry = createTelemetrySession(
+        true,
+        "orchestrator_v2",
+      );
+      const state = ownedInteractive(
+        registration.sessionScope,
+        root,
+        "active-state",
+        "session-a",
+      );
+      state.status = status;
+      state.telemetryEligible = true;
+      state.telemetryCorrelationId =
+        registration.sessionScope.telemetry.correlationId;
+      state.telemetryActiveTurnId = "active-turn";
+      state.telemetryTurnStartedAt = 1_000;
+      state.telemetryMessageTurnId = "active-message";
+      state.telemetryTurnMessageCounts = new Map([
+        ["active-message", 4],
+        ["active-turn", 6],
+      ]);
+      state.telemetryInvocationSource = "interactive";
+      state.telemetryCompletionPolicy = "each";
+      state.telemetryAsync = true;
+      state.telemetryDepth = 3;
+      state.telemetryDepthBucket = "3";
+      state.telemetryModel = "default";
+      if (workflowOwned) {
+        state.completionOwner = "workflow";
+        const art = artifactPath(root, state.id);
+        appendEvent(art, {
+          version: 2,
+          eventId: "active-turn-start",
+          turnId: "active-turn",
+          ts: 1_000,
+          type: "turn_started",
+          status: "running",
+        });
+        writeFileSync(
+          join(state.artifactDir, "active-turn.json"),
+          JSON.stringify({ turnId: "active-turn" }),
+        );
+        appendInteractiveState(root, {
+          id: state.id,
+          paneId: state.paneId,
+          mux: "tmux",
+          artifactDir: state.artifactDir,
+          sessionFile: state.sessionFile,
+          parentSessionId: "session-a",
+          eventByteCursor: eventLogEndOffset(art),
+          sessionByteCursor: 0,
+          pendingDeliveries: [],
+          deliveryReceipts: [],
+          telemetry: {
+            correlationId: state.telemetryCorrelationId!,
+            invocationSource: "interactive",
+            mux: "tmux",
+            async: true,
+            depth: 3,
+            depthBucket: "3",
+            completionPolicy: "each",
+            model: "default",
+            activeTurnId: "active-turn",
+            turnStartedAt: 1_000,
+            messageTurnId: "active-message",
+            messageCounts: { "active-message": 4, "active-turn": 6 },
+          },
+        });
+      }
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "dead",
+        getPaneLivenessAsync: async () => "dead",
+      } as any);
+
+      registration.handlers.get("session_shutdown")![0]({ reason }, ctx);
+
+      if (workflowOwned) {
+        const persisted = loadInteractiveStates(root);
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "activeTurnId",
+        );
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "messageTurnId",
+        );
+        expect(persisted?.states[state.id].telemetry).not.toHaveProperty(
+          "messageCounts",
+        );
+        registration.handlers.get("session_start")![0](
+          { reason: "reload" },
+          ctx,
+        );
+        const recoveredCorrelation =
+          registration.sessionScope.telemetry?.correlationId;
+        registration.sessionScope.telemetry = createTelemetrySession(
+          true,
+          "orchestrator_v2",
+          recoveredCorrelation,
+        );
+        await pollArtifactChanges(
+          registration.pi,
+          sessionOwner(registration.sessionScope),
+        );
+      }
+
+      expect(
+        telemetryPayloads.filter(
+          (payload) => payload.event === "pi_subagentura_task_completed",
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            status: "cancelled",
+            execution: "interactive",
+            mux: "tmux",
+            unit: "turn",
+            depth: 3,
+            duration_ms: 4_000,
+            child_conversation_message_count: 6,
+          }),
+        }),
+      ]);
+      fetchMock.mockRestore();
+    },
+  );
   it.each([
     ["A-first", "a"],
     ["B-first", "b"],

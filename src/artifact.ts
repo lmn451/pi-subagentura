@@ -37,6 +37,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
+import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -1393,6 +1394,29 @@ export interface InteractiveSubagentPersistedStateV1 {
 
   /** Parent pi session id; only rehydrated when the current session matches. */
   parentSessionId?: string;
+
+  /** Closed analytics dimensions only; never task, prompt, output, or identity. */
+  telemetry?: PersistedInteractiveTelemetry;
+}
+
+export interface PersistedInteractiveTelemetry {
+  correlationId: string;
+  invocationSource: "with_context" | "isolated" | "interactive" | "workflow";
+  async: boolean;
+  mux: TelemetryMux;
+  depth?: number;
+  depthBucket: "1" | "2" | "3" | "4-7" | "8+" | "unknown";
+  completionPolicy: "inline" | "each" | "group" | "legacy";
+  model: string;
+  activeTurnId?: string;
+  turnStartedAt?: number;
+  messageTurnId?: string;
+  messageCounts?: Record<string, number>;
+}
+
+export interface PersistedTelemetrySession {
+  correlationId: string;
+  mode: "straight" | "orchestrator" | "orchestrator_v2";
 }
 
 export interface PersistedDeliveryIntent {
@@ -1445,6 +1469,9 @@ export interface InteractiveSubagentStateFile {
   /** Parent pi session id; redundant with the filename but kept for verification/debugging. */
 
   parent: string;
+
+  /** Random logical-session correlation, never a stable install identity. */
+  telemetry?: PersistedTelemetrySession;
 
   states: { [id: string]: InteractiveSubagentPersistedStateV2 };
 }
@@ -1512,6 +1539,28 @@ function migrateStatePayload(
   const rawStates = obj.states;
   const parent =
     typeof obj.parent === "string" && obj.parent.length > 0 ? obj.parent : "pi";
+  const rawTelemetry =
+    obj.telemetry &&
+    typeof obj.telemetry === "object" &&
+    !Array.isArray(obj.telemetry)
+      ? (obj.telemetry as Record<string, unknown>)
+      : undefined;
+  const rawTelemetryMode =
+    rawTelemetry?.mode === "manual" ? "straight" : rawTelemetry?.mode;
+  const telemetry: PersistedTelemetrySession | undefined =
+    rawTelemetry &&
+    typeof rawTelemetry.correlationId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      rawTelemetry.correlationId,
+    ) &&
+    (rawTelemetryMode === "straight" ||
+      rawTelemetryMode === "orchestrator" ||
+      rawTelemetryMode === "orchestrator_v2")
+      ? {
+          correlationId: rawTelemetry.correlationId.toLowerCase(),
+          mode: rawTelemetryMode,
+        }
+      : undefined;
 
   // Helper: produce a valid states object from an untrusted value.
   const asStates = (
@@ -1720,6 +1769,100 @@ function migrateStatePayload(
               : {}),
           }
         : undefined;
+      const rawEntryTelemetry =
+        entry.telemetry &&
+        typeof entry.telemetry === "object" &&
+        !Array.isArray(entry.telemetry)
+          ? (entry.telemetry as unknown as Record<string, unknown>)
+          : undefined;
+      const telemetryMux: TelemetryMux =
+        rawEntryTelemetry?.mux === "none" ||
+        rawEntryTelemetry?.mux === "tmux" ||
+        rawEntryTelemetry?.mux === "zellij" ||
+        rawEntryTelemetry?.mux === "herdr"
+          ? rawEntryTelemetry.mux
+          : entry.mux === "tmux" || entry.mux === "zellij"
+            ? entry.mux
+            : "none";
+      const entryTelemetry: PersistedInteractiveTelemetry | undefined =
+        rawEntryTelemetry &&
+        typeof rawEntryTelemetry.correlationId === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          rawEntryTelemetry.correlationId,
+        ) &&
+        (rawEntryTelemetry.invocationSource === "with_context" ||
+          rawEntryTelemetry.invocationSource === "isolated" ||
+          rawEntryTelemetry.invocationSource === "interactive" ||
+          rawEntryTelemetry.invocationSource === "workflow") &&
+        typeof rawEntryTelemetry.async === "boolean" &&
+        (rawEntryTelemetry.depthBucket === "1" ||
+          rawEntryTelemetry.depthBucket === "2" ||
+          rawEntryTelemetry.depthBucket === "3" ||
+          rawEntryTelemetry.depthBucket === "4-7" ||
+          rawEntryTelemetry.depthBucket === "8+" ||
+          rawEntryTelemetry.depthBucket === "unknown") &&
+        (rawEntryTelemetry.completionPolicy === "inline" ||
+          rawEntryTelemetry.completionPolicy === "each" ||
+          rawEntryTelemetry.completionPolicy === "group" ||
+          rawEntryTelemetry.completionPolicy === "legacy") &&
+        typeof rawEntryTelemetry.model === "string" &&
+        rawEntryTelemetry.model.length <= 128
+          ? {
+              correlationId: rawEntryTelemetry.correlationId.toLowerCase(),
+              invocationSource: rawEntryTelemetry.invocationSource,
+              async: rawEntryTelemetry.async,
+              mux: telemetryMux,
+              ...(typeof rawEntryTelemetry.depth === "number" &&
+              Number.isSafeInteger(rawEntryTelemetry.depth) &&
+              rawEntryTelemetry.depth >= 1 &&
+              rawEntryTelemetry.depth <= 64
+                ? { depth: rawEntryTelemetry.depth }
+                : {}),
+              depthBucket: rawEntryTelemetry.depthBucket,
+              completionPolicy: rawEntryTelemetry.completionPolicy,
+              model: sanitizeTelemetryModel(rawEntryTelemetry.model),
+              ...(typeof rawEntryTelemetry.activeTurnId === "string" &&
+              rawEntryTelemetry.activeTurnId.length > 0 &&
+              rawEntryTelemetry.activeTurnId.length <= MAX_TURN_ID_LENGTH &&
+              /^[A-Za-z0-9._:-]+$/.test(rawEntryTelemetry.activeTurnId)
+                ? { activeTurnId: rawEntryTelemetry.activeTurnId }
+                : {}),
+              ...(typeof rawEntryTelemetry.turnStartedAt === "number" &&
+              Number.isFinite(rawEntryTelemetry.turnStartedAt) &&
+              rawEntryTelemetry.turnStartedAt >= 0
+                ? { turnStartedAt: rawEntryTelemetry.turnStartedAt }
+                : {}),
+              ...(typeof rawEntryTelemetry.messageTurnId === "string" &&
+              rawEntryTelemetry.messageTurnId.length > 0 &&
+              rawEntryTelemetry.messageTurnId.length <= MAX_TURN_ID_LENGTH &&
+              /^[A-Za-z0-9._:-]+$/.test(rawEntryTelemetry.messageTurnId)
+                ? { messageTurnId: rawEntryTelemetry.messageTurnId }
+                : {}),
+              ...(rawEntryTelemetry.messageCounts &&
+              typeof rawEntryTelemetry.messageCounts === "object" &&
+              !Array.isArray(rawEntryTelemetry.messageCounts)
+                ? {
+                    messageCounts: Object.fromEntries(
+                      Object.entries(rawEntryTelemetry.messageCounts)
+                        .filter(
+                          ([turnId, count]) =>
+                            turnId.length > 0 &&
+                            turnId.length <= MAX_TURN_ID_LENGTH &&
+                            /^[A-Za-z0-9._:-]+$/.test(turnId) &&
+                            typeof count === "number" &&
+                            Number.isSafeInteger(count) &&
+                            count >= 0,
+                        )
+                        .slice(-32)
+                        .map(([turnId, count]) => [
+                          turnId,
+                          Math.min(count as number, 1_000),
+                        ]),
+                    ),
+                  }
+                : {}),
+            }
+          : undefined;
       migrated[id] = {
         id,
         paneId: entry.paneId,
@@ -1771,6 +1914,7 @@ function migrateStatePayload(
         deliveryReceipts,
         legacyCutoverOffset: cursor(entry.legacyCutoverOffset, cutoverOffset),
         ...(lifecycle ? { lifecycle } : {}),
+        ...(entryTelemetry ? { telemetry: entryTelemetry } : {}),
       };
     }
     return migrated;
@@ -1810,6 +1954,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
+      ...(telemetry ? { telemetry } : {}),
       states: withLegacyCatchup(asStates(rawStates, true)),
     };
   }
@@ -1819,6 +1964,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
+      ...(telemetry ? { telemetry } : {}),
       states: withLegacyCatchup(asStates(rawStates, true)),
     };
   }
@@ -1827,6 +1973,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
+      ...(telemetry ? { telemetry } : {}),
       states: asStates(rawStates, false),
     };
   }
@@ -1837,6 +1984,7 @@ function migrateStatePayload(
     return {
       schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       parent,
+      ...(telemetry ? { telemetry } : {}),
       states: withLegacyCatchup(asStates(rawStates, true)),
     };
   }
@@ -2097,6 +2245,44 @@ export function appendInteractiveState(
           ? entry.legacyCutoverOffset
           : eventLogEndOffset(art),
     };
+    writeInteractiveStatesUnlocked(cwd, current);
+  });
+}
+
+/**
+ * Read-only probe for a telemetry field on disk. Opt-out must be inert: with
+ * telemetry disabled the extension must not create `.pi/`, take the state lock,
+ * or rewrite the state file — it only has work to do when a previous run left a
+ * correlation behind to clear.
+ */
+export function hasPersistedTelemetryField(cwd: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(stateFilePath(cwd), "utf8"));
+  } catch {
+    return false;
+  }
+  return (
+    !!parsed &&
+    typeof parsed === "object" &&
+    (parsed as Record<string, unknown>).telemetry !== undefined
+  );
+}
+
+/** Persist or clear the random logical-session telemetry correlation. */
+export function updatePersistedTelemetrySession(
+  cwd: string,
+  parentSessionId: string,
+  telemetry: PersistedTelemetrySession | undefined,
+): void {
+  withInteractiveStateLock(cwd, () => {
+    const current = loadInteractiveStates(cwd) ?? {
+      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+      parent: parentSessionId,
+      states: {},
+    };
+    current.parent = parentSessionId;
+    current.telemetry = telemetry;
     writeInteractiveStatesUnlocked(cwd, current);
   });
 }

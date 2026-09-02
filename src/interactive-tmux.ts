@@ -94,6 +94,16 @@ import {
   writeLineageBootstrap,
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
+import { TELEMETRY_ENV } from "./settings";
+import {
+  captureTelemetry,
+  sanitizeTelemetryModel,
+  telemetryDepth,
+  telemetryDepthBucket,
+  type TelemetryCompletionPolicy,
+  type TelemetryDepthBucket,
+  type TelemetryInvocationSource,
+} from "./telemetry";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -219,6 +229,22 @@ export interface InteractiveSubagentState {
   completionOwner?: "standalone" | "workflow";
   /** Workflow-runner acknowledgement that this child's result was consumed; runtime-only and intentionally not persisted. */
   workflowResultConsumed?: boolean;
+  /** Matching logical-session correlation gates telemetry after rehydrate. */
+  telemetryCorrelationId?: string;
+  telemetryEligible?: boolean;
+  /** Runtime-only turn identity; a completion is emitted only after its start. */
+  telemetryActiveTurnId?: string;
+  /** Runtime-only start of the currently observed child turn. */
+  telemetryTurnStartedAt?: number;
+  /** Runtime-only bounded per-turn message counts keyed by Pi user-entry id. */
+  telemetryTurnMessageCounts?: Map<string, number>;
+  telemetryMessageTurnId?: string;
+  telemetryInvocationSource?: TelemetryInvocationSource;
+  telemetryCompletionPolicy?: TelemetryCompletionPolicy;
+  telemetryAsync?: boolean;
+  telemetryDepth?: number;
+  telemetryDepthBucket?: TelemetryDepthBucket;
+  telemetryModel?: string;
   model?: string;
   startedAt: number;
   /**
@@ -537,6 +563,12 @@ export function launchInteractiveSubagent(params: {
   parentCwd?: string;
   /** Thinking/reasoning level for the child Pi process. */
   thinkingLevel?: ThinkingLevel;
+  /** Closed telemetry source; never derived from user-authored names. */
+  telemetryInvocationSource?: TelemetryInvocationSource;
+  /** Whether the invoking parent operation runs in the background. */
+  telemetryAsync?: boolean;
+  /** Aggregate policy attributed to workflow-owned child execution. */
+  telemetryCompletionPolicy?: TelemetryCompletionPolicy;
 }): InteractiveSubagentState {
   // 8 bytes, not 4: at 32 bits a birthday collision inside one tree is not
   // remote, and the duplicate-id path only degrades gracefully — it does not
@@ -557,6 +589,9 @@ export function launchInteractiveSubagent(params: {
   const effectiveCurrentDepth = spawnTreeContext?.depth ?? 0;
   const effectiveMaxDepth = spawnTreeContext?.maxDepth ?? DEFAULT_MAX_DEPTH;
   const nextDepth = effectiveCurrentDepth + 1;
+  const liveScope =
+    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
+
   if (rootId && nextDepth > effectiveMaxDepth) {
     throw new Error(
       `interactive sub-agent depth ${nextDepth} exceeds max ${effectiveMaxDepth}`,
@@ -649,6 +684,24 @@ export function launchInteractiveSubagent(params: {
     throw err;
   }
 
+  const telemetry = liveScope?.telemetry;
+  const telemetryMetadata = telemetry?.enabled
+    ? {
+        correlationId: telemetry.correlationId,
+        mux: mux.name,
+        invocationSource:
+          params.telemetryInvocationSource ?? ("interactive" as const),
+        async: params.telemetryAsync ?? true,
+        depth: telemetryDepth(nextDepth),
+        depthBucket: telemetryDepthBucket(nextDepth),
+        completionPolicy:
+          params.telemetryCompletionPolicy ??
+          params.completionPolicy ??
+          ("legacy" as const),
+        model: sanitizeTelemetryModel(params.model),
+      }
+    : undefined;
+
   // Create the pane FIRST (so we have a target for the launch script to attach
   // to). If any later step throws, try to kill the orphan pane and rethrow.
   const {
@@ -690,6 +743,7 @@ export function launchInteractiveSubagent(params: {
         sessionByteCursor: 0,
         pendingDeliveries: [],
         deliveryReceipts: [],
+        ...(telemetryMetadata ? { telemetry: telemetryMetadata } : {}),
       });
       persistedState = true;
     } catch (err) {
@@ -762,6 +816,7 @@ export function launchInteractiveSubagent(params: {
       ...(lineageBootstrapPath
         ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
         : {}),
+      ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
     });
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
     mux.sendKeys(
@@ -834,11 +889,30 @@ export function launchInteractiveSubagent(params: {
     eventByteCursor: 0,
     pendingDeliveries: [],
     deliveryReceipts: [],
+    telemetryCorrelationId: telemetryMetadata?.correlationId,
+    telemetryEligible: telemetryMetadata !== undefined,
+    telemetryTurnMessageCounts: new Map(),
+    telemetryInvocationSource: telemetryMetadata?.invocationSource,
+    telemetryCompletionPolicy: telemetryMetadata?.completionPolicy,
+    telemetryAsync: telemetryMetadata?.async,
+    telemetryDepth: telemetryMetadata?.depth,
+    telemetryDepthBucket: telemetryMetadata?.depthBucket,
+    telemetryModel: telemetryMetadata?.model,
   };
-  registerInteractiveSubagentState(
-    state,
-    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner),
-  );
+  registerInteractiveSubagentState(state, liveScope);
+  if (telemetryMetadata) {
+    captureTelemetry(telemetry, {
+      event: "agent_created",
+      execution: "interactive",
+      mux: telemetryMetadata.mux,
+      invocation_source: telemetryMetadata.invocationSource,
+      model: telemetryMetadata.model,
+      async: telemetryMetadata.async,
+      depth: telemetryMetadata.depth,
+      depth_bucket: telemetryMetadata.depthBucket,
+      completion_policy: telemetryMetadata.completionPolicy,
+    });
+  }
   return state;
 }
 
