@@ -21,8 +21,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, artifactPath, readEvents } from "../src/artifact";
+import {
+  appendEvent,
+  appendInteractiveState,
+  artifactPath,
+  loadInteractiveStates,
+  readEvents,
+  updatePersistedTelemetrySession,
+} from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
+import { createTelemetrySession } from "../src/telemetry";
+import { rehydrateInteractiveSubagents } from "../src/rehydrate";
 import { importFresh } from "./test-utils";
 
 function makeTmp(): string {
@@ -85,6 +99,8 @@ describe("session-log tail-read", () => {
   });
 
   afterEach(() => {
+    clearSessionScopes();
+    vi.unstubAllGlobals();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -145,6 +161,857 @@ describe("session-log tail-read", () => {
     expect(event.status).toBe("running");
     // Cursor advanced.
     expect(state.lastDeliveredSessionByte).toBeGreaterThan(0);
+  });
+
+  it("pairs telemetry starts and completions for every interactive turn", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const scope = registerSessionScope({
+      id: 901,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepth = 1;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(state.id, state);
+    const art = artifactPath(join(artifactDir, ".."), state.id);
+
+    for (const [index, messages] of [
+      [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "first result" },
+      ],
+      [
+        { role: "user", content: "follow-up" },
+        { role: "assistant", content: "working" },
+        { role: "assistant", content: "follow-up result" },
+      ],
+    ].entries()) {
+      appendFileSync(
+        state.sessionFile,
+        messages
+          .map((message, messageIndex) =>
+            JSON.stringify({
+              id:
+                message.role === "user"
+                  ? `turn-${index}`
+                  : `assistant-${index}-${messageIndex}`,
+              type: "message",
+              message,
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      appendEvent(art, {
+        version: 2,
+        eventId: `start-${index}`,
+        turnId: `turn-${index}`,
+        ts: 1_000 + index * 100,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: `done-${index}`,
+        turnId: `turn-${index}`,
+        ts: 1_050 + index * 100,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "agent_settled",
+      });
+    }
+    await mod.pollArtifactChanges({} as any, sessionOwner(scope));
+
+    const starts = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_task_started",
+    );
+    const completions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_task_completed",
+    );
+    expect(starts).toHaveLength(2);
+    expect(completions).toHaveLength(2);
+    expect(starts.map(({ properties }) => properties.unit)).toEqual([
+      "turn",
+      "turn",
+    ]);
+    expect(
+      completions.map(
+        ({ properties }) => properties.child_conversation_message_count,
+      ),
+    ).toEqual([2, 3]);
+  });
+
+  it("keeps streaming steering in one telemetry task", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const cwd = join(artifactDir, "..");
+    const correlationId = "77777777-7777-4777-8777-777777777777";
+    const telemetry = createTelemetrySession(
+      true,
+      "orchestrator_v2",
+      correlationId,
+    );
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const pi = {} as unknown as Parameters<typeof mod.pollArtifactChanges>[0];
+    Object.assign(state, {
+      cwd,
+      parentSessionId: "pi",
+      telemetryEligible: true,
+      telemetryCorrelationId: correlationId,
+      telemetryInvocationSource: "interactive",
+      telemetryCompletionPolicy: "each",
+      telemetryAsync: true,
+      telemetryDepth: 1,
+      telemetryDepthBucket: "1",
+      telemetryModel: "default",
+      telemetryTurnMessageCounts: new Map(),
+    });
+    updatePersistedTelemetrySession(cwd, "pi", {
+      correlationId,
+      mode: "orchestrator_v2",
+    });
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      parentSessionId: "pi",
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      telemetry: {
+        correlationId,
+        invocationSource: "interactive",
+        mux: "tmux",
+        async: true,
+        depth: 1,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "default",
+      },
+    });
+    const scope = registerSessionScope({
+      id: 904,
+      generation: 1,
+      lifecycle: "started",
+      pi,
+      telemetry,
+    });
+    scope.interactiveStates.set(state.id, state);
+    const art = artifactPath(cwd, state.id);
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "10", role: "user", content: "initial" },
+        { id: "assistant-10", role: "assistant", content: "working" },
+        { id: "2", role: "user", content: "latest initial" },
+        { id: "assistant-2", role: "assistant", content: "still working" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-initial",
+      turnId: "2",
+      ts: 1_000,
+      type: "turn_started",
+      status: "running",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(1);
+    expect(state.telemetryActiveTurnId).toBe("2");
+    expect(state.telemetryTurnStartedAt).toBe(1_000);
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({
+      activeTurnId: "2",
+      turnStartedAt: 1_000,
+      messageTurnId: "2",
+      messageCounts: { "10": 2, "2": 2 },
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-steering",
+      turnId: "3",
+      ts: 1_100,
+      type: "turn_started",
+      status: "running",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(1);
+    expect(state.telemetryActiveTurnId).toBe("3");
+    expect(state.telemetryTurnStartedAt).toBe(1_000);
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({
+      activeTurnId: "3",
+      turnStartedAt: 1_000,
+      messageTurnId: "3",
+      messageCounts: { "10": 2, "3": 2 },
+    });
+    clearSessionScopes();
+    const recoveredTelemetry = createTelemetrySession(
+      true,
+      "orchestrator_v2",
+      correlationId,
+    );
+    const recoveredScope = registerSessionScope({
+      id: 905,
+      generation: 1,
+      lifecycle: "started",
+      pi,
+      telemetry: recoveredTelemetry,
+    });
+    rehydrateInteractiveSubagents(cwd, "pi", [], recoveredScope);
+    const recoveredState = recoveredScope.interactiveStates.get(state.id);
+    expect(recoveredState).toBeDefined();
+    if (!recoveredState) throw new Error("steering state did not rehydrate");
+    expect(recoveredState.telemetryActiveTurnId).toBe("3");
+    expect(recoveredState.telemetryMessageTurnId).toBe("3");
+    expect(
+      Object.fromEntries(recoveredState.telemetryTurnMessageCounts ?? []),
+    ).toEqual({ "10": 2, "3": 2 });
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "3", role: "user", content: "steer" },
+        { id: "assistant-3", role: "assistant", content: "continued" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    await mod.pollArtifactChanges(pi, sessionOwner(recoveredScope));
+    expect(recoveredState.telemetryActiveTurnId).toBe("3");
+    expect(recoveredState.telemetryTurnStartedAt).toBe(1_000);
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({
+      activeTurnId: "3",
+      turnStartedAt: 1_000,
+      messageTurnId: "3",
+      messageCounts: { "10": 2, "3": 4 },
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-steering",
+      turnId: "3",
+      ts: 1_300,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(recoveredScope));
+    const starts = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_started",
+    );
+    const completions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_completed",
+    );
+    expect(starts).toHaveLength(1);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.properties).toMatchObject({
+      duration_ms: 300,
+      mux: "tmux",
+      child_conversation_message_count: 4,
+    });
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).not.toHaveProperty("messageTurnId");
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "4", role: "user", content: "follow up" },
+        { id: "assistant-4", role: "assistant", content: "done" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-follow-up",
+      turnId: "4",
+      ts: 2_000,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-follow-up",
+      turnId: "4",
+      ts: 2_050,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(recoveredScope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(2);
+    const allCompletions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_completed",
+    );
+    expect(allCompletions).toHaveLength(2);
+    expect(allCompletions[1]?.properties).toMatchObject({
+      duration_ms: 100,
+      mux: "tmux",
+      child_conversation_message_count: 2,
+    });
+  });
+
+  it("folds event-ahead steering before users and starts a fresh task after completion", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const cwd = join(artifactDir, "..");
+    const correlationId = "88888888-8888-4888-8888-888888888888";
+    const telemetry = createTelemetrySession(
+      true,
+      "orchestrator_v2",
+      correlationId,
+    );
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const pi = {} as unknown as Parameters<typeof mod.pollArtifactChanges>[0];
+    Object.assign(state, {
+      cwd,
+      parentSessionId: "pi",
+      telemetryEligible: true,
+      telemetryCorrelationId: correlationId,
+      telemetryInvocationSource: "interactive",
+      telemetryCompletionPolicy: "each",
+      telemetryAsync: true,
+      telemetryDepth: 1,
+      telemetryDepthBucket: "1",
+      telemetryModel: "default",
+      telemetryTurnMessageCounts: new Map(),
+    });
+    updatePersistedTelemetrySession(cwd, "pi", {
+      correlationId,
+      mode: "orchestrator_v2",
+    });
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      parentSessionId: "pi",
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      telemetry: {
+        correlationId,
+        invocationSource: "interactive",
+        mux: "tmux",
+        async: true,
+        depth: 1,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "default",
+      },
+    });
+    const scope = registerSessionScope({
+      id: 906,
+      generation: 1,
+      lifecycle: "started",
+      pi,
+      telemetry,
+    });
+    scope.interactiveStates.set(state.id, state);
+    const art = artifactPath(cwd, state.id);
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-old", role: "user", content: "old" },
+        { id: "assistant-old", role: "assistant", content: "working" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-old",
+      turnId: "turn-old",
+      ts: 1_000,
+      type: "turn_started",
+      status: "running",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    // Both steering starts can be observed before either user entry reaches
+    // the session log. Rebinding must carry the original count through t2 and t3.
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-new",
+      turnId: "turn-new",
+      ts: 1_100,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-third",
+      turnId: "turn-third",
+      ts: 1_200,
+      type: "turn_started",
+      status: "running",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(1);
+    expect(state.telemetryActiveTurnId).toBe("turn-third");
+    expect(state.telemetryTurnStartedAt).toBe(1_000);
+    expect(state.telemetryMessageTurnId).toBe("turn-third");
+    expect(state.telemetryTurnMessageCounts).toEqual(
+      new Map([["turn-third", 2]]),
+    );
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({
+      activeTurnId: "turn-third",
+      turnStartedAt: 1_000,
+      messageTurnId: "turn-third",
+      messageCounts: { "turn-third": 2 },
+    });
+
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-new", role: "user", content: "steer" },
+        { id: "assistant-new", role: "assistant", content: "continued" },
+        { id: "turn-third", role: "user", content: "second steer" },
+        {
+          id: "assistant-third",
+          role: "assistant",
+          content: "continued again",
+        },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(state.telemetryActiveTurnId).toBe("turn-third");
+    expect(state.telemetryTurnStartedAt).toBe(1_000);
+    expect(state.telemetryMessageTurnId).toBe("turn-third");
+    expect(state.telemetryTurnMessageCounts).toEqual(
+      new Map([["turn-third", 6]]),
+    );
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({
+      activeTurnId: "turn-third",
+      turnStartedAt: 1_000,
+      messageTurnId: "turn-third",
+      messageCounts: { "turn-third": 6 },
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-third",
+      turnId: "turn-third",
+      ts: 1_300,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_completed"),
+    ).toHaveLength(1);
+    expect(
+      payloads.find(({ event }) => event === "pi_subagentura_task_completed")
+        ?.properties,
+    ).toMatchObject({
+      duration_ms: 300,
+      mux: "tmux",
+      child_conversation_message_count: 6,
+    });
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).not.toHaveProperty("messageTurnId");
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-after", role: "user", content: "after" },
+        { id: "assistant-after", role: "assistant", content: "done" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-after",
+      turnId: "turn-after",
+      ts: 2_000,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-after",
+      turnId: "turn-after",
+      ts: 2_050,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(2);
+    const completions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_completed",
+    );
+    expect(completions).toHaveLength(2);
+    expect(completions[1]?.properties).toMatchObject({
+      duration_ms: 100,
+      mux: "tmux",
+      child_conversation_message_count: 2,
+    });
+  });
+
+  it("keeps a log-ahead user count when the prior turn completes", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const cwd = join(artifactDir, "..");
+    const correlationId = "99999999-9999-4999-8999-999999999999";
+    const telemetry = createTelemetrySession(
+      true,
+      "orchestrator_v2",
+      correlationId,
+    );
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const pi = {} as unknown as Parameters<typeof mod.pollArtifactChanges>[0];
+    Object.assign(state, {
+      cwd,
+      parentSessionId: "pi",
+      telemetryEligible: true,
+      telemetryCorrelationId: correlationId,
+      telemetryInvocationSource: "interactive",
+      telemetryCompletionPolicy: "each",
+      telemetryAsync: true,
+      telemetryDepth: 1,
+      telemetryDepthBucket: "1",
+      telemetryModel: "default",
+      telemetryActiveTurnId: "turn-one",
+      telemetryTurnStartedAt: 1_000,
+      telemetryMessageTurnId: "turn-two",
+      telemetryTurnMessageCounts: new Map([
+        ["turn-one", 2],
+        ["turn-two", 0],
+      ]),
+    });
+    updatePersistedTelemetrySession(cwd, "pi", {
+      correlationId,
+      mode: "orchestrator_v2",
+    });
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      parentSessionId: "pi",
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      telemetry: {
+        correlationId,
+        invocationSource: "interactive",
+        mux: "tmux",
+        async: true,
+        depth: 1,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "default",
+        activeTurnId: "turn-one",
+        turnStartedAt: 1_000,
+        messageTurnId: "turn-two",
+        messageCounts: { "turn-one": 2, "turn-two": 0 },
+      },
+    });
+    const scope = registerSessionScope({
+      id: 907,
+      generation: 1,
+      lifecycle: "started",
+      pi,
+      telemetry,
+    });
+    scope.interactiveStates.set(state.id, state);
+    const art = artifactPath(cwd, state.id);
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-two", role: "user", content: "steer" },
+        { id: "assistant-two", role: "assistant", content: "continued" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-one",
+      turnId: "turn-one",
+      ts: 1_100,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-two",
+      turnId: "turn-two",
+      ts: 1_150,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-two",
+      turnId: "turn-two",
+      ts: 1_200,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+
+    await mod.pollArtifactChanges(pi, sessionOwner(scope));
+
+    const starts = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_started",
+    );
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.properties).toMatchObject({ mux: "tmux" });
+    const completions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_completed",
+    );
+    expect(completions).toHaveLength(2);
+    expect(completions.map(({ properties }) => properties.mux)).toEqual([
+      "tmux",
+      "tmux",
+    ]);
+    expect(
+      completions.map(
+        ({ properties }) => properties.child_conversation_message_count,
+      ),
+    ).toEqual([2, 2]);
+    expect(state.telemetryMessageTurnId).toBeUndefined();
+    expect(state.telemetryTurnMessageCounts).toEqual(new Map());
+  });
+
+  it("preserves active-turn telemetry progress across rehydrate", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state, artifactDir } = makeState({});
+    const cwd = join(artifactDir, "..");
+    const correlationId = "66666666-6666-4666-8666-666666666666";
+    const telemetry = createTelemetrySession(
+      true,
+      "orchestrator",
+      correlationId,
+    );
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    Object.assign(state, {
+      cwd,
+      parentSessionId: "pi",
+      telemetryEligible: true,
+      telemetryCorrelationId: correlationId,
+      telemetryInvocationSource: "interactive",
+      telemetryCompletionPolicy: "each",
+      telemetryAsync: true,
+      telemetryDepth: 1,
+      telemetryDepthBucket: "1",
+      telemetryModel: "default",
+      telemetryTurnMessageCounts: new Map(),
+    });
+    updatePersistedTelemetrySession(cwd, "pi", {
+      correlationId,
+      mode: "orchestrator",
+    });
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      parentSessionId: "pi",
+      eventByteCursor: 0,
+      sessionByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      telemetry: {
+        correlationId,
+        invocationSource: "interactive",
+        mux: "tmux",
+        async: true,
+        depth: 1,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "default",
+      },
+    });
+    const firstScope = registerSessionScope({
+      id: 902,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry,
+    });
+    firstScope.interactiveStates.set(state.id, state);
+    appendFileSync(
+      state.sessionFile,
+      [
+        { id: "turn-mid", role: "user", content: "begin" },
+        { id: "assistant-1", role: "assistant", content: "working" },
+        { id: "assistant-2", role: "assistant", content: "still working" },
+      ]
+        .map(({ id, ...message }) =>
+          JSON.stringify({ id, type: "message", message }),
+        )
+        .join("\n") + "\n",
+    );
+    const art = artifactPath(cwd, state.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: "start-mid",
+      turnId: "turn-mid",
+      ts: 1_000,
+      type: "turn_started",
+      status: "running",
+    });
+
+    await mod.pollArtifactChanges({} as any, sessionOwner(firstScope));
+    clearSessionScopes();
+    const recoveredTelemetry = createTelemetrySession(
+      true,
+      "orchestrator",
+      correlationId,
+    );
+    const recoveredScope = registerSessionScope({
+      id: 903,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as any,
+      telemetry: recoveredTelemetry,
+    });
+    rehydrateInteractiveSubagents(cwd, "pi", [], recoveredScope);
+    appendEvent(art, {
+      version: 2,
+      eventId: "done-mid",
+      turnId: "turn-mid",
+      ts: 1_050,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
+
+    await mod.pollArtifactChanges({} as any, sessionOwner(recoveredScope));
+
+    expect(
+      payloads.filter(({ event }) => event === "pi_subagentura_task_started"),
+    ).toHaveLength(1);
+    const completions = payloads.filter(
+      ({ event }) => event === "pi_subagentura_task_completed",
+    );
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.properties).toMatchObject({
+      mux: "tmux",
+      child_conversation_message_count: 3,
+      duration_ms: 100,
+      duration_bucket: "<1s",
+    });
   });
 
   it("appends tool_activity for write, edit, read with file paths", async () => {

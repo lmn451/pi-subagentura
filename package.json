@@ -74,10 +74,12 @@
     "src/multiplexer.ts",
     "src/multiplexer-tmux.ts",
     "src/multiplexer-zellij.ts",
+    "src/multiplexer-herdr.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
     "src/session-scope.ts",
     "src/settings.ts",
+    "src/telemetry.ts",
     "src/subagent.ts",
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",
@@ -110,14 +112,15 @@
     ]
   },
   "scripts": {
-    "test": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude 'tests/terminal-e2e/**'",
     "test:random": "npm test -- --sequence.shuffle --sequence.seed=424242",
-    "test:unit": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/pi-session-delivery.integration.test.ts --exclude tests/published-tarball.test.ts --exclude 'tests/property/**' --exclude 'tests/terminal-e2e/**'",
+    "test:unit": "vitest run --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/pi-session-delivery.integration.test.ts --exclude tests/published-tarball.test.ts --exclude 'tests/property/**' --exclude 'tests/terminal-e2e/**'",
     "test:property": "vitest run tests/property",
     "test:pi": "vitest run tests/pi-session-delivery.integration.test.ts",
     "test:tmux": "vitest run tests/tmux.integration.test.ts",
     "test:zellij": "vitest run tests/zellij.integration.test.ts",
-    "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/published-tarball.test.ts --exclude 'tests/terminal-e2e/**'",
+    "test:herdr": "vitest run tests/herdr.integration.test.ts",
+    "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/published-tarball.test.ts --exclude 'tests/terminal-e2e/**'",
     "mutation:pilot": "stryker run",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
@@ -158,6 +161,7 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
     "is-path-inside": "^4.0.0",
     "ndjson": "^2.0.0"

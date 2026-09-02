@@ -7,6 +7,9 @@ settings:
 importers:
   .:
     dependencies:
+      "@juanibiapina/pi-extension-settings":
+        specifier: ^0.9.1
+        version: 0.9.1
       acorn:
         specifier: ^8.14.0
         version: 8.18.0
@@ -583,6 +586,13 @@ packages:
       {
         integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==,
       }
+
+  "@juanibiapina/pi-extension-settings@0.9.1":
+    resolution:
+      {
+        integrity: sha512-CPt6zwYLxwwndrIsd4/IwZlm2SxWJIgmGL5a3b1paVl0Vm6TcppTn8LPA+AfoQPZZVoP6/VH/aiozqNWXdc7Mg==,
+      }
+    engines: { node: ">=20.0.0" }
 
   "@mariozechner/clipboard-darwin-arm64@0.3.9":
     resolution:
@@ -2873,6 +2883,8 @@ snapshots:
     dependencies:
       "@jridgewell/resolve-uri": 3.1.2
       "@jridgewell/sourcemap-codec": 1.5.5
+
+  "@juanibiapina/pi-extension-settings@0.9.1": {}
 
   "@mariozechner/clipboard-darwin-arm64@0.3.9":
     optional: true

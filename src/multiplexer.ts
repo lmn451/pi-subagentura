@@ -15,21 +15,22 @@
  *     per backend so `isAvailable()` can be probed during resolution).
  *
  * Resolution order (`getMux`):
- *   1. Explicit `preference` arg from the tool (forces tmux or zellij).
+ *   1. Explicit `preference` arg from the tool (forces one backend).
  *   2. Auto-detect: prefer the mux already attached to the parent process
- *      (env var heuristic: ZELLIJ_SESSION_NAME, then TMUX).
+ *      (env var heuristic: HERDR_ENV, ZELLIJ_SESSION_NAME, then TMUX).
  *   3. Fall back to whichever backend has a binary + active server, tmux first
  *      for backward compatibility.
- *   4. Throw with a setup hint pointing at both backends.
+ *   4. Throw with a setup hint pointing at the supported backends.
  */
 
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
+import { HerdrMultiplexer } from "./multiplexer-herdr";
 import { assertNever } from "./artifact";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij";
+export type MuxName = "tmux" | "zellij" | "herdr";
 /** Result of a backend pane-listing liveness probe. */
 export type PaneLiveness = "alive" | "dead" | "unknown";
 /** Result of a pane-focus activity probe for the user's mux client. */
@@ -38,6 +39,8 @@ export type PaneActivity = "active" | "inactive" | "unknown";
 /** Backend-neutral structured reference to a durable mux pane. */
 export interface PaneRef {
   readonly paneId: string;
+  /** Stable backend terminal identity when the backend exposes one (Herdr). */
+  readonly muxTerminalId?: string;
   readonly windowName?: string;
   readonly session?: string;
 }
@@ -51,7 +54,7 @@ export interface PaneRef {
  *   by `maxLines`/`maxBytes`.
  * `nativeOverlay` — `showNativeViewer(title, content)` has a backend-native
  *   surface to render into. Note this describes the BACKEND, not the current
- *   process: both backends additionally require the parent process to be inside
+ *   process: backends may additionally require the parent process to be inside
  *   a session and return `false` from `showNativeViewer` when it is not.
  */
 export interface MultiplexerCapabilities {
@@ -63,15 +66,24 @@ export interface MultiplexerCapabilities {
 /**
  * Verified capability matrix, keyed by backend name.
  *
- * Single source of truth: both backends expose the matching entry as their
+ * Single source of truth: every backend exposes the matching entry as its
  * `capabilities` field, and UI code that wants to gate an action can read the
  * entry directly from a `MuxName` (e.g. `InteractiveSubagentState.mux`) without
  * resolving a backend instance or paying an availability probe.
  *
- * Every flag below is asserted against the real `tmux` / `zellij` binaries in
- * `tests/tmux.integration.test.ts` and `tests/zellij.integration.test.ts` —
+ * Every flag below is asserted against the real `tmux` / `zellij` / `herdr`
+ * binaries in `tests/tmux.integration.test.ts`,
+ * `tests/zellij.integration.test.ts` and `tests/herdr.integration.test.ts` —
  * flipping one to `true` without a passing real-binary assertion is how the
  * broken zellij `dump-screen` argv shipped green.
+ *
+ * Caveat on the Herdr row, stated plainly because a half-kept invariant is
+ * worse than none: that suite is wired into CI but SELF-SKIPS on every runner
+ * today. Herdr has no headless Linux install and its backend only operates
+ * from inside a Herdr-managed pane, so the assertions run only where such an
+ * environment exists — `npm run test:herdr` on a Herdr machine. Until a runner
+ * can host Herdr, treat the Herdr flags as asserted-on-demand rather than
+ * asserted-per-commit, and run that suite by hand when changing them.
  */
 export const MUX_CAPABILITIES: Readonly<
   Record<MuxName, MultiplexerCapabilities>
@@ -92,6 +104,16 @@ export const MUX_CAPABILITIES: Readonly<
     boundedCapture: true,
     // `action new-pane --floating`.
     nativeOverlay: true,
+  },
+  herdr: {
+    // Control-socket `pane.focus { pane_id }`: pane ids are server-scoped and
+    // the response echoes the pane's workspace/tab, so focus is verifiable.
+    structuredFocus: true,
+    // Control-socket `pane.read { source: "recent_unwrapped", lines }` is
+    // server-bounded, and the reply carries its own `truncated` flag.
+    boundedCapture: true,
+    // Herdr has no generic transient content overlay in its public CLI.
+    nativeOverlay: false,
   },
 } as const;
 
@@ -157,6 +179,10 @@ export interface Multiplexer {
    *                           format is backend-specific (tmux uses `%N`,
    *                           zellij uses `terminal_N` or just an integer
    *                           stringified).
+   * @returns muxTerminalId    Optional stable backend terminal identity. Herdr
+   *                           returns this so persisted states never need to
+   *                           rediscover an attach target from a transient
+   *                           pane id; tmux and zellij leave it undefined.
    * @returns windowName       The actual window/tab name used (for
    *                           `attachCommand` formatting). Always defined
    *                           for background mode, undefined for visible
@@ -173,7 +199,12 @@ export interface Multiplexer {
     windowName?: string;
     /** Unique id (8 hex) for naming the new session when parent is not in a mux. */
     id?: string;
-  }): { paneId: string; windowName?: string; session?: string };
+  }): {
+    paneId: string;
+    muxTerminalId?: string;
+    windowName?: string;
+    session?: string;
+  };
 
   /**
    * Probe whether the pane is still known to the backend.
@@ -265,6 +296,8 @@ export interface Multiplexer {
    */
   buildAttachCommands(opts: {
     paneId: string;
+    /** Stable backend terminal identity, when available. */
+    terminalId?: string;
     windowName?: string;
     session?: string;
   }): {
@@ -288,8 +321,8 @@ export interface GetMuxOptions {
 export class NoMultiplexerAvailableError extends Error {
   constructor() {
     super(
-      "No multiplexer available. Start pi inside tmux or zellij, " +
-        "for example: tmux new -A -s pi 'pi'  —  or install one of them and ensure a server is running.",
+      "No multiplexer available. Start pi inside tmux, zellij, or Herdr, " +
+        "for example: tmux new -A -s pi 'pi'  —  or install one and ensure its server is running.",
     );
     this.name = "NoMultiplexerAvailableError";
   }
@@ -306,6 +339,7 @@ export class NoMultiplexerAvailableError extends Error {
 export function getMux(opts: GetMuxOptions = {}): Multiplexer {
   const tmux = getOrCreate("tmux", () => new TmuxMultiplexer());
   const zellij = getOrCreate("zellij", () => new ZellijMultiplexer());
+  const herdr = getOrCreate("herdr", () => new HerdrMultiplexer());
 
   const preference = opts.preference ?? "auto";
   switch (preference) {
@@ -313,12 +347,15 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
       return tmux;
     case "zellij":
       return zellij;
+    case "herdr":
+      return herdr;
     case "auto": {
       // Prefer the mux already attached to this process. We check env vars
       // (cheap) before probing availability (one exec call each). If both env
-      // vars are set (e.g., nested sessions — exotic but possible), zellij wins
-      // (it's the more specific signal — ZELLIJ_SESSION_NAME is a single session
-      // name, TMUX can be inherited through nested tmux-in-tmux shells).
+      // vars are set (nested sessions are possible), Herdr wins because its
+      // managed-pane marker is the most specific signal. Zellij remains ahead
+      // of tmux because TMUX is commonly inherited through nested sessions.
+      if (process.env.HERDR_ENV === "1" && herdr.isAvailable()) return herdr;
       if (process.env.ZELLIJ_SESSION_NAME && zellij.isAvailable())
         return zellij;
       if (process.env.TMUX && tmux.isAvailable()) return tmux;
@@ -368,11 +405,11 @@ export function __resetMuxInstances(): void {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Small helpers shared by both backends
+ * Small helpers shared by the backends
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Test whether a binary is on PATH. Used by both backends' `isAvailable`.
+ * Test whether a binary is on PATH. Used by backend `isAvailable` probes.
  * Cheap (one sh -c exec); safe to call repeatedly. The 5s timeout guards
  * against a hung PATH (e.g., NFS hang) blocking the agent's startup probe.
  *
@@ -395,7 +432,7 @@ export function commandExists(command: string): boolean {
 /**
  * Sanitize a free-form name into a safe window/tab/session segment.
  *
- * Shared by both backends AND by the orchestrator in `interactive-tmux.ts`,
+ * Shared by the backends AND by the orchestrator in `interactive-tmux.ts`,
  * which reuses it for the artifact/session path segments, so a sub-agent's
  * display name maps to exactly one segment everywhere — a second, drifting copy
  * of this logic is how a window name and its artifact directory came apart.
@@ -518,9 +555,9 @@ export function shellEscape(value: string): string {
  * and relevant stderr/stdout/exit-status details from the underlying exec
  * failure. The original error is preserved as `cause`.
  *
- * @param muxName   Backend name ("tmux" or "zellij") — identifies the tool in the error.
+ * @param muxName   Backend name ("tmux", "zellij", or "herdr") — identifies the tool in the error.
  * @param operation Human-readable description (e.g. "new-window", "send-keys").
- * @param cmd       The command binary (e.g. "tmux", "zellij").
+ * @param cmd       The command binary (e.g. "tmux", "zellij", "herdr").
  * @param args      Command arguments (passed through to execFileSync).
  * @param options   execFileSync options (e.g. `{ encoding: "utf8", timeout: 5000 }`).
  * @returns The stdout as a string.

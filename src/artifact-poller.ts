@@ -73,6 +73,7 @@ import {
   resolveLiveSessionScope,
 } from "./session-scope";
 import { isAgentListHidden } from "./settings";
+import { captureTelemetry } from "./telemetry";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -491,6 +492,31 @@ function persistPolledState(
   entry.pendingDeliveries = state.pendingDeliveries ?? [];
   entry.deliveryReceipts = state.deliveryReceipts ?? [];
   entry.lifecycle = state.lifecycle;
+  if (
+    entry.telemetry &&
+    entry.telemetry.correlationId === state.telemetryCorrelationId
+  ) {
+    if (state.telemetryActiveTurnId) {
+      entry.telemetry.activeTurnId = state.telemetryActiveTurnId;
+      entry.telemetry.turnStartedAt = state.telemetryTurnStartedAt;
+    } else {
+      delete entry.telemetry.activeTurnId;
+      delete entry.telemetry.turnStartedAt;
+    }
+    if (state.telemetryMessageTurnId) {
+      entry.telemetry.messageTurnId = state.telemetryMessageTurnId;
+    } else {
+      delete entry.telemetry.messageTurnId;
+    }
+    const messageCounts = [...(state.telemetryTurnMessageCounts ?? [])].slice(
+      -32,
+    );
+    if (messageCounts.length > 0) {
+      entry.telemetry.messageCounts = Object.fromEntries(messageCounts);
+    } else {
+      delete entry.telemetry.messageCounts;
+    }
+  }
 }
 
 function persistPolledStates(
@@ -511,6 +537,31 @@ function persistPolledStates(
       })),
     );
   }
+}
+
+/**
+ * Pi keeps Enter-during-streaming steering inside one agent run, but the child
+ * protocol gives each persisted user entry a fresh turn id. Keep that run as
+ * one telemetry task until the next persisted user entry advances it.
+ */
+function rebindTelemetryTurn(
+  state: InteractiveSubagentState,
+  nextTurnId: string,
+): void {
+  const previousTurnId = state.telemetryActiveTurnId;
+  if (previousTurnId !== undefined && previousTurnId !== nextTurnId) {
+    const counts = state.telemetryTurnMessageCounts;
+    const previousCount = counts?.get(previousTurnId);
+    if (counts && previousCount !== undefined) {
+      const nextCount = counts.get(nextTurnId) ?? 0;
+      counts.set(nextTurnId, Math.min(previousCount + nextCount, 1_000));
+      counts.delete(previousTurnId);
+    }
+    if (state.telemetryMessageTurnId === previousTurnId) {
+      state.telemetryMessageTurnId = nextTurnId;
+    }
+  }
+  state.telemetryActiveTurnId = nextTurnId;
 }
 
 /**
@@ -629,6 +680,101 @@ async function runPollArtifactChanges(
         foldInteractiveLifecycle(lifecycle, ev);
         if ("version" in ev && ev.version === 2 && ev.type === "turn_started") {
           state.activeTurnId = ev.turnId;
+          const telemetryEligible =
+            state.telemetryEligible === true &&
+            state.telemetryCorrelationId ===
+              ownerContext?.telemetry?.correlationId;
+          if (telemetryEligible) {
+            if (state.telemetryActiveTurnId !== undefined) {
+              rebindTelemetryTurn(state, ev.turnId);
+            } else {
+              state.telemetryActiveTurnId = ev.turnId;
+              state.telemetryTurnStartedAt = ev.ts;
+              state.telemetryMessageTurnId = ev.turnId;
+              captureTelemetry(
+                ownerContext?.telemetry,
+                {
+                  event: "task_started",
+                  execution: "interactive",
+                  mux: state.mux,
+                  unit: "turn",
+                  invocation_source:
+                    state.telemetryInvocationSource ?? "interactive",
+                  model: state.telemetryModel,
+                  async: state.telemetryAsync ?? true,
+                  depth: state.telemetryDepth,
+                  depth_bucket: state.telemetryDepthBucket ?? "unknown",
+                  completion_policy:
+                    state.telemetryCompletionPolicy ?? "legacy",
+                },
+                {
+                  dedupeKey: `task-started:interactive:${state.id}:${ev.eventId}`,
+                },
+              );
+            }
+          }
+        }
+        if (
+          ev.type === "completion" &&
+          state.telemetryActiveTurnId === ev.turnId &&
+          state.telemetryCorrelationId ===
+            ownerContext?.telemetry?.correlationId
+        ) {
+          const status = deliveryStatusFromEvent(ev);
+          const messageTurnId = state.telemetryMessageTurnId;
+          const directMessageCount = state.telemetryTurnMessageCounts?.get(
+            ev.turnId,
+          );
+          const fallbackMessageCount =
+            directMessageCount === undefined &&
+            messageTurnId !== undefined &&
+            messageTurnId !== ev.turnId
+              ? state.telemetryTurnMessageCounts?.get(messageTurnId)
+              : undefined;
+          const messageCount = directMessageCount ?? fallbackMessageCount;
+          captureTelemetry(
+            ownerContext?.telemetry,
+            {
+              event: "task_completed",
+              execution: "interactive",
+              mux: state.mux,
+              unit: "turn",
+              invocation_source:
+                state.telemetryInvocationSource ?? "interactive",
+              model: state.telemetryModel,
+              async: state.telemetryAsync ?? true,
+              depth: state.telemetryDepth,
+              depth_bucket: state.telemetryDepthBucket ?? "unknown",
+              completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+              status: status === "done" ? "success" : status,
+              duration_ms:
+                state.telemetryTurnStartedAt === undefined
+                  ? undefined
+                  : ev.ts - state.telemetryTurnStartedAt,
+              child_conversation_message_count: messageCount,
+            },
+            {
+              dedupeKey: `task-completed:interactive:${state.id}:${ev.turnId}`,
+            },
+          );
+          state.telemetryActiveTurnId = undefined;
+          state.telemetryTurnStartedAt = undefined;
+          if (directMessageCount !== undefined) {
+            state.telemetryTurnMessageCounts?.delete(ev.turnId);
+          } else if (
+            messageTurnId !== undefined &&
+            messageTurnId !== ev.turnId &&
+            fallbackMessageCount !== undefined
+          ) {
+            state.telemetryTurnMessageCounts?.delete(messageTurnId);
+          }
+          if (
+            messageTurnId === ev.turnId ||
+            (directMessageCount === undefined &&
+              fallbackMessageCount !== undefined)
+          ) {
+            state.telemetryMessageTurnId = undefined;
+          }
         }
         if (!queuesCompletion) continue;
         const v2 = ev.type === "completion" ? ev : undefined;
@@ -767,7 +913,12 @@ async function runPollArtifactChanges(
     if (ui) {
       const ownerContext = resolveLiveSessionScope(owner);
       const hideAgentList =
-        ownerContext !== undefined && isAgentListHidden(ownerContext.pi);
+        widgetRows.length > 0 &&
+        ownerContext !== undefined &&
+        // Pass the session cwd, if any, and let the setting own its scope:
+        // hide-agent-list is read globally, so a missing cwd never degrades
+        // into a lookup against Node's process cwd.
+        isAgentListHidden(ownerContext.pi, { cwd: ownerContext.cwd });
       updateRunningSubagentFooter(ui, owner);
       updateWidgetRows(ui, WIDGET_KEY, hideAgentList ? [] : widgetRows, owner);
       // Workflow TUI footer + widget: show running async workflows.
@@ -1042,10 +1193,57 @@ function processSessionLogEntry(
   art: SubagentArtifact,
   entry: Record<string, unknown>,
 ): void {
-  const e = entry as { type?: string; message?: Record<string, unknown> };
+  const e = entry as {
+    id?: unknown;
+    type?: string;
+    message?: Record<string, unknown>;
+  };
   if (e.type !== "message") return;
   const msg = e.message;
   if (!msg) return;
+  if (state.telemetryEligible && msg.role === "user") {
+    const turnId =
+      typeof e.id === "string" &&
+      e.id.length > 0 &&
+      e.id.length <= 256 &&
+      /^[A-Za-z0-9._:-]+$/.test(e.id)
+        ? e.id
+        : undefined;
+    if (turnId) {
+      const counts = (state.telemetryTurnMessageCounts ??= new Map());
+      if (
+        state.telemetryActiveTurnId === turnId &&
+        state.telemetryMessageTurnId !== turnId
+      ) {
+        // Steering reuses the active agent run but persists a fresh user entry.
+        const previousTurnId = state.telemetryMessageTurnId;
+        const previousCount = previousTurnId
+          ? (counts.get(previousTurnId) ?? 0)
+          : 0;
+        const nextCount = counts.get(turnId) ?? 0;
+        counts.set(turnId, Math.min(previousCount + nextCount + 1, 1_000));
+        if (previousTurnId) counts.delete(previousTurnId);
+      } else if (state.telemetryActiveTurnId === turnId) {
+        // A rebind may have carried an earlier turn's count into this user id.
+        if (!counts.has(turnId) && counts.size >= 32) {
+          counts.delete(counts.keys().next().value!);
+        }
+        counts.set(turnId, Math.min((counts.get(turnId) ?? 0) + 1, 1_000));
+      } else {
+        if (!counts.has(turnId) && counts.size >= 32) {
+          counts.delete(counts.keys().next().value!);
+        }
+        counts.set(turnId, 1);
+      }
+      state.telemetryMessageTurnId = turnId;
+    }
+  } else if (state.telemetryEligible && state.telemetryMessageTurnId) {
+    const counts = (state.telemetryTurnMessageCounts ??= new Map());
+    counts.set(
+      state.telemetryMessageTurnId,
+      Math.min((counts.get(state.telemetryMessageTurnId) ?? 0) + 1, 1_000),
+    );
+  }
 
   // New user-role message = a new turn. Clear legacy per-turn session metadata.
   if (msg.role === "user") {

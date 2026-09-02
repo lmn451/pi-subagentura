@@ -42,6 +42,20 @@ import {
 
 export const FAILED_TOMBSTONE_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Placeholder for a state whose attach/focus commands cannot be rebuilt —
+ * the backend is gone, the pane is gone, or the persisted identity no longer
+ * resolves. Rehydration must never throw, so it substitutes this.
+ *
+ * It is rendered where the UI promises a copy-pasteable command
+ * (`Attach: <cmd>`), so it must be unmistakably NOT a command: the previous
+ * bare `"unavailable"` read as one, for every backend. Keep the parenthesized
+ * shape — `interactive-supervisor-registration.ts` builds its own detailed
+ * variants of this and matches the convention.
+ */
+export const ATTACH_UNAVAILABLE =
+  "(attach command unavailable - pane could not be resolved)";
+
 interface RecoverableCompletionState {
   completionPolicy?: "each" | "group";
   completionGroupId?: string;
@@ -241,15 +255,31 @@ export function rehydrateInteractiveSubagents(
       try {
         return buildAttachCommandsForState(entry);
       } catch {
-        return { attachCommand: "", focusCommand: "" };
+        return {
+          attachCommand: ATTACH_UNAVAILABLE,
+          focusCommand: ATTACH_UNAVAILABLE,
+        };
       }
     })();
 
+    const telemetryEligible =
+      entry.telemetry !== undefined &&
+      payload.telemetry?.correlationId === entry.telemetry.correlationId &&
+      scope?.telemetry?.correlationId === entry.telemetry.correlationId;
+    const telemetryActiveTurnId =
+      telemetryEligible && entry.telemetry?.turnStartedAt !== undefined
+        ? entry.telemetry.activeTurnId
+        : undefined;
+    const telemetryMessageTurnId =
+      telemetryActiveTurnId === undefined
+        ? undefined
+        : (entry.telemetry?.messageTurnId ?? telemetryActiveTurnId);
     const rehydrated: InteractiveSubagentState = {
       id: entry.id,
       name: recoveredName,
       task: "",
       paneId: entry.paneId,
+      ...(entry.muxTerminalId ? { muxTerminalId: entry.muxTerminalId } : {}),
       windowName: entry.windowName,
       mux: entry.mux,
       muxSession: entry.muxSession,
@@ -275,6 +305,22 @@ export function rehydrateInteractiveSubagents(
       pendingDeliveries: [...entry.pendingDeliveries],
       deliveryReceipts: [...entry.deliveryReceipts],
       lifecycle: entry.lifecycle ? { ...entry.lifecycle } : {},
+      telemetryCorrelationId: entry.telemetry?.correlationId,
+      telemetryEligible,
+      telemetryActiveTurnId,
+      telemetryTurnStartedAt: telemetryActiveTurnId
+        ? entry.telemetry?.turnStartedAt
+        : undefined,
+      telemetryTurnMessageCounts: telemetryEligible
+        ? new Map(Object.entries(entry.telemetry?.messageCounts ?? {}))
+        : undefined,
+      telemetryMessageTurnId,
+      telemetryInvocationSource: entry.telemetry?.invocationSource,
+      telemetryCompletionPolicy: entry.telemetry?.completionPolicy,
+      telemetryAsync: entry.telemetry?.async,
+      telemetryDepth: entry.telemetry?.depth,
+      telemetryDepthBucket: entry.telemetry?.depthBucket,
+      telemetryModel: entry.telemetry?.model,
       // Legacy timestamp fields remain for API compatibility only.
       lastDeliveredEventTs: undefined,
       lastInjectedEventTs: undefined,

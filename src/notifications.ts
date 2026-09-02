@@ -28,6 +28,7 @@ import {
   type SessionOwnerToken,
 } from "./session-scope";
 import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
+import { captureTelemetry } from "./telemetry";
 interface NotificationGlobalState {
   __piSubagenturaPiRef?: ExtensionAPI;
   __piSubagenturaUi?: CompletionNotificationUi;
@@ -696,6 +697,15 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   } catch {
     return;
   }
+  captureTelemetry(
+    resolveLiveSessionScope(effectiveOwner)?.telemetry,
+    {
+      event: "completion_delivered",
+      delivery: "notification",
+      count: deliveryIds.length,
+    },
+    { dedupeKey: `notification:${deliveryIds.join(":")}` },
+  );
   notifyCompletionDelivery(
     target.ui,
     llm.map(({ pending, mode, trigger, status }) => ({

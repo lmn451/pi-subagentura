@@ -7,7 +7,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
+  hasPersistedTelemetryField,
+  loadInteractiveStates,
   removeInteractiveState,
+  updateInteractiveStates,
+  updatePersistedTelemetrySession,
 } from "./artifact";
 import {
   updateRunningSubagentFooter,
@@ -55,6 +59,7 @@ import {
   getStartedSessionScopes,
   registerSessionScope,
   removeSessionScope,
+  resolveLiveSessionScope,
   sessionOwner,
   setLegacyActiveSessionRefs,
   type SessionOwnerToken,
@@ -69,7 +74,18 @@ import {
   recoverCompletionTurnWakes,
   settleCompletionTurnWake,
 } from "./completion-turn";
-import { readExtensionSettings } from "./settings";
+import {
+  emitExtensionSettingsRegistration,
+  isTelemetryEnabled,
+  readExtensionSettings,
+} from "./settings";
+import {
+  captureTelemetry,
+  createTelemetrySession,
+  manifestDeliveryDedupeKey,
+  retireTelemetrySession,
+  resolveTelemetryMode,
+} from "./telemetry";
 
 function getGlobalState() {
   return typeof global !== "undefined" ? global : globalThis;
@@ -79,6 +95,26 @@ function logSessionError(event: string, error: unknown): void {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   debugLog("error", event, { error: message });
+}
+
+function recordPreparedManifest(
+  scope: SessionScope,
+  message: { details?: { completionIds?: string[] } },
+): void {
+  const completionIds = message.details?.completionIds ?? [];
+  if (completionIds.length === 0) return;
+  // The completion coordinator emits the same event for the same manifest.
+  // Both sites must resolve the live scope the same way, or the shared dedupe
+  // key lands in two different key sets and one delivery is counted twice.
+  captureTelemetry(
+    resolveLiveSessionScope(sessionOwner(scope))?.telemetry,
+    {
+      event: "completion_delivered",
+      delivery: "manifest",
+      count: completionIds.length,
+    },
+    { dedupeKey: manifestDeliveryDedupeKey(completionIds) },
+  );
 }
 
 function isInMemoryWorkflowPane(state: InteractiveSubagentState): boolean {
@@ -158,6 +194,91 @@ function cancellationLifecycleReason(reason: string | undefined) {
   }
 }
 
+function captureInteractiveLifecycleCancellation(
+  scope: SessionScope,
+  state: InteractiveSubagentState,
+): void {
+  const telemetry = scope.telemetry;
+  const turnId = state.telemetryActiveTurnId;
+  if (
+    !turnId ||
+    !telemetry ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const turnStartedAt = state.telemetryTurnStartedAt;
+  const messageTurnId = state.telemetryMessageTurnId;
+  const messageCount =
+    state.telemetryTurnMessageCounts?.get(turnId) ??
+    (messageTurnId === undefined
+      ? undefined
+      : state.telemetryTurnMessageCounts?.get(messageTurnId));
+  state.telemetryActiveTurnId = undefined;
+  state.telemetryTurnStartedAt = undefined;
+  state.telemetryTurnMessageCounts?.delete(turnId);
+  if (messageTurnId !== undefined && messageTurnId !== turnId) {
+    state.telemetryTurnMessageCounts?.delete(messageTurnId);
+  }
+  state.telemetryMessageTurnId = undefined;
+  try {
+    updateInteractiveStates(state.cwd, [
+      {
+        id: state.id,
+        update: (entry) => {
+          if (
+            entry.telemetry?.correlationId !== telemetry.correlationId ||
+            entry.telemetry.activeTurnId !== turnId
+          ) {
+            return;
+          }
+          delete entry.telemetry.activeTurnId;
+          delete entry.telemetry.turnStartedAt;
+          delete entry.telemetry.messageTurnId;
+          if (entry.telemetry.messageCounts) {
+            delete entry.telemetry.messageCounts[turnId];
+            if (messageTurnId !== undefined && messageTurnId !== turnId) {
+              delete entry.telemetry.messageCounts[messageTurnId];
+            }
+            if (Object.keys(entry.telemetry.messageCounts).length === 0) {
+              delete entry.telemetry.messageCounts;
+            }
+          }
+        },
+      },
+    ]);
+  } catch {
+    /* best effort; lifecycle cleanup must continue if state persistence fails */
+  }
+  captureTelemetry(
+    telemetry,
+    {
+      event: "task_completed",
+      execution: "interactive",
+      mux: state.mux,
+      unit: "turn",
+      invocation_source: state.telemetryInvocationSource ?? "interactive",
+      model: state.telemetryModel,
+      async: state.telemetryAsync ?? true,
+      depth: state.telemetryDepth,
+      depth_bucket: state.telemetryDepthBucket ?? "unknown",
+      completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+      status: "cancelled",
+      // `turnStartedAt` is an event-log `ts`, which the child writes from the
+      // same epoch clock, so this subtraction stays in one clock domain. A
+      // recovered timestamp from an old run can still be arbitrarily stale;
+      // `telemetryDurationMs` drops the result instead of reporting it.
+      duration_ms:
+        turnStartedAt === undefined ? undefined : Date.now() - turnStartedAt,
+      child_conversation_message_count: messageCount,
+    },
+    {
+      allowInactive: true,
+      dedupeKey: `task-completed:interactive:${state.id}:${turnId}`,
+    },
+  );
+}
+
 function clearFreshChildLineage(
   scope: SessionScope,
   reason: string | undefined,
@@ -188,14 +309,19 @@ function cleanupScopeGeneration(
   const destroysStandalonePanes =
     event?.reason === "new" || event?.reason === "fork";
   for (const state of [...scope.interactiveStates.values()]) {
-    removeInteractiveSubagentState(state);
-    if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
-    if (
-      (destroysStandalonePanes || isInMemoryWorkflowPane(state)) &&
+    const destroysPane =
+      destroysStandalonePanes || isInMemoryWorkflowPane(state);
+    const cancelsActivePane =
+      destroysPane &&
       (state.status === "running" ||
         state.status === "idle" ||
-        state.status === "unknown")
-    ) {
+        state.status === "unknown");
+    if (destroysPane) {
+      captureInteractiveLifecycleCancellation(scope, state);
+    }
+    removeInteractiveSubagentState(state);
+    if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
+    if (cancelsActivePane) {
       try {
         cancelInteractiveSubagentByState(state, {
           origin: lifecycleOrigin,
@@ -237,6 +363,13 @@ export function registerSessionHandlers(
   pi: ExtensionAPI,
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
+  /**
+   * Injection seam for the opt-in decision. Production always resolves it from
+   * settings; tests override it because `isTelemetryEnabled` is unconditionally
+   * false under vitest, which would otherwise leave every enabled-telemetry
+   * branch below unreachable.
+   */
+  resolveTelemetryEnabled: (pi: ExtensionAPI) => boolean = isTelemetryEnabled,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
@@ -260,6 +393,7 @@ export function registerSessionHandlers(
     markCompletionTurnWakeStarted(pi, event.prompt);
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
+    if (message) recordPreparedManifest(scope, message);
     return message ? { message } : undefined;
   });
   pi.on("agent_start", () => {
@@ -279,11 +413,18 @@ export function registerSessionHandlers(
   });
 
   pi.on("session_start", (event, ctx) => {
+    if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
     clearCompletionTurnWake(pi);
+    const continuityReason =
+      event.reason === "startup" ||
+      event.reason === "reload" ||
+      event.reason === "resume";
+    const previousTelemetry = scope.telemetry;
     if (scope.lifecycle === "started") {
       const previousOwner = sessionOwner(scope);
+      retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(previousOwner);
       clearSessionParsers(previousOwner);
       cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
@@ -304,18 +445,90 @@ export function registerSessionHandlers(
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const orchestratorMode = isOrchestratorMode(pi);
     const orchestratorV2Mode = isOrchestratorV2Enabled(pi);
+    const isChild =
+      !allowRootLineage || process.env.PI_SUBAGENTURA_CHILD === "1";
+    const persisted =
+      allowRootLineage && continuityReason
+        ? loadInteractiveStates(ctx.cwd)
+        : undefined;
+    const persistedTelemetry =
+      persisted && sessionId && persisted.parent === sessionId
+        ? persisted.telemetry
+        : undefined;
+    const activeSpawnTelemetry =
+      scope.spawnTreeContext?.role === "descendant"
+        ? {
+            correlationId: scope.spawnTreeContext.telemetrySessionId,
+            mode: scope.spawnTreeContext.telemetryMode,
+          }
+        : undefined;
+    const recoveredTelemetry = continuityReason
+      ? previousTelemetry?.correlationId
+        ? {
+            correlationId: previousTelemetry.correlationId,
+            mode: previousTelemetry.mode,
+          }
+        : (persistedTelemetry ??
+          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+            ? {
+                correlationId: activeSpawnTelemetry.correlationId,
+                mode: activeSpawnTelemetry.mode,
+              }
+            : undefined))
+      : undefined;
+    const mode =
+      recoveredTelemetry?.mode ??
+      (isChild
+        ? (activeSpawnTelemetry?.mode ?? "straight")
+        : resolveTelemetryMode(orchestratorMode, orchestratorV2Mode));
+    scope.telemetry = createTelemetrySession(
+      resolveTelemetryEnabled(pi),
+      mode,
+      recoveredTelemetry?.correlationId,
+    );
+    if (!isChild && recoveredTelemetry === undefined) {
+      captureTelemetry(scope.telemetry, { event: "session_started" });
+    }
+    // With telemetry off there is nothing to persist, so touching `.pi/`, the
+    // state lock, and the state file would make the opt-out observable. The one
+    // exception is a correlation an earlier opted-in run left behind: that has
+    // to be cleared.
+    if (
+      allowRootLineage &&
+      sessionId &&
+      (scope.telemetry.enabled || hasPersistedTelemetryField(ctx.cwd))
+    ) {
+      try {
+        updatePersistedTelemetrySession(
+          ctx.cwd,
+          sessionId,
+          scope.telemetry.enabled
+            ? {
+                correlationId: scope.telemetry.correlationId,
+                mode: scope.telemetry.mode,
+              }
+            : undefined,
+        );
+      } catch (error) {
+        logSessionError("telemetry_session_persist_failed", error);
+      }
+    }
     if (
       allowRootLineage &&
       sessionId &&
       scope.spawnTreeContext?.role !== "descendant"
     ) {
-      const maxDepth = readExtensionSettings(pi).maxDepth;
+      const maxDepth = readExtensionSettings(pi, { cwd: ctx.cwd }, (message) =>
+        ctx.ui?.notify?.(message, "warning"),
+      ).maxDepth;
       scope.spawnTreeContext = createRootSpawnTreeContext(
         sessionId,
         undefined,
         orchestratorMode,
         orchestratorV2Mode,
         maxDepth,
+        scope.telemetry.enabled ? scope.telemetry.correlationId : undefined,
+        scope.telemetry.mode,
       );
     }
     scope.isParentIdle =
@@ -372,6 +585,7 @@ export function registerSessionHandlers(
       if (scope.lifecycle !== "started") return;
 
       const owner = sessionOwner(scope);
+      retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
       cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);

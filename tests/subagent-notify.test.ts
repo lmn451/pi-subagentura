@@ -26,6 +26,7 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { settleCompletionParentTurn } from "../src/completion-coordinator";
+import { createTelemetrySession } from "../src/telemetry";
 
 // ── Hoisted mock: startSubagentJob must be mocked before any imports ──────
 const { mockStartSubagentJob } = vi.hoisted(() => ({
@@ -1825,6 +1826,108 @@ describe("read_subagent_artifact (output reporting)", () => {
         }),
       );
     } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["error", "cancelled"] as const)(
+    "does not report an inspected %s snapshot as a successful telemetry consumption",
+    async (outcome) => {
+      const id = outcome === "error" ? "ab12cd3800000012" : "ab12cd3800000013";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(id, parent, false);
+        writeOutput(art, `${outcome} diagnostic output`);
+        appendCompletionEvent(art, {
+          turnId: `${outcome}-turn`,
+          eventId: `${outcome}-event`,
+          outcome,
+          source: "agent_settled",
+          ts: 2,
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
+        const telemetryPayloads: Array<{ event?: string }> = [];
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (_input, init) => {
+            telemetryPayloads.push(JSON.parse(String(init?.body)));
+            return new Response(null, { status: 200 });
+          }),
+        );
+
+        await readTool.execute(
+          `read-${outcome}`,
+          { id },
+          undefined,
+          undefined,
+          {} as any,
+        );
+
+        expect(
+          telemetryPayloads.filter(
+            (payload) => payload.event === "pi_subagentura_result_consumed",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        vi.unstubAllGlobals();
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("reports a successful interactive result only on its first read", async () => {
+    const id = "ab12cd3800000014";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false);
+      writeOutput(art, "successful output");
+      appendCompletionEvent(art, {
+        turnId: "successful-turn",
+        eventId: "successful-event",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
+      const telemetryPayloads: Array<{ event?: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input, init) => {
+          telemetryPayloads.push(JSON.parse(String(init?.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+
+      await readTool.execute(
+        "read-first",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      await readTool.execute(
+        "read-again",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(
+        telemetryPayloads.filter(
+          (payload) => payload.event === "pi_subagentura_result_consumed",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
       rmSync(parent, { recursive: true, force: true });
     }
   });

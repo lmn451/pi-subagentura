@@ -6,6 +6,7 @@ import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
 import type { PendingJobDelivery } from "./notifications";
+import type { TelemetrySession } from "./telemetry";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
 const SESSION_SCOPE_ID_COUNTER_KEY = "__piSubagenturaSessionScopeIdCounter";
@@ -38,6 +39,8 @@ export interface SessionScope {
   inProcessJobs: Map<string, JobState>;
   pendingInProcessDeliveries: PendingJobDelivery[];
   interactiveStates: Map<string, InteractiveSubagentState>;
+  /** Anonymous correlation state for this exact lifecycle generation. */
+  telemetry?: TelemetrySession;
 }
 
 /** External registrations may omit runtime-owned collections and streaming state. */
@@ -56,6 +59,7 @@ export interface SessionScopeRegistration {
   inProcessJobs?: Map<string, JobState>;
   pendingInProcessDeliveries?: PendingJobDelivery[];
   interactiveStates?: Map<string, InteractiveSubagentState>;
+  telemetry?: TelemetrySession;
 }
 
 export interface SessionOwnerToken {
@@ -123,6 +127,7 @@ export function createSessionScope(
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
+    telemetry: undefined,
   };
 }
 
@@ -180,6 +185,9 @@ export function registerSessionScope(
     if (registration.interactiveStates !== undefined) {
       existing.interactiveStates = registration.interactiveStates;
     }
+    if (Object.hasOwn(registration, "telemetry")) {
+      existing.telemetry = registration.telemetry;
+    }
     return existing;
   }
 
@@ -201,6 +209,7 @@ export function registerSessionScope(
         pendingInProcessDeliveries:
           registration.pendingInProcessDeliveries ?? [],
         interactiveStates: registration.interactiveStates ?? new Map(),
+        telemetry: registration.telemetry,
       };
   registry.set(scope.id, scope);
   return scope;

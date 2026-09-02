@@ -260,7 +260,7 @@ export interface WorkflowAgentOpts {
   phase?: string;
   model?: string;
   persona?: string;
-  /** Defaults to "process" (tmux/zellij); use "in-process" to opt out. */
+  /** Defaults to "process" (attachable multiplexer); use "in-process" to opt out. */
   isolation?: string;
   /** Accepted for fidelity but a no-op in v2. */
   agentType?: string;

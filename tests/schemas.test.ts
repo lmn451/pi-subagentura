@@ -772,7 +772,7 @@ describe("InteractiveParams", () => {
     );
   });
 
-  /* ---------- optional `mux` (union "auto" | "tmux" | "zellij") ---------- */
+  /* ---------- optional `mux` (auto | tmux | zellij | herdr) ---------- */
 
   it("accepts missing mux", () => {
     expect(check(InteractiveParams)({ task: "t" })).toBe(true);
@@ -796,6 +796,12 @@ describe("InteractiveParams", () => {
     ).toBe(true);
   });
 
+  it("accepts mux 'herdr'", () => {
+    expect(check(InteractiveParams)({ task: "t", mux: "herdr" as const })).toBe(
+      true,
+    );
+  });
+
   it("rejects mux 'screen'", () => {
     expect(check(InteractiveParams)({ task: "t", mux: "screen" })).toBe(false);
   });
@@ -813,9 +819,9 @@ describe("InteractiveParams", () => {
       task: "t",
       mux: "hyper",
     });
-    expect(msgs.some((m) => /auto|tmux|zellij|constant|anyOf/i.test(m))).toBe(
-      true,
-    );
+    expect(
+      msgs.some((m) => /auto|tmux|zellij|herdr|constant|anyOf/i.test(m)),
+    ).toBe(true);
   });
 
   /* ---------- edge: null / undefined / array input ---------- */

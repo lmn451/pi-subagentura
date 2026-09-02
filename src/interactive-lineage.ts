@@ -46,6 +46,8 @@ type JsonRecord = Record<string, unknown>;
 export interface LineagePaneRef {
   backend: string;
   paneId: string;
+  /** Stable backend terminal identity when available (Herdr). */
+  muxTerminalId?: string;
   muxSession?: string;
   windowName?: string;
 }
@@ -757,7 +759,8 @@ export async function projectManifests(
     }
     if (
       manifest.pane.backend !== "tmux" &&
-      manifest.pane.backend !== "zellij"
+      manifest.pane.backend !== "zellij" &&
+      manifest.pane.backend !== "herdr"
     ) {
       issues.push({
         kind: "malformed",
@@ -1282,7 +1285,7 @@ function validatePaneRef(
   }
   rejectUnknownKeys(
     value,
-    new Set(["backend", "paneId", "muxSession", "windowName"]),
+    new Set(["backend", "paneId", "muxTerminalId", "muxSession", "windowName"]),
     "pane",
   );
   return {
@@ -1295,6 +1298,12 @@ function validatePaneRef(
       value.paneId,
       "pane.paneId",
       bounds.maxStringBytes,
+    ),
+    ...optionalNonEmptyObjectString(
+      value,
+      "muxTerminalId",
+      "pane.muxTerminalId",
+      bounds,
     ),
     ...optionalObjectString(value, "muxSession", "pane.muxSession", bounds),
     ...optionalObjectString(value, "windowName", "pane.windowName", bounds),
@@ -1313,6 +1322,24 @@ function optionalObjectString(
     bounds.maxStringBytes,
   );
   return value === undefined ? {} : { [key]: value };
+}
+
+function optionalNonEmptyObjectString(
+  object: JsonRecord,
+  key: string,
+  label: string,
+  bounds: LineageBounds,
+): Record<string, string> {
+  const value = optionalBoundedString(
+    object[key],
+    label,
+    bounds.maxStringBytes,
+  );
+  if (value === undefined) return {};
+  if (value.length === 0 || value.trim() !== value || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return { [key]: value };
 }
 
 function makeNode(

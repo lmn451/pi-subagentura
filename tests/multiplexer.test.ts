@@ -29,6 +29,8 @@ describe("getMux relaxed-spawn resolution", () => {
     delete process.env.TMUX;
     delete process.env.ZELLIJ;
     delete process.env.ZELLIJ_SESSION_NAME;
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_SOCKET_PATH;
   });
 
   afterEach(() => {
@@ -115,6 +117,31 @@ describe("getMux relaxed-spawn resolution", () => {
     expect(() => getMux({ preference: "auto" })).toThrow(
       "No multiplexer available",
     );
+  });
+
+  it("getMux auto prefers the Herdr pane over inherited outer mux markers", async () => {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
+    process.env.ZELLIJ_SESSION_NAME = "outer-zellij";
+    process.env.TMUX = "/tmp/tmux/default,1,0";
+    vi.doMock(
+      "node:child_process",
+      () =>
+        ({
+          execFileSync: (_file: string, args: string[]) => {
+            if (args.join(" ").includes("command -v 'herdr'")) return "";
+            throw new Error("unexpected exec: " + args.join(" "));
+          },
+        }) as unknown as typeof import("node:child_process"),
+    );
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(getMux({ preference: "auto" }).name).toBe("herdr");
   });
 
   it("getMux explicit preference bypasses all env checks", async () => {
@@ -331,9 +358,14 @@ describe("MUX_CAPABILITIES", () => {
       await importFresh<typeof import("../src/multiplexer")>(
         "../src/multiplexer",
       );
-    expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual(["tmux", "zellij"]);
+    expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
+      "herdr",
+      "tmux",
+      "zellij",
+    ]);
     expect(muxCapabilities("tmux")).toBe(MUX_CAPABILITIES.tmux);
     expect(muxCapabilities("zellij")).toBe(MUX_CAPABILITIES.zellij);
+    expect(muxCapabilities("herdr")).toBe(MUX_CAPABILITIES.herdr);
   });
 
   it("is the single source of truth both backends expose", async () => {
@@ -347,11 +379,15 @@ describe("MUX_CAPABILITIES", () => {
     const { ZellijMultiplexer } = await importFresh<
       typeof import("../src/multiplexer-zellij")
     >("../src/multiplexer-zellij");
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
 
     expect(new TmuxMultiplexer().capabilities).toEqual(MUX_CAPABILITIES.tmux);
     expect(new ZellijMultiplexer().capabilities).toEqual(
       MUX_CAPABILITIES.zellij,
     );
+    expect(new HerdrMultiplexer().capabilities).toEqual(MUX_CAPABILITIES.herdr);
   });
 });
 

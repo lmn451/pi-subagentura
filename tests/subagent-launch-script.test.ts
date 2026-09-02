@@ -30,6 +30,8 @@ import {
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
+import { createTelemetrySession } from "../src/telemetry";
+import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -289,6 +291,8 @@ describe("spawn-time state persistence", () => {
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
     vi.doUnmock("node:child_process");
+    vi.unstubAllGlobals();
+    clearSessionScopes();
     for (const name of SPAWN_ENV_NAMES) {
       const value = savedEnv[name];
       if (value === undefined) delete process.env[name];
@@ -314,6 +318,67 @@ describe("spawn-time state persistence", () => {
     // accept an unintended sibling such as `${cwd}-other/...`.
     expect(relative(cwd, state.artifactDir).split(sep)[0]).not.toBe("..");
     expect(isAbsolute(relative(cwd, state.artifactDir))).toBe(false);
+  });
+
+  it("records one created agent when an interactive pane launches", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const spawnTreeContext = createRootSpawnTreeContext(
+      SESSION,
+      cwd,
+      false,
+      true,
+      4,
+    );
+    const scope = registerSessionScope({
+      id: 777,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as never,
+      telemetry: createTelemetrySession(true, "orchestrator_v2"),
+      spawnTreeContext,
+    });
+    const { launchInteractiveSubagent } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "never sent to telemetry",
+      cwd,
+      parentSessionId: SESSION,
+      sessionScope: scope,
+      spawnTreeContext,
+      telemetryInvocationSource: "interactive",
+      telemetryAsync: true,
+      completionPolicy: "each",
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      event: "pi_subagentura_agent_created",
+      properties: {
+        mode: "orchestrator_v2",
+        execution: "interactive",
+        mux: "tmux",
+        invocation_source: "interactive",
+        depth: 1,
+        completion_policy: "each",
+      },
+    });
+    expect(JSON.stringify(payloads)).not.toContain("never sent to telemetry");
+    expect(
+      loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
+    ).toMatchObject({ depth: 1, depthBucket: "1", mux: "tmux" });
   });
 
   it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {
@@ -345,7 +410,15 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
-      spawnTreeContext: createRootSpawnTreeContext("pi", cwd),
+      spawnTreeContext: createRootSpawnTreeContext(
+        "pi",
+        cwd,
+        false,
+        false,
+        undefined,
+        "123e4567-e89b-42d3-a456-426614174000",
+        "orchestrator_v2",
+      ),
     });
 
     const script = readFileSync(state.launchScriptFile, "utf8");
@@ -354,6 +427,7 @@ describe("spawn-time state persistence", () => {
     expect(script).not.toContain("PI_SUBAGENTURA_LINEAGE_SESSION_ROOT=");
     expect(script).not.toContain("PI_SUBAGENTURA_AGENT_ID=");
     expect(script).not.toContain("PI_SUBAGENTURA_DEPTH=");
+    expect(script).not.toContain("PI_SUBAGENTURA_TELEMETRY_SESSION_ID=");
     const bootstrapName = readdirSync(state.artifactDir).find((name) =>
       name.startsWith(".lineage-bootstrap-"),
     );
@@ -366,6 +440,8 @@ describe("spawn-time state persistence", () => {
       rootId: "pi",
       currentAgentId: state.id,
       depth: 1,
+      telemetrySessionId: "123e4567-e89b-42d3-a456-426614174000",
+      telemetryMode: "orchestrator_v2",
     });
   });
 
@@ -385,6 +461,32 @@ describe("spawn-time state persistence", () => {
     expect(entry?.mux).toBe(state.mux);
     expect(entry?.artifactDir).toBe(state.artifactDir);
     expect(entry?.sessionFile).toBe(state.sessionFile);
+  });
+
+  it("persists only a sanitized custom model telemetry dimension", async () => {
+    const { launchInteractiveSubagent } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    const state = launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      parentSessionId: "pi",
+      model: "private-provider/customer-deployment-secret",
+      sessionScope: {
+        id: 1,
+        generation: 1,
+        interactiveStates: new Map(),
+        telemetry: createTelemetrySession(true),
+      } as any,
+    });
+
+    expect(loadInteractiveStates(cwd)?.states[state.id]?.telemetry?.model).toBe(
+      "custom",
+    );
+    expect(readFileSync(stateFilePath(cwd), "utf8")).not.toContain(
+      "customer-deployment-secret",
+    );
   });
 
   it("the state has parentSessionId populated for terminal cleanup", async () => {

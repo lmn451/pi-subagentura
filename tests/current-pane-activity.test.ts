@@ -10,6 +10,9 @@ const PANE_ENVIRONMENT_KEYS = [
   "ZELLIJ",
   "ZELLIJ_SESSION_NAME",
   "ZELLIJ_PANE_ID",
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
   "PI_SUBAGENTURA_CHILD",
 ] as const;
 const originalPaneEnvironment = new Map(
@@ -156,6 +159,37 @@ describe("current pane activity", () => {
       paneId: "42",
       session: "main",
     });
+  });
+
+  it("prefers Herdr activity over inherited outer mux markers", async () => {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
+    process.env.HERDR_PANE_ID = "w1:p2";
+    process.env.ZELLIJ = "0";
+    process.env.TMUX = "/tmp/tmux.sock,123,0";
+    // No mock branch for a Herdr probe on purpose: Herdr's focus is
+    // server-global and proves nothing about an attached client, so
+    // `getPaneActivityAsync` answers "unknown" WITHOUT issuing any command.
+    // Any spawn here is the regression.
+    const commands: string[][] = [];
+    installMockChildProcess((args) => {
+      commands.push([...args]);
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
+      mux: "herdr",
+      paneId: "w1:p2",
+      session: "/tmp/herdr.sock",
+    });
+    // Herdr wins the backend race over the inherited TMUX/ZELLIJ markers, so
+    // neither of those backends gets probed either.
+    expect(commands).toEqual([]);
   });
 
   it("reports zellij inactive when no client is attached", async () => {
