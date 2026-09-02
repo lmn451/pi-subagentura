@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-09-02
+
 ### Added
 
+- Added optional persisted extension settings: project-level max-depth values
+  take precedence over global values, activity-list hiding persists globally
+  only, and malformed persisted values are ignored without failing startup.
+- Added default-on anonymous lifecycle telemetry with personless, bounded events,
+  documented opt-outs, and no prompt or output content.
 - Interactive sub-agents and process-backed workflow agents now support Herdr
   alongside tmux and Zellij, including pane creation, messaging, focus,
   bounded capture, alias-aware liveness and cancellation, stable direct attach,
@@ -203,7 +210,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...HEAD
+[3.6.0]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/lmn451/pi-subagentura/compare/v3.4.2...v3.5.0
 [3.4.2]: https://github.com/lmn451/pi-subagentura/compare/v3.4.0...v3.4.2
 [3.4.0]: https://github.com/lmn451/pi-subagentura/compare/v3.3.1...v3.4.0
