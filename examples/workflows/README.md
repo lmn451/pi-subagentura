@@ -31,32 +31,23 @@ workflow({
 To reuse a script by name, pass the same source to `save_workflow` once. Saving
 `ralplan-occ.mjs` as `ralplan`, for example, immediately exposes
 `/workflow:ralplan`. Type `/workflow:` to discover every saved workflow, then
-write the task naturally: +
+write the task naturally:
 
 ```text
 /workflow:ralplan rework auth
 ```
 
--
+The command sends `rework auth` through the normal parent LLM turn. The model
+reads the workflow's `meta.inputSchema`, infers the structured arguments, and
+invokes the existing `workflow({ name, args })` tool. Users do not write JSON.
 
-The command passes `rework auth` to the workflow as its plain-text `args` value.
-Structured `workflow({ name, args })` calls remain available for programmatic
-use.
-
-All bundled examples accept either an args object or its JSON-string form. JSON
-strings are useful when another tool boundary serializes the payload:
+Programmatic callers can still invoke the tool directly:
 
 ```js
 workflow({
-  name: "ralplan-consensus",
-  args: '{"idea":"Review src/auth.ts","maxIterations":2}',
+  name: "ralplan",
+  args: { idea: "Review src/auth.ts and produce an implementation plan" },
 });
-```
-
-The equivalent saved-workflow command needs no JSON:
-
-```text
-/workflow:ralplan Review src/auth.ts and produce an implementation plan
 ```
 
 `save_workflow` stores workflows in `<project>/.pi/workflows/` by default.

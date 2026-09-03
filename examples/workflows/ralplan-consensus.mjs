@@ -5,6 +5,23 @@ export const meta = {
   name: "ralplan-consensus",
   description:
     "Compact SHORT-only RALPLAN with verified immutable Markdown artifacts, independent same-draft review, five-round cap, and pending host approval.",
+  argumentHint: "<planning request>",
+  inputSchema: {
+    type: "object",
+    required: ["idea"],
+    properties: {
+      idea: {
+        type: "string",
+        description: "The implementation problem to plan.",
+      },
+      maxIterations: {
+        type: "integer",
+        description: "Consensus rounds, clamped to 1–5.",
+      },
+      artifactsDir: { type: "string" },
+      planName: { type: "string" },
+    },
+  },
   phases: [
     { title: "Ralplan consensus" },
     { title: "Round N - Planner" },

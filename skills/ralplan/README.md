@@ -11,6 +11,9 @@ Save the bundled example as `ralplan`, then invoke it with ordinary text:
 /workflow:ralplan rework auth
 ```
 
+The parent LLM maps the natural-language request to the workflow's declared
+`inputSchema` and invokes the existing generic `workflow` tool.
+
 ## Contract
 
 - Planner writes `drafts/<planName>_draft-rN.md`.

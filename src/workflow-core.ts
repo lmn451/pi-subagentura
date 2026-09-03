@@ -311,6 +311,8 @@ export type WorkflowAgentRunner = (req: {
 export interface WorkflowMeta {
   name: string;
   description: string;
+  argumentHint?: string;
+  inputSchema?: unknown;
   whenToUse?: string;
   phases?: Array<{ title: string; detail?: string }>;
   [k: string]: unknown;

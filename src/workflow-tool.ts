@@ -1594,7 +1594,6 @@ export function registerWorkflowTool(
       name: string,
       parsed: { name: string | null; argsJson: string | null },
       ctx: ExtensionCommandContext,
-      plainTextArgs = false,
     ) {
       const items = listWorkflows(ctx.cwd);
       const known = items.some((w) => w.name === name);
@@ -1606,12 +1605,8 @@ export function registerWorkflowTool(
       }
       try {
         const argsValue = parsed.argsJson
-          ? plainTextArgs
-            ? parsed.argsJson
-            : parseArgsJson(parsed.argsJson)
-          : plainTextArgs
-            ? await promptForWorkflowText(ctx)
-            : await promptForWorkflowArgs(ctx);
+          ? parseArgsJson(parsed.argsJson)
+          : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
         const { job, meta } = startSavedWorkflowFromCommand(
           name,
@@ -1651,12 +1646,27 @@ export function registerWorkflowTool(
           summary ? ` — ${summary}` : ""
         }`,
         handler: async (args: string, ctx: ExtensionCommandContext) => {
-          await runNamedWorkflow(
-            name,
-            { name, argsJson: args.trim() || null },
-            ctx,
-            true,
-          );
+          const script = loadSavedWorkflow(name, ctx.cwd);
+          if (!script) {
+            const text = `No saved workflow named "${name}".`;
+            ctx.ui.notify(text);
+            sendCommandMessage(text);
+            return;
+          }
+          try {
+            const meta = parseWorkflow(script).meta;
+            const prompt = buildSavedWorkflowInvocationPrompt(
+              name,
+              args.trim(),
+              meta,
+            );
+            ctx.ui.notify(`Preparing workflow ${name}.`);
+            pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            ctx.ui.notify(`Workflow not started: ${message}`, "error");
+          }
         },
       });
     };
@@ -1791,14 +1801,6 @@ export function registerWorkflowTool(
     }
   }
 
-  async function promptForWorkflowText(
-    ctx: ExtensionCommandContext,
-  ): Promise<string | typeof CANCELLED_ARGS_PROMPT> {
-    const raw = await ctx.ui.editor("Workflow request:", "");
-    if (raw == null) return CANCELLED_ARGS_PROMPT;
-    return String(raw).trim();
-  }
-
   async function promptForWorkflowArgs(
     ctx: ExtensionCommandContext,
   ): Promise<unknown | typeof CANCELLED_ARGS_PROMPT> {
@@ -1815,6 +1817,37 @@ export function registerWorkflowTool(
     return trimmed ? parseArgsJson(trimmed) : undefined;
   }
 
+  function buildSavedWorkflowInvocationPrompt(
+    name: string,
+    request: string,
+    meta: WorkflowMeta,
+  ): string {
+    const contract = JSON.stringify(
+      {
+        name,
+        description: meta.description,
+        argumentHint: meta.argumentHint,
+        inputSchema: meta.inputSchema,
+      },
+      null,
+      2,
+    ).slice(0, 8_000);
+    return [
+      `You are handling the \`/workflow:${name}\` command.`,
+      "",
+      "Invoke the saved workflow through the generic `workflow` tool. Do not perform the workflow's work yourself.",
+      "Infer the structured `args` from the user's natural-language request and the declared workflow input contract below.",
+      "Use documented defaults for omitted optional values. If a required value cannot be inferred safely, ask one concise clarification instead of guessing.",
+      `Call \`workflow\` with \`name: ${JSON.stringify(name)}\` and the inferred \`args\`.`,
+      "",
+      "WORKFLOW INPUT CONTRACT:",
+      contract,
+      "",
+      "USER REQUEST:",
+      request || "(no request text supplied)",
+    ].join("\n");
+  }
+
   function buildWorkflowCreationPrompt(task: string): string {
     return [
       "You are handling the `/workflow <task>` command.",
@@ -1822,10 +1855,10 @@ export function registerWorkflowTool(
       "Create a reusable JavaScript workflow for the user's task, save it, and run it immediately.",
       "",
       "Requirements:",
-      "1. Design a bounded workflow script with `export const meta = { name, description, phases }`.",
-      "2. Accept a plain `args` string as the natural-language task input; structured object args may provide optional configuration.",
+      "1. Design a bounded workflow script with `export const meta = { name, description, argumentHint, inputSchema, phases }`.",
+      "2. Declare a complete JSON-compatible `inputSchema` so `/workflow:<name>` can infer structured arguments from natural-language requests.",
       "3. Save with `save_workflow` using a lowercase slug name. Use project scope unless the user explicitly requests a global workflow.",
-      "4. Immediately start it with the `workflow` tool by saved `name` and suitable `args`.",
+      "4. Immediately start it with the `workflow` tool by saved `name` and suitable structured `args`.",
       "5. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
       "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
       "7. Report the saved workflow name, its `/workflow:<name>` command, and returned workflowId.",

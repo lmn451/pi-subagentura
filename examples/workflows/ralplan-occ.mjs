@@ -9,6 +9,33 @@ export const meta = {
   name: "ralplan-occ",
   description:
     "Reference skill-to-workflow translation of OCC RALPLAN with verified artifacts, isolated reviews, bounded revision, and pending approval.",
+  argumentHint: "<planning request>",
+  inputSchema: {
+    type: "object",
+    required: ["idea"],
+    properties: {
+      idea: {
+        type: "string",
+        description: "The implementation problem to plan.",
+      },
+      deliberate: {
+        enum: [true, false, "auto"],
+        description: "Enable or auto-detect high-risk planning requirements.",
+      },
+      requirementsTraceability: {
+        type: "boolean",
+        description: "Add advisory requirement coverage analysis.",
+      },
+      maxIterations: {
+        type: "integer",
+        description: "Consensus rounds, clamped to 1–5.",
+      },
+      artifactsDir: { type: "string" },
+      planName: { type: "string" },
+      architectModel: { type: "string" },
+      criticModel: { type: "string" },
+    },
+  },
   phases: [
     { title: "Gate" },
     { title: "Requirements" },

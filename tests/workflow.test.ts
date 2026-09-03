@@ -2745,7 +2745,7 @@ describe("registerWorkflowTool", () => {
     const saved = new Map([
       [
         "ralplan",
-        'export const meta = { name: "ralplan", description: "Consensus planning" };\nreturn args;',
+        'export const meta = { name: "ralplan", description: "Consensus planning", argumentHint: "<planning request>", inputSchema: { type: "object", required: ["idea"], properties: { idea: { type: "string" } } } };\nreturn args;',
       ],
     ]);
     const projectSaved = new Map([
@@ -2782,6 +2782,7 @@ describe("registerWorkflowTool", () => {
         sessionHandlers.push({ event, handler }),
       ),
       sendMessage: vi.fn(),
+      sendUserMessage: vi.fn(),
     };
     // The test double intentionally implements only registration methods used here.
     const extensionApi = pi as unknown as Parameters<
@@ -2855,6 +2856,7 @@ describe("registerWorkflowTool", () => {
     const command = commands.find(
       (candidate) => candidate.name === "workflow:ralplan",
     )!;
+    const jobsBefore = workflowJobRegistry.size;
     await command.handler("rework auth", {
       cwd: "/repo",
       model: undefined,
@@ -2862,15 +2864,16 @@ describe("registerWorkflowTool", () => {
       sessionManager: { getSessionId: () => "parent" },
       ui: { notify: vi.fn() },
     });
-    const job = [...workflowJobRegistry.values()].find(
-      (candidate) => candidate.name === "ralplan",
-    )!;
-    try {
-      const run = await job.promise;
-      expect(run.result).toBe("rework auth");
-    } finally {
-      workflowJobRegistry.delete(job.id);
-    }
+
+    expect(workflowJobRegistry.size).toBe(jobsBefore);
+    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    const [prompt, delivery] = pi.sendUserMessage.mock.calls[0];
+    expect(prompt).toContain("generic `workflow` tool");
+    expect(prompt).toContain('"name": "ralplan"');
+    expect(prompt).toContain('"required": [');
+    expect(prompt).toContain('"idea"');
+    expect(prompt).toContain("rework auth");
+    expect(delivery).toEqual({ deliverAs: "followUp" });
   });
 
   it("/workflow queues a prompt to create, save, and run a workflow", async () => {
@@ -2903,6 +2906,8 @@ describe("registerWorkflowTool", () => {
     expect(ctx.sendUserMessage).toHaveBeenCalledTimes(1);
     const [prompt, opts] = ctx.sendUserMessage.mock.calls[0];
     expect(prompt).toContain("save_workflow");
+    expect(prompt).toContain("inputSchema");
+    expect(prompt).toContain("project scope");
     expect(prompt).toContain("workflow` tool");
     expect(prompt).toContain("build a release checklist");
     expect(prompt).not.toContain("Big Pickle");

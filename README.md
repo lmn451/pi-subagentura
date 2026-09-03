@@ -74,10 +74,12 @@ pi --orchestrator
 
 `/workflow` asks the parent to create, save, and immediately run a reusable
 workflow. Each saved workflow is also exposed as `/workflow:<name>`—for example,
-`/workflow:ralplan rework auth`. The trailing text is passed to the workflow as
-its natural-language input; users do not need to construct JSON. Type
-`/workflow:` to discover saved workflows. `/workflows` opens the picker, and
-`/workflow-tree` shows live phases, agents, and cancellation controls.
+`/workflow:ralplan rework auth`. That command starts a normal parent-model turn:
+the LLM reads the workflow's declared `inputSchema`, infers the structured
+arguments from `rework auth`, and invokes the generic `workflow` tool. Users do
+not need to construct JSON. Type `/workflow:` to discover saved workflows.
+`/workflows` remains available as the picker.
+
 Workflows are project-scoped by default under `<project>/.pi/workflows/`.
 Project workflows override same-named global workflows stored under
 `~/.pi-subagentura/workflows/`. Pass `scope: "global"` to `save_workflow` only

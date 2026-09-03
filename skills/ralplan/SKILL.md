@@ -21,8 +21,10 @@ ordinary text:
 /workflow:ralplan rework auth
 ```
 
-The named workflow command passes that text directly to this code-enforced
-planning workflow. No JSON arguments or RALPLAN-specific host command is needed.
+The named command sends that request to the parent LLM. The model uses this
+workflow's declared `inputSchema` to infer `{ idea: "rework auth" }` and invokes
+the generic `workflow` tool. The user supplies neither JSON nor a
+RALPLAN-specific host command.
 
 ## Consensus roles
 

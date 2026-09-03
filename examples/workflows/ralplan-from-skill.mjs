@@ -32,6 +32,25 @@ export const meta = {
     "the host environment provides agent execution via any available method. " +
     "Non-deliberate ideas run in SHORT mode by default; DELIBERATE mode auto-detects " +
     "from the idea text and forces pre-mortem + expanded test plan.",
+  argumentHint: "<planning request>",
+  inputSchema: {
+    type: "object",
+    required: ["idea", "workingDir"],
+    properties: {
+      idea: {
+        type: "string",
+        description: "The implementation problem to plan.",
+      },
+      workingDir: {
+        type: "string",
+        description: "Absolute project directory; infer from the current cwd.",
+      },
+      specPath: { type: "string" },
+      planName: { type: "string" },
+      deliberate: { type: "boolean" },
+      maxIterations: { type: "integer" },
+    },
+  },
   phases: [
     {
       title: "Planning",
