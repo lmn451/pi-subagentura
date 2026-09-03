@@ -267,18 +267,21 @@ pi install npm:@juanibiapina/pi-extension-settings
 The extension exposes three settings: `max-depth`, `hide-agent-list`, and
 `telemetry`. Use `/extension-settings` for global settings. Whether a project
 value can override the global one is per-setting — see the scope rules below;
-only `max-depth` is project-overridable. The optional package's
+`max-depth` and `telemetry` are project-overridable, while `hide-agent-list`
+alone remains global-only. The optional package's
 `/extension-settings-local` command is not session-cwd-correct in the pinned
 `@juanibiapina/pi-extension-settings@0.9.1`: it resolves local settings from
 Node's process cwd instead of Pi's command context. Do not use that command for
 cross-project sessions. It also still renders a `hide-agent-list` row, but
 setting it there is a no-op because that setting is global-only. For a
-session-local `max-depth`, edit `<session-cwd>/.pi/settings-extensions.json`
-manually, using the exact cwd of the Pi session. `max-depth` controls
-Orchestratorv2 lineage depth and defaults to `2`; `hide-agent-list` defaults to
-`false` and only hides the compact per-agent activity widget rows. `telemetry`
-controls anonymous product analytics, defaults to the string `"true"` (enabled),
-and is global-only. Persisted `telemetry` values must be `"true"` or `"false"`.
+session-local `max-depth` or `telemetry`, edit
+`<session-cwd>/.pi/settings-extensions.json` manually, using the exact cwd of
+the Pi session. `max-depth` controls Orchestratorv2 lineage depth and defaults
+to `2`; `hide-agent-list` defaults to `false` and only hides the compact
+per-agent activity widget rows. `telemetry` controls anonymous product
+analytics, defaults to the string `"true"` (enabled), and is
+project-overridable. Persisted `telemetry` values must be `"true"` or
+`"false"`.
 
 The running footer, list/status tools, and visual agent supervisor remain
 available.
@@ -297,15 +300,20 @@ All three settings can also be configured without the panel. The global file
 ```
 
 The project-local file `<project>/.pi/settings-extensions.json` is read for
-`max-depth` only:
+`max-depth` and `telemetry`; `hide-agent-list` remains global-only:
 
 ```json
 {
   "pi-subagentura": {
-    "max-depth": "6"
+    "max-depth": "6",
+    "telemetry": "true"
   }
 }
 ```
+
+Here `<project>` must be the authoritative Pi session cwd. When no
+authoritative cwd is available, only the global file is read; the extension
+never uses Node's process cwd for a local lookup.
 
 Scope rules:
 
@@ -313,14 +321,18 @@ Scope rules:
 - `hide-agent-list` is read **only** from the global file. A checked-out
   repository must not be able to hide agent activity from whoever opens it, so a
   project-local `hide-agent-list` is ignored.
-- `telemetry` is read **only** from the global file. A project-local
-  `telemetry` value is ignored, so a checked-out repository cannot change the
-  user's telemetry choice.
+- `telemetry` is read project-local first, with the global file as fallback, and
+  defaults to `"true"` when neither scope supplies a valid value. Both
+  persisted values are authoritative at project scope: local `"true"` and local
+  `"false"` each override the global value.
 
-An invalid persisted value never aborts a session: the extension keeps the
-documented defaults (`max-depth` `2`, `hide-agent-list` `false`, `telemetry`
-`"true"`) and reports the ignored value in the TUI at the start of a root
-session, and to the debug log otherwise.
+An invalid persisted value never aborts a session. Every global or project
+file that is read is validated; malformed files or values are reported without
+exposing file contents, the invalid candidate is ignored, and resolution
+continues to the next applicable scope or documented defaults (`max-depth` `2`,
+`hide-agent-list` `false`, `telemetry` `"true"`). The extension reports the
+ignored setting in the TUI at the start of a root session, and to the debug log
+otherwise.
 
 Telemetry configuration has three source families: environment variables,
 persisted extension settings, and launch flags. The extension also exposes these
@@ -329,12 +341,15 @@ validated launch flags for advanced configurations:
 - `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`. Unlike the persisted setting, an invalid value here fails fast.
 - `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global setting. It also works without the optional settings panel. The flag is on-only: it cannot override a persisted `hide-agent-list` of `true`, so to show the rows again clear the global setting.
 - `--subagentura-telemetry` — presence-only boolean flag, enabled by default; it
-  is not an opt-out.
+  is not an opt-out and does not bypass persisted telemetry precedence.
 - `--no-subagentura-telemetry` — presence-only opt-out for anonymous product analytics. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
 
-Telemetry opt-outs are monotone: any environment opt-out, persisted global
-`telemetry: "false"`, or the presence-only `--no-subagentura-telemetry` flag
-disables telemetry; no source can force-enable it.
+Telemetry precedence is explicit: environment opt-outs and the
+presence-only `--no-subagentura-telemetry` flag are evaluated first and cannot
+be overridden. If neither applies, persisted telemetry resolves from the
+project-local value, then the global value, then the default `"true"`. A
+project-local `telemetry: "true"` deliberately overrides a global persisted
+`telemetry: "false"`; local `"false"` likewise overrides global `"true"`.
 
 #### See the thin-router flow
 
@@ -1000,9 +1015,28 @@ to `"false"` with `/extension-settings`, or edit
 }
 ```
 
-`telemetry` is global-only. Do not put it in
-`<project>/.pi/settings-extensions.json`: project-local telemetry values are
-ignored, so a checked-out repository cannot change your telemetry choice.
+To disable telemetry for one project, add the same setting to
+`<project>/.pi/settings-extensions.json`, using the authoritative session cwd:
+
+```json
+{
+  "pi-subagentura": {
+    "telemetry": "false"
+  }
+}
+```
+
+Project-local persisted telemetry is resolved before the global value. Both
+local `"true"` and local `"false"` override whatever global value is stored.
+Consequently, a checked-in project-local `"true"` can re-enable telemetry in
+that project even when the global persisted value is `"false"`; this is an
+explicit privacy tradeoff. A local `"false"` can conversely disable telemetry
+when the global value is `"true"`. If neither scope has a valid value,
+telemetry defaults to `"true"`.
+
+Environment opt-outs and `--no-subagentura-telemetry` are higher-priority than
+persisted settings and are evaluated first. They still disable telemetry even
+when either global or project-local persistence says `"true"`.
 
 You can also make the opt-out persistent through the shell environment that
 launches Pi. For example, add this to `~/.zshrc`, `~/.bashrc`, or the

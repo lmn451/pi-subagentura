@@ -154,7 +154,7 @@ describe("generic extension settings", () => {
           {
             id: "telemetry",
             label: "Telemetry",
-            description: expect.stringContaining("global only"),
+            description: expect.stringContaining("project-local"),
             defaultValue: "true",
             values: ["false", "true"],
           },
