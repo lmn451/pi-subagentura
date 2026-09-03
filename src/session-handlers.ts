@@ -369,7 +369,7 @@ export function registerSessionHandlers(
    * false under vitest, which would otherwise leave every enabled-telemetry
    * branch below unreachable.
    */
-  resolveTelemetryEnabled: (pi: ExtensionAPI) => boolean = isTelemetryEnabled,
+  resolveTelemetryEnabled: typeof isTelemetryEnabled = isTelemetryEnabled,
 ): SessionScope {
   const scope = createSessionScope(
     pi,
@@ -482,7 +482,9 @@ export function registerSessionHandlers(
         ? (activeSpawnTelemetry?.mode ?? "straight")
         : resolveTelemetryMode(orchestratorMode, orchestratorV2Mode));
     scope.telemetry = createTelemetrySession(
-      resolveTelemetryEnabled(pi),
+      resolveTelemetryEnabled(pi, { cwd: ctx.cwd }, (message) =>
+        ctx.ui?.notify?.(message, "warning"),
+      ),
       mode,
       recoveredTelemetry?.correlationId,
     );

@@ -264,9 +264,10 @@ Install the optional settings panel once with:
 pi install npm:@juanibiapina/pi-extension-settings
 ```
 
-Use `/extension-settings` for global settings. Whether a project value can
-override the global one is per-setting — see the scope rules below; only
-`max-depth` is project-overridable. The optional package's
+The extension exposes three settings: `max-depth`, `hide-agent-list`, and
+`telemetry`. Use `/extension-settings` for global settings. Whether a project
+value can override the global one is per-setting — see the scope rules below;
+only `max-depth` is project-overridable. The optional package's
 `/extension-settings-local` command is not session-cwd-correct in the pinned
 `@juanibiapina/pi-extension-settings@0.9.1`: it resolves local settings from
 Node's process cwd instead of Pi's command context. Do not use that command for
@@ -275,17 +276,22 @@ setting it there is a no-op because that setting is global-only. For a
 session-local `max-depth`, edit `<session-cwd>/.pi/settings-extensions.json`
 manually, using the exact cwd of the Pi session. `max-depth` controls
 Orchestratorv2 lineage depth and defaults to `2`; `hide-agent-list` defaults to
-`false` and only hides the compact per-agent activity widget rows. The running
-footer, list/status tools, and visual agent supervisor remain available.
+`false` and only hides the compact per-agent activity widget rows. `telemetry`
+controls anonymous product analytics, defaults to the string `"true"` (enabled),
+and is global-only. Persisted `telemetry` values must be `"true"` or `"false"`.
 
-Both settings can also be configured without the panel. The global file
-`~/.pi/agent/settings-extensions.json` accepts either key:
+The running footer, list/status tools, and visual agent supervisor remain
+available.
+
+All three settings can also be configured without the panel. The global file
+`~/.pi/agent/settings-extensions.json` accepts these keys:
 
 ```json
 {
   "pi-subagentura": {
     "max-depth": "4",
-    "hide-agent-list": "true"
+    "hide-agent-list": "true",
+    "telemetry": "false"
   }
 }
 ```
@@ -307,19 +313,28 @@ Scope rules:
 - `hide-agent-list` is read **only** from the global file. A checked-out
   repository must not be able to hide agent activity from whoever opens it, so a
   project-local `hide-agent-list` is ignored.
+- `telemetry` is read **only** from the global file. A project-local
+  `telemetry` value is ignored, so a checked-out repository cannot change the
+  user's telemetry choice.
 
 An invalid persisted value never aborts a session: the extension keeps the
-documented default (`max-depth` `2`, `hide-agent-list` `false`) and reports the
-ignored value in the TUI at the start of a root session, and to the debug log
-otherwise.
+documented defaults (`max-depth` `2`, `hide-agent-list` `false`, `telemetry`
+`"true"`) and reports the ignored value in the TUI at the start of a root
+session, and to the debug log otherwise.
 
-The extension also exposes these validated launch flags for advanced
-configurations:
+Telemetry configuration has three source families: environment variables,
+persisted extension settings, and launch flags. The extension also exposes these
+validated launch flags for advanced configurations:
 
 - `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`. Unlike the persisted setting, an invalid value here fails fast.
 - `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global setting. It also works without the optional settings panel. The flag is on-only: it cannot override a persisted `hide-agent-list` of `true`, so to show the rows again clear the global setting.
-- `--subagentura-telemetry` — anonymous product analytics, enabled by default. Extension booleans are presence-only; `--subagentura-telemetry=false` is not an opt-out.
+- `--subagentura-telemetry` — presence-only boolean flag, enabled by default; it
+  is not an opt-out.
 - `--no-subagentura-telemetry` — presence-only opt-out for anonymous product analytics. The exact events and other opt-outs are documented in [Anonymous product telemetry](#anonymous-product-telemetry).
+
+Telemetry opt-outs are monotone: any environment opt-out, persisted global
+`telemetry: "false"`, or the presence-only `--no-subagentura-telemetry` flag
+disables telemetry; no source can force-enable it.
 
 #### See the thin-router flow
 
@@ -973,17 +988,32 @@ never affect extension behavior.
 
 ### Disable telemetry
 
-For a persistent opt-out across Pi sessions, set
-`PI_SUBAGENTURA_TELEMETRY=0` in the environment that launches Pi. For example,
-add this to `~/.zshrc`, `~/.bashrc`, or the equivalent shell profile:
+For a persistent opt-out across Pi sessions, set the global `telemetry` setting
+to `"false"` with `/extension-settings`, or edit
+`~/.pi/agent/settings-extensions.json` directly:
+
+```json
+{
+  "pi-subagentura": {
+    "telemetry": "false"
+  }
+}
+```
+
+`telemetry` is global-only. Do not put it in
+`<project>/.pi/settings-extensions.json`: project-local telemetry values are
+ignored, so a checked-out repository cannot change your telemetry choice.
+
+You can also make the opt-out persistent through the shell environment that
+launches Pi. For example, add this to `~/.zshrc`, `~/.bashrc`, or the
+equivalent shell profile:
 
 ```bash
 export PI_SUBAGENTURA_TELEMETRY=0
 ```
 
-Reload the profile and restart Pi. The opt-out is inherited by recursive
-interactive children. It is not read from `settings-extensions.json`; that file
-only configures `max-depth` and `hide-agent-list`.
+Reload the profile and restart Pi. The environment opt-out is inherited by
+recursive interactive children.
 
 For a single invocation, use any of:
 

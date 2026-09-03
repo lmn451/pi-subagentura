@@ -62,6 +62,27 @@ The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`
 
 These are non-obvious behaviors that have bitten people. Read them before touching the relevant code.
 
+### Configuration sources and telemetry opt-outs
+
+Configuration has three source families: environment variables, persisted
+extension settings, and launch flags. Persisted extension settings use
+`~/.pi/agent/settings-extensions.json` globally; only `max-depth` also reads
+`<cwd>/.pi/settings-extensions.json`, with the project-local value taking
+precedence over the global fallback. `hide-agent-list` and `telemetry` are
+global-only; project-local values for either are ignored. `telemetry` accepts
+only the persisted strings `"true"` and `"false"` and defaults to `"true"`.
+
+The `--subagentura-telemetry` launch flag is presence-only and enabled by
+default; it is not an opt-out. Use only the presence-only
+`--no-subagentura-telemetry` flag to disable telemetry at launch.
+
+Telemetry opt-outs are monotone: any environment opt-out, persisted global
+`telemetry: "false"`, or the presence-only `--no-subagentura-telemetry` flag
+disables telemetry; no source may force-enable it. Invalid persisted values are
+non-fatal: report them and use the documented defaults. Invalid
+`--subagentura-max-depth` values fail fast; boolean launch flags are
+presence-only.
+
 ### Physical byte order is authoritative
 
 Protocol-v2 event identity is `eventId` plus Pi-derived `turnId`. The poller

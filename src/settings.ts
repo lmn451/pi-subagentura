@@ -1,4 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import {
   getSetting,
   type SettingDefinition,
@@ -14,8 +19,10 @@ export const TELEMETRY_ENV = "PI_SUBAGENTURA_TELEMETRY";
 export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 2;
 const MAX_CONFIGURED_DEPTH = 64;
 const SETTINGS_EXTENSION_NAME = "pi-subagentura";
+const SETTINGS_FILE_NAME = "settings-extensions.json";
 const MAX_DEPTH_SETTING = "max-depth";
 const HIDE_AGENT_LIST_SETTING = "hide-agent-list";
+const TELEMETRY_SETTING = "telemetry";
 const MAX_DEPTH_DEFINITION = {
   id: MAX_DEPTH_SETTING,
   label: "Maximum depth",
@@ -28,6 +35,14 @@ const HIDE_AGENT_LIST_DEFINITION = {
   description:
     "Hide compact per-agent activity widget rows (global only; ignored by /extension-settings-local)",
   defaultValue: "false",
+  values: ["false", "true"],
+} satisfies SettingDefinition;
+const TELEMETRY_DEFINITION = {
+  id: TELEMETRY_SETTING,
+  label: "Telemetry",
+  description:
+    "Send anonymous session-level product analytics (global only; ignored by /extension-settings-local)",
+  defaultValue: "true",
   values: ["false", "true"],
 } satisfies SettingDefinition;
 
@@ -67,7 +82,11 @@ export function emitExtensionSettingsRegistration(pi: ExtensionAPI): void {
   if (events && typeof events.emit === "function") {
     events.emit("pi-extension-settings:register", {
       name: SETTINGS_EXTENSION_NAME,
-      settings: [MAX_DEPTH_DEFINITION, HIDE_AGENT_LIST_DEFINITION],
+      settings: [
+        MAX_DEPTH_DEFINITION,
+        HIDE_AGENT_LIST_DEFINITION,
+        TELEMETRY_DEFINITION,
+      ],
     });
   }
 }
@@ -206,6 +225,115 @@ function readPersistedHideAgentList(
   return false;
 }
 
+/**
+ * Read only `telemetry`, from the global file. A checked-in project
+ * `.pi/settings-extensions.json` must not be able to change the telemetry
+ * choice of whoever opens the repo, so the local scope is deliberately
+ * ignored here.
+ */
+function readPersistedTelemetry(
+  storageOptions: SettingStorageOptions,
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean {
+  if (!validateGlobalSettingsFile(storageOptions, onInvalidSetting)) {
+    return true;
+  }
+  let raw: unknown = undefined;
+  try {
+    raw = getSetting(
+      SETTINGS_EXTENSION_NAME,
+      TELEMETRY_SETTING,
+      TELEMETRY_DEFINITION.defaultValue,
+      { ...storageOptions, scope: "global" },
+    );
+  } catch {
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      raw,
+      'must be either "true" or "false"; using "true"',
+      onInvalidSetting,
+    );
+    return true;
+  }
+  if (raw === "true" || raw === undefined) return true;
+  if (raw === "false") return false;
+  reportInvalidPersistedSetting(
+    TELEMETRY_SETTING,
+    raw,
+    'must be either "true" or "false"; using "true"',
+    onInvalidSetting,
+  );
+  return true;
+}
+
+/**
+ * The settings helper intentionally treats unreadable and syntactically invalid
+ * files as empty. Preflight the global file so those failures remain visible
+ * while leaving structural validation and setting precedence to the helper.
+ */
+function validateGlobalSettingsFile(
+  storageOptions: SettingStorageOptions,
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean {
+  const path = join(
+    storageOptions.agentDir ?? getAgentDir(),
+    SETTINGS_FILE_NAME,
+  );
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    ) {
+      return true;
+    }
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      undefined,
+      'could not be read; using "true"',
+      onInvalidSetting,
+    );
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      "<invalid JSON document>",
+      'must be valid JSON; using "true"',
+      onInvalidSetting,
+    );
+    return false;
+  }
+  const invalidRoot =
+    typeof parsed !== "object" || parsed === null || Array.isArray(parsed);
+  const extensionSettings = invalidRoot
+    ? undefined
+    : (parsed as Record<string, unknown>)[SETTINGS_EXTENSION_NAME];
+  if (
+    invalidRoot ||
+    (extensionSettings !== undefined &&
+      (typeof extensionSettings !== "object" ||
+        extensionSettings === null ||
+        Array.isArray(extensionSettings)))
+  ) {
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      "<invalid settings document shape>",
+      'must be stored in an object-shaped settings document; using "true"',
+      onInvalidSetting,
+    );
+    return false;
+  }
+  return true;
+}
+
 function reportInvalidPersistedSetting(
   setting: string,
   value: unknown,
@@ -276,7 +404,11 @@ function envSwitchIsTruthy(name: string, falsy: ReadonlySet<string>): boolean {
   return value !== undefined && !falsy.has(value);
 }
 
-export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
+export function isTelemetryEnabled(
+  pi: ExtensionAPI,
+  storageOptions: SettingStorageOptions = {},
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean {
   const productSwitch = envSwitchValue(TELEMETRY_ENV);
   if (
     productSwitch !== undefined &&
@@ -290,5 +422,9 @@ export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
   if (envSwitchIsTruthy("VITEST", PERMISSIVE_FALSY_VALUES)) return false;
   if (process.env.NODE_ENV === "test") return false;
   if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
-  return readFlag(pi, TELEMETRY_FLAG) !== false;
+  const persistedTelemetryEnabled = readPersistedTelemetry(
+    storageOptions,
+    onInvalidSetting,
+  );
+  return persistedTelemetryEnabled && readFlag(pi, TELEMETRY_FLAG) !== false;
 }

@@ -57,6 +57,8 @@ interface HandlerRegistration {
   sessionScope: SessionScope;
 }
 
+type TelemetryResolver = Parameters<typeof registerSessionHandlers>[3];
+
 function registerHandlers(
   initialSpawnTreeContext?: ParsedSpawnTreeContext,
   allowRootLineage = true,
@@ -66,6 +68,7 @@ function registerHandlers(
    * branches of session_start are unreachable without this injection seam.
    */
   telemetryEnabled?: boolean,
+  telemetryResolver?: TelemetryResolver,
 ): HandlerRegistration {
   const handlers = new Map<string, Function[]>();
   const pi = {
@@ -85,7 +88,8 @@ function registerHandlers(
     pi as any,
     initialSpawnTreeContext,
     allowRootLineage,
-    telemetryEnabled === undefined ? undefined : () => telemetryEnabled,
+    telemetryResolver ??
+      (telemetryEnabled === undefined ? undefined : () => telemetryEnabled),
   );
   return { handlers, pi, sessionScope };
 }
@@ -223,6 +227,31 @@ describe("session handler lifecycle callbacks", () => {
     });
   });
 
+  it("passes session cwd and warning reporter to the telemetry resolver", () => {
+    const resolver: TelemetryResolver = (_pi, _storageOptions, onInvalid) => {
+      onInvalid?.("invalid telemetry");
+      return false;
+    };
+    const resolverSpy = vi.fn(resolver);
+    const registration = registerHandlers(
+      undefined,
+      true,
+      "orchestratorv2",
+      undefined,
+      resolverSpy,
+    );
+    const ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() };
+
+    startSession(registration, root, "session-a", ui);
+
+    expect(resolverSpy).toHaveBeenCalledWith(
+      registration.pi,
+      { cwd: root },
+      expect.any(Function),
+    );
+    expect(ui.notify).toHaveBeenCalledWith("invalid telemetry", "warning");
+  });
+
   it.each(["reload", "resume"] as const)(
     "preserves one telemetry session across %s without another root start",
     (reason) => {
@@ -257,7 +286,12 @@ describe("session handler lifecycle callbacks", () => {
       }),
     );
     try {
-      const registration = registerHandlers();
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
       const ctx = startSession(registration, root, "session-a");
       registration.handlers.get("session_start")![0]({ reason: "reload" }, ctx);
       registration.handlers.get("session_start")![0]({ reason: "resume" }, ctx);

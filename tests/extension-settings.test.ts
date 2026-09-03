@@ -151,6 +151,13 @@ describe("generic extension settings", () => {
             defaultValue: "false",
             values: ["false", "true"],
           },
+          {
+            id: "telemetry",
+            label: "Telemetry",
+            description: expect.stringContaining("global only"),
+            defaultValue: "true",
+            values: ["false", "true"],
+          },
         ],
       },
     );
