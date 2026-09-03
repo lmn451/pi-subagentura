@@ -80,6 +80,20 @@ arguments from `rework auth`, and invokes the generic `workflow` tool. Users do
 not need to construct JSON. Type `/workflow:` to discover saved workflows.
 `/workflows` remains available as the picker.
 
+Named commands are an LLM routing surface, not a second workflow runtime:
+
+```text
+/workflow:<name> <natural-language request>
+  → parent LLM receives request + workflow metadata
+  → LLM infers args against meta.inputSchema
+  → LLM calls workflow({ name, args })
+  → existing workflow runtime executes the saved script
+```
+
+The slash-command handler neither executes the workflow directly nor passes the
+raw request through as workflow arguments. If required input cannot be inferred,
+the parent asks for clarification instead of guessing.
+
 Workflows are project-scoped by default under `<project>/.pi/workflows/`.
 Project workflows override same-named global workflows stored under
 `~/.pi-subagentura/workflows/`. Pass `scope: "global"` to `save_workflow` only

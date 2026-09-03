@@ -54,6 +54,59 @@ workflow({
 Specify `scope: "global"` to use `~/.pi-subagentura/workflows/`; a project
 workflow overrides a same-named global workflow.
 
+### Named command argument contract
+
+`/workflow:<name>` deliberately routes through the parent LLM. It does **not**
+run the saved script directly and does **not** pass the command's trailing text
+through as raw workflow `args`.
+
+For reliable inference, workflow metadata declares the human-facing hint and
+machine-readable input shape:
+
+```js
+export const meta = {
+  name: "review",
+  description: "Review a target with an optional focus.",
+  argumentHint: "<target and review focus>",
+  inputSchema: {
+    type: "object",
+    required: ["target"],
+    properties: {
+      target: {
+        type: "string",
+        description: "File, directory, or subsystem to review.",
+      },
+      focus: {
+        type: "string",
+        description: "Optional review emphasis.",
+      },
+    },
+  },
+};
+```
+
+Given:
+
+```text
+/workflow:review auth with a security focus
+```
+
+the parent model receives the request and metadata, then invokes the existing
+tool with inferred structured arguments:
+
+```js
+workflow({
+  name: "review",
+  args: { target: "auth", focus: "security" },
+});
+```
+
+If a required field cannot be inferred safely, the routing prompt requires one
+concise clarification. Existing workflows without `inputSchema` remain
+loadable, but named-command inference has only their name and description;
+adding `argumentHint` and `inputSchema` is strongly recommended. Workflows
+created through `/workflow` are instructed to declare both fields.
+
 ## Background completion
 
 Background workflows default to `completionPolicy: "each"`. The workflow
