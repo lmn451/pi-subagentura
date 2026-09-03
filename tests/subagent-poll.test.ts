@@ -40,6 +40,7 @@ import {
   removeSessionScope,
 } from "../src/session-scope";
 import { responsiveFlowMinimumWidth } from "../src/rendering";
+import { createTelemetrySession } from "../src/telemetry";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
@@ -235,6 +236,104 @@ describe("pollArtifactChanges", () => {
     const sendMessage = installDeliverySpies();
     await mod.pollArtifactChanges({ sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "cancel_all",
+      origin: "cancel_all",
+      expected: "explicit_cancel",
+    },
+    {
+      label: "new",
+      origin: "session_shutdown",
+      lifecycleReason: "new",
+      expected: "fresh_session",
+    },
+    {
+      label: "fork",
+      origin: "session_shutdown",
+      lifecycleReason: "fork",
+      expected: "fresh_session",
+    },
+    {
+      label: "startup",
+      origin: "session_start",
+      lifecycleReason: "startup",
+      expected: "session_shutdown",
+    },
+    {
+      label: "reload",
+      origin: "session_start",
+      lifecycleReason: "reload",
+      expected: "session_shutdown",
+    },
+    {
+      label: "resume",
+      origin: "session_start",
+      lifecycleReason: "resume",
+      expected: "session_shutdown",
+    },
+  ] as const)("maps $label cancellation to $expected", async (testCase) => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    const session = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 811, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      pi: {} as unknown as ExtensionAPI,
+      telemetry: session,
+      sessionManager: { getSessionId: () => "poll-telemetry" },
+    });
+    item.state.telemetryEligible = true;
+    item.state.telemetryCorrelationId = session.correlationId;
+    item.state.telemetryActiveTurnId = "turn";
+    item.state.telemetryTurnStartedAt = 1;
+    item.state.telemetryTurnMessageCounts = new Map();
+    item.state.telemetryInvocationSource = "interactive";
+    item.state.telemetryCompletionPolicy = "each";
+    item.state.telemetryAsync = true;
+    item.state.telemetryDepth = 1;
+    item.state.telemetryDepthBucket = "1";
+    item.state.telemetryModel = "default";
+    item.state.completionOwner = "workflow";
+    scope.interactiveStates.set(item.id, item.state);
+    mod.interactiveSubagentRegistry.set(item.id, item.state);
+    const art = artifactPath(join(item.artifactDir, ".."), item.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: `event-${testCase.label}`,
+      turnId: "turn",
+      ts: 2,
+      type: "completion",
+      status: "cancelled",
+      outcome: "cancelled",
+      source: "parent",
+      cancellationOrigin: testCase.origin,
+      ...(testCase.lifecycleReason
+        ? { cancellationLifecycleReason: testCase.lifecycleReason }
+        : {}),
+    });
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive" as const,
+    } as unknown as Multiplexer);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+
+    await mod.pollArtifactChanges({} as unknown as ExtensionAPI, owner);
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_task_completed",
+    );
+    expect(completed?.properties?.terminal_reason).toBe(testCase.expected);
   });
 
   it("clears the activity widget on an empty tick with a malformed setting", async () => {

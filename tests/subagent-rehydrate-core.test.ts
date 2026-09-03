@@ -42,7 +42,10 @@ describe("rehydrateInteractiveSubagents", () => {
       }),
       NoMultiplexerAvailableError: class extends Error {},
     }));
-    const g = globalThis as any;
+    const g = globalThis as typeof globalThis & {
+      __piSubagenturaInteractiveRegistry?: { clear?: () => void };
+      __piSubagenturaPiRef?: unknown;
+    };
     g.__piSubagenturaInteractiveRegistry?.clear?.();
     g.__piSubagenturaPiRef = undefined;
   });
@@ -52,11 +55,17 @@ describe("rehydrateInteractiveSubagents", () => {
     vi.doUnmock("../src/multiplexer");
   });
 
-  it("returns { total: 0 } when the state file is missing", async () => {
+  it("returns zero recovery counts when the state file is missing", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const result = mod.rehydrateInteractiveSubagents(cwd);
-    expect(result).toEqual({ total: 0, alive: 0, terminal: 0 });
+    expect(result).toEqual({
+      total: 0,
+      recovered: 0,
+      alive: 0,
+      terminal: 0,
+      unknown: 0,
+    });
   });
 
   it("populates the registry from a state.json with one entry", async () => {
@@ -400,8 +409,7 @@ describe("rehydrateInteractiveSubagents", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     // Two entries: alive1 (no events, pane not alive → unknown), done1 (done event,
-    // pane not alive → exited). We can predict exact counts here because the test
-    // runs in a tmux environment and isPaneAlive returns false for fake pane IDs.
+    // pane not alive → exited). Rehydration reports both eligible entries.
     const cwdA = cwd;
     const cwdB = cwd;
     for (const id of ["alive1", "done1"]) {
@@ -427,9 +435,10 @@ describe("rehydrateInteractiveSubagents", () => {
     const result = mod.rehydrateInteractiveSubagents(cwdA);
 
     expect(result.total).toBe(2);
-    // alive1 has no events → status=unknown (not counted); done1 has done event → status=exited (terminal)
+    expect(result.recovered).toBe(2);
     expect(result.alive).toBe(0);
     expect(result.terminal).toBe(1);
+    expect(result.unknown).toBe(1);
     expect(interactiveSubagentRegistry.get("alive1")?.status).toBe("unknown");
     expect(interactiveSubagentRegistry.get("done1")?.status).toBe("exited");
   });

@@ -28,6 +28,7 @@ import {
   readOutputForTurn,
   updateInteractiveState,
   type SubagentArtifact,
+  type SubagentEvent,
 } from "../artifact";
 import {
   assertCompletionGroupOpen,
@@ -41,6 +42,8 @@ import {
 } from "../completion-coordinator";
 import {
   cancelInteractiveSubagent,
+  captureInteractiveSubagentCreatedTelemetry,
+  captureInteractiveSpawnFailure,
   getCurrentPaneActivity,
   removeInteractiveSubagentState,
   formatInteractiveState,
@@ -73,13 +76,18 @@ import { InteractiveParams, MAX_INTERACTIVE_CONTEXT_BYTES } from "../schemas";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import {
+  findSessionScope,
   getStartedSessionScopes,
   resolveToolSessionScope,
   sessionOwner,
   type SessionScope,
   type SessionToolToken,
 } from "../session-scope";
-import { captureTelemetry } from "../telemetry";
+import {
+  captureTelemetry,
+  type TelemetryResultReadOutcome,
+  type TelemetrySpawnFailureStage,
+} from "../telemetry";
 
 function isValidSubagentId(id: string): boolean {
   return isValidOrchestratorChildId(id);
@@ -330,6 +338,7 @@ interface SelectedCompletion {
   turnId: string;
   protocolV2: boolean;
   outcome: "done" | "error" | "cancelled";
+  terminalTs: number;
 }
 
 function completionForRead(
@@ -365,6 +374,7 @@ function completionForRead(
         turnId: selected.event.turnId,
         protocolV2: true,
         outcome: selected.event.outcome,
+        terminalTs: selected.event.ts,
       }
     : {
         turnId: `legacy-${selected.startOffset}`,
@@ -375,7 +385,56 @@ function completionForRead(
             : selected.event.type === "cancelled"
               ? "cancelled"
               : "done",
+        terminalTs: selected.event.ts,
       };
+}
+function readLatencyFromTerminal(
+  terminalTs: number | undefined,
+  readAt: number,
+): number | undefined {
+  if (
+    terminalTs === undefined ||
+    !Number.isSafeInteger(terminalTs) ||
+    terminalTs < 0 ||
+    !Number.isSafeInteger(readAt) ||
+    terminalTs > readAt
+  ) {
+    return undefined;
+  }
+  return readAt - terminalTs;
+}
+
+function resultReadOutcome(params: {
+  artifactAvailable: boolean;
+  wantsOutput: boolean;
+  output: string | null;
+  selectedCompletion: SelectedCompletion | undefined;
+  lastEvent: SubagentEvent | null;
+  firstConsumption: boolean | undefined;
+}): TelemetryResultReadOutcome {
+  if (!params.artifactAvailable) return "unavailable";
+  const selectedOutcome = params.selectedCompletion?.outcome;
+  if (selectedOutcome === "error") return "error";
+  if (selectedOutcome === "cancelled") return "cancelled";
+  if (!params.wantsOutput) {
+    if (params.selectedCompletion) return "unavailable";
+    if (!params.lastEvent || !isArtifactOutputSettled(params.lastEvent)) {
+      return "running";
+    }
+    if (params.lastEvent.type === "error") return "error";
+    if (params.lastEvent.type === "cancelled") return "cancelled";
+    return "unavailable";
+  }
+  if (params.output === null) {
+    if (params.lastEvent && !isArtifactOutputSettled(params.lastEvent)) {
+      return "running";
+    }
+    return "unavailable";
+  }
+  if (params.output.length === 0) return "empty";
+  if (params.firstConsumption === true) return "consumed";
+  if (params.firstConsumption === false) return "already_consumed";
+  return "running";
 }
 
 function resolveInteractiveToolStates(token: SessionToolToken | undefined):
@@ -477,14 +536,37 @@ export function registerInteractiveSubagentTools(
       "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
       "Completion coordination defaults to each: every terminal turn creates one TUI-only notice, while safely-idle results are coalesced into a compact immutable-reference manifest that resumes the parent.",
       "Use completionPolicy=group with a shared completionGroupId for related agents; the parent resumes once the spawning turn settles and every registered member is terminal.",
-      "Human input takes priority, and successful read_subagent_artifact collection consumes the matching pending delivery.",
-      "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
     ].join("\n"),
     parameters: InteractiveParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const spawnStartedAt = Date.now();
       const registration = resolveInteractiveToolStates(toolToken);
+      const staleScope =
+        !registration && toolToken ? findSessionScope(toolToken.id) : undefined;
+      const spawnTreeDepth =
+        registration?.scope?.spawnTreeContext?.depth ??
+        staleScope?.spawnTreeContext?.depth;
+      const reportSpawnFailure = (
+        stage: TelemetrySpawnFailureStage,
+        mux?: "tmux" | "zellij" | "herdr",
+      ): void => {
+        captureInteractiveSpawnFailure({
+          telemetry: registration?.scope?.telemetry ?? staleScope?.telemetry,
+          stage,
+          startedAt: spawnStartedAt,
+          mux,
+          invocationSource: "interactive",
+          async: true,
+          depth: spawnTreeDepth === undefined ? undefined : spawnTreeDepth + 1,
+          completionPolicy: params.completionPolicy ?? "legacy",
+          model: params.model,
+        });
+      };
       if (!registration) {
+        if (staleScope && staleScope.lifecycle !== "started") {
+          reportSpawnFailure("parent_shutdown");
+        }
         return {
           content: [
             {
@@ -500,6 +582,7 @@ export function registerInteractiveSubagentTools(
         registration.scope?.lineageMode === "child" &&
         !registration.scope.spawnTreeContext
       ) {
+        reportSpawnFailure("context");
         return {
           content: [
             {
@@ -525,6 +608,7 @@ export function registerInteractiveSubagentTools(
         params.routingAliases,
       );
       if (routingMetadataError || routingModeError) {
+        reportSpawnFailure("context");
         const error = routingMetadataError ?? routingModeError!;
         return {
           content: [
@@ -549,6 +633,7 @@ export function registerInteractiveSubagentTools(
         Buffer.byteLength(contextParams.context, "utf8") >
           MAX_INTERACTIVE_CONTEXT_BYTES
       ) {
+        reportSpawnFailure("context");
         return {
           content: [
             {
@@ -585,6 +670,7 @@ export function registerInteractiveSubagentTools(
           );
         }
       } catch (error) {
+        reportSpawnFailure("context");
         const message = error instanceof Error ? error.message : String(error);
         return {
           content: [
@@ -608,6 +694,7 @@ export function registerInteractiveSubagentTools(
             sessionOwner(registration.scope),
           );
         } catch (error) {
+          reportSpawnFailure("registration");
           const msg = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text", text: `Sub-agent not started: ${msg}` }],
@@ -634,17 +721,29 @@ export function registerInteractiveSubagentTools(
           ? (contextParams.context ?? null)
           : null;
       let authorityEntries: readonly unknown[] | undefined;
-      if (contextParams.includeContext === true) {
-        const branch = ctx.sessionManager.getBranch();
-        authorityEntries = branch;
-        const messages = branch
-          .filter(
-            (e): e is typeof e & { type: "message" } => e.type === "message",
-          )
-          .map((e) => e.message);
-        contextText = serializeConversation(convertToLlm(messages));
-      } else if (topLevelOrchestratorV2) {
-        authorityEntries = parentBranchEntries(ctx);
+      try {
+        if (contextParams.includeContext === true) {
+          const branch = ctx.sessionManager.getBranch();
+          authorityEntries = branch;
+          const messages = branch
+            .filter(
+              (e): e is typeof e & { type: "message" } => e.type === "message",
+            )
+            .map((e) => e.message);
+          contextText = serializeConversation(convertToLlm(messages));
+        } else if (topLevelOrchestratorV2) {
+          authorityEntries = parentBranchEntries(ctx);
+        }
+      } catch (error) {
+        reportSpawnFailure("context");
+        throw error;
+      }
+      let parentSessionId: string;
+      try {
+        parentSessionId = ctx.sessionManager.getSessionId();
+      } catch (error) {
+        reportSpawnFailure("session_creation");
+        throw error;
       }
 
       const taskPreview = params.task.replace(/\s+/g, " ").slice(0, 48);
@@ -666,13 +765,16 @@ export function registerInteractiveSubagentTools(
           completionGroupId: completion.groupId,
           muxPreference: params.mux, // pass through user's mux preference
           parentCwd: ctx.cwd,
-          parentSessionId: ctx.sessionManager.getSessionId(),
+          parentSessionId,
           thinkingLevel: params.thinkingLevel,
           sessionScope: registration.scope,
           spawnTreeContext: registration.scope?.spawnTreeContext,
           requireActivePaneForUserAttention: topLevelOrchestratorV2,
           telemetryInvocationSource: "interactive",
           telemetryAsync: true,
+          spawnRequestedAt: spawnStartedAt,
+          deferAgentCreatedTelemetry:
+            registration.scope !== undefined && completion.policy !== undefined,
         });
         if (registration.scope && completion.policy) {
           try {
@@ -685,6 +787,21 @@ export function registerInteractiveSubagentTools(
               completionReservation,
             );
           } catch (error) {
+            captureInteractiveSpawnFailure({
+              telemetry: registration.scope.telemetry,
+              stage: "registration",
+              startedAt: spawnStartedAt,
+              mux: state.mux,
+              invocationSource:
+                state.telemetryInvocationSource ?? "interactive",
+              async: state.telemetryAsync ?? true,
+              depth: state.telemetryDepth,
+              completionPolicy:
+                state.telemetryCompletionPolicy ??
+                completion.policy ??
+                "legacy",
+              model: state.telemetryModel ?? state.model,
+            });
             releaseCompletionGroup(completionReservation);
             rollbackInteractiveSpawn(state);
             return {
@@ -698,6 +815,7 @@ export function registerInteractiveSubagentTools(
               isError: true,
             };
           }
+          captureInteractiveSubagentCreatedTelemetry(state);
         }
         const routingMetadata = persistInitialRoutingMetadata({
           cwd: ctx.cwd,
@@ -1216,9 +1334,28 @@ export function registerInteractiveSubagentTools(
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+      const registration = resolveInteractiveToolStates(toolToken);
+      const staleScope =
+        !registration && toolToken ? findSessionScope(toolToken.id) : undefined;
+      const captureResultRead = (
+        outcome: TelemetryResultReadOutcome,
+        terminalTs?: number,
+      ): void => {
+        const readAt = Date.now();
+        captureTelemetry(
+          registration?.scope?.telemetry ?? staleScope?.telemetry,
+          {
+            event: "result_read",
+            source: "interactive",
+            outcome,
+            read_latency_ms: readLatencyFromTerminal(terminalTs, readAt),
+          },
+        );
+      };
       // Validate the id shape FIRST so a malformed id gets a precise error
       // instead of being collapsed into the generic "not found" message.
       if (!isValidSubagentId(params.id)) {
+        captureResultRead("unavailable");
         return {
           content: [
             {
@@ -1231,6 +1368,7 @@ export function registerInteractiveSubagentTools(
         };
       }
       if (params.turn !== undefined && params.turnId !== undefined) {
+        captureResultRead("unavailable");
         return {
           content: [
             {
@@ -1242,7 +1380,6 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      const registration = resolveInteractiveToolStates(toolToken);
       const state = registration?.states.get(params.id);
       const foreignInMemoryState =
         !state && interactiveSubagentRegistry.has(params.id);
@@ -1252,6 +1389,7 @@ export function registerInteractiveSubagentTools(
           ? findOwnedDiskArtifact(ctx.cwd, params.id, registration.scope)
           : null;
       if (!art) {
+        captureResultRead("unavailable");
         return {
           content: [
             {
@@ -1263,113 +1401,121 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      const events = readEvents(art, params.since);
-      // Historical selectors imply includeOutput: selecting a turn without its
-      // immutable content would be surprising and provides no useful mapping.
-      const wantsOutput =
-        params.includeOutput !== false ||
-        params.turn !== undefined ||
-        params.turnId !== undefined;
-      const selectedCompletion = wantsOutput
-        ? completionForRead(art, params)
-        : undefined;
-      const output = wantsOutput
-        ? params.turnId !== undefined
-          ? readOutputForTurnId(art, params.turnId)
-          : params.turn !== undefined
-            ? readOutputForTurn(art, params.turn)
-            : selectedCompletion?.protocolV2
-              ? readOutputForTurnId(art, selectedCompletion.turnId)
-              : readOutput(art)
-        : null;
-      const lastEventValue =
-        events.length > 0 ? events[events.length - 1] : null;
-      // Distinguish three cases when output is missing/empty so the caller
-      // doesn't see a misleading "not written yet" after the sub-agent has
-      // already exited (the common case: model finished without writing).
-      let outputText: string;
-      if (!wantsOutput) {
-        outputText = "(not requested)";
-      } else if (output === null) {
-        if (params.turnId !== undefined) {
-          outputText = `(no immutable snapshot for turnId ${params.turnId})`;
-        } else if (params.turn !== undefined) {
-          outputText = `(no snapshot for turn ${params.turn} — the poller may not have run yet, or this turn number is past the history)`;
+      try {
+        const events = readEvents(art, params.since);
+        // Historical selectors imply includeOutput: selecting a turn without its
+        // immutable content would be surprising and provides no useful mapping.
+        const wantsOutput =
+          params.includeOutput !== false ||
+          params.turn !== undefined ||
+          params.turnId !== undefined;
+        const selectedCompletion = wantsOutput
+          ? completionForRead(art, params)
+          : undefined;
+        const readCompletion =
+          selectedCompletion ??
+          (!wantsOutput ? completionForRead(art, {}) : undefined);
+        const output = wantsOutput
+          ? params.turnId !== undefined
+            ? readOutputForTurnId(art, params.turnId)
+            : params.turn !== undefined
+              ? readOutputForTurn(art, params.turn)
+              : selectedCompletion?.protocolV2
+                ? readOutputForTurnId(art, selectedCompletion.turnId)
+                : readOutput(art)
+          : null;
+        const lastEventValue =
+          events.length > 0 ? events[events.length - 1] : null;
+        // Distinguish three cases when output is missing/empty so the caller
+        // doesn't see a misleading "not written yet" after the sub-agent has
+        // already exited (the common case: model finished without writing).
+        let outputText: string;
+        if (!wantsOutput) {
+          outputText = "(not requested)";
+        } else if (output === null) {
+          if (params.turnId !== undefined) {
+            outputText = `(no immutable snapshot for turnId ${params.turnId})`;
+          } else if (params.turn !== undefined) {
+            outputText = `(no snapshot for turn ${params.turn} — the poller may not have run yet, or this turn number is past the history)`;
+          } else {
+            const exited =
+              lastEventValue && isArtifactOutputSettled(lastEventValue);
+            outputText = exited
+              ? `(sub-agent exited without writing output.md — last event: ${lastEventValue.type} @ ${lastEventValue.ts})`
+              : `(${events.length} events, last: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"} — output.md not written yet)`;
+          }
+        } else if (output.length === 0) {
+          outputText = "(empty — 0 chars)";
         } else {
-          const exited =
-            lastEventValue && isArtifactOutputSettled(lastEventValue);
-          outputText = exited
-            ? `(sub-agent exited without writing output.md — last event: ${lastEventValue.type} @ ${lastEventValue.ts})`
-            : `(${events.length} events, last: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"} — output.md not written yet)`;
+          outputText = `${output.length} chars`;
         }
-      } else if (output.length === 0) {
-        outputText = "(empty — 0 chars)";
-      } else {
-        outputText = `${output.length} chars`;
-      }
-      // Available turns summary so the caller knows what history exists.
-      const availableTurns = listOutputTurns(art);
-      const outputHistory = listOutputHistory(art);
-      const turnsLine =
-        availableTurns.length > 0
-          ? `Available turns: [${availableTurns.join(", ")}]\n`
-          : "";
-      const historyLine =
-        outputHistory.length > 0
-          ? `Protocol-v2 outputs: ${outputHistory
-              .map(({ turnId, eventId }) => `${turnId} → ${eventId}`)
-              .join(", ")}\n`
-          : "";
-      if (wantsOutput && output !== null && selectedCompletion) {
-        const firstConsumption = consumeCompletionSource(
-          pi,
-          {
-            source: "interactive",
-            sourceId: params.id,
-            turnId: selectedCompletion.turnId,
-          },
-          registration?.scope ? sessionOwner(registration.scope) : undefined,
-        );
-        if (
-          firstConsumption &&
-          output.length > 0 &&
-          selectedCompletion.outcome === "done"
-        ) {
-          captureTelemetry(registration?.scope?.telemetry, {
-            event: "result_consumed",
-            source: "interactive",
-          });
+        // Available turns summary so the caller knows what history exists.
+        const availableTurns = listOutputTurns(art);
+        const outputHistory = listOutputHistory(art);
+        const turnsLine =
+          availableTurns.length > 0
+            ? `Available turns: [${availableTurns.join(", ")}]\n`
+            : "";
+        const historyLine =
+          outputHistory.length > 0
+            ? `Protocol-v2 outputs: ${outputHistory
+                .map(({ turnId, eventId }) => `${turnId} → ${eventId}`)
+                .join(", ")}\n`
+            : "";
+        let firstConsumption: boolean | undefined;
+        if (wantsOutput && output !== null && selectedCompletion) {
+          firstConsumption = consumeCompletionSource(
+            pi,
+            {
+              source: "interactive",
+              sourceId: params.id,
+              turnId: selectedCompletion.turnId,
+            },
+            registration?.scope ? sessionOwner(registration.scope) : undefined,
+          );
         }
-      }
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Artifact for ${params.id} (${events.length} event${events.length === 1 ? "" : "s"}${params.since ? ` since ${params.since}` : ""}).\n` +
-              `Last event: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"}\n` +
-              (params.turn !== undefined
-                ? `Reading turn: ${params.turn}\n`
-                : "") +
-              (params.turnId !== undefined
-                ? `Reading turnId: ${params.turnId}\n`
-                : "") +
-              turnsLine +
-              historyLine +
-              `Output: ${outputText}` +
-              (wantsOutput ? formatArtifactProviderOutput(output) : ""),
-          },
-        ],
-        details: {
-          id: params.id,
-          artifactDir: art.dir,
-          events,
+        const readOutcome = resultReadOutcome({
+          artifactAvailable: true,
+          wantsOutput,
           output,
+          selectedCompletion: readCompletion,
           lastEvent: lastEventValue,
-          availableTurns,
-          outputHistory,
-        },
-      };
+          firstConsumption,
+        });
+        captureResultRead(readOutcome, readCompletion?.terminalTs);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Artifact for ${params.id} (${events.length} event${events.length === 1 ? "" : "s"}${params.since ? ` since ${params.since}` : ""}).\n` +
+                `Last event: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"}\n` +
+                (params.turn !== undefined
+                  ? `Reading turn: ${params.turn}\n`
+                  : "") +
+                (params.turnId !== undefined
+                  ? `Reading turnId: ${params.turnId}\n`
+                  : "") +
+                turnsLine +
+                historyLine +
+                `Output: ${outputText}` +
+                (wantsOutput ? formatArtifactProviderOutput(output) : ""),
+            },
+          ],
+          details: {
+            id: params.id,
+            artifactDir: art.dir,
+            events,
+            output,
+            lastEvent: lastEventValue,
+            availableTurns,
+            outputHistory,
+          },
+        };
+      } catch (error) {
+        captureResultRead("error");
+        throw error;
+      }
     },
   });
 

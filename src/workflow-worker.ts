@@ -39,6 +39,7 @@ import {
   type WorkflowProgressUpdate,
   type WorkflowRunResultWithUsage,
   WorkflowExecutionError,
+  WorkflowWallTimeoutError,
   type WorkflowUsage,
   addWorkflowUsage,
   workflowUsageFromUsage,
@@ -542,9 +543,7 @@ function runWorkflowWorker(
     };
     const onAbort = () => fail(new Error("Workflow aborted."));
     const timeout = setTimeout(() => {
-      const err = new Error(
-        `Workflow timed out after ${engine.workflowTimeoutMs}ms; the worker was terminated.`,
-      );
+      const err = new WorkflowWallTimeoutError(engine.workflowTimeoutMs);
       fail(err);
       engine.abort.abort(err);
     }, engine.workflowTimeoutMs);

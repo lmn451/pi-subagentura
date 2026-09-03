@@ -184,6 +184,26 @@ function queueBytes(queue: PersistedDeliveryIntent[]): number {
   return Buffer.byteLength(JSON.stringify(queue), "utf8");
 }
 
+function maxKnownCompletionAge(
+  completedAt: readonly (number | undefined)[],
+  now = Date.now(),
+): number | undefined {
+  let maximum: number | undefined;
+  for (const timestamp of completedAt) {
+    if (
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp) ||
+      timestamp < 0
+    ) {
+      continue;
+    }
+    const age = now - timestamp;
+    if (!Number.isFinite(age) || age < 0) continue;
+    maximum = Math.max(maximum ?? 0, age);
+  }
+  return maximum;
+}
+
 function persistOverflowIdentity(
   state: InteractiveSubagentState,
   intent: PersistedDeliveryIntent,
@@ -199,6 +219,9 @@ function persistOverflowIdentity(
       mode: intent.mode,
       triggerTurn: intent.triggerTurn,
       status: intent.status,
+      ...(intent.completedAt === undefined
+        ? {}
+        : { completedAt: intent.completedAt }),
     })}\n`,
     { mode: 0o600 },
   );
@@ -213,6 +236,12 @@ function mergeOverflowSemantics(
   if (collapsed.status === "error") summary.status = "error";
   else if (collapsed.status === "cancelled" && summary.status !== "error") {
     summary.status = "cancelled";
+  }
+  if (collapsed.completedAt !== undefined) {
+    summary.completedAt =
+      summary.completedAt === undefined
+        ? collapsed.completedAt
+        : Math.min(summary.completedAt, collapsed.completedAt);
   }
 }
 
@@ -267,6 +296,14 @@ export function enqueueDelivery(
     intent.message = undefined;
   } else if (intent.message.length > 500) {
     intent.message = `${intent.message.slice(0, 500)}…`;
+  }
+  if (
+    intent.completedAt !== undefined &&
+    (typeof intent.completedAt !== "number" ||
+      !Number.isFinite(intent.completedAt) ||
+      intent.completedAt < 0)
+  ) {
+    intent.completedAt = undefined;
   }
   const queue = (state.pendingDeliveries ??= []);
   if (
@@ -424,7 +461,10 @@ function publishCoordinatedInteractiveCompletion(
         ? { groupId: intent.completionGroupId }
         : {}),
       references,
-      completedAt: Date.now(),
+      completedAt: intent.completedAt ?? Date.now(),
+      ...(intent.completedAt === undefined
+        ? {}
+        : { telemetryCompletedAt: intent.completedAt }),
     },
     owner,
   );
@@ -505,12 +545,18 @@ export function flushDeliveries(
   } catch {
     return;
   }
+  const deliveryLatencyMs = maxKnownCompletionAge(
+    selected.map(({ intent }) => intent.completedAt),
+  );
   captureTelemetry(
     resolveLiveSessionScope(owner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "notification",
       count: deliveryIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     { dedupeKey: `notification:${deliveryIds.join(":")}` },
   );

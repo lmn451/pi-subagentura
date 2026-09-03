@@ -28,6 +28,7 @@ import { debugLog, removeInProcessJob } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import {
   clearCompletionCoordinator,
+  completionLatencyForIds,
   markCompletionHumanInput,
   markCompletionTurnStarting,
   prepareCompletionManifest,
@@ -85,6 +86,7 @@ import {
   manifestDeliveryDedupeKey,
   retireTelemetrySession,
   resolveTelemetryMode,
+  type TelemetryTerminalReason,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -103,6 +105,10 @@ function recordPreparedManifest(
 ): void {
   const completionIds = message.details?.completionIds ?? [];
   if (completionIds.length === 0) return;
+  const deliveryLatencyMs = completionLatencyForIds(
+    completionIds,
+    sessionOwner(scope),
+  );
   // The completion coordinator emits the same event for the same manifest.
   // Both sites must resolve the live scope the same way, or the shared dedupe
   // key lands in two different key sets and one delivery is counted twice.
@@ -112,6 +118,9 @@ function recordPreparedManifest(
       event: "completion_delivered",
       delivery: "manifest",
       count: completionIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     { dedupeKey: manifestDeliveryDedupeKey(completionIds) },
   );
@@ -194,9 +203,43 @@ function cancellationLifecycleReason(reason: string | undefined) {
   }
 }
 
+function lifecycleCancellationTerminalReason(
+  state: InteractiveSubagentState,
+  lifecycleOrigin: "session_start" | "session_shutdown",
+  sessionReason: string | undefined,
+): TelemetryTerminalReason {
+  if (sessionReason === "new" || sessionReason === "fork") {
+    return "fresh_session";
+  }
+  if (lifecycleOrigin === "session_shutdown") {
+    return "session_shutdown";
+  }
+  switch (state.cancellationSnapshot?.source) {
+    case "session_shutdown":
+      return "session_shutdown";
+    case "cancel_interactive_subagent":
+    case "cancel_subagent":
+    case "cancel_all":
+      return "explicit_cancel";
+    case "signal":
+    case "workflow":
+    case "supervisor":
+      return "parent_cancelled";
+    default:
+      return state.lifecycle?.parentCancelled === true ||
+        state.lifecycle?.completionSource === "parent"
+        ? "parent_cancelled"
+        : lifecycleOrigin === "session_start"
+          ? "session_shutdown"
+          : "unknown";
+  }
+}
+
 function captureInteractiveLifecycleCancellation(
   scope: SessionScope,
   state: InteractiveSubagentState,
+  lifecycleOrigin: "session_start" | "session_shutdown",
+  sessionReason: string | undefined,
 ): void {
   const telemetry = scope.telemetry;
   const turnId = state.telemetryActiveTurnId;
@@ -207,6 +250,11 @@ function captureInteractiveLifecycleCancellation(
   ) {
     return;
   }
+  const terminalReason = lifecycleCancellationTerminalReason(
+    state,
+    lifecycleOrigin,
+    sessionReason,
+  );
   const turnStartedAt = state.telemetryTurnStartedAt;
   const messageTurnId = state.telemetryMessageTurnId;
   const messageCount =
@@ -264,6 +312,7 @@ function captureInteractiveLifecycleCancellation(
       depth_bucket: state.telemetryDepthBucket ?? "unknown",
       completion_policy: state.telemetryCompletionPolicy ?? "legacy",
       status: "cancelled",
+      terminal_reason: terminalReason,
       // `turnStartedAt` is an event-log `ts`, which the child writes from the
       // same epoch clock, so this subtraction stays in one clock domain. A
       // recovered timestamp from an old run can still be arbitrarily stale;
@@ -303,7 +352,12 @@ function cleanupScopeGeneration(
   const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
   snapshotOwnedJobs(scope, sessionId, ctx?.cwd, reason);
-  cleanupWorkflowJobsForOwner(owner);
+  cleanupWorkflowJobsForOwner(
+    owner,
+    event?.reason === "new" || event?.reason === "fork"
+      ? "fresh_session"
+      : "session_shutdown",
+  );
   clearInProcessDeliveries(owner);
 
   const destroysStandalonePanes =
@@ -317,7 +371,12 @@ function cleanupScopeGeneration(
         state.status === "idle" ||
         state.status === "unknown");
     if (destroysPane) {
-      captureInteractiveLifecycleCancellation(scope, state);
+      captureInteractiveLifecycleCancellation(
+        scope,
+        state,
+        lifecycleOrigin,
+        event?.reason,
+      );
     }
     removeInteractiveSubagentState(state);
     if (destroysStandalonePanes) retireLineageBootstraps(state.artifactDir);
@@ -543,12 +602,22 @@ export function registerSessionHandlers(
     if (scope.ui && hasFooterIdentity) {
       updateRunningSubagentFooter(scope.ui, sessionOwner(scope));
     }
-
-    const shouldRehydrate =
-      event.reason === "startup" ||
-      event.reason === "reload" ||
-      event.reason === "resume";
-    if (shouldRehydrate) {
+    const recoveryReason =
+      event.reason === "startup"
+        ? "startup"
+        : event.reason === "reload"
+          ? "reload"
+          : event.reason === "resume"
+            ? "resume"
+            : undefined;
+    if (recoveryReason) {
+      let recovery = {
+        total: 0,
+        recovered: 0,
+        alive: 0,
+        terminal: 0,
+        unknown: 0,
+      };
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the
@@ -559,7 +628,7 @@ export function registerSessionHandlers(
         }
       }
       try {
-        rehydrateInteractiveSubagents(
+        recovery = rehydrateInteractiveSubagents(
           ctx.cwd,
           ctx.sessionManager?.getSessionId?.(),
           ctx.sessionManager?.getEntries?.() ?? [],
@@ -568,6 +637,14 @@ export function registerSessionHandlers(
       } catch {
         /* best effort — rehydrate is a recovery path */
       }
+      captureTelemetry(scope.telemetry, {
+        event: "session_recovered",
+        reason: recoveryReason,
+        total_count: recovery.recovered,
+        alive_count: recovery.alive,
+        terminal_count: recovery.terminal,
+        unknown_count: recovery.unknown,
+      });
       sealCompletionGroups(sessionOwner(scope));
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);

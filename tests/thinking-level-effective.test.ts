@@ -214,6 +214,72 @@ describe("startSubagentJob effective thinking level", () => {
     }
   });
 
+  it.each([
+    ["session_start (new)", "fresh_session"],
+    ["session_start (fork)", "fresh_session"],
+    ["session_shutdown (new)", "fresh_session"],
+    ["session_shutdown (fork)", "fresh_session"],
+    ["session_start (new) with extra text", "session_shutdown"],
+    ["session_shutdown (fork) with extra text", "session_shutdown"],
+  ] as const)(
+    "maps the exact lifecycle reason %s to %s",
+    async (reason, expectedReason) => {
+      const payloads: Array<{
+        event: string;
+        properties: Record<string, unknown>;
+      }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          payloads.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const controller = new AbortController();
+      const promptGate = Promise.withResolvers<void>();
+      const session = {
+        ...createSession("medium"),
+        prompt: vi.fn(() => promptGate.promise),
+        abort: vi.fn(async () => {
+          promptGate.resolve();
+        }),
+      };
+      const telemetrySession = createTelemetrySession(true, "orchestrator_v2");
+      mockCreateAgentSession.mockResolvedValue({ session });
+
+      try {
+        const started = await startSubagentJob({
+          ...params(),
+          signal: controller.signal,
+          cancellationSource: "workflow",
+          telemetry: {
+            session: telemetrySession,
+            invocationSource: "workflow",
+            async: true,
+            depth: 1,
+            completionPolicy: "each",
+          },
+        });
+        started.start();
+        await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+        controller.abort({ source: "session_shutdown", reason });
+        const result = await started.jobPromise;
+
+        expect(result.cancelled).toBe(true);
+        const completions = payloads.filter(
+          ({ event }) => event === "pi_subagentura_task_completed",
+        );
+        expect(completions).toHaveLength(1);
+        expect(completions[0]?.properties?.terminal_reason).toBe(
+          expectedReason,
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("keeps thinking-level details omitted when the request omits it", async () => {
     const session = createSession("medium");
     mockCreateAgentSession.mockResolvedValue({ session });

@@ -23,10 +23,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import {
-  launchInteractiveSubagent,
-  writeLaunchScript,
-} from "../src/interactive-tmux";
+import { writeLaunchScript } from "../src/interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
@@ -216,12 +213,21 @@ describe("launch script EXIT trap (idempotency)", () => {
 // real bash + the wrapper and don't need a tmux mock; the spawn-persistence
 // tests below drive launchInteractiveSubagent directly and would otherwise
 // leave orphan tmux windows behind (test pollution).
-function installTmuxMock() {
+function installTmuxMock(
+  options: {
+    sendKeysError?: string;
+    attachError?: string;
+  } = {},
+) {
   vi.resetModules();
   const calls: string[][] = [];
+  let displayMessageCalls = 0;
   vi.doMock("node:child_process", () => ({
     execFileSync: (_file: string, args: string[]) => {
       calls.push(args);
+      if (args[0] === "send-keys" && options.sendKeysError) {
+        throw new Error(options.sendKeysError);
+      }
       // new-window / new-session / split-window return a pane id; everything
       // else is a no-op (display-message would otherwise throw).
       if (
@@ -232,6 +238,10 @@ function installTmuxMock() {
         return "%99\n";
       }
       if (args[0] === "display-message") {
+        displayMessageCalls += 1;
+        if (displayMessageCalls > 1 && options.attachError) {
+          throw new Error(options.attachError);
+        }
         return "sess\t1\t0\n";
       }
       return "";
@@ -291,6 +301,7 @@ describe("spawn-time state persistence", () => {
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/spawn-tree-context");
     vi.unstubAllGlobals();
     clearSessionScopes();
     for (const name of SPAWN_ENV_NAMES) {
@@ -379,6 +390,176 @@ describe("spawn-time state persistence", () => {
     expect(
       loadInteractiveStates(cwd)?.states[state.id]?.telemetry,
     ).toMatchObject({ depth: 1, depthBucket: "1", mux: "tmux" });
+  });
+
+  it("defers creation telemetry until coordinated registration succeeds", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const spawnTreeContext = createRootSpawnTreeContext(
+      SESSION,
+      cwd,
+      false,
+      true,
+      4,
+    );
+    const scope = registerSessionScope({
+      id: 778,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as never,
+      telemetry: createTelemetrySession(true, "orchestrator_v2"),
+      spawnTreeContext,
+    });
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+
+    const state = mod.launchInteractiveSubagent({
+      name: "Deferred",
+      task: "never sent to telemetry",
+      cwd,
+      parentSessionId: SESSION,
+      sessionScope: scope,
+      spawnTreeContext,
+      telemetryInvocationSource: "interactive",
+      telemetryAsync: true,
+      completionPolicy: "group",
+      deferAgentCreatedTelemetry: true,
+    });
+
+    expect(payloads).toHaveLength(0);
+    mod.captureInteractiveSubagentCreatedTelemetry(state);
+    mod.captureInteractiveSubagentCreatedTelemetry(state);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      event: "pi_subagentura_agent_created",
+      properties: { execution: "interactive", completion_policy: "group" },
+    });
+  });
+
+  it("reports lineage bootstrap write failures as state_persistence", async () => {
+    tmuxCalls = installTmuxMock();
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    vi.doMock("../src/spawn-tree-context", async () => {
+      const real = await vi.importActual<
+        typeof import("../src/spawn-tree-context")
+      >("../src/spawn-tree-context");
+      return {
+        ...real,
+        writeLineageBootstrap: () => {
+          throw new Error("lineage persistence failed");
+        },
+      };
+    });
+    const spawnTreeContext = createRootSpawnTreeContext(
+      SESSION,
+      cwd,
+      false,
+      true,
+      4,
+    );
+    const scope = registerSessionScope({
+      id: 779,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as never,
+      telemetry: createTelemetrySession(true, "orchestrator_v2"),
+    });
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+
+    expect(() =>
+      mod.launchInteractiveSubagent({
+        name: "Lineage failure",
+        task: "not sent to telemetry",
+        cwd,
+        parentSessionId: SESSION,
+        sessionScope: scope,
+        spawnTreeContext,
+        telemetryInvocationSource: "interactive",
+        telemetryAsync: true,
+      }),
+    ).toThrow(/lineage persistence failed/);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      event: "pi_subagentura_agent_spawn_failed",
+      properties: { failure_stage: "state_persistence" },
+    });
+    expect(tmuxCalls.some((args) => args[0] === "send-keys")).toBe(false);
+  });
+
+  it.each([
+    {
+      label: "mux send",
+      options: { sendKeysError: "mux send failed" },
+      message: "send-keys failed",
+    },
+    {
+      label: "mux attach",
+      options: { attachError: "mux attach failed" },
+      message: "display-message failed",
+    },
+  ] as const)("reports $label failures as pane_launch", async (testCase) => {
+    tmuxCalls = installTmuxMock(testCase.options);
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const scope = registerSessionScope({
+      id: 780,
+      generation: 1,
+      lifecycle: "started",
+      pi: {} as never,
+      telemetry: createTelemetrySession(true, "orchestrator_v2"),
+    });
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+
+    expect(() =>
+      mod.launchInteractiveSubagent({
+        name: "Mux failure",
+        task: "not sent to telemetry",
+        cwd,
+        parentSessionId: SESSION,
+        sessionScope: scope,
+        telemetryInvocationSource: "interactive",
+        telemetryAsync: true,
+      }),
+    ).toThrow(new RegExp(testCase.message));
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      event: "pi_subagentura_agent_spawn_failed",
+      properties: { failure_stage: "pane_launch" },
+    });
+    expect(tmuxCalls.some((args) => args[0] === "kill-pane")).toBe(true);
   });
 
   it("launchInteractiveSubagent without parentSessionId does NOT write the state file", async () => {

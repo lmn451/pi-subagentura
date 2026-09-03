@@ -41,10 +41,7 @@ import {
 } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import { updateRunningSubagentFooter } from "./artifact-poller";
-import {
-  normalizeCancelledWorkflowState,
-  workflowJobsForOwner,
-} from "./workflow-jobs";
+import { cancelWorkflowJob, workflowJobsForOwner } from "./workflow-jobs";
 import {
   interactiveStateBelongsToOwner,
   ownerlessEntitiesVisible,
@@ -555,9 +552,7 @@ export function registerInteractiveSupervisor(
         },
         cancelWorkflow: (job) => {
           if (job.status !== "running") return false;
-          job.abort.abort();
-          job.status = "cancelled";
-          normalizeCancelledWorkflowState(job);
+          cancelWorkflowJob(job, "explicit_cancel");
           return true;
         },
         cancel: (id) => {
@@ -755,6 +750,7 @@ function cancelInProcessFromSupervisor(
   });
   abortJobTree(job.id, info, owner);
   job.status = "cancelled";
+  job.completedAt ??= Date.now();
   scheduleJobCleanup(job.id, true, undefined, owner);
   return true;
 }

@@ -338,11 +338,24 @@ describe("session handler lifecycle callbacks", () => {
 
       startSession(registration, root, "session-a");
 
-      expect(captured).toHaveLength(1);
+      expect(captured.map(({ event }) => event)).toEqual([
+        "pi_subagentura_session_started",
+        "pi_subagentura_session_recovered",
+      ]);
       expect(captured[0]).toMatchObject({
         event: "pi_subagentura_session_started",
         distinct_id: loadInteractiveStates(root)?.telemetry?.correlationId,
         properties: { mode: "orchestrator_v2" },
+      });
+      expect(captured[1]).toMatchObject({
+        event: "pi_subagentura_session_recovered",
+        properties: {
+          reason: "startup",
+          total_count: 0,
+          alive_count: 0,
+          terminal_count: 0,
+          unknown_count: 0,
+        },
       });
     });
 
@@ -726,6 +739,27 @@ describe("session handler lifecycle callbacks", () => {
     expect(getSessionScopes()).toEqual([]);
     expect((globalThis as any).__piSubagenturaPiRef).toBeUndefined();
   });
+  it.each(["new", "fork"] as const)(
+    "classifies workflow cleanup as fresh_session for %s",
+    (reason) => {
+      const registration = registerHandlers();
+      const ctx = startSession(
+        registration,
+        root,
+        `session-${reason}`,
+        undefined,
+        reason,
+      );
+      const workflow = ownedWorkflow(
+        registration.sessionScope,
+        `workflow-${reason}`,
+      ).workflow;
+
+      registration.handlers.get("session_shutdown")![0]({ reason }, ctx);
+
+      expect(workflow.telemetryTerminalReason).toBe("fresh_session");
+    },
+  );
 
   it("continues shutdown when lifecycle completion receipt persistence fails", () => {
     const registration = registerHandlers();

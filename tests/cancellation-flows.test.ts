@@ -542,6 +542,8 @@ describe("cancelAllFlows helper", () => {
     // Verify status was set to cancelled (matching per-ID cancel semantics)
     expect(jobRegistry.get("job-1")!.status).toBe("cancelled");
     expect(jobRegistry.get("job-2")!.status).toBe("cancelled");
+    expect(jobRegistry.get("job-1")!.completedAt).toEqual(expect.any(Number));
+    expect(jobRegistry.get("job-2")!.completedAt).toEqual(expect.any(Number));
     // Done job should be untouched
     expect(jobRegistry.get("job-3")!.status).toBe("done");
   });
@@ -578,6 +580,18 @@ describe("cancelAllFlows helper", () => {
     // Verify status was set to cancelled
     expect(workflowJobRegistry.get("wf-1")!.status).toBe("cancelled");
     expect(workflowJobRegistry.get("wf-2")!.status).toBe("cancelled");
+    expect(workflowJobRegistry.get("wf-1")!.telemetryTerminalReason).toBe(
+      "explicit_cancel",
+    );
+    expect(workflowJobRegistry.get("wf-2")!.telemetryTerminalReason).toBe(
+      "explicit_cancel",
+    );
+    expect(workflowJobRegistry.get("wf-1")!.completedAt).toEqual(
+      expect.any(Number),
+    );
+    expect(workflowJobRegistry.get("wf-2")!.completedAt).toEqual(
+      expect.any(Number),
+    );
     expect(workflowJobRegistry.get("wf-3")!.status).toBe("done");
     expect(
       workflowJobRegistry.get("wf-1")!.suppressCompletionNotification,
