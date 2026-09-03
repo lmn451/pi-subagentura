@@ -17,12 +17,14 @@ import {
   MAX_ITEMS_PER_CALL,
   INTERACTIVE_POLL_MS,
   MAX_TOTAL_AGENTS,
-  listSavedWorkflows,
-  loadWorkflowScript,
+  deleteAvailableWorkflowScript,
+  listAvailableWorkflows,
+  loadAvailableWorkflowScript,
   parseWorkflow,
-  saveWorkflowScript,
-  deleteWorkflowScript,
+  saveAvailableWorkflowScript,
   sanitizeWorkflowName,
+  type AvailableWorkflow,
+  type WorkflowScope,
   type WorkflowAgentRunner,
   WorkflowExecutionError,
   type WorkflowMeta,
@@ -212,10 +214,19 @@ export function formatWorkflowNotificationSummary(
 }
 
 export interface WorkflowToolOptions {
-  listSavedWorkflows?: typeof listSavedWorkflows;
-  loadWorkflowScript?: typeof loadWorkflowScript;
-  saveWorkflowScript?: typeof saveWorkflowScript;
-  deleteWorkflowScript?: typeof deleteWorkflowScript;
+  listSavedWorkflows?: (cwd?: string) => AvailableWorkflow[];
+  loadWorkflowScript?: (name: string, cwd?: string) => string | null;
+  saveWorkflowScript?: (
+    name: string,
+    script: string,
+    cwd?: string,
+    scope?: WorkflowScope,
+  ) => string;
+  deleteWorkflowScript?: (
+    name: string,
+    cwd?: string,
+    scope?: WorkflowScope,
+  ) => boolean;
 }
 
 export function registerWorkflowTool(
@@ -224,13 +235,23 @@ export function registerWorkflowTool(
   options: WorkflowToolOptions = {},
 ): void {
   debugLog("info", "workflow_registered", {});
-  const listWorkflows = options.listSavedWorkflows ?? listSavedWorkflows;
-  const loadSavedWorkflow = options.loadWorkflowScript ?? loadWorkflowScript;
-  const saveSavedWorkflow = options.saveWorkflowScript ?? saveWorkflowScript;
+  const listWorkflows =
+    options.listSavedWorkflows ??
+    ((cwd?: string) => listAvailableWorkflows({ cwd }));
+  const loadSavedWorkflow =
+    options.loadWorkflowScript ??
+    ((name: string, cwd?: string) =>
+      loadAvailableWorkflowScript(name, { cwd }));
+  const saveSavedWorkflow =
+    options.saveWorkflowScript ??
+    ((name: string, script: string, cwd?: string, scope?: WorkflowScope) =>
+      saveAvailableWorkflowScript(name, script, { cwd, scope }));
   const deleteSavedWorkflow =
-    options.deleteWorkflowScript ?? deleteWorkflowScript;
+    options.deleteWorkflowScript ??
+    ((name: string, cwd?: string, scope?: WorkflowScope) =>
+      deleteAvailableWorkflowScript(name, { cwd, scope }));
   let registerSavedWorkflowCommand:
-    ((workflow: { name: string; description: string }) => void) | undefined;
+    ((workflow: AvailableWorkflow) => void) | undefined;
   const owner = (): SessionOwnerToken | undefined =>
     sessionScope
       ? { id: sessionScope.id, generation: sessionScope.generation }
@@ -748,7 +769,7 @@ export function registerWorkflowTool(
         typeof params.script === "string" && params.script.trim()
           ? params.script
           : params.name
-            ? loadSavedWorkflow(params.name)
+            ? loadSavedWorkflow(params.name, ctx.cwd)
             : null;
       if (!script) {
         const why = params.name
@@ -780,7 +801,7 @@ export function registerWorkflowTool(
           workflowTelemetryCompletionPolicy(params.async !== false, completion),
           spawn,
         ),
-        loadWorkflow: (n: string) => loadSavedWorkflow(n),
+        loadWorkflow: (n: string) => loadSavedWorkflow(n, ctx.cwd),
       });
 
       // ── Async (background) path — default ──
@@ -1255,7 +1276,7 @@ export function registerWorkflowTool(
     name: "save_workflow",
     label: "Save Workflow",
     description:
-      "Persist a workflow script under a name, expose `/workflow:<name>`, and allow composition via workflow(name).",
+      "Persist a project workflow by default (or global with `scope`), expose `/workflow:<name>`, and allow composition via workflow(name).",
     parameters: Type.Object({
       name: Type.String({
         description: "Slug name (lowercase letters, digits, hyphens; max 64).",
@@ -1263,13 +1284,32 @@ export function registerWorkflowTool(
       script: Type.String({
         description: "The workflow script to save (validated before writing).",
       }),
+      scope: Type.Optional(
+        Type.Union([Type.Literal("project"), Type.Literal("global")], {
+          description:
+            "Storage scope. Defaults to the current project when a cwd is available.",
+        }),
+      ),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    async execute(
+      _id: string,
+      params: { name: string; script: string; scope?: WorkflowScope },
+      _signal?: AbortSignal,
+      _onUpdate?: unknown,
+      toolContext?: { cwd?: string },
+    ): Promise<any> {
       try {
-        const file = saveSavedWorkflow(params.name, params.script);
+        const scope = params.scope ?? (toolContext?.cwd ? "project" : "global");
+        const file = saveSavedWorkflow(
+          params.name,
+          params.script,
+          toolContext?.cwd,
+          scope,
+        );
         registerSavedWorkflowCommand?.({
           name: params.name,
           description: parseWorkflow(params.script).meta.description,
+          scope,
         });
         return {
           content: [
@@ -1280,7 +1320,7 @@ export function registerWorkflowTool(
                 `Run it with /workflow:${params.name}.`,
             },
           ],
-          details: { status: "saved", name: params.name, file },
+          details: { status: "saved", name: params.name, file, scope },
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1297,12 +1337,24 @@ export function registerWorkflowTool(
   registerToolWithDefaultGuidance(pi, {
     name: "list_workflows",
     label: "List Workflows",
-    description: "List saved workflows (name + description).",
+    description:
+      "List effective project and global workflows with their scope.",
     parameters: Type.Object({}),
-    async execute(): Promise<any> {
-      const items = listWorkflows();
+    async execute(
+      _id: string,
+      _params: Record<string, never>,
+      _signal?: AbortSignal,
+      _onUpdate?: unknown,
+      toolContext?: { cwd?: string },
+    ): Promise<any> {
+      const items = listWorkflows(toolContext?.cwd);
       const text = items.length
-        ? items.map((w) => `- ${w.name}: ${w.description}`).join("\n")
+        ? items
+            .map(
+              (workflow) =>
+                `- ${workflow.name} [${workflow.scope}]: ${workflow.description}`,
+            )
+            .join("\n")
         : "(no saved workflows)";
       return {
         content: [{ type: "text", text }],
@@ -1315,15 +1367,33 @@ export function registerWorkflowTool(
   registerToolWithDefaultGuidance(pi, {
     name: "delete_workflow",
     label: "Delete Workflow",
-    description: "Delete a saved workflow by name.",
+    description:
+      "Delete a project or global saved workflow by name. The effective project workflow is selected by default.",
     parameters: Type.Object({
       name: Type.String({
         description: "Name of the saved workflow to delete.",
       }),
+      scope: Type.Optional(
+        Type.Union([Type.Literal("project"), Type.Literal("global")]),
+      ),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    async execute(
+      _id: string,
+      params: { name: string; scope?: WorkflowScope },
+      _signal?: AbortSignal,
+      _onUpdate?: unknown,
+      toolContext?: { cwd?: string },
+    ): Promise<any> {
       try {
-        const existed = deleteSavedWorkflow(params.name);
+        const workflow = listWorkflows(toolContext?.cwd).find(
+          (candidate) => candidate.name === params.name,
+        );
+        const scope = params.scope ?? workflow?.scope;
+        const existed = deleteSavedWorkflow(
+          params.name,
+          toolContext?.cwd,
+          scope,
+        );
         return {
           content: [
             {
@@ -1336,6 +1406,7 @@ export function registerWorkflowTool(
           details: {
             status: existed ? "deleted" : "not_found",
             name: params.name,
+            scope,
           },
         };
       } catch (err) {
@@ -1388,7 +1459,7 @@ export function registerWorkflowTool(
       argsValue: unknown,
       ctx: ExtensionCommandContext,
     ) => {
-      const script = loadSavedWorkflow(name);
+      const script = loadSavedWorkflow(name, ctx.cwd);
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
       const workflowOwner = owner();
@@ -1423,7 +1494,7 @@ export function registerWorkflowTool(
             workflowTelemetryCompletionPolicy(true, commandCompletion),
             spawn,
           ),
-          loadWorkflow: (n: string) => loadSavedWorkflow(n),
+          loadWorkflow: (n: string) => loadSavedWorkflow(n, ctx.cwd),
         }),
         Date.now(),
         notifyWorkflowCompletion,
@@ -1482,7 +1553,7 @@ export function registerWorkflowTool(
       rawArgs: string,
       ctx: ExtensionCommandContext,
     ) => {
-      const items = listWorkflows();
+      const items = listWorkflows(ctx.cwd);
       const parsed = parseWorkflowCommandArgs(rawArgs);
 
       const choices = items.map((w) => ({
@@ -1508,7 +1579,8 @@ export function registerWorkflowTool(
       const action = await selectSavedWorkflow(ctx.ui, choices);
       if (!action || action.kind === "cancel") return;
       if (action.kind === "delete") {
-        deleteSavedWorkflow(action.name);
+        const workflow = items.find((item) => item.name === action.name);
+        deleteSavedWorkflow(action.name, ctx.cwd, workflow?.scope);
         const text = `Deleted workflow "${action.name}".`;
         ctx.ui.notify(text);
         sendCommandMessage(text);
@@ -1522,8 +1594,9 @@ export function registerWorkflowTool(
       name: string,
       parsed: { name: string | null; argsJson: string | null },
       ctx: ExtensionCommandContext,
+      plainTextArgs = false,
     ) {
-      const items = listWorkflows();
+      const items = listWorkflows(ctx.cwd);
       const known = items.some((w) => w.name === name);
       if (!known) {
         const text = `No saved workflow named "${name}".`;
@@ -1533,8 +1606,12 @@ export function registerWorkflowTool(
       }
       try {
         const argsValue = parsed.argsJson
-          ? parseArgsJson(parsed.argsJson)
-          : await promptForWorkflowArgs(ctx);
+          ? plainTextArgs
+            ? parsed.argsJson
+            : parseArgsJson(parsed.argsJson)
+          : plainTextArgs
+            ? await promptForWorkflowText(ctx)
+            : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
         const { job, meta } = startSavedWorkflowFromCommand(
           name,
@@ -1578,12 +1655,20 @@ export function registerWorkflowTool(
             name,
             { name, argsJson: args.trim() || null },
             ctx,
+            true,
           );
         },
       });
     };
     for (const workflow of listWorkflows()) {
       registerSavedWorkflowCommand(workflow);
+    }
+    if (typeof pi.on === "function") {
+      pi.on("session_start", (_event, ctx) => {
+        for (const workflow of listWorkflows(ctx.cwd)) {
+          registerSavedWorkflowCommand?.(workflow);
+        }
+      });
     }
 
     pi.registerCommand("workflow", {
@@ -1645,7 +1730,7 @@ export function registerWorkflowTool(
       description:
         "Delete a saved workflow by name (interactive picker if no name given).",
       handler: async (args: string, ctx: ExtensionCommandContext) => {
-        const items = listWorkflows();
+        const items = listWorkflows(ctx.cwd);
         if (items.length === 0) {
           const text = "No saved workflows to delete.";
           ctx.ui.notify(text);
@@ -1673,7 +1758,8 @@ export function registerWorkflowTool(
           sendCommandMessage(text);
           return;
         }
-        deleteSavedWorkflow(name);
+        const workflow = items.find((item) => item.name === name);
+        deleteSavedWorkflow(name, ctx.cwd, workflow?.scope);
         const text = `Deleted workflow "${name}".`;
         ctx.ui.notify(text);
         sendCommandMessage(text);
@@ -1705,6 +1791,14 @@ export function registerWorkflowTool(
     }
   }
 
+  async function promptForWorkflowText(
+    ctx: ExtensionCommandContext,
+  ): Promise<string | typeof CANCELLED_ARGS_PROMPT> {
+    const raw = await ctx.ui.editor("Workflow request:", "");
+    if (raw == null) return CANCELLED_ARGS_PROMPT;
+    return String(raw).trim();
+  }
+
   async function promptForWorkflowArgs(
     ctx: ExtensionCommandContext,
   ): Promise<unknown | typeof CANCELLED_ARGS_PROMPT> {
@@ -1729,8 +1823,8 @@ export function registerWorkflowTool(
       "",
       "Requirements:",
       "1. Design a bounded workflow script with `export const meta = { name, description, phases }`.",
-      "2. The workflow should accept its task/config through `args` so it can be reused later.",
-      "3. Save the script with `save_workflow` using a lowercase slug name.",
+      "2. Accept a plain `args` string as the natural-language task input; structured object args may provide optional configuration.",
+      "3. Save with `save_workflow` using a lowercase slug name. Use project scope unless the user explicitly requests a global workflow.",
       "4. Immediately start it with the `workflow` tool by saved `name` and suitable `args`.",
       "5. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
       "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",

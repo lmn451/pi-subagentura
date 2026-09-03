@@ -5,6 +5,12 @@ translation. The ordinary `workflow` tool—not a RALPLAN-specific extension
 surface—enforces isolated Planner, Architect, and Critic roles over immutable,
 bounded Markdown artifacts.
 
+Save the bundled example as `ralplan`, then invoke it with ordinary text:
+
+```text
+/workflow:ralplan rework auth
+```
+
 ## Contract
 
 - Planner writes `drafts/<planName>_draft-rN.md`.

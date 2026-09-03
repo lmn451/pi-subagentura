@@ -56,7 +56,7 @@ function parseWorkflowArgs(raw) {
     try {
       return JSON.parse(raw);
     } catch {
-      return {};
+      return { idea: raw, workingDir: cwd };
     }
   }
   return {};

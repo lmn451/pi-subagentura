@@ -14,10 +14,15 @@ RALPLAN-specific extension tool or mode is required.
 
 ## Invocation
 
-Use an explicit `/ralplan [idea]` or `--ralplan [idea]` invocation. Bare prose
-mentions do not start a pipeline. Host commands such as status, approval,
-cancel, or resume require host integration; a workflow body cannot intercept
-arbitrary parent text or suspend for user input.
+Save the bundled example as `ralplan`, then provide the planning request as
+ordinary text:
+
+```text
+/workflow:ralplan rework auth
+```
+
+The named workflow command passes that text directly to this code-enforced
+planning workflow. No JSON arguments or RALPLAN-specific host command is needed.
 
 ## Consensus roles
 

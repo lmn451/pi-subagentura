@@ -459,6 +459,22 @@ describe("ralplan independent review contracts", () => {
     });
   });
 
+  it("maps plain-text command arguments to the planning idea", async () => {
+    const root = ".omc/plans";
+    const prompts: Record<string, string[]> = {};
+    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+      args: "rework auth",
+      runAgent: occRunner(root, { prompts }),
+    });
+
+    expect(prompts.planner[0]).toContain("REQUEST: rework auth");
+    expect(run.result).toMatchObject({
+      status: "pending_approval",
+      consensus: true,
+      artifactPaths: { plan: ".omc/plans/plan.md" },
+    });
+  });
+
   it("keeps the compact example independent, verified, and pending", async () => {
     const root = "/repo/plans";
     const prompts: Record<string, string> = {};

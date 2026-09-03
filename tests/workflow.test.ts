@@ -8,6 +8,7 @@ import {
   MAX_WORKFLOW_JOBS,
   MAX_WORKFLOW_NOTIFICATION_ATTEMPTS,
   awaitInteractiveResult,
+  deleteAvailableWorkflowScript,
   deleteWorkflowScript,
   extractJson,
   formatWorkflowUsage,
@@ -18,13 +19,16 @@ import {
   presentWorkflowUsage,
   workflowUsageFromUsage,
   getWorkflowCompletionPresentation,
+  listAvailableWorkflows,
   listSavedWorkflows,
   loadWorkflowScript,
+  loadAvailableWorkflowScript,
   parseWorkflow,
   registerWorkflowTool,
   renderProgress,
   retryPendingWorkflowNotifications,
   runWorkflow,
+  saveAvailableWorkflowScript,
   saveWorkflowScript,
   sanitizeWorkflowName,
   startWorkflowJob,
@@ -63,7 +67,13 @@ import {
 } from "../src/artifact";
 import { formatWorkflowNotificationSummary } from "../src/workflow-tool";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTelemetrySession } from "../src/telemetry";
@@ -1229,6 +1239,58 @@ describe("saved workflows", () => {
     expect(loadWorkflowScript("nope", dir)).toBeNull();
     const list = listSavedWorkflows(dir);
     expect(list).toEqual([{ name: "greet", description: "say hi" }]);
+  });
+
+  it("layers project workflows over global workflows", () => {
+    const root = mkdtempSync(join(tmpdir(), "wf-scoped-"));
+    const cwd = join(root, "project");
+    const globalDir = join(root, "global");
+    const globalScript =
+      'export const meta = { name: "shared", description: "global" };\nreturn "global";';
+    const projectScript =
+      'export const meta = { name: "shared", description: "project" };\nreturn "project";';
+    mkdirSync(cwd);
+
+    saveAvailableWorkflowScript("shared", globalScript, {
+      cwd,
+      globalDir,
+      scope: "global",
+    });
+    saveAvailableWorkflowScript("global-only", globalScript, {
+      cwd,
+      globalDir,
+      scope: "global",
+    });
+    saveAvailableWorkflowScript("shared", projectScript, {
+      cwd,
+      globalDir,
+      scope: "project",
+    });
+
+    expect(loadAvailableWorkflowScript("shared", { cwd, globalDir })).toBe(
+      projectScript,
+    );
+    expect(loadAvailableWorkflowScript("global-only", { cwd, globalDir })).toBe(
+      globalScript,
+    );
+    expect(listAvailableWorkflows({ cwd, globalDir })).toEqual([
+      { name: "global-only", description: "global", scope: "global" },
+      { name: "shared", description: "project", scope: "project" },
+    ]);
+    expect(
+      readFileSync(join(cwd, ".pi", "workflows", "shared.js"), "utf8"),
+    ).toBe(projectScript);
+
+    expect(
+      deleteAvailableWorkflowScript("shared", {
+        cwd,
+        globalDir,
+        scope: "project",
+      }),
+    ).toBe(true);
+    expect(loadAvailableWorkflowScript("shared", { cwd, globalDir })).toBe(
+      globalScript,
+    );
   });
 
   it("rejects an invalid name and an unparseable script", () => {
@@ -2686,6 +2748,12 @@ describe("registerWorkflowTool", () => {
         'export const meta = { name: "ralplan", description: "Consensus planning" };\nreturn args;',
       ],
     ]);
+    const projectSaved = new Map([
+      [
+        "project-review",
+        'export const meta = { name: "project-review", description: "Project review" };\nreturn args;',
+      ],
+    ]);
     const tools: Array<{
       name: string;
       execute: (...args: unknown[]) => Promise<unknown>;
@@ -2693,8 +2761,9 @@ describe("registerWorkflowTool", () => {
     const commands: Array<{
       name: string;
       description?: string;
-      handler: (args: string, ctx: unknown) => Promise<void>;
+      handler: Function;
     }> = [];
+    const sessionHandlers: Array<{ event: string; handler: Function }> = [];
     const pi = {
       registerTool: vi.fn(
         (definition: {
@@ -2706,29 +2775,46 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(
         (
           name: string,
-          definition: {
-            description?: string;
-            handler: (args: string, ctx: unknown) => Promise<void>;
-          },
+          definition: { description?: string; handler: Function },
         ) => commands.push({ name, ...definition }),
       ),
-      on: vi.fn(),
+      on: vi.fn((event: string, handler: Function) =>
+        sessionHandlers.push({ event, handler }),
+      ),
       sendMessage: vi.fn(),
     };
     // The test double intentionally implements only registration methods used here.
     const extensionApi = pi as unknown as Parameters<
       typeof registerWorkflowTool
     >[0];
+    let savedLocation:
+      { cwd: string | undefined; scope: string | undefined } | undefined;
     registerWorkflowTool(extensionApi, undefined, {
-      listSavedWorkflows: () =>
-        [...saved].map(([name, script]) => ({
+      listSavedWorkflows: (cwd?: string) => [
+        ...[...saved].map(([name, script]) => ({
           name,
           description: parseWorkflow(script).meta.description,
+          scope: "global" as const,
         })),
-      loadWorkflowScript: (name: string) => saved.get(name) ?? null,
-      saveWorkflowScript: (name: string, script: string) => {
-        saved.set(name, script);
-        return `/saved/${name}.js`;
+        ...(cwd
+          ? [...projectSaved].map(([name, script]) => ({
+              name,
+              description: parseWorkflow(script).meta.description,
+              scope: "project" as const,
+            }))
+          : []),
+      ],
+      loadWorkflowScript: (name: string, cwd?: string) =>
+        (cwd ? projectSaved.get(name) : undefined) ?? saved.get(name) ?? null,
+      saveWorkflowScript: (
+        name: string,
+        script: string,
+        cwd?: string,
+        scope?: "project" | "global",
+      ) => {
+        savedLocation = { cwd, scope };
+        (scope === "project" ? projectSaved : saved).set(name, script);
+        return `/saved/${scope}/${name}.js`;
       },
     });
 
@@ -2738,13 +2824,30 @@ describe("registerWorkflowTool", () => {
         description: "Run saved workflow “ralplan” — Consensus planning",
       }),
     );
+    expect(commands.map((command) => command.name)).not.toContain(
+      "workflow:project-review",
+    );
+    const sessionStart = sessionHandlers.find(
+      ({ event }) => event === "session_start",
+    )!;
+    await sessionStart.handler({}, { cwd: "/repo" });
+    expect(commands.map((command) => command.name)).toContain(
+      "workflow:project-review",
+    );
 
     const save = tools.find((tool) => tool.name === "save_workflow")!;
-    await save.execute("", {
-      name: "review",
-      script:
-        'export const meta = { name: "review", description: "Review code" };\nreturn args;',
-    });
+    await save.execute(
+      "",
+      {
+        name: "review",
+        script:
+          'export const meta = { name: "review", description: "Review code" };\nreturn args;',
+      },
+      undefined,
+      undefined,
+      { cwd: "/repo" },
+    );
+    expect(savedLocation).toEqual({ cwd: "/repo", scope: "project" });
     expect(commands.map((command) => command.name)).toContain(
       "workflow:review",
     );
@@ -2752,7 +2855,7 @@ describe("registerWorkflowTool", () => {
     const command = commands.find(
       (candidate) => candidate.name === "workflow:ralplan",
     )!;
-    await command.handler('{"idea":"design auth"}', {
+    await command.handler("rework auth", {
       cwd: "/repo",
       model: undefined,
       modelRegistry: undefined,
@@ -2764,7 +2867,7 @@ describe("registerWorkflowTool", () => {
     )!;
     try {
       const run = await job.promise;
-      expect(run.result).toEqual({ idea: "design auth" });
+      expect(run.result).toBe("rework auth");
     } finally {
       workflowJobRegistry.delete(job.id);
     }
@@ -2775,8 +2878,9 @@ describe("registerWorkflowTool", () => {
     const pi = {
       registerTool: vi.fn(),
       registerFlag: vi.fn(),
-      registerCommand: vi.fn((name: string, def: any) =>
-        commands.push({ name, ...def }),
+      registerCommand: vi.fn(
+        (name: string, definition: { handler: Function }) =>
+          commands.push({ name, ...definition }),
       ),
       on: vi.fn(),
       sendUserMessage: vi.fn(),
@@ -2785,10 +2889,16 @@ describe("registerWorkflowTool", () => {
       ui: { notify: vi.fn() },
       sendUserMessage: vi.fn(),
     };
+    // The test double intentionally implements only registration methods used here.
+    const extensionApi = pi as unknown as Parameters<
+      typeof registerWorkflowTool
+    >[0];
 
-    registerWorkflowTool(pi as any);
-    const cmd = commands.find((c) => c.name === "workflow")!;
-    await cmd.handler("build a release checklist", ctx);
+    registerWorkflowTool(extensionApi);
+    const command = commands.find(
+      (candidate) => candidate.name === "workflow",
+    )!;
+    await command.handler("build a release checklist", ctx);
 
     expect(ctx.sendUserMessage).toHaveBeenCalledTimes(1);
     const [prompt, opts] = ctx.sendUserMessage.mock.calls[0];

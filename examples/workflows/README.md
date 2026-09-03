@@ -30,9 +30,18 @@ workflow({
 
 To reuse a script by name, pass the same source to `save_workflow` once. Saving
 `ralplan-occ.mjs` as `ralplan`, for example, immediately exposes
-`/workflow:ralplan`. Type `/workflow:` to discover every saved workflow, append
-JSON arguments inline, select one with `/workflows`, or invoke it through the
-generic `workflow({ name, args })` tool.
+`/workflow:ralplan`. Type `/workflow:` to discover every saved workflow, then
+write the task naturally: +
+
+```text
+/workflow:ralplan rework auth
+```
+
+-
+
+The command passes `rework auth` to the workflow as its plain-text `args` value.
+Structured `workflow({ name, args })` calls remain available for programmatic
+use.
 
 All bundled examples accept either an args object or its JSON-string form. JSON
 strings are useful when another tool boundary serializes the payload:
@@ -44,11 +53,15 @@ workflow({
 });
 ```
 
-The equivalent saved-workflow command is:
+The equivalent saved-workflow command needs no JSON:
 
 ```text
-/workflow:ralplan-consensus {"idea":"Review src/auth.ts","maxIterations":2}
+/workflow:ralplan Review src/auth.ts and produce an implementation plan
 ```
+
+`save_workflow` stores workflows in `<project>/.pi/workflows/` by default.
+Specify `scope: "global"` to use `~/.pi-subagentura/workflows/`; a project
+workflow overrides a same-named global workflow.
 
 ## Background completion
 

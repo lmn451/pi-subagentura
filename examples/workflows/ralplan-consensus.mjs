@@ -37,7 +37,7 @@ function parseWorkflowArgs(raw) {
         ? parsed
         : {};
     } catch {
-      return {};
+      return { idea: raw };
     }
   }
   return {};

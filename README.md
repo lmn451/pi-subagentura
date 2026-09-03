@@ -74,9 +74,14 @@ pi --orchestrator
 
 `/workflow` asks the parent to create, save, and immediately run a reusable
 workflow. Each saved workflow is also exposed as `/workflow:<name>`—for example,
-`/workflow:ralplan {"idea":"review src/auth.ts"}`. Type `/workflow:` to discover
-saved workflows. `/workflows` opens the picker, and `/workflow-tree` shows live
-phases, agents, and cancellation controls.
+`/workflow:ralplan rework auth`. The trailing text is passed to the workflow as
+its natural-language input; users do not need to construct JSON. Type
+`/workflow:` to discover saved workflows. `/workflows` opens the picker, and
+`/workflow-tree` shows live phases, agents, and cancellation controls.
+Workflows are project-scoped by default under `<project>/.pi/workflows/`.
+Project workflows override same-named global workflows stored under
+`~/.pi-subagentura/workflows/`. Pass `scope: "global"` to `save_workflow` only
+for workflows intended to be shared across projects.
 
 ## Reusable workflows
 
@@ -146,7 +151,7 @@ These commands are intended for people at the Pi prompt.
 | Command             | Purpose                                                           |
 | ------------------- | ----------------------------------------------------------------- |
 | `/workflow`         | Create, save, and run a reusable workflow from a task             |
-| `/workflow:<name>`  | Run a saved workflow; type `/workflow:` to discover saved names   |
+| `/workflow:<name>`  | Run a saved workflow with a natural-language task                 |
 | `/workflows`        | Select and run a saved workflow                                   |
 | `/list-workflows`   | Alias for `/workflows`                                            |
 | `/workflow-status`  | List workflow jobs and their live or terminal status              |
@@ -162,9 +167,9 @@ The extension registers these public tools for parent agents.
 | Tool                                    | Purpose                                                           |
 | --------------------------------------- | ----------------------------------------------------------------- |
 | `workflow`                              | Run a trusted workflow script or saved workflow                   |
-| `save_workflow`                         | Validate and save a reusable workflow                             |
-| `list_workflows`                        | List saved workflows                                              |
-| `delete_workflow`                       | Delete a saved workflow                                           |
+| `save_workflow`                         | Save a project or global reusable workflow                        |
+| `list_workflows`                        | List effective project and global workflows                       |
+| `delete_workflow`                       | Delete a project or global saved workflow                         |
 | `get_workflow_status`                   | Inspect a background workflow                                     |
 | `get_workflow_result`                   | Wait for and return a workflow result                             |
 | `cancel_workflow`                       | Cancel a background workflow                                      |

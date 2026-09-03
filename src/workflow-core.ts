@@ -7,7 +7,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { normalizeUsage, type SubagentResult, type Usage } from "./helpers";
 
@@ -837,8 +837,106 @@ export function deleteWorkflowScript(
   try {
     unlinkSync(file);
     return true;
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return false;
-    throw err;
+  } catch (error: unknown) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return false;
+    }
+    throw error;
   }
+}
+
+export type WorkflowScope = "project" | "global";
+
+export interface WorkflowStorageOptions {
+  cwd?: string;
+  globalDir?: string;
+  scope?: WorkflowScope;
+}
+
+export interface AvailableWorkflow {
+  name: string;
+  description: string;
+  scope: WorkflowScope;
+}
+
+export function projectWorkflowsDir(cwd: string): string {
+  if (!cwd.trim()) throw new Error("Project workflow cwd is required");
+  return join(resolve(cwd), ".pi", "workflows");
+}
+
+function workflowScopeDir(
+  scope: WorkflowScope,
+  options: WorkflowStorageOptions,
+): string {
+  if (scope === "global") return options.globalDir ?? WORKFLOWS_DIR;
+  if (!options.cwd) throw new Error("Project workflow scope requires a cwd");
+  return projectWorkflowsDir(options.cwd);
+}
+
+export function saveAvailableWorkflowScript(
+  name: string,
+  script: string,
+  options: WorkflowStorageOptions = {},
+): string {
+  const scope = options.scope ?? (options.cwd ? "project" : "global");
+  return saveWorkflowScript(name, script, workflowScopeDir(scope, options));
+}
+
+export function loadAvailableWorkflowScript(
+  name: string,
+  options: Omit<WorkflowStorageOptions, "scope"> = {},
+): string | null {
+  if (options.cwd) {
+    const projectScript = loadWorkflowScript(
+      name,
+      projectWorkflowsDir(options.cwd),
+    );
+    if (projectScript !== null) return projectScript;
+  }
+  return loadWorkflowScript(name, options.globalDir ?? WORKFLOWS_DIR);
+}
+
+export function listAvailableWorkflows(
+  options: Omit<WorkflowStorageOptions, "scope"> = {},
+): AvailableWorkflow[] {
+  const workflows = new Map<string, AvailableWorkflow>();
+  for (const workflow of listSavedWorkflows(
+    options.globalDir ?? WORKFLOWS_DIR,
+  )) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(workflow.name)) continue;
+    workflows.set(workflow.name, { ...workflow, scope: "global" });
+  }
+  if (options.cwd) {
+    for (const workflow of listSavedWorkflows(
+      projectWorkflowsDir(options.cwd),
+    )) {
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(workflow.name)) continue;
+      workflows.set(workflow.name, { ...workflow, scope: "project" });
+    }
+  }
+  return [...workflows.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+}
+
+export function deleteAvailableWorkflowScript(
+  name: string,
+  options: WorkflowStorageOptions = {},
+): boolean {
+  const safe = sanitizeWorkflowName(name);
+  if (options.scope) {
+    return deleteWorkflowScript(safe, workflowScopeDir(options.scope, options));
+  }
+  if (options.cwd) {
+    const projectDir = projectWorkflowsDir(options.cwd);
+    if (existsSync(join(projectDir, `${safe}.js`))) {
+      return deleteWorkflowScript(safe, projectDir);
+    }
+  }
+  return deleteWorkflowScript(safe, options.globalDir ?? WORKFLOWS_DIR);
 }
