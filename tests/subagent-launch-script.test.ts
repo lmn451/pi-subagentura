@@ -213,20 +213,25 @@ describe("launch script EXIT trap (idempotency)", () => {
 // real bash + the wrapper and don't need a tmux mock; the spawn-persistence
 // tests below drive launchInteractiveSubagent directly and would otherwise
 // leave orphan tmux windows behind (test pollution).
-function installTmuxMock(
-  options: {
-    sendKeysError?: string;
-    attachError?: string;
-  } = {},
-) {
+interface TmuxMockOptions {
+  sendKeysError?: string;
+  attachError?: string;
+}
+
+let tmuxMockOptions: TmuxMockOptions = {};
+let tmuxMockCalls: string[][] = [];
+let tmuxDisplayMessageCalls = 0;
+
+function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
+  tmuxMockOptions = options;
+  tmuxMockCalls = [];
+  tmuxDisplayMessageCalls = 0;
   vi.resetModules();
-  const calls: string[][] = [];
-  let displayMessageCalls = 0;
   vi.doMock("node:child_process", () => ({
     execFileSync: (_file: string, args: string[]) => {
-      calls.push(args);
-      if (args[0] === "send-keys" && options.sendKeysError) {
-        throw new Error(options.sendKeysError);
+      tmuxMockCalls.push(args);
+      if (args[0] === "send-keys" && tmuxMockOptions.sendKeysError) {
+        throw new Error(tmuxMockOptions.sendKeysError);
       }
       // new-window / new-session / split-window return a pane id; everything
       // else is a no-op (display-message would otherwise throw).
@@ -238,16 +243,16 @@ function installTmuxMock(
         return "%99\n";
       }
       if (args[0] === "display-message") {
-        displayMessageCalls += 1;
-        if (displayMessageCalls > 1 && options.attachError) {
-          throw new Error(options.attachError);
+        tmuxDisplayMessageCalls += 1;
+        if (tmuxDisplayMessageCalls > 1 && tmuxMockOptions.attachError) {
+          throw new Error(tmuxMockOptions.attachError);
         }
         return "sess\t1\t0\n";
       }
       return "";
     },
   }));
-  return calls;
+  return tmuxMockCalls;
 }
 
 const SPAWN_ENV_NAMES = [
