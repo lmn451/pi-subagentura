@@ -768,6 +768,14 @@ export function createSemaphore(max: number): Semaphore {
 // ── Saved workflows ──────────────────────────────────────────────────
 
 export const WORKFLOWS_DIR = join(homedir(), ".pi-subagentura", "workflows");
+const WORKFLOW_FILE_EXTENSIONS = [".mjs", ".js"] as const;
+const WORKFLOW_LIST_EXTENSIONS = [".js", ".mjs"] as const;
+
+function workflowFilePaths(dir: string, name: string): string[] {
+  return WORKFLOW_FILE_EXTENSIONS.map((extension) =>
+    join(dir, `${name}${extension}`),
+  );
+}
 
 export function sanitizeWorkflowName(name: string): string {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
@@ -786,7 +794,7 @@ export function saveWorkflowScript(
   const safe = sanitizeWorkflowName(name);
   parseWorkflow(script); // validate before persisting
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = join(dir, `${safe}.js`);
+  const file = join(dir, `${safe}.mjs`);
   writeFileSync(file, script, { encoding: "utf8", mode: 0o600 });
   return file;
 }
@@ -801,33 +809,40 @@ export function loadWorkflowScript(
   } catch {
     return null;
   }
-  const file = join(dir, `${safe}.js`);
-  if (!existsSync(file)) return null;
-  try {
-    return readFileSync(file, "utf8");
-  } catch {
-    return null;
+  for (const file of workflowFilePaths(dir, safe)) {
+    if (!existsSync(file)) continue;
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
   }
+  return null;
 }
 
 export function listSavedWorkflows(
   dir = WORKFLOWS_DIR,
 ): Array<{ name: string; description: string }> {
   if (!existsSync(dir)) return [];
-  const out: Array<{ name: string; description: string }> = [];
-  for (const entry of readdirSync(dir)) {
-    const m = /^(.+)\.js$/.exec(entry);
-    if (!m) continue;
-    let description = "";
-    try {
-      description = parseWorkflow(readFileSync(join(dir, entry), "utf8")).meta
-        .description;
-    } catch {
-      description = "(unparseable)";
+  const workflows = new Map<string, { name: string; description: string }>();
+  const entries = readdirSync(dir);
+  for (const extension of WORKFLOW_LIST_EXTENSIONS) {
+    for (const entry of entries) {
+      if (!entry.endsWith(extension)) continue;
+      const name = entry.slice(0, -extension.length);
+      let description = "";
+      try {
+        description = parseWorkflow(readFileSync(join(dir, entry), "utf8")).meta
+          .description;
+      } catch {
+        description = "(unparseable)";
+      }
+      workflows.set(name, { name, description });
     }
-    out.push({ name: m[1], description });
   }
-  return out;
+  return [...workflows.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
 }
 
 export function deleteWorkflowScript(
@@ -835,21 +850,24 @@ export function deleteWorkflowScript(
   dir = WORKFLOWS_DIR,
 ): boolean {
   const safe = sanitizeWorkflowName(name);
-  const file = join(dir, `${safe}.js`);
-  try {
-    unlinkSync(file);
-    return true;
-  } catch (error: unknown) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return false;
+  let deleted = false;
+  for (const file of workflowFilePaths(dir, safe)) {
+    try {
+      unlinkSync(file);
+      deleted = true;
+    } catch (error: unknown) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+  return deleted;
 }
 
 export type WorkflowScope = "project" | "global";
@@ -936,7 +954,7 @@ export function deleteAvailableWorkflowScript(
   }
   if (options.cwd) {
     const projectDir = projectWorkflowsDir(options.cwd);
-    if (existsSync(join(projectDir, `${safe}.js`))) {
+    if (workflowFilePaths(projectDir, safe).some((file) => existsSync(file))) {
       return deleteWorkflowScript(safe, projectDir);
     }
   }

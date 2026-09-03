@@ -1234,11 +1234,29 @@ describe("saved workflows", () => {
   it("saves, loads, and lists a workflow by name", () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-saved-"));
     const script = `export const meta = { name: "greet", description: "say hi" };\nreturn "hi";`;
-    saveWorkflowScript("greet", script, dir);
+    expect(saveWorkflowScript("greet", script, dir)).toBe(
+      join(dir, "greet.mjs"),
+    );
     expect(loadWorkflowScript("greet", dir)).toBe(script);
     expect(loadWorkflowScript("nope", dir)).toBeNull();
     const list = listSavedWorkflows(dir);
     expect(list).toEqual([{ name: "greet", description: "say hi" }]);
+  });
+
+  it("loads legacy .js files and prefers a same-named .mjs workflow", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-legacy-"));
+    const legacy =
+      'export const meta = { name: "legacy", description: "legacy" };\nreturn "legacy";';
+    const current =
+      'export const meta = { name: "legacy", description: "current" };\nreturn "current";';
+    writeFileSync(join(dir, "legacy.js"), legacy);
+
+    expect(loadWorkflowScript("legacy", dir)).toBe(legacy);
+    saveWorkflowScript("legacy", current, dir);
+    expect(loadWorkflowScript("legacy", dir)).toBe(current);
+    expect(listSavedWorkflows(dir)).toEqual([
+      { name: "legacy", description: "current" },
+    ]);
   });
 
   it("layers project workflows over global workflows", () => {
@@ -1278,7 +1296,7 @@ describe("saved workflows", () => {
       { name: "shared", description: "project", scope: "project" },
     ]);
     expect(
-      readFileSync(join(cwd, ".pi", "workflows", "shared.js"), "utf8"),
+      readFileSync(join(cwd, ".pi", "workflows", "shared.mjs"), "utf8"),
     ).toBe(projectScript);
 
     expect(
@@ -1307,6 +1325,7 @@ describe("saved workflows", () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-del-"));
     const script = `export const meta = { name: "greet", description: "say hi" };\nreturn "hi";`;
     saveWorkflowScript("greet", script, dir);
+    writeFileSync(join(dir, "greet.js"), script);
     expect(loadWorkflowScript("greet", dir)).toBe(script);
     const result = deleteWorkflowScript("greet", dir);
     expect(result).toBe(true);

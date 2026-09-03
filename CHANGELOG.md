@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added bundled RALPLAN examples that translate a prose skill into a
-  code-enforced workflow using the existing generic workflow runtime.
+- Added a bundled RALPLAN workflow that translates a prose skill into
+  code-enforced orchestration using the existing generic workflow runtime.
 - Saved workflows now appear as `/workflow:<name>` slash commands. Their
   natural-language task text is routed through the parent LLM, which uses the
   workflow's declared `inputSchema` to invoke `workflow` with structured
-  arguments. Workflows save under the current project's `.pi/workflows/`
-  directory by default, with explicitly global workflows under
-  `~/.pi-subagentura/workflows/` as fallbacks.
+  arguments. New workflows save as `.mjs` under the current project's
+  `.pi/workflows/` directory by default, with explicitly global workflows under
+  `~/.pi-subagentura/workflows/` as fallbacks. Legacy `.js` files remain
+  readable.
 
 ## [3.6.0] - 2026-09-02
 

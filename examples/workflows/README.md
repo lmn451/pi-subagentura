@@ -1,9 +1,10 @@
 # Bundled workflow examples
 
-These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They show how the generic `workflow` tool turns orchestration techniques into
-reusable executable code. In particular, the RALPLAN examples translate a prose
-skill into code-enforced roles, ordering, validation, and stopping conditions.
+This package includes trusted `.mjs` workflow scripts under
+`examples/workflows/`. They show how the generic `workflow` tool turns
+orchestration techniques into reusable executable code. The bundled RALPLAN
+workflow translates a prose skill into code-enforced roles, ordering,
+validation, and stopping conditions.
 
 ## Running an example
 
@@ -12,14 +13,14 @@ read an example and pass its complete source to the `workflow` tool:
 
 ```text
 pi -e . --orchestrator
-Run examples/workflows/ralplan-consensus.mjs with idea="review src/auth.ts" and maxIterations=2.
+Run examples/workflows/ralplan.mjs with idea="review src/auth.ts" and maxIterations=2.
 ```
 
 The equivalent agent-tool payload is:
 
 ```js
 workflow({
-  script: "<contents of examples/workflows/ralplan-consensus.mjs>",
+  script: "<contents of examples/workflows/ralplan.mjs>",
   args: {
     idea: "Review src/auth.ts and produce an implementation plan",
     maxIterations: 2,
@@ -28,10 +29,9 @@ workflow({
 });
 ```
 
-To reuse a script by name, pass the same source to `save_workflow` once. Saving
-`ralplan-occ.mjs` as `ralplan`, for example, immediately exposes
-`/workflow:ralplan`. Type `/workflow:` to discover every saved workflow, then
-write the task naturally:
+To reuse the RALPLAN script by name, pass its source to `save_workflow` once.
+Saving `ralplan.mjs` immediately exposes `/workflow:ralplan`. Type
+`/workflow:` to discover every saved workflow, then write the task naturally:
 
 ```text
 /workflow:ralplan rework auth
@@ -50,9 +50,10 @@ workflow({
 });
 ```
 
-`save_workflow` stores workflows in `<project>/.pi/workflows/` by default.
-Specify `scope: "global"` to use `~/.pi-subagentura/workflows/`; a project
-workflow overrides a same-named global workflow.
+`save_workflow` stores workflows as `<project>/.pi/workflows/<name>.mjs` by
+default. Specify `scope: "global"` to use
+`~/.pi-subagentura/workflows/<name>.mjs`; a project workflow overrides a
+same-named global workflow. Legacy `.js` workflow files remain readable.
 
 ### Named command argument contract
 
@@ -158,33 +159,16 @@ native structured output; process-isolated agents fall back to textual JSON
 extraction and validation. Workflow snapshots retain the latest 50 per-agent
 records, while `/workflow-tree` displays the latest 20 and reports omissions.
 
-## Planning workflows
+## Bundled RALPLAN workflow
 
-### `ralplan-consensus.mjs`
+### `ralplan.mjs`
 
-A compact SHORT-only Planner → Architect → Critic loop. Every round uses an
-immutable draft/review filename. Read-only verifier agents check exact paths,
-size bounds, headings, round/kind, source identity, and SHA-256. Architect and
-Critic independently review the same verified draft; Critic receives no
-Architect output/path. Final consolidation and verification happen only after
-both explicit approvals. All results remain pending and execution-halted.
-
-| Argument             | Required | Meaning                                 |
-| -------------------- | -------- | --------------------------------------- |
-| `idea`               | yes      | Planning problem                        |
-| `maxIterations`      | no       | Round cap, clamped to 1–5 (default 5)   |
-| `artifactsDir`       | no       | Output directory; defaults to `plans`   |
-| `executeOnConsensus` | no       | Deprecated compatibility input; ignored |
-
-### `ralplan-occ.mjs`
-
-The reference example translates the latest
+The single RALPLAN example translates the latest
 [oh-my-claudecode RALPLAN skill](https://github.com/Yeachan-Heo/oh-my-claudecode/blob/main/skills/ralplan/SKILL.md)
-and its Plan consensus contract into an ordinary workflow script. The script
-enforces isolated role calls, immutable artifacts, Architect-before-Critic
-ordering, reviewer input separation, explicit verdicts, and bounded revision.
-It never executes the resulting plan and adds no RALPLAN-specific extension
-tool or mode.
+and its Plan consensus contract into an ordinary workflow script. It enforces
+isolated role calls, immutable artifacts, Architect-before-Critic ordering,
+reviewer input separation, explicit verdicts, and bounded revision. It never
+executes the resulting plan and adds no RALPLAN-specific extension tool or mode.
 
 | Argument                   | Required | Meaning                                            |
 | -------------------------- | -------- | -------------------------------------------------- |
@@ -205,19 +189,6 @@ agents because the workflow VM exposes no filesystem API. A workflow cannot
 suspend at an interactive checkpoint, so optional marker text remains
 non-blocking. A marker, digest, valid artifact, or workflow result is never
 execution consent; every terminal result is pending and execution-halted.
-
-### `ralplan-from-skill.mjs`
-
-A generated, self-contained RALPLAN example derived from the bundled skill.
-
-| Argument        | Required | Meaning                                        |
-| --------------- | -------- | ---------------------------------------------- |
-| `idea`          | yes      | Planning problem                               |
-| `workingDir`    | yes      | Absolute project directory                     |
-| `specPath`      | no       | Optional spec file                             |
-| `planName`      | no       | Plan filename without extension                |
-| `deliberate`    | no       | Boolean override; otherwise inferred from idea |
-| `maxIterations` | no       | Positive iteration cap; defaults to 5          |
 
 ## Converter workflows
 

@@ -94,10 +94,11 @@ The slash-command handler neither executes the workflow directly nor passes the
 raw request through as workflow arguments. If required input cannot be inferred,
 the parent asks for clarification instead of guessing.
 
-Workflows are project-scoped by default under `<project>/.pi/workflows/`.
-Project workflows override same-named global workflows stored under
-`~/.pi-subagentura/workflows/`. Pass `scope: "global"` to `save_workflow` only
-for workflows intended to be shared across projects.
+Workflows are project-scoped by default under
+`<project>/.pi/workflows/<name>.mjs`. Project workflows override same-named
+global workflows stored under
+`~/.pi-subagentura/workflows/<name>.mjs`. Pass `scope: "global"` to
+`save_workflow` only for workflows intended to be shared across projects.
 
 ## Reusable workflows
 
@@ -113,7 +114,7 @@ of injected orchestration primitives:
 - `phase()` names progress in the TUI. Saved workflows may call another saved
   workflow with `workflow(name, args)`, with one level of nesting.
 
-The bundled `ralplan-occ.mjs` example demonstrates the core workflow idea:
+The bundled `ralplan.mjs` example demonstrates the core workflow idea:
 translate a prose skill into executable orchestration code. It uses the same
 generic `workflow` tool as user-authored workflows while code-enforcing isolated
 roles, review order, bounded revision, artifact checks, and a planning-only

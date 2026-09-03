@@ -119,7 +119,7 @@ describe("RALPLAN artifact contract", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -207,7 +207,7 @@ describe("RALPLAN artifact contract", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -252,7 +252,7 @@ describe("RALPLAN artifact contract", () => {
         throw new Error(`Unexpected label: ${label}`);
       };
 
-      const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+      const run = await runWorkflow(workflow("ralplan.mjs"), {
         args: {
           idea: "force: review src/auth.ts",
           gate: false,
@@ -322,7 +322,7 @@ describe("RALPLAN artifact contract", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    await runWorkflow(workflow("ralplan-occ.mjs"), {
+    await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -373,7 +373,7 @@ describe("RALPLAN artifact contract", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -422,7 +422,7 @@ describe("RALPLAN artifact contract", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -447,7 +447,7 @@ describe("RALPLAN artifact contract", () => {
     };
 
     await expect(
-      runWorkflow(workflow("ralplan-occ.mjs"), {
+      runWorkflow(workflow("ralplan.mjs"), {
         args: {
           idea: "force: review src/auth.ts",
           gate: false,

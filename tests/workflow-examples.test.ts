@@ -87,9 +87,7 @@ describe("bundled workflow examples", () => {
 
     expect(files).toEqual([
       "package-to-skill.mjs",
-      "ralplan-consensus.mjs",
-      "ralplan-from-skill.mjs",
-      "ralplan-occ.mjs",
+      "ralplan.mjs",
       "skill-to-workflow.mjs",
     ]);
     for (const file of files) {
@@ -98,91 +96,9 @@ describe("bundled workflow examples", () => {
   });
 
   it.each(["object", "JSON string"])(
-    "ralplan-consensus consumes documented %s args",
+    "ralplan consumes documented %s args and routes reviewer models",
     async (argsKind) => {
-      const artifactsDir = join(tempDir("ralplan-consensus-"), "custom");
-      const args = {
-        idea: "Review src/auth.ts and produce a plan",
-        maxIterations: 1,
-        artifactsDir,
-      };
-      const draftPath = join(artifactsDir, "drafts", "plan_draft-r1.md");
-      const architectPath = join(
-        artifactsDir,
-        "drafts",
-        "architect_review-r1.md",
-      );
-      const criticPath = join(artifactsDir, "drafts", "critic_review-r1.md");
-      const finalPath = join(artifactsDir, "plan.md");
-      const runner: WorkflowAgentRunner = async ({ label }) => {
-        if (label === "planner-1") {
-          return json({
-            verdict: "DRAFT_READY",
-            path: draftPath,
-            round: 1,
-            summary: "draft",
-          });
-        }
-        if (label === "verify-draft-1") {
-          return json(verifiedArtifact(draftPath, "draft"));
-        }
-        if (label === "architect-1") {
-          return json({
-            verdict: "APPROVE",
-            draftDigest: "digest-draft",
-            reviewPath: architectPath,
-            steelman: "alternative",
-            tradeoffTension: "speed versus safety",
-            principleViolations: [],
-            summary: "approved",
-          });
-        }
-        if (label === "critic-1") {
-          return json({
-            verdict: "APPROVE",
-            draftDigest: "digest-draft",
-            reviewPath: criticPath,
-            findings: [],
-            summary: "approved",
-          });
-        }
-        if (label === "verify-architect-1") {
-          return json(verifiedArtifact(architectPath, "architect-review"));
-        }
-        if (label === "verify-critic-1") {
-          return json(verifiedArtifact(criticPath, "critic-review"));
-        }
-        if (label === "consolidate") {
-          return json({
-            verdict: "CONSOLIDATED",
-            path: finalPath,
-            sourceDraftDigest: "digest-draft",
-            summary: "done",
-          });
-        }
-        if (label === "verify-final") {
-          return json(verifiedArtifact(finalPath, "final-plan"));
-        }
-        throw new Error(`Unexpected label: ${label}`);
-      };
-
-      const run = await runWorkflow(script("ralplan-consensus.mjs"), {
-        args: argsKind === "object" ? args : JSON.stringify(args),
-        runAgent: runner,
-      });
-
-      expect(run.result).toMatchObject({
-        consensus: true,
-        iterations: 1,
-        planPath: join(artifactsDir, "plan.md"),
-      });
-    },
-  );
-
-  it.each(["object", "JSON string"])(
-    "ralplan-occ consumes %s args and routes reviewer models",
-    async (argsKind) => {
-      const root = tempDir("ralplan-occ-");
+      const root = tempDir("ralplan-");
       const args = {
         idea: "force: review src/auth.ts and produce a migration plan",
         deliberate: false,
@@ -253,7 +169,7 @@ describe("bundled workflow examples", () => {
         throw new Error(`Unexpected label: ${label}`);
       };
 
-      const run = await runWorkflow(script("ralplan-occ.mjs"), {
+      const run = await runWorkflow(script("ralplan.mjs"), {
         args: argsKind === "object" ? args : JSON.stringify(args),
         runAgent: runner,
       });
@@ -268,42 +184,6 @@ describe("bundled workflow examples", () => {
       });
       expect(models.get("architect")).toBe("test/architect");
       expect(models.get("critic")).toBe("test/critic");
-    },
-  );
-
-  it.each(["object", "JSON string"])(
-    "ralplan-from-skill consumes documented %s args",
-    async (argsKind) => {
-      const workingDir = tempDir("ralplan-from-skill-");
-      const args = {
-        idea: "Plan a safe authentication migration",
-        workingDir,
-        planName: "auth-migration",
-        deliberate: false,
-        maxIterations: 1,
-      };
-      const runner: WorkflowAgentRunner = async ({ label }) => {
-        if (label === "ralplan-planner-1") return ok("DRAFT_WRITTEN");
-        if (label === "ralplan-architect-1") {
-          return ok("Review complete\n**VERDICT: APPROVE**");
-        }
-        if (label === "ralplan-critic-1") {
-          return ok("Review complete\n**VERDICT: APPROVE**");
-        }
-        throw new Error(`Unexpected label: ${label}`);
-      };
-
-      const run = await runWorkflow(script("ralplan-from-skill.mjs"), {
-        args: argsKind === "object" ? args : JSON.stringify(args),
-        runAgent: runner,
-      });
-
-      expect(run.result).toMatchObject({
-        planPath: join(workingDir, "plans", "auth-migration.md"),
-        iterations: 1,
-        mode: "SHORT",
-        verdicts: { architect: "APPROVE", critic: "APPROVE" },
-      });
     },
   );
 

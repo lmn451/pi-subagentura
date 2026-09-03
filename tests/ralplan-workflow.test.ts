@@ -174,7 +174,7 @@ describe("ralplan independent review contracts", () => {
       return base(input);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -223,7 +223,7 @@ describe("ralplan independent review contracts", () => {
       return base(input);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -277,7 +277,7 @@ describe("ralplan independent review contracts", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -339,7 +339,7 @@ describe("ralplan independent review contracts", () => {
       throw new Error(`Unexpected label: ${label}`);
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -369,7 +369,7 @@ describe("ralplan independent review contracts", () => {
       return failed();
     };
 
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -393,7 +393,7 @@ describe("ralplan independent review contracts", () => {
   it("enforces deliberate artifact sections", async () => {
     const root = "/repo/plans";
     const runner = occRunner(root);
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "force: review src/auth.ts",
         gate: false,
@@ -415,7 +415,7 @@ describe("ralplan independent review contracts", () => {
 
   it("keeps optional markers non-blocking and disabled by default", async () => {
     const root = "/repo/plans";
-    const bypassed = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const bypassed = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "plan something",
         gate: false,
@@ -426,7 +426,7 @@ describe("ralplan independent review contracts", () => {
       },
       runAgent: occRunner(root),
     });
-    const defaulted = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const defaulted = await runWorkflow(workflow("ralplan.mjs"), {
       args: {
         idea: "review src/auth.ts",
         gate: false,
@@ -436,7 +436,7 @@ describe("ralplan independent review contracts", () => {
       },
       runAgent: occRunner(root),
     });
-    const gated = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const gated = await runWorkflow(workflow("ralplan.mjs"), {
       args: { idea: "plan something", gate: true, interactive: true },
       runAgent: async () => {
         throw new Error("gate should not spawn agents");
@@ -462,7 +462,7 @@ describe("ralplan independent review contracts", () => {
   it("maps plain-text command arguments to the planning idea", async () => {
     const root = ".omc/plans";
     const prompts: Record<string, string[]> = {};
-    const run = await runWorkflow(workflow("ralplan-occ.mjs"), {
+    const run = await runWorkflow(workflow("ralplan.mjs"), {
       args: "rework auth",
       runAgent: occRunner(root, { prompts }),
     });
@@ -475,65 +475,7 @@ describe("ralplan independent review contracts", () => {
     });
   });
 
-  it("keeps the compact example independent, verified, and pending", async () => {
-    const root = "/repo/plans";
-    const prompts: Record<string, string> = {};
-    const runner: WorkflowAgentRunner = async ({ label, prompt }) => {
-      prompts[label ?? ""] = String(prompt);
-      if (label === "planner-1")
-        return json({
-          verdict: "DRAFT_READY",
-          path: paths(root, 1).draft,
-          round: 1,
-          summary: "draft",
-        });
-      if (label === "verify-draft-1")
-        return json(verification(paths(root, 1).draft, 1, "draft"));
-      if (label === "architect-1")
-        return json(architect(paths(root, 1).architect, 1));
-      if (label === "critic-1") return json(critic(paths(root, 1).critic, 1));
-      if (label === "verify-architect-1")
-        return json(
-          verification(paths(root, 1).architect, 1, "architect-review"),
-        );
-      if (label === "verify-critic-1")
-        return json(verification(paths(root, 1).critic, 1, "critic-review"));
-      if (label === "consolidate")
-        return json({
-          verdict: "CONSOLIDATED",
-          path: paths(root, 1).final,
-          sourceDraftDigest: "digest-1-draft",
-          summary: "final",
-        });
-      if (label === "verify-final")
-        return json(verification(paths(root, 1).final, 1, "final-plan"));
-      throw new Error(`Unexpected label: ${label}`);
-    };
-
-    const run = await runWorkflow(workflow("ralplan-consensus.mjs"), {
-      args: {
-        idea: "review src/auth.ts",
-        maxIterations: 1,
-        artifactsDir: root,
-        planName: "plan",
-      },
-      runAgent: runner,
-    });
-
-    expect(prompts["critic-1"]).toContain("plan_draft-r1.md");
-    expect(prompts["critic-1"]).not.toContain("architect_review-r1.md");
-    expect(run.result).toMatchObject({
-      consensus: true,
-      status: "pending_approval",
-      pending_approval: true,
-      execution_halted: true,
-    });
-  });
-
   it("remains parseable", () => {
-    expect(() => parseWorkflow(workflow("ralplan-occ.mjs"))).not.toThrow();
-    expect(() =>
-      parseWorkflow(workflow("ralplan-consensus.mjs")),
-    ).not.toThrow();
+    expect(() => parseWorkflow(workflow("ralplan.mjs"))).not.toThrow();
   });
 });
