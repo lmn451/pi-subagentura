@@ -1,4 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildTelemetryPayload,
   captureTelemetry,
@@ -25,6 +34,7 @@ const originalEnvironment = {
   CI: process.env.CI,
   DO_NOT_TRACK: process.env.DO_NOT_TRACK,
   NODE_ENV: process.env.NODE_ENV,
+  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
   PI_OFFLINE: process.env.PI_OFFLINE,
   TELEMETRY: process.env[TELEMETRY_ENV],
   VITEST: process.env.VITEST,
@@ -35,6 +45,7 @@ function restoreEnvironment(): void {
     CI: originalEnvironment.CI,
     DO_NOT_TRACK: originalEnvironment.DO_NOT_TRACK,
     NODE_ENV: originalEnvironment.NODE_ENV,
+    PI_CODING_AGENT_DIR: originalEnvironment.PI_CODING_AGENT_DIR,
     PI_OFFLINE: originalEnvironment.PI_OFFLINE,
     [TELEMETRY_ENV]: originalEnvironment.TELEMETRY,
     VITEST: originalEnvironment.VITEST,
@@ -53,10 +64,28 @@ function clearTelemetryOptOuts(): void {
   delete process.env.VITEST;
 }
 
+let telemetrySettingsRoot: string | undefined;
+let telemetryStorageOptions: { agentDir: string; cwd: string };
+
 describe("anonymous product telemetry", () => {
+  beforeEach(() => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-telemetry-settings-"));
+    telemetrySettingsRoot = root;
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    telemetryStorageOptions = { agentDir, cwd };
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+  });
+
   afterEach(() => {
     restoreEnvironment();
     vi.restoreAllMocks();
+    if (telemetrySettingsRoot !== undefined) {
+      rmSync(telemetrySettingsRoot, { recursive: true, force: true });
+      telemetrySettingsRoot = undefined;
+    }
   });
 
   it("reuses one random personless correlation id within a session", () => {
@@ -636,6 +665,211 @@ describe("anonymous product telemetry", () => {
     expect(isTelemetryEnabled({ getFlag: vi.fn(() => undefined) } as any)).toBe(
       true,
     );
+  });
+
+  it("disables telemetry when the global persisted setting is false", () => {
+    clearTelemetryOptOuts();
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+
+    expect(
+      isTelemetryEnabled(
+        {
+          getFlag: vi.fn((name) =>
+            name === TELEMETRY_FLAG ? true : undefined,
+          ),
+        } as unknown as Parameters<typeof isTelemetryEnabled>[0],
+        telemetryStorageOptions,
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a project-local false override a global true", () => {
+    clearTelemetryOptOuts();
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+    );
+    writeFileSync(
+      join(telemetryStorageOptions.cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions)).toBe(false);
+  });
+
+  it("lets a project-local true override a global false", () => {
+    clearTelemetryOptOuts();
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+    writeFileSync(
+      join(telemetryStorageOptions.cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+    );
+
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions)).toBe(true);
+  });
+
+  it("falls back to the global value when the project-local setting is missing", () => {
+    clearTelemetryOptOuts();
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions)).toBe(false);
+  });
+
+  it("reads only the global value without an authoritative cwd", () => {
+    clearTelemetryOptOuts();
+    const ambientCwd = join(telemetrySettingsRoot!, "ambient");
+    mkdirSync(join(ambientCwd, ".pi"), { recursive: true });
+    vi.spyOn(process, "cwd").mockReturnValue(ambientCwd);
+    writeFileSync(
+      join(ambientCwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+    );
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(
+      isTelemetryEnabled(pi, {
+        agentDir: telemetryStorageOptions.agentDir,
+      }),
+    ).toBe(false);
+  });
+
+  const malformedTelemetryDocuments = [
+    [
+      "an invalid value",
+      JSON.stringify({ "pi-subagentura": { telemetry: "sometimes" } }),
+    ],
+    ["a malformed settings document", "null"],
+    ["syntactically invalid JSON", '{"pi-subagentura":'],
+    ["an array document", "[]"],
+    ["a numeric document", "0"],
+    ["a string document", '"bad"'],
+    ["a null extension object", '{"pi-subagentura":null}'],
+  ] as const;
+
+  it.each(
+    (["local", "global"] as const).flatMap((scope) =>
+      malformedTelemetryDocuments.map(
+        ([label, settingsDocument]) =>
+          [scope, label, settingsDocument] as const,
+      ),
+    ),
+  )(
+    "reports malformed telemetry in the %s settings file (%s)",
+    (scope, _label, settingsDocument) => {
+      clearTelemetryOptOuts();
+      const path =
+        scope === "local"
+          ? join(telemetryStorageOptions.cwd, ".pi", "settings-extensions.json")
+          : join(telemetryStorageOptions.agentDir, "settings-extensions.json");
+      writeFileSync(path, settingsDocument);
+      const onInvalid = vi.fn();
+      const pi = {
+        getFlag: vi.fn(() => undefined),
+      } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+      const storageOptions =
+        scope === "local"
+          ? telemetryStorageOptions
+          : { agentDir: telemetryStorageOptions.agentDir };
+
+      expect(isTelemetryEnabled(pi, storageOptions, onInvalid)).toBe(true);
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("telemetry"),
+      );
+    },
+  );
+
+  it("ignores an invalid local candidate and falls back to the global value", () => {
+    clearTelemetryOptOuts();
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "false" } }),
+    );
+    writeFileSync(
+      join(telemetryStorageOptions.cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({
+        "pi-subagentura": { telemetry: "secret-telemetry-value" },
+      }),
+    );
+    const onInvalid = vi.fn();
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions, onInvalid)).toBe(
+      false,
+    );
+    expect(onInvalid).toHaveBeenCalledWith(
+      expect.stringContaining("telemetry"),
+    );
+    expect(JSON.stringify(onInvalid.mock.calls)).not.toContain(
+      "secret-telemetry-value",
+    );
+  });
+
+  it.each(["local", "global"] as const)(
+    "reports an unreadable %s settings file without aborting",
+    (scope) => {
+      clearTelemetryOptOuts();
+      const path =
+        scope === "local"
+          ? join(telemetryStorageOptions.cwd, ".pi", "settings-extensions.json")
+          : join(telemetryStorageOptions.agentDir, "settings-extensions.json");
+      writeFileSync(path, JSON.stringify({ "pi-subagentura": {} }));
+      chmodSync(path, 0o000);
+      try {
+        const onInvalid = vi.fn();
+        const pi = {
+          getFlag: vi.fn(() => undefined),
+        } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+        const storageOptions =
+          scope === "local"
+            ? telemetryStorageOptions
+            : { agentDir: telemetryStorageOptions.agentDir };
+
+        expect(isTelemetryEnabled(pi, storageOptions, onInvalid)).toBe(true);
+        expect(onInvalid).toHaveBeenCalledWith(
+          expect.stringContaining("could not be read"),
+        );
+      } finally {
+        chmodSync(path, 0o600);
+      }
+    },
+  );
+
+  it("keeps telemetry enabled when the persisted setting is missing or true", () => {
+    clearTelemetryOptOuts();
+    const pi = { getFlag: vi.fn(() => undefined) };
+    expect(isTelemetryEnabled(pi as any, telemetryStorageOptions)).toBe(true);
+
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+    );
+    expect(isTelemetryEnabled(pi as any, telemetryStorageOptions)).toBe(true);
   });
 
   it("supports the default-on flag and explicit CLI opt-out", () => {

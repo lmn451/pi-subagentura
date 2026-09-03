@@ -62,6 +62,35 @@ The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`
 
 These are non-obvious behaviors that have bitten people. Read them before touching the relevant code.
 
+### Configuration sources and telemetry opt-outs
+
+Configuration has three source families: environment variables, persisted
+extension settings, and launch flags. Persisted extension settings use
+`~/.pi/agent/settings-extensions.json` globally and
+`<authoritative-session-cwd>/.pi/settings-extensions.json` locally when an
+authoritative cwd is available. Without an authoritative cwd, read only the
+global file; never fall back to Node's process cwd.
+
+Persisted settings use these precedence rules:
+
+- `telemetry`: project-local value, then global value, then the default
+  `"true"`. Both persisted strings `"true"` and `"false"` are valid; a local
+  `"true"` can explicitly override a global `"false"`, and a local `"false"`
+  can override a global `"true"`.
+- `max-depth`: project-local value, then global value, then the default `2`.
+- `hide-agent-list`: global-only; any project-local value is ignored.
+
+Environment opt-outs and the `--no-subagentura-telemetry` negative launch flag
+are evaluated before persisted telemetry settings and cannot be overridden by a
+persisted `"true"` value. The positive `--subagentura-telemetry` launch flag is
+not an opt-out. The `--subagentura-max-depth` launch flag overrides persisted
+`max-depth` for the current run, while `--subagentura-hide-agent-list` can only
+turn hiding on.
+
+Malformed persisted files or values are non-fatal in every scope that is read:
+report the validation failure without exposing file contents, ignore the
+invalid candidate, and continue to the next applicable scope or default.
+
 ### Physical byte order is authoritative
 
 Protocol-v2 event identity is `eventId` plus Pi-derived `turnId`. The poller

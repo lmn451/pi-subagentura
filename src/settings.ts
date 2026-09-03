@@ -1,4 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import {
   getSetting,
   type SettingDefinition,
@@ -14,8 +19,11 @@ export const TELEMETRY_ENV = "PI_SUBAGENTURA_TELEMETRY";
 export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 2;
 const MAX_CONFIGURED_DEPTH = 64;
 const SETTINGS_EXTENSION_NAME = "pi-subagentura";
+const SETTINGS_FILE_NAME = "settings-extensions.json";
 const MAX_DEPTH_SETTING = "max-depth";
 const HIDE_AGENT_LIST_SETTING = "hide-agent-list";
+const TELEMETRY_SETTING = "telemetry";
+const REDACTED_TELEMETRY_VALUE = "<redacted invalid telemetry value>";
 const MAX_DEPTH_DEFINITION = {
   id: MAX_DEPTH_SETTING,
   label: "Maximum depth",
@@ -28,6 +36,14 @@ const HIDE_AGENT_LIST_DEFINITION = {
   description:
     "Hide compact per-agent activity widget rows (global only; ignored by /extension-settings-local)",
   defaultValue: "false",
+  values: ["false", "true"],
+} satisfies SettingDefinition;
+const TELEMETRY_DEFINITION = {
+  id: TELEMETRY_SETTING,
+  label: "Telemetry",
+  description:
+    "Send anonymous session-level product analytics (project-local value overrides global value)",
+  defaultValue: "true",
   values: ["false", "true"],
 } satisfies SettingDefinition;
 
@@ -67,7 +83,11 @@ export function emitExtensionSettingsRegistration(pi: ExtensionAPI): void {
   if (events && typeof events.emit === "function") {
     events.emit("pi-extension-settings:register", {
       name: SETTINGS_EXTENSION_NAME,
-      settings: [MAX_DEPTH_DEFINITION, HIDE_AGENT_LIST_DEFINITION],
+      settings: [
+        MAX_DEPTH_DEFINITION,
+        HIDE_AGENT_LIST_DEFINITION,
+        TELEMETRY_DEFINITION,
+      ],
     });
   }
 }
@@ -76,8 +96,8 @@ export function emitExtensionSettingsRegistration(pi: ExtensionAPI): void {
  * Resolve the effective settings. CLI flags are still validated strictly —
  * a bad flag is an operator typo worth failing on — but persisted values are
  * parsed defensively: a hand-edited or panel-written file must never abort
- * session start, so an invalid value degrades to the documented default and is
- * reported through `onInvalidSetting`.
+ * session start, so an invalid candidate is ignored and resolution continues
+ * through the remaining scopes before using the documented default.
  */
 export function readExtensionSettings(
   pi: ExtensionAPI,
@@ -116,7 +136,7 @@ function readFlag(pi: ExtensionAPI, name: string): unknown {
 function resolveStorageOptions(
   options: SettingStorageOptions,
 ): SettingStorageOptions {
-  if (options.scope !== undefined || options.cwd !== undefined) return options;
+  if (options.cwd !== undefined || options.scope === "global") return options;
   return { ...options, scope: "global" };
 }
 
@@ -206,6 +226,220 @@ function readPersistedHideAgentList(
   return false;
 }
 
+/**
+ * Read `telemetry` project-local first, with the global file as fallback when an
+ * authoritative cwd is available. Without one, only the global file is read.
+ */
+function readPersistedTelemetry(
+  storageOptions: SettingStorageOptions,
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean {
+  const resolvedStorageOptions = resolveStorageOptions(storageOptions);
+  const validations = validateSettingsFiles(
+    resolvedStorageOptions,
+    onInvalidSetting,
+  );
+
+  if (
+    resolvedStorageOptions.scope === "global" ||
+    resolvedStorageOptions.cwd === undefined
+  ) {
+    return (
+      readTelemetryCandidate(
+        resolvedStorageOptions,
+        validations[0],
+        onInvalidSetting,
+      ) ?? true
+    );
+  }
+
+  const localValidation = validations[0];
+  const globalValidation = validations[1];
+  if (!localValidation || !globalValidation) return true;
+
+  // With two structurally valid files and no invalid candidate, let the
+  // settings helper apply its normal local-over-global precedence.
+  if (
+    isUsableTelemetryFile(localValidation) &&
+    isUsableTelemetryFile(globalValidation)
+  ) {
+    const raw = readTelemetrySetting(resolvedStorageOptions);
+    return parseTelemetryValue(raw, onInvalidSetting) ?? true;
+  }
+
+  // A malformed or invalid local candidate is ignored so the global candidate
+  // can still win. Conversely, a malformed global file must not erase a valid
+  // local choice.
+  const localValue = readTelemetryCandidate(
+    { ...resolvedStorageOptions, scope: "local" },
+    localValidation,
+    onInvalidSetting,
+  );
+  if (localValue !== undefined) return localValue;
+  return (
+    readTelemetryCandidate(
+      { ...resolvedStorageOptions, scope: "global" },
+      globalValidation,
+      onInvalidSetting,
+    ) ?? true
+  );
+}
+
+interface SettingsFileValidation {
+  valid: boolean;
+  telemetry: "missing" | "valid" | "invalid";
+}
+
+function isUsableTelemetryFile(validation: SettingsFileValidation): boolean {
+  return validation.valid && validation.telemetry !== "invalid";
+}
+
+function readTelemetryCandidate(
+  storageOptions: SettingStorageOptions,
+  validation: SettingsFileValidation | undefined,
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean | undefined {
+  if (!validation || !isUsableTelemetryFile(validation)) return undefined;
+  return parseTelemetryValue(
+    readTelemetrySetting(storageOptions),
+    onInvalidSetting,
+  );
+}
+
+function readTelemetrySetting(storageOptions: SettingStorageOptions): unknown {
+  try {
+    return getSetting(
+      SETTINGS_EXTENSION_NAME,
+      TELEMETRY_SETTING,
+      undefined,
+      storageOptions,
+    );
+  } catch {
+    // Structural failures are reported by validateSettingsFiles. Treat a
+    // concurrent file replacement as an absent candidate rather than aborting.
+    return undefined;
+  }
+}
+
+function parseTelemetryValue(
+  raw: unknown,
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  reportInvalidPersistedSetting(
+    TELEMETRY_SETTING,
+    REDACTED_TELEMETRY_VALUE,
+    'must be either "true" or "false"; ignoring this candidate',
+    onInvalidSetting,
+  );
+  return undefined;
+}
+
+function settingsFilePaths(storageOptions: SettingStorageOptions): string[] {
+  const globalPath = join(
+    storageOptions.agentDir ?? getAgentDir(),
+    SETTINGS_FILE_NAME,
+  );
+  if (storageOptions.scope === "global" || storageOptions.cwd === undefined) {
+    return [globalPath];
+  }
+  return [join(storageOptions.cwd, ".pi", SETTINGS_FILE_NAME), globalPath];
+}
+
+/**
+ * The settings helper treats unreadable and syntactically invalid files as
+ * empty. Preflight every file in the resolver's scope order so those failures
+ * remain visible without exposing file contents.
+ */
+function validateSettingsFiles(
+  storageOptions: SettingStorageOptions,
+  onInvalidSetting?: InvalidSettingReporter,
+): SettingsFileValidation[] {
+  return settingsFilePaths(storageOptions).map((path) =>
+    validateSettingsFile(path, onInvalidSetting),
+  );
+}
+
+function validateSettingsFile(
+  path: string,
+  onInvalidSetting?: InvalidSettingReporter,
+): SettingsFileValidation {
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    ) {
+      return { valid: true, telemetry: "missing" };
+    }
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      undefined,
+      "could not be read; ignoring this candidate",
+      onInvalidSetting,
+    );
+    return { valid: false, telemetry: "missing" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      "<invalid JSON document>",
+      "must be valid JSON; ignoring this candidate",
+      onInvalidSetting,
+    );
+    return { valid: false, telemetry: "missing" };
+  }
+
+  const invalidRoot =
+    typeof parsed !== "object" || parsed === null || Array.isArray(parsed);
+  const extensionSettings = invalidRoot
+    ? undefined
+    : (parsed as Record<string, unknown>)[SETTINGS_EXTENSION_NAME];
+  if (
+    invalidRoot ||
+    (extensionSettings !== undefined &&
+      (typeof extensionSettings !== "object" ||
+        extensionSettings === null ||
+        Array.isArray(extensionSettings)))
+  ) {
+    reportInvalidPersistedSetting(
+      TELEMETRY_SETTING,
+      "<invalid settings document shape>",
+      "must be stored in an object-shaped settings document; ignoring this candidate",
+      onInvalidSetting,
+    );
+    return { valid: false, telemetry: "missing" };
+  }
+
+  const telemetryValue =
+    extensionSettings === undefined
+      ? undefined
+      : (extensionSettings as Record<string, unknown>)[TELEMETRY_SETTING];
+  if (telemetryValue === undefined) {
+    return { valid: true, telemetry: "missing" };
+  }
+  if (telemetryValue === "true" || telemetryValue === "false") {
+    return { valid: true, telemetry: "valid" };
+  }
+  reportInvalidPersistedSetting(
+    TELEMETRY_SETTING,
+    REDACTED_TELEMETRY_VALUE,
+    'must be either "true" or "false"; ignoring this candidate',
+    onInvalidSetting,
+  );
+  return { valid: true, telemetry: "invalid" };
+}
+
 function reportInvalidPersistedSetting(
   setting: string,
   value: unknown,
@@ -276,7 +510,11 @@ function envSwitchIsTruthy(name: string, falsy: ReadonlySet<string>): boolean {
   return value !== undefined && !falsy.has(value);
 }
 
-export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
+export function isTelemetryEnabled(
+  pi: ExtensionAPI,
+  storageOptions: SettingStorageOptions = {},
+  onInvalidSetting?: InvalidSettingReporter,
+): boolean {
   const productSwitch = envSwitchValue(TELEMETRY_ENV);
   if (
     productSwitch !== undefined &&
@@ -290,5 +528,9 @@ export function isTelemetryEnabled(pi: ExtensionAPI): boolean {
   if (envSwitchIsTruthy("VITEST", PERMISSIVE_FALSY_VALUES)) return false;
   if (process.env.NODE_ENV === "test") return false;
   if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
-  return readFlag(pi, TELEMETRY_FLAG) !== false;
+  const persistedTelemetryEnabled = readPersistedTelemetry(
+    storageOptions,
+    onInvalidSetting,
+  );
+  return persistedTelemetryEnabled && readFlag(pi, TELEMETRY_FLAG) !== false;
 }
