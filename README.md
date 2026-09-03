@@ -970,7 +970,22 @@ Capture is fire-and-forget with a 1.5-second timeout. Event payloads are not
 queued, persisted, or retried; only the random active-session correlation and
 bounded recovery metadata described above are stored locally. Telemetry failures
 never affect extension behavior.
-Disable it with any of:
+
+### Disable telemetry
+
+For a persistent opt-out across Pi sessions, set
+`PI_SUBAGENTURA_TELEMETRY=0` in the environment that launches Pi. For example,
+add this to `~/.zshrc`, `~/.bashrc`, or the equivalent shell profile:
+
+```bash
+export PI_SUBAGENTURA_TELEMETRY=0
+```
+
+Reload the profile and restart Pi. The opt-out is inherited by recursive
+interactive children. It is not read from `settings-extensions.json`; that file
+only configures `max-depth` and `hide-agent-list`.
+
+For a single invocation, use any of:
 
 ```bash
 pi --no-subagentura-telemetry
@@ -980,7 +995,7 @@ PI_OFFLINE=1 pi
 ```
 
 Telemetry is also disabled automatically under `PI_OFFLINE`, `CI`, `VITEST`,
-or `NODE_ENV=test`. The opt-out is inherited by recursive interactive children.
+or `NODE_ENV=test`.
 
 For every switch below except `NODE_ENV`, surrounding whitespace and letter case
 never change how the value is read, and an unset or empty variable is never a
