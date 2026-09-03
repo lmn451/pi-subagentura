@@ -17,21 +17,28 @@ import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import { flushDeliveries } from "../src/delivery";
 import { importFresh } from "./test-utils";
 import { makeTmp, makeState } from "./subagent-rehydrate-helpers";
+type AttachCommandBuilder = (state: { windowName?: string }) => {
+  attachCommand: string;
+  focusCommand: string;
+};
+
+let buildAttachCommands: AttachCommandBuilder;
 
 describe("rehydrateInteractiveSubagents", () => {
   let cwd: string;
 
   beforeEach(() => {
+    buildAttachCommands = (state) => ({
+      attachCommand: `tmux attach -t ${state.windowName ?? "session"}`,
+      focusCommand: `tmux select-window -t ${state.windowName ?? "session"}`,
+    });
     cwd = makeTmp();
     vi.resetModules();
     vi.doMock("../src/multiplexer", () => ({
       getMux: () => ({
         name: "tmux",
         getPaneLiveness: () => "dead",
-        buildAttachCommands: (state: { windowName?: string }) => ({
-          attachCommand: `tmux attach -t ${state.windowName ?? "session"}`,
-          focusCommand: `tmux select-window -t ${state.windowName ?? "session"}`,
-        }),
+        buildAttachCommands,
       }),
       NoMultiplexerAvailableError: class extends Error {},
     }));
@@ -126,16 +133,9 @@ describe("rehydrateInteractiveSubagents", () => {
     // placeholder — but it is rendered where the UI promises a copy-pasteable
     // command ("Attach: <cmd>"). The old bare "unavailable" read as one; the
     // replacement must be unmistakably not a command, for every backend.
-    vi.doMock("../src/multiplexer", () => ({
-      getMux: () => ({
-        name: "tmux",
-        getPaneLiveness: () => "dead",
-        buildAttachCommands: () => {
-          throw new Error("pane is gone");
-        },
-      }),
-      NoMultiplexerAvailableError: class extends Error {},
-    }));
+    buildAttachCommands = () => {
+      throw new Error("pane is gone");
+    };
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { ATTACH_UNAVAILABLE } =
