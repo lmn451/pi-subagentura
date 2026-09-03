@@ -47,6 +47,7 @@ function verified(path: string, round: number, kind: string) {
       "Dependency Graph",
       "Acceptance Criteria",
       "Risk Register",
+      "Applied Improvements",
     ],
     issues: [],
   };

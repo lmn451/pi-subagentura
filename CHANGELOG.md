@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added bundled RALPLAN examples that translate a prose skill into a
+  code-enforced workflow using the existing generic workflow runtime.
+- Saved workflows now appear as `/workflow:<name>` slash commands and accept
+  optional inline JSON arguments.
+
 ## [3.6.0] - 2026-09-02
 
 ### Added

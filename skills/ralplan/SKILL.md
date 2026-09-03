@@ -1,16 +1,16 @@
 ---
 name: ralplan
-description: Consensus-driven implementation planning via verified immutable Markdown artifacts and isolated Planner, Architect, and Critic reviews. Results remain pending and execution-halted until a separate host approval.
+description: Reference skill contract translated by the bundled workflow into verified, isolated Planner, Architect, and Critic orchestration.
 argument-hint: "[idea]"
 level: intermediate
 ---
 
 # ralplan — Verified Consensus Planning
 
-RALPLAN is a planning protocol, not an executor. It produces bounded, verified
-Markdown artifacts and independent review evidence. A workflow return, artifact
-path, digest, completion marker, or `executeOnConsensus` argument is never
-execution consent.
+This packaged skill is the readable source contract for the bundled RALPLAN
+workflow example. `examples/workflows/ralplan-occ.mjs` translates the contract
+into executable orchestration using the existing generic `workflow` tool. No
+RALPLAN-specific extension tool or mode is required.
 
 ## Invocation
 
@@ -97,20 +97,21 @@ The verifier treats missing sections as invalid. The compact
 
 ## OCC workflow semantics
 
-`examples/workflows/ralplan-occ.mjs` is canonical. `gate: false` bypasses its
-local short-prompt heuristic. `interactive` controls only non-blocking
-`[pending approval]` log markers; the workflow VM cannot wait for a user.
-`executeOnConsensus` is accepted only for compatibility, reported as ignored,
-and never changes approval or execution state.
+`examples/workflows/ralplan-occ.mjs` is the reference translation. Direct
+workflow invocation begins planning, so the optional local short-prompt
+heuristic is enabled only with `gate: true`. Optional `interactive: true`
+controls non-blocking `[pending approval]` markers; the workflow VM cannot wait
+for a user. `executeOnConsensus` is accepted only for compatibility, reported as
+ignored, and never changes approval or execution state.
 
 ## Safety boundary
 
 Planning agents may write only the bounded Markdown paths above. They never edit
 source, execute, delegate implementation, commit, or push. Every terminal result
 has `pending_approval: true` and `execution_halted: true`. Missing consensus,
-cap exhaustion, cancellation, or artifact failure has no `ralph`, `team`,
-autopilot, or other executable recommendation. Host-owned approval/state and
-durable execution are separate contracts.
+cap exhaustion, cancellation, or artifact failure has no executable
+recommendation. Approval and any later execution are outside this example
+workflow.
 
 If the host cannot provide isolated role execution, stop with:
 

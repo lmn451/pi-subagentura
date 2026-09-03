@@ -2625,7 +2625,7 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers 6 tools with the Pi SDK", () => {
+  it("registers 7 tools with the Pi SDK", () => {
     const tools: Array<{ name: string }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -2659,7 +2659,11 @@ describe("registerWorkflowTool", () => {
 
     registerWorkflowTool(pi as any);
 
-    expect(commands.map((c) => c.name)).toEqual([
+    expect(
+      commands
+        .map((command) => command.name)
+        .filter((name) => !name.startsWith("workflow:")),
+    ).toEqual([
       "workflow",
       "workflows",
       "list-workflows",
@@ -2667,6 +2671,103 @@ describe("registerWorkflowTool", () => {
       "workflow-tree",
       "delete-workflow",
     ]);
+    expect(
+      commands
+        .map((command) => command.name)
+        .filter((name) => name.startsWith("workflow:"))
+        .every((name) => /^workflow:[a-z0-9][a-z0-9-]{0,63}$/.test(name)),
+    ).toBe(true);
+  });
+
+  it("exposes saved workflows as /workflow:<name> commands", async () => {
+    const saved = new Map([
+      [
+        "ralplan",
+        'export const meta = { name: "ralplan", description: "Consensus planning" };\nreturn args;',
+      ],
+    ]);
+    const tools: Array<{
+      name: string;
+      execute: (...args: unknown[]) => Promise<unknown>;
+    }> = [];
+    const commands: Array<{
+      name: string;
+      description?: string;
+      handler: (args: string, ctx: unknown) => Promise<void>;
+    }> = [];
+    const pi = {
+      registerTool: vi.fn(
+        (definition: {
+          name: string;
+          execute: (...args: unknown[]) => Promise<unknown>;
+        }) => tools.push(definition),
+      ),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(
+        (
+          name: string,
+          definition: {
+            description?: string;
+            handler: (args: string, ctx: unknown) => Promise<void>;
+          },
+        ) => commands.push({ name, ...definition }),
+      ),
+      on: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    // The test double intentionally implements only registration methods used here.
+    const extensionApi = pi as unknown as Parameters<
+      typeof registerWorkflowTool
+    >[0];
+    registerWorkflowTool(extensionApi, undefined, {
+      listSavedWorkflows: () =>
+        [...saved].map(([name, script]) => ({
+          name,
+          description: parseWorkflow(script).meta.description,
+        })),
+      loadWorkflowScript: (name: string) => saved.get(name) ?? null,
+      saveWorkflowScript: (name: string, script: string) => {
+        saved.set(name, script);
+        return `/saved/${name}.js`;
+      },
+    });
+
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        name: "workflow:ralplan",
+        description: "Run saved workflow “ralplan” — Consensus planning",
+      }),
+    );
+
+    const save = tools.find((tool) => tool.name === "save_workflow")!;
+    await save.execute("", {
+      name: "review",
+      script:
+        'export const meta = { name: "review", description: "Review code" };\nreturn args;',
+    });
+    expect(commands.map((command) => command.name)).toContain(
+      "workflow:review",
+    );
+
+    const command = commands.find(
+      (candidate) => candidate.name === "workflow:ralplan",
+    )!;
+    await command.handler('{"idea":"design auth"}', {
+      cwd: "/repo",
+      model: undefined,
+      modelRegistry: undefined,
+      sessionManager: { getSessionId: () => "parent" },
+      ui: { notify: vi.fn() },
+    });
+    const job = [...workflowJobRegistry.values()].find(
+      (candidate) => candidate.name === "ralplan",
+    )!;
+    try {
+      const run = await job.promise;
+      expect(run.result).toEqual({ idea: "design auth" });
+    } finally {
+      workflowJobRegistry.delete(job.id);
+    }
   });
 
   it("/workflow queues a prompt to create, save, and run a workflow", async () => {

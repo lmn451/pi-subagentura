@@ -63,6 +63,7 @@ function verifiedArtifact(path: string, kind: string) {
       "Dependency Graph",
       "Acceptance Criteria",
       "Risk Register",
+      "Applied Improvements",
     ],
     issues: [],
   };

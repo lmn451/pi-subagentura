@@ -1,8 +1,9 @@
 # Bundled workflow examples
 
 These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They demonstrate reusable workflow structure and provide practical planning and
-conversion flows.
+They show how the generic `workflow` tool turns orchestration techniques into
+reusable executable code. In particular, the RALPLAN examples translate a prose
+skill into code-enforced roles, ordering, validation, and stopping conditions.
 
 ## Running an example
 
@@ -27,8 +28,11 @@ workflow({
 });
 ```
 
-To reuse a script by name, pass the same source to `save_workflow` once, then
-run it with `workflow({ name, args })` or select it with `/workflows`.
+To reuse a script by name, pass the same source to `save_workflow` once. Saving
+`ralplan-occ.mjs` as `ralplan`, for example, immediately exposes
+`/workflow:ralplan`. Type `/workflow:` to discover every saved workflow, append
+JSON arguments inline, select one with `/workflows`, or invoke it through the
+generic `workflow({ name, args })` tool.
 
 All bundled examples accept either an args object or its JSON-string form. JSON
 strings are useful when another tool boundary serializes the payload:
@@ -38,6 +42,12 @@ workflow({
   name: "ralplan-consensus",
   args: '{"idea":"Review src/auth.ts","maxIterations":2}',
 });
+```
+
+The equivalent saved-workflow command is:
+
+```text
+/workflow:ralplan-consensus {"idea":"Review src/auth.ts","maxIterations":2}
 ```
 
 ## Background completion
@@ -111,29 +121,33 @@ both explicit approvals. All results remain pending and execution-halted.
 
 ### `ralplan-occ.mjs`
 
-The canonical OCC-facing RALPLAN flow adds a short-prompt gate, DELIBERATE
-artifact gates, optional advisory requirements traceability, and reviewer model
-routing to the same verified immutable-artifact contract. It never executes the
-resulting plan.
+The reference example translates the latest
+[oh-my-claudecode RALPLAN skill](https://github.com/Yeachan-Heo/oh-my-claudecode/blob/main/skills/ralplan/SKILL.md)
+and its Plan consensus contract into an ordinary workflow script. The script
+enforces isolated role calls, immutable artifacts, Architect-before-Critic
+ordering, reviewer input separation, explicit verdicts, and bounded revision.
+It never executes the resulting plan and adds no RALPLAN-specific extension
+tool or mode.
 
-| Argument                   | Required | Meaning                                                  |
-| -------------------------- | -------- | -------------------------------------------------------- |
-| `idea`                     | yes      | Planning problem                                         |
-| `gate`                     | no       | `false` bypasses the local heuristic; default is enabled |
-| `interactive`              | no       | Controls non-blocking approval marker text; never pauses |
-| `deliberate`               | no       | `true`, `false`, or `"auto"` risk-triggered mode         |
-| `maxIterations`            | no       | Iteration cap clamped to 1–5; defaults to 5              |
-| `artifactsDir`             | no       | Final-plan path prefix; defaults to `.omc/plans`         |
-| `planName`                 | no       | Safe final-plan basename; defaults to `plan`             |
-| `requirementsTraceability` | no       | Runs advisory Analyst + requires coverage map            |
-| `architectModel`           | no       | Model id passed to the Architect `agent()` call          |
-| `criticModel`              | no       | Model id passed to the Critic `agent()` call             |
-| `executeOnConsensus`       | no       | Deprecated compatibility input; ignored                  |
+| Argument                   | Required | Meaning                                            |
+| -------------------------- | -------- | -------------------------------------------------- |
+| `idea`                     | yes      | Planning problem                                   |
+| `gate`                     | no       | `true` enables the optional short-prompt heuristic |
+| `interactive`              | no       | `true` emits non-blocking checkpoint markers       |
+| `deliberate`               | no       | `true`, `false`, or `"auto"` risk-triggered mode   |
+| `maxIterations`            | no       | Iteration cap clamped to 1–5; defaults to 5        |
+| `artifactsDir`             | no       | Final-plan path prefix; defaults to `.omc/plans`   |
+| `planName`                 | no       | Safe final-plan basename; defaults to `plan`       |
+| `requirementsTraceability` | no       | Runs advisory Analyst + requires coverage map      |
+| `architectModel`           | no       | Model id passed to the Architect `agent()` call    |
+| `criticModel`              | no       | Model id passed to the Critic `agent()` call       |
+| `executeOnConsensus`       | no       | Deprecated compatibility input; ignored            |
 
 Artifacts are bounded to 1 MB and validated by dedicated read-only verifier
-agents because the workflow VM exposes no filesystem API. Actual approval and
-execution routing belong to the host; the VM cannot suspend for user input or
-convert marker text, a digest, or a valid plan into approval.
+agents because the workflow VM exposes no filesystem API. A workflow cannot
+suspend at an interactive checkpoint, so optional marker text remains
+non-blocking. A marker, digest, valid artifact, or workflow result is never
+execution consent; every terminal result is pending and execution-halted.
 
 ### `ralplan-from-skill.mjs`
 

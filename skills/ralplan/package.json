@@ -1,7 +1,7 @@
 {
   "name": "pi-ralplan-local",
   "version": "0.1.0",
-  "description": "Verified immutable-artifact planning via isolated Planner/Architect/Critic review. Results remain pending and execution-halted until host approval.",
+  "description": "Readable RALPLAN contract with an executable workflow translation over isolated Planner/Architect/Critic roles.",
   "type": "module",
   "pi": {
     "skills": [

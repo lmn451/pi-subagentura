@@ -67,18 +67,22 @@ describe("README public surface", () => {
         "update_orchestrator_agent_description",
       ].sort(),
     );
-    expect(commands).toHaveLength(8);
+    const staticCommands = commands.filter(
+      (name) => !name.startsWith("workflow:"),
+    );
+    expect(staticCommands).toHaveLength(8);
     for (const name of tools) {
       expect(toolInventory, `Missing tool inventory row for ${name}`).toContain(
         `| \`${name}\``,
       );
     }
-    for (const name of commands) {
+    for (const name of staticCommands) {
       expect(
         commandInventory,
         `Missing command inventory row for /${name}`,
       ).toContain(`| \`/${name}\``);
     }
+    expect(commandInventory).toContain("| `/workflow:<name>`");
     for (const name of flags) {
       expect(
         orchestrationDefaults,

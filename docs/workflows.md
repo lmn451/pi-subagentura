@@ -97,12 +97,7 @@ The combined generate-and-persist phase is intentional — see [Workflow tool pi
 
 ### `ralplan-consensus.mjs`
 
-A compact SHORT-only implementation of the verified RALPLAN contract. Each
-round writes immutable draft and review Markdown paths. Dedicated read-only
-verifier agents validate exact path, 1 MB size bound, headings, round/kind,
-source-draft identity, and SHA-256. Planner → Architect → Critic iterate for
-at most five rounds; final consolidation/verification occurs only after both
-independent reviewers explicitly approve.
+Re-implements the pi-ralplan consensus pipeline as a workflow. Three isolated roles (Planner → Architect → Critic) iterate up to 5 rounds until all approve or the cap is hit.
 
 ```js
 workflow({
@@ -116,13 +111,10 @@ Args:
 - `idea` (required, string) — task description
 - `maxIterations` (optional, default `5`) — consensus rounds
 - `artifactsDir` (optional, default `"plans"`) — output directory
-- `planName` (optional, default `"plan"`) — safe final plan basename
 
 ### `ralplan-occ.mjs`
 
-The canonical OCC-facing implementation adds gate detection, DELIBERATE
-pre-mortem/test-plan headings, optional advisory requirements traceability,
-and reviewer model routing to the verified immutable-artifact contract.
+Faithful port of oh-my-claudecode's RALPLAN skill with gate detection, deliberate mode, and planning/execution boundary. Captures the OCC UX contract as closely as the workflow runtime allows.
 
 ```js
 workflow({
@@ -132,22 +124,15 @@ workflow({
     deliberate: "auto", // auto-detect high-risk substrings
     gate: true, // enable gate detection
     interactive: true, // emit [pending approval] markers
-    requirementsTraceability: true, // advisory Analyst + coverage map
   },
 });
 ```
 
-**Runtime boundaries:**
+**Fidelity limitations** (also documented in the script header):
 
-- The worker VM has no filesystem API. Planner/reviewer/consolidator agents own
-  their bounded Markdown writes; separate read-only verifier agents inspect
-  those files and return small structured reports.
-- Interactive approval checkpoints remain non-blocking `[pending approval]`
-  markers. Real approval and invocation routing belong to the host.
-- Reviewer model ids must be configured in Pi.
-- A valid artifact or consensus result is never execution consent. Every
-  terminal result remains `pending_approval: true` and
-  `execution_halted: true`.
+- Interactive AskUserQuestion checkpoints are not supported by the workflow runtime. Substituted with `[pending approval]` log markers.
+- Architect and Critic model overrides are routed through their respective `agent()` calls, but each model id must be configured in Pi.
+- The workflow never executes; it always returns `pending_approval: true` and `execution_halted: true`, per OCC's planning/execution boundary.
 
 ## Workflow tool pitfalls
 

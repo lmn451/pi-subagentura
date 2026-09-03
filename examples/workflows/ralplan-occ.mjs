@@ -1,10 +1,14 @@
-// ralplan-occ — canonical OCC-facing RALPLAN workflow
+// ralplan-occ — a skill translated into executable workflow code
+// Based on oh-my-claudecode's RALPLAN/Plan consensus contract:
+// https://github.com/Yeachan-Heo/oh-my-claudecode/blob/main/skills/ralplan/SKILL.md
+// The existing generic workflow tool enforces role isolation, ordering, artifact
+// checks, and bounded revision. This example adds no RALPLAN-specific host tools.
 // Planning agents may write bounded Markdown artifacts only. The workflow never
 // edits source, executes a plan, commits, pushes, or treats consensus as consent.
 export const meta = {
   name: "ralplan-occ",
   description:
-    "Canonical OCC RALPLAN: verified immutable artifacts, isolated same-snapshot reviews, requirements traceability, five-round cap, and pending host approval.",
+    "Reference skill-to-workflow translation of OCC RALPLAN with verified artifacts, isolated reviews, bounded revision, and pending approval.",
   phases: [
     { title: "Gate" },
     { title: "Requirements" },
@@ -26,6 +30,10 @@ const REQUIRED_PLAN_HEADINGS = [
   "Dependency Graph",
   "Acceptance Criteria",
   "Risk Register",
+];
+const REQUIRED_FINAL_HEADINGS = [
+  ...REQUIRED_PLAN_HEADINGS,
+  "Applied Improvements",
 ];
 const HIGH_RISK_TRIGGERS = [
   "auth",
@@ -167,8 +175,10 @@ function pathSet(artifactsDir, planName, round) {
   };
 }
 
-function requiredHeadings(mode, requirementsTraceability) {
-  const headings = REQUIRED_PLAN_HEADINGS.slice();
+function requiredHeadings(mode, requirementsTraceability, finalPlan = false) {
+  const headings = (
+    finalPlan ? REQUIRED_FINAL_HEADINGS : REQUIRED_PLAN_HEADINGS
+  ).slice();
   if (mode === "DELIBERATE") {
     headings.push("Pre-Mortem", "Expanded Test Plan");
   }
@@ -279,6 +289,9 @@ CRITIC REVIEW: ${input.criticPath}
 WRITE FINAL EXACTLY: ${input.finalPath}
 ROUND: ${input.round}
 
+Read both review artifacts. Collect, deduplicate, and categorize their actionable
+improvements, apply every accepted improvement to the final plan, and add an
+## Applied Improvements changelog (or state explicitly that none were needed).
 Preserve RALPLAN-DR, ADR, 3-6 tasks with exact paths, dependency graph,
 acceptance criteria, risk register, requirements coverage when present, and
 DELIBERATE sections when present. Return only
@@ -406,8 +419,8 @@ async function callAgent(prompt, options) {
 
 const workflowArgs = parseWorkflowArgs(args);
 const idea = String(workflowArgs.idea || "");
-const interactive = workflowArgs.interactive !== false;
-const gateEnabled = workflowArgs.gate !== false;
+const interactive = workflowArgs.interactive === true;
+const gateEnabled = workflowArgs.gate === true;
 const mode = isDeliberate(idea, workflowArgs) ? "DELIBERATE" : "SHORT";
 const maxRounds = clampRounds(workflowArgs.maxIterations);
 const artifactsDir = safeArtifactsDir(workflowArgs.artifactsDir);
@@ -753,7 +766,7 @@ const finalExpected = {
   path: finalPath,
   round: lastRound,
   kind: "final-plan",
-  headings: requiredHeadings(mode, requirementsTraceability),
+  headings: requiredHeadings(mode, requirementsTraceability, true),
   sourceDigest: lastDraftVerification.sha256,
 };
 const finalVerification = await callAgent(verifierPrompt(finalExpected), {

@@ -1,7 +1,9 @@
 # pi-ralplan-local
 
-Verified consensus planning for Pi. The skill defines isolated Planner,
-Architect, and Critic roles over immutable, bounded Markdown artifacts.
+Readable RALPLAN skill material plus its bundled executable workflow
+translation. The ordinary `workflow` tool—not a RALPLAN-specific extension
+surface—enforces isolated Planner, Architect, and Critic roles over immutable,
+bounded Markdown artifacts.
 
 ## Contract
 
@@ -22,14 +24,16 @@ plus Unit, Integration, E2E, and Observability coverage.
 
 ## Examples
 
-- `examples/workflows/ralplan-occ.mjs` — canonical OCC flow with gate,
-  DELIBERATE mode, requirements traceability, and reviewer model overrides.
+- `examples/workflows/ralplan-occ.mjs` — reference translation with optional
+  gate markers, DELIBERATE mode, requirements traceability, and reviewer model
+  overrides.
 - `examples/workflows/ralplan-consensus.mjs` — compact SHORT-only compatibility
   flow with the same artifact and independent-review guarantees.
 
-The workflow VM cannot pause for user approval. `interactive` only controls
-non-blocking markers. `executeOnConsensus` is ignored compatibility input. A
-plan, digest, completion marker, or consensus result never authorizes execution.
+Direct workflow invocation starts planning. Set `gate: true` only to demonstrate
+the upstream short-prompt heuristic, or `interactive: true` to emit non-blocking
+checkpoint markers. `executeOnConsensus` is ignored compatibility input. A plan,
+digest, completion marker, or consensus result never authorizes execution.
 
 ## Install
 

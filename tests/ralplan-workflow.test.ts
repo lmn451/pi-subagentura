@@ -18,6 +18,7 @@ const HEADINGS = [
   "Dependency Graph",
   "Acceptance Criteria",
   "Risk Register",
+  "Applied Improvements",
 ];
 
 function workflow(name: string): string {
@@ -198,6 +199,7 @@ describe("ralplan independent review contracts", () => {
     expect(prompts.critic[0]).toContain("plan_draft-r1.md");
     expect(prompts.critic[0]).not.toContain("architect_review-r1.md");
     expect(prompts.critic[0]).not.toContain("architect result");
+    expect(prompts.consolidate[0]).toContain("Applied Improvements");
     expect(run.result).toMatchObject({
       status: "pending_approval",
       consensus: true,
@@ -411,13 +413,23 @@ describe("ralplan independent review contracts", () => {
     });
   });
 
-  it("honors gate false and makes interactive markers non-blocking", async () => {
+  it("keeps optional markers non-blocking and disabled by default", async () => {
     const root = "/repo/plans";
     const bypassed = await runWorkflow(workflow("ralplan-occ.mjs"), {
       args: {
         idea: "plan something",
         gate: false,
         interactive: false,
+        maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
+      },
+      runAgent: occRunner(root),
+    });
+    const defaulted = await runWorkflow(workflow("ralplan-occ.mjs"), {
+      args: {
+        idea: "review src/auth.ts",
+        gate: false,
         maxIterations: 1,
         artifactsDir: root,
         planName: "plan",
@@ -432,6 +444,10 @@ describe("ralplan independent review contracts", () => {
     });
 
     expect(bypassed.result).toMatchObject({
+      gate: { enabled: false },
+      interactive: { enabled: false, blocking: false },
+    });
+    expect(defaulted.result).toMatchObject({
       gate: { enabled: false },
       interactive: { enabled: false, blocking: false },
     });

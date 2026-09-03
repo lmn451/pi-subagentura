@@ -73,7 +73,9 @@ pi --orchestrator
 ```
 
 `/workflow` asks the parent to create, save, and immediately run a reusable
-workflow. `/workflows` runs saved workflows, and `/workflow-tree` shows live
+workflow. Each saved workflow is also exposed as `/workflow:<name>`—for example,
+`/workflow:ralplan {"idea":"review src/auth.ts"}`. Type `/workflow:` to discover
+saved workflows. `/workflows` opens the picker, and `/workflow-tree` shows live
 phases, agents, and cancellation controls.
 
 ## Reusable workflows
@@ -89,6 +91,12 @@ of injected orchestration primitives:
   for every item to finish a stage first.
 - `phase()` names progress in the TUI. Saved workflows may call another saved
   workflow with `workflow(name, args)`, with one level of nesting.
+
+The bundled `ralplan-occ.mjs` example demonstrates the core workflow idea:
+translate a prose skill into executable orchestration code. It uses the same
+generic `workflow` tool as user-authored workflows while code-enforcing isolated
+roles, review order, bounded revision, artifact checks, and a planning-only
+result. It does not register RALPLAN-specific tools or modes.
 
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
@@ -138,6 +146,7 @@ These commands are intended for people at the Pi prompt.
 | Command             | Purpose                                                           |
 | ------------------- | ----------------------------------------------------------------- |
 | `/workflow`         | Create, save, and run a reusable workflow from a task             |
+| `/workflow:<name>`  | Run a saved workflow; type `/workflow:` to discover saved names   |
 | `/workflows`        | Select and run a saved workflow                                   |
 | `/list-workflows`   | Alias for `/workflows`                                            |
 | `/workflow-status`  | List workflow jobs and their live or terminal status              |
