@@ -55,6 +55,13 @@ default. Specify `scope: "global"` to use
 `~/.pi-subagentura/workflows/<name>.mjs`; a project workflow overrides a
 same-named global workflow. Legacy `.js` workflow files remain readable.
 
+Pi does not currently expose command unregistration. Named-command completion is
+rebuilt on extension reload, so deleting a workflow or changing project scope
+can leave a stale `/workflow:<name>` completion until `/reload`. Calling it is
+safe: the handler resolves the current stores again, reports `No saved
+workflow`, and starts nothing. The `/workflows` picker always reads the live
+inventory.
+
 ### Named command argument contract
 
 `/workflow:<name>` deliberately routes through the parent LLM. It does **not**

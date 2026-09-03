@@ -83,6 +83,8 @@ describe("README public surface", () => {
       ).toContain(`| \`/${name}\``);
     }
     expect(commandInventory).toContain("| `/workflow:<name>`");
+    expect(README).toContain("command registration but not command removal");
+    expect(README).toContain("stale command reports");
     for (const name of flags) {
       expect(
         orchestrationDefaults,

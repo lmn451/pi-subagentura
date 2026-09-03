@@ -2895,6 +2895,48 @@ describe("registerWorkflowTool", () => {
     expect(delivery).toEqual({ deliverAs: "followUp" });
   });
 
+  it("keeps a disappeared workflow command inert until extension reload", async () => {
+    const source =
+      'export const meta = { name: "review", description: "Review code" };\nreturn args;';
+    const saved = new Map([["review", source]]);
+    const commands: Array<{ name: string; handler: Function }> = [];
+    const pi = {
+      registerTool: vi.fn(),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(
+        (name: string, definition: { handler: Function }) =>
+          commands.push({ name, ...definition }),
+      ),
+      on: vi.fn(),
+      sendMessage: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    // The test double intentionally implements only registration methods used here.
+    const extensionApi = pi as unknown as Parameters<
+      typeof registerWorkflowTool
+    >[0];
+    registerWorkflowTool(extensionApi, undefined, {
+      listSavedWorkflows: () => [
+        { name: "review", description: "Review code", scope: "global" },
+      ],
+      loadWorkflowScript: (name: string) => saved.get(name) ?? null,
+    });
+    const command = commands.find(
+      (candidate) => candidate.name === "workflow:review",
+    )!;
+    saved.delete("review");
+    const notify = vi.fn();
+
+    await command.handler("review auth", {
+      cwd: "/repo",
+      ui: { notify },
+    });
+
+    expect(commands.map(({ name }) => name)).toContain("workflow:review");
+    expect(notify).toHaveBeenCalledWith('No saved workflow named "review".');
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
   it("/workflow queues a prompt to create, save, and run a workflow", async () => {
     const commands: Array<{ name: string; handler: Function }> = [];
     const pi = {

@@ -100,6 +100,13 @@ global workflows stored under
 `~/.pi-subagentura/workflows/<name>.mjs`. Pass `scope: "global"` to
 `save_workflow` only for workflows intended to be shared across projects.
 
+Pi currently exposes command registration but not command removal. The
+`/workflow:<name>` inventory is therefore rebuilt on extension reload. If a
+workflow is deleted—or a previously visited project contributed a command—the
+stale completion can remain visible until `/reload`. Invocation always
+re-resolves the current project/global stores; a stale command reports
+`No saved workflow` and never starts work. `/workflows` reads the live inventory.
+
 ## Reusable workflows
 
 Workflow files are ordinary `.mjs` scripts with static metadata and a small set
