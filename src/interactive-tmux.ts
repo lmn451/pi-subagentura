@@ -1430,15 +1430,15 @@ export function cancelInteractiveSubagent(
     /* best effort — dir may not exist yet if the launch script is still warming up */
   }
   retireLineageBootstraps(state.artifactDir);
-  appendCancellation(state, { origin: source });
-
-  // 2. Update the registry. The poller still processes the durable cancellation.
-  state.status = "cancelled";
-
-  // 3. Kill the pane via the backend that created it. The wrapper's EXIT trap fires and records the event.
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    mux.killPane(state.paneId, state.muxSession);
+  try {
+    appendCancellation(state, { origin: source });
+  } finally {
+    // A failed artifact write must not prevent the requested stop.
+    state.status = "cancelled";
+    const mux = getMuxForState(state);
+    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+      mux.killPane(state.paneId, state.muxSession);
+    }
   }
   return state;
 }
@@ -1519,11 +1519,14 @@ export function cancelInteractiveDescendantByState(
     /* best effort; the owner will reconcile the durable pane state */
   }
   retireLineageBootstraps(state.artifactDir);
-  appendCancellation(state, { origin: "supervisor_descendant" }, false);
-  state.status = "cancelled";
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    mux.killPane(state.paneId, state.muxSession);
+  try {
+    appendCancellation(state, { origin: "supervisor_descendant" }, false);
+  } finally {
+    state.status = "cancelled";
+    const mux = getMuxForState(state);
+    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+      mux.killPane(state.paneId, state.muxSession);
+    }
   }
   return state;
 }
@@ -1576,16 +1579,17 @@ export function cancelInteractiveSubagentByState(
     /* best-effort */
   }
   retireLineageBootstraps(state.artifactDir);
-  appendCancellation(state, context);
-
-  // A destructive lifecycle transition owns teardown: unless absence is
-  // confirmed, attempt the kill even when the listing probe is unavailable.
-  const mux = getMuxForState(state);
-  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-    try {
-      mux.killPane(state.paneId, state.muxSession);
-    } catch {
-      /* best-effort */
+  try {
+    appendCancellation(state, context);
+  } finally {
+    // Teardown must outlive artifact failures during destructive transitions.
+    const mux = getMuxForState(state);
+    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+      try {
+        mux.killPane(state.paneId, state.muxSession);
+      } catch {
+        /* best-effort */
+      }
     }
   }
   // Does NOT update state.status — see JSDoc point 2.
