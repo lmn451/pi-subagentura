@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,13 +72,56 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
     }
   });
 
-  it("installs the missing Pi server package for the latest SDK", () => {
-    const install = stepBlock(
-      "Install latest Pi server compatibility dependency",
-    );
-    expect(install).toContain("if: matrix.pi-version == 'latest'");
-    expect(install).toContain("@earendil-works/pi-server@${PI_VERSION}");
-  });
+  it.each(["0.80.6", "latest"])(
+    "installs the selected %s SDK in one npm invocation",
+    (version) => {
+      const scripts = [...workflow.matchAll(/^      - name: (.+)\n/gm)]
+        .map((match) => match[1])
+        .filter((name) =>
+          /^Install (selected Pi SDK|latest Pi server)/.test(name),
+        )
+        .map(stepBlock)
+        .filter(
+          (step) =>
+            version === "latest" ||
+            !step.includes("if: matrix.pi-version == 'latest'"),
+        )
+        .map((step) => {
+          const inline = step.match(/^        run: (npm .+)$/m);
+          if (inline) return inline[1];
+          const run = step.match(
+            /^        run: ([|>]-?)\n((?:          .*\n|\n)*)/m,
+          );
+          expect(run).not.toBeNull();
+          const lines = run![2]
+            .trimEnd()
+            .split("\n")
+            .map((line) => line.slice(10));
+          return lines.join(run![1].startsWith(">") ? " " : "\n");
+        });
+      const calls = execFileSync(
+        "bash",
+        ["-c", `npm() { printf '%s\\n' "$*"; }\n${scripts.join("\n")}`],
+        { encoding: "utf8", env: { ...process.env, PI_VERSION: version } },
+      )
+        .trim()
+        .split("\n");
+
+      // A later no-save install can reset the earlier unsaved SDK selection.
+      expect(calls).toHaveLength(1);
+      for (const name of [
+        "pi-agent-core",
+        "pi-ai",
+        "pi-coding-agent",
+        "pi-tui",
+      ]) {
+        expect(calls[0]).toContain(`@earendil-works/${name}@${version}`);
+      }
+      expect(calls[0].includes("@earendil-works/pi-server@latest")).toBe(
+        version === "latest",
+      );
+    },
+  );
 
   it("runs static, coverage, and packaging checks once", () => {
     expect(occurrences("run: npm run format:check")).toBe(1);

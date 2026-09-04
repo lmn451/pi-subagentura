@@ -78,22 +78,20 @@ jobs:
       - name: Install selected Pi SDK
         env:
           PI_VERSION: ${{ matrix.pi-version }}
-        run: >-
-          npm install --no-save --package-lock=false
-          "@earendil-works/pi-agent-core@${PI_VERSION}"
-          "@earendil-works/pi-ai@${PI_VERSION}"
-          "@earendil-works/pi-coding-agent@${PI_VERSION}"
-          "@earendil-works/pi-tui@${PI_VERSION}"
-
-      # Pi 0.85.0's published coding-agent package imports pi-server
-      # without declaring it. The official bundled CLI is unaffected; this
-      # compatibility install covers direct SDK imports used by these tests.
-      # Remove it when upstream publishes a complete dependency graph.
-      - name: Install latest Pi server compatibility dependency
-        if: matrix.pi-version == 'latest'
-        env:
-          PI_VERSION: ${{ matrix.pi-version }}
-        run: npm install --no-save --package-lock=false "@earendil-works/pi-server@${PI_VERSION}"
+        run: |
+          pi_packages=(
+            "@earendil-works/pi-agent-core@${PI_VERSION}"
+            "@earendil-works/pi-ai@${PI_VERSION}"
+            "@earendil-works/pi-coding-agent@${PI_VERSION}"
+            "@earendil-works/pi-tui@${PI_VERSION}"
+          )
+          # Pi 0.85.0 imports pi-server without declaring it. Install it
+          # together with the SDK: a later no-save install can reset the
+          # selected SDK versions to the package.json development pins.
+          if [ "$PI_VERSION" = "latest" ]; then
+            pi_packages+=("@earendil-works/pi-server@${PI_VERSION}")
+          fi
+          npm install --no-save --package-lock=false "${pi_packages[@]}"
 
       - name: Verify extension loads in selected Pi
         run: |
