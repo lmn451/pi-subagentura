@@ -1487,12 +1487,12 @@ function registerGetSubagentResultTool(
       }
 
       if (job.status === "cancelled") {
-        captureInProcessResultRead(job, execution.owner, "cancelled");
         consumeCompletionSource(
           pi,
           { source: "in-process", sourceId: job.id },
           execution.owner,
         );
+        captureInProcessResultRead(job, execution.owner, "cancelled");
         return {
           content: [
             {
@@ -1617,7 +1617,12 @@ function registerGetSubagentResultTool(
         return unavailableSessionResult();
       }
       const result = waitResult.value!;
-      // Only set resultRetrieved after successful completion (not on abort)
+      consumeCompletionSource(
+        pi,
+        { source: "in-process", sourceId: job.id },
+        execution.owner,
+      );
+      // Failed receipt persistence must leave the result protected for retry.
       const firstResultRead = !job.resultRetrieved;
       job.resultRetrieved = true;
       const outcome =
@@ -1625,11 +1630,6 @@ function registerGetSubagentResultTool(
           ? "cancelled"
           : resultReadOutcome(result, firstResultRead);
       captureInProcessResultRead(job, execution.owner, outcome);
-      consumeCompletionSource(
-        pi,
-        { source: "in-process", sourceId: job.id },
-        execution.owner,
-      );
       if (job.cleanupAfterCollection) {
         job.cleanupAfterCollection = false;
         scheduleJobCleanup(job.id, true, undefined, execution.owner);

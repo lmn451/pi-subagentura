@@ -1047,6 +1047,44 @@ describe("completion coordinator", () => {
     }
   });
 
+  it("rejects consumption when both receipt stores fail and allows a durable retry", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.parentStreaming = true;
+    const owner = sessionOwner(scope);
+    publishCompletion(record("receipt-retry"), owner);
+    const ledgerPath = sessionLedgerPath(
+      setupResult.ledgerRoot,
+      "parent-session",
+      "subagentura-completion-consumed",
+    );
+    mkdirSync(ledgerPath, { recursive: true });
+    let unavailable = true;
+    setupResult.pi.appendEntry.mockImplementation((customType, data) => {
+      if (unavailable && customType === "subagentura-completion-consumed") {
+        throw new Error("receipt storage unavailable");
+      }
+      setupResult.entries.push({ type: "custom", customType, data });
+    });
+    const consume = () =>
+      consumeCompletionSource(
+        setupResult.pi as never,
+        {
+          source: "interactive",
+          sourceId: "receipt-retry",
+          turnId: "turn-receipt-retry",
+        },
+        owner,
+      );
+
+    expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    rmSync(ledgerPath, { recursive: true });
+    unavailable = false;
+    expect(consume()).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+  });
+
   it("ignores forged project-local consumption and overflow ledgers", () => {
     const setupResult = setup();
     scope = setupResult.scope;

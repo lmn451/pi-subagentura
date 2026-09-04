@@ -1576,7 +1576,7 @@ function manifestMessage(
 function appendConsumption(
   state: CompletionCoordinatorState,
   consumption: CompletionConsumption,
-): void {
+): boolean {
   let durable = false;
   try {
     if (typeof state.pi.appendEntry === "function") {
@@ -1594,12 +1594,14 @@ function appendConsumption(
         state.consumptionLedgerPath,
         JSON.stringify(consumption),
       );
+      durable = true;
     } catch (error) {
       debugLog("warn", "completion_consumption_ledger_write_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
+  if (!durable) return false;
   state.sourceConsumptions.push(consumption);
   if (state.sourceConsumptions.length > MAX_COMPLETION_RECORDS) {
     state.sourceConsumptions.shift();
@@ -1616,6 +1618,7 @@ function appendConsumption(
       state.fallbackExpectations.delete(record.completionId);
     }
   }
+  return true;
 }
 
 function persistPendingNotices(state: CompletionCoordinatorState): boolean {
@@ -2025,12 +2028,17 @@ export function consumeCompletionSource(
           }
       : { source: selector.source, sourceId: normalizedSourceId };
   if (fallbackConsumptionMatches(state, normalizedSelector)) return false;
-  appendConsumption(state, {
+  const persisted = appendConsumption(state, {
     schemaVersion: COMPLETION_RECORD_SCHEMA_VERSION,
     ...normalizedSelector,
     consumedAt: Date.now(),
     reason: "manual",
   });
+  if (!persisted) {
+    throw new Error(
+      "Could not persist the result consumption receipt. The result is retained; retry collection when storage is available.",
+    );
+  }
   return true;
 }
 
