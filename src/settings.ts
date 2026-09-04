@@ -169,24 +169,25 @@ function readPersistedMaxDepth(
   storageOptions: SettingStorageOptions,
   onInvalidSetting?: InvalidSettingReporter,
 ): number {
-  let raw: unknown = undefined;
-  try {
-    raw = getSetting(
-      SETTINGS_EXTENSION_NAME,
-      MAX_DEPTH_SETTING,
-      MAX_DEPTH_DEFINITION.defaultValue,
-      resolveStorageOptions(storageOptions),
-    );
-    return parseMaxDepth(raw);
-  } catch {
-    reportInvalidPersistedSetting(
-      MAX_DEPTH_SETTING,
-      raw,
-      `must be an integer between 0 and ${MAX_CONFIGURED_DEPTH}; using ${DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH}`,
-      onInvalidSetting,
-    );
-    return DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH;
+  for (const path of settingsFilePaths(resolveStorageOptions(storageOptions))) {
+    const raw = readSettingsFile(path, MAX_DEPTH_SETTING, onInvalidSetting)?.[
+      MAX_DEPTH_SETTING
+    ];
+    if (raw === undefined) continue;
+    try {
+      // The CLI accepts false as "unset"; persisted values must be strings.
+      if (typeof raw !== "string") throw new Error("Invalid max-depth type");
+      return parseMaxDepth(raw);
+    } catch {
+      reportInvalidPersistedSetting(
+        MAX_DEPTH_SETTING,
+        "<redacted invalid max-depth value>",
+        `must be an integer between 0 and ${MAX_CONFIGURED_DEPTH}; ignoring this candidate`,
+        onInvalidSetting,
+      );
+    }
   }
+  return DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH;
 }
 
 /**
@@ -362,10 +363,11 @@ function validateSettingsFiles(
   );
 }
 
-function validateSettingsFile(
+function readSettingsFile(
   path: string,
+  setting: string,
   onInvalidSetting?: InvalidSettingReporter,
-): SettingsFileValidation {
+): Record<string, unknown> | undefined {
   let content: string;
   try {
     content = readFileSync(path, "utf8");
@@ -376,15 +378,15 @@ function validateSettingsFile(
       "code" in error &&
       (error as { code?: unknown }).code === "ENOENT"
     ) {
-      return { valid: true, telemetry: "missing" };
+      return {};
     }
     reportInvalidPersistedSetting(
-      TELEMETRY_SETTING,
+      setting,
       undefined,
       "could not be read; ignoring this candidate",
       onInvalidSetting,
     );
-    return { valid: false, telemetry: "missing" };
+    return undefined;
   }
 
   let parsed: unknown;
@@ -392,12 +394,12 @@ function validateSettingsFile(
     parsed = JSON.parse(content);
   } catch {
     reportInvalidPersistedSetting(
-      TELEMETRY_SETTING,
+      setting,
       "<invalid JSON document>",
       "must be valid JSON; ignoring this candidate",
       onInvalidSetting,
     );
-    return { valid: false, telemetry: "missing" };
+    return undefined;
   }
 
   const invalidRoot =
@@ -413,18 +415,24 @@ function validateSettingsFile(
         Array.isArray(extensionSettings)))
   ) {
     reportInvalidPersistedSetting(
-      TELEMETRY_SETTING,
+      setting,
       "<invalid settings document shape>",
       "must be stored in an object-shaped settings document; ignoring this candidate",
       onInvalidSetting,
     );
-    return { valid: false, telemetry: "missing" };
+    return undefined;
   }
 
-  const telemetryValue =
-    extensionSettings === undefined
-      ? undefined
-      : (extensionSettings as Record<string, unknown>)[TELEMETRY_SETTING];
+  return (extensionSettings as Record<string, unknown> | undefined) ?? {};
+}
+
+function validateSettingsFile(
+  path: string,
+  onInvalidSetting?: InvalidSettingReporter,
+): SettingsFileValidation {
+  const settings = readSettingsFile(path, TELEMETRY_SETTING, onInvalidSetting);
+  if (!settings) return { valid: false, telemetry: "missing" };
+  const telemetryValue = settings[TELEMETRY_SETTING];
   if (telemetryValue === undefined) {
     return { valid: true, telemetry: "missing" };
   }
