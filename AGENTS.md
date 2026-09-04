@@ -172,6 +172,12 @@ directly; only their background workflow aggregate does. Preserve that suppressi
 on both
 process and in-process runner paths.
 
+Manual consumption writes and syncs the private receipt ledger before mirroring
+the receipt into Pi. Pi can expose an entry in memory before its disk write fails;
+that entry alone must not unlock result collection. Receipt-ledger reads also sync
+their snapshot before accepting it. Lifecycle retirement may still use Pi when
+the ledger is unavailable, because the corresponding jobs are being removed.
+
 Durable notice persistence gates parent manifests. Retain failed notice appends for
 a later bounded retry, reconcile append-then-throw against session entries, and
 never spin while storage remains unavailable. Keep groups bounded to 32

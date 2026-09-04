@@ -30,13 +30,25 @@ import {
   createPiSessionHarness,
   type PiSessionHarness,
 } from "./helpers/pi-session-harness";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendDeterministicTurn } from "./helpers/deterministic-artifacts";
-import { registerInProcessJob } from "../src/helpers";
+import {
+  registerInProcessJob,
+  removeInProcessJob,
+  type JobState,
+  type SubagentResult,
+} from "../src/helpers";
+import { sessionLedgerPath } from "../src/completion-ledger";
 import {
   ORCHESTRATOR_V2_WAKE_DETAIL_KEY,
   ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
@@ -47,7 +59,9 @@ import {
 } from "../src/completion-turn";
 
 import {
+  clearCompletionCoordinator,
   flushCompletionManifests,
+  prepareCompletionManifest,
   publishCompletion,
   registerCompletionMember,
   settleCompletionParentTurn,
@@ -165,6 +179,116 @@ async function setup(
 }
 
 describe("coordinated completion delivery", () => {
+  it.each([false, true])(
+    "requires a durable receipt across retries and coordinator reload (Pi storage blocked=%s)",
+    async (blockPiStorage) => {
+      const root = mkdtempSync(join(tmpdir(), "pi-receipt-persistence-"));
+      artifactRoots.push(root);
+      const manager = SessionManager.create(root, join(root, "sessions"));
+      const existingScopes = new Set(getSessionScopes().map(({ id }) => id));
+      const harness = await createPiSessionHarness(root, {
+        extensionRoot: repoRoot,
+        includeTools: true,
+        sessionManager: manager,
+      });
+      harnesses.push(harness);
+      const scope = resolveHarnessScope(harness, existingScopes);
+      const owner = sessionOwner(scope);
+      const seed = harness.session.prompt("Initialize the persisted session.");
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.completeNext();
+      await seed;
+      scope.parentStreaming = true;
+      const usage = {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 1,
+      };
+      const result: SubagentResult = {
+        output: "retained result",
+        isError: false,
+        usage,
+      };
+      const job: JobState = {
+        id: "durable-receipt-job",
+        session: harness.session,
+        status: "done",
+        startedAt: Date.now(),
+        liveStatus: { turn: 1, output: result.output, usage },
+        promise: Promise.resolve(result),
+        result,
+        completionPolicy: "each",
+      };
+      expect(registerInProcessJob(job, owner)).toBe(true);
+      publishCompletion(
+        {
+          schemaVersion: 1,
+          completionId: "job:durable-receipt-job",
+          source: "in-process",
+          sourceId: job.id,
+          label: "Retained job",
+          status: "done",
+          policy: "each",
+          references: [{ label: "result", value: job.id }],
+          completedAt: Date.now(),
+        },
+        owner,
+      );
+      const sessionFile = manager.getSessionFile()!;
+      expect(readFileSync(sessionFile, "utf8")).toContain(
+        "subagentura-completion",
+      );
+      const receiptPath = sessionLedgerPath(
+        manager.getSessionDir(),
+        manager.getSessionId(),
+        "subagentura-completion-consumed",
+      );
+      mkdirSync(receiptPath, { recursive: true });
+      if (blockPiStorage) {
+        renameSync(sessionFile, `${sessionFile}.retained`);
+        mkdirSync(sessionFile);
+      }
+      const tool = harness.session.agent.state.tools.find(
+        (candidate) => candidate.name === "get_subagent_result",
+      )!;
+      const read = () => tool.execute("read-result", { jobId: job.id });
+      try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await expect(read()).rejects.toThrow(/persist.*receipt/i);
+          expect(job.resultRetrieved).not.toBe(true);
+          expect(
+            manager
+              .getEntries()
+              .filter(
+                (entry) =>
+                  entry.type === "custom" &&
+                  entry.customType === "subagentura-completion-consumed",
+              ),
+          ).toHaveLength(0);
+          clearCompletionCoordinator(owner);
+          expect(prepareCompletionManifest(owner)).toBeDefined();
+        }
+        rmSync(receiptPath, { recursive: true });
+        if (blockPiStorage) {
+          rmSync(sessionFile, { recursive: true });
+          renameSync(`${sessionFile}.retained`, sessionFile);
+        }
+        expect((await read()).content).toEqual([
+          { type: "text", text: result.output },
+        ]);
+        expect(readFileSync(receiptPath, "utf8")).toContain(job.id);
+        expect(job.resultRetrieved).toBe(true);
+        clearCompletionCoordinator(owner);
+        expect(prepareCompletionManifest(owner)).toBeUndefined();
+      } finally {
+        removeInProcessJob(job.id, owner);
+      }
+    },
+  );
+
   it("keeps the durable user notice out of provider context and sends one compact manifest", async () => {
     const { harness, scope } = await setupCoordinatorHarness();
     const owner = sessionOwner(scope);
