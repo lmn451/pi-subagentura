@@ -189,6 +189,20 @@ describe("completion coordinator", () => {
     );
   });
 
+  it("defers completion manifests while a UI prompt is active", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.uiPromptActive = true;
+
+    publishCompletion(record("ui-prompt"), sessionOwner(scope));
+    await Promise.resolve();
+
+    expect(manifests(setupResult.pi)).toHaveLength(0);
+    scope.uiPromptActive = false;
+    flushCompletionManifests(sessionOwner(scope));
+    expect(manifests(setupResult.pi)).toHaveLength(1);
+  });
+
   it("notifies the user once and sends one independent reference manifest", () => {
     const setupResult = setup();
     scope = setupResult.scope;

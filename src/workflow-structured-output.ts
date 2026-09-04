@@ -11,6 +11,10 @@ interface WorkflowStructuredOutputToolDefinition {
   label: string;
   description: string;
   parameters: unknown;
+  constrainedSampling: {
+    type: "json_schema";
+    strict: "prefer";
+  };
   executionMode: "sequential";
   execute(
     _toolCallId: string,
@@ -52,6 +56,10 @@ export function createWorkflowStructuredOutputTool(
       description:
         "Return the final structured output for workflow schema-driven calls.",
       parameters: wrappedSchema,
+      constrainedSampling: {
+        type: "json_schema",
+        strict: "prefer",
+      },
       executionMode: "sequential",
       async execute(
         _toolCallId: string,

@@ -252,6 +252,54 @@ describe("session handler lifecycle callbacks", () => {
     expect(ui.notify).toHaveBeenCalledWith("invalid telemetry", "warning");
   });
 
+  it("uses Pi UI prompt events to defer completion delivery", async () => {
+    const registration = registerHandlers();
+    const ctx = startSession(registration, root, "session-a");
+    const promptStart = registration.handlers.get("ui_prompt_start")?.[0];
+    const promptEnd = registration.handlers.get("ui_prompt_end")?.[0];
+    expect(promptStart).toBeTypeOf("function");
+    expect(promptEnd).toBeTypeOf("function");
+
+    promptStart!(
+      {
+        type: "ui_prompt_start",
+        reason: "ui_prompt",
+        kind: "input",
+      },
+      ctx,
+    );
+    expect(registration.sessionScope.uiPromptActive).toBe(true);
+
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: "ui-prompt-event",
+        source: "in-process",
+        sourceId: "ui-prompt-event",
+        label: "UI prompt event",
+        status: "done",
+        policy: "each",
+        references: [{ label: "result", value: "job" }],
+        completedAt: 1,
+      },
+      sessionOwner(registration.sessionScope),
+    );
+    await Promise.resolve();
+    expect(registration.pi.sendMessage).not.toHaveBeenCalled();
+
+    promptEnd!(
+      {
+        type: "ui_prompt_end",
+        reason: "ui_prompt",
+        kind: "input",
+      },
+      ctx,
+    );
+    await Promise.resolve();
+    expect(registration.sessionScope.uiPromptActive).toBe(false);
+    expect(registration.pi.sendMessage).toHaveBeenCalled();
+  });
+
   it.each(["reload", "resume"] as const)(
     "preserves one telemetry session across %s without another root start",
     (reason) => {

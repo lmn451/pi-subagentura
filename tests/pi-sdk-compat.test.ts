@@ -73,6 +73,29 @@ describe("Pi SDK session compatibility", () => {
     expect(registerProviderMock).toHaveBeenCalledTimes(2);
   });
 
+  it("copies native provider registrations into modern runtimes", () => {
+    const nativeProvider = { id: "native-provider" };
+    const registerNativeProvider = vi.fn();
+    const registerProviderMock = vi.fn();
+    const runtime = {
+      kind: "modern" as const,
+      modelRuntime: {
+        getModel: vi.fn(),
+        registerProvider: registerProviderMock,
+        registerNativeProvider,
+      } as never,
+    };
+    const parentRegistry = {
+      getRegisteredNativeProvider: vi.fn().mockReturnValue(nativeProvider),
+      getRegisteredProviderConfig: vi.fn(),
+    } as never;
+
+    copyProviderConfig(runtime, parentRegistry, "native-provider");
+
+    expect(registerNativeProvider).toHaveBeenCalledWith(nativeProvider);
+    expect(registerProviderMock).not.toHaveBeenCalled();
+  });
+
   it("creates a default runtime when no auth data is supplied", async () => {
     const runtime = await createCompatibleSessionRuntime();
     expect(["legacy", "modern"]).toContain(runtime.kind);
