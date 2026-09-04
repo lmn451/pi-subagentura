@@ -120,7 +120,7 @@
     "test:tmux": "vitest run tests/tmux.integration.test.ts",
     "test:zellij": "vitest run tests/zellij.integration.test.ts",
     "test:herdr": "vitest run tests/herdr.integration.test.ts",
-    "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/published-tarball.test.ts --exclude 'tests/terminal-e2e/**'",
+    "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/published-tarball.test.ts --exclude tests/performance-regression.test.ts --exclude 'tests/terminal-e2e/**'",
     "mutation:pilot": "stryker run",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
@@ -152,13 +152,13 @@
     "@earendil-works/pi-tui": "0.80.6",
     "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^26.0.0",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/coverage-v8": "^5.0.0",
     "fast-check": "^4.9.0",
     "lint-staged": "^17.0.7",
     "prettier": "^3.9.0",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
