@@ -80,6 +80,7 @@
     "src/session-scope.ts",
     "src/settings.ts",
     "src/telemetry.ts",
+    "src/telemetry-operations.ts",
     "src/subagent.ts",
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",
@@ -142,6 +143,7 @@
     "@earendil-works/pi-agent-core": ">=0.80.6",
     "@earendil-works/pi-ai": ">=0.80.6",
     "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-server": ">=0.84.0",
     "@earendil-works/pi-tui": ">=0.80.6",
     "typebox": "*"
   },

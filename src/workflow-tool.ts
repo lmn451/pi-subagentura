@@ -80,6 +80,7 @@ import {
 import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 import { attachAsyncJobSettlement } from "./tools/in-process";
 import { registerToolWithDefaultGuidance } from "./tool-guidance";
+import { registerCommandWithTelemetry } from "./telemetry-operations";
 import {
   assertCompletionGroupOpen,
   reserveCompletionGroup,
@@ -1672,7 +1673,7 @@ export function registerWorkflowTool(
       }
     }
 
-    pi.registerCommand("workflow", {
+    registerCommandWithTelemetry(pi, "workflow", {
       description:
         "Create a reusable workflow from a task, save it, and run it immediately.",
       handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -1696,17 +1697,17 @@ export function registerWorkflowTool(
       },
     });
 
-    pi.registerCommand("workflows", {
+    registerCommandWithTelemetry(pi, "workflows", {
       description: "List saved workflows, select one, and run it.",
       handler: runSavedWorkflowCommand,
     });
 
-    pi.registerCommand("list-workflows", {
+    registerCommandWithTelemetry(pi, "list-workflows", {
       description: "Alias for /workflows.",
       handler: runSavedWorkflowCommand,
     });
 
-    pi.registerCommand("workflow-status", {
+    registerCommandWithTelemetry(pi, "workflow-status", {
       description:
         "List running and completed workflow jobs with status, agent counts, canonical usage, output budget, and elapsed time.",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
@@ -1716,7 +1717,7 @@ export function registerWorkflowTool(
       },
     });
 
-    pi.registerCommand("workflow-tree", {
+    registerCommandWithTelemetry(pi, "workflow-tree", {
       description:
         "Open an interactive workflow tree with expand/collapse and cancel controls.",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
@@ -1727,7 +1728,7 @@ export function registerWorkflowTool(
       },
     });
 
-    pi.registerCommand("delete-workflow", {
+    registerCommandWithTelemetry(pi, "delete-workflow", {
       description:
         "Delete a saved workflow by name (interactive picker if no name given).",
       handler: async (args: string, ctx: ExtensionCommandContext) => {

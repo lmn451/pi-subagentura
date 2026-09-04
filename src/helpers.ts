@@ -265,6 +265,67 @@ export function usageFromAssistantMessages(
   return total;
 }
 
+/** Use Pi's aggregate session accounting when the SDK exposes it. */
+function usageFromSessionStats(session: unknown, fallback: Usage): Usage {
+  const getSessionStats = (
+    session as {
+      getSessionStats?: () => unknown;
+    }
+  ).getSessionStats;
+  if (typeof getSessionStats !== "function") return { ...fallback };
+
+  let stats: unknown;
+  try {
+    stats = getSessionStats.call(session);
+  } catch {
+    // Stats are an optional compatibility enhancement, not a spawn failure.
+    return { ...fallback };
+  }
+  if (!stats || typeof stats !== "object" || Array.isArray(stats)) {
+    return { ...fallback };
+  }
+  const rawStats = stats as Record<string, unknown>;
+  const rawTokens = rawStats.tokens;
+  if (!rawTokens || typeof rawTokens !== "object" || Array.isArray(rawTokens)) {
+    return { ...fallback };
+  }
+  const tokens = rawTokens as Record<string, unknown>;
+  const input = nonNegativeFiniteNumber(tokens.input);
+  const output = nonNegativeFiniteNumber(tokens.output);
+  const cacheRead = nonNegativeFiniteNumber(tokens.cacheRead);
+  const cacheWrite = nonNegativeFiniteNumber(tokens.cacheWrite);
+  const cost = nonNegativeFiniteNumber(rawStats.cost);
+  if (
+    input === undefined ||
+    output === undefined ||
+    cacheRead === undefined ||
+    cacheWrite === undefined ||
+    cost === undefined
+  ) {
+    return { ...fallback };
+  }
+  if (input + output + cacheRead + cacheWrite + cost === 0) {
+    return { ...fallback };
+  }
+  const costSource =
+    fallback.costSource ?? (cost > 0 ? "estimated" : "unavailable");
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    cost,
+    costSource,
+    turns: fallback.turns,
+  };
+}
+
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 function zeroUsageShape(): Usage {
   return {
     input: 0,
@@ -1356,13 +1417,15 @@ export async function startSubagentJob(
     thinkingLevel: effectiveThinkingLevel,
     errorMessage: "No subagent result captured.",
   };
-  const currentSessionUsage = (): Usage =>
-    observedUsageEvent
+  const currentSessionUsage = (): Usage => {
+    const fallback = observedUsageEvent
       ? { ...liveStatus.usage }
       : usageFromAssistantMessages(
           session.agent.state.messages as readonly unknown[],
           liveStatus.usage,
         );
+    return usageFromSessionStats(session, fallback);
+  };
   const jobPromise = (async (): Promise<SubagentResult> => {
     try {
       await startGate;

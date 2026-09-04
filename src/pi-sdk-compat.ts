@@ -15,6 +15,7 @@ type ProviderConfig = Parameters<ModelRegistry["registerProvider"]>[1];
 type ModelRuntime = {
   getModel(provider: string, modelId: string): Model<any> | undefined;
   registerProvider(provider: string, config: unknown): void;
+  registerNativeProvider?(provider: unknown): void;
 };
 
 type ModelRuntimeFactory = {
@@ -130,7 +131,13 @@ export function copyProviderConfig(
 ): void {
   const registry = parentModelRegistry as unknown as {
     getRegisteredProviderConfig?: (providerId: string) => unknown;
+    getRegisteredNativeProvider?: (providerId: string) => unknown;
   };
+  const nativeProvider = registry.getRegisteredNativeProvider?.(provider);
   const config = registry.getRegisteredProviderConfig?.(provider);
+  if (nativeProvider && runtime.kind === "modern") {
+    runtime.modelRuntime.registerNativeProvider?.(nativeProvider);
+    if (runtime.modelRuntime.registerNativeProvider) return;
+  }
   if (config) registerProvider(runtime, provider, config);
 }
