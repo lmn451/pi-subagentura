@@ -73,8 +73,39 @@ pi --orchestrator
 ```
 
 `/workflow` asks the parent to create, save, and immediately run a reusable
-workflow. `/workflows` runs saved workflows, and `/workflow-tree` shows live
-phases, agents, and cancellation controls.
+workflow. Each saved workflow is also exposed as `/workflow:<name>`—for example,
+`/workflow:ralplan rework auth`. That command starts a normal parent-model turn:
+the LLM reads the workflow's declared `inputSchema`, infers the structured
+arguments from `rework auth`, and invokes the generic `workflow` tool. Users do
+not need to construct JSON. Type `/workflow:` to discover saved workflows.
+`/workflows` remains available as the picker.
+
+Named commands are an LLM routing surface, not a second workflow runtime:
+
+```text
+/workflow:<name> <natural-language request>
+  → parent LLM receives request + workflow metadata
+  → LLM infers args against meta.inputSchema
+  → LLM calls workflow({ name, args })
+  → existing workflow runtime executes the saved script
+```
+
+The slash-command handler neither executes the workflow directly nor passes the
+raw request through as workflow arguments. If required input cannot be inferred,
+the parent asks for clarification instead of guessing.
+
+Workflows are project-scoped by default under
+`<project>/.pi/workflows/<name>.mjs`. Project workflows override same-named
+global workflows stored under
+`~/.pi-subagentura/workflows/<name>.mjs`. Pass `scope: "global"` to
+`save_workflow` only for workflows intended to be shared across projects.
+
+Pi currently exposes command registration but not command removal. The
+`/workflow:<name>` inventory is therefore rebuilt on extension reload. If a
+workflow is deleted—or a previously visited project contributed a command—the
+stale completion can remain visible until `/reload`. Invocation always
+re-resolves the current project/global stores; a stale command reports
+`No saved workflow` and never starts work. `/workflows` reads the live inventory.
 
 ## Reusable workflows
 
@@ -89,6 +120,12 @@ of injected orchestration primitives:
   for every item to finish a stage first.
 - `phase()` names progress in the TUI. Saved workflows may call another saved
   workflow with `workflow(name, args)`, with one level of nesting.
+
+The bundled `ralplan.mjs` example demonstrates the core workflow idea:
+translate a prose skill into executable orchestration code. It uses the same
+generic `workflow` tool as user-authored workflows while code-enforcing isolated
+roles, review order, bounded revision, artifact checks, and a planning-only
+result. It does not register RALPLAN-specific tools or modes.
 
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
@@ -138,6 +175,7 @@ These commands are intended for people at the Pi prompt.
 | Command             | Purpose                                                           |
 | ------------------- | ----------------------------------------------------------------- |
 | `/workflow`         | Create, save, and run a reusable workflow from a task             |
+| `/workflow:<name>`  | Run a saved workflow with a natural-language task                 |
 | `/workflows`        | Select and run a saved workflow                                   |
 | `/list-workflows`   | Alias for `/workflows`                                            |
 | `/workflow-status`  | List workflow jobs and their live or terminal status              |
@@ -153,9 +191,9 @@ The extension registers these public tools for parent agents.
 | Tool                                    | Purpose                                                           |
 | --------------------------------------- | ----------------------------------------------------------------- |
 | `workflow`                              | Run a trusted workflow script or saved workflow                   |
-| `save_workflow`                         | Validate and save a reusable workflow                             |
-| `list_workflows`                        | List saved workflows                                              |
-| `delete_workflow`                       | Delete a saved workflow                                           |
+| `save_workflow`                         | Save a project or global reusable workflow                        |
+| `list_workflows`                        | List effective project and global workflows                       |
+| `delete_workflow`                       | Delete a project or global saved workflow                         |
 | `get_workflow_status`                   | Inspect a background workflow                                     |
 | `get_workflow_result`                   | Wait for and return a workflow result                             |
 | `cancel_workflow`                       | Cancel a background workflow                                      |

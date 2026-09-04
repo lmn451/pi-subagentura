@@ -1,8 +1,10 @@
 # Bundled workflow examples
 
-These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They demonstrate reusable workflow structure and provide practical planning and
-conversion flows.
+This package includes trusted `.mjs` workflow scripts under
+`examples/workflows/`. They show how the generic `workflow` tool turns
+orchestration techniques into reusable executable code. The bundled RALPLAN
+workflow translates a prose skill into code-enforced roles, ordering,
+validation, and stopping conditions.
 
 ## Running an example
 
@@ -11,14 +13,14 @@ read an example and pass its complete source to the `workflow` tool:
 
 ```text
 pi -e . --orchestrator
-Run examples/workflows/ralplan-consensus.mjs with idea="review src/auth.ts" and maxIterations=2.
+Run examples/workflows/ralplan.mjs with idea="review src/auth.ts" and maxIterations=2.
 ```
 
 The equivalent agent-tool payload is:
 
 ```js
 workflow({
-  script: "<contents of examples/workflows/ralplan-consensus.mjs>",
+  script: "<contents of examples/workflows/ralplan.mjs>",
   args: {
     idea: "Review src/auth.ts and produce an implementation plan",
     maxIterations: 2,
@@ -27,18 +29,91 @@ workflow({
 });
 ```
 
-To reuse a script by name, pass the same source to `save_workflow` once, then
-run it with `workflow({ name, args })` or select it with `/workflows`.
+To reuse the RALPLAN script by name, pass its source to `save_workflow` once.
+Saving `ralplan.mjs` immediately exposes `/workflow:ralplan`. Type
+`/workflow:` to discover every saved workflow, then write the task naturally:
 
-All bundled examples accept either an args object or its JSON-string form. JSON
-strings are useful when another tool boundary serializes the payload:
+```text
+/workflow:ralplan rework auth
+```
+
+The command sends `rework auth` through the normal parent LLM turn. The model
+reads the workflow's `meta.inputSchema`, infers the structured arguments, and
+invokes the existing `workflow({ name, args })` tool. Users do not write JSON.
+
+Programmatic callers can still invoke the tool directly:
 
 ```js
 workflow({
-  name: "ralplan-consensus",
-  args: '{"idea":"Review src/auth.ts","maxIterations":2}',
+  name: "ralplan",
+  args: { idea: "Review src/auth.ts and produce an implementation plan" },
 });
 ```
+
+`save_workflow` stores workflows as `<project>/.pi/workflows/<name>.mjs` by
+default. Specify `scope: "global"` to use
+`~/.pi-subagentura/workflows/<name>.mjs`; a project workflow overrides a
+same-named global workflow. Legacy `.js` workflow files remain readable.
+
+Pi does not currently expose command unregistration. Named-command completion is
+rebuilt on extension reload, so deleting a workflow or changing project scope
+can leave a stale `/workflow:<name>` completion until `/reload`. Calling it is
+safe: the handler resolves the current stores again, reports `No saved
+workflow`, and starts nothing. The `/workflows` picker always reads the live
+inventory.
+
+### Named command argument contract
+
+`/workflow:<name>` deliberately routes through the parent LLM. It does **not**
+run the saved script directly and does **not** pass the command's trailing text
+through as raw workflow `args`.
+
+For reliable inference, workflow metadata declares the human-facing hint and
+machine-readable input shape:
+
+```js
+export const meta = {
+  name: "review",
+  description: "Review a target with an optional focus.",
+  argumentHint: "<target and review focus>",
+  inputSchema: {
+    type: "object",
+    required: ["target"],
+    properties: {
+      target: {
+        type: "string",
+        description: "File, directory, or subsystem to review.",
+      },
+      focus: {
+        type: "string",
+        description: "Optional review emphasis.",
+      },
+    },
+  },
+};
+```
+
+Given:
+
+```text
+/workflow:review auth with a security focus
+```
+
+the parent model receives the request and metadata, then invokes the existing
+tool with inferred structured arguments:
+
+```js
+workflow({
+  name: "review",
+  args: { target: "auth", focus: "security" },
+});
+```
+
+If a required field cannot be inferred safely, the routing prompt requires one
+concise clarification. Existing workflows without `inputSchema` remain
+loadable, but named-command inference has only their name and description;
+adding `argumentHint` and `inputSchema` is strongly recommended. Workflows
+created through `/workflow` are instructed to declare both fields.
 
 ## Background completion
 
@@ -91,49 +166,36 @@ native structured output; process-isolated agents fall back to textual JSON
 extraction and validation. Workflow snapshots retain the latest 50 per-agent
 records, while `/workflow-tree` displays the latest 20 and reports omissions.
 
-## Planning workflows
+## Bundled RALPLAN workflow
 
-### `ralplan-consensus.mjs`
+### `ralplan.mjs`
 
-A Planner → Architect → Critic loop that asks agents to write review artifacts
-and a final plan.
+The single RALPLAN example translates the latest
+[oh-my-claudecode RALPLAN skill](https://github.com/Yeachan-Heo/oh-my-claudecode/blob/main/skills/ralplan/SKILL.md)
+and its Plan consensus contract into an ordinary workflow script. It enforces
+isolated role calls, immutable artifacts, Architect-before-Critic ordering,
+reviewer input separation, explicit verdicts, and bounded revision. It never
+executes the resulting plan and adds no RALPLAN-specific extension tool or mode.
 
-| Argument        | Required | Meaning                               |
-| --------------- | -------- | ------------------------------------- |
-| `idea`          | yes      | Planning problem                      |
-| `maxIterations` | no       | Positive iteration cap; defaults to 3 |
-| `artifactsDir`  | no       | Output directory; defaults to `plans` |
+| Argument                   | Required | Meaning                                            |
+| -------------------------- | -------- | -------------------------------------------------- |
+| `idea`                     | yes      | Planning problem                                   |
+| `gate`                     | no       | `true` enables the optional short-prompt heuristic |
+| `interactive`              | no       | `true` emits non-blocking checkpoint markers       |
+| `deliberate`               | no       | `true`, `false`, or `"auto"` risk-triggered mode   |
+| `maxIterations`            | no       | Iteration cap clamped to 1–5; defaults to 5        |
+| `artifactsDir`             | no       | Final-plan path prefix; defaults to `.omc/plans`   |
+| `planName`                 | no       | Safe final-plan basename; defaults to `plan`       |
+| `requirementsTraceability` | no       | Runs advisory Analyst + requires coverage map      |
+| `architectModel`           | no       | Model id passed to the Architect `agent()` call    |
+| `criticModel`              | no       | Model id passed to the Critic `agent()` call       |
+| `executeOnConsensus`       | no       | Deprecated compatibility input; ignored            |
 
-### `ralplan-occ.mjs`
-
-An OCC-style RALPLAN flow with a short-prompt gate, deliberate-mode checks,
-per-reviewer model routing, and explicit approval markers. It never executes
-the resulting plan.
-
-| Argument             | Required | Meaning                                                   |
-| -------------------- | -------- | --------------------------------------------------------- |
-| `idea`               | yes      | Planning problem                                          |
-| `deliberate`         | no       | `true`, `false`, or `"auto"` risk-triggered mode          |
-| `maxIterations`      | no       | Iteration cap from 1 to 5; defaults to 5                  |
-| `artifactsDir`       | no       | Final-plan directory; defaults to `.omc/plans`            |
-| `draftsDir`          | no       | Draft directory; defaults to `.omc/drafts`                |
-| `planName`           | no       | Final plan basename; defaults to `ralplan`                |
-| `architectModel`     | no       | Model id passed to the Architect `agent()` call           |
-| `criticModel`        | no       | Model id passed to the Critic `agent()` call              |
-| `executeOnConsensus` | no       | Changes the reported approval status; never executes code |
-
-### `ralplan-from-skill.mjs`
-
-A generated, self-contained RALPLAN example derived from the bundled skill.
-
-| Argument        | Required | Meaning                                        |
-| --------------- | -------- | ---------------------------------------------- |
-| `idea`          | yes      | Planning problem                               |
-| `workingDir`    | yes      | Absolute project directory                     |
-| `specPath`      | no       | Optional spec file                             |
-| `planName`      | no       | Plan filename without extension                |
-| `deliberate`    | no       | Boolean override; otherwise inferred from idea |
-| `maxIterations` | no       | Positive iteration cap; defaults to 5          |
+Artifacts are bounded to 1 MB and validated by dedicated read-only verifier
+agents because the workflow VM exposes no filesystem API. A workflow cannot
+suspend at an interactive checkpoint, so optional marker text remains
+non-blocking. A marker, digest, valid artifact, or workflow result is never
+execution consent; every terminal result is pending and execution-halted.
 
 ## Converter workflows
 
