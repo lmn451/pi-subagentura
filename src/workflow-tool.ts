@@ -534,7 +534,7 @@ export function registerWorkflowTool(
           captureSpawnFailure(
             childOwner && !isSessionOwnerLive(childOwner)
               ? "parent_shutdown"
-              : "registration",
+              : "capacity",
             spawnRequestedAt,
           );
           discardWorkflowChildSpawn(abort, prepared);

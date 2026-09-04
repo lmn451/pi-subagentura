@@ -1006,6 +1006,12 @@ The payload schema is versioned; schema version `3` contains these events:
 | `completion_delivered`     | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                             |
 | `result_read`              | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                   |
 
+For workflow lifecycle events, `invocation: "tool"` includes the generic
+`workflow` tool call made by the LLM for `/workflow:<name>` requests.
+`invocation: "saved_command"` is reserved for direct `runNamedWorkflow`
+execution, including the `/workflows` picker path; named slash commands are
+LLM-mediated and therefore use `tool`.
+
 All duration and latency fields use the existing bounded representation: values
 are rounded to 100 ms and accepted only from `0` through 30 days. The numeric
 field is omitted when the timestamp is unavailable, negative, non-finite, or

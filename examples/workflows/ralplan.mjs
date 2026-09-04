@@ -26,6 +26,21 @@ export const meta = {
         type: "boolean",
         description: "Add advisory requirement coverage analysis.",
       },
+      gate: {
+        type: "boolean",
+        description:
+          "Enable the safety gate for short, unanchored requests; gated requests halt before agents run.",
+      },
+      interactive: {
+        type: "boolean",
+        description:
+          "Emit non-blocking pending-approval markers for host-managed approval; this does not authorize execution.",
+      },
+      executeOnConsensus: {
+        type: "boolean",
+        description:
+          "Accepted for compatibility but ignored; consensus never authorizes execution and execution always remains halted.",
+      },
       maxIterations: {
         type: "integer",
         description: "Consensus rounds, clamped to 1–5.",

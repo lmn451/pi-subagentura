@@ -475,6 +475,73 @@ describe("ralplan independent review contracts", () => {
     });
   });
 
+  it("declares every supported input and keeps compatibility execution halted", async () => {
+    const script = workflow("ralplan.mjs");
+    const { meta } = parseWorkflow(script);
+    const schema = meta.inputSchema as {
+      type?: string;
+      required?: string[];
+      properties?: Record<string, { type?: string; description?: string }>;
+    };
+    const properties = schema.properties ?? {};
+    const supportedInputs = [
+      "idea",
+      "deliberate",
+      "requirementsTraceability",
+      "gate",
+      "interactive",
+      "executeOnConsensus",
+      "maxIterations",
+      "artifactsDir",
+      "planName",
+      "architectModel",
+      "criticModel",
+    ];
+
+    expect(schema.type).toBe("object");
+    expect(schema.required).toEqual(["idea"]);
+    expect(Object.keys(properties).sort()).toEqual([...supportedInputs].sort());
+    expect(properties.gate).toMatchObject({ type: "boolean" });
+    expect(properties.gate?.description).toMatch(/gate/i);
+    expect(properties.gate?.description).toMatch(/halt/i);
+    expect(properties.interactive).toMatchObject({ type: "boolean" });
+    expect(properties.interactive?.description).toMatch(/non-blocking/i);
+    expect(properties.interactive?.description).toMatch(/approval/i);
+    expect(properties.executeOnConsensus).toMatchObject({ type: "boolean" });
+    expect(properties.executeOnConsensus?.description).toMatch(
+      /compatibility/i,
+    );
+    expect(properties.executeOnConsensus?.description).toMatch(/ignored/i);
+    expect(properties.executeOnConsensus?.description).toMatch(/halted/i);
+
+    const root = "/repo/plans";
+    const run = await runWorkflow(script, {
+      args: {
+        idea: "force: review src/auth.ts",
+        deliberate: false,
+        requirementsTraceability: false,
+        gate: false,
+        interactive: true,
+        executeOnConsensus: true,
+        maxIterations: 1,
+        artifactsDir: root,
+        planName: "plan",
+        architectModel: "test/model",
+        criticModel: "test/model",
+      },
+      runAgent: occRunner(root),
+    });
+
+    expect(run.result).toMatchObject({
+      status: "pending_approval",
+      consensus: true,
+      pending_approval: true,
+      execution_halted: true,
+      executeOnConsensusIgnored: true,
+    });
+    expect(run.result).not.toHaveProperty("recommendedExecution");
+  });
+
   it("remains parseable", () => {
     expect(() => parseWorkflow(workflow("ralplan.mjs"))).not.toThrow();
   });

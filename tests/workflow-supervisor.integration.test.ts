@@ -14,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { annotateSpawnFailure, type SubagentResult } from "../src/helpers";
+import {
+  MAX_REGISTRY_SIZE,
+  annotateSpawnFailure,
+  type SubagentResult,
+} from "../src/helpers";
 
 const { mockAwaitInteractiveResult, mockLaunch, mockStartSubagentJob } =
   vi.hoisted(() => ({
@@ -544,6 +548,74 @@ describe("workflow supervisor integration", () => {
     expect(childJob?.status).toBe("done");
     expect(childJob?.result?.output).toBe("fallback complete");
     expect(jobRegistry.has("fallback-child")).toBe(false);
+  });
+
+  it("reports capacity when the in-process fallback owner registry is saturated", async () => {
+    const payloads = captureTelemetryPayloads();
+    const { context } = liveSessionContext({ id: 12, sessionId: "session-a" });
+    const start = vi.fn();
+    const disposeBeforeStart = vi.fn();
+
+    for (let index = 0; index < MAX_REGISTRY_SIZE; index++) {
+      const id = `saturating-${index}`;
+      context.inProcessJobs.set(id, {
+        id,
+        status: "running",
+        startedAt: Date.now(),
+        promise: new Promise<SubagentResult>(() => {}),
+        abort: new AbortController(),
+      } as never);
+    }
+    expect(context.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
+
+    mockLaunch.mockImplementationOnce(() => {
+      throw new Error("mux unavailable");
+    });
+    mockStartSubagentJob.mockResolvedValueOnce({
+      jobId: "capacity-child",
+      jobPromise: new Promise<SubagentResult>(() => {}),
+      liveStatus: { turn: 0, output: "", usage: {} },
+      session: { abort: vi.fn() },
+      modelLabel: "test/model",
+      thinkingLevel: "medium",
+      start,
+      disposeBeforeStart,
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const result = await findTool().execute(
+      "call-fallback-capacity",
+      { script: SINGLE_AGENT_SCRIPT("fallback-capacity"), async: false },
+      undefined,
+      vi.fn(),
+      {
+        cwd: "/tmp",
+        modelRegistry: {},
+        sessionManager: { getSessionId: () => "session-a" },
+      },
+    );
+
+    expect(result.details.status).toBe("error");
+    expect(start).not.toHaveBeenCalled();
+    expect(disposeBeforeStart).toHaveBeenCalledOnce();
+
+    await vi.waitFor(() => {
+      const failures = payloads.filter(
+        (payload) =>
+          payload.event === "pi_subagentura_agent_spawn_failed" &&
+          payload.properties?.execution === "in-process",
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.properties).toMatchObject({
+        failure_stage: "capacity",
+      });
+    });
+    expect(
+      payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_created",
+      ),
+    ).toHaveLength(0);
   });
 
   it.each(["model_resolution", "session_creation"] as const)(

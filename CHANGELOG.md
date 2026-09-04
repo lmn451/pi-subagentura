@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.pi/workflows/` directory by default, with explicitly global workflows under
   `~/.pi-subagentura/workflows/` as fallbacks. Legacy `.js` files remain
   readable.
+- Added schema v3 anonymous lifecycle telemetry for rejected spawns, terminal
+  task and workflow reasons, aggregate workflow lifecycle, session recovery,
+  completion-delivery latency, and result-read outcomes, while preserving the
+  bounded, personless payloads and existing opt-outs.
 
 ## [3.6.0] - 2026-09-02
 
