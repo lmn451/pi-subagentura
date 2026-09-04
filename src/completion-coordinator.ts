@@ -72,6 +72,12 @@ export interface CompletionRecord {
   groupComplete?: boolean;
   references: CompletionReference[];
   completedAt: number;
+  /**
+   * Source completion time for delivery-latency analytics. Interactive
+   * completions recovered from legacy state may not have one; the required
+   * `completedAt` remains the coordinator publication timestamp.
+   */
+  telemetryCompletedAt?: number;
   /** Monotonic publication sequence used to retire spilled session entries. */
   sequence?: number;
   ownerSessionId?: string;
@@ -359,6 +365,12 @@ function normalizeRecord(value: unknown): CompletionRecord {
     raw.completedAt >= 0
       ? raw.completedAt
       : Date.now();
+  const telemetryCompletedAt =
+    typeof raw.telemetryCompletedAt === "number" &&
+    Number.isFinite(raw.telemetryCompletedAt) &&
+    raw.telemetryCompletedAt >= 0
+      ? raw.telemetryCompletedAt
+      : undefined;
   const sequence =
     typeof raw.sequence === "number" &&
     Number.isSafeInteger(raw.sequence) &&
@@ -388,6 +400,7 @@ function normalizeRecord(value: unknown): CompletionRecord {
     ...(groupComplete === true ? { groupComplete } : {}),
     references,
     completedAt,
+    ...(telemetryCompletedAt !== undefined ? { telemetryCompletedAt } : {}),
     ...(sequence !== undefined ? { sequence } : {}),
     ...(typeof raw.ownerSessionId === "string" && raw.ownerSessionId.length > 0
       ? { ownerSessionId: raw.ownerSessionId.slice(0, MAX_SOURCE_ID_LENGTH) }
@@ -1423,6 +1436,49 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
   );
 }
 
+function maxKnownCompletionAge(
+  records: readonly CompletionRecord[],
+  now = Date.now(),
+): number | undefined {
+  let maximum: number | undefined;
+  for (const record of records) {
+    const timestamp =
+      record.source === "interactive"
+        ? record.telemetryCompletedAt
+        : record.completedAt;
+    if (
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp) ||
+      timestamp < 0
+    ) {
+      continue;
+    }
+    const age = now - timestamp;
+    if (!Number.isFinite(age) || age < 0) continue;
+    maximum = Math.max(maximum ?? 0, age);
+  }
+  return maximum;
+}
+
+/**
+ * Return the oldest known completion age for a manifest batch. The caller
+ * supplies only coordinator-owned completion ids; missing records/timestamps
+ * are deliberately ignored so unavailable latency is not reported as zero.
+ */
+export function completionLatencyForIds(
+  completionIds: readonly string[],
+  owner?: SessionOwnerToken,
+): number | undefined {
+  const state = getState(owner);
+  if (!state || completionIds.length === 0) return undefined;
+  return maxKnownCompletionAge(
+    completionIds.flatMap((completionId) => {
+      const record = state.records.get(completionId);
+      return record ? [record] : [];
+    }),
+  );
+}
+
 function retrievalCall(record: CompletionRecord): string {
   if (record.source === "interactive") {
     const turn = record.turnId
@@ -2114,12 +2170,19 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
     scheduleManifestRetry(state);
     return;
   }
+  const deliveryLatencyMs = completionLatencyForIds(
+    message.details.completionIds,
+    state.owner,
+  );
   captureTelemetry(
     resolveLiveSessionScope(state.owner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "manifest",
       count: message.details.completionIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     {
       dedupeKey: manifestDeliveryDedupeKey(message.details.completionIds),

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -3942,7 +3943,10 @@ it("formats USD usage without floating-point artifacts", () => {
 });
 
 it("includes accumulated usage in async workflow error results", async () => {
-  const telemetryPayloads: Array<{ event?: string }> = [];
+  const telemetryPayloads: Array<{
+    event?: string;
+    properties?: Record<string, unknown>;
+  }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_input, init) => {
@@ -4000,11 +4004,11 @@ it("includes accumulated usage in async workflow error results", async () => {
     });
     expect(result.content[0].text).toContain("↓7/20");
     expect(result.details.budgetTotal).toBe(20);
-    expect(
-      telemetryPayloads.filter(
-        (payload) => payload.event === "pi_subagentura_result_consumed",
-      ),
-    ).toHaveLength(0);
+    const reads = telemetryPayloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(reads).toHaveLength(1);
+    expect(reads[0].properties?.outcome).toBe("error");
   } finally {
     vi.unstubAllGlobals();
     workflowJobRegistry.delete(job.id);
@@ -4012,9 +4016,12 @@ it("includes accumulated usage in async workflow error results", async () => {
   }
 });
 
-it("records only the first successful workflow result read", async () => {
+it("records successful and repeated workflow result reads", async () => {
   clearSessionScopes();
-  const telemetryPayloads: Array<{ event?: string }> = [];
+  const telemetryPayloads: Array<{
+    event?: string;
+    properties?: Record<string, unknown>;
+  }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_input, init) => {
@@ -4055,11 +4062,14 @@ it("records only the first successful workflow result read", async () => {
     await getResult.execute("first", { workflowId: job.id });
     await getResult.execute("again", { workflowId: job.id });
 
-    expect(
-      telemetryPayloads.filter(
-        (payload) => payload.event === "pi_subagentura_result_consumed",
-      ),
-    ).toHaveLength(1);
+    const reads = telemetryPayloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(reads).toHaveLength(2);
+    expect(reads.map((read) => read.properties?.outcome)).toEqual([
+      "consumed",
+      "already_consumed",
+    ]);
   } finally {
     vi.unstubAllGlobals();
     workflowJobRegistry.delete(job.id);
@@ -4787,5 +4797,561 @@ describe("canonical workflow usage formatting", () => {
       turns: 1,
     });
     expect(workflowUsageFromUsage(usage)).toBeUndefined();
+  });
+});
+describe("workflow aggregate telemetry", () => {
+  type Payload = {
+    event?: string;
+    properties?: Record<string, unknown>;
+  };
+  type WorkflowToolResult = {
+    details: { status?: string };
+    isError?: boolean;
+  };
+  type WorkflowToolDefinition = {
+    name: string;
+    execute: (
+      ...args: unknown[]
+    ) => WorkflowToolResult | Promise<WorkflowToolResult>;
+  };
+  type WorkflowTelemetryTestPi = {
+    registerTool: (definition: WorkflowToolDefinition) => void;
+    registerFlag: (...args: unknown[]) => void;
+    registerCommand: (...args: unknown[]) => void;
+    on: (...args: unknown[]) => void;
+  };
+
+  function makePi(tools: WorkflowToolDefinition[]): WorkflowTelemetryTestPi {
+    return {
+      registerTool: vi.fn((definition: WorkflowToolDefinition) =>
+        tools.push(definition),
+      ),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+    };
+  }
+
+  function capturePayloads(): Payload[] {
+    const payloads: Payload[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)) as Payload);
+        return new Response(null, { status: 204 });
+      }),
+    );
+    return payloads;
+  }
+
+  function registerTelemetryScope(pi: WorkflowTelemetryTestPi, id: number) {
+    const scope = registerSessionScope({
+      id,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as unknown as ExtensionAPI,
+      telemetry: createTelemetrySession(true),
+    });
+    return { scope, owner: sessionOwner(scope) };
+  }
+
+  it("does not emit a start for pre-job validation failures", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { scope } = registerTelemetryScope(pi, 1_100);
+    registerWorkflowTool(pi as unknown as ExtensionAPI, scope);
+    const workflow = tools.find((tool) => tool.name === "workflow")!;
+    const result = await workflow.execute(
+      "",
+      {
+        script:
+          'export const meta = { name: unknownName, description: "d" };\n' +
+          'return "never";',
+        async: true,
+      },
+      undefined,
+      undefined,
+      { cwd: "/tmp" },
+    );
+    try {
+      expect(result.isError).toBe(true);
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_workflow_started",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("emits one aggregate pair for foreground, background, and saved jobs", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { owner } = registerTelemetryScope(pi, 1_101);
+    const script =
+      'export const meta = { name: "aggregate", description: "d" };\n' +
+      'return "ok";';
+    const start = (
+      mode: "async" | "sync",
+      invocation: "tool" | "saved_command",
+      completionPolicy: "inline" | "each",
+    ) =>
+      startWorkflowJob(
+        "aggregate",
+        script,
+        { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        owner,
+        mode,
+        { invocation, async: mode === "async", completionPolicy },
+      );
+    const foreground = start("sync", "tool", "inline");
+    const background = start("async", "tool", "each");
+    const saved = start("async", "saved_command", "each");
+
+    try {
+      await Promise.all([
+        foreground.promise,
+        background.promise,
+        saved.promise,
+      ]);
+      const starts = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_workflow_started",
+      );
+      const completions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_workflow_completed",
+      );
+      expect(starts).toHaveLength(3);
+      expect(completions).toHaveLength(3);
+      expect(starts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              invocation: "tool",
+              async: false,
+              completion_policy: "inline",
+            }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              invocation: "tool",
+              async: true,
+              completion_policy: "each",
+            }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              invocation: "saved_command",
+              async: true,
+              completion_policy: "each",
+            }),
+          }),
+        ]),
+      );
+      expect(
+        completions.every(
+          (payload) =>
+            payload.properties?.invocation === "tool" ||
+            payload.properties?.invocation === "saved_command",
+        ),
+      ).toBe(true);
+    } finally {
+      workflowJobRegistry.delete(background.id);
+      workflowJobRegistry.delete(saved.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("classifies partial, thrown-error, and cancelled workflow settlements", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { owner } = registerTelemetryScope(pi, 1_102);
+    const partial = startWorkflowJob(
+      "partial",
+      'export const meta = { name: "partial", description: "d" };\n' +
+        'return await parallel([() => agent("failed")]);',
+      { runAgent: async () => fail() },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    const thrown = startWorkflowJob(
+      "thrown",
+      'export const meta = { name: "thrown", description: "d" };\n' +
+        'throw new Error("workflow failure");',
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    const cancellationController = new AbortController();
+    const cancelled = startWorkflowJob(
+      "cancelled",
+      'export const meta = { name: "cancelled", description: "d" };\n' +
+        'return await agent("waiting");',
+      {
+        signal: cancellationController.signal,
+        runAgent: ({ signal }) =>
+          new Promise<SubagentResult>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => reject(new Error("agent aborted")),
+              { once: true },
+            );
+          }),
+      },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    cancelled.telemetryTerminalReason = "explicit_cancel";
+    cancellationController.abort();
+
+    try {
+      await partial.promise;
+      await expect(thrown.promise).rejects.toThrow("workflow failure");
+      await expect(cancelled.promise).rejects.toBeDefined();
+      const completions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_workflow_completed",
+      );
+      expect(completions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              status: "partial",
+              terminal_reason: "agent_error",
+            }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              status: "error",
+              terminal_reason: "agent_error",
+            }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              status: "cancelled",
+              terminal_reason: "explicit_cancel",
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      workflowJobRegistry.delete(partial.id);
+      workflowJobRegistry.delete(thrown.id);
+      workflowJobRegistry.delete(cancelled.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("bounds counts and rounds aggregate duration", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { owner } = registerTelemetryScope(pi, 1_103);
+    const now = vi.spyOn(Date, "now").mockReturnValue(2_501);
+    const job = startWorkflowJob(
+      "duration",
+      'export const meta = { name: "duration", description: "d" };\n' +
+        'return await agent("one");',
+      { runAgent: echoRunner() },
+      1_000,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    try {
+      await job.promise;
+      const completion = payloads.find(
+        (payload) => payload.event === "pi_subagentura_workflow_completed",
+      );
+      expect(completion?.properties).toEqual(
+        expect.objectContaining({
+          duration_ms: 1_500,
+          duration_bucket: "1-5s",
+          agents_spawned: 1,
+          error_count: 0,
+        }),
+      );
+    } finally {
+      now.mockRestore();
+      workflowJobRegistry.delete(job.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("records unavailable, empty, and wait-cancelled result reads", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { scope, owner } = registerTelemetryScope(pi, 1_104);
+    registerWorkflowTool(pi as unknown as ExtensionAPI, scope);
+    const getResult = tools.find(
+      (tool) => tool.name === "get_workflow_result",
+    )!;
+    const unavailable = await getResult.execute("", {
+      workflowId: "missing",
+    });
+    expect(unavailable.details.status).toBe("not_found");
+
+    const empty = startWorkflowJob(
+      "empty",
+      'export const meta = { name: "empty", description: "d" };\nreturn "";',
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    const blockedController = new AbortController();
+    const blocked = startWorkflowJob(
+      "blocked",
+      'export const meta = { name: "blocked", description: "d" };\n' +
+        'return await agent("blocked");',
+      {
+        signal: blockedController.signal,
+        runAgent: ({ signal }) =>
+          new Promise<SubagentResult>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => reject(new Error("blocked aborted")),
+              { once: true },
+            );
+          }),
+      },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    await empty.promise;
+    await getResult.execute("", { workflowId: empty.id });
+    const waitController = new AbortController();
+    waitController.abort();
+    const wait = await getResult.execute(
+      "",
+      { workflowId: blocked.id },
+      waitController.signal,
+    );
+    expect(wait.details.status).toBe("wait_cancelled");
+    blockedController.abort();
+
+    try {
+      await expect(blocked.promise).rejects.toBeDefined();
+      const reads = payloads
+        .filter((payload) => payload.event === "pi_subagentura_result_read")
+        .map((payload) => payload.properties?.outcome);
+      expect(reads).toEqual(
+        expect.arrayContaining(["unavailable", "empty", "wait_cancelled"]),
+      );
+    } finally {
+      workflowJobRegistry.delete(empty.id);
+      workflowJobRegistry.delete(blocked.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+});
+
+describe("inline workflow telemetry", () => {
+  function capturePayloads(): Array<{
+    event?: string;
+    properties?: Record<string, unknown>;
+  }> {
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 204 });
+      }),
+    );
+    return payloads;
+  }
+
+  function registerTelemetryScopeForTest(
+    tools: Array<{ name: string; execute: Function }>,
+  ) {
+    const pi = {
+      registerTool: vi.fn((definition: { name: string; execute: Function }) =>
+        tools.push(definition),
+      ),
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+    };
+    const scope = registerSessionScope({
+      id: 1_200,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as never,
+      telemetry: createTelemetrySession(true),
+    });
+    registerWorkflowTool(pi as never, scope);
+    return {
+      workflow: tools.find((tool) => tool.name === "workflow")!,
+      owner: sessionOwner(scope),
+    };
+  }
+
+  it("emits consumed and empty reads for inline successes", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const { workflow } = registerTelemetryScopeForTest(tools);
+    try {
+      await workflow.execute(
+        "",
+        {
+          script:
+            'export const meta = { name: "inline-consumed", description: "d" };\n' +
+            'return "result";',
+          async: false,
+        },
+        undefined,
+        undefined,
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      await workflow.execute(
+        "",
+        {
+          script:
+            'export const meta = { name: "inline-empty", description: "d" };\n' +
+            'return "";',
+          async: false,
+        },
+        undefined,
+        undefined,
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+
+      const reads = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_read",
+      );
+      expect(reads.map((read) => read.properties?.outcome)).toEqual([
+        "consumed",
+        "empty",
+      ]);
+      expect(
+        reads.every(
+          (read) => typeof read.properties?.read_latency_ms === "number",
+        ),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("emits error and cancelled reads for inline terminal returns", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const { workflow } = registerTelemetryScopeForTest(tools);
+    const cancelled = new AbortController();
+    cancelled.abort();
+    try {
+      const error = await workflow.execute(
+        "",
+        {
+          script:
+            'export const meta = { name: "inline-error", description: "d" };\n' +
+            'throw new Error("workflow failure");',
+          async: false,
+        },
+        undefined,
+        undefined,
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      const cancellation = await workflow.execute(
+        "",
+        {
+          script:
+            'export const meta = { name: "inline-cancelled", description: "d" };\n' +
+            'return "never";',
+          async: false,
+        },
+        cancelled.signal,
+        undefined,
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+
+      expect(error.isError).toBe(true);
+      expect(cancellation.isError).toBe(true);
+      const reads = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_result_read",
+      );
+      expect(reads.map((read) => read.properties?.outcome)).toEqual([
+        "error",
+        "cancelled",
+      ]);
+      expect(
+        reads.every(
+          (read) => typeof read.properties?.read_latency_ms === "number",
+        ),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
+  it("maps only the workflow wall timer to timeout", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: Array<{ name: string; execute: Function }> = [];
+    const { owner } = registerTelemetryScopeForTest(tools);
+    const job = startWorkflowJob(
+      "wall-timeout",
+      'export const meta = { name: "wall-timeout", description: "d" };\nwhile (true) {}',
+      { runAgent: echoRunner(), workflowTimeoutMs: 20 },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+    try {
+      await expect(job.promise).rejects.toThrow(/timed out/i);
+      const completion = payloads.find(
+        (payload) => payload.event === "pi_subagentura_workflow_completed",
+      );
+      expect(completion?.properties).toEqual(
+        expect.objectContaining({
+          status: "error",
+          terminal_reason: "timeout",
+        }),
+      );
+    } finally {
+      workflowJobRegistry.delete(job.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
   });
 });

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   registerWorkflowTool,
   MAX_WORKFLOW_JOBS,
+  cancelWorkflowJob,
   cleanupWorkflowJobsForOwner,
   discardWorkflowJob,
   getWorkflowJobForActiveSession,
@@ -107,6 +108,35 @@ describe("workflow parent session ownership", () => {
     discardWorkflowJob(workflow);
     expect(workflow.abort.signal.aborted).toBe(true);
     expect(workflow.suppressCompletionNotification).toBe(true);
+    expect(workflowJobRegistry.has(workflow.id)).toBe(false);
+  });
+  it("records cancellation evidence and invokes the completion hook once", () => {
+    const workflow = makeJob("cancel", "running", owner(6, 1));
+    workflow.parentSessionOwner = undefined;
+    const onComplete = vi.fn();
+    workflow.completionNotification = onComplete;
+    const abort = vi.spyOn(workflow.abort, "abort");
+
+    cancelWorkflowJob(workflow, "explicit_cancel");
+    cancelWorkflowJob(workflow, "parent_cancelled");
+
+    expect(workflow.status).toBe("cancelled");
+    expect(workflow.telemetryTerminalReason).toBe("explicit_cancel");
+    expect(workflow.completedAt).toEqual(expect.any(Number));
+    expect(workflow.snapshot.runningCount).toBe(0);
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the requested terminal reason when cleaning up workflow jobs", () => {
+    const workflow = makeJob("fresh", "running", owner(6, 1));
+    workflowJobRegistry.set(workflow.id, workflow);
+
+    cleanupWorkflowJobsForOwner(owner(6, 1), "fresh_session");
+
+    expect(workflow.status).toBe("cancelled");
+    expect(workflow.telemetryTerminalReason).toBe("fresh_session");
+    expect(workflow.completedAt).toEqual(expect.any(Number));
     expect(workflowJobRegistry.has(workflow.id)).toBe(false);
   });
 

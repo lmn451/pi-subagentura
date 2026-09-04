@@ -15,6 +15,7 @@ import {
   interactiveSubagentRegistry,
 } from "./interactive-tmux";
 import {
+  cancelWorkflowJob,
   normalizeCancelledWorkflowState,
   workflowJobsForOwner,
 } from "./workflow-jobs";
@@ -87,7 +88,8 @@ export async function cancelAllFlows(
     reason: "cancel-all-flows aborted every running flow",
   };
   for (const job of jobs) {
-    job.cancellation = { ...jobCancellation, at: Date.now() };
+    const cancellationAt = Date.now();
+    job.cancellation = { ...jobCancellation, at: cancellationAt };
     job.cancellationSnapshot = snapshotInProcessSession({
       kind: "in-process",
       jobId: job.id,
@@ -112,6 +114,7 @@ export async function cancelAllFlows(
       /* session may already be disposed */
     }
     job.status = "cancelled";
+    job.completedAt ??= Date.now();
     scheduleJobCleanup(job.id, true, undefined, owner);
     result.jobsAborted++;
   }
@@ -119,9 +122,10 @@ export async function cancelAllFlows(
   // 2. Abort all running workflows
   for (const workflow of workflowJobsForOwner(owner)) {
     if (workflow.status === "running") {
+      // Cancel-all owns the aggregate notification, so retain the existing
+      // suppression while routing state changes through the shared helper.
       workflow.suppressCompletionNotification = true;
-      workflow.abort.abort();
-      workflow.status = "cancelled";
+      cancelWorkflowJob(workflow, "explicit_cancel");
       result.workflowsAborted++;
     }
     if (workflow.status === "cancelled") {

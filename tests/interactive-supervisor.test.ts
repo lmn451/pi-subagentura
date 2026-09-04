@@ -1507,8 +1507,11 @@ describe("interactive supervisor", () => {
 
     expect(processAbort.signal.aborted).toBe(true);
     expect(processJob.status).toBe("cancelled");
+    expect(processJob.completedAt).toEqual(expect.any(Number));
     expect(workflowAbort).toHaveBeenCalledOnce();
     expect(workflow.status).toBe("cancelled");
+    expect(workflow.telemetryTerminalReason).toBe("explicit_cancel");
+    expect(workflow.completedAt).toEqual(expect.any(Number));
     expect(workflow.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
   });
 

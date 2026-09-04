@@ -283,6 +283,8 @@ describe("WorkflowTreeComponent", () => {
 
     expect(abortSpy).toHaveBeenCalledTimes(1);
     expect(job.status).toBe("cancelled");
+    expect(job.telemetryTerminalReason).toBe("explicit_cancel");
+    expect(job.completedAt).toEqual(expect.any(Number));
     expect(job.snapshot.runningCount).toBe(0);
     expect(job.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
     expect(notify).toHaveBeenCalledWith("Cancelled workflow wf_test.");
