@@ -944,37 +944,46 @@ export class HerdrMultiplexer implements Multiplexer {
 
     const boundedMaxLines = Math.min(maxLines, MAX_HERDR_READ_LINES - 1);
     const boundedMaxBytes = Math.min(maxBytes, MAX_CAPTURE_READ_BYTES);
-    const requestedLines = Math.min(maxLines + 1, MAX_HERDR_READ_LINES);
-    const response = await requestHerdrSocket(ref.session, "pane.read", {
-      pane_id: requirePaneId(this.canonicalPaneId(ref.paneId, ref.session)),
-      source: "recent_unwrapped",
-      lines: requestedLines,
-      format: "text",
-      strip_ansi: true,
-    });
-    if (response.error || !response.result) {
-      throw socketError(response, "pane read");
-    }
-    const read = parsePaneRead(response.result);
-    this.rememberPane(ref.paneId, ref.session, read.pane);
-    // Herdr terminates the last row with `\n`. `boundCaptureOutput` splits on
-    // "\n", so that terminator counts as an extra, empty line — it would spend
-    // the `maxLines + 1` truncation-probe slot and make an exactly-`maxLines`
-    // capture drop its oldest real line while reporting `truncated: true`.
-    // Strip exactly one (a genuinely blank final row keeps its own newline).
-    const text = read.text.endsWith("\n") ? read.text.slice(0, -1) : read.text;
-    const bounded = boundCaptureOutput(text, {
-      maxLines: boundedMaxLines,
-      maxBytes: boundedMaxBytes,
-    });
-    return {
-      output: bounded.output,
-      truncated:
-        read.truncated ||
+    let requestedLines = Math.min(maxLines + 1, MAX_HERDR_READ_LINES);
+    while (true) {
+      const response = await requestHerdrSocket(ref.session, "pane.read", {
+        pane_id: requirePaneId(this.canonicalPaneId(ref.paneId, ref.session)),
+        source: "recent_unwrapped",
+        lines: requestedLines,
+        format: "text",
+        strip_ansi: true,
+      });
+      if (response.error || !response.result) {
+        throw socketError(response, "pane read");
+      }
+      const read = parsePaneRead(response.result);
+      this.rememberPane(ref.paneId, ref.session, read.pane);
+      // Strip Herdr's single framing newline, preserving actual blank rows.
+      const text = read.text.endsWith("\n")
+        ? read.text.slice(0, -1)
+        : read.text;
+      const bounded = boundCaptureOutput(text, {
+        maxLines: boundedMaxLines,
+        maxBytes: boundedMaxBytes,
+      });
+      if (
+        !read.truncated ||
         bounded.truncated ||
-        boundedMaxLines !== maxLines ||
-        boundedMaxBytes !== maxBytes,
-    };
+        requestedLines === MAX_HERDR_READ_LINES
+      ) {
+        return {
+          output: bounded.output,
+          truncated:
+            read.truncated ||
+            bounded.truncated ||
+            boundedMaxLines !== maxLines ||
+            boundedMaxBytes !== maxBytes,
+        };
+      }
+      // Herdr counts blank viewport rows before unwrapping and stripping them.
+      // Widen a sparse read until it supplies enough content or hits our cap.
+      requestedLines = Math.min(requestedLines * 2, MAX_HERDR_READ_LINES);
+    }
   }
 
   buildAttachCommands(opts: {
