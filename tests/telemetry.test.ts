@@ -283,6 +283,39 @@ describe("anonymous product telemetry", () => {
     });
   });
 
+  it("bounds completion delivery failures and excludes diagnostic content", () => {
+    const payload = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "completion_delivery_failed",
+      failure_stage: "notice_persistence",
+      retry_attempt: 900,
+      error: "private prompt",
+      completionId: "private-agent",
+    } as unknown as TelemetryEvent);
+
+    expect(payload.event).toBe("pi_subagentura_completion_delivery_failed");
+    expect(Object.keys(payload.properties).sort()).toEqual(
+      [
+        "$geoip_disable",
+        "$ip",
+        "$lib",
+        "$lib_version",
+        "$process_person_profile",
+        "delivery",
+        "failure_stage",
+        "mode",
+        "retry_attempt",
+        "schema_version",
+        "telemetry_session_id",
+      ].sort(),
+    );
+    expect(payload.properties).toMatchObject({
+      delivery: "manifest",
+      failure_stage: "notice_persistence",
+      retry_attempt: 32,
+    });
+    expect(JSON.stringify(payload)).not.toContain("private");
+  });
+
   it.each([
     [Number.NaN, 0],
     [-7, 0],

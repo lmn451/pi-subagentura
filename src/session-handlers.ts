@@ -592,6 +592,10 @@ export function registerSessionHandlers(
             : undefined,
         );
       } catch (error) {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "telemetry_persistence",
+        });
         logSessionError("telemetry_session_persist_failed", error);
       }
     }
@@ -645,6 +649,10 @@ export function registerSessionHandlers(
           // routing overlay never becomes a second runtime registry or cache.
           loadOrchestratorRoutingMetadata(ctx.cwd);
         } catch (error) {
+          captureTelemetry(scope.telemetry, {
+            event: "session_setup_failed",
+            failure_stage: "routing_recovery",
+          });
           logSessionError("orchestrator_routing_recovery_failed", error);
         }
       }
@@ -656,6 +664,10 @@ export function registerSessionHandlers(
           scope,
         );
       } catch {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "state_recovery",
+        });
         /* best effort — rehydrate is a recovery path */
       }
       captureTelemetry(scope.telemetry, {
@@ -670,6 +682,10 @@ export function registerSessionHandlers(
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
       } catch (error) {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "wake_recovery",
+        });
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
     }

@@ -20,7 +20,11 @@ import {
 } from "./session-scope";
 import { debugLog } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
-import { captureTelemetry, manifestDeliveryDedupeKey } from "./telemetry";
+import {
+  captureTelemetry,
+  manifestDeliveryDedupeKey,
+  type TelemetryCompletionFailureStage,
+} from "./telemetry";
 
 export const COMPLETION_ENTRY_TYPE = "subagentura-completion";
 export const COMPLETION_CONSUMED_ENTRY_TYPE = "subagentura-completion-consumed";
@@ -236,6 +240,7 @@ interface CompletionCoordinatorState {
   overflow: CompletionOverflowState;
   manifestRetryAttempt: number;
   manifestRetryExhausted: boolean;
+  reportedDeliveryFailures?: Set<TelemetryCompletionFailureStage>;
   manifestRetryTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -1241,6 +1246,7 @@ function reconcileState(state: CompletionCoordinatorState): void {
     if (entryCustomType(entry) === COMPLETION_MANIFEST_TYPE) {
       const data = objectRecord(entryData(entry));
       if (data?.overflowPath === state.overflow.path) {
+        state.reportedDeliveryFailures?.clear();
         const generation =
           typeof data.overflowNoticeGeneration === "number" &&
           Number.isSafeInteger(data.overflowNoticeGeneration) &&
@@ -1299,7 +1305,10 @@ function reconcileState(state: CompletionCoordinatorState): void {
   }
   for (const completionId of manifestIds) {
     const record = state.records.get(completionId);
-    if (record) markConsumed(record);
+    if (record) {
+      state.reportedDeliveryFailures?.clear();
+      markConsumed(record);
+    }
   }
   if (consumptions.length === 0) return;
   for (const record of state.records.values()) {
@@ -1618,6 +1627,24 @@ function appendConsumption(
   }
 }
 
+function reportCompletionDeliveryFailure(
+  state: CompletionCoordinatorState,
+  failureStage: TelemetryCompletionFailureStage,
+): void {
+  const telemetry = resolveLiveSessionScope(state.owner)?.telemetry;
+  if (!telemetry?.enabled || !telemetry.active) return;
+  // One event per stage until a manifest dispatch succeeds or is reconciled
+  // from the parent session. Polling and exhausted retries must not flood capture.
+  const reported = (state.reportedDeliveryFailures ??= new Set());
+  if (reported.has(failureStage)) return;
+  reported.add(failureStage);
+  captureTelemetry(telemetry, {
+    event: "completion_delivery_failed",
+    failure_stage: failureStage,
+    retry_attempt: state.manifestRetryAttempt,
+  });
+}
+
 function persistPendingNotices(state: CompletionCoordinatorState): boolean {
   const appendEntry = state.pi.appendEntry;
   if (typeof appendEntry !== "function") return false;
@@ -1630,6 +1657,7 @@ function persistPendingNotices(state: CompletionCoordinatorState): boolean {
         completionId,
         error: error instanceof Error ? error.message : String(error),
       });
+      reportCompletionDeliveryFailure(state, "notice_persistence");
       return false;
     }
   }
@@ -1659,6 +1687,7 @@ function scheduleManifestRetry(state: CompletionCoordinatorState): void {
     debugLog("warn", "completion_manifest_retry_exhausted", {
       attempts: state.manifestRetryAttempt,
     });
+    reportCompletionDeliveryFailure(state, "retry_exhausted");
     return;
   }
   const delay = Math.min(
@@ -2167,6 +2196,7 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
     debugLog("warn", "completion_manifest_dispatch_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
+    reportCompletionDeliveryFailure(state, "manifest_dispatch");
     scheduleManifestRetry(state);
     return;
   }
@@ -2190,6 +2220,7 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
   );
   state.manifestRetryAttempt = 0;
   state.manifestRetryExhausted = false;
+  state.reportedDeliveryFailures?.clear();
   if (message.details.overflowPath === state.overflow.path) {
     const generation =
       message.details.overflowNoticeGeneration ??

@@ -425,6 +425,36 @@ describe("session handler lifecycle callbacks", () => {
       });
     });
 
+    it("reports recovery failures without sending exception text or stopping startup", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      ctx.sessionManager.getEntries = () => {
+        throw new Error("private state /home/customer");
+      };
+      ctx.sessionManager.getBranch = () => {
+        throw new Error("private branch /home/customer");
+      };
+      captured.length = 0;
+      expect(() =>
+        registration.handlers.get("session_start")![0](
+          { reason: "reload" },
+          ctx,
+        ),
+      ).not.toThrow();
+      expect(
+        captured
+          .filter((p) => p.event === "pi_subagentura_session_setup_failed")
+          .map((p) => p.properties.failure_stage),
+      ).toEqual(["state_recovery", "wake_recovery"]);
+      expect(registration.sessionScope.lifecycle).toBe("started");
+      expect(JSON.stringify(captured)).not.toMatch(/private|customer/);
+    });
+
     it("hands the same correlation to the root lineage bootstrap", () => {
       const registration = registerHandlers(
         undefined,

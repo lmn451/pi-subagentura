@@ -80,6 +80,7 @@
     "src/session-scope.ts",
     "src/settings.ts",
     "src/telemetry.ts",
+    "src/telemetry-operations.ts",
     "src/subagent.ts",
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",

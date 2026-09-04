@@ -7,6 +7,10 @@
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { cancelAllFlows } from "./cancel-all-flows";
 import type { SessionScope } from "./session-scope";
+import {
+  registerCommandWithTelemetry,
+  registerShortcutWithTelemetry,
+} from "./telemetry-operations";
 
 function snapshotSummary(
   result: Awaited<ReturnType<typeof cancelAllFlows>>,
@@ -31,7 +35,7 @@ export function registerCancelAllFlows(
       : undefined;
   // ── ctrl+alt+x shortcut ────────────────────────────────────────────
   if (typeof pi.registerShortcut === "function") {
-    pi.registerShortcut("ctrl+alt+x", {
+    registerShortcutWithTelemetry(pi, "ctrl+alt+x", {
       description:
         "Cancel all active sub-agent flows (jobs, workflows, running interactive agents)",
       handler: async (ctx) => {
@@ -66,7 +70,7 @@ export function registerCancelAllFlows(
 
   // ── /cancel-all-flows command fallback ──────────────────────────────
   if (typeof pi.registerCommand === "function") {
-    pi.registerCommand("cancel-all-flows", {
+    registerCommandWithTelemetry(pi, "cancel-all-flows", {
       description:
         "Cancel all active sub-agent flows (jobs, workflows, running interactive agents)",
       handler: async (_args, ctx) => {

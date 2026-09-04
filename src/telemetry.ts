@@ -22,6 +22,8 @@ export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";
+export type TelemetryCompletionFailureStage =
+  "notice_persistence" | "manifest_dispatch" | "retry_exhausted";
 export type TelemetryWorkflowInvocation = "tool" | "saved_command";
 export type TelemetryWorkflowStatus =
   "success" | "partial" | "error" | "cancelled";
@@ -62,6 +64,80 @@ export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
   "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
 
+export const TELEMETRY_OPERATION_NAMES = {
+  tool: [
+    "subagent_with_context",
+    "subagent_isolated",
+    "subagent_interactive",
+    "get_subagent_status",
+    "get_subagent_result",
+    "cancel_subagent",
+    "prune_subagent_jobs",
+    "list_available_models",
+    "cleanup_subagent_artifacts",
+    "get_current_pane_activity",
+    "get_interactive_subagent_status",
+    "cancel_interactive_subagent",
+    "send_interactive_subagent_message",
+    "read_subagent_artifact",
+    "list_subagent_artifacts",
+    "list_orchestrator_agents",
+    "update_orchestrator_agent_description",
+    "workflow",
+    "get_workflow_status",
+    "get_workflow_result",
+    "cancel_workflow",
+    "save_workflow",
+    "list_workflows",
+    "delete_workflow",
+  ],
+  command: [
+    "workflow",
+    "workflows",
+    "list-workflows",
+    "workflow-status",
+    "workflow-tree",
+    "delete-workflow",
+    "subagents",
+    "cancel-all-flows",
+  ],
+  shortcut: ["ctrl+alt+a", "ctrl+alt+x"],
+} as const;
+export type TelemetrySurface = keyof typeof TELEMETRY_OPERATION_NAMES;
+export type TelemetryOperation =
+  (typeof TELEMETRY_OPERATION_NAMES)[TelemetrySurface][number];
+export type TelemetryOperationOutcome =
+  "returned" | "reported_error" | "threw" | "aborted";
+export type TelemetryOperationResultStatus =
+  | "ok"
+  | "started"
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "wait_timeout"
+  | "wait_cancelled"
+  | "unavailable"
+  | "invalid_input"
+  | "confirmation_required"
+  | "error"
+  | "unknown";
+export type TelemetrySessionFailureStage =
+  | "telemetry_persistence"
+  | "routing_recovery"
+  | "state_recovery"
+  | "wake_recovery";
+
+export function telemetryOperationName(
+  surface: TelemetrySurface,
+  name: string,
+): TelemetryOperation | undefined {
+  return (TELEMETRY_OPERATION_NAMES[surface] as readonly string[]).includes(
+    name,
+  )
+    ? (name as TelemetryOperation)
+    : undefined;
+}
+
 interface TelemetryAgentDimensions {
   execution: TelemetryExecution;
   mux: TelemetryMux;
@@ -79,6 +155,25 @@ type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
 
 export type TelemetryEvent =
   | { event: "session_started" }
+  | {
+      event: "session_setup_failed";
+      failure_stage: TelemetrySessionFailureStage;
+    }
+  | {
+      event: "operation_started";
+      surface: TelemetrySurface;
+      operation: TelemetryOperation;
+      session_role: "root" | "child";
+    }
+  | {
+      event: "operation_completed";
+      surface: TelemetrySurface;
+      operation: TelemetryOperation;
+      session_role: "root" | "child";
+      outcome: TelemetryOperationOutcome;
+      result_status: TelemetryOperationResultStatus;
+      duration_ms?: number;
+    }
   | ({
       event: "agent_created";
       spawn_duration_ms?: number;
@@ -132,6 +227,11 @@ export type TelemetryEvent =
       delivery: TelemetryDelivery;
       count: number;
       delivery_latency_ms?: number;
+    }
+  | {
+      event: "completion_delivery_failed";
+      failure_stage: TelemetryCompletionFailureStage;
+      retry_attempt: number;
     }
   | {
       event: "result_read";
@@ -371,6 +471,28 @@ export function buildTelemetryPayload(
     case "session_started":
       properties = common;
       break;
+    case "session_setup_failed":
+      properties = { ...common, failure_stage: event.failure_stage };
+      break;
+    case "operation_started":
+      properties = {
+        ...common,
+        surface: event.surface,
+        operation: event.operation,
+        session_role: event.session_role,
+      };
+      break;
+    case "operation_completed":
+      properties = {
+        ...common,
+        surface: event.surface,
+        operation: event.operation,
+        session_role: event.session_role,
+        outcome: event.outcome,
+        result_status: event.result_status,
+        ...durationProperties("duration", event.duration_ms),
+      };
+      break;
     case "agent_created":
       properties = {
         ...common,
@@ -483,6 +605,14 @@ export function buildTelemetryPayload(
         delivery: event.delivery,
         count: boundedCount(event.count, 128),
         ...durationProperties("delivery_latency", event.delivery_latency_ms),
+      };
+      break;
+    case "completion_delivery_failed":
+      properties = {
+        ...common,
+        delivery: "manifest",
+        failure_stage: event.failure_stage,
+        retry_attempt: boundedCount(event.retry_attempt, 32),
       };
       break;
     case "result_read":
