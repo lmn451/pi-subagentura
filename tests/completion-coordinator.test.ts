@@ -39,6 +39,7 @@ import {
   type CompletionRecord,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
+import { createTelemetrySession } from "../src/telemetry";
 const coordinatorLedgerRoots: string[] = [];
 
 function record(
@@ -139,6 +140,7 @@ describe("completion coordinator", () => {
   afterEach(() => {
     if (scope) clearCompletionCoordinator(sessionOwner(scope));
     clearSessionScopes();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
     for (const root of coordinatorLedgerRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
@@ -187,6 +189,20 @@ describe("completion coordinator", () => {
     expect(completionLatencyForIds(["completion-known-latency"], owner)).toBe(
       2_000,
     );
+  });
+
+  it("defers completion manifests while a UI prompt is active", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.uiPromptActive = true;
+
+    publishCompletion(record("ui-prompt"), sessionOwner(scope));
+    await Promise.resolve();
+
+    expect(manifests(setupResult.pi)).toHaveLength(0);
+    scope.uiPromptActive = false;
+    flushCompletionManifests(sessionOwner(scope));
+    expect(manifests(setupResult.pi)).toHaveLength(1);
   });
 
   it("notifies the user once and sends one independent reference manifest", () => {
@@ -1013,6 +1029,125 @@ describe("completion coordinator", () => {
       setupResult.pi.sendMessage.mock.calls[9]?.[0].details.completionIds,
     ).toContain("completion-permanent-retry");
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["notice_persistence", "manifest_dispatch"])(
+    "reports bounded %s failures and retry exhaustion without content",
+    async (failureStage) => {
+      const setupResult = setup();
+      scope = setupResult.scope;
+      scope.telemetry = createTelemetrySession(true);
+      const payloads: any[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url, init) => {
+          payloads.push(JSON.parse(init.body));
+          return Promise.resolve({ body: null });
+        }),
+      );
+      const failedMethod =
+        failureStage === "notice_persistence"
+          ? setupResult.pi.appendEntry
+          : setupResult.pi.sendMessage;
+      failedMethod.mockImplementation(() => {
+        throw new Error("private prompt /private/project customer-secret");
+      });
+      scope.parentStreaming = true;
+      publishCompletion(record("private-agent"), sessionOwner(scope));
+      scope.parentStreaming = false;
+      flushCompletionManifests(sessionOwner(scope));
+      await vi.runAllTimersAsync();
+      for (let index = 0; index < 20; index++) {
+        flushCompletionManifests(sessionOwner(scope));
+      }
+      await Promise.resolve();
+
+      expect(
+        payloads.map((payload) => payload.properties.failure_stage),
+      ).toEqual([failureStage, "retry_exhausted"]);
+      expect(
+        payloads.map((payload) => payload.properties.retry_attempt),
+      ).toEqual([0, 8]);
+      expect(
+        payloads.every(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(payloads)).not.toMatch(/private|customer-secret/);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(setupResult.entries).toHaveLength(
+        failureStage === "notice_persistence" ? 0 : 1,
+      );
+    },
+  );
+
+  it.each(["automatic", "human"])(
+    "reports a new failure after %s delivery recovers",
+    (recovery) => {
+      const setupResult = setup();
+      scope = setupResult.scope;
+      scope.telemetry = createTelemetrySession(true);
+      const payloads: any[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url, init) => {
+          payloads.push(JSON.parse(init.body));
+          return Promise.resolve({ body: null });
+        }),
+      );
+      const sendMessage = setupResult.pi.sendMessage.getMockImplementation()!;
+      setupResult.pi.sendMessage.mockImplementationOnce(() => {
+        throw new Error("dispatch failed");
+      });
+      const owner = sessionOwner(scope);
+      scope.parentStreaming = true;
+      publishCompletion(record("first-failure"), owner);
+      scope.parentStreaming = false;
+      flushCompletionManifests(owner);
+      if (recovery === "human") {
+        const message = prepareCompletionManifest(owner)!;
+        setupResult.entries.push({ type: "custom_message", ...message });
+      } else {
+        flushCompletionManifests(owner);
+      }
+      settleCompletionParentTurn(owner);
+      setupResult.pi.sendMessage.mockImplementationOnce(() => {
+        throw new Error("another dispatch failed");
+      });
+      scope.parentStreaming = true;
+      publishCompletion(record("second-failure"), owner);
+      scope.parentStreaming = false;
+      flushCompletionManifests(owner);
+
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(2);
+      setupResult.pi.sendMessage.mockImplementation(sendMessage);
+    },
+  );
+
+  it("does not send completion failure telemetry when opted out or retired", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    scope.telemetry = createTelemetrySession(false);
+    setupResult.pi.sendMessage.mockImplementation(() => {
+      throw new Error("dispatch failed");
+    });
+    scope.parentStreaming = true;
+    publishCompletion(record("opted-out"), sessionOwner(scope));
+    scope.parentStreaming = false;
+    flushCompletionManifests(sessionOwner(scope));
+    scope.telemetry = createTelemetrySession(true);
+    scope.telemetry.active = false;
+    vi.runAllTimers();
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps successful consumption durable when the receipt append fails", () => {

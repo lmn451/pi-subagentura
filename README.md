@@ -934,7 +934,7 @@ Parameters:
 ## Anonymous product telemetry
 
 Anonymous product telemetry is enabled by default. The extension sends
-best-effort lifecycle events directly to PostHog's public capture endpoint so
+best-effort lifecycle and operation events directly to PostHog's public capture endpoint so
 the maintainers can understand which execution modes are useful and where
 sub-agent completion or collection breaks down.
 
@@ -952,21 +952,41 @@ ambient identity environment variables—and never read or write the root state
 file's telemetry metadata. A child without that explicit context starts an
 unrelated anonymous correlation rather than reconstructing identity.
 
-The payload schema is versioned; schema version `3` contains these events:
+The payload schema is versioned; schema version `3` contains these lifecycle events:
 
-| Event                      | Properties                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_started`          | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                                                                                                                               |
-| `agent_created`            | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source (`with_context`, `isolated`, `interactive`, or `workflow`), public/sanitized model, async, exact bounded depth plus bucket, completion policy, and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                    |
-| `agent_spawn_failed`       | once per observed rejected spawn attempt; the same agent dimensions, except mux may also be `unknown`, plus required `failure_stage` (`depth_limit`, `capacity`, `context`, `model_resolution`, `session_creation`, `mux_resolution`, `pane_launch`, `state_persistence`, `registration`, `parent_shutdown`, or `unknown`) and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                     |
-| `task_started`             | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `unit` (`job` or `turn`)                                                                                                                                                                                                                                                                |
-| `interactive_message_sent` | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                                                                                                                         |
-| `task_completed`           | repeated closed execution and mux dimensions; `unit` (`job` or `turn`), `success`, `error`, or `cancelled` status, required `terminal_reason` (`completed`, `agent_error`, `process_exit`, `timeout`, `explicit_cancel`, `parent_cancelled`, `session_shutdown`, `fresh_session`, or `unknown`), optional rounded `duration_ms` plus `duration_bucket`, and bounded child-conversation message count when observable |
-| `workflow_started`         | one aggregate record for an accepted workflow invocation: required `invocation` (`tool` or `saved_command`), `async`, and `completion_policy`                                                                                                                                                                                                                                                                        |
-| `workflow_completed`       | the same invocation dimensions plus required `status` (`success`, `partial`, `error`, or `cancelled`), required `terminal_reason` (the same closed reasons as `task_completed`), bounded `agents_spawned` and `error_count` (each `0..1000`), and optional rounded `duration_ms` plus `duration_bucket`                                                                                                              |
-| `session_recovered`        | recovery `reason` (`startup`, `reload`, or `resume`) and bounded `total_count`, `alive_count`, `terminal_count`, and `unknown_count` (each `0..1000`); `total_count` is the eligible recovered count and equals `alive_count + terminal_count + unknown_count`                                                                                                                                                       |
-| `completion_delivered`     | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                             |
-| `result_read`              | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                   |
+| Event                        | Properties                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_started`            | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                                                                                                                               |
+| `agent_created`              | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source (`with_context`, `isolated`, `interactive`, or `workflow`), public/sanitized model, async, exact bounded depth plus bucket, completion policy, and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                    |
+| `agent_spawn_failed`         | once per observed rejected spawn attempt; the same agent dimensions, except mux may also be `unknown`, plus required `failure_stage` (`depth_limit`, `capacity`, `context`, `model_resolution`, `session_creation`, `mux_resolution`, `pane_launch`, `state_persistence`, `registration`, `parent_shutdown`, or `unknown`) and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                     |
+| `task_started`               | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `unit` (`job` or `turn`)                                                                                                                                                                                                                                                                |
+| `interactive_message_sent`   | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                                                                                                                         |
+| `task_completed`             | repeated closed execution and mux dimensions; `unit` (`job` or `turn`), `success`, `error`, or `cancelled` status, required `terminal_reason` (`completed`, `agent_error`, `process_exit`, `timeout`, `explicit_cancel`, `parent_cancelled`, `session_shutdown`, `fresh_session`, or `unknown`), optional rounded `duration_ms` plus `duration_bucket`, and bounded child-conversation message count when observable |
+| `workflow_started`           | one aggregate record for an accepted workflow invocation: required `invocation` (`tool` or `saved_command`), `async`, and `completion_policy`                                                                                                                                                                                                                                                                        |
+| `workflow_completed`         | the same invocation dimensions plus required `status` (`success`, `partial`, `error`, or `cancelled`), required `terminal_reason` (the same closed reasons as `task_completed`), bounded `agents_spawned` and `error_count` (each `0..1000`), and optional rounded `duration_ms` plus `duration_bucket`                                                                                                              |
+| `session_recovered`          | recovery `reason` (`startup`, `reload`, or `resume`) and bounded `total_count`, `alive_count`, `terminal_count`, and `unknown_count` (each `0..1000`); `total_count` is the eligible recovered count and equals `alive_count + terminal_count + unknown_count`                                                                                                                                                       |
+| `completion_delivered`       | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                             |
+| `completion_delivery_failed` | manifest delivery only; closed `failure_stage` (`notice_persistence`, `manifest_dispatch`, or `retry_exhausted`) and bounded `retry_attempt` (`0..32`, currently at most `8`); no error text or completion identifiers                                                                                                                                                                                               |
+| `result_read`                | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                   |
+
+It also records the following operation and setup events:
+
+| Event                  | Properties                                                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_setup_failed` | closed `failure_stage`: `telemetry_persistence`, `routing_recovery`, `state_recovery`, or `wake_recovery`; setup continues with its existing fallback                    |
+| `operation_started`    | one entered extension tool, command, or shortcut handler; closed `surface`, allowlisted `operation`, and `session_role` (`root` or `child`)                              |
+| `operation_completed`  | the same operation dimensions; `outcome` (`returned`, `reported_error`, `threw`, or `aborted`), closed `result_status`, and rounded `duration_ms` plus `duration_bucket` |
+
+Operation coverage includes all 24 extension tools, eight commands, and two
+shortcuts. Names come from a fixed allowlist; arguments and output are never
+inspected. Result status is restricted to `ok`, `started`, `running`, `completed`,
+`cancelled`, `wait_timeout`, `wait_cancelled`, `unavailable`, `invalid_input`,
+`confirmation_required`, `error`, or `unknown`. A returned error flag is separate
+from an exception. A returned command means its handler finished, which can
+include a dismissed picker or a handled validation failure; it does not prove
+the requested action succeeded. Operation duration includes any intentional wait
+inside the handler. Pending calls emit no completion into a replaced or retired
+session. Host rejections before handler entry are not captured.
 
 All duration and latency fields use the existing bounded representation: values
 are rounded to 100 ms and accepted only from `0` through 30 days. The numeric
@@ -1031,6 +1051,17 @@ These are anonymous session-level aggregates, not per-agent, per-job, or
 per-workflow joins; those identifiers are deliberately not collected. For
 `completion_delivered` batches, the latency statistic is the maximum known age
 among the included completions, not the age of every individual completion.
+
+`completion_delivery_failed` is an additive schema-v3 event. Each coordinator
+reports each failure stage once until a manifest dispatch succeeds or a matching
+manifest is reconciled from the parent session (including a human-started turn).
+The three-stage suppression set is process-local and is cleared with the
+coordinator. Reload/recovery can report an ongoing failure again. Counts measure
+observed failure episodes by stage, not failed completions or every retry. A
+`notice_persistence` event can also represent an append that wrote before throwing;
+normal reconciliation still prevents duplicate notices. `retry_attempt` is the
+number of backoff retries already scheduled at the first observation of that stage.
+All existing opt-outs and inactive-session guards apply.
 
 The observed session span is the time from `session_started` to its last event.
 There is deliberately no shutdown-only summary: crashes can skip shutdown, and

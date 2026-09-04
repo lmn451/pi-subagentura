@@ -311,6 +311,33 @@ describe("startSubagentJob effective thinking level", () => {
     expect(session.dispose).toHaveBeenCalledOnce();
   });
 
+  it("includes session-level usage totals from Pi session stats", async () => {
+    const session = createSession("medium") as any;
+    session.getSessionStats = vi.fn(() => ({
+      tokens: {
+        input: 40,
+        output: 12,
+        cacheRead: 5,
+        cacheWrite: 2,
+      },
+      cost: 1.25,
+    }));
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    const started = await startSubagentJob(params());
+    started.start();
+    const result = await started.jobPromise;
+
+    expect(result.usage).toMatchObject({
+      input: 40,
+      output: 12,
+      cacheRead: 5,
+      cacheWrite: 2,
+      cost: 1.25,
+      turns: 0,
+    });
+  });
+
   it("keeps live usage cumulative across turns without counting the current message twice", async () => {
     type TestSessionEvent =
       | { type: "turn_start" }

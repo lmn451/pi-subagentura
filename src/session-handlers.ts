@@ -29,6 +29,7 @@ import { snapshotInProcessSession } from "./cancellation-snapshots";
 import {
   clearCompletionCoordinator,
   completionLatencyForIds,
+  flushCompletionManifests,
   markCompletionHumanInput,
   markCompletionTurnStarting,
   prepareCompletionManifest,
@@ -439,7 +440,26 @@ export function registerSessionHandlers(
   registerSessionScope(scope);
   setLegacyActiveSessionRefs(scope);
   registerCompletionCoordinator(pi, scope);
-
+  const flushAfterUiPrompt = (): void => {
+    queueMicrotask(() => {
+      if (scope.lifecycle !== "started" || scope.uiPromptActive) return;
+      const owner = sessionOwner(scope);
+      flushDeliveries(pi, scope.ui, owner);
+      flushInProcessDeliveries(owner);
+      flushCompletionManifests(owner);
+    });
+  };
+  (pi as any).on?.("ui_prompt_start", () => {
+    if (scope.lifecycle !== "started") return;
+    scope.uiPromptActive = true;
+    setLegacyActiveSessionRefs(scope);
+  });
+  (pi as any).on?.("ui_prompt_end", () => {
+    if (scope.lifecycle !== "started") return;
+    scope.uiPromptActive = false;
+    setLegacyActiveSessionRefs(scope);
+    flushAfterUiPrompt();
+  });
   pi.on("input", (event) => {
     if (scope.lifecycle === "started" && event.source !== "extension") {
       markCompletionHumanInput(sessionOwner(scope));
@@ -497,6 +517,7 @@ export function registerSessionHandlers(
 
     advanceSessionScopeGeneration(scope.id);
     scope.lifecycle = "started";
+    scope.uiPromptActive = false;
     scope.ui = ctx.ui;
     scope.cwd = ctx.cwd;
     scope.sessionManager = ctx.sessionManager;
@@ -571,6 +592,10 @@ export function registerSessionHandlers(
             : undefined,
         );
       } catch (error) {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "telemetry_persistence",
+        });
         logSessionError("telemetry_session_persist_failed", error);
       }
     }
@@ -624,6 +649,10 @@ export function registerSessionHandlers(
           // routing overlay never becomes a second runtime registry or cache.
           loadOrchestratorRoutingMetadata(ctx.cwd);
         } catch (error) {
+          captureTelemetry(scope.telemetry, {
+            event: "session_setup_failed",
+            failure_stage: "routing_recovery",
+          });
           logSessionError("orchestrator_routing_recovery_failed", error);
         }
       }
@@ -635,6 +664,10 @@ export function registerSessionHandlers(
           scope,
         );
       } catch {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "state_recovery",
+        });
         /* best effort — rehydrate is a recovery path */
       }
       captureTelemetry(scope.telemetry, {
@@ -649,6 +682,10 @@ export function registerSessionHandlers(
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
       } catch (error) {
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "wake_recovery",
+        });
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
     }
@@ -675,6 +712,7 @@ export function registerSessionHandlers(
       );
       clearCompletionCoordinator(owner);
       scope.parentStreaming = false;
+      scope.uiPromptActive = false;
       scope.isParentIdle = undefined;
       clearCompletionTurnWake(pi);
       scope.lifecycle = "shutdown";
