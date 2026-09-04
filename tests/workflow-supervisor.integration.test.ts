@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SubagentResult } from "../src/helpers";
+import { annotateSpawnFailure, type SubagentResult } from "../src/helpers";
 
 const { mockAwaitInteractiveResult, mockLaunch, mockStartSubagentJob } =
   vi.hoisted(() => ({
@@ -213,6 +213,22 @@ function makePi() {
 const SINGLE_AGENT_SCRIPT = (name: string) =>
   `export const meta = { name: "${name}", description: "d" };\n` +
   'return await agent("inspect", { label: "reviewer" });';
+type TelemetryPayload = {
+  event?: string;
+  properties?: Record<string, unknown>;
+};
+
+function captureTelemetryPayloads(): TelemetryPayload[] {
+  const payloads: TelemetryPayload[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)) as TelemetryPayload);
+      return new Response(null, { status: 204 });
+    }),
+  );
+  return payloads;
+}
 
 beforeEach(() => {
   clearSessionScopes();
@@ -270,6 +286,7 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+  vi.unstubAllGlobals();
 });
 
 describe("workflow supervisor integration", () => {
@@ -529,7 +546,59 @@ describe("workflow supervisor integration", () => {
     expect(jobRegistry.has("fallback-child")).toBe(false);
   });
 
+  it.each(["model_resolution", "session_creation"] as const)(
+    "emits one in-process failure when %s preparation rejects",
+    async (failureStage) => {
+      const payloads = captureTelemetryPayloads();
+      const { context } = liveSessionContext({
+        id: 6,
+        sessionId: "session-a",
+      });
+      mockLaunch.mockImplementationOnce(() => {
+        throw new Error("mux unavailable");
+      });
+      mockStartSubagentJob.mockRejectedValueOnce(
+        annotateSpawnFailure(new Error("preparation failed"), failureStage),
+      );
+      const { pi, findTool } = makePi();
+      context.pi = pi as never;
+      registerWorkflowTool(pi as never, context);
+
+      try {
+        const result = await findTool().execute(
+          "call-preparation-failure",
+          {
+            script: SINGLE_AGENT_SCRIPT(`preparation-${failureStage}`),
+            async: false,
+          },
+          undefined,
+          vi.fn(),
+          { cwd: "/tmp", modelRegistry: {} },
+        );
+
+        expect(result.details.status).toBe("error");
+        const failures = payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_agent_spawn_failed" &&
+            payload.properties?.execution === "in-process",
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.properties).toMatchObject({
+          failure_stage: failureStage,
+        });
+        expect(
+          payloads.filter(
+            (payload) => payload.event === "pi_subagentura_agent_created",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("does not start an in-process child whose parent shut down mid-spawn", async () => {
+    const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const start = vi.fn();
     const disposeBeforeStart = vi.fn();
@@ -568,13 +637,31 @@ describe("workflow supervisor integration", () => {
       disposeBeforeStart,
     });
 
-    const result = await execution;
+    try {
+      const result = await execution;
 
-    expect(start).not.toHaveBeenCalled();
-    expect(disposeBeforeStart).toHaveBeenCalledOnce();
-    expect(sessionAbort).toHaveBeenCalledOnce();
-    expect(jobRegistry.has("escaped-child")).toBe(false);
-    expect(result.details.status).toBe("error");
+      expect(start).not.toHaveBeenCalled();
+      expect(disposeBeforeStart).toHaveBeenCalledOnce();
+      expect(sessionAbort).toHaveBeenCalledOnce();
+      expect(jobRegistry.has("escaped-child")).toBe(false);
+      expect(result.details.status).toBe("error");
+      const failures = payloads.filter(
+        (payload) =>
+          payload.event === "pi_subagentura_agent_spawn_failed" &&
+          payload.properties?.execution === "in-process",
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.properties).toMatchObject({
+        failure_stage: "parent_shutdown",
+      });
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_created",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("leaves an unownable in-process child out of the registry", async () => {

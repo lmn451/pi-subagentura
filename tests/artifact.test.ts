@@ -1346,7 +1346,7 @@ describe("persisted interactive state helpers", () => {
     expect(loaded).toEqual({ schemaVersion: 2, parent: "pi", states: {} });
   });
 
-  it("skips malformed v1 entries and normalizes untrusted fields", () => {
+  it("skips malformed v1 entries, retains valid intents, and normalizes untrusted fields", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     const validIntent = {
@@ -1359,6 +1359,7 @@ describe("persisted interactive state helpers", () => {
       status: "done",
       artifactDir: SAMPLE.artifactDir,
       state: "queued",
+      completedAt: 1234,
     };
     writeFileSync(
       file,
@@ -1378,6 +1379,11 @@ describe("persisted interactive state helpers", () => {
               { ...validIntent, deliveryId: "x".repeat(129) },
               { ...validIntent, turnId: "" },
               { ...validIntent, eventId: "../escape" },
+              {
+                ...validIntent,
+                eventId: "bad-time",
+                completedAt: "not-a-number",
+              },
               validIntent,
             ],
             deliveryReceipts: ["one", "one", 42, "two"],
@@ -1392,7 +1398,22 @@ describe("persisted interactive state helpers", () => {
     expect(Object.keys(loaded.states)).toEqual([SAMPLE.id]);
     expect(loaded.states[SAMPLE.id].eventByteCursor).toBe(0);
     expect(loaded.states[SAMPLE.id].sessionByteCursor).toBe(0);
-    expect(loaded.states[SAMPLE.id].pendingDeliveries).toEqual([validIntent]);
+    expect(loaded.states[SAMPLE.id].pendingDeliveries).toHaveLength(2);
+    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).toMatchObject({
+      deliveryId: "delivery",
+      subagentId: SAMPLE.id,
+      turnId: "turn",
+      eventId: "bad-time",
+      mode: "notify",
+      triggerTurn: false,
+      status: "done",
+      artifactDir: SAMPLE.artifactDir,
+      state: "queued",
+    });
+    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).not.toHaveProperty(
+      "completedAt",
+    );
+    expect(loaded.states[SAMPLE.id].pendingDeliveries[1]).toEqual(validIntent);
     expect(loaded.states[SAMPLE.id].deliveryReceipts).toEqual(["one", "two"]);
   });
 

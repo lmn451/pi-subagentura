@@ -41,6 +41,7 @@ import {
 } from "./session-scope";
 
 export const FAILED_TOMBSTONE_TTL_MS = 5 * 60 * 1000;
+const MAX_RECOVERY_COUNTS = 1_000;
 
 /**
  * Placeholder for a state whose attach/focus commands cannot be rebuilt —
@@ -173,14 +174,20 @@ export function rehydrateInteractiveSubagents(
   scope?: SessionScope,
 ): {
   total: number;
+  recovered: number;
   alive: number;
   terminal: number;
+  unknown: number;
 } {
   const payload = loadInteractiveStates(cwd);
-  if (!payload) return { total: 0, alive: 0, terminal: 0 };
+  if (!payload) {
+    return { total: 0, recovered: 0, alive: 0, terminal: 0, unknown: 0 };
+  }
 
+  let recovered = 0;
   let alive = 0;
   let terminal = 0;
+  let unknown = 0;
   const owner: SessionOwnerToken | undefined = scope
     ? sessionOwner(scope)
     : undefined;
@@ -339,8 +346,12 @@ export function rehydrateInteractiveSubagents(
     );
     rehydrated.status = next;
     recoveredStates.push({ entry, state: rehydrated });
-    if (next === "exited" || next === "cancelled") terminal++;
-    else if (next === "running" || next === "idle") alive++;
+    if (recovered < MAX_RECOVERY_COUNTS) {
+      recovered++;
+      if (next === "exited" || next === "cancelled") terminal++;
+      else if (next === "running" || next === "idle") alive++;
+      else unknown++;
+    }
     for (const intent of rehydrated.pendingDeliveries ?? []) {
       if (
         !intent.completionPolicy ||
@@ -389,5 +400,11 @@ export function rehydrateInteractiveSubagents(
     registerInteractiveSubagentState(rehydrated, scope);
   }
 
-  return { total: Object.keys(payload.states).length, alive, terminal };
+  return {
+    total: Object.keys(payload.states).length,
+    recovered,
+    alive,
+    terminal,
+    unknown,
+  };
 }

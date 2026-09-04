@@ -82,10 +82,11 @@ import {
   DEFAULT_MAX_NODES,
   hashLineageRoot,
   LINEAGE_SCHEMA_VERSION,
-  type LineageManifest,
   pruneTerminalLineageNodesSync,
   resolveLineageStorePathsSync,
   writeLineageManifestAtomicSync,
+  type LineageManifest,
+  type LineageStorePaths,
 } from "./interactive-lineage";
 import {
   createDescendantSpawnTreeContext,
@@ -104,6 +105,9 @@ import {
   type TelemetryCompletionPolicy,
   type TelemetryDepthBucket,
   type TelemetryInvocationSource,
+  type TelemetrySpawnFailureMux,
+  type TelemetrySession,
+  type TelemetrySpawnFailureStage,
 } from "./telemetry";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
@@ -328,6 +332,23 @@ if (!globalThis.__piSubagenturaInteractiveRegistry) {
 
 export const interactiveSubagentRegistry =
   globalThis.__piSubagenturaInteractiveRegistry!;
+
+interface InteractiveCreatedTelemetry {
+  readonly session: TelemetrySession;
+  readonly spawnStartedAt: number;
+  captured: boolean;
+}
+
+/**
+ * A coordinated interactive tool launch registers its completion member after
+ * the pane has been created. Keep the creation event pending until that
+ * registration succeeds so one attempt cannot report both `agent_created` and
+ * `agent_spawn_failed`.
+ */
+const interactiveCreatedTelemetry = new WeakMap<
+  InteractiveSubagentState,
+  InteractiveCreatedTelemetry
+>();
 /** Insert a state into its authoritative session map and the legacy aggregate index. */
 export function registerInteractiveSubagentState(
   state: InteractiveSubagentState,
@@ -523,6 +544,72 @@ export function writeLaunchScript(
   writeFileSync(path, script, { mode: 0o700 });
 }
 
+/**
+ * Record a privacy-safe failure while an interactive child is being spawned.
+ * This helper deliberately accepts only closed dimensions; the exception that
+ * caused the failure never enters the telemetry payload.
+ */
+export function captureInteractiveSpawnFailure(params: {
+  telemetry?: TelemetrySession;
+  stage: TelemetrySpawnFailureStage;
+  startedAt?: number;
+  mux?: TelemetrySpawnFailureMux;
+  invocationSource?: TelemetryInvocationSource;
+  async?: boolean;
+  depth?: number;
+  completionPolicy?: TelemetryCompletionPolicy;
+  model?: string;
+}): void {
+  let model = "custom";
+  try {
+    model = sanitizeTelemetryModel(params.model);
+  } catch {
+    // Model registry failures must not prevent the failure signal itself.
+  }
+  const depth = telemetryDepth(params.depth);
+  const duration =
+    params.startedAt === undefined ? undefined : Date.now() - params.startedAt;
+  captureTelemetry(params.telemetry, {
+    event: "agent_spawn_failed",
+    execution: "interactive",
+    mux: params.mux ?? "unknown",
+    invocation_source: params.invocationSource ?? "interactive",
+    model,
+    async: params.async ?? true,
+    depth,
+    depth_bucket: telemetryDepthBucket(params.depth),
+    completion_policy: params.completionPolicy ?? "legacy",
+    failure_stage: params.stage,
+    spawn_duration_ms: duration,
+  });
+}
+
+/**
+ * Emit the deferred creation event after the interactive tool has registered
+ * its completion member. The weak-map entry makes this safe to call more than
+ * once without double-counting a single launch.
+ */
+export function captureInteractiveSubagentCreatedTelemetry(
+  state: InteractiveSubagentState,
+): void {
+  const pending = interactiveCreatedTelemetry.get(state);
+  if (!pending || pending.captured) return;
+  pending.captured = true;
+  interactiveCreatedTelemetry.delete(state);
+  captureTelemetry(pending.session, {
+    event: "agent_created",
+    execution: "interactive",
+    mux: state.mux,
+    invocation_source: state.telemetryInvocationSource ?? "interactive",
+    model: state.telemetryModel,
+    async: state.telemetryAsync ?? true,
+    depth: state.telemetryDepth,
+    depth_bucket: state.telemetryDepthBucket ?? "unknown",
+    completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+    spawn_duration_ms: Date.now() - pending.spawnStartedAt,
+  });
+}
+
 export function launchInteractiveSubagent(params: {
   name: string;
   task: string;
@@ -573,17 +660,61 @@ export function launchInteractiveSubagent(params: {
   telemetryAsync?: boolean;
   /** Aggregate policy attributed to workflow-owned child execution. */
   telemetryCompletionPolicy?: TelemetryCompletionPolicy;
+  /** Hold `agent_created` until coordinated completion registration succeeds. */
+  deferAgentCreatedTelemetry?: boolean;
+  /** Caller-observed attempt start; direct callers default to launcher entry. */
+  spawnRequestedAt?: number;
 }): InteractiveSubagentState {
+  const spawnStartedAt = params.spawnRequestedAt ?? Date.now();
+  let spawnFailureReported = false;
+  let nextDepth: number | undefined;
+  const reportSpawnFailure = (
+    stage: TelemetrySpawnFailureStage,
+    mux?: TelemetrySpawnFailureMux,
+  ): void => {
+    if (spawnFailureReported) return;
+    spawnFailureReported = true;
+    captureInteractiveSpawnFailure({
+      telemetry:
+        params.sessionScope?.telemetry ??
+        resolveLiveSessionScope(params.supervisorOwner)?.telemetry,
+      stage,
+      startedAt: spawnStartedAt,
+      mux,
+      invocationSource: params.telemetryInvocationSource,
+      async: params.telemetryAsync,
+      depth: nextDepth,
+      completionPolicy:
+        params.telemetryCompletionPolicy ?? params.completionPolicy ?? "legacy",
+      model: params.model,
+    });
+  };
   // 8 bytes, not 4: at 32 bits a birthday collision inside one tree is not
   // remote, and the duplicate-id path only degrades gracefully — it does not
   // recover the shadowed agent.
-  const id = randomBytes(8).toString("hex");
-  const cwd = resolve(params.cwd);
-  const stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
-  const artifactOwnerSessionId =
-    params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
+  let id: string;
+  try {
+    id = randomBytes(8).toString("hex");
+  } catch (error) {
+    reportSpawnFailure("unknown");
+    throw error;
+  }
+  let cwd: string;
+  try {
+    cwd = resolve(params.cwd);
+  } catch (error) {
+    reportSpawnFailure("context");
+    throw error;
+  }
+  let stateCwd: string;
+  try {
+    stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
+  } catch (error) {
+    reportSpawnFailure("context");
+    throw error;
+  }
+  let artifactOwnerSessionId: string | undefined;
   const background = params.background !== false; // default true (hidden)
-  const paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
   // Parse-don't-validate: callers must hand us an already-parsed context.
   const spawnTreeContext = params.spawnTreeContext;
   const parentAgentId = spawnTreeContext?.currentAgentId;
@@ -592,11 +723,31 @@ export function launchInteractiveSubagent(params: {
     spawnTreeContext?.sessionRoot ?? defaultSpawnTreeSessionRoot();
   const effectiveCurrentDepth = spawnTreeContext?.depth ?? 0;
   const effectiveMaxDepth = spawnTreeContext?.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const nextDepth = effectiveCurrentDepth + 1;
+  nextDepth = effectiveCurrentDepth + 1;
+  try {
+    artifactOwnerSessionId =
+      params.parentSessionId ?? sessionIdForOwner(params.supervisorOwner);
+  } catch (error) {
+    reportSpawnFailure("session_creation");
+    throw error;
+  }
+  let paths: {
+    sessionFile: string;
+    artifactDir: string;
+    promptFile: string;
+    systemPromptFile: string;
+    launchScriptFile: string;
+  };
+  try {
+    paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
+  } catch (error) {
+    reportSpawnFailure("state_persistence");
+    throw error;
+  }
   const liveScope =
     params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
-
   if (rootId && nextDepth > effectiveMaxDepth) {
+    reportSpawnFailure("depth_limit");
     throw new Error(
       `interactive sub-agent depth ${nextDepth} exceeds max ${effectiveMaxDepth}`,
     );
@@ -605,9 +756,15 @@ export function launchInteractiveSubagent(params: {
   // The cap applies whenever a lineage root exists, even when this spawn will
   // not persist a manifest of its own — recursion inside a tree still has to be
   // bounded by that tree's budget.
-  const lineageStore = rootId
-    ? resolveLineageStorePathsSync(sessionRoot, rootId)
-    : undefined;
+  let lineageStore: LineageStorePaths | undefined;
+  try {
+    lineageStore = rootId
+      ? resolveLineageStorePathsSync(sessionRoot, rootId)
+      : undefined;
+  } catch (error) {
+    reportSpawnFailure("state_persistence");
+    throw error;
+  }
   if (lineageStore) {
     let activeCount = existsSync(lineageStore.nodesDir)
       ? countLineageManifestsSync(lineageStore.nodesDir)
@@ -622,6 +779,7 @@ export function launchInteractiveSubagent(params: {
       ).active;
     }
     if (activeCount >= maxNodes) {
+      reportSpawnFailure("capacity");
       throw new Error(
         `interactive sub-agent tree reached max nodes ${maxNodes} (${activeCount} nodes are active or have unknown liveness)`,
       );
@@ -631,15 +789,20 @@ export function launchInteractiveSubagent(params: {
     task: params.task,
     contextText: params.contextText,
   });
-  mkdirSync(paths.artifactDir, { recursive: true });
-  if (artifactOwnerSessionId) {
-    writeFileSync(
-      join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),
-      artifactOwnerSessionId,
-      { encoding: "utf8", mode: 0o600 },
-    );
+  try {
+    mkdirSync(paths.artifactDir, { recursive: true });
+    if (artifactOwnerSessionId) {
+      writeFileSync(
+        join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),
+        artifactOwnerSessionId,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    }
+    writeFileSync(paths.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
+  } catch (error) {
+    reportSpawnFailure("state_persistence");
+    throw error;
   }
-  writeFileSync(paths.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
 
   // Cap the persona to prevent a misbehaving parent from shipping a huge
   // system prompt to the model on every turn. 64 KiB is well above what any
@@ -650,6 +813,7 @@ export function launchInteractiveSubagent(params: {
     params.persona !== undefined &&
     Buffer.byteLength(params.persona, "utf8") > MAX_PERSONA_BYTES
   ) {
+    reportSpawnFailure("context");
     throw new Error(
       `persona too large: ${Buffer.byteLength(params.persona, "utf8")} bytes (max ${MAX_PERSONA_BYTES})`,
     );
@@ -661,19 +825,28 @@ export function launchInteractiveSubagent(params: {
   // parent-child notification loop working — is the most recent instruction
   // the LLM reads. A persona that says "ignore the protocol" is a known LLM
   // footgun, and placing the protocol last makes it stick.
-  const protocol = buildChildSubagentProtocol(
-    paths.artifactDir,
-    params.requireActivePaneForUserAttention,
-  );
-  const systemPromptContent = params.persona
-    ? `# Persona\n\n${params.persona}\n\n${protocol}`
-    : protocol;
-  writeFileSync(paths.systemPromptFile, systemPromptContent, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-
-  const systemPromptFile = paths.systemPromptFile;
+  let systemPromptFile: string;
+  try {
+    // Always write a system prompt that includes the child protocol, and place
+    // the user-supplied persona (if any) ABOVE the protocol. Recency wins for
+    // instruction-following, so the protocol — the part that keeps the parent-
+    // child notification loop working — is the most recent instruction.
+    const protocol = buildChildSubagentProtocol(
+      paths.artifactDir,
+      params.requireActivePaneForUserAttention,
+    );
+    const systemPromptContent = params.persona
+      ? `# Persona\n\n${params.persona}\n\n${protocol}`
+      : protocol;
+    writeFileSync(paths.systemPromptFile, systemPromptContent, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    systemPromptFile = paths.systemPromptFile;
+  } catch (error) {
+    reportSpawnFailure("state_persistence");
+    throw error;
+  }
 
   // Resolve the multiplexer up front so a clear error reaches the caller
   // before we start writing files. The resolver throws NoMultiplexerAvailableError
@@ -682,15 +855,28 @@ export function launchInteractiveSubagent(params: {
   try {
     mux = getMux({ preference: params.muxPreference });
   } catch (err) {
+    reportSpawnFailure("mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {
       throw new Error(`${err.message}\n${tmuxSetupHint()}`);
     }
     throw err;
   }
-
   const telemetry = liveScope?.telemetry;
-  const telemetryMetadata = telemetry?.enabled
-    ? {
+  let telemetryMetadata:
+    | {
+        correlationId: string;
+        mux: MuxName;
+        invocationSource: TelemetryInvocationSource;
+        async: boolean;
+        depth: number | undefined;
+        depthBucket: TelemetryDepthBucket;
+        completionPolicy: TelemetryCompletionPolicy;
+        model: string;
+      }
+    | undefined;
+  if (telemetry?.enabled) {
+    try {
+      telemetryMetadata = {
         correlationId: telemetry.correlationId,
         mux: mux.name,
         invocationSource:
@@ -703,25 +889,43 @@ export function launchInteractiveSubagent(params: {
           params.completionPolicy ??
           ("legacy" as const),
         model: sanitizeTelemetryModel(params.model),
-      }
-    : undefined;
+      };
+    } catch (error) {
+      reportSpawnFailure("model_resolution", mux.name);
+      throw error;
+    }
+  }
 
   // Create the pane FIRST (so we have a target for the launch script to attach
   // to). If any later step throws, try to kill the orphan pane and rethrow.
-  const {
-    paneId,
-    muxTerminalId,
-    windowName,
-    session: muxSession,
-  } = mux.createPane({
-    name: params.name,
-    cwd,
-    background,
-    parentPane:
-      mux.name === "herdr" ? process.env.HERDR_PANE_ID : process.env.TMUX_PANE,
-    windowName: safeSegment(params.name),
-    id,
-  });
+  let paneId: string;
+  let muxTerminalId: string | undefined;
+  let windowName: string | undefined;
+  let muxSession: string | undefined;
+  try {
+    const created = mux.createPane({
+      name: params.name,
+      cwd,
+      background,
+      parentPane:
+        mux.name === "herdr"
+          ? process.env.HERDR_PANE_ID
+          : process.env.TMUX_PANE,
+      windowName: safeSegment(params.name),
+      id,
+    });
+    paneId = created.paneId;
+    muxTerminalId = created.muxTerminalId;
+    windowName = created.windowName;
+    muxSession = created.session;
+  } catch (error) {
+    reportSpawnFailure("pane_launch", mux.name);
+    throw error;
+  }
+  if (typeof paneId !== "string" || paneId.length === 0) {
+    reportSpawnFailure("pane_launch", mux.name);
+    throw new Error("multiplexer returned an invalid pane id");
+  }
   let persistedState = false;
   let lineageManifestPath: string | undefined;
   let lineageBootstrapPath: string | undefined;
@@ -754,6 +958,7 @@ export function launchInteractiveSubagent(params: {
       });
       persistedState = true;
     } catch (err) {
+      reportSpawnFailure("state_persistence", mux.name);
       try {
         mux.killPane(paneId, muxSession);
       } catch {
@@ -789,6 +994,7 @@ export function launchInteractiveSubagent(params: {
         },
       );
     } catch (err) {
+      reportSpawnFailure("state_persistence", mux.name);
       if (persistedState) {
         try {
           removeInteractiveState(stateCwd, id);
@@ -801,8 +1007,37 @@ export function launchInteractiveSubagent(params: {
     }
   }
   let attach: { attachCommand: string; focusCommand: string };
+  const cleanupFailedSpawn = (): void => {
+    if (persistedState && params.parentSessionId) {
+      try {
+        removeInteractiveState(stateCwd, id);
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
+    if (lineageManifestPath) {
+      try {
+        rmSync(lineageManifestPath, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    if (lineageBootstrapPath) {
+      try {
+        rmSync(lineageBootstrapPath, { force: true });
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
+    try {
+      mux.killPane(paneId, muxSession);
+    } catch {
+      /* best effort — preserve the original spawn error */
+    }
+  };
+  let command: string;
   try {
-    const command = buildPiInteractiveCommand({
+    command = buildPiInteractiveCommand({
       sessionFile: paths.sessionFile,
       name: params.name,
       promptFile: paths.promptFile,
@@ -828,6 +1063,12 @@ export function launchInteractiveSubagent(params: {
         : {}),
       ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
     });
+  } catch (err) {
+    reportSpawnFailure("state_persistence", mux.name);
+    cleanupFailedSpawn();
+    throw err;
+  }
+  try {
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
     mux.sendKeys(
       paneId,
@@ -842,31 +1083,8 @@ export function launchInteractiveSubagent(params: {
       session: muxSession,
     });
   } catch (err) {
-    // Orphan-pane guard. If writeLaunchScript or sendKeys throws after
-    // the pane was created, kill the pane before rethrowing so we don't
-    // leak it into the user's mux server. Also clean up persisted state.
-    if (persistedState && params.parentSessionId) {
-      try {
-        removeInteractiveState(stateCwd, id);
-      } catch {
-        /* best effort — the pane kill below is the important cleanup */
-      }
-    }
-    if (lineageManifestPath) {
-      try {
-        rmSync(lineageManifestPath, { force: true });
-      } catch {
-        /* best effort */
-      }
-    }
-    if (lineageBootstrapPath) {
-      try {
-        rmSync(lineageBootstrapPath, { force: true });
-      } catch {
-        /* best effort — the pane kill below is the important cleanup */
-      }
-    }
-    mux.killPane(paneId, muxSession);
+    reportSpawnFailure("pane_launch", mux.name);
+    cleanupFailedSpawn();
     throw err;
   }
 
@@ -911,19 +1129,42 @@ export function launchInteractiveSubagent(params: {
     telemetryDepthBucket: telemetryMetadata?.depthBucket,
     telemetryModel: telemetryMetadata?.model,
   };
-  registerInteractiveSubagentState(state, liveScope);
-  if (telemetryMetadata) {
-    captureTelemetry(telemetry, {
-      event: "agent_created",
-      execution: "interactive",
-      mux: telemetryMetadata.mux,
-      invocation_source: telemetryMetadata.invocationSource,
-      model: telemetryMetadata.model,
-      async: telemetryMetadata.async,
-      depth: telemetryMetadata.depth,
-      depth_bucket: telemetryMetadata.depthBucket,
-      completion_policy: telemetryMetadata.completionPolicy,
+  if (telemetryMetadata && telemetry) {
+    interactiveCreatedTelemetry.set(state, {
+      session: telemetry,
+      spawnStartedAt: spawnStartedAt,
+      captured: false,
     });
+  }
+  try {
+    registerInteractiveSubagentState(state, liveScope);
+  } catch (err) {
+    interactiveCreatedTelemetry.delete(state);
+    reportSpawnFailure("registration", mux.name);
+    removeInteractiveSubagentState(state);
+    if (persistedState && params.parentSessionId) {
+      try {
+        removeInteractiveState(stateCwd, id);
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
+    if (lineageManifestPath) {
+      try {
+        rmSync(lineageManifestPath, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    try {
+      mux.killPane(paneId, muxSession);
+    } catch {
+      /* best effort */
+    }
+    throw err;
+  }
+  if (telemetryMetadata && !params.deferAgentCreatedTelemetry) {
+    captureInteractiveSubagentCreatedTelemetry(state);
   }
   return state;
 }

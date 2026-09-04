@@ -1434,6 +1434,8 @@ export interface PersistedDeliveryIntent {
   artifactDir: string;
   output?: OutputSnapshot;
   message?: string;
+  /** Terminal artifact timestamp used for delivery-latency telemetry. */
+  completedAt?: number;
   state: "queued" | "dispatchAttempted";
   completionPolicy?: "each" | "group";
   completionGroupId?: string;
@@ -1707,6 +1709,11 @@ function migrateStatePayload(
                   ...(output ? { output } : {}),
                   ...(typeof rawIntent.message === "string"
                     ? { message: rawIntent.message.slice(0, 500) }
+                    : {}),
+                  ...(typeof rawIntent.completedAt === "number" &&
+                  Number.isFinite(rawIntent.completedAt) &&
+                  rawIntent.completedAt >= 0
+                    ? { completedAt: rawIntent.completedAt }
                     : {}),
                   ...(intentPolicy ? { completionPolicy: intentPolicy } : {}),
                   ...(intentPolicy === "group"

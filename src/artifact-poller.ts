@@ -73,7 +73,7 @@ import {
   resolveLiveSessionScope,
 } from "./session-scope";
 import { isAgentListHidden } from "./settings";
-import { captureTelemetry } from "./telemetry";
+import { captureTelemetry, type TelemetryTerminalReason } from "./telemetry";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -473,6 +473,66 @@ function deliveryMessageFromEvent(ev: CompletionEvent): string | undefined {
   return ev.outputError?.message;
 }
 
+function terminalReasonFromEvent(ev: SubagentEvent): TelemetryTerminalReason {
+  switch (ev.type) {
+    case "done":
+      return "completed";
+    case "error":
+      return "agent_error";
+    case "cancelled":
+      // Legacy cancellation events carry no source or cancellation origin.
+      return "unknown";
+    case "process_exited":
+      return "process_exit";
+    case "completion":
+      if (ev.outcome === "done") return "completed";
+      if (ev.outcome === "error") {
+        return ev.source === "process_exit" ? "process_exit" : "agent_error";
+      }
+      if (ev.source === "explicit") return "explicit_cancel";
+      if (ev.source === "process_exit") return "process_exit";
+      if (ev.source === "parent") {
+        // An explicit cancel-all operation is authoritative even if a caller
+        // also supplied stale lifecycle metadata.
+        if (ev.cancellationOrigin === "cancel_all") {
+          return "explicit_cancel";
+        }
+        // New/fork replace the logical session; startup/reload/resume only
+        // recover the existing one and therefore are ordinary shutdowns.
+        if (
+          ev.cancellationLifecycleReason === "new" ||
+          ev.cancellationLifecycleReason === "fork"
+        ) {
+          return "fresh_session";
+        }
+        if (
+          ev.cancellationOrigin === "cancel_interactive_subagent" ||
+          ev.cancellationOrigin === "cancel_subagent"
+        ) {
+          return "explicit_cancel";
+        }
+        if (
+          ev.cancellationLifecycleReason === "startup" ||
+          ev.cancellationLifecycleReason === "reload" ||
+          ev.cancellationLifecycleReason === "resume" ||
+          ev.cancellationLifecycleReason === "quit" ||
+          ev.cancellationOrigin === "session_start" ||
+          ev.cancellationOrigin === "session_shutdown"
+        ) {
+          return "session_shutdown";
+        }
+        return "parent_cancelled";
+      }
+      return "unknown";
+    case "started":
+    case "tool_activity":
+    case "turn_started":
+      return "unknown";
+    default:
+      return assertNever(ev);
+  }
+}
+
 const pollsInFlight = new Map<string, Promise<void>>();
 // ── Poller ─────────────────────────────────────────────────────────────
 
@@ -714,21 +774,33 @@ async function runPollArtifactChanges(
             }
           }
         }
+        const terminalTelemetryEvent =
+          ev.type === "completion" ||
+          ev.type === "done" ||
+          ev.type === "error" ||
+          ev.type === "cancelled" ||
+          ev.type === "process_exited";
+        const terminalTurnId =
+          ev.type === "completion" ? ev.turnId : state.telemetryActiveTurnId;
         if (
-          ev.type === "completion" &&
-          state.telemetryActiveTurnId === ev.turnId &&
+          terminalTelemetryEvent &&
+          terminalTurnId !== undefined &&
+          (ev.type !== "completion" ||
+            state.telemetryActiveTurnId === ev.turnId) &&
           state.telemetryCorrelationId ===
             ownerContext?.telemetry?.correlationId
         ) {
-          const status = deliveryStatusFromEvent(ev);
+          const status =
+            ev.type === "process_exited"
+              ? ev.status
+              : deliveryStatusFromEvent(ev);
           const messageTurnId = state.telemetryMessageTurnId;
-          const directMessageCount = state.telemetryTurnMessageCounts?.get(
-            ev.turnId,
-          );
+          const directMessageCount =
+            state.telemetryTurnMessageCounts?.get(terminalTurnId);
           const fallbackMessageCount =
             directMessageCount === undefined &&
             messageTurnId !== undefined &&
-            messageTurnId !== ev.turnId
+            messageTurnId !== terminalTurnId
               ? state.telemetryTurnMessageCounts?.get(messageTurnId)
               : undefined;
           const messageCount = directMessageCount ?? fallbackMessageCount;
@@ -747,6 +819,7 @@ async function runPollArtifactChanges(
               depth_bucket: state.telemetryDepthBucket ?? "unknown",
               completion_policy: state.telemetryCompletionPolicy ?? "legacy",
               status: status === "done" ? "success" : status,
+              terminal_reason: terminalReasonFromEvent(ev),
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
@@ -754,22 +827,22 @@ async function runPollArtifactChanges(
               child_conversation_message_count: messageCount,
             },
             {
-              dedupeKey: `task-completed:interactive:${state.id}:${ev.turnId}`,
+              dedupeKey: `task-completed:interactive:${state.id}:${terminalTurnId}:${ev.type}:${record.startOffset}`,
             },
           );
           state.telemetryActiveTurnId = undefined;
           state.telemetryTurnStartedAt = undefined;
           if (directMessageCount !== undefined) {
-            state.telemetryTurnMessageCounts?.delete(ev.turnId);
+            state.telemetryTurnMessageCounts?.delete(terminalTurnId);
           } else if (
             messageTurnId !== undefined &&
-            messageTurnId !== ev.turnId &&
+            messageTurnId !== terminalTurnId &&
             fallbackMessageCount !== undefined
           ) {
             state.telemetryTurnMessageCounts?.delete(messageTurnId);
           }
           if (
-            messageTurnId === ev.turnId ||
+            messageTurnId === terminalTurnId ||
             (directMessageCount === undefined &&
               fallbackMessageCount !== undefined)
           ) {
@@ -807,6 +880,7 @@ async function runPollArtifactChanges(
             triggerTurn,
             status,
             artifactDir: state.artifactDir,
+            completedAt: ev.ts,
             output: v2?.output,
             message: deliveryMessageFromEvent(ev),
             completionPolicy: state.completionPolicy,

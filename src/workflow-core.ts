@@ -442,6 +442,18 @@ export class WorkflowExecutionError extends Error {
     this.usage = usage;
   }
 }
+/** Typed evidence for the workflow VM's exact wall-clock timeout branch. */
+export class WorkflowWallTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(
+      `Workflow timed out after ${timeoutMs}ms; the worker was terminated.`,
+    );
+    this.name = "WorkflowWallTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
 
 export interface RunWorkflowOptions {
   args?: unknown;

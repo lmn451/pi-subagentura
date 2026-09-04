@@ -1851,7 +1851,10 @@ describe("read_subagent_artifact (output reporting)", () => {
           );
         const readTool = makeReadTool(mod, state);
         getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
-        const telemetryPayloads: Array<{ event?: string }> = [];
+        const telemetryPayloads: Array<{
+          event?: string;
+          properties?: { outcome?: string };
+        }> = [];
         vi.stubGlobal(
           "fetch",
           vi.fn(async (_input, init) => {
@@ -1870,9 +1873,11 @@ describe("read_subagent_artifact (output reporting)", () => {
 
         expect(
           telemetryPayloads.filter(
-            (payload) => payload.event === "pi_subagentura_result_consumed",
+            (payload) =>
+              payload.event === "pi_subagentura_result_read" &&
+              payload.properties?.outcome === outcome,
           ),
-        ).toHaveLength(0);
+        ).toHaveLength(1);
       } finally {
         vi.unstubAllGlobals();
         rmSync(parent, { recursive: true, force: true });
@@ -1897,7 +1902,10 @@ describe("read_subagent_artifact (output reporting)", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const readTool = makeReadTool(mod, state);
       getSessionScopes().at(-1)!.telemetry = createTelemetrySession(true);
-      const telemetryPayloads: Array<{ event?: string }> = [];
+      const telemetryPayloads: Array<{
+        event?: string;
+        properties?: { outcome?: string };
+      }> = [];
       vi.stubGlobal(
         "fetch",
         vi.fn(async (_input, init) => {
@@ -1922,10 +1930,10 @@ describe("read_subagent_artifact (output reporting)", () => {
       );
 
       expect(
-        telemetryPayloads.filter(
-          (payload) => payload.event === "pi_subagentura_result_consumed",
-        ),
-      ).toHaveLength(1);
+        telemetryPayloads
+          .filter((payload) => payload.event === "pi_subagentura_result_read")
+          .map((payload) => payload.properties?.outcome),
+      ).toEqual(["consumed", "already_consumed"]);
     } finally {
       vi.unstubAllGlobals();
       rmSync(parent, { recursive: true, force: true });

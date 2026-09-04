@@ -2,11 +2,14 @@ import { Type } from "typebox";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
+  type InProcessSpawnFailureStage,
   MAX_REGISTRY_SIZE,
   registerInProcessJob,
   removeInProcessJob,
+  spawnFailureStage,
   startSubagentJob,
   type JobState,
+  type StartSubagentJobResult,
 } from "./helpers";
 import {
   launchInteractiveSubagent,
@@ -36,10 +39,10 @@ import {
   workflowUsageFromUsage,
 } from "./workflow-core";
 import {
+  cancelWorkflowJob,
   discardWorkflowJob,
   getWorkflowCompletionPresentation,
   getWorkflowJobForOwner,
-  invokeWorkflowCompletionHook,
   normalizeCancelledWorkflowState,
   startWorkflowJob,
   workflowJobsForOwner,
@@ -91,7 +94,13 @@ import {
   type ResolvedCompletionPolicy,
   type CompletionGroupReservation,
 } from "./completion-coordinator";
-import { captureTelemetry, type TelemetryCompletionPolicy } from "./telemetry";
+import {
+  captureTelemetry,
+  telemetryDepth,
+  telemetryDepthBucket,
+  type TelemetryCompletionPolicy,
+  type TelemetryResultReadOutcome,
+} from "./telemetry";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -211,6 +220,46 @@ export function formatWorkflowNotificationSummary(
         })})`
       : ""
   }`;
+}
+function workflowReadLatencyMs(job: WorkflowJobState): number | undefined {
+  if (job.completedAt === undefined) return undefined;
+  try {
+    const now = Date.now();
+    if (
+      !Number.isFinite(now) ||
+      now < 0 ||
+      !Number.isFinite(job.completedAt) ||
+      job.completedAt < 0 ||
+      now < job.completedAt
+    ) {
+      return undefined;
+    }
+    return now - job.completedAt;
+  } catch {
+    return undefined;
+  }
+}
+
+function emitWorkflowResultReadTelemetry(
+  job: WorkflowJobState | undefined,
+  owner: SessionOwnerToken | undefined,
+  outcome: TelemetryResultReadOutcome,
+): void {
+  const readLatencyMs = job ? workflowReadLatencyMs(job) : undefined;
+  const session =
+    job?.telemetry?.session ?? resolveLiveSessionScope(owner)?.telemetry;
+  captureTelemetry(
+    session,
+    {
+      event: "result_read",
+      source: "workflow",
+      outcome,
+      ...(readLatencyMs === undefined
+        ? {}
+        : { read_latency_ms: readLatencyMs }),
+    },
+    { allowInactive: true },
+  );
 }
 
 export interface WorkflowToolOptions {
@@ -358,6 +407,28 @@ export function registerWorkflowTool(
       // it from `supervisorOwner` instead drops every child event whenever the
       // workflow tool was registered without a session scope.
       const childTelemetry = resolveLiveSessionScope(childOwner)?.telemetry;
+      const captureSpawnFailure = (
+        failureStage: InProcessSpawnFailureStage,
+        attemptStartedAt: number,
+      ): void => {
+        captureTelemetry(
+          childTelemetry,
+          {
+            event: "agent_spawn_failed",
+            execution: "in-process",
+            mux: "none",
+            invocation_source: "workflow",
+            model: undefined,
+            async: workflowAsync,
+            depth: telemetryDepth(spawn.childDepth),
+            depth_bucket: telemetryDepthBucket(spawn.childDepth),
+            completion_policy: telemetryCompletionPolicy,
+            failure_stage: failureStage,
+            spawn_duration_ms: Date.now() - attemptStartedAt,
+          },
+          { allowInactive: true },
+        );
+      };
 
       // Own the child session so its parent abort cascades to it and exact-scope
       // shutdown can drain it from the authoritative job map.
@@ -365,60 +436,73 @@ export function registerWorkflowTool(
       const forwardAbort = () => abort.abort(signal?.reason);
       if (signal?.aborted) abort.abort(signal.reason);
       else signal?.addEventListener("abort", forwardAbort, { once: true });
-      const prepared = await startSubagentJob({
-        task: prompt,
-        persona,
-        modelOverride: model,
-        cwd: ctx.cwd,
-        contextText: null,
-        signal: abort.signal,
-        onUpdate: (partial) => {
-          const liveUsage = workflowUsageFromUsage(
-            partial.details?.subagentStatus?.usage,
-          );
-          const status = partial.details?.subagentStatus;
-          if (status?.activeTool) {
-            maybeEmitUpdate(`⚙ ${status.activeTool.name}`, liveUsage);
-          } else if (status?.output) {
-            const preview = (status.output || "")
-              .slice(0, 60)
-              .replace(/\s+/g, " ")
-              .trim();
-            if (preview) maybeEmitUpdate(`💭 ${preview}`, liveUsage);
-          } else if (liveUsage) maybeEmitUpdate("↻ usage", liveUsage);
-        },
-        defaultModel: ctx.model,
-        parentModelRegistry: ctx.modelRegistry,
-        onCancellationSnapshot,
-        cancellationSource: "workflow",
-        thinkingLevel,
-        // The child binds this depth into its own orchestration context, so a
-        // sub-agent it spawns counts from here. Left unset, the child bound
-        // depth 0 and its own children reported depth 1 — the same value as
-        // their parent — so the dimension was non-monotone within one spawn
-        // tree and the depth cap never saw a workflow grandchild.
-        depth: spawn.childDepth,
-        rootSessionId: spawn.rootSessionId,
-        owner: childOwner,
-        telemetry: childTelemetry
-          ? {
-              session: childTelemetry,
-              invocationSource: "workflow",
-              async: workflowAsync,
-              depth: spawn.childDepth,
-              completionPolicy: telemetryCompletionPolicy,
-            }
-          : undefined,
-        ...(isolation === "in-process" && schema !== undefined
-          ? { workflowStructuredOutputSchema: schema }
-          : {}),
-      });
+      const spawnRequestedAt = Date.now();
+      let prepared: StartSubagentJobResult;
+      try {
+        prepared = await startSubagentJob({
+          task: prompt,
+          persona,
+          modelOverride: model,
+          cwd: ctx.cwd,
+          contextText: null,
+          signal: abort.signal,
+          onUpdate: (partial) => {
+            const liveUsage = workflowUsageFromUsage(
+              partial.details?.subagentStatus?.usage,
+            );
+            const status = partial.details?.subagentStatus;
+            if (status?.activeTool) {
+              maybeEmitUpdate(`⚙ ${status.activeTool.name}`, liveUsage);
+            } else if (status?.output) {
+              const preview = (status.output || "")
+                .slice(0, 60)
+                .replace(/\s+/g, " ")
+                .trim();
+              if (preview) maybeEmitUpdate(`💭 ${preview}`, liveUsage);
+            } else if (liveUsage) maybeEmitUpdate("↻ usage", liveUsage);
+          },
+          defaultModel: ctx.model,
+          parentModelRegistry: ctx.modelRegistry,
+          onCancellationSnapshot,
+          cancellationSource: "workflow",
+          thinkingLevel,
+          // The child binds this depth into its own orchestration context, so a
+          // sub-agent it spawns counts from here. Left unset, the child bound
+          // depth 0 and its own children reported depth 1 — the same value as
+          // their parent — so the dimension was non-monotone within one spawn
+          // tree and the depth cap never saw a workflow grandchild.
+          depth: spawn.childDepth,
+          rootSessionId: spawn.rootSessionId,
+          owner: childOwner,
+          telemetry: childTelemetry
+            ? {
+                session: childTelemetry,
+                invocationSource: "workflow",
+                async: workflowAsync,
+                depth: spawn.childDepth,
+                completionPolicy: telemetryCompletionPolicy,
+              }
+            : undefined,
+          ...(isolation === "in-process" && schema !== undefined
+            ? { workflowStructuredOutputSchema: schema }
+            : {}),
+          spawnRequestedAt,
+        });
+      } catch (error) {
+        captureSpawnFailure(
+          spawnFailureStage(error) ?? "unknown",
+          spawnRequestedAt,
+        );
+        signal?.removeEventListener("abort", forwardAbort);
+        throw error;
+      }
       // The parent session can shut down while startSubagentJob is awaited above.
       // session_shutdown drains jobRegistry, so registering now would re-insert
       // into an already-drained registry and start a model turn that no abort path
       // can reach (the PR #59 shutdown-escape hole).
       if (childOwner && !isSessionOwnerLive(childOwner)) {
         signal?.removeEventListener("abort", forwardAbort);
+        captureSpawnFailure("parent_shutdown", spawnRequestedAt);
         discardWorkflowChildSpawn(abort, prepared);
         throw new Error(
           "Workflow agent cancelled: parent session shut down before the child was registered.",
@@ -447,6 +531,12 @@ export function registerWorkflowTool(
       if (childOwner) {
         if (!registerInProcessJob(childJob, childOwner)) {
           signal?.removeEventListener("abort", forwardAbort);
+          captureSpawnFailure(
+            childOwner && !isSessionOwnerLive(childOwner)
+              ? "parent_shutdown"
+              : "registration",
+            spawnRequestedAt,
+          );
           discardWorkflowChildSpawn(abort, prepared);
           throw new Error(
             `Workflow agent could not start: ${MAX_REGISTRY_SIZE} in-process sub-agent jobs are retained or running.`,
@@ -843,6 +933,14 @@ export function registerWorkflowTool(
             notifyWorkflowCompletion,
             workflowOwner,
             "async",
+            {
+              invocation: "tool",
+              async: true,
+              completionPolicy: workflowTelemetryCompletionPolicy(
+                true,
+                completion,
+              ),
+            },
           );
         } catch (err) {
           releaseCompletionGroup(completionReservation);
@@ -884,6 +982,7 @@ export function registerWorkflowTool(
       }
 
       // ── Synchronous (block-and-stream) path ──
+      let job: WorkflowJobState | undefined;
       try {
         const meta = parseWorkflow(script).meta;
         const syncProgress = (p: WorkflowProgress) => {
@@ -904,7 +1003,7 @@ export function registerWorkflowTool(
             /* onUpdate is best-effort */
           }
         };
-        const job = startWorkflowJob(
+        job = startWorkflowJob(
           meta.name,
           script,
           (workflowId) => ({
@@ -916,10 +1015,23 @@ export function registerWorkflowTool(
           undefined,
           workflowOwner,
           "sync",
+          {
+            invocation: "tool",
+            async: false,
+            completionPolicy: workflowTelemetryCompletionPolicy(
+              false,
+              completion,
+            ),
+          },
         );
         const run = await job.promise;
         const resultText =
           typeof run.result === "string" ? run.result : stringify(run.result);
+        emitWorkflowResultReadTelemetry(
+          job,
+          workflowOwner,
+          resultText.length > 0 ? "consumed" : "empty",
+        );
         const presentation = getWorkflowCompletionPresentation(
           "done",
           run.errorCount,
@@ -956,6 +1068,11 @@ export function registerWorkflowTool(
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        emitWorkflowResultReadTelemetry(
+          job,
+          workflowOwner,
+          job?.status === "cancelled" ? "cancelled" : "error",
+        );
         const usage = workflowErrorUsage(err);
         const usageDetails = usage ? { usage } : {};
         const budgetTotal = params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET;
@@ -1065,6 +1182,11 @@ export function registerWorkflowTool(
       const workflowOwner = owner();
       const st = getWorkflowJobForOwner(params.workflowId, workflowOwner);
       if (!st) {
+        emitWorkflowResultReadTelemetry(
+          undefined,
+          workflowOwner,
+          "unavailable",
+        );
         return {
           content: [
             { type: "text", text: workflowNotFoundMessage(params.workflowId) },
@@ -1076,6 +1198,7 @@ export function registerWorkflowTool(
 
       // If signal is already aborted, return immediately
       if (signal?.aborted) {
+        emitWorkflowResultReadTelemetry(st, workflowOwner, "wait_cancelled");
         return {
           content: [
             {
@@ -1093,6 +1216,7 @@ export function registerWorkflowTool(
       try {
         const waitResult = await abortableWait(st.promise, signal);
         if (waitResult.aborted) {
+          emitWorkflowResultReadTelemetry(st, workflowOwner, "wait_cancelled");
           return {
             content: [
               {
@@ -1111,6 +1235,11 @@ export function registerWorkflowTool(
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};
+        emitWorkflowResultReadTelemetry(
+          st,
+          workflowOwner,
+          st.status === "cancelled" ? "cancelled" : "error",
+        );
         st.resultRetrieved = true;
         consumeCompletionSource(
           pi,
@@ -1141,8 +1270,10 @@ export function registerWorkflowTool(
         };
       }
 
-      const resultText =
+      const serializedResult =
         typeof run.result === "string" ? run.result : stringify(run.result);
+      const resultText =
+        typeof serializedResult === "string" ? serializedResult : "";
       const presentation = getWorkflowCompletionPresentation(
         "done",
         run.errorCount,
@@ -1155,12 +1286,15 @@ export function registerWorkflowTool(
         { source: "workflow", sourceId: st.id },
         workflowOwner,
       );
-      if (firstResultRead && st.status === "done" && resultText.length > 0) {
-        captureTelemetry(resolveLiveSessionScope(workflowOwner)?.telemetry, {
-          event: "result_consumed",
-          source: "workflow",
-        });
-      }
+      const readOutcome: TelemetryResultReadOutcome =
+        st.status === "cancelled"
+          ? "cancelled"
+          : firstResultRead
+            ? resultText.length > 0
+              ? "consumed"
+              : "empty"
+            : "already_consumed";
+      emitWorkflowResultReadTelemetry(st, workflowOwner, readOutcome);
       return {
         content: [
           {
@@ -1251,10 +1385,7 @@ export function registerWorkflowTool(
           },
         };
       }
-      st.abort.abort();
-      st.status = "cancelled";
-      normalizeCancelledWorkflowState(st);
-      invokeWorkflowCompletionHook(st);
+      cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);
         normalizeCancelledWorkflowState(st);
@@ -1499,6 +1630,15 @@ export function registerWorkflowTool(
         Date.now(),
         notifyWorkflowCompletion,
         workflowOwner,
+        "async",
+        {
+          invocation: "saved_command",
+          async: true,
+          completionPolicy: workflowTelemetryCompletionPolicy(
+            true,
+            commandCompletion,
+          ),
+        },
       );
       configureWorkflowCompletion(job, commandCompletion, workflowOwner);
       return { job, meta };

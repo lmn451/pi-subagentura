@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 2;
+export const TELEMETRY_SCHEMA_VERSION = 3;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -15,12 +15,49 @@ const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
+export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
   "with_context" | "isolated" | "interactive" | "workflow";
 export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";
+export type TelemetryWorkflowInvocation = "tool" | "saved_command";
+export type TelemetryWorkflowStatus =
+  "success" | "partial" | "error" | "cancelled";
+export type TelemetryRecoveryReason = "startup" | "reload" | "resume";
+export type TelemetryResultReadOutcome =
+  | "consumed"
+  | "already_consumed"
+  | "empty"
+  | "running"
+  | "error"
+  | "cancelled"
+  | "wait_timeout"
+  | "wait_cancelled"
+  | "unavailable";
+export type TelemetrySpawnFailureStage =
+  | "depth_limit"
+  | "capacity"
+  | "context"
+  | "model_resolution"
+  | "session_creation"
+  | "mux_resolution"
+  | "pane_launch"
+  | "state_persistence"
+  | "registration"
+  | "parent_shutdown"
+  | "unknown";
+export type TelemetryTerminalReason =
+  | "completed"
+  | "agent_error"
+  | "process_exit"
+  | "timeout"
+  | "explicit_cancel"
+  | "parent_cancelled"
+  | "session_shutdown"
+  | "fresh_session"
+  | "unknown";
 export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
   "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
@@ -36,9 +73,21 @@ interface TelemetryAgentDimensions {
   completion_policy: TelemetryCompletionPolicy;
 }
 
+type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
+  mux: TelemetrySpawnFailureMux;
+};
+
 export type TelemetryEvent =
   | { event: "session_started" }
-  | ({ event: "agent_created" } & TelemetryAgentDimensions)
+  | ({
+      event: "agent_created";
+      spawn_duration_ms?: number;
+    } & TelemetryAgentDimensions)
+  | ({
+      event: "agent_spawn_failed";
+      failure_stage: TelemetrySpawnFailureStage;
+      spawn_duration_ms?: number;
+    } & TelemetrySpawnFailureDimensions)
   | ({ event: "task_started"; unit: "job" | "turn" } & TelemetryAgentDimensions)
   | {
       event: "interactive_message_sent";
@@ -49,15 +98,47 @@ export type TelemetryEvent =
       event: "task_completed";
       unit: "job" | "turn";
       status: TelemetryAgentStatus;
+      terminal_reason: TelemetryTerminalReason;
       duration_ms: number | undefined;
       child_conversation_message_count: number | undefined;
     } & TelemetryAgentDimensions)
   | {
+      event: "workflow_started";
+      invocation: TelemetryWorkflowInvocation;
+      async: boolean;
+      completion_policy: TelemetryCompletionPolicy;
+    }
+  | {
+      event: "workflow_completed";
+      invocation: TelemetryWorkflowInvocation;
+      async: boolean;
+      completion_policy: TelemetryCompletionPolicy;
+      status: TelemetryWorkflowStatus;
+      terminal_reason: TelemetryTerminalReason;
+      agents_spawned: number;
+      error_count: number;
+      duration_ms?: number;
+    }
+  | {
+      event: "session_recovered";
+      reason: TelemetryRecoveryReason;
+      total_count: number;
+      alive_count: number;
+      terminal_count: number;
+      unknown_count: number;
+    }
+  | {
       event: "completion_delivered";
       delivery: TelemetryDelivery;
       count: number;
+      delivery_latency_ms?: number;
     }
-  | { event: "result_consumed"; source: TelemetryResultSource };
+  | {
+      event: "result_read";
+      source: TelemetryResultSource;
+      outcome: TelemetryResultReadOutcome;
+      read_latency_ms?: number;
+    };
 
 export interface TelemetrySession {
   readonly enabled: boolean;
@@ -250,11 +331,20 @@ function depthProperty(depth: number | undefined): { depth?: number } {
   return boundedDepth === undefined ? {} : { depth: boundedDepth };
 }
 
-function durationProperty(durationMs: number | undefined): {
-  duration_ms?: number;
-} {
+type TelemetryDurationPropertyPrefix =
+  "spawn_duration" | "duration" | "delivery_latency" | "read_latency";
+
+function durationProperties(
+  prefix: TelemetryDurationPropertyPrefix,
+  durationMs: number | undefined,
+): Record<string, number | string> {
   const boundedDuration = telemetryDurationMs(durationMs);
-  return boundedDuration === undefined ? {} : { duration_ms: boundedDuration };
+  return {
+    [`${prefix}_bucket`]: telemetryDurationBucket(durationMs),
+    ...(boundedDuration === undefined
+      ? {}
+      : { [`${prefix}_ms`]: boundedDuration }),
+  };
 }
 
 function boundedCount(value: number | undefined, max: number): number {
@@ -292,6 +382,22 @@ export function buildTelemetryPayload(
         ...depthProperty(event.depth),
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
+        ...durationProperties("spawn_duration", event.spawn_duration_ms),
+      };
+      break;
+    case "agent_spawn_failed":
+      properties = {
+        ...common,
+        execution: event.execution,
+        mux: event.mux,
+        invocation_source: event.invocation_source,
+        model: sanitizeTelemetryModel(event.model),
+        async: event.async,
+        ...depthProperty(event.depth),
+        depth_bucket: event.depth_bucket,
+        completion_policy: event.completion_policy,
+        failure_stage: event.failure_stage,
+        ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
     case "task_started":
@@ -328,8 +434,8 @@ export function buildTelemetryPayload(
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
         status: event.status,
-        duration_bucket: telemetryDurationBucket(event.duration_ms),
-        ...durationProperty(event.duration_ms),
+        terminal_reason: event.terminal_reason,
+        ...durationProperties("duration", event.duration_ms),
         ...(event.child_conversation_message_count === undefined
           ? {}
           : {
@@ -340,15 +446,53 @@ export function buildTelemetryPayload(
             }),
       };
       break;
+    case "workflow_started":
+      properties = {
+        ...common,
+        invocation: event.invocation,
+        async: event.async,
+        completion_policy: event.completion_policy,
+      };
+      break;
+    case "workflow_completed":
+      properties = {
+        ...common,
+        invocation: event.invocation,
+        async: event.async,
+        completion_policy: event.completion_policy,
+        status: event.status,
+        terminal_reason: event.terminal_reason,
+        ...durationProperties("duration", event.duration_ms),
+        agents_spawned: boundedCount(event.agents_spawned, 1_000),
+        error_count: boundedCount(event.error_count, 1_000),
+      };
+      break;
+    case "session_recovered":
+      properties = {
+        ...common,
+        reason: event.reason,
+        total_count: boundedCount(event.total_count, 1_000),
+        alive_count: boundedCount(event.alive_count, 1_000),
+        terminal_count: boundedCount(event.terminal_count, 1_000),
+        unknown_count: boundedCount(event.unknown_count, 1_000),
+      };
+      break;
     case "completion_delivered":
       properties = {
         ...common,
         delivery: event.delivery,
         count: boundedCount(event.count, 128),
+        ...durationProperties("delivery_latency", event.delivery_latency_ms),
       };
       break;
-    case "result_consumed":
-      properties = { ...common, source: event.source };
+    case "result_read":
+      properties = {
+        ...common,
+        source: event.source,
+        outcome: event.outcome,
+        ...durationProperties("read_latency", event.read_latency_ms),
+      };
+      break;
   }
   return {
     api_key: TELEMETRY_PROJECT_TOKEN,

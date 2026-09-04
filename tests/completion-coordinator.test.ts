@@ -19,6 +19,7 @@ import {
 } from "../src/session-scope";
 import {
   clearCompletionCoordinator,
+  completionLatencyForIds,
   MAX_COMPLETION_RECORDS,
   assertCompletionGroupOpen,
   consumeCompletionSource,
@@ -164,6 +165,28 @@ describe("completion coordinator", () => {
       .render(200)
       .join("\n");
     expect(expanded).toContain('("worker", turn "turn-worker")');
+  });
+  it("uses known interactive telemetry timestamps and omits legacy latency", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    vi.setSystemTime(10_000);
+
+    publishCompletion(record("legacy-latency", { completedAt: 9_000 }), owner);
+    expect(
+      completionLatencyForIds(["completion-legacy-latency"], owner),
+    ).toBeUndefined();
+
+    publishCompletion(
+      record("known-latency", {
+        completedAt: 9_000,
+        telemetryCompletedAt: 8_000,
+      }),
+      owner,
+    );
+    expect(completionLatencyForIds(["completion-known-latency"], owner)).toBe(
+      2_000,
+    );
   });
 
   it("notifies the user once and sends one independent reference manifest", () => {
