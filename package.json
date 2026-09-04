@@ -44,7 +44,6 @@
     "docs/workflows.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
-    "skills/ralplan",
     "types/workflow.d.ts",
     "src/ndjson.d.ts",
     "src/notifications.ts",

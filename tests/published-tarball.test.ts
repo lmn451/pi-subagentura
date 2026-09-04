@@ -21,7 +21,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -274,19 +273,21 @@ describe("published tarball", () => {
     });
   });
 
-  it("contains the workflow guide, examples, and bundled RALPLAN skill", () => {
+  it("contains the workflow guide and single bundled RALPLAN workflow", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         "docs/workflows.md",
         "examples/workflows/README.md",
         "examples/workflows/package-to-skill.mjs",
-        "examples/workflows/ralplan-consensus.mjs",
-        "examples/workflows/ralplan-from-skill.mjs",
-        "examples/workflows/ralplan-occ.mjs",
+        "examples/workflows/ralplan.mjs",
         "examples/workflows/skill-to-workflow.mjs",
-        "skills/ralplan/SKILL.md",
       ]),
     );
+    expect(
+      entries.filter((entry) =>
+        /examples\/workflows\/ralplan.*\.mjs$/.test(entry),
+      ),
+    ).toEqual(["examples/workflows/ralplan.mjs"]);
   });
 
   it("resolves every package-relative source dependency inside the tarball", () => {
