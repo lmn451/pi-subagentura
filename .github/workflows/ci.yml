@@ -85,6 +85,16 @@ jobs:
           "@earendil-works/pi-coding-agent@${PI_VERSION}"
           "@earendil-works/pi-tui@${PI_VERSION}"
 
+      # Pi 0.85.0's published coding-agent package imports pi-server
+      # without declaring it. The official bundled CLI is unaffected; this
+      # compatibility install covers direct SDK imports used by these tests.
+      # Remove it when upstream publishes a complete dependency graph.
+      - name: Install latest Pi server compatibility dependency
+        if: matrix.pi-version == 'latest'
+        env:
+          PI_VERSION: ${{ matrix.pi-version }}
+        run: npm install --no-save --package-lock=false "@earendil-works/pi-server@${PI_VERSION}"
+
       - name: Verify extension loads in selected Pi
         run: |
           npx --no-install pi --version

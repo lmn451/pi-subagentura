@@ -71,6 +71,14 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
     }
   });
 
+  it("installs the missing Pi server package for the latest SDK", () => {
+    const install = stepBlock(
+      "Install latest Pi server compatibility dependency",
+    );
+    expect(install).toContain("if: matrix.pi-version == 'latest'");
+    expect(install).toContain("@earendil-works/pi-server@${PI_VERSION}");
+  });
+
   it("runs static, coverage, and packaging checks once", () => {
     expect(occurrences("run: npm run format:check")).toBe(1);
     expect(occurrences("run: npm run coverage:check")).toBe(1);
