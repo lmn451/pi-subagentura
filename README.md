@@ -1063,9 +1063,6 @@ normal reconciliation still prevents duplicate notices. `retry_attempt` is the
 number of backoff retries already scheduled at the first observation of that stage.
 All existing opt-outs and inactive-session guards apply.
 
-See [the monitoring runbook](monitoring/README.md) for the PostHog dashboard
-definitions, interpretation limits, and activation of newly instrumented events.
-
 The observed session span is the time from `session_started` to its last event.
 There is deliberately no shutdown-only summary: crashes can skip shutdown, and
 reload/resume lifecycle transitions can occur inside one logical session.
