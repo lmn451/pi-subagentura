@@ -12,7 +12,7 @@ Reference docs for the pi-subagentura project.
 | [bun.md](./bun.md)                                         | JavaScript runtime and package manager conventions                      |
 | [publish.md](./publish.md)                                 | npm release process via OIDC trusted publisher                          |
 | [terminal-e2e.md](./terminal-e2e.md)                       | Terminal E2E harness: how to run it, determinism rules, recording tools |
-| [workflows.md](./workflows.md)                             | Workflow scripts shipped in the repo (consensus pipelines + converters) |
+| [workflows.md](./workflows.md)                             | Bundled workflows, converter scripts, and authoring pitfalls            |
 | [interactive-tmux-review.md](./interactive-tmux-review.md) | Code review of `src/interactive-tmux.ts` via GLM-5.2                    |
 
 ## Known limitations
@@ -21,19 +21,19 @@ Interactive lineage bootstrap credentials expire 60 seconds after the parent cre
 
 ## Workflow scripts in `examples/workflows/`
 
-These are `.mjs` workflow files under `examples/workflows/` invoked via the `workflow` tool:
+The repository ships these `.mjs` files under `examples/workflows/`:
 
-```
-skill-to-workflow.mjs       (12 KB)  Generic: Pi skill → workflow script
-package-to-skill.mjs       (12 KB)  Generic: Pi package source → pure skill
-ralplan-consensus.mjs       (23 KB)  pi-ralplan consensus pipeline
-ralplan-occ.mjs             (56 KB)  oh-my-claudecode RALPLAN with gate + deliberate mode
-ralplan-from-skill.mjs      (28 KB)  Demo output of skill-to-workflow
+```text
+skill-to-workflow.mjs  (12.5 KB)  Generic: Pi skill → workflow script
+package-to-skill.mjs   (11.3 KB)  Generic: Pi package source → pure skill
+ralplan.mjs            (24.5 KB)  RALPLAN planning consensus workflow
 ```
 
-The `skills/ralplan/` directory is the demo output of `package-to-skill.mjs` — a complete installable skill.
+`ralplan.mjs` is the single bundled RALPLAN example. It translates the current
+oh-my-claudecode RALPLAN contract into the generic workflow runtime, produces a
+verified plan, and always stops at pending approval without executing it.
 
-See [workflows.md](./workflows.md) for usage and the workflow-tool pitfalls we hit while building them.
+See [workflows.md](./workflows.md) for usage and workflow-authoring pitfalls.
 
 ## Code review artifacts
 

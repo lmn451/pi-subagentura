@@ -5,10 +5,9 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
-This project ships several `.mjs` workflow scripts under
-`examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`
-tool. Two are **generic converters**; the rest are **concrete instantiations**
-of consensus planning pipelines.
+This project ships three `.mjs` workflow scripts under `examples/workflows/`.
+They orchestrate isolated sub-agents through the `workflow` tool: two generic
+converters and one concrete RALPLAN planning workflow.
 
 Workflow scripts are trusted agent-authored JavaScript. The worker VM hides
 accidental Node globals and disables string code generation, but it is not a
@@ -22,7 +21,7 @@ GitHub issue [#62](https://github.com/lmn451/pi-subagentura/issues/62).
 ## Authoring contract
 
 Submit raw JavaScript without markdown fences. Include a top-level pure-literal
-`export const meta = { name, description, phases? }`; helper declarations may
+`export const meta = { name, description, argumentHint?, inputSchema?, phases? }`; helper declarations may
 appear before or after it. Do not use TypeScript, imports, `require`, filesystem
 APIs, `Date.now()`, `Math.random()`, or argless `new Date()`. For editor support,
 reference the published ambient declarations at `pi-subagentura/workflow`.
@@ -43,15 +42,11 @@ process agents use textual JSON extraction and validation as a fallback.
 
 ## Inventory
 
-| File                     | Size    | Purpose                                                  |
-| ------------------------ | ------- | -------------------------------------------------------- |
-| `skill-to-workflow.mjs`  | 12.8 KB | Generic: convert any Pi skill → workflow script          |
-| `package-to-skill.mjs`   | 11.5 KB | Generic: convert any Pi package source → pure skill      |
-| `ralplan-consensus.mjs`  | 24.4 KB | Workflow re-implementation of `pi-ralplan`               |
-| `ralplan-occ.mjs`        | 59.6 KB | Workflow re-implementation of oh-my-claudecode's RALPLAN |
-| `ralplan-from-skill.mjs` | 28.8 KB | Demo: `skill-to-workflow` output for pi-ralplan          |
-
-The demo output of `package-to-skill` is in `skills/ralplan/` — a complete installable skill.
+| File                    | Size    | Purpose                                               |
+| ----------------------- | ------- | ----------------------------------------------------- |
+| `skill-to-workflow.mjs` | 12.5 KB | Generic: convert any Pi skill into a workflow         |
+| `package-to-skill.mjs`  | 11.3 KB | Generic: convert any Pi package into a reusable skill |
+| `ralplan.mjs`           | 24.5 KB | RALPLAN planning consensus with verified artifacts    |
 
 ## Generic converters
 
@@ -93,46 +88,57 @@ workflow({
 
 The combined generate-and-persist phase is intentional — see [Workflow tool pitfalls](#workflow-tool-pitfalls) below.
 
-## Concrete workflows
+## Bundled RALPLAN workflow
 
-### `ralplan-consensus.mjs`
+### `ralplan.mjs`
 
-Re-implements the pi-ralplan consensus pipeline as a workflow. Three isolated roles (Planner → Architect → Critic) iterate up to 5 rounds until all approve or the cap is hit.
+The single RALPLAN example translates the current oh-my-claudecode RALPLAN and
+Plan consensus contract into the generic workflow runtime. It enforces isolated
+role calls, immutable artifact identity, Architect-before-Critic ordering,
+reviewer input separation, explicit verdicts, and at most five revision rounds.
+It never executes the resulting plan or adds a RALPLAN-specific host tool.
 
-```js
-workflow({
-  script: readFileSync("examples/workflows/ralplan-consensus.mjs", "utf8"),
-  args: { idea: "build a CLI that diffs two directories", maxIterations: 5 },
-});
+Save it as a project or global workflow, then invoke it naturally:
+
+```text
+/workflow:ralplan rework auth
 ```
 
-Args:
-
-- `idea` (required, string) — task description
-- `maxIterations` (optional, default `5`) — consensus rounds
-- `artifactsDir` (optional, default `"plans"`) — output directory
-
-### `ralplan-occ.mjs`
-
-Faithful port of oh-my-claudecode's RALPLAN skill with gate detection, deliberate mode, and planning/execution boundary. Captures the OCC UX contract as closely as the workflow runtime allows.
+The named command asks the parent LLM to infer structured arguments from
+`meta.inputSchema` and call the generic `workflow` tool. Programmatic callers can
+run the same saved script directly:
 
 ```js
 workflow({
-  script: readFileSync("examples/workflows/ralplan-occ.mjs", "utf8"),
+  script: readFileSync("examples/workflows/ralplan.mjs", "utf8"),
   args: {
     idea: "migrate auth module to JWT",
-    deliberate: "auto", // auto-detect high-risk substrings
-    gate: true, // enable gate detection
-    interactive: true, // emit [pending approval] markers
+    deliberate: "auto",
+    gate: true,
+    interactive: true,
+    maxIterations: 5,
   },
 });
 ```
 
-**Fidelity limitations** (also documented in the script header):
+Arguments:
 
-- Interactive AskUserQuestion checkpoints are not supported by the workflow runtime. Substituted with `[pending approval]` log markers.
-- Architect and Critic model overrides are routed through their respective `agent()` calls, but each model id must be configured in Pi.
-- The workflow never executes; it always returns `pending_approval: true` and `execution_halted: true`, per OCC's planning/execution boundary.
+- `idea` (required) — implementation problem to plan
+- `gate` — enable the optional short-prompt ambiguity heuristic
+- `interactive` — emit non-blocking pending-approval markers
+- `deliberate` — `true`, `false`, or `"auto"` high-risk planning mode
+- `maxIterations` — consensus rounds, clamped to 1–5
+- `artifactsDir` — bounded artifact path prefix; defaults to `.omc/plans`
+- `planName` — safe final-plan basename; defaults to `plan`
+- `requirementsTraceability` — add advisory Analyst coverage
+- `architectModel` / `criticModel` — configured model overrides
+- `executeOnConsensus` — deprecated compatibility input; accepted and ignored
+
+Artifacts are capped at 1 MB and checked by dedicated verifier agents because
+the workflow VM exposes no filesystem API. Interactive checkpoints are
+non-blocking markers. Every terminal result remains `pending_approval: true` and
+`execution_halted: true`; consensus, a digest, or `executeOnConsensus` never
+authorizes execution.
 
 ## Workflow tool pitfalls
 
