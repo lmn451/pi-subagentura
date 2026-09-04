@@ -16,12 +16,14 @@ import {
   MAX_TELEMETRY_DEDUPE_KEYS,
   resolveTelemetryMode,
   retireTelemetrySession,
+  sanitizeTelemetryErrorCategory,
   sanitizeTelemetryModel,
   TELEMETRY_ENDPOINT,
   telemetryDepth,
   telemetryDepthBucket,
   telemetryDurationMs,
   telemetryDurationBucket,
+  telemetryErrorCountBucket,
   type TelemetryEvent,
 } from "../src/telemetry";
 import {
@@ -115,7 +117,7 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 3,
+      schema_version: 4,
       mode: "orchestrator_v2",
     });
     expect(agent.properties).toMatchObject({
@@ -176,6 +178,39 @@ describe("anonymous product telemetry", () => {
     expect(telemetryDurationBucket(700_000)).toBe("10m+");
     expect(telemetryDurationMs(12_345)).toBe(12_300);
     expect(telemetryDurationMs(Number.POSITIVE_INFINITY)).toBeUndefined();
+  });
+
+  it.each([
+    [Number.NaN, "unknown"],
+    [undefined, "unknown"],
+    [-1, "unknown"],
+    [0, "0"],
+    [1, "1"],
+    [1.9, "1"],
+    [2, "2+"],
+    [10_000, "2+"],
+    [Number.POSITIVE_INFINITY, "unknown"],
+  ] as const)("buckets error count %s as %s", (count, expected) => {
+    expect(telemetryErrorCountBucket(count)).toBe(expected);
+  });
+
+  it.each([
+    "provider",
+    "timeout",
+    "schema",
+    "capacity",
+    "session",
+    "mux",
+    "transport",
+    "unknown",
+  ] as const)("accepts closed error category %s", (error_category) => {
+    expect(sanitizeTelemetryErrorCategory(error_category)).toBe(error_category);
+  });
+
+  it("maps an untrusted error category to unknown", () => {
+    expect(sanitizeTelemetryErrorCategory("secret-error-category")).toBe(
+      "unknown",
+    );
   });
 
   it("reports an implausible span as unknown instead of a capped number", () => {
@@ -364,8 +399,9 @@ describe("anonymous product telemetry", () => {
       depth: 1,
       depth_bucket: "1",
       completion_policy: "each",
-      status: "success",
-      terminal_reason: "completed",
+      status: "error",
+      terminal_reason: "agent_error",
+      error_category: "provider",
       duration_ms: 12_345,
       child_conversation_message_count: 50_000,
     });
@@ -393,6 +429,7 @@ describe("anonymous product telemetry", () => {
         "status",
         "telemetry_session_id",
         "terminal_reason",
+        "error_category",
         "unit",
       ].sort(),
     );
@@ -401,6 +438,38 @@ describe("anonymous product telemetry", () => {
     expect(JSON.stringify(completed)).not.toMatch(
       /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
     );
+  });
+
+  it("never serializes a raw error attached to an event", () => {
+    const secret =
+      "Authorization: Bearer super-secret /Users/alice/private/project";
+    const event = {
+      event: "task_completed",
+      execution: "in-process",
+      mux: "none",
+      unit: "job",
+      invocation_source: "isolated",
+      model: "default",
+      async: false,
+      depth: undefined,
+      depth_bucket: "unknown",
+      completion_policy: "inline",
+      status: "error",
+      terminal_reason: "agent_error",
+      error_category: "secret-error-category",
+      errorMessage: secret,
+      message: secret,
+      stack: `${secret}\n    at /Users/alice/private/project.ts:1:1`,
+      path: secret,
+      url: secret,
+      duration_ms: undefined,
+      child_conversation_message_count: undefined,
+    } as unknown as TelemetryEvent;
+    const payload = buildTelemetryPayload(createTelemetrySession(true), event);
+
+    expect(JSON.stringify(payload)).not.toContain(secret);
+    expect(payload.properties).not.toHaveProperty("errorMessage");
+    expect(payload.properties.error_category).toBe("unknown");
   });
 
   it("emits the complete agent_spawn_failed shape with bounded duration", () => {
@@ -449,7 +518,7 @@ describe("anonymous product telemetry", () => {
       failure_stage: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 3,
+      schema_version: 4,
     });
   });
 
@@ -613,7 +682,7 @@ describe("anonymous product telemetry", () => {
         "completion_policy",
         "duration_bucket",
         "duration_ms",
-        "error_count",
+        "error_count_bucket",
         "invocation",
         "mode",
         "schema_version",
@@ -627,7 +696,7 @@ describe("anonymous product telemetry", () => {
       status: "partial",
       terminal_reason: "agent_error",
       agents_spawned: 1_000,
-      error_count: 1_000,
+      error_count_bucket: "2+",
       duration_ms: 12_300,
       duration_bucket: "5-30s",
     });
@@ -741,7 +810,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("keeps every v3 event within the privacy allowlist", () => {
+  it("keeps every v4 event within the privacy allowlist", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
     const dimensions = {
       execution: "in-process" as const,
@@ -842,7 +911,8 @@ describe("anonymous product telemetry", () => {
       "depth_bucket",
       "duration_bucket",
       "duration_ms",
-      "error_count",
+      "error_category",
+      "error_count_bucket",
       "execution",
       "failure_stage",
       "invocation",
@@ -874,7 +944,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(3);
+      expect(payload.properties.schema_version).toBe(4);
     }
   });
 

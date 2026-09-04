@@ -5061,6 +5061,52 @@ describe("workflow aggregate telemetry", () => {
     }
   });
 
+  it("keeps workflow error details out of telemetry", async () => {
+    clearSessionScopes();
+    const payloads = capturePayloads();
+    const tools: WorkflowToolDefinition[] = [];
+    const pi = makePi(tools);
+    const { owner } = registerTelemetryScope(pi, 1_105);
+    const errorMessage =
+      "provider rejected: Bearer secret https://private.example/token /Users/alice/project";
+    const failure = new Error(errorMessage);
+    failure.stack = `${errorMessage}\n    at /Users/alice/project/index.ts:1:1`;
+    const job = startWorkflowJob(
+      "sensitive",
+      'export const meta = { name: "sensitive", description: "d" };\n' +
+        'return await agent("task");',
+      {
+        runAgent: async () => {
+          throw failure;
+        },
+      },
+      undefined,
+      undefined,
+      owner,
+      "async",
+      { invocation: "tool", async: true, completionPolicy: "each" },
+    );
+
+    try {
+      await expect(job.promise).rejects.toThrow(errorMessage);
+      const completion = payloads.find(
+        (payload) => payload.event === "pi_subagentura_workflow_completed",
+      );
+      expect(completion?.properties).toEqual(
+        expect.objectContaining({
+          status: "error",
+          error_count_bucket: expect.stringMatching(/^(0|1|2\+)$/),
+        }),
+      );
+      expect(JSON.stringify(payloads)).not.toContain(errorMessage);
+      expect(JSON.stringify(payloads)).not.toContain("index.ts:1:1");
+    } finally {
+      workflowJobRegistry.delete(job.id);
+      vi.unstubAllGlobals();
+      clearSessionScopes();
+    }
+  });
+
   it("bounds counts and rounds aggregate duration", async () => {
     clearSessionScopes();
     const payloads = capturePayloads();
@@ -5089,7 +5135,7 @@ describe("workflow aggregate telemetry", () => {
           duration_ms: 1_500,
           duration_bucket: "1-5s",
           agents_spawned: 1,
-          error_count: 0,
+          error_count_bucket: "0",
         }),
       );
     } finally {

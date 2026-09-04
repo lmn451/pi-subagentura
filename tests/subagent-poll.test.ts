@@ -2851,6 +2851,95 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
   });
 
+  it.each([
+    ["agent_settled", "error", "provider"],
+    ["agent_settled", "aborted", "unknown"],
+    ["agent_settled", undefined, "unknown"],
+    ["agent_end", undefined, "unknown"],
+    ["explicit", undefined, "unknown"],
+    ["process_exit", undefined, "transport"],
+  ] as const)(
+    "classifies %s/%s errors as %s without serializing details",
+    async (source, agentStopReason, expectedCategory) => {
+      vi.resetModules();
+      vi.doMock("node:child_process", () => ({
+        execFileSync: () => Buffer.from("%99\n"),
+        execFile: (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null, stdout?: string) => void,
+        ) => callback(null, "%99\n"),
+      }));
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const { cwd, id, state } = makePersistedState();
+      const telemetry = createTelemetrySession(true, "orchestrator_v2");
+      const owner = { id: 904, generation: 1 };
+      const scope = registerSessionScope({
+        ...owner,
+        lifecycle: "started",
+        pi: { sendMessage: vi.fn() } as any,
+        ui: {
+          notify: vi.fn(),
+          setStatus: vi.fn(),
+          setWidget: vi.fn(),
+        } as any,
+        sessionManager: { getSessionId: () => "pi" },
+        telemetry,
+      });
+      state.telemetryEligible = true;
+      state.telemetryCorrelationId = telemetry.correlationId;
+      state.telemetryActiveTurnId = "turn-error";
+      state.telemetryTurnStartedAt = 1;
+      state.telemetryInvocationSource = "interactive";
+      state.telemetryCompletionPolicy = "each";
+      state.telemetryAsync = true;
+      state.telemetryDepth = 1;
+      state.telemetryDepthBucket = "1";
+      state.telemetryModel = "default";
+      scope.interactiveStates.set(id, state);
+      mod.interactiveSubagentRegistry.set(id, state);
+      const art = artifactPath(join(state.artifactDir, ".."), id);
+      const secret =
+        "provider failed: Bearer secret https://private.example/token /Users/alice/project";
+      appendEvent(art, {
+        version: 2,
+        eventId: "error-completion-sensitive",
+        turnId: "turn-error",
+        ts: 2,
+        type: "completion",
+        status: "error",
+        outcome: "error",
+        source,
+        ...(agentStopReason === undefined ? {} : { agentStopReason }),
+        message: secret,
+        errorMessage: secret,
+        summary: secret,
+      });
+      const payloads: Array<{
+        event?: string;
+        properties?: Record<string, unknown>;
+      }> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      });
+      installDeliverySpies();
+
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+      const completed = payloads.find(
+        (payload) => payload.event === "pi_subagentura_task_completed",
+      );
+      expect(completed?.properties).toMatchObject({
+        status: "error",
+        error_category: expectedCategory,
+      });
+      expect(JSON.stringify(payloads)).not.toContain(secret);
+    },
+  );
+
   it("removes state after process_exited even if pane liveness reports true", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({

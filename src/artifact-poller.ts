@@ -73,7 +73,11 @@ import {
   resolveLiveSessionScope,
 } from "./session-scope";
 import { isAgentListHidden } from "./settings";
-import { captureTelemetry, type TelemetryTerminalReason } from "./telemetry";
+import {
+  captureTelemetry,
+  type TelemetryErrorCategory,
+  type TelemetryTerminalReason,
+} from "./telemetry";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -533,6 +537,26 @@ function terminalReasonFromEvent(ev: SubagentEvent): TelemetryTerminalReason {
   }
 }
 
+function errorCategoryFromEvent(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+  terminalReason: TelemetryTerminalReason,
+): TelemetryErrorCategory | undefined {
+  if (status !== "error") return undefined;
+  if (terminalReason === "timeout") return "timeout";
+  if (event.type === "process_exited" || terminalReason === "process_exit") {
+    return "transport";
+  }
+  if (
+    event.type === "completion" &&
+    event.source === "agent_settled" &&
+    event.agentStopReason === "error"
+  ) {
+    return "provider";
+  }
+  return "unknown";
+}
+
 const pollsInFlight = new Map<string, Promise<void>>();
 // ── Poller ─────────────────────────────────────────────────────────────
 
@@ -804,6 +828,12 @@ async function runPollArtifactChanges(
               ? state.telemetryTurnMessageCounts?.get(messageTurnId)
               : undefined;
           const messageCount = directMessageCount ?? fallbackMessageCount;
+          const terminalReason = terminalReasonFromEvent(ev);
+          const errorCategory = errorCategoryFromEvent(
+            ev,
+            status,
+            terminalReason,
+          );
           captureTelemetry(
             ownerContext?.telemetry,
             {
@@ -819,7 +849,10 @@ async function runPollArtifactChanges(
               depth_bucket: state.telemetryDepthBucket ?? "unknown",
               completion_policy: state.telemetryCompletionPolicy ?? "legacy",
               status: status === "done" ? "success" : status,
-              terminal_reason: terminalReasonFromEvent(ev),
+              terminal_reason: terminalReason,
+              ...(errorCategory === undefined
+                ? {}
+                : { error_category: errorCategory }),
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
