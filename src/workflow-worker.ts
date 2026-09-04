@@ -425,7 +425,7 @@ async function executeScript(
           const outTokens = agentUsage?.output ?? 0;
           tokensDelta += outTokens;
           accountAgentUsage(engine, activeRun, res.usage);
-          if (res.isError) {
+          if (res.isError || res.cancelled) {
             status = "error";
             engine.counters.errorCount++;
             return { value: null, tokensDelta };

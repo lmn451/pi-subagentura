@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   mkdirSync,
   appendFileSync,
+  fsyncSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -40,6 +41,11 @@ import {
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { createTelemetrySession } from "../src/telemetry";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync) };
+});
 const coordinatorLedgerRoots: string[] = [];
 
 function record(
@@ -1180,6 +1186,112 @@ describe("completion coordinator", () => {
     } finally {
       rmSync(scope.cwd, { recursive: true, force: true });
     }
+  });
+
+  it("does not accept a visible receipt until disk sync succeeds", async () => {
+    const { pi, scope, ledgerRoot } = setup();
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    publishCompletion(record("sync-failure"), owner);
+    const selector = {
+      source: "interactive" as const,
+      sourceId: "sync-failure",
+      turnId: "turn-sync-failure",
+    };
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(fsyncSync).mockImplementation(() => {
+      throw new Error("disk sync unavailable");
+    });
+    try {
+      expect(() =>
+        consumeCompletionSource(pi as never, selector, owner),
+      ).toThrow(/persist.*receipt/i);
+      const path = sessionLedgerPath(
+        ledgerRoot,
+        "parent-session",
+        "subagentura-completion-consumed",
+      );
+      expect(readFileSync(path, "utf8")).toContain("sync-failure");
+      clearCompletionCoordinator(owner);
+      expect(prepareCompletionManifest(owner)).toBeDefined();
+      expect(() =>
+        consumeCompletionSource(pi as never, selector, owner),
+      ).toThrow(/persist.*receipt/i);
+    } finally {
+      vi.mocked(fsyncSync).mockImplementation(actual.fsyncSync);
+    }
+    expect(consumeCompletionSource(pi as never, selector, owner)).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+  });
+
+  it("persists lifecycle retirement through Pi when the receipt ledger is unavailable", () => {
+    const { pi, scope, ledgerRoot, entries } = setup();
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    publishCompletion(
+      record("retired-job", {
+        source: "in-process",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    const path = sessionLedgerPath(
+      ledgerRoot,
+      "parent-session",
+      "subagentura-completion-consumed",
+    );
+    mkdirSync(path, { recursive: true });
+
+    retireSessionScopedCompletions(owner);
+
+    expect(
+      entries.some(
+        (entry) =>
+          entry.customType === "subagentura-completion-consumed" &&
+          entry.data.reason === "lifecycle",
+      ),
+    ).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+  });
+
+  it("rejects consumption when both receipt stores fail and allows a durable retry", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.parentStreaming = true;
+    const owner = sessionOwner(scope);
+    publishCompletion(record("receipt-retry"), owner);
+    const ledgerPath = sessionLedgerPath(
+      setupResult.ledgerRoot,
+      "parent-session",
+      "subagentura-completion-consumed",
+    );
+    mkdirSync(ledgerPath, { recursive: true });
+    let unavailable = true;
+    setupResult.pi.appendEntry.mockImplementation((customType, data) => {
+      if (unavailable && customType === "subagentura-completion-consumed") {
+        throw new Error("receipt storage unavailable");
+      }
+      setupResult.entries.push({ type: "custom", customType, data });
+    });
+    const consume = () =>
+      consumeCompletionSource(
+        setupResult.pi as never,
+        {
+          source: "interactive",
+          sourceId: "receipt-retry",
+          turnId: "turn-receipt-retry",
+        },
+        owner,
+      );
+
+    expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    rmSync(ledgerPath, { recursive: true });
+    unavailable = false;
+    expect(consume()).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
   });
 
   it("ignores forged project-local consumption and overflow ledgers", () => {

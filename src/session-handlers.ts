@@ -387,8 +387,10 @@ function cleanupScopeGeneration(
           origin: lifecycleOrigin,
           lifecycleReason: cancellationLifecycleReason(event?.reason),
         });
-      } catch {
-        /* best effort */
+      } catch (error) {
+        debugLog("warn", "interactive_lifecycle_cancellation_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
     if (event?.reason === "new" || event?.reason === "fork") {

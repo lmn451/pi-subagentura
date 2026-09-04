@@ -54,6 +54,7 @@ import {
   telemetryDepthBucket,
   type AgentTelemetryContext,
   type TelemetryAgentStatus,
+  type TelemetryErrorCategory,
 } from "./telemetry";
 // ── Debug Logging ─────────────────────────────────────────────────
 
@@ -561,6 +562,16 @@ function terminalReasonForResult(
       : "agent_error";
   }
   return "completed";
+}
+
+function telemetryErrorCategoryForResult(
+  result: SubagentResult,
+  terminalReason: InProcessTerminalReason,
+  providerError: boolean,
+): TelemetryErrorCategory | undefined {
+  if (!result.isError) return undefined;
+  if (terminalReason === "timeout") return "timeout";
+  return providerError ? "provider" : "unknown";
 }
 
 // ── Job Registry ────────────────────────────────────────────────────
@@ -1567,6 +1578,14 @@ export async function startSubagentJob(
           : result.isError
             ? "error"
             : "success";
+        const terminalReason = terminalReasonForResult(result, signal);
+        const providerError =
+          result.isError && Boolean(session.agent.state.errorMessage);
+        const errorCategory = telemetryErrorCategoryForResult(
+          result,
+          terminalReason,
+          providerError,
+        );
         captureTelemetry(
           telemetry?.session,
           {
@@ -1581,7 +1600,10 @@ export async function startSubagentJob(
             depth_bucket: telemetryDepthBucket(telemetry?.depth),
             completion_policy: telemetry?.completionPolicy ?? "inline",
             status,
-            terminal_reason: terminalReasonForResult(result, signal),
+            terminal_reason: terminalReason,
+            ...(errorCategory === undefined
+              ? {}
+              : { error_category: errorCategory }),
             duration_ms:
               telemetryStartedAt === undefined
                 ? undefined

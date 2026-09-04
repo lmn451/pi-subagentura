@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 3;
+export const TELEMETRY_SCHEMA_VERSION = 4;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -63,6 +63,17 @@ export type TelemetryTerminalReason =
 export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
   "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
+
+export type TelemetryErrorCategory =
+  | "provider"
+  | "timeout"
+  | "schema"
+  | "capacity"
+  | "session"
+  | "mux"
+  | "transport"
+  | "unknown";
+export type TelemetryErrorCountBucket = "0" | "1" | "2+" | "unknown";
 
 export const TELEMETRY_OPERATION_NAMES = {
   tool: [
@@ -194,6 +205,7 @@ export type TelemetryEvent =
       unit: "job" | "turn";
       status: TelemetryAgentStatus;
       terminal_reason: TelemetryTerminalReason;
+      error_category?: TelemetryErrorCategory;
       duration_ms: number | undefined;
       child_conversation_message_count: number | undefined;
     } & TelemetryAgentDimensions)
@@ -367,6 +379,37 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
     return "custom";
   }
   return "custom";
+}
+
+const TELEMETRY_ERROR_CATEGORIES: readonly TelemetryErrorCategory[] = [
+  "provider",
+  "timeout",
+  "schema",
+  "capacity",
+  "session",
+  "mux",
+  "transport",
+  "unknown",
+];
+
+/** Never forward arbitrary error categories into telemetry. */
+export function sanitizeTelemetryErrorCategory(
+  value: unknown,
+): TelemetryErrorCategory {
+  return typeof value === "string" &&
+    TELEMETRY_ERROR_CATEGORIES.includes(value as TelemetryErrorCategory)
+    ? (value as TelemetryErrorCategory)
+    : "unknown";
+}
+
+export function telemetryErrorCountBucket(
+  value: number | undefined,
+): TelemetryErrorCountBucket {
+  if (value === undefined || !Number.isFinite(value) || value < 0) {
+    return "unknown";
+  }
+  const count = Math.trunc(value);
+  return count === 0 ? "0" : count === 1 ? "1" : "2+";
 }
 
 export function telemetryDepthBucket(
@@ -557,6 +600,13 @@ export function buildTelemetryPayload(
         completion_policy: event.completion_policy,
         status: event.status,
         terminal_reason: event.terminal_reason,
+        ...(event.status === "error"
+          ? {
+              error_category: sanitizeTelemetryErrorCategory(
+                event.error_category,
+              ),
+            }
+          : {}),
         ...durationProperties("duration", event.duration_ms),
         ...(event.child_conversation_message_count === undefined
           ? {}
@@ -586,7 +636,7 @@ export function buildTelemetryPayload(
         terminal_reason: event.terminal_reason,
         ...durationProperties("duration", event.duration_ms),
         agents_spawned: boundedCount(event.agents_spawned, 1_000),
-        error_count: boundedCount(event.error_count, 1_000),
+        error_count_bucket: telemetryErrorCountBucket(event.error_count),
       };
       break;
     case "session_recovered":

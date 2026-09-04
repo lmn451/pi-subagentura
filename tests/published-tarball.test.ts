@@ -358,7 +358,14 @@ describe("published tarball", () => {
     mkdirSync(consumer);
     const install = spawnSync(
       "npm",
-      ["install", "--omit=dev", "--ignore-scripts", tgz, "jiti"],
+      [
+        "install",
+        "--omit=dev",
+        "--ignore-scripts",
+        tgz,
+        "jiti",
+        "@earendil-works/pi-server@latest",
+      ],
       { cwd: consumer, encoding: "utf8" },
     );
     if (install.status !== 0) {

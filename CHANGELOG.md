@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-09-04
+
+### Added
+
+- Added persisted telemetry controls with project-over-global precedence while
+  preserving environment and negative launch-flag opt-outs.
+- Expanded anonymous telemetry to cover lifecycle outcomes, tool and command
+  operations, setup and delivery failures, and closed error categories. Schema
+  v4 uses bounded counts and durations without prompts, outputs, raw errors,
+  paths, or agent identifiers.
+- Added Pi SDK support for native provider registrations, JSON-schema constrained
+  sampling, session usage totals, and completion deferral during UI prompts.
+
+### Changed
+
+- Development fixtures now use Pi 0.85.0; minimum supported Pi remains 0.80.6.
+  Declared the Pi server peer needed by newer SDK installations.
+- Manual result collection now syncs a private consumption receipt before
+  returning output. A writable receipt ledger is required; storage failures
+  report an error and retain results for retry. Historical session receipts
+  remain compatible.
+
+### Fixed
+
+- Interactive cancellation attempts pane teardown even when recording the
+  cancellation fails, including descendant and fresh-session cleanup.
+- Consumption recovery no longer accepts Pi's memory-only entries or unsynced
+  ledger writes after storage failures.
+- Cancelled workflow children stop schema retries and report cancellation.
+- Invalid project max-depth settings fall back to the global value or default.
+- Herdr capture widens bounded reads when blank viewport rows hide recent output.
+- Terminal cancellation tests verify recovery by completing a subsequent turn.
+
 ## [3.6.0] - 2026-09-02
 
 ### Added

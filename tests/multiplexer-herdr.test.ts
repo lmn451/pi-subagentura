@@ -1452,6 +1452,80 @@ describe("multiplexer-herdr", () => {
     expect(calls.some((call) => call.file === "node:net")).toBe(true);
   });
 
+  it.each([3, 200])(
+    "captures sparse viewport content with a %s-line limit",
+    async (maxLines) => {
+      const requested: number[] = [];
+      installMockExec(
+        () => "",
+        (request) => {
+          const lines = Number(request.params.lines);
+          requested.push(lines);
+          return socketSuccess({
+            type: "pane_read",
+            read: {
+              pane_id: "w1:p2",
+              workspace_id: "w1",
+              tab_id: "w1:t1",
+              source: "recent_unwrapped",
+              format: "text",
+              revision: 3,
+              text: lines < 300 ? "" : "a\nb\nc\n",
+              truncated: lines < 300,
+            },
+          });
+        },
+      );
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+
+      await expect(
+        new HerdrMultiplexer().capturePane(
+          { paneId: "w1:p2", session: "/tmp/other.sock" },
+          { maxLines, maxBytes: 4096 },
+        ),
+      ).resolves.toEqual({ output: "a\nb\nc", truncated: false });
+      expect(requested[0]).toBe(maxLines + 1);
+      expect(requested.at(-1)).toBeGreaterThanOrEqual(300);
+      expect(Math.max(...requested)).toBeLessThanOrEqual(4096);
+    },
+  );
+
+  it("bounds retries when a sparse viewport never yields content", async () => {
+    const requested: number[] = [];
+    installMockExec(
+      () => "",
+      (request) => {
+        requested.push(Number(request.params.lines));
+        return socketSuccess({
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            revision: 3,
+            text: "",
+            truncated: true,
+          },
+        });
+      },
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    await expect(
+      new HerdrMultiplexer().capturePane(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        { maxLines: 3, maxBytes: 4096 },
+      ),
+    ).resolves.toEqual({ output: "", truncated: true });
+    expect(requested.at(-1)).toBe(4096);
+    expect(requested.length).toBeLessThanOrEqual(12);
+  });
+
   it("still reports truncation past maxLines with a trailing newline", async () => {
     installMockExec(
       () => "",

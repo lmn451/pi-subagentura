@@ -294,6 +294,36 @@ describe("generic extension settings", () => {
     }
   });
 
+  it.each([
+    '{"pi-subagentura":{"max-depth":"private-invalid-depth"}}',
+    '{"pi-subagentura":{"max-depth":false}}',
+    '{"pi-subagentura":{"max-depth":null}}',
+    '{"pi-subagentura":"private-invalid-depth"}',
+    "null",
+    "{private-invalid-depth",
+  ])(
+    "falls back to global max-depth after invalid local settings %s",
+    (local) => {
+      writeFileSync(
+        join(settingsSandbox.agentDir, "settings-extensions.json"),
+        JSON.stringify({ "pi-subagentura": { "max-depth": "0" } }),
+      );
+      writeFileSync(
+        join(settingsSandbox.cwd, ".pi", "settings-extensions.json"),
+        local,
+      );
+      const onInvalid = vi.fn();
+
+      expect(readTestSettings(mockApi() as any, onInvalid).maxDepth).toBe(0);
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("max-depth"),
+      );
+      expect(JSON.stringify(onInvalid.mock.calls)).not.toContain(
+        "private-invalid-depth",
+      );
+    },
+  );
+
   it("ignores a repo-controlled project-local hide-agent-list", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");

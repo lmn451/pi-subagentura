@@ -91,16 +91,17 @@ Malformed persisted files or values are non-fatal in every scope that is read:
 report the validation failure without exposing file contents, ignore the
 invalid candidate, and continue to the next applicable scope or default.
 
-### Telemetry schema v3 invariants
+### Telemetry schema v4 invariants
 
 - Telemetry dimensions are closed enums. Use only the literals in the schema
   (and `unknown` only where that field permits it); never forward arbitrary
   strings. Counts remain bounded and duration/latency numbers remain rounded
   to the existing `0..30`-day representation.
 - Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `terminal_reason`, and result-outcome values; never send
-  exception text or stacks, prompts, tasks, personas, tool arguments, message
-  content, outputs, paths, or agent/job/workflow/session identifiers.
+  `failure_stage`, `terminal_reason`, result-outcome, and error-category values;
+  error counts use bounded buckets. Never send exception text or stacks, prompts,
+  tasks, personas, tool arguments, message content, outputs, paths, or
+  agent/job/workflow/session identifiers.
 - The workflow runner is the sole owner of the aggregate lifecycle pair:
   exactly one `workflow_started` and one `workflow_completed` for an accepted
   invocation. Child agent/task records must not emit duplicate workflow
@@ -170,6 +171,12 @@ consumption receipt before returning. Workflow-owned child agents never publish
 directly; only their background workflow aggregate does. Preserve that suppression
 on both
 process and in-process runner paths.
+
+Manual consumption writes and syncs the private receipt ledger before mirroring
+the receipt into Pi. Pi can expose an entry in memory before its disk write fails;
+that entry alone must not unlock result collection. Receipt-ledger reads also sync
+their snapshot before accepting it. Lifecycle retirement may still use Pi when
+the ledger is unavailable, because the corresponding jobs are being removed.
 
 Durable notice persistence gates parent manifests. Retain failed notice appends for
 a later bounded retry, reconcile append-then-throw against session entries, and

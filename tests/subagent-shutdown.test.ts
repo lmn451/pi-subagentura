@@ -8,7 +8,13 @@ import {
   type Mock,
   type MockInstance,
 } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -428,6 +434,62 @@ describe("session_shutdown handler", () => {
       shutdownGlobalState().__piSubagenturaInteractivePollerHandle,
     ).toBeUndefined();
   });
+
+  it.each(["new", "fork"])(
+    "stops panes on %s even when cancellation persistence fails",
+    (reason) => {
+      cancelByStateSpy.mockRestore();
+      tmpRoot = mkdtempSync(join(tmpdir(), "cancel-persistence-"));
+      mkdirSync(join(tmpRoot, "events.ndjson"));
+      const killPane = vi.fn();
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "alive",
+        killPane,
+      } as unknown as Multiplexer);
+      const registration = setupExtension({ cwd: tmpRoot });
+      const state = ownedInteractive(registration.scope, "running", "running", {
+        cwd: tmpRoot,
+        artifactDir: tmpRoot,
+      });
+
+      expect(() => registration.shutdown({ reason })).not.toThrow();
+
+      expect(killPane).toHaveBeenCalledWith(state.paneId, state.muxSession);
+      expect(registration.scope.interactiveStates.size).toBe(0);
+    },
+  );
+
+  it.each(["direct", "descendant", "lifecycle"] as const)(
+    "attempts %s pane teardown before reporting a cancellation write failure",
+    (kind) => {
+      cancelByStateSpy.mockRestore();
+      tmpRoot = mkdtempSync(join(tmpdir(), "cancel-persistence-"));
+      mkdirSync(join(tmpRoot, "events.ndjson"));
+      const state = makeState("running", "running", tmpRoot);
+      const killPane = vi.fn();
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "alive",
+        killPane,
+      } as unknown as Multiplexer);
+
+      expect(() => {
+        if (kind === "direct") {
+          interactiveTmux.cancelInteractiveSubagent(
+            state.id,
+            "cancel_interactive_subagent",
+            state,
+          );
+        } else if (kind === "descendant") {
+          interactiveTmux.cancelInteractiveDescendantByState(state);
+        } else {
+          interactiveTmux.cancelInteractiveSubagentByState(state);
+        }
+      }).toThrow();
+
+      expect(killPane).toHaveBeenCalledWith(state.paneId, state.muxSession);
+      if (kind !== "lifecycle") expect(state.status).toBe("cancelled");
+    },
+  );
 
   it.each(["new", "fork"])(
     "kills live panes owned by the scope for non-preserving reason %s",

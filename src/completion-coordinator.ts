@@ -806,7 +806,9 @@ function loadFallbackConsumptions(
 ): CompletionConsumption[] {
   const consumptions: CompletionConsumption[] = [];
   try {
-    const loaded = readLedgerLines(path, MAX_LEDGER_BYTES);
+    const loaded = readLedgerLines(path, MAX_LEDGER_BYTES, {
+      syncBeforeRead: true,
+    });
     if (
       loaded.truncated ||
       loaded.lines.length > MAX_FALLBACK_RECEIPT_RECORDS
@@ -897,6 +899,7 @@ function reconcileFallbackConsumptions(
         if (consumption) scannedConsumptions.push(consumption);
       },
       {
+        syncBeforeRead: true,
         startOffset: state.fallbackReceiptOffset,
         includeUnterminated: false,
         dropping: state.fallbackReceiptDropping,
@@ -1585,8 +1588,23 @@ function manifestMessage(
 function appendConsumption(
   state: CompletionCoordinatorState,
   consumption: CompletionConsumption,
-): void {
+): boolean {
+  // Pi exposes new entries in memory before its disk write can fail. Persist
+  // our receipt first so reconciliation never sees an uncommitted consumption.
   let durable = false;
+  try {
+    appendLedgerLineLossless(
+      state.consumptionLedgerPath,
+      JSON.stringify(consumption),
+    );
+    durable = true;
+  } catch (error) {
+    debugLog("warn", "completion_consumption_ledger_write_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    // Retirement must still suppress jobs that shutdown removes permanently.
+    if (consumption.reason !== "lifecycle") return false;
+  }
   try {
     if (typeof state.pi.appendEntry === "function") {
       state.pi.appendEntry(COMPLETION_CONSUMED_ENTRY_TYPE, consumption);
@@ -1597,18 +1615,7 @@ function appendConsumption(
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  if (!durable) {
-    try {
-      appendLedgerLineLossless(
-        state.consumptionLedgerPath,
-        JSON.stringify(consumption),
-      );
-    } catch (error) {
-      debugLog("warn", "completion_consumption_ledger_write_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  if (!durable) return false;
   state.sourceConsumptions.push(consumption);
   if (state.sourceConsumptions.length > MAX_COMPLETION_RECORDS) {
     state.sourceConsumptions.shift();
@@ -1625,6 +1632,7 @@ function appendConsumption(
       state.fallbackExpectations.delete(record.completionId);
     }
   }
+  return true;
 }
 
 function reportCompletionDeliveryFailure(
@@ -2054,12 +2062,17 @@ export function consumeCompletionSource(
           }
       : { source: selector.source, sourceId: normalizedSourceId };
   if (fallbackConsumptionMatches(state, normalizedSelector)) return false;
-  appendConsumption(state, {
+  const persisted = appendConsumption(state, {
     schemaVersion: COMPLETION_RECORD_SCHEMA_VERSION,
     ...normalizedSelector,
     consumedAt: Date.now(),
     reason: "manual",
   });
+  if (!persisted) {
+    throw new Error(
+      "Could not persist the result consumption receipt. The result is retained; retry collection when storage is available.",
+    );
+  }
   return true;
 }
 

@@ -150,6 +150,51 @@ describe("startSubagentJob effective thinking level", () => {
     }
   });
 
+  it("classifies provider errors without serializing the error message", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const errorMessage =
+      "provider rejected request: secret-token /Users/alice/project";
+    const session = {
+      ...createSession("low"),
+      agent: { state: { messages: [], errorMessage } },
+    };
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        telemetry: {
+          session: createTelemetrySession(true, "orchestrator_v2"),
+          invocationSource: "isolated",
+          async: false,
+          depth: 1,
+          completionPolicy: "inline",
+        },
+      });
+      started.start();
+      const result = await started.jobPromise;
+
+      expect(result).toMatchObject({ isError: true, errorMessage });
+      expect(payloads[2]?.properties).toMatchObject({
+        status: "error",
+        error_category: "provider",
+      });
+      expect(JSON.stringify(payloads)).not.toContain(errorMessage);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("records cancellation after lifecycle cleanup retires the session", async () => {
     const payloads: Array<{
       event: string;
