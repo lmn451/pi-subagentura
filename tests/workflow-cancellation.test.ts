@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SubagentResult } from "../src/helpers";
 import {
   startWorkflowJob,
   workflowJobRegistry,
@@ -81,6 +82,45 @@ function workflowTools(): Record<string, any> {
 }
 
 describe("cancelled workflow snapshot normalization", () => {
+  it.each([false, true])(
+    "does not accept or retry an independently cancelled child (schema=%s)",
+    async (withSchema) => {
+      const runAgent = vi.fn(async (): Promise<SubagentResult> => ({
+        isError: false,
+        cancelled: true,
+        output: "Sub-agent cancelled before completion.",
+        usage: {
+          input: 4,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turns: 1,
+        },
+        model: "test/model",
+      }));
+      const job = startWorkflowJob(
+        "cancel-child",
+        'export const meta = { name: "cancel-child", description: "d" };\n' +
+          `return await agent("task", { isolation: "in-process"${withSchema ? ', schema: { type: "object" }' : ""} });`,
+        { runAgent },
+      );
+      jobs.push(job);
+
+      const result = await job.promise;
+
+      expect(runAgent).toHaveBeenCalledOnce();
+      expect(job.abort.signal.aborted).toBe(false);
+      expect(result).toMatchObject({
+        result: null,
+        agentsSpawned: 1,
+        errorCount: 1,
+      });
+      expect(result.usage).toMatchObject({ input: 4, output: 2, turns: 1 });
+      expect(job.snapshot.agentRecords?.[0]?.status).toBe("error");
+    },
+  );
+
   it("normalizes cancel_workflow immediately and after settlement", async () => {
     const job = await startInFlightWorkflow();
     const tools = workflowTools();
