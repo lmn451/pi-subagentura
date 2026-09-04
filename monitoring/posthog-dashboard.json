@@ -1,9 +1,6 @@
 {
   "dashboard": {
-    "name": "pi-subagentura reliability",
-    "url": "https://us.posthog.com/project/518458/dashboard/2065797",
-    "id": 2065797,
-    "project_id": 518458
+    "name": "pi-subagentura reliability"
   },
   "validated_at": "2026-09-04",
   "insights": [
@@ -11,8 +8,6 @@
       "key": "workflow-outcomes",
       "name": "Workflow outcomes by schema",
       "description": "Observed terminal workflow events, with success, partial, error and cancellation shown separately. Schema versions have separate series. Counts are events, not unique workflows or users; telemetry is best effort.",
-      "id": 11619251,
-      "short_id": "CW9mCfY1",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -51,8 +46,6 @@
       "key": "task-outcomes",
       "name": "Task outcomes by schema",
       "description": "Observed terminal job/turn events by schema and status. Cancellations remain separate from errors. Do not divide completions by starts in the same window to infer an exact success rate.",
-      "id": 11619252,
-      "short_id": "t6nBZKq4",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -91,8 +84,6 @@
       "key": "read-outcomes",
       "name": "Result reads by schema, source and outcome",
       "description": "Result-read events can repeat. An error outcome can mean the underlying workflow or task failed; it is not proof that reading the result failed. Legacy result_consumed events are not mixed in.",
-      "id": 11619253,
-      "short_id": "JF33XEer",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -134,8 +125,6 @@
       "key": "delivery-coverage",
       "name": "Delivery latency coverage by schema",
       "description": "Counts of delivery batches by latency bucket and schema. Missing values indicate older instrumentation; unknown indicates an unavailable or invalid timestamp. A batch's latency is its maximum known completion age, and can include intentional parent/group waiting.",
-      "id": 11619254,
-      "short_id": "HWiT0ZuN",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -173,8 +162,6 @@
       "key": "execution-mix",
       "name": "Accepted agents by execution and multiplexer",
       "description": "Accepted agents and launched panes, not task turns. Execution/multiplexer mix helps interpret changes in reliability. This count is not an installation or user count.",
-      "id": 11619256,
-      "short_id": "MDVlAfyS",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -212,8 +199,6 @@
       "key": "release-coverage",
       "name": "Task completion coverage by release and schema",
       "description": "Package release and schema coverage for observed task completions. Keep unknown and prerelease versions visible. No production/development origin is inferred from anonymous events.",
-      "id": 11619257,
-      "short_id": "lEI4SCri",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -251,8 +236,6 @@
       "key": "workflow-reasons",
       "name": "Workflow terminal reasons by schema",
       "description": "Closed terminal reasons for all workflow terminal outcomes. agent_error is a broad category and does not identify a root cause. Missing values indicate incomplete/older instrumentation.",
-      "id": 11619258,
-      "short_id": "RhTmrz8a",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -290,8 +273,6 @@
       "key": "workflow-duration",
       "name": "Workflow duration p95 by schema",
       "description": "95th percentile elapsed milliseconds for terminal workflow events, split by schema. Missing numeric values are excluded; inspect the companion coverage chart before interpreting empty daily buckets that can render zero.",
-      "id": 11619259,
-      "short_id": "8TGccawk",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -329,8 +310,6 @@
       "key": "workflow-duration-coverage",
       "name": "Workflow duration coverage by schema",
       "description": "Duration bucket counts, including missing and unknown, provide sample coverage for the workflow percentile chart.",
-      "id": 11619266,
-      "short_id": "12KJENbW",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -368,8 +347,6 @@
       "key": "session-journey",
       "name": "Session journey: start → launch → successful work",
       "description": "Ordered steps within 24 hours. Anonymous session/tree adoption context, not stable users or exact job conversion. Parallel jobs can satisfy different steps; event loss and ingestion order affect progression.",
-      "id": 11619646,
-      "short_id": "Ao4ENbDf",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -450,9 +427,7 @@
             "aggregationAxisFormat": "duration_ms"
           }
         }
-      },
-      "id": 11619705,
-      "short_id": "rKJwYg6P"
+      }
     },
     {
       "key": "task-duration-coverage",
@@ -490,9 +465,7 @@
             "showLegend": true
           }
         }
-      },
-      "id": 11619706,
-      "short_id": "lhkxl3HT"
+      }
     },
     {
       "key": "spawn-duration",
@@ -533,9 +506,7 @@
             "aggregationAxisFormat": "duration_ms"
           }
         }
-      },
-      "id": 11619707,
-      "short_id": "prlFd3qL"
+      }
     },
     {
       "key": "spawn-duration-coverage",
@@ -573,9 +544,7 @@
             "showLegend": true
           }
         }
-      },
-      "id": 11619708,
-      "short_id": "hTaSETAI"
+      }
     },
     {
       "key": "recovery-state",
@@ -617,9 +586,7 @@
             "showLegend": true
           }
         }
-      },
-      "id": 11619709,
-      "short_id": "gIR2qrXA"
+      }
     },
     {
       "key": "read-latency",
@@ -660,9 +627,7 @@
             "aggregationAxisFormat": "duration_ms"
           }
         }
-      },
-      "id": 11619710,
-      "short_id": "zK1oOu5s"
+      }
     },
     {
       "key": "read-latency-coverage",
@@ -700,9 +665,7 @@
             "showLegend": true
           }
         }
-      },
-      "id": 11619712,
-      "short_id": "JwQaL5wj"
+      }
     },
     {
       "key": "delivery-latency",
@@ -743,9 +706,7 @@
             "aggregationAxisFormat": "duration_ms"
           }
         }
-      },
-      "id": 11619713,
-      "short_id": "D9h5C7A8"
+      }
     }
   ],
   "pending_insights": [
@@ -831,7 +792,7 @@
       "key": "operation-adoption",
       "name": "Extension operation adoption",
       "description": "Entered handlers, not users. Includes tools, commands and shortcuts with root/child role. Counts can reflect repeated polling. Default breakdown limits show top series.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -874,7 +835,7 @@
       "key": "operation-outcomes",
       "name": "Extension operation outcomes",
       "description": "Returned, reported_error, threw and aborted are handler outcomes. Confirmation prompts and cancelled work are not automatically bugs. Filter a surface or operation for focused triage.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -917,7 +878,7 @@
       "key": "operation-result-status",
       "name": "Tool result status categories",
       "description": "Closed statuses distinguish missing state, invalid input, confirmation, waiting, cancellation, errors and ordinary results. Command/shortcut statuses are unknown; delegated task outcomes use their existing lifecycle events.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -956,7 +917,7 @@
       "key": "operation-duration",
       "name": "Extension handler duration p95",
       "description": "Handler elapsed milliseconds, including intentional waits and time spent in an open UI. Use coverage and compare the same operation and release.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -997,7 +958,7 @@
       "key": "operation-duration-coverage",
       "name": "Extension handler timing coverage",
       "description": "Sample counts and unknown timing. Missing or retired completions cannot be inferred as failures.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {
@@ -1036,7 +997,7 @@
       "key": "session-setup-failures",
       "name": "Session setup and recovery failures",
       "description": "Observed recoverable setup exceptions, with closed stages and no raw errors. Zero recovery counts alone do not imply failure.",
-      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on dashboard 2065797.",
+      "activation": "After release, discover the event and properties in PostHog, validate this query, then save it on the target dashboard.",
       "query": {
         "kind": "InsightVizNode",
         "source": {

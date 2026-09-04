@@ -1,14 +1,15 @@
 # Extension reliability monitoring
 
-The [pi-subagentura reliability dashboard](https://us.posthog.com/project/518458/dashboard/2065797)
+The pi-subagentura reliability dashboard
 uses anonymous extension lifecycle events. Its eighteen saved insights were queried
 against the connected project before creation. The website starter dashboard is
 independent.
 
-`posthog-dashboard.json` records the saved dashboard/insight IDs, query definitions,
-and descriptions. Update these resources by ID instead of creating duplicates.
-The file contains no ingestion or account credentials and is not part of the
-published npm tarball.
+`posthog-dashboard.json` contains reusable query definitions and descriptions.
+Keep deployment-specific URLs and project, dashboard, and insight IDs outside the
+repository. Use that deployment mapping to update existing resources instead of
+creating duplicates. The definition contains no ingestion or account credentials
+and is not part of the published npm tarball.
 
 ## Reading the dashboard
 
@@ -83,8 +84,9 @@ and properties are observed and their queries can be validated.
 3. Run the pending query and verify its results. Do not inject fake failures into
    this project; exercise failure paths with mocked capture or a separate test
    project when a controlled check is needed.
-4. Save the insight on the existing dashboard, record its returned ID in
-   `insights`, and remove its `pending_insights` entry. Update the dashboard
+4. Save the insight on the existing dashboard and record its returned ID in the
+   deployment mapping outside the repository. Move its definition from
+   `pending_insights` to `insights`, without adding the ID. Update the dashboard
    description once the new charts are active.
 
 ## Alert rollout
