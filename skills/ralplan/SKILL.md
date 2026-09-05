@@ -1,137 +1,131 @@
 ---
 name: ralplan
-description: Consensus-driven implementation planning via strict Planner/Architect/Critic iteration. Use when the user needs a detailed spec and implementation plan before coding. Trigger with /ralplan or by saying 'ralplan'. Execution-agnostic: RALPLAN defines roles, workflow, and artifact formats only; the host environment provides agent execution via any available method.
+description: Consensus-driven implementation planning via isolated Planner, Architect, and Critic reviews of one immutable Planner snapshot. Use when a detailed plan is needed before coding; planning remains pending and read-only until a separate host approval.
 argument-hint: "[idea]"
 level: intermediate
 ---
 
 # ralplan — Consensus-Driven Implementation Planning
 
-A strict three-role state machine that produces an implementation plan via adversarial review. Each role is a separately invoked agent; the parent agent does **not** perform role work itself. The pipeline prevents "Simulated Consensus" — the failure mode where a single generation hallucinates all three approvals in one block.
+RALPLAN is a planning protocol, not an executor. It produces a bounded plan and
+review evidence while keeping the result **pending approval** and
+**execution-halted**. A workflow result, plan file, marker, or
+`executeOnConsensus` argument is never permission to edit source or invoke an
+executor. Only a separate host-controlled approval and handoff may authorize a
+later phase.
 
-## Usage
+## Invocation
 
-Invoke one of:
+Use an explicit invocation:
 
-- `/ralplan [idea]` — slash command, auto-starts the pipeline.
-- `/ralplan:status` — show current iteration, last verdict, and produced artifacts.
-- `/ralplan:artifacts` — list every file written under `plans/`.
-- `/ralplan:skip` — advance past the current stage (use sparingly).
-- `/ralplan:cancel` — end the session.
-- `/brainstorm [idea]` — same pipeline under the brainstorm variant (see below).
-- `--ralplan [idea]` / `--brainstorm [idea]` — CLI flag form for non-interactive hosts.
+- `/ralplan [idea]`
+- `--ralplan [idea]`
+- `/brainstorm [idea]` for a host-supported question-elicitation variant
 
-Auto-start is slash/flag only. Bare mentions of "ralplan" in prose do **not** re-trigger a fresh pipeline — the role prompts mention "ralplan" naturally during consensus rounds, and the loop must continue from where it is.
+A bare mention of “ralplan” in prose does not start a new pipeline. Status,
+artifact, skip, and cancel commands are host features; a workflow body cannot
+intercept arbitrary parent text or suspend for user input.
 
-## Flags / Options
+## Hard contract
 
-| Form                  | Effect                                                               |
-| --------------------- | -------------------------------------------------------------------- |
-| `/ralplan [idea]`     | Slash command — auto-starts the planning pipeline.                   |
-| `/brainstorm [idea]`  | Slash command — auto-starts the brainstorm variant (open Q&A first). |
-| `--ralplan [idea]`    | CLI flag — auto-starts the planning pipeline.                        |
-| `--brainstorm [idea]` | CLI flag — auto-starts the brainstorm variant.                       |
-| `/ralplan:status`     | Print the current iteration, last verdict, and artifact list.        |
-| `/ralplan:artifacts`  | List every file produced under `plans/`.                             |
-| `/ralplan:skip`       | Advance past the current stage (logged in the artifact trail).       |
-| `/ralplan:cancel`     | End the session immediately; artifacts on disk are preserved.        |
+1. **Isolated roles.** Planner, Architect, and Critic are separate agent
+   invocations. The parent does not impersonate a role and no role approves its
+   own work.
+2. **One fixed snapshot.** After Planner settles, capture one immutable value
+   snapshot. Architect and Critic are awaited sequentially and each receives
+   that same snapshot. Critic receives neither Architect JSON nor an Architect
+   artifact path.
+3. **Explicit verdicts.** Planner returns `DRAFT_READY`; Architect returns
+   `APPROVE` or `REVISION_NEEDED`; Critic returns `APPROVE`, `ITERATE`, or
+   `REJECT`. Never infer approval from an empty violations, issues, gaps, or
+   findings array. Missing, malformed, or failed output is non-approval.
+4. **Complete re-review.** Critic runs after Architect settles, including after
+   `REVISION_NEEDED` or an Architect failure. Any non-approval starts a complete
+   Planner → Architect → Critic round. `maxIterations` is clamped to 1–5.
+5. **Planning boundary.** Every terminal result is pending/read-only and
+   execution-halted. No consensus, cap, null result, cancellation, or failure
+   may recommend `ralph`, `team`, autopilot, or another executable skill.
+6. **Deliberate mode.** When high-risk work requests DELIBERATE mode, Planner
+   must return exactly three actionable pre-mortem scenarios and all four
+   expanded test pillars: unit, integration, e2e, and observability. Missing or
+   weak structured sections are non-approval. SHORT mode does not require them.
 
-## Core Directive
+## Role responsibilities
 
-You are executing a strict multi-agent state machine. Your primary goal is to prevent **Simulated Consensus** — hallucinating all three approvals in a single generation. True consensus requires:
+### Planner
 
-- Adversarial pushback (Architect and Critic must disagree before they agree).
-- Isolated reasoning (each role is a separately invoked agent).
-- Verifiable file-system checkpoints (artifacts written to `plans/` between roles).
+Investigate requirements and codebase facts through available read-only agents,
+then produce a 3–6 step actionable plan. Include:
 
-**Self-approval is strictly prohibited.**
+- RALPLAN-DR: 3–5 principles, the top 3 decision drivers, and at least 2
+  viable options with bounded pros/cons;
+- guardrails, task acceptance criteria, dependencies, risks, and open questions;
+- an ADR with Decision, Drivers, Alternatives Considered, Why Chosen,
+  Consequences, and Follow-ups;
+- DELIBERATE additions when that mode is active.
 
-## Hard Constraints
+Planner does not implement, commit, push, execute, or approve.
 
-1. **Isolated Roles.** Each role (Planner, Architect, Critic) MUST be executed by a separately invoked agent. The parent agent MUST NOT perform the work of any role itself.
-2. **No Single-Turn Consensus.** The Planner's draft, the Architect's review, and the Critic's approval MUST NOT appear in the same output block.
-3. **Mandatory Pushback.** The Architect or Critic must provide genuine pushback on the first pass. Rubber-stamping a first draft is a violation of the protocol.
-4. **Auto-start is slash/flag only.** The pipeline auto-starts ONLY when the prompt begins with `/ralplan` or `/brainstorm` (or uses `--ralplan` / `--brainstorm` flags). Bare mentions of "ralplan" in prose do NOT trigger auto-start, because role prompts reference the skill name naturally and must not re-trigger a fresh pipeline for each consensus round.
+### Architect
 
-## Iteration Loop
+Read-only and independent. Review the fixed Planner snapshot for technical
+soundness, alternatives, ownership/lifecycle risks, compatibility, and
+trade-offs. Always provide a steelman antithesis and a real tradeoff tension,
+then return an explicit `APPROVE` or `REVISION_NEEDED` verdict. An empty
+`principleViolations` array is evidence, not a verdict.
 
+### Critic
+
+Read-only and independent. Review the same fixed Planner snapshot without
+seeing Architect output. Check principle/option consistency, risk mitigation,
+acceptance criteria, verification, missing assumptions, and deliberate-mode
+hard gates. Return an explicit `APPROVE`, `ITERATE`, or `REJECT` verdict.
+
+## Loop and termination
+
+```text
+Planner(snapshot N)
+       |
+       +--> Architect(snapshot N) --+
+       |                             |
+       +--> Critic(snapshot N) ------+
+                                      |
+                 both explicit APPROVE and mode gates pass?
+                    yes -> pending consensus result
+                    no  -> Planner(snapshot N+1, with both reviews)
 ```
-        +-----------+        REVISION NEEDED        +-----------+
-        |  PLANNER  | <---------------------------+ | ARCHITECT |
-        |  (State1) |                              +-----------+
-        +-----------+                                      |
-              |                                            | APPROVE
-              v                                            v
-        plans/drafts/plan_draft.md                  plans/drafts/architect_review.md
-              |                                            |
-              | APPROVE                                   |
-              v                                            v
-        +-----------+        REVISION NEEDED        +-----------+
-        |  PLANNER  | <---------------------------+ |  CRITIC   |
-        |  (State1) |                              +-----------+
-        +-----------+                                      |
-              ^                                            | APPROVE
-              | REVISION NEEDED / REJECT                   v
-              |                                  plans/plan.md
-              +---------------------------------- PIPELINE_RALPLAN_COMPLETE
-```
 
-1. **State 1 — Planner.** Creates or revises the plan from the spec and prior feedback. Writes to `plans/drafts/plan_draft.md` and MUST include a RALPLAN-DR summary before handing off to the Architect.
-2. **State 2 — Architect.** Reviews `plans/drafts/plan_draft.md` for technical feasibility. Must produce the strongest steelman antithesis. **REVISION NEEDED** routes back to State 1; **APPROVE** advances to State 3. **SEQUENTIAL** — await the Architect's complete verdict before invoking the Critic.
-3. **State 3 — Critic.** Reviews the Architect-approved draft. Challenges assumptions, surfaces edge cases, verifies security/ops concerns. **REVISION NEEDED** or **REJECT** routes back to State 1; **APPROVE** saves the consensus-approved plan to `plans/plan.md`.
-4. **Re-review loop.** Any non-APPROVE verdict loops back to State 1. Maximum **5 iterations** total.
-5. **Termination.** Success — all three roles approve, emit `PIPELINE_RALPLAN_COMPLETE`. Failure — max iterations reached, halt and report. Escalation — fundamental disagreement between Architect and Critic, halt and request human input to break the tie.
+The Critic is not skipped when Architect rejects. The next Planner may receive
+both settled review results, but those results are never passed from Architect
+to Critic. After five rounds, return the best/last draft with `capped: true`,
+`pending_approval: true`, and `execution_halted: true`; require manual review
+and provide no execution recommendation.
 
-## Output Artifacts
+## OCC workflow arguments
 
-| File                               | Purpose                                                                                                                                                                                                                                                                                                  |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plans/spec.md`                    | Foundational requirements. MUST contain `## Acceptance Criteria` (testable boolean statements) and `## Requirement Coverage Map`.                                                                                                                                                                        |
-| `plans/drafts/plan_draft.md`       | Working plan during consensus review. MUST include an implementation plan (task breakdown, dependency graph, acceptance criteria, risk register) and the **RALPLAN-DR** summary block.                                                                                                                   |
-| `plans/plan.md`                    | Consensus-approved implementation guide. MUST include `## Architecture Decision Record` (Decision, Drivers, Alternatives Considered, Why Chosen, Consequences, Follow-ups), `## Task Breakdown` with exact file paths, `## Dependency Graph`, `## Acceptance Criteria` per task, and `## Risk Register`. |
-| `plans/drafts/architect_review.md` | Architect verdict — `APPROVE` or `REVISION NEEDED` (with steelman antithesis and tradeoff tension).                                                                                                                                                                                                      |
-| `plans/drafts/critic_review.md`    | Critic verdict — `APPROVE`, `ITERATE`, or `REJECT` (with severity-tagged findings).                                                                                                                                                                                                                      |
-| `plans/answers.md`                 | Brainstorm answers accumulation.                                                                                                                                                                                                                                                                         |
-| `plans/open-questions.md`          | Brainstorm open questions.                                                                                                                                                                                                                                                                               |
+The canonical `examples/workflows/ralplan-occ.mjs` accepts `idea`,
+`deliberate`, `maxIterations`, `artifactsDir`, `planName`,
+`architectModel`, and `criticModel`. Its local gate is controlled by `gate`:
+`gate: false` bypasses the heuristic; otherwise an unanchored short prompt may
+return a pending redirect. `interactive` only controls emission of
+non-blocking `[pending approval]` marker text. The workflow VM cannot pause for
+a user, ask a host question, or turn a marker into approval; actual approval
+and invocation routing belong to the host. `executeOnConsensus` is accepted
+only for compatibility, reported as ignored, and never changes safety state.
 
-The RALPLAN-DR block in `plan_draft.md` contains: **Principles** (3-5), **Decision Drivers** (top 3), and **Viable Options** (≥2 or explicit invalidation rationale). In **DELIBERATE** mode it additionally contains a **Pre-Mortem** (3 failure scenarios) and an **Expanded Test Plan** (unit / integration / e2e / observability).
+The compact `ralplan-consensus.mjs` example is SHORT-only. It shares the fixed
+snapshot, explicit verdict, unconditional Critic, five-round, and pending
+boundary contract but does not advertise DELIBERATE or interactive parity.
 
-## Completion Signals
+## Artifacts and execution separation
 
-The pipeline emits exactly one of these strings on termination. Hosts MUST treat them as the canonical stop markers:
+Planning may produce bounded Markdown evidence only. A claimed path is not
+proof of a valid artifact, and the Phase 1 workflow does not provide a host
+artifact verifier or persisted approval state. Artifact existence/content
+verification and host-owned run/approval state are later phases. Do not treat
+`plans/plan.md`, a completion marker, or a successful workflow return as
+consent to execute.
 
-- `PIPELINE_RALPLAN_COMPLETE` — consensus reached, `plans/plan.md` written.
-- `PIPELINE_EXECUTION_COMPLETE` — execution stage finished (host-defined).
-- `PIPELINE_RALPH_COMPLETE` — verification (RALPH) stage finished.
-- `PIPELINE_QA_COMPLETE` — QA stage finished.
-- `BRAINSTORM_OPEN_QUESTIONS_READY` — brainstorm variant surfaced its open questions.
-- `CONSENSUS_APPROVED` — intermediate marker from the Critic on acceptance.
-- `CONSENSUS_REJECTED` — intermediate marker from the Critic on rejection.
-- `EXPANSION_COMPLETE` — DELIBERATE-mode pre-mortem + expanded test plan finished.
-- `PLAN_CREATED` — Planner handed off its draft.
-- `PLANNING_COMPLETE` — generic alias for `PIPELINE_RALPLAN_COMPLETE`.
+If the host cannot provide isolated agent invocations, stop with:
 
-## Termination Conditions
-
-- **Success.** All three roles approve; emit `PIPELINE_RALPLAN_COMPLETE`; `plans/plan.md` exists.
-- **Failure.** 5 iterations exhausted without unanimous approval; halt with the last verdict and a summary of unresolved disagreements.
-- **Escalation.** Architect and Critic reach a fundamental disagreement the Planner cannot resolve; halt and request human input. Artifacts on disk are preserved.
-- **Cancel.** `/ralplan:cancel` ends the session; artifacts on disk are preserved.
-
-## Planning / Execution Boundary
-
-The RALPLAN consensus loop runs entirely within the **planning** stage. On `PIPELINE_RALPLAN_COMPLETE` the pipeline advances to:
-
-1. **Execution** — implements the approved plan.
-2. **Verification (RALPH)** — reviews the implementation's quality.
-3. **QA** — cycles build / lint / test until green.
-
-Planning writes only markdown artifacts under `plans/` — **never** code files. Each pipeline run creates a single Git worktree under `<repo>-worktrees/` and all planning artifacts live inside that worktree. The `--ralplan` / `--brainstorm` CLI flags and the `/ralplan` slash command both auto-start a pipeline.
-
-## Brainstorm Variant
-
-`/brainstorm` runs the same consensus loop but opens with a question-elicitation phase that writes to `plans/open-questions.md` and accumulates user answers in `plans/answers.md` before the Planner drafts. The `BRAINSTORM_OPEN_QUESTIONS_READY` signal is emitted once questions are surfaced; the loop proceeds to `PIPELINE_RALPLAN_COMPLETE` after consensus on the resulting plan.
-
-## Fallback Mode
-
-There is no single-turn fallback. If the host cannot isolate the three roles into separate agent invocations (e.g. extremely constrained environments), the skill is **not applicable** — the protocol explicitly forbids parent-agent role substitution. In that case, halt and report "ralplan requires role-isolated agent execution; current host does not support it."
+> ralplan requires role-isolated agent execution; current host does not support it.
