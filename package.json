@@ -73,6 +73,7 @@
     "src/interactive-lineage.ts",
     "src/spawn-tree-context.ts",
     "src/multiplexer.ts",
+    "src/multiplexer-contracts.ts",
     "src/multiplexer-tmux.ts",
     "src/multiplexer-zellij.ts",
     "src/multiplexer-herdr.ts",
