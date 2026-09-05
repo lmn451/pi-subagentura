@@ -30,7 +30,7 @@ import type {
   PaneActivity,
   PaneLiveness,
   PaneRef,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 import {
   boundCaptureOutput,
   commandExists,
@@ -41,7 +41,7 @@ import {
   sanitizeViewerTitle,
   shellEscape,
   spawnNativeViewer,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 
 /**
  * Optional test/CI isolation for real tmux integration tests.

@@ -36,7 +36,7 @@ import type {
   PaneActivity,
   PaneLiveness,
   PaneRef,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 import {
   boundCaptureOutput,
   commandExists,
@@ -46,7 +46,7 @@ import {
   sanitizeViewerTitle,
   shellEscape,
   spawnNativeViewer,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 
 /**
  * Normalize a zellij pane id to the bare-integer string form used by

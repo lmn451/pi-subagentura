@@ -26,23 +26,11 @@ No `NPM_TOKEN` secret, no token rotation, nothing to leak.
 
 ## Release Process
 
-```bash
-# 1. Edit version in package.json (e.g., 1.0.2 → 1.0.3)
-
-# 2. Commit, tag, and push
-git add package.json
-git commit -m "chore: bump version to X.Y.Z"
-git tag vX.Y.Z
-git push origin master
-git push origin vX.Y.Z
-```
-
-Or use `npm version`:
-
-```bash
-npm version patch   # bumps version, commits, tags
-git push origin master --follow-tags
-```
+Follow the [authoritative release flow in CONTRIBUTING.md](../CONTRIBUTING.md#release-flow).
+It covers the reviewed release PR, synchronized `package.json`,
+`package-lock.json`, and changelog updates, required checks, merge gate, and
+tagging the merged `master` commit. Keep this page focused on the OIDC
+publishing workflow described above.
 
 ## Verify
 

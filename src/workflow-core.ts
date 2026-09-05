@@ -9,7 +9,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { normalizeUsage, type SubagentResult, type Usage } from "./helpers";
+import type { SubagentResult } from "./helpers";
+import { normalizeUsage, zeroUsage, type Usage } from "./usage";
+
+export { zeroUsage };
 
 // ── Limits ───────────────────────────────────────────────────────────
 export const MAX_TOTAL_AGENTS = 1000;
@@ -30,16 +33,6 @@ export function defaultConcurrency(): number {
 export function defaultProcessConcurrency(): number {
   const n = cpus()?.length ?? 4;
   return Math.max(1, Math.min(4, n - 2));
-}
-export function zeroUsage(): Usage {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  };
 }
 
 export type WorkflowCostSource =

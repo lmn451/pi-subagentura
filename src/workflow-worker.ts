@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
-import { existsSync, readFileSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { join } from "node:path";
 import {
   assertNever,
@@ -12,8 +13,14 @@ import {
   type SubagentEvent,
   type TurnTerminalEvent,
 } from "./artifact";
-import { debugLog, usageFromAssistantMessages } from "./helpers";
-import type { SubagentResult, Usage } from "./helpers";
+import { debugLog } from "./helpers";
+import type { SubagentResult } from "./helpers";
+import {
+  addUsageSamples,
+  usageFromAssistantMessage,
+  zeroUsage,
+  type Usage,
+} from "./usage";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   INTERACTIVE_DEAD_GRACE_TICKS,
@@ -43,7 +50,6 @@ import {
   type WorkflowUsage,
   addWorkflowUsage,
   workflowUsageFromUsage,
-  zeroUsage,
   zeroWorkflowUsage,
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
@@ -711,30 +717,101 @@ function artifactFor(state: InteractiveSubagentState) {
   };
 }
 
+const SESSION_USAGE_READ_CHUNK_BYTES = 64 * 1024;
+
+interface SessionUsageAccumulator {
+  total: Usage;
+  found: boolean;
+}
+
+function consumeSessionUsageLine(
+  line: string,
+  accumulator: SessionUsageAccumulator,
+): void {
+  if (!line.trim()) return;
+  let entry: unknown;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    /* skip malformed lines */
+    return;
+  }
+  if (!entry || typeof entry !== "object") return;
+  const candidate = entry as { type?: unknown; message?: unknown };
+  if (candidate.type !== "message" || !candidate.message) return;
+  const usage = usageFromAssistantMessage(candidate.message);
+  if (!usage) return;
+  accumulator.found = true;
+  accumulator.total = addUsageSamples(accumulator.total, usage);
+}
+
+/** Process decoded text while retaining only the current incomplete line. */
+function consumeSessionUsageText(
+  text: string,
+  lineParts: string[],
+  accumulator: SessionUsageAccumulator,
+): void {
+  let start = 0;
+  for (;;) {
+    const lineEnd = text.indexOf("\n", start);
+    if (lineEnd < 0) break;
+    lineParts.push(text.slice(start, lineEnd));
+    consumeSessionUsageLine(lineParts.join(""), accumulator);
+    lineParts.length = 0;
+    start = lineEnd + 1;
+  }
+  if (start < text.length) lineParts.push(text.slice(start));
+}
+
 /**
  * Parse token usage from a child Pi's session JSONL file.
- * Reads assistant messages with `usage` data and aggregates them,
- * mirroring the in-process path in helpers.ts.
+ * Reads assistant messages with `usage` data and aggregates them while
+ * retaining only one incomplete line and one bounded read chunk in memory.
  * Returns zeroUsage() if the file is missing, unparseable, or has no usage data.
  */
-function parseUsageFromSessionFile(sessionFile: string | undefined): Usage {
+export async function parseUsageFromSessionFile(
+  sessionFile: string | undefined,
+): Promise<Usage> {
+  if (!sessionFile) return zeroUsage();
+  let handle: FileHandle | undefined;
   try {
-    if (!sessionFile || !existsSync(sessionFile)) return zeroUsage();
-    const raw = readFileSync(sessionFile, "utf8");
-    const messages: unknown[] = [];
-    for (const line of raw.split("\n").filter((l) => l.trim())) {
+    handle = await open(sessionFile, "r");
+    const accumulator: SessionUsageAccumulator = {
+      total: zeroUsage(),
+      found: false,
+    };
+    const lineParts: string[] = [];
+    const decoder = new StringDecoder("utf8");
+    const buffer = Buffer.allocUnsafe(SESSION_USAGE_READ_CHUNK_BYTES);
+    const fileSize = (await handle.stat()).size;
+    let position = 0;
+    while (position < fileSize) {
+      const length = Math.min(buffer.byteLength, fileSize - position);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      consumeSessionUsageText(
+        decoder.write(buffer.subarray(0, bytesRead)),
+        lineParts,
+        accumulator,
+      );
+    }
+    consumeSessionUsageText(decoder.end(), lineParts, accumulator);
+    if (lineParts.length > 0) {
+      consumeSessionUsageLine(lineParts.join(""), accumulator);
+    }
+    return accumulator.found ? accumulator.total : zeroUsage();
+  } catch {
+    /* Missing or unreadable session files do not invalidate the terminal result. */
+    return zeroUsage();
+  } finally {
+    if (handle) {
       try {
-        const entry = JSON.parse(line);
-        if (entry?.type === "message" && entry.message) {
-          messages.push(entry.message);
-        }
+        await handle.close();
       } catch {
-        /* skip malformed lines */
+        /* The file may already be closed after an interrupted read. */
       }
     }
-    return usageFromAssistantMessages(messages, zeroUsage());
-  } catch {
-    return zeroUsage();
   }
 }
 
@@ -786,6 +863,30 @@ function readCurrentTurnTerminal(
   return cursor.terminal;
 }
 
+function requestInteractiveCancellation(
+  state: InteractiveSubagentState,
+  onCancellationSnapshot:
+    ((receipt: CancellationSnapshotReceipt) => void) | undefined,
+): void {
+  try {
+    const cancelled = cancelInteractiveSubagent(state.id, "workflow", state);
+    if (cancelled?.cancellationSnapshot) {
+      onCancellationSnapshot?.(cancelled.cancellationSnapshot);
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
+function abortedInteractiveResult(usage: Usage): SubagentResult {
+  return {
+    isError: true,
+    output: "",
+    usage,
+    errorMessage: "aborted",
+  };
+}
+
 /**
  * Await a process-backed sub-agent's owned terminal artifact event, then read the
  * matching immutable `outputs/<eventId>.md` snapshot by turnId. Mutable output.md
@@ -804,115 +905,123 @@ export async function awaitInteractiveResult(
     sawTurnStart: false,
     terminal: null,
   };
-  for (;;) {
-    let terminal: TurnTerminalEvent | null;
-    if (signal?.aborted) {
-      try {
-        const cancelled = cancelInteractiveSubagent(
-          state.id,
-          "workflow",
-          state,
+  let cancellationRequested = false;
+  const requestCancellationOnce = () => {
+    if (cancellationRequested) return;
+    cancellationRequested = true;
+    requestInteractiveCancellation(state, onCancellationSnapshot);
+  };
+  const onAbort = () => requestCancellationOnce();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  try {
+    for (;;) {
+      let terminal: TurnTerminalEvent | null;
+      if (signal?.aborted) {
+        requestCancellationOnce();
+        const cancellationUsage = await parseUsageFromSessionFile(
+          state.sessionFile,
         );
-        if (cancelled?.cancellationSnapshot) {
-          onCancellationSnapshot?.(cancelled.cancellationSnapshot);
-        }
-      } catch {
-        /* best effort */
+        return abortedInteractiveResult(cancellationUsage);
       }
-      const cancellationUsage = parseUsageFromSessionFile(state.sessionFile);
-      return {
-        isError: true,
-        output: "",
-        usage: cancellationUsage,
-        errorMessage: "aborted",
-      };
-    }
-    terminal = readCurrentTurnTerminal(art, eventCursor);
-    if (terminal) {
-      const usage = parseUsageFromSessionFile(state.sessionFile);
-      switch (terminal.type) {
-        case "completion":
-          switch (terminal.outcome) {
-            case "done":
-              return {
-                isError: false,
-                output:
-                  readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                usage,
-                ...(state.model !== undefined ? { model: state.model } : {}),
-              };
-            case "error":
-            case "cancelled":
-              return {
-                isError: true,
-                output:
-                  readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                usage,
-                errorMessage:
-                  terminal.errorMessage ??
-                  terminal.message ??
-                  `interactive sub-agent ${terminal.outcome}`,
-              };
-            default:
-              return assertNever(terminal.outcome);
+      terminal = readCurrentTurnTerminal(art, eventCursor);
+      if (terminal) {
+        const usage = await parseUsageFromSessionFile(state.sessionFile);
+        if (signal?.aborted) {
+          requestCancellationOnce();
+          return abortedInteractiveResult(usage);
+        }
+        switch (terminal.type) {
+          case "completion":
+            switch (terminal.outcome) {
+              case "done":
+                return {
+                  isError: false,
+                  output:
+                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
+                  usage,
+                  ...(state.model !== undefined ? { model: state.model } : {}),
+                };
+              case "error":
+              case "cancelled":
+                return {
+                  isError: true,
+                  output:
+                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
+                  usage,
+                  errorMessage:
+                    terminal.errorMessage ??
+                    terminal.message ??
+                    `interactive sub-agent ${terminal.outcome}`,
+                };
+              default:
+                return assertNever(terminal.outcome);
+            }
+          case "done":
+            return {
+              isError: false,
+              output: readOutput(art) ?? "(no output)",
+              usage,
+              ...(state.model !== undefined ? { model: state.model } : {}),
+            };
+          case "error":
+          case "cancelled":
+            return {
+              isError: true,
+              output: readOutput(art) ?? "(no output)",
+              usage,
+              errorMessage:
+                terminal.message ?? `interactive sub-agent ${terminal.type}`,
+            };
+          default:
+            return assertNever(terminal);
+        }
+      }
+      // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
+      let alive = true;
+      try {
+        alive = await isPaneAliveAsync(state);
+      } catch {
+        alive = false;
+      }
+      if (!alive) {
+        deadTicks++;
+        debugLog("warn", "interactive_dead_pane", {
+          deadTicks,
+          graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
+        });
+        if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
+          const output = readOutput(art) ?? "(no output)";
+          const usage = await parseUsageFromSessionFile(state.sessionFile);
+          if (signal?.aborted) {
+            requestCancellationOnce();
+            return abortedInteractiveResult(usage);
           }
-        case "done":
-          return {
-            isError: false,
-            output: readOutput(art) ?? "(no output)",
-            usage,
-            ...(state.model !== undefined ? { model: state.model } : {}),
-          };
-        case "error":
-        case "cancelled":
           return {
             isError: true,
-            output: readOutput(art) ?? "(no output)",
+            output,
             usage,
-            errorMessage:
-              terminal.message ?? `interactive sub-agent ${terminal.type}`,
+            errorMessage: "interactive sub-agent pane exited before completing",
           };
-        default:
-          return assertNever(terminal);
+        }
+      } else {
+        deadTicks = 0;
       }
-    }
-    // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
-    let alive = true;
-    try {
-      alive = await isPaneAliveAsync(state);
-    } catch {
-      alive = false;
-    }
-    if (!alive) {
-      deadTicks++;
-      debugLog("warn", "interactive_dead_pane", {
-        deadTicks,
-        graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
-      });
-      if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-        const output = readOutput(art) ?? "(no output)";
-        return {
-          isError: true,
-          output,
-          usage: parseUsageFromSessionFile(state.sessionFile),
-          errorMessage: "interactive sub-agent pane exited before completing",
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", finish);
+          resolve();
         };
-      }
-    } else {
-      deadTicks = 0;
+        const timer = setTimeout(finish, pollMs);
+        signal?.addEventListener("abort", finish, { once: true });
+        if (signal?.aborted) finish();
+      });
     }
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, pollMs);
-      signal?.addEventListener("abort", finish, { once: true });
-      if (signal?.aborted) finish();
-    });
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }

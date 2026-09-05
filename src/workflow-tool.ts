@@ -668,7 +668,7 @@ export function registerWorkflowTool(
       "",
       "Injected helpers/globals:",
       "  agent(prompt, opts?)   -> spawn one isolated sub-agent. opts: { schema?, label?, phase?,",
-      "                            model?, persona?, isolation?, agentType?, thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
+      "                            model?, persona?, isolation?, agentType? (compatibility no-op), thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
       "                            with schema returns a value validated against the supported JSON Schema",
       "                            subset (type, enum, required/properties, additionalProperties, items,",
       "                            minItems, maxItems), or null after retries. Returns null on error",

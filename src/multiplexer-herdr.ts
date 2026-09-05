@@ -17,7 +17,7 @@ import type {
   PaneActivity,
   PaneLiveness,
   PaneRef,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 import {
   boundCaptureOutput,
   commandExists,
@@ -26,7 +26,7 @@ import {
   MUX_CAPABILITIES,
   safeSegment,
   shellEscape,
-} from "./multiplexer";
+} from "./multiplexer-contracts";
 
 const HERDR_TIMEOUT_MS = 5000;
 const MAX_HERDR_SOCKET_PATH_LENGTH = 4096;
