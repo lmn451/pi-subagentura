@@ -2190,6 +2190,7 @@ describe("awaitInteractiveResult", () => {
 
       controller.abort();
       await vi.advanceTimersByTimeAsync(0);
+      await pending;
 
       expect(result).toBeDefined();
       if (!result) return;

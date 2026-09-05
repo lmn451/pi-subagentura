@@ -99,6 +99,46 @@ describe("high-concurrency input latency regressions", () => {
     expect(asynchronousProbe).toHaveBeenCalled();
   });
 
+  it("keeps the parent event loop responsive while scanning a large session log", async () => {
+    const cwd = temporaryDirectory("subagentura-workflow-usage-latency-");
+    const state = interactiveState("agent-usage", cwd);
+    const eventsFile = join(state.artifactDir, "events.ndjson");
+    writeFileSync(
+      eventsFile,
+      `${JSON.stringify({ ts: 1, type: "done", status: "done", exitCode: 0 })}\n`,
+    );
+    const sessionLine = `${JSON.stringify({
+      type: "message",
+      message: { role: "user", content: "x".repeat(120) },
+    })}\n`;
+    writeFileSync(state.sessionFile, sessionLine.repeat(200_000));
+
+    let resultSettled = false;
+    let timerObservedPending = false;
+    const timerProbe = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        timerObservedPending = !resultSettled;
+        resolve();
+      }, 0);
+    });
+    const result = await awaitInteractiveResult(state, undefined, 1);
+    resultSettled = true;
+    await timerProbe;
+
+    expect(result).toMatchObject({
+      isError: false,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 0,
+      },
+    });
+    expect(timerObservedPending).toBe(true);
+  });
+
   it("persists a 200-subagent poll without quadratic input delay", async () => {
     const cwd = temporaryDirectory("subagentura-poller-latency-");
     const owner = { id: 901, generation: 1 };
