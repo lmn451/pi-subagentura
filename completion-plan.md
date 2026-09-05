@@ -63,9 +63,13 @@ or semantic resolver.
 - **Consumed**: terminal output was retrieved manually, so later automatic
   delivery omits the matching completion.
 - **Consumption receipt**: a durable marker that manual or lifecycle handling
-  consumed a terminal result, normally a parent-session custom entry.
-- **Fallback consumption ledger**: a private, session-scoped append-only NDJSON
-  ledger used when the parent session cannot persist a consumption entry.
+  consumed a terminal result. Manual consumption first appends it and calls
+  `fsyncSync` in the private parent-session ledger, then best-effort mirrors it as a parent-session custom
+  entry.
+- **Consumption ledger**: a private, session-scoped append-only NDJSON ledger
+  beneath the parent Pi session directory. Manual consumption writes it first;
+  the parent session entry is a best-effort mirror. A manager without a session
+  directory uses a process-private temporary root without restart durability.
 - **Completion group**: an explicit barrier keyed by a caller-declared `completionGroupId`.
 - **Sealed**: the spawning parent turn settled, so no new group members may join.
 
@@ -199,11 +203,15 @@ consumption entry before returning:
 - `get_subagent_result`;
 - `get_workflow_result`.
 
-Parent session entries are the preferred receipt location. If `appendEntry` is
-unavailable or fails, the coordinator losslessly appends the receipt to a
-private, session-scoped append-only NDJSON ledger under `<cwd>/.pi/`, keyed by
-the parent session identity. Fallback-ledger reads take a fixed snapshot of the
-current file size and stream it with bounded chunks and line buffers.
+The coordinator first losslessly appends the receipt and calls `fsyncSync` in a private,
+session-scoped append-only NDJSON ledger beneath the parent Pi session
+directory, outside the project working tree, keyed by the parent session
+identity. After that append succeeds, it best-effort mirrors the receipt into a
+parent session entry. A manager without a session directory uses a random
+process-private temporary root and does not claim restart durability. A ledger
+write failure blocks manual collection; lifecycle retirement has a separate
+best-effort path. Ledger reads take a fixed snapshot of the current file size
+and stream it with bounded chunks and line buffers.
 Reconciliation advances through later snapshots so late-published receipts are
 not lost without repeatedly loading or scanning the whole file.
 
@@ -252,14 +260,15 @@ changing workflow IDs, retained workflow names, or retrieval identity.
 
 Interactive completion policy, group identity, event cursors, pending intents,
 and legacy receipts rehydrate only into the matching parent session. Consumption
-receipts prefer parent-session entries and fall back to a private ledger beneath
-Pi's parent session directory, never the project working directory. Partial or
-programmatic managers without a session directory use a random process-private
-temporary root and do not claim restart durability. In-process jobs and
-background workflows remain parent-session scoped and do not survive session
-replacement. `new` and `fork` do not import prior completion work.
+receipts use the private ledger beneath Pi's parent session directory first and
+then mirror into parent-session entries; they never use the project working
+directory. Partial or programmatic managers without a session directory use a
+random process-private temporary root and do not claim restart durability.
+In-process jobs and background workflows remain parent-session scoped and do not
+survive session replacement. `new` and `fork` do not import prior completion
+work.
 
-Fallback appends remain lossless during a parent-entry outage, but bootstrap and
+Ledger appends remain lossless even when mirroring into a parent entry fails, but bootstrap and
 incremental reconciliation enforce total byte, record-count, line, identifier,
 and selector bounds. If a snapshot exceeds those bounds, reconciliation ignores
 that unchecked snapshot and fails open to a possible duplicate manifest rather
@@ -268,7 +277,7 @@ Turn-scoped expectations require an exact `turnId`; source-only receipts cannot
 consume current or future interactive turns.
 
 Session shutdown clears live coordinator state after recording lifecycle
-retirements; it does not truncate or delete fallback ledgers. Same-session
+retirements; it does not truncate or delete consumption ledgers. Same-session
 reload, resume, or restart can reconcile the matching ledger, while replacement
 sessions leave old private files on disk without importing them.
 
@@ -310,13 +319,12 @@ npm run test:zellij
 Also run the terminal E2E suite. Runtime diagnostics use `debugLog`; published
 runtime code must not call host `console.*` methods.
 
-## External documentation sync handoff
+## Documentation ownership
 
-The repository-managed root docs and published example guide carry the current
-contract. The externally managed `pi-docs` source must mirror these changes into
-`docs/workflows.md`: add the background completion API/ownership semantics and
-replace mutable `output.md` polling with terminal-event selection followed by the
-matching immutable `outputs/<eventId>.md` snapshot. Its frontmatter should add
-`completion`, `completionPolicy`, and `completionGroupId`. The Phase 2
-`docs/workflow.md` design should either gain the current coordinator flow or be
-marked historical. Do not edit generated `docs/` copies in this repository.
+The root documentation and every file under `docs/` are maintained in this
+repository and are the source of truth for the published contract. The
+separately published `pi-docs` injector indexes these files downstream; it is
+not an editing source. Keep `docs/workflows.md` aligned with the background
+completion API and immutable terminal snapshots, and keep the Phase 2
+`docs/workflow.md` design clearly marked as historical where it describes the
+earlier implementation.

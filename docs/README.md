@@ -5,15 +5,20 @@ keywords: [docs, index, workflows, code-review, publishing, runtime]
 
 # Documentation
 
-Reference docs for the pi-subagentura project.
+Reference docs for the pi-subagentura project. The `docs/` directory is
+maintained in this repository and is the documentation source of truth;
+[`pi-docs`](https://github.com/lmn451/pi-docs) indexes these files for its
+published injector.
 
-| Doc                                                        | Purpose                                                                 |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [bun.md](./bun.md)                                         | JavaScript runtime and package manager conventions                      |
-| [publish.md](./publish.md)                                 | npm release process via OIDC trusted publisher                          |
-| [terminal-e2e.md](./terminal-e2e.md)                       | Terminal E2E harness: how to run it, determinism rules, recording tools |
-| [workflows.md](./workflows.md)                             | Workflow scripts shipped in the repo (consensus pipelines + converters) |
-| [interactive-tmux-review.md](./interactive-tmux-review.md) | Code review of `src/interactive-tmux.ts` via GLM-5.2                    |
+| Doc                                                                                | Purpose                                                                 |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [bun.md](./bun.md)                                                                 | JavaScript runtime and package manager conventions                      |
+| [publish.md](./publish.md)                                                         | npm release process via OIDC trusted publisher                          |
+| [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness: how to run it, determinism rules, recording tools |
+| [workflow.md](./workflow.md)                                                       | Historical Phase 2 workflow design and implementation notes             |
+| [workflows.md](./workflows.md)                                                     | Workflow scripts shipped in the repo (consensus pipelines + converters) |
+| [interactive-tmux-review.md](./interactive-tmux-review.md)                         | Historical code review of `src/interactive-tmux.ts` via GLM-5.2         |
+| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Historical test-isolation design notes                                  |
 
 ## Known limitations
 
@@ -37,7 +42,12 @@ See [workflows.md](./workflows.md) for usage and the workflow-tool pitfalls we h
 
 ## Code review artifacts
 
-The interactive subagent code review on 2026-06-18 surfaced 3 High-priority bugs in `src/interactive-tmux.ts`, 5 Medium, and 6 Low. All findings are unfixed.
+The interactive subagent code review on 2026-06-18 is an archived report of
+the implementation at that date. It surfaced 3 High-priority bugs in
+`src/interactive-tmux.ts`, 5 Medium, and 6 Low; subsequent changes addressed
+the three High-priority launch-script findings. Treat the report's remaining
+recommendations and file locations as historical material that must be
+rechecked against current source before acting on them.
 
 See [interactive-tmux-review.md](./interactive-tmux-review.md) for the full report with file:line citations, bash reproductions for H2/H3, and recommended test cases.
 

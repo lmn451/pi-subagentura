@@ -107,8 +107,11 @@ Existing agent/item caps, concurrency, timeouts, cancellation, and errors still 
 Workflow scripts are trusted agent-authored JavaScript. The VM improves
 determinism but is not a security boundary, so never run untrusted JavaScript.
 Background workflow jobs are scoped to the current parent session and are
-cancelled by reload, resume, quit, or a new session. Attachable interactive
-sub-agents use durable artifacts and can survive those boundaries.
+cancelled by reload, resume, quit, or a new session. Standalone attachable
+interactive sub-agents use durable artifacts and survive parent `reload`,
+`resume`, and `quit` continuity transitions. A fresh `new` or `fork` transition
+cleans up their owned panes and state entries; workflow-owned interactive panes
+are also cleaned up with their owning workflow.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
@@ -599,24 +602,26 @@ artifact survives parent restarts.
   that may wait for user input. Other children and parent sessions receive the
   neutral activity result without changing their user-attention behavior.
 
-The interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
+The standalone interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
 The state file and subagent panes are preserved across these actions:
 
-| Action                                            | State file  | Panes      | Rehydrated next start?                   |
-| ------------------------------------------------- | ----------- | ---------- | ---------------------------------------- |
-| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept        | Preserved  | ✅ Same session, parentSessionId matches |
-| **Ctrl+D → fresh `pi` (no session)**              | Kept        | Preserved  | ❌ Different session, no match           |
-| **`/reload`**                                     | Kept        | Preserved  | ✅ Same session                          |
-| **`/resume`** (switch to another session)         | Kept        | Preserved  | ✅ If parentSessionId matches            |
-| **`/new`**                                        | **Deleted** | **Killed** | ❌ Clean slate                           |
-| **`/fork`**                                       | **Deleted** | **Killed** | ❌ Clean slate                           |
+| Action                                            | State file                   | Panes      | Rehydrated next start?                       |
+| ------------------------------------------------- | ---------------------------- | ---------- | -------------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved  | ✅ Same session, parentSessionId matches     |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved  | ❌ Different session, no match               |
+| **`/reload`**                                     | Kept                         | Preserved  | ✅ Same session                              |
+| **`/resume`** (switch to another session)         | Kept                         | Preserved  | ✅ If parentSessionId matches                |
+| **`/new`**                                        | **Deleted**                  | **Killed** | ❌ Clean slate                               |
+| **`/fork`**                                       | Kept (owned entries removed) | **Killed** | ❌ Fresh fork does not rehydrate prior state |
 
-> **Note:** `/new` deletes the state file. If you do `/new` and then `/resume`
-> back to the session where subagents were spawned, they **will not reappear**
-> — the state file was already deleted. Only `/reload` or a restart with the
-> same session (`--session`/`-r`) preserves the registry.
+> **Note:** `/new` deletes the whole state file. `/fork` removes entries owned
+> by the old parent while preserving any unrelated entries in that file; a
+> fresh fork does not rehydrate prior state. If you do `/new` and then
+> `/resume` back to the session where subagents were spawned, they **will not
+> reappear** because the state file was already deleted. Only `/reload` or a
+> restart with the same session (`--session`/`-r`) preserves the registry.
 
 On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
@@ -645,10 +650,12 @@ in-flight agents. Interactive lineage can include descendants created from
 different working directories. Interactive
 children receive a minimal child runtime that can launch more interactive
 children, but does not register in-process or workflow orchestration tools.
-Recursion is bounded by default to depth 8 and 256 **live** lineage nodes; the
-manifests of exited agents are pruned so a long-lived session's all-time spawn
-total never exhausts the budget. The supervisor shows active, actionable work
-only. Cancelled, completed, malformed, orphaned, cyclic, and stale entries remain
+Recursion is bounded by the active orchestration policy: legacy orchestration
+retains its depth of 8, while Orchestratorv2 defaults to depth 2 and can be
+configured with `max-depth`. Both policies also cap the tree at 256 **live**
+lineage nodes; manifests of exited agents are pruned so a long-lived session's
+all-time spawn total never exhausts the budget. The supervisor shows active,
+actionable work only. Cancelled, completed, malformed, orphaned, cyclic, and stale entries remain
 available through retained artifacts but are hidden from the overlay. A footer
 line reports how many nodes were hidden and why, whether the view is truncated,
 and whether lineage refresh is failing, so hiding is never silent. Subtree
@@ -710,8 +717,8 @@ the newly persisted steering user entry before its provider request and starts a
 distinct artifact turn for it. The explicit CLI remains supported:
 
 ```bash
-$ARTIFACT_DIR/cli.mjs done 0       # success — parent reads the literal output.md path baked into the child prompt
-$ARTIFACT_DIR/cli.mjs error "msg"  # unrecoverable failure
+"${ARTIFACT_DIR}/cli.mjs" done 0       # success — parent reads the literal output.md path baked into the child prompt
+"${ARTIFACT_DIR}/cli.mjs" error "msg"  # unrecoverable failure
 # 'cancelled' is only set by the parent via cancel_interactive_subagent
 ```
 
@@ -795,8 +802,11 @@ injection.
 
 Interactive coordinated policy, group membership, and intents survive
 same-session startup/reload/resume through `.pi/subagentura-state.json` and
-parent session entries. Consumption receipts prefer those entries and use the
-private fallback ledger when needed. In-process jobs and background workflows
+parent session entries. Manual consumption first persists its receipt to a
+private, session-scoped ledger beneath the parent Pi session directory, then
+best-effort mirrors it into a parent session entry. If the ledger write fails,
+result collection fails before the mirror is attempted; lifecycle retirement
+has a separate best-effort path. In-process jobs and background workflows
 remain parent-session scoped and are retired on session replacement. `new` and
 `fork` do not import prior completion work.
 
@@ -808,15 +818,17 @@ identities prevent routine replay, but Pi's synchronous `sendMessage` proves
 dispatch rather than durable commit, so a crash in that separate window can still
 replay a manifest.
 
-#### Consumption-receipt fallback
+#### Consumption-receipt persistence
 
-Parent session entries are the preferred durable location for consumption
-receipts. If the parent cannot append an entry because `appendEntry` is
-unavailable or fails, the coordinator appends the receipt beneath the parent
-Pi session directory, outside the project working tree. The path is keyed by the
-parent session identity and is not shared across sessions. A partial manager
-without a session directory uses a random process-private temporary root and
-does not claim restart durability.
+Manual result consumption first appends its receipt and calls `fsyncSync` in a private,
+session-scoped NDJSON ledger beneath the parent Pi session directory, outside
+the project working tree. The path is keyed by the parent session identity and
+is not shared across sessions. After the ledger append succeeds, the
+coordinator best-effort mirrors the receipt into a parent session entry. A
+ledger write failure blocks result collection even when `appendEntry` is
+available; lifecycle retirement has a separate best-effort path. A partial
+manager without a session directory uses a random process-private temporary
+root and does not claim restart durability.
 
 Readers take a fixed snapshot and enforce total byte, record-count, line,
 identifier, and selector bounds. An over-budget or truncated snapshot is ignored
@@ -830,7 +842,7 @@ Session shutdown clears live coordinator state and records lifecycle
 retirements: non-interactive session-scoped work is retired, while interactive
 state and receipts remain eligible for same-session reload, resume, or restart.
 `/new` and `/fork` also retire interactive work and do not import prior
-completion work. Cleanup does not truncate or delete protected fallback ledgers,
+completion work. Cleanup does not truncate or delete protected consumption ledgers,
 so old private files can remain after a replacement session starts.
 
 #### `get_interactive_subagent_status`

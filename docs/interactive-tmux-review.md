@@ -6,6 +6,11 @@ keywords:
 
 # Interactive Subagent Code Review
 
+> **Historical archive:** This report records the implementation review from
+> 2026-06-18. H1, H2, and H3 were subsequently fixed; the remaining findings
+> and recommendations are dated review notes and must be revalidated against
+> the current source and tests before being treated as open defects.
+
 Review of `src/interactive-tmux.ts` and adjacent mux files (`src/multiplexer-tmux.ts`, `src/multiplexer-zellij.ts`, `src/multiplexer.ts`) conducted via an interactive subagent running on **GLM-5.2** (`opencode-go/glm-5.2`) on 2026-06-18.
 
 The reviewer read all source and test files plus the consumer call sites in `src/subagent.ts`. Output was saved to a local subagent artifact directory.
@@ -162,4 +167,7 @@ trap 'if [ -f "${ARTIFACT_DIR}/.cancelled" ]; then echo cancelled; else echo don
 
 ## Status
 
-All findings are **unfixed** as of 2026-06-18. The H1/H2/H3 fixes are localized (single-line edits in `interactive-tmux.ts`) and could ship as a single PR. M1-M6 should be a follow-up.
+This is a historical report of the 2026-06-18 implementation. H1/H2/H3 were
+subsequently fixed. M1-M6 and the low-priority notes remain dated review
+observations; verify the current source and tests before treating any as an
+open defect.

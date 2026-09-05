@@ -45,6 +45,7 @@ export interface WorkflowAgentOptions {
   readonly model?: string;
   readonly persona?: string;
   readonly isolation?: "process" | "in-process";
+  /** Accepted for compatibility with callers; the workflow runtime ignores it. */
   readonly agentType?: string;
   readonly thinkingLevel?: WorkflowThinkingLevel;
 }

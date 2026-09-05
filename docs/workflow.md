@@ -1,5 +1,9 @@
 # Workflow Tool — Design Doc (Phase 2)
 
+> Historical Phase 2 design note. The current implementation tracks both
+> background and synchronous workflow executions through `startWorkflowJob`; the
+> synchronous path awaits that job and streams progress through `onUpdate`.
+
 ## Overview
 
 The workflow tool orchestrates sub-agents at scale via a JavaScript script that runs
@@ -47,9 +51,10 @@ graph TD
     E[User runs /workflows] --> F[Select saved workflow]
     F --> D
     D --> G{async param?}
-    G -- default true --> H[startWorkflowJob]
-    G -- explicit false --> I[runWorkflow sync]
+    G -- default true --> H[startWorkflowJob (async)]
+    G -- explicit false --> I[startWorkflowJob (sync; await promise)]
     H --> J[WorkflowJobState in registry]
+    I --> J
     K[User runs /workflow-status] --> J
     D --> L[agent() inside workflow]
     L --> M{isolation param?}
@@ -64,10 +69,12 @@ graph TD
 ## Runtime behavior
 
 1. **`async` defaults to `true`**
+
    - `workflow({ script })` spawns a background job and returns a `workflowId`.
    - `workflow({ script, async: false })` still blocks and streams progress.
 
 2. **`agent()` defaults to process isolation**
+
    - If `isolation` is omitted, the workflow runtime passes `"process"`.
    - `makeRunAgent` tries tmux/zellij via `launchInteractiveSubagent()`.
    - If no multiplexer is available, it logs a warning and falls back to the

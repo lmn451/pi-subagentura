@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Process-backed workflow usage accounting reads session logs incrementally so
+  large histories do not block the parent while the whole file is parsed.
+- Workflow cancellation tears down the child pane and records its receipt
+  promptly while session usage accounting finishes.
+- Corrected release, completion-receipt, pane-lifecycle, runtime, and workflow
+  documentation, including obsolete instructions in the review workflow.
+
+### Changed
+
+- Separated shared usage utilities and multiplexer contracts from their runtime
+  adapters while preserving existing exports.
+- Removed the stale pnpm lockfile and obsolete manual interactive smoke script;
+  npm and the maintained multiplexer/TUI test harnesses remain the supported paths.
+
 ## [3.6.1] - 2026-09-04
 
 ### Added
