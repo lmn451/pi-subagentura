@@ -292,6 +292,31 @@ Notable dependency facts:
 - `subagent-artifact-cli.ts` supplies source text; it is materialized into each artifact directory rather than launched as the installed TypeScript module.
 - Registration stays in adapters and the composition root; storage/protocol modules do not register Pi tools.
 
+### Testing the boundaries
+
+`usage.ts` has no runtime imports, so accounting tests can exercise normalization
+and aggregation directly without loading Pi sessions or a multiplexer.
+`workflow-core.ts` imports those utilities directly; its references to Pi-facing
+result types are erased at runtime. Shared backend helpers live in
+`multiplexer-contracts.ts`, which imports only Node's child-process API. The
+concrete backends can therefore load independently of the registry; the module
+boundary test in `tests/multiplexer.test.ts` verifies that separation.
+
+Integration tests still exercise the boundaries that require coordination.
+The parser in `workflow-worker.ts` still imports Pi-facing helpers, so importing
+it also loads SDK dependencies.
+`tests/workflow-usage.test.ts` uses real temporary session files and a mocked
+interactive adapter to verify accounting, fixed snapshots, and cancellation
+during reads. The Pi-session, lifecycle, and live multiplexer suites cover the
+host SDK and process behavior. Extracting a module does not replace those tests.
+
+Directory names organize navigation; imports and fixture ownership determine
+test isolation. The current layout keeps runtime modules in `src/` and tests in
+`tests/`. Tests should import the smallest relevant module and explicitly own
+their sessions, artifacts, and terminal adapters. See the
+[test-isolation guide](./docs/interactive-subagent-test-isolation.md) for the
+current setup.
+
 ---
 
 ## 5. In-process AgentSession execution

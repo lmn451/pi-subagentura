@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapters while preserving existing exports.
 - Removed the stale pnpm lockfile and obsolete manual interactive smoke script;
   npm and the maintained multiplexer/TUI test harnesses remain the supported paths.
+- Consolidated documentation into current runtime and testing guidance, removing
+  obsolete design plans and review reports preserved in Git history.
 
 ## [3.6.1] - 2026-09-04
 
