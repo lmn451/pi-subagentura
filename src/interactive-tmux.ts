@@ -49,6 +49,7 @@ import {
   artifactPath,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   assertNever,
+  MAX_PERSISTED_WORKING_CWD_BYTES,
   newEventId,
   type SubagentEvent,
   type PersistedDeliveryIntent,
@@ -218,7 +219,13 @@ export interface InteractiveSubagentState {
    */
   muxSession?: string;
   sessionFile: string;
+  /**
+   * Parent pi session cwd used as the state-file scope. The child process's
+   * resolved working directory is stored separately in `workingCwd`.
+   */
   cwd: string;
+  /** Resolved child process working directory. */
+  workingCwd?: string;
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
    * (see src/artifact.ts: stateFilePath). Required for terminal-event cleanup to
@@ -706,6 +713,15 @@ export function launchInteractiveSubagent(params: {
     reportSpawnFailure("context");
     throw error;
   }
+  if (
+    cwd.includes("\0") ||
+    Buffer.byteLength(cwd, "utf8") > MAX_PERSISTED_WORKING_CWD_BYTES
+  ) {
+    reportSpawnFailure("context");
+    throw new Error(
+      `working cwd exceeds ${MAX_PERSISTED_WORKING_CWD_BYTES} bytes or contains NUL`,
+    );
+  }
   let stateCwd: string;
   try {
     stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
@@ -943,6 +959,7 @@ export function launchInteractiveSubagent(params: {
         muxSession,
         artifactDir: paths.artifactDir,
         sessionFile: paths.sessionFile,
+        workingCwd: cwd,
         notifyOnComplete: params.completionPolicy
           ? undefined
           : (params.notifyOnComplete ?? "inject"),
@@ -1099,6 +1116,7 @@ export function launchInteractiveSubagent(params: {
     muxSession,
     sessionFile: paths.sessionFile,
     cwd: stateCwd,
+    workingCwd: cwd,
     model: params.model,
     startedAt: Date.now(),
     status: "running",
@@ -1775,6 +1793,8 @@ export function formatInteractiveState(
   if (state.windowName) lines.push(`Window: ${state.windowName}`);
   if (state.exitCode !== undefined) lines.push(`Exit code: ${state.exitCode}`);
   lines.push(`Artifact: ${state.artifactDir}`);
+  lines.push(`State cwd: ${state.cwd}`);
+  lines.push(`Working cwd: ${state.workingCwd ?? "unknown"}`);
   if (!(state.mux === "tmux" && process.env.TMUX)) {
     lines.push(`Attach: ${state.attachCommand}`);
   }

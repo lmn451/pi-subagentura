@@ -450,7 +450,7 @@ Parameters:
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
 - `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
-- `maxAge` — optional TTL in ms for completed job retention (async only)
+- `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
 Deprecated compatibility fields cannot be combined with `completionPolicy` or
 `completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.
@@ -477,7 +477,7 @@ Parameters:
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
 - `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
-- `maxAge` — optional TTL in ms for completed job retention (async only)
+- `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
 Deprecated compatibility fields cannot be combined with `completionPolicy` or
 `completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.

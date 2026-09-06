@@ -291,6 +291,9 @@ export function rehydrateInteractiveSubagents(
       mux: entry.mux,
       muxSession: entry.muxSession,
       sessionFile: entry.sessionFile,
+      ...(entry.workingCwd !== undefined
+        ? { workingCwd: entry.workingCwd }
+        : {}),
       cwd,
       startedAt,
       status: "running",

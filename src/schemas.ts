@@ -91,9 +91,11 @@ export const BaseParams = Type.Object({
     }),
   ),
   maxAge: Type.Optional(
-    Type.Number({
+    Type.Integer({
+      minimum: 0,
+      maximum: 2_147_483_647,
       description:
-        "Optional TTL in milliseconds for completed job retention. Jobs persist indefinitely if omitted.",
+        "Optional TTL in milliseconds for completed job retention. Omitted or 0 keeps results indefinitely; positive values expire uncollected coordinated results only after collection and expire other completed results after the TTL.",
     }),
   ),
 });

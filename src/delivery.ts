@@ -383,6 +383,7 @@ function readBoundedOutput(intent: PersistedDeliveryIntent): string | null {
       content.subarray(0, MAX_OUTPUT_BYTES).toString("utf8"),
     );
   } catch {
+    // Any artifact read or integrity failure must fail closed.
     return null;
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -543,6 +544,7 @@ export function flushDeliveries(
       },
     );
   } catch {
+    // Keep intents pending so a later flush can retry the dispatch.
     return;
   }
   const deliveryLatencyMs = maxKnownCompletionAge(

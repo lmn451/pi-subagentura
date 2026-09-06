@@ -26,6 +26,8 @@ The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`
 
 ## Source layout (the 30-second tour)
 
+The table below is abbreviated; see [architecture.md §13](./architecture.md#13-complete-src-inventory) for the exhaustive source map.
+
 | File                                                   | Purpose                                                                                                                                                                                                           |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/subagent.ts`                                      | **Entrypoint/barrel.** Default export registers all tool groups and session handlers; re-exports internals for test access.                                                                                       |
@@ -303,6 +305,8 @@ remain process/session scoped and are retired rather than rehydrated.
 
 ## File map at a glance
 
+This abbreviated map is not exhaustive; see [architecture.md §13](./architecture.md#13-complete-src-inventory) for the complete source inventory.
+
 ```
 src/
   subagent.ts                      # Entrypoint/barrel — registers tools, re-exports internals
@@ -323,7 +327,7 @@ src/
   notifications.ts                 # upgrade-only legacy completion broker
   rendering.ts                     # TUI render helpers
   schemas.ts                       # TypeBox tool-param schemas
-  workflow.ts                      # workflow tool
+  workflow.ts                      # Internal workflow barrel and registration re-export
   ndjson.d.ts                      # ambient types for the ndjson dep
   usage.ts                         # SDK-free usage normalization and aggregation
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-subagentura",
-  "version": "3.6.1",
+  "version": "3.6.2",
   "description": "Reusable agent workflows and observable, attachable sub-agents for the Pi coding agent",
   "author": "lmn451",
   "license": "MIT",
@@ -147,7 +147,7 @@
     "@earendil-works/pi-coding-agent": ">=0.80.6",
     "@earendil-works/pi-server": ">=0.84.0",
     "@earendil-works/pi-tui": ">=0.80.6",
-    "typebox": "*"
+    "typebox": ">=1.1.38 <2"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.85.0",

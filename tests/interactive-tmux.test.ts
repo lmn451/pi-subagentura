@@ -238,6 +238,39 @@ describe("interactive-tmux", () => {
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
+  it("keeps the parent state cwd separate from the child working cwd", async () => {
+    const parentCwd = makeTmp();
+    const childCwd = join(parentCwd, "child");
+    mkdirSync(childCwd, { recursive: true });
+    process.env.PI_CODING_AGENT_SESSION_DIR = parentCwd;
+    process.env.TMUX = makeArgs().TMUX;
+    process.env.TMUX_PANE = "%9";
+    installMockExec((_file, args) => {
+      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+      if (args[0] === "display-message") return MOCK_LOCATION;
+      if (args[0] === "show-options") return "0\n";
+      return "";
+    });
+
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+    const state = mod.launchInteractiveSubagent({
+      name: "Custom cwd",
+      task: "work elsewhere",
+      cwd: childCwd,
+      parentCwd,
+      parentSessionId: "parent-session",
+    });
+
+    expect(state.cwd).toBe(parentCwd);
+    expect(state.workingCwd).toBe(childCwd);
+    expect(loadInteractiveStates(parentCwd)?.states[state.id]).toMatchObject({
+      parentSessionId: "parent-session",
+      workingCwd: childCwd,
+    });
+    expect(loadInteractiveStates(childCwd)).toBeNull();
+  });
 
   it("writes a lineage manifest before exposure and propagates child identity", async () => {
     const tmp = makeTmp();

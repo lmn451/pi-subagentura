@@ -7,17 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-09-06
+
 ### Fixed
 
-- Process-backed workflow usage accounting reads session logs incrementally so
-  large histories do not block the parent while the whole file is parsed.
+- Process-backed workflow usage accounting reads session logs incrementally and
+  skips individual records above 2 MiB, preserving later usage without
+  unbounded parent memory growth.
 - Workflow cancellation tears down the child pane and records its receipt
   promptly while session usage accounting finishes.
+- Zellij native viewers now use the backend's blocking pane lifecycle instead
+  of reporting a successfully created floating pane as unavailable.
+- Persisted interactive state reads, migration, and writes enforce file and
+  entry bounds, preserve invalid existing files, and keep child working
+  directories distinct from parent persistence roots across rehydration.
+- Lineage admission fails closed when its node directory cannot be listed.
+- Async job TTLs reject values outside Node's safe timer range, and invalid
+  persisted activity-list values remain redacted in diagnostics.
 - Corrected release, completion-receipt, pane-lifecycle, runtime, and workflow
   documentation, including obsolete instructions in the review workflow.
 
 ### Changed
 
+- Bounded the TypeBox peer dependency to the tested compatible 1.x range.
 - Separated shared usage utilities and multiplexer contracts from their runtime
   adapters while preserving existing exports.
 - Removed the stale pnpm lockfile and obsolete manual interactive smoke script;
@@ -261,7 +273,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.2...HEAD
+[3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
+[3.6.1]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/lmn451/pi-subagentura/compare/v3.4.2...v3.5.0
 [3.4.2]: https://github.com/lmn451/pi-subagentura/compare/v3.4.0...v3.4.2

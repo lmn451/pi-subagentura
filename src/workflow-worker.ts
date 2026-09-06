@@ -718,6 +718,7 @@ function artifactFor(state: InteractiveSubagentState) {
 }
 
 const SESSION_USAGE_READ_CHUNK_BYTES = 64 * 1024;
+export const SESSION_USAGE_MAX_RECORD_BYTES = 2 * 1024 * 1024;
 
 interface SessionUsageAccumulator {
   total: Usage;
@@ -745,28 +746,56 @@ function consumeSessionUsageLine(
   accumulator.total = addUsageSamples(accumulator.total, usage);
 }
 
-/** Process decoded text while retaining only the current incomplete line. */
+interface SessionUsageLineState {
+  parts: string[];
+  byteLength: number;
+  discardUntilNewline: boolean;
+}
+
+/** Process decoded text while retaining only the current bounded line. */
 function consumeSessionUsageText(
   text: string,
-  lineParts: string[],
+  lineState: SessionUsageLineState,
   accumulator: SessionUsageAccumulator,
 ): void {
   let start = 0;
   for (;;) {
     const lineEnd = text.indexOf("\n", start);
-    if (lineEnd < 0) break;
-    lineParts.push(text.slice(start, lineEnd));
-    consumeSessionUsageLine(lineParts.join(""), accumulator);
-    lineParts.length = 0;
+    const segmentEnd = lineEnd < 0 ? text.length : lineEnd;
+    const segment = text.slice(start, segmentEnd);
+
+    if (lineState.discardUntilNewline) {
+      if (lineEnd < 0) return;
+    } else {
+      const segmentBytes = Buffer.byteLength(segment);
+      if (
+        lineState.byteLength + segmentBytes >
+        SESSION_USAGE_MAX_RECORD_BYTES
+      ) {
+        lineState.parts.length = 0;
+        lineState.byteLength = 0;
+        lineState.discardUntilNewline = true;
+      } else {
+        if (segment.length > 0) lineState.parts.push(segment);
+        lineState.byteLength += segmentBytes;
+      }
+    }
+
+    if (lineEnd < 0) return;
+    if (!lineState.discardUntilNewline) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
+    }
+    lineState.parts.length = 0;
+    lineState.byteLength = 0;
+    lineState.discardUntilNewline = false;
     start = lineEnd + 1;
   }
-  if (start < text.length) lineParts.push(text.slice(start));
 }
 
 /**
  * Parse token usage from a child Pi's session JSONL file.
  * Reads assistant messages with `usage` data and aggregates them while
- * retaining only one incomplete line and one bounded read chunk in memory.
+ * retaining only one bounded incomplete line and one bounded read chunk in memory.
  * Returns zeroUsage() if the file is missing, unparseable, or has no usage data.
  */
 export async function parseUsageFromSessionFile(
@@ -780,7 +809,11 @@ export async function parseUsageFromSessionFile(
       total: zeroUsage(),
       found: false,
     };
-    const lineParts: string[] = [];
+    const lineState: SessionUsageLineState = {
+      parts: [],
+      byteLength: 0,
+      discardUntilNewline: false,
+    };
     const decoder = new StringDecoder("utf8");
     const buffer = Buffer.allocUnsafe(SESSION_USAGE_READ_CHUNK_BYTES);
     const fileSize = (await handle.stat()).size;
@@ -792,13 +825,13 @@ export async function parseUsageFromSessionFile(
       position += bytesRead;
       consumeSessionUsageText(
         decoder.write(buffer.subarray(0, bytesRead)),
-        lineParts,
+        lineState,
         accumulator,
       );
     }
-    consumeSessionUsageText(decoder.end(), lineParts, accumulator);
-    if (lineParts.length > 0) {
-      consumeSessionUsageLine(lineParts.join(""), accumulator);
+    consumeSessionUsageText(decoder.end(), lineState, accumulator);
+    if (!lineState.discardUntilNewline && lineState.parts.length > 0) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
     }
     return accumulator.found ? accumulator.total : zeroUsage();
   } catch {

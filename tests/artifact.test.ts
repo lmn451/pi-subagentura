@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  MAX_PERSISTED_STATE_COUNT,
+  MAX_PERSISTED_STATE_FILE_BYTES,
   appendCompletionEvent,
   appendEvent,
   appendInteractiveState,
@@ -976,6 +978,38 @@ describe("persisted interactive state helpers", () => {
 
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
+  it("round-trips only bounded absolute working cwd values", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: { ...SAMPLE, workingCwd: "/workspace/project" },
+          relative: {
+            ...SAMPLE,
+            id: "relative",
+            artifactDir: "/tmp/artifacts/relative",
+            workingCwd: "workspace/project",
+          },
+          oversized: {
+            ...SAMPLE,
+            id: "oversized",
+            artifactDir: "/tmp/artifacts/oversized",
+            workingCwd: `/x${"y".repeat(4096)}`,
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const states = loadInteractiveStates(root)?.states;
+    expect(states?.[SAMPLE.id].workingCwd).toBe("/workspace/project");
+    expect(states?.relative).not.toHaveProperty("workingCwd");
+    expect(states?.oversized).not.toHaveProperty("workingCwd");
+  });
 
   it("loadInteractiveStates returns null when the file is missing", () => {
     expect(loadInteractiveStates(root)).toBeNull();
@@ -1003,6 +1037,81 @@ describe("persisted interactive state helpers", () => {
     );
 
     expect(loadInteractiveStates(root)).toBeNull();
+  });
+  it("rejects an oversized raw state file without allowing append to replace it", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const raw = JSON.stringify({
+      schemaVersion: 2,
+      parent: "pi",
+      states: {},
+      padding: "x".repeat(MAX_PERSISTED_STATE_FILE_BYTES),
+    });
+    expect(Buffer.byteLength(raw)).toBeGreaterThan(
+      MAX_PERSISTED_STATE_FILE_BYTES,
+    );
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  it("rejects a state file with more than the top-level state cap", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const states = Object.fromEntries(
+      Array.from({ length: MAX_PERSISTED_STATE_COUNT + 1 }, (_, index) => [
+        `entry-${index}`,
+        {},
+      ]),
+    );
+    const raw = JSON.stringify({ schemaVersion: 2, parent: "pi", states });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+  });
+
+  it.each([
+    ["malformed", "not-json{"],
+    ["unsupported", JSON.stringify({ schemaVersion: 99, states: {} })],
+  ])(
+    "preserves an existing %s state file when append and update are attempted",
+    (_label, raw) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(file, raw, { mode: 0o600 });
+      const before = readFileSync(file);
+
+      expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+      expect(readFileSync(file)).toEqual(before);
+      expect(() =>
+        updateInteractiveStates(root, [
+          { id: SAMPLE.id, update: () => undefined },
+        ]),
+      ).toThrow(/state file/i);
+      expect(readFileSync(file)).toEqual(before);
+    },
+  );
+
+  it("enforces persisted file bounds before writing", () => {
+    expect(() =>
+      saveInteractiveStates(root, {
+        schemaVersion: 2,
+        parent: "pi",
+        states: Object.fromEntries(
+          Array.from({ length: MAX_PERSISTED_STATE_COUNT + 1 }, (_, index) => [
+            `entry-${index}`,
+            SAMPLE,
+          ]),
+        ),
+      } as never),
+    ).toThrow(/state file|states/i);
+    expect(existsSync(stateFilePath(root))).toBe(false);
   });
 
   it("migrates safe telemetry dimensions and message-turn IDs", () => {
@@ -1254,6 +1363,14 @@ describe("persisted interactive state helpers", () => {
       ["a file with no telemetry key", '{"schemaVersion":2,"states":{}}'],
     ])("reports nothing to clear for %s", (_label, body) => {
       writeRaw(body);
+      expect(hasPersistedTelemetryField(root)).toBe(false);
+    });
+    it("does not inspect an oversized file for persisted telemetry", () => {
+      writeRaw(
+        `{"schemaVersion":2,"states":{},"telemetry":"junk","padding":"${"x".repeat(
+          MAX_PERSISTED_STATE_FILE_BYTES,
+        )}"}`,
+      );
       expect(hasPersistedTelemetryField(root)).toBe(false);
     });
 
