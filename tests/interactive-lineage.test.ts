@@ -617,6 +617,31 @@ describe("interactive lineage pruning", () => {
     expect(await fs.readdir(nodesDir)).toEqual(["broken.json"]);
   });
 
+  it("treats a missing nodes directory as empty for synchronous admission helpers", async () => {
+    const dir = await tempDir();
+    const nodesDir = path.join(dir, "missing-nodes");
+
+    expect(countLineageManifestsSync(nodesDir)).toBe(0);
+    expect(pruneTerminalLineageNodesSync(nodesDir, () => true)).toEqual({
+      pruned: [],
+      retained: 0,
+      active: 0,
+    });
+  });
+
+  it("propagates non-ENOENT nodes directory listing failures", async () => {
+    const dir = await tempDir();
+    const nodesDir = path.join(dir, "nodes");
+    await fs.writeFile(nodesDir, "not a directory");
+
+    expect(() => countLineageManifestsSync(nodesDir)).toThrow(
+      /ENOTDIR|not a directory/i,
+    );
+    expect(() => pruneTerminalLineageNodesSync(nodesDir, () => true)).toThrow(
+      /ENOTDIR|not a directory/i,
+    );
+  });
+
   it("prunes synchronously for the spawn gate", async () => {
     const dir = await tempDir();
     const nodesDir = path.join(dir, "nodes");
