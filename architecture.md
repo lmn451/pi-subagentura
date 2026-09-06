@@ -432,7 +432,7 @@ The target controller aborts the `AgentSession`; `cascadeChildAborts` walks reco
 The kernel checks the signal after `prompt()` because Pi may resolve rather than reject a prompt on abort.
 
 The authoritative in-process registry is per session scope; its legacy process-wide index survives module reload but not process restart.
-Done/error entries persist by default, can expire by positive `maxAge`, can be pruned explicitly, and may be evicted oldest-first at the 100-entry cap.
+Done/error entries persist when `maxAge` is omitted or `0`. A positive integer `maxAge` in the safe Node timer range (1–2,147,483,647 ms) schedules cleanup at settlement: ordinary terminal entries are removed when it elapses, while an uncollected coordinated result remains protected and is removed when collected after expiry (or when its TTL later elapses). Entries can also be pruned explicitly and may be evicted oldest-first at the 100-entry cap.
 Cancelled entries are scheduled for immediate deletion.
 
 ---
