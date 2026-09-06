@@ -699,7 +699,14 @@ describe("multiplexer-zellij", () => {
     await expect(
       new ZellijMultiplexer().showNativeViewer("Agent", "bounded output"),
     ).resolves.toBe(true);
-    expect(calls[0]).toEqual(
+    const args = calls[0]!;
+    const separator = args.indexOf("--");
+    expect(separator).toBeGreaterThan(-1);
+    expect(args.slice(separator - 2, separator)).toEqual([
+      "--blocking",
+      "--close-on-exit",
+    ]);
+    expect(args).toEqual(
       expect.arrayContaining([
         "--session",
         "main",
