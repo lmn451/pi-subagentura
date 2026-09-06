@@ -3,7 +3,7 @@ import {
   registerCommandWithTelemetry,
   registerShortcutWithTelemetry,
 } from "./telemetry-operations";
-import { basename } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import {
   compareByStartedAt,
   INTERACTIVE_SUPERVISOR_SHORTCUT,
@@ -305,6 +305,9 @@ function stateForNode(
     muxSession: manifest.pane.muxSession,
     sessionFile: manifest.childSessionFile ?? "unknown",
     cwd: manifest.cwd,
+    ...(isAbsolute(manifest.cwd) && !manifest.cwd.includes("\0")
+      ? { workingCwd: manifest.cwd }
+      : {}),
     parentSessionId: manifest.ownerSessionId,
     startedAt: parseStartedAt(manifest.startedAt),
     status:
