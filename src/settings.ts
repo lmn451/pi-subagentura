@@ -24,6 +24,8 @@ const MAX_DEPTH_SETTING = "max-depth";
 const HIDE_AGENT_LIST_SETTING = "hide-agent-list";
 const TELEMETRY_SETTING = "telemetry";
 const REDACTED_TELEMETRY_VALUE = "<redacted invalid telemetry value>";
+const REDACTED_HIDE_AGENT_LIST_VALUE =
+  "<redacted invalid hide-agent-list value>";
 const MAX_DEPTH_DEFINITION = {
   id: MAX_DEPTH_SETTING,
   label: "Maximum depth",
@@ -210,7 +212,7 @@ function readPersistedHideAgentList(
   } catch {
     reportInvalidPersistedSetting(
       HIDE_AGENT_LIST_SETTING,
-      raw,
+      REDACTED_HIDE_AGENT_LIST_VALUE,
       'must be either "true" or "false"; using "false"',
       onInvalidSetting,
     );
@@ -220,7 +222,7 @@ function readPersistedHideAgentList(
   if (raw === "false" || raw === undefined) return false;
   reportInvalidPersistedSetting(
     HIDE_AGENT_LIST_SETTING,
-    raw,
+    REDACTED_HIDE_AGENT_LIST_VALUE,
     'must be either "true" or "false"; using "false"',
     onInvalidSetting,
   );
