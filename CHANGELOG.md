@@ -7,15 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-09-06
+
 ### Added
 
-- Prepared unreleased anonymous telemetry schema v4 diagnostics for the 3.6.2
-  release: closed runtime failure categories, stages, and kinds; conditional
+- Added anonymous telemetry schema v4 diagnostics: closed runtime failure
+  categories, stages, and kinds; conditional
   task and workflow diagnostics; process-exit code buckets; and completion
   delivery failure stages. Payload allowlists omit arbitrary values and raw
   diagnostic content.
-
-## [3.6.2] - 2026-09-06
 
 ### Fixed
 
