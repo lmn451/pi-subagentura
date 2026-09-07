@@ -96,8 +96,11 @@ invalid candidate, and continue to the next applicable scope or default.
 
 ### Telemetry schema v4 invariants
 
-- Schema v4 is unreleased and targeted for the 3.6.2 release; never describe it
-  as part of shipped 3.6.1 telemetry.
+- Schema v4 shipped in the 3.6.2 release. `TELEMETRY_SCHEMA_VERSION` in
+  `src/telemetry.ts` is the source of truth for the current schema; when
+  documenting telemetry, attribute schema changes to the release that shipped
+  them (per CHANGELOG.md) rather than restating a release status that can go
+  stale.
 - Telemetry dimensions are closed enums. Use only the literals in the schema
   (and `unknown` only where that field permits it); never forward arbitrary
   strings. Counts remain bounded and duration/latency numbers remain rounded
