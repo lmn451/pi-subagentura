@@ -964,7 +964,7 @@ ambient identity environment variables—and never read or write the root state
 file's telemetry metadata. A child without that explicit context starts an
 unrelated anonymous correlation rather than reconstructing identity.
 
-The unreleased payload schema prepared for the 3.6.2 release is version `4`;
+The current payload schema, shipped in the 3.6.2 release, is version `4`;
 it contains these events:
 
 | Event                        | Properties                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -1019,7 +1019,7 @@ an error, but cancelled tasks may include `agent_stop_reason` (`error` or
 `aborted`). `exit_code_bucket` is emitted only with `process_exit` terminal
 evidence.
 
-The unreleased schema v4 keeps the existing privacy model. It adds no content
+Schema v4 keeps the existing privacy model. It adds no content
 or stable identity: the random runtime correlation UUID remains scoped to the
 logical session/tree and is never a stable installation, machine, user,
 repository, or project identity. Payloads contain only closed enums, booleans,
@@ -1082,8 +1082,7 @@ per-workflow joins; those identifiers are deliberately not collected. For
 `completion_delivered` batches, the latency statistic is the maximum known age
 among the included completions, not the age of every individual completion.
 
-`completion_delivery_failed` is included in the unreleased telemetry schema
-v4. Coordinators report each failure stage once until the relevant persistence
+`completion_delivery_failed` is included in telemetry schema v4. Coordinators report each failure stage once until the relevant persistence
 or delivery succeeds, a manifest dispatch succeeds, or a matching manifest is
 reconciled from the parent session (including a human-started turn).
 `consumption_persistence` covers completion-consumption receipt writes;
