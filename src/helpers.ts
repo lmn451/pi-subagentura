@@ -54,7 +54,9 @@ import {
   telemetryDepthBucket,
   type AgentTelemetryContext,
   type TelemetryAgentStatus,
+  type TelemetryAgentStopReason,
   type TelemetryErrorCategory,
+  type TelemetryErrorStage,
 } from "./telemetry";
 import {
   addUsageSamples,
@@ -428,13 +430,36 @@ function terminalReasonForResult(
   }
   return "completed";
 }
+function authoritativeAgentStopReason(
+  session: AgentSession,
+): TelemetryAgentStopReason | undefined {
+  const messages = session.agent.state.messages;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    return message.stopReason === "error" || message.stopReason === "aborted"
+      ? message.stopReason
+      : undefined;
+  }
+  return undefined;
+}
+
+function telemetryErrorStageForResult(
+  result: SubagentResult,
+  terminalReason: InProcessTerminalReason,
+  providerError: boolean,
+): TelemetryErrorStage | undefined {
+  if (result.cancelled || !result.isError) return undefined;
+  if (terminalReason === "timeout") return "turn";
+  return providerError ? "provider" : "turn";
+}
 
 function telemetryErrorCategoryForResult(
   result: SubagentResult,
   terminalReason: InProcessTerminalReason,
   providerError: boolean,
 ): TelemetryErrorCategory | undefined {
-  if (!result.isError) return undefined;
+  if (result.cancelled || !result.isError) return undefined;
   if (terminalReason === "timeout") return "timeout";
   return providerError ? "provider" : "unknown";
 }
@@ -1444,13 +1469,25 @@ export async function startSubagentJob(
             ? "error"
             : "success";
         const terminalReason = terminalReasonForResult(result, signal);
+        const structuredStopReason = authoritativeAgentStopReason(session);
         const providerError =
-          result.isError && Boolean(session.agent.state.errorMessage);
+          result.isError &&
+          (Boolean(session.agent.state.errorMessage) ||
+            structuredStopReason === "error");
         const errorCategory = telemetryErrorCategoryForResult(
           result,
           terminalReason,
           providerError,
         );
+        const errorStage = telemetryErrorStageForResult(
+          result,
+          terminalReason,
+          providerError,
+        );
+        const agentStopReason =
+          status === "error" || status === "cancelled"
+            ? structuredStopReason
+            : undefined;
         captureTelemetry(
           telemetry?.session,
           {
@@ -1469,6 +1506,10 @@ export async function startSubagentJob(
             ...(errorCategory === undefined
               ? {}
               : { error_category: errorCategory }),
+            ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+            ...(agentStopReason === undefined
+              ? {}
+              : { agent_stop_reason: agentStopReason }),
             duration_ms:
               telemetryStartedAt === undefined
                 ? undefined

@@ -13,6 +13,7 @@ import {
   type RunWorkflowOptions,
   type WorkflowAgentRunner,
   type WorkflowAgentRecord,
+  type WorkflowFailureClassification,
   type WorkflowProgress,
   type WorkflowRunResult,
   type WorkflowRunResultWithUsage,
@@ -20,6 +21,7 @@ import {
   WorkflowExecutionError,
   WorkflowWallTimeoutError,
   MAX_WORKFLOW_AGENT_RECORDS,
+  workflowFailureClassification,
   zeroWorkflowUsage,
 } from "./workflow-core";
 import {
@@ -115,7 +117,6 @@ function terminalReasonFromAbortReason(
       return undefined;
   }
 }
-
 function workflowTelemetryStatus(
   job: WorkflowJobState,
   result: WorkflowRunResult | undefined,
@@ -123,8 +124,34 @@ function workflowTelemetryStatus(
   if (job.status === "cancelled" || job.abort.signal.aborted) {
     return "cancelled";
   }
+  if ((result?.cancelledCount ?? job.snapshot.cancelledCount ?? 0) > 0) {
+    return "cancelled";
+  }
   if (job.status === "error") return "error";
   return result && result.errorCount > 0 ? "partial" : "success";
+}
+
+function workflowFailureForError(
+  error: unknown,
+): WorkflowFailureClassification | undefined {
+  return workflowFailureClassification(error);
+}
+
+function emitWorkflowRuntimeFailure(
+  session: TelemetrySession | undefined,
+  failure: WorkflowFailureClassification | undefined,
+): void {
+  if (!session || !failure?.runtimeFailureKind) return;
+  captureTelemetry(
+    session,
+    {
+      event: "runtime_failure",
+      error_category: failure.errorCategory,
+      error_stage: failure.errorStage,
+      failure_kind: failure.runtimeFailureKind,
+    },
+    { allowInactive: true },
+  );
 }
 
 function isWorkflowWallTimeout(error: unknown): boolean {
@@ -171,6 +198,16 @@ function emitWorkflowCompletedTelemetry(
   const status = workflowTelemetryStatus(job, result);
   const telemetry = job.telemetry;
   if (!telemetry) return;
+  const failure =
+    result?.failure ??
+    job.telemetryFailure ??
+    (status === "error"
+      ? { errorCategory: "unknown", errorStage: "workflow" }
+      : undefined);
+  if (failure?.runtimeFailureKind && !job.telemetryRuntimeFailureReported) {
+    job.telemetryRuntimeFailureReported = true;
+    emitWorkflowRuntimeFailure(telemetry.session, failure);
+  }
   const agentsSpawned = boundedWorkflowTelemetryCount(
     result?.agentsSpawned ?? job.snapshot.agentsSpawned,
   );
@@ -189,6 +226,12 @@ function emitWorkflowCompletedTelemetry(
       terminal_reason: workflowTelemetryTerminalReason(job, status),
       agents_spawned: agentsSpawned,
       error_count: errorCount,
+      ...(status === "cancelled" || failure === undefined
+        ? {}
+        : {
+            error_category: failure.errorCategory,
+            error_stage: failure.errorStage,
+          }),
       ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     },
     { allowInactive: true },
@@ -214,6 +257,7 @@ export interface WorkflowJobState {
   snapshot: {
     agentsSpawned: number;
     errorCount: number;
+    cancelledCount?: number;
     /** @deprecated Output-token count; use usage.output. */
     tokensSpent: number;
     /** Soft completed-output-token target, if configured. */
@@ -261,6 +305,10 @@ export interface WorkflowJobState {
   telemetry?: WorkflowJobTelemetry;
   /** Evidence-backed cancellation reason for the aggregate terminal event. */
   telemetryTerminalReason?: TelemetryTerminalReason;
+  /** Structured workflow failure evidence retained for aggregate telemetry. */
+  telemetryFailure?: WorkflowFailureClassification;
+  /** Runtime failures are emitted once per workflow operation. */
+  telemetryRuntimeFailureReported?: boolean;
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -447,6 +495,8 @@ export function startWorkflowJob(
   telemetryOptions?: WorkflowJobTelemetryOptions,
 ): WorkflowJobState {
   const parentSessionOwner = owner;
+  const telemetrySession =
+    resolveLiveSessionScope(parentSessionOwner)?.telemetry;
   // A blocking sync workflow ran unconditionally before it was tracked here.
   // Subjecting it to the cap would turn an always-succeeding call into a new
   // user-visible failure, so sync jobs are exempt — they are also removed from
@@ -471,6 +521,11 @@ export function startWorkflowJob(
       }
     }
     if (!evicted) {
+      emitWorkflowRuntimeFailure(telemetrySession, {
+        errorCategory: "capacity",
+        errorStage: "workflow",
+        runtimeFailureKind: "workflow_capacity",
+      });
       throw new Error(
         `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
@@ -487,7 +542,7 @@ export function startWorkflowJob(
       ? telemetryOptions.async
       : defaultAsync;
   const telemetry: WorkflowJobTelemetry = {
-    session: resolveLiveSessionScope(parentSessionOwner)?.telemetry,
+    session: telemetrySession,
     invocation: normalizeWorkflowInvocation(telemetryOptions?.invocation),
     async: telemetryAsync,
     completionPolicy: normalizeWorkflowCompletionPolicy(
@@ -513,6 +568,7 @@ export function startWorkflowJob(
     snapshot: {
       agentsSpawned: 0,
       errorCount: 0,
+      cancelledCount: 0,
       tokensSpent: 0,
       budgetTotal: opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
       usage: zeroWorkflowUsage(),
@@ -573,6 +629,8 @@ export function startWorkflowJob(
     .then((r) => {
       if (state.status === "running") state.status = "done";
       state.result = r;
+      state.snapshot.cancelledCount = r.cancelledCount ?? 0;
+      if (r.failure) state.telemetryFailure = r.failure;
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
@@ -582,9 +640,17 @@ export function startWorkflowJob(
     })
     .catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
-      if (isWorkflowWallTimeout(err)) state.telemetryTerminalReason = "timeout";
+      const timedOut = isWorkflowWallTimeout(err);
+      if (timedOut) state.telemetryTerminalReason = "timeout";
       state.status = abort.signal.aborted ? "cancelled" : "error";
       state.error = msg;
+      if (state.status !== "cancelled") {
+        state.telemetryFailure =
+          workflowFailureForError(err) ??
+          (timedOut
+            ? { errorCategory: "timeout", errorStage: "workflow" }
+            : { errorCategory: "unknown", errorStage: "workflow" });
+      }
       if (err instanceof WorkflowExecutionError && err.usage) {
         state.snapshot.usage = { ...err.usage };
         state.snapshot.tokensSpent = err.usage.output;

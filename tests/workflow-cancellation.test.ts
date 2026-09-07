@@ -114,10 +114,10 @@ describe("cancelled workflow snapshot normalization", () => {
       expect(result).toMatchObject({
         result: null,
         agentsSpawned: 1,
-        errorCount: 1,
+        errorCount: 0,
       });
       expect(result.usage).toMatchObject({ input: 4, output: 2, turns: 1 });
-      expect(job.snapshot.agentRecords?.[0]?.status).toBe("error");
+      expect(job.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
     },
   );
 

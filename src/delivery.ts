@@ -44,7 +44,10 @@ import {
 } from "./session-scope";
 import { inProcessJobOwner, inProcessJobsForOwner } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
-import { captureTelemetry } from "./telemetry";
+import {
+  captureTelemetry,
+  type TelemetryCompletionFailureStage,
+} from "./telemetry";
 
 export const MAX_DELIVERY_RECORDS = 32;
 export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
@@ -58,6 +61,10 @@ interface DeliveryGlobalState {
 }
 
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
+const reportedNotificationFailures = new WeakMap<
+  InteractiveSubagentState,
+  Set<TelemetryCompletionFailureStage>
+>();
 
 function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
   return globalThis as typeof globalThis & DeliveryGlobalState;
@@ -471,6 +478,34 @@ function publishCoordinatedInteractiveCompletion(
   );
 }
 
+function reportNotificationDispatchFailure(
+  states: readonly InteractiveSubagentState[],
+  owner?: SessionOwnerToken,
+): void {
+  const telemetry = resolveLiveSessionScope(owner)?.telemetry;
+  if (!telemetry?.enabled || !telemetry.active) return;
+  let alreadyReported = false;
+  for (const state of states) {
+    if (reportedNotificationFailures.get(state)?.has("notification_dispatch")) {
+      alreadyReported = true;
+      break;
+    }
+  }
+  if (alreadyReported) return;
+  for (const state of states) {
+    const reported =
+      reportedNotificationFailures.get(state) ??
+      new Set<TelemetryCompletionFailureStage>();
+    reported.add("notification_dispatch");
+    reportedNotificationFailures.set(state, reported);
+  }
+  captureTelemetry(telemetry, {
+    event: "completion_delivery_failed",
+    failure_stage: "notification_dispatch",
+    retry_attempt: 0,
+  });
+}
+
 export function flushDeliveries(
   pi: ExtensionAPI,
   ui: ExtensionUIContext | undefined,
@@ -545,7 +580,14 @@ export function flushDeliveries(
     );
   } catch {
     // Keep intents pending so a later flush can retry the dispatch.
+    reportNotificationDispatchFailure(
+      selected.map(({ state }) => state),
+      owner,
+    );
     return;
+  }
+  for (const { state } of selected) {
+    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
   }
   const deliveryLatencyMs = maxKnownCompletionAge(
     selected.map(({ intent }) => intent.completedAt),
@@ -646,11 +688,13 @@ function reconcileDeliveryReceiptsInMemory(
     for (const id of ids) if (typeof id === "string") seen.add(id);
   }
   let changed = false;
+  let reconciledDelivery = false;
   const canRetryUncommittedDispatch = !resolveStreamingFlag(owner);
   for (const intent of state.pendingDeliveries ?? []) {
     if (seen.has(intent.deliveryId)) {
       (state.deliveryReceipts ??= []).push(intent.deliveryId);
       changed = true;
+      reconciledDelivery = true;
     } else if (
       intent.state === "dispatchAttempted" &&
       canRetryUncommittedDispatch
@@ -663,6 +707,9 @@ function reconcileDeliveryReceiptsInMemory(
     (intent) => !seen.has(intent.deliveryId),
   );
   if (changed) compactDeliveryReceipts(state);
+  if (reconciledDelivery) {
+    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
+  }
   return changed;
 }
 

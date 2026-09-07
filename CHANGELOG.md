@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Prepared unreleased anonymous telemetry schema v4 diagnostics for the 3.6.2
+  release: closed runtime failure categories, stages, and kinds; conditional
+  task and workflow diagnostics; process-exit code buckets; and completion
+  delivery failure stages. Payload allowlists omit arbitrary values and raw
+  diagnostic content.
+
 ## [3.6.2] - 2026-09-06
 
 ### Fixed
@@ -44,9 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added persisted telemetry controls with project-over-global precedence while
   preserving environment and negative launch-flag opt-outs.
 - Expanded anonymous telemetry to cover lifecycle outcomes, tool and command
-  operations, setup and delivery failures, and closed error categories. Schema
-  v4 uses bounded counts and durations without prompts, outputs, raw errors,
-  paths, or agent identifiers.
+  operations, setup and delivery failures, and closed error categories.
+  Payloads use bounded counts and durations without prompts, outputs, raw
+  errors, paths, or agent identifiers.
 - Added Pi SDK support for native provider registrations, JSON-schema constrained
   sampling, session usage totals, and completion deferral during UI prompts.
 

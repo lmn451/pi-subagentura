@@ -195,6 +195,64 @@ describe("startSubagentJob effective thinking level", () => {
     }
   });
 
+  it("exposes only the SDK assistant stop reason in task diagnostics", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const errorMessage =
+      "provider rejected request: secret-token /Users/alice/project";
+    const session = {
+      ...createSession("low"),
+      agent: {
+        state: {
+          messages: [
+            {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              diagnostics: [{ message: errorMessage }],
+            },
+          ],
+          errorMessage,
+        },
+      },
+    };
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        telemetry: {
+          session: createTelemetrySession(true, "orchestrator_v2"),
+          invocationSource: "isolated",
+          async: false,
+          depth: 1,
+          completionPolicy: "inline",
+        },
+      });
+      started.start();
+      await started.jobPromise;
+
+      expect(payloads[2]?.properties).toMatchObject({
+        status: "error",
+        error_category: "provider",
+        error_stage: "provider",
+        agent_stop_reason: "error",
+      });
+      expect(JSON.stringify(payloads)).not.toContain(errorMessage);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("records cancellation after lifecycle cleanup retires the session", async () => {
     const payloads: Array<{
       event: string;
@@ -219,6 +277,11 @@ describe("startSubagentJob effective thinking level", () => {
       ),
       abort: vi.fn(async () => releasePrompt()),
     };
+    session.agent.state.messages.push({
+      role: "assistant",
+      content: [],
+      stopReason: "aborted",
+    } as never);
     mockCreateAgentSession.mockResolvedValue({ session });
     const telemetrySession = createTelemetrySession(true, "orchestrator_v2");
 
@@ -251,6 +314,7 @@ describe("startSubagentJob effective thinking level", () => {
           properties: expect.objectContaining({
             status: "cancelled",
             mux: "none",
+            agent_stop_reason: "aborted",
           }),
         }),
       ]);

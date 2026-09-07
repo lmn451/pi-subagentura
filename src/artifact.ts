@@ -266,11 +266,36 @@ export interface EventRecord {
   legacy: boolean;
 }
 
-export interface EventReadIssue {
-  kind: "record_too_large";
-  startOffset: number;
-  endOffset: number;
-  maxBytes: number;
+export type EventReadIssue =
+  | {
+      kind: "record_too_large";
+      startOffset: number;
+      endOffset: number;
+      maxBytes: number;
+    }
+  | {
+      kind: "artifact_malformed";
+      startOffset: number;
+      endOffset: number;
+    }
+  | {
+      kind: "artifact_unreadable";
+    };
+
+export const MAX_EVENT_ISSUES = 64;
+
+function isMissingArtifactError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+  return error.code === "ENOENT";
+}
+
+function appendEventReadIssue(
+  issues: EventReadIssue[],
+  issue: EventReadIssue,
+): void {
+  if (issues.length < MAX_EVENT_ISSUES) issues.push(issue);
 }
 
 export const MAX_EVENT_BATCH_BYTES = 256 * 1024;
@@ -927,9 +952,9 @@ function normalizeEvent(
 
 /**
  * Read all events for a sub-agent. If `since` is provided, only events with
- * ts >= since are returned. Malformed lines are silently skipped (the
- * sub-agent CLI is the only writer, but a partial write could in theory
- * leave a truncated line).
+ * ts >= since are returned. Malformed complete lines are skipped from the
+ * returned records and surfaced as bounded issues by `readEventBatch`.
+ * A partial final line remains uncommitted until its newline is observed.
  *
  * Reads through the same bounded validator as the incremental poller.
  */
@@ -962,6 +987,11 @@ export function readEventRecords(
   return readEventBatch(art, fromOffset).records;
 }
 
+/**
+ * Read a bounded physical batch. Complete malformed records are skipped and
+ * reported without exposing their contents; unreadable files keep the cursor
+ * unchanged. Missing files are normal during launch and report no issue.
+ */
 export function readEventBatch(
   art: SubagentArtifact,
   fromOffset = 0,
@@ -971,15 +1001,35 @@ export function readEventBatch(
   try {
     fd = openSync(art.statusFile, "r");
     size = statSync(art.statusFile).size;
-  } catch {
-    return { records: [], issues: [], endOffset: fromOffset };
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+    if (isMissingArtifactError(error)) {
+      return { records: [], issues: [], endOffset: fromOffset };
+    }
+    return {
+      records: [],
+      issues: [{ kind: "artifact_unreadable" }],
+      endOffset: fromOffset,
+    };
   }
+
   const offset = Math.max(0, Math.min(fromOffset, size));
   let content = Buffer.alloc(Math.min(MAX_EVENT_BATCH_BYTES, size - offset));
   let oversizedEndOffset: number | undefined;
+  let oversizedRecordComplete = false;
+  let readFailed = false;
   try {
     if (content.byteLength > 0) {
-      readSync(fd, content, 0, content.length, offset);
+      const bytesRead = readSync(fd, content, 0, content.length, offset);
+      if (bytesRead < content.byteLength) {
+        content = content.subarray(0, Math.max(0, bytesRead));
+      }
       while (
         content.indexOf(0x0a) < 0 &&
         offset + content.byteLength < size &&
@@ -990,100 +1040,142 @@ export function readEventBatch(
           size - offset - content.byteLength,
           MAX_EVENT_RECORD_BYTES - content.byteLength,
         );
+        if (remaining <= 0) break;
         const next = Buffer.alloc(remaining);
-        readSync(fd, next, 0, next.length, offset + content.byteLength);
-        content = Buffer.concat([content, next]);
+        const nextBytesRead = readSync(
+          fd,
+          next,
+          0,
+          next.length,
+          offset + content.byteLength,
+        );
+        if (nextBytesRead > 0) {
+          content = Buffer.concat([content, next.subarray(0, nextBytesRead)]);
+        }
+        if (nextBytesRead < next.length) break;
       }
       if (
         content.indexOf(0x0a) < 0 &&
-        content.byteLength >= MAX_EVENT_RECORD_BYTES &&
-        offset + content.byteLength < size
+        content.byteLength >= MAX_EVENT_RECORD_BYTES
       ) {
-        let scanOffset = offset + content.byteLength;
-        const scan = Buffer.alloc(MAX_EVENT_BATCH_BYTES);
-        while (scanOffset < size) {
-          const bytesRead = readSync(
-            fd,
-            scan,
-            0,
-            Math.min(scan.length, size - scanOffset),
-            scanOffset,
-          );
-          if (bytesRead === 0) break;
-          const newline = scan.subarray(0, bytesRead).indexOf(0x0a);
-          if (newline >= 0) {
-            const lineBytes = scanOffset + newline - offset;
-            if (lineBytes > MAX_EVENT_RECORD_BYTES) {
-              oversizedEndOffset = scanOffset + newline + 1;
-            } else {
-              content = Buffer.concat([content, Buffer.from("\n")]);
+        if (offset + content.byteLength < size) {
+          let scanOffset = offset + content.byteLength;
+          const scan = Buffer.alloc(MAX_EVENT_BATCH_BYTES);
+          while (scanOffset < size) {
+            const bytesRead = readSync(
+              fd,
+              scan,
+              0,
+              Math.min(scan.length, size - scanOffset),
+              scanOffset,
+            );
+            if (bytesRead === 0) break;
+            const newline = scan.subarray(0, bytesRead).indexOf(0x0a);
+            if (newline >= 0) {
+              const lineBytes = scanOffset + newline - offset;
+              if (lineBytes > MAX_EVENT_RECORD_BYTES) {
+                oversizedEndOffset = scanOffset + newline + 1;
+                oversizedRecordComplete = true;
+              } else {
+                content = Buffer.concat([content, Buffer.from("\n")]);
+              }
+              break;
             }
-            break;
+            scanOffset += bytesRead;
           }
-          scanOffset += bytesRead;
+          if (oversizedEndOffset === undefined && scanOffset >= size) {
+            // Keep the cursor at the record start until a physical newline commits
+            // the discard boundary. The observed extent is still reported.
+            oversizedEndOffset = size;
+          }
+        } else if (size - offset > MAX_EVENT_RECORD_BYTES) {
+          // An unterminated oversized record is not consumed yet. Reporting its
+          // observed extent must not make a later suffix look like a new event.
+          oversizedEndOffset = size;
         }
       }
     }
+  } catch {
+    readFailed = true;
   } finally {
-    closeSync(fd);
+    try {
+      closeSync(fd);
+    } catch {
+      /* fd is already closed or unreadable */
+    }
   }
+  if (readFailed) {
+    return {
+      records: [],
+      issues: [{ kind: "artifact_unreadable" }],
+      endOffset: fromOffset,
+    };
+  }
+
   const records: EventRecord[] = [];
   const issues: EventReadIssue[] = [];
   if (oversizedEndOffset !== undefined) {
-    issues.push({
+    appendEventReadIssue(issues, {
       kind: "record_too_large",
       startOffset: offset,
       endOffset: oversizedEndOffset,
       maxBytes: MAX_EVENT_RECORD_BYTES,
     });
-    return { records, issues, endOffset: oversizedEndOffset };
+    return {
+      records,
+      issues,
+      endOffset: oversizedRecordComplete ? oversizedEndOffset : offset,
+    };
   }
+
   let start = 0;
   let endOffset = offset;
   while (start < content.byteLength) {
     const newline = content.indexOf(0x0a, start);
     if (newline < 0) break;
     const lineEnd = newline + 1;
+    const recordStart = offset + start;
+    const recordEnd = offset + lineEnd;
     const raw = content.subarray(start, newline).toString("utf8");
+    let normalized: { event: SubagentEvent; legacy: boolean } | null = null;
     try {
-      const normalized = normalizeEvent(JSON.parse(raw), offset + start, raw);
-      if (normalized) {
-        if (normalized.legacy) {
-          Object.defineProperties(normalized.event, {
-            eventId: {
-              value: `legacy-${createHash("sha256")
-                .update(`${offset + start}:`)
-                .update(raw)
-                .digest("hex")
-                .slice(0, 24)}`,
-              enumerable: false,
-            },
-            turnId: {
-              value: `legacy-${offset + start}`,
-              enumerable: false,
-            },
-          });
-        }
-        records.push({
-          event: normalized.event,
-          startOffset: offset + start,
-          endOffset: offset + lineEnd,
-          raw,
-          legacy: normalized.legacy,
+      normalized = normalizeEvent(JSON.parse(raw), recordStart, raw);
+    } catch {
+      normalized = null;
+    }
+    if (normalized) {
+      if (normalized.legacy) {
+        Object.defineProperties(normalized.event, {
+          eventId: {
+            value: `legacy-${createHash("sha256")
+              .update(`${recordStart}:`)
+              .update(raw)
+              .digest("hex")
+              .slice(0, 24)}`,
+            enumerable: false,
+          },
+          turnId: {
+            value: `legacy-${recordStart}`,
+            enumerable: false,
+          },
         });
       }
-    } catch {
-      /* malformed complete lines are skipped; physical cursor still advances */
+      records.push({
+        event: normalized.event,
+        startOffset: recordStart,
+        endOffset: recordEnd,
+        raw,
+        legacy: normalized.legacy,
+      });
+    } else {
+      appendEventReadIssue(issues, {
+        kind: "artifact_malformed",
+        startOffset: recordStart,
+        endOffset: recordEnd,
+      });
     }
     start = lineEnd;
-    endOffset = offset + start;
-  }
-  if (
-    endOffset === offset &&
-    content.byteLength > 0 &&
-    offset + content.byteLength < size
-  ) {
-    endOffset = offset + content.byteLength;
+    endOffset = recordEnd;
   }
   return { records, issues, endOffset };
 }
@@ -1366,15 +1458,15 @@ export function cleanupOldArtifacts(
 }
 
 /**
-
+ 
  * Per-entry shape. The minimum to drive sendCommandToPane (src/interactive-tmux.ts:533),
-
+ 
  * isPaneAlive (:525), cancelInteractiveSubagent (:557), and the poller's tailReadSessionLog
-
+ 
  * (:714). Fields like task/model/startedAt are intentionally not persisted — they're
-
+ 
  * recoverable from the launch script + prompt file on demand, or not needed for live ops.
-
+ 
  */
 
 export interface InteractiveSubagentPersistedStateV1 {

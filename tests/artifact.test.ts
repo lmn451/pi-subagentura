@@ -30,6 +30,7 @@ import {
   isTurnTerminal,
   lastEvent,
   listArtifacts,
+  MAX_EVENT_ISSUES,
   MAX_EVENT_RECORD_BYTES,
   listOutputTurns,
   loadInteractiveStates,
@@ -195,6 +196,70 @@ describe("artifact", () => {
       );
       const events = readEvents(art);
       expect(events).toHaveLength(2);
+    });
+    it("returns a bounded structured issue for malformed records while advancing the byte cursor", () => {
+      const art = artifactPath(root, "malformed-diagnostic");
+      ensureArtifactDir(art);
+      const secret = "malformed secret bearer token";
+      const valid =
+        JSON.stringify({
+          ts: 1,
+          type: "started",
+          status: "running",
+        }) + "\n";
+      const malformed = `${secret}\n`;
+      const done =
+        JSON.stringify({ ts: 2, type: "done", status: "done" }) + "\n";
+      writeFileSync(art.statusFile, valid + malformed + done);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toHaveLength(2);
+      expect(batch.endOffset).toBe(statSync(art.statusFile).size);
+      expect(batch.issues).toHaveLength(1);
+      expect(batch.issues[0]).toMatchObject({
+        startOffset: Buffer.byteLength(valid),
+        endOffset: Buffer.byteLength(valid + malformed),
+      });
+      expect(batch.issues[0].kind).toMatch(/malformed/);
+      expect(JSON.stringify(batch.issues)).not.toContain(secret);
+      expect(readEventBatch(art, batch.endOffset).issues).toEqual([]);
+    });
+
+    it("keeps a missing status file as a normal empty read", () => {
+      const art = artifactPath(root, "missing-status-diagnostic");
+
+      expect(readEventBatch(art, 0)).toEqual({
+        records: [],
+        issues: [],
+        endOffset: 0,
+      });
+    });
+    it("reports an unreadable status file without fabricating offsets", () => {
+      const art = artifactPath(root, "unreadable-status-diagnostic");
+      ensureArtifactDir(art);
+      mkdirSync(art.statusFile);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toEqual([]);
+      expect(batch.issues).toEqual([{ kind: "artifact_unreadable" }]);
+      expect(batch.endOffset).toBe(0);
+    });
+    it("caps malformed issue accumulation without pinning the cursor", () => {
+      const art = artifactPath(root, "malformed-issue-cap");
+      ensureArtifactDir(art);
+      const malformedLines = Array.from(
+        { length: MAX_EVENT_ISSUES + 10 },
+        () => "not-json\n",
+      ).join("");
+      writeFileSync(art.statusFile, malformedLines);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toEqual([]);
+      expect(batch.issues).toHaveLength(MAX_EVENT_ISSUES);
+      expect(batch.endOffset).toBe(statSync(art.statusFile).size);
     });
 
     it("normalizes malformed object fields and bounds adversarial text", () => {
@@ -458,6 +523,49 @@ describe("artifact", () => {
       issues: [],
       endOffset: expectedEnd,
     });
+  });
+  it("holds an oversized unterminated record until its physical newline", () => {
+    const art = artifactPath(root, "oversized-partial");
+    ensureArtifactDir(art);
+    writeFileSync(
+      art.statusFile,
+      Buffer.alloc(MAX_EVENT_RECORD_BYTES + 1, 120),
+    );
+
+    const partial = readEventBatch(art, 0);
+    const partialEnd = statSync(art.statusFile).size;
+    expect(partial.records).toEqual([]);
+    expect(partial.issues).toEqual([
+      {
+        kind: "record_too_large",
+        startOffset: 0,
+        endOffset: partialEnd,
+        maxBytes: MAX_EVENT_RECORD_BYTES,
+      },
+    ]);
+    expect(partial.endOffset).toBe(0);
+
+    const forgedSuffix =
+      JSON.stringify({ ts: 1, type: "done", status: "done" }) + "\n";
+    appendFileSync(art.statusFile, forgedSuffix);
+    const committed = readEventBatch(art, partial.endOffset);
+    const committedEnd = statSync(art.statusFile).size;
+    expect(committed.records).toEqual([]);
+    expect(committed.issues).toEqual([
+      {
+        kind: "record_too_large",
+        startOffset: 0,
+        endOffset: committedEnd,
+        maxBytes: MAX_EVENT_RECORD_BYTES,
+      },
+    ]);
+    expect(committed.endOffset).toBe(committedEnd);
+
+    appendEvent(art, { ts: 2, type: "started", status: "running" });
+    const recovered = readEventBatch(art, committed.endOffset);
+    expect(recovered.records.map(({ event }) => event.type)).toEqual([
+      "started",
+    ]);
   });
 
   describe("readOutput", () => {
