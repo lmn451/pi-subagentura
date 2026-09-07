@@ -50,6 +50,7 @@ import { appendEvent, artifactPath } from "../src/artifact";
 import {
   awaitInteractiveResult,
   parseUsageFromSessionFile,
+  SESSION_USAGE_MAX_RECORD_BYTES,
 } from "../src/workflow-worker";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import type { CancellationSnapshotReceipt } from "../src/cancellation-snapshots";
@@ -140,6 +141,66 @@ describe("workflow session usage parsing", () => {
       cost: 0.03,
       costSource: "mixed",
       turns: 2,
+    });
+  });
+
+  it("skips an oversized record and aggregates a later assistant usage record", async () => {
+    const cwd = temporaryDirectory("subagentura-usage-oversized-");
+    const sessionFile = join(cwd, "session.jsonl");
+    const oversizedRecord = JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: "x".repeat(SESSION_USAGE_MAX_RECORD_BYTES),
+        usage: { input: 100, output: 200, cost: { total: 1 } },
+      },
+    });
+    const laterRecord = JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 3, output: 5, cost: { total: 0.02 } },
+      },
+    });
+    expect(Buffer.byteLength(oversizedRecord)).toBeGreaterThan(
+      SESSION_USAGE_MAX_RECORD_BYTES,
+    );
+    writeFileSync(sessionFile, `${oversizedRecord}\n${laterRecord}\n`);
+
+    await expect(parseUsageFromSessionFile(sessionFile)).resolves.toEqual({
+      input: 3,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0.02,
+      costSource: "estimated",
+      turns: 1,
+    });
+  });
+
+  it("skips an oversized final record without a trailing newline", async () => {
+    const cwd = temporaryDirectory("subagentura-usage-oversized-final-");
+    const sessionFile = join(cwd, "session.jsonl");
+    const oversizedRecord = JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: "x".repeat(SESSION_USAGE_MAX_RECORD_BYTES),
+        usage: { input: 100, output: 200, cost: { total: 1 } },
+      },
+    });
+    expect(Buffer.byteLength(oversizedRecord)).toBeGreaterThan(
+      SESSION_USAGE_MAX_RECORD_BYTES,
+    );
+    writeFileSync(sessionFile, oversizedRecord);
+
+    await expect(parseUsageFromSessionFile(sessionFile)).resolves.toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
     });
   });
 

@@ -66,6 +66,7 @@ import {
   registerCompletionMember,
   settleCompletionParentTurn,
 } from "../src/completion-coordinator";
+import { createTelemetrySession } from "../src/telemetry";
 const repoRoot = new URL("..", import.meta.url).pathname;
 const harnesses: PiSessionHarness[] = [];
 const artifactRoots: string[] = [];
@@ -485,6 +486,50 @@ describe("Pi session delivery integration", () => {
         .some((entry: any) => entry.type === "custom_message"),
     ).toBe(true);
     expect(harness.contexts).toHaveLength(0);
+  });
+
+  it("retains a failed notification and reports one bounded dispatch failure", async () => {
+    const { state, sendMessage, scope } = await setup("notify", false);
+    scope.telemetry = createTelemetrySession(true);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init: RequestInit) => {
+        payloads.push(
+          JSON.parse(String(init.body)) as {
+            event?: string;
+            properties?: Record<string, unknown>;
+          },
+        );
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }),
+    );
+    sendMessage.mockImplementation(() => {
+      throw new Error("notification dispatch failed /private/project-secret");
+    });
+
+    flushHarnessDeliveries(scope);
+    flushHarnessDeliveries(scope);
+
+    expect(
+      payloads.filter(
+        (payload) =>
+          payload.event === "pi_subagentura_completion_delivery_failed",
+      ),
+    ).toHaveLength(1);
+    expect(payloads[0]?.properties).toMatchObject({
+      failure_stage: "notification_dispatch",
+      retry_attempt: 0,
+    });
+    expect(JSON.stringify(payloads)).not.toMatch(
+      /notification dispatch failed|private|project-secret/,
+    );
+    expect(state.pendingDeliveries).toHaveLength(1);
+    expect(state.pendingDeliveries?.[0]?.state).toBe("queued");
+    expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 
   it("idle inject triggers one attributed provider turn by default", async () => {

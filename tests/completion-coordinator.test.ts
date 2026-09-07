@@ -1037,7 +1037,7 @@ describe("completion coordinator", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(["notice_persistence", "manifest_dispatch"])(
+  it.each(["completion_publication", "manifest_dispatch"])(
     "reports bounded %s failures and retry exhaustion without content",
     async (failureStage) => {
       const setupResult = setup();
@@ -1052,7 +1052,7 @@ describe("completion coordinator", () => {
         }),
       );
       const failedMethod =
-        failureStage === "notice_persistence"
+        failureStage === "completion_publication"
           ? setupResult.pi.appendEntry
           : setupResult.pi.sendMessage;
       failedMethod.mockImplementation(() => {
@@ -1083,7 +1083,7 @@ describe("completion coordinator", () => {
       expect(JSON.stringify(payloads)).not.toMatch(/private|customer-secret/);
       expect(vi.getTimerCount()).toBe(0);
       expect(setupResult.entries).toHaveLength(
-        failureStage === "notice_persistence" ? 0 : 1,
+        failureStage === "completion_publication" ? 0 : 1,
       );
     },
   );
@@ -1159,6 +1159,23 @@ describe("completion coordinator", () => {
   it("keeps successful consumption durable when the receipt append fails", () => {
     const setupResult = setup();
     scope = setupResult.scope;
+    scope.telemetry = createTelemetrySession(true);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init: RequestInit) => {
+        payloads.push(
+          JSON.parse(String(init.body)) as {
+            event?: string;
+            properties?: Record<string, unknown>;
+          },
+        );
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }),
+    );
     scope.cwd = mkdtempSync(join(tmpdir(), "completion-receipt-"));
     setupResult.pi.appendEntry.mockImplementationOnce(() => {
       throw new Error("receipt storage unavailable");
@@ -1175,6 +1192,15 @@ describe("completion coordinator", () => {
           sessionOwner(scope),
         ),
       ).not.toThrow();
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(1);
+      expect(payloads[0]?.properties).toMatchObject({
+        failure_stage: "consumption_persistence",
+      });
       publishCompletion(
         record("consumed", { turnId: "turn-consumed" }),
         sessionOwner(scope),
@@ -1256,10 +1282,27 @@ describe("completion coordinator", () => {
     expect(prepareCompletionManifest(owner)).toBeUndefined();
   });
 
-  it("rejects consumption when both receipt stores fail and allows a durable retry", () => {
+  it("rejects consumption when both receipt stores fail and allows a durable retry", async () => {
     const setupResult = setup();
     scope = setupResult.scope;
     scope.parentStreaming = true;
+    scope.telemetry = createTelemetrySession(true);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init: RequestInit) => {
+        payloads.push(
+          JSON.parse(String(init.body)) as {
+            event?: string;
+            properties?: Record<string, unknown>;
+          },
+        );
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }),
+    );
     const owner = sessionOwner(scope);
     publishCompletion(record("receipt-retry"), owner);
     const ledgerPath = sessionLedgerPath(
@@ -1271,7 +1314,7 @@ describe("completion coordinator", () => {
     let unavailable = true;
     setupResult.pi.appendEntry.mockImplementation((customType, data) => {
       if (unavailable && customType === "subagentura-completion-consumed") {
-        throw new Error("receipt storage unavailable");
+        throw new Error("receipt storage unavailable /private/project-secret");
       }
       setupResult.entries.push({ type: "custom", customType, data });
     });
@@ -1287,6 +1330,28 @@ describe("completion coordinator", () => {
       );
 
     expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    expect(
+      payloads.filter(
+        (payload) =>
+          payload.event === "pi_subagentura_completion_delivery_failed",
+      ),
+    ).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(payloads[0]?.properties).toMatchObject({
+      failure_stage: "consumption_persistence",
+    });
+    expect(JSON.stringify(payloads)).not.toMatch(
+      /receipt storage unavailable|private|project-secret/,
+    );
+    expect(prepareCompletionManifest(owner)).toBeDefined();
     rmSync(ledgerPath, { recursive: true });
     unavailable = false;
     expect(consume()).toBe(true);

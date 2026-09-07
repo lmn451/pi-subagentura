@@ -504,6 +504,167 @@ describe("anonymous product telemetry", () => {
     expect(payload.properties).not.toHaveProperty("errorMessage");
     expect(payload.properties.error_category).toBe("unknown");
   });
+  it("conditionally emits sanitized task diagnostics", () => {
+    const dimensions = {
+      execution: "in-process" as const,
+      mux: "none" as const,
+      unit: "job" as const,
+      invocation_source: "isolated" as const,
+      model: "default" as const,
+      async: false,
+      depth: 1,
+      depth_bucket: "1" as const,
+      completion_policy: "inline" as const,
+      duration_ms: undefined,
+      child_conversation_message_count: undefined,
+    };
+
+    const processExit = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "task_completed",
+      ...dimensions,
+      status: "error",
+      terminal_reason: "process_exit",
+      error_category: "artifact",
+      error_stage: "schema_validation",
+      agent_stop_reason: "error",
+      exit_code_bucket: "nonzero",
+      rawError: "private prompt",
+    } as unknown as TelemetryEvent);
+    expect(processExit.properties).toMatchObject({
+      error_category: "artifact",
+      error_stage: "schema_validation",
+      agent_stop_reason: "error",
+      exit_code_bucket: "nonzero",
+    });
+    expect(JSON.stringify(processExit)).not.toContain("private prompt");
+
+    const nonProcessExit = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "task_completed",
+      ...dimensions,
+      status: "error",
+      terminal_reason: "agent_error",
+      error_category: "internal",
+      error_stage: "provider",
+      agent_stop_reason: "aborted",
+      exit_code_bucket: "nonzero",
+    } as unknown as TelemetryEvent);
+    expect(nonProcessExit.properties).not.toHaveProperty("exit_code_bucket");
+
+    const cancelled = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "task_completed",
+      ...dimensions,
+      status: "cancelled",
+      terminal_reason: "explicit_cancel",
+      error_category: "secret-category",
+      error_stage: "secret-stage",
+      agent_stop_reason: "aborted",
+      exit_code_bucket: "nonzero",
+    } as unknown as TelemetryEvent);
+    expect(cancelled.properties).toHaveProperty("agent_stop_reason", "aborted");
+    expect(cancelled.properties).not.toHaveProperty("error_category");
+    expect(cancelled.properties).not.toHaveProperty("error_stage");
+    expect(cancelled.properties).not.toHaveProperty("exit_code_bucket");
+
+    const success = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "task_completed",
+      ...dimensions,
+      status: "success",
+      terminal_reason: "completed",
+      error_category: "secret-category",
+      error_stage: "secret-stage",
+      agent_stop_reason: "secret-stop-reason",
+      exit_code_bucket: "secret-exit-code",
+    } as unknown as TelemetryEvent);
+    expect(success.properties).not.toHaveProperty("error_category");
+    expect(success.properties).not.toHaveProperty("error_stage");
+    expect(success.properties).not.toHaveProperty("agent_stop_reason");
+    expect(success.properties).not.toHaveProperty("exit_code_bucket");
+  });
+
+  it("conditionally emits workflow diagnostics and bounds runtime failures", () => {
+    const partial = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "workflow_completed",
+      invocation: "tool",
+      async: true,
+      completion_policy: "group",
+      status: "partial",
+      terminal_reason: "agent_error",
+      agents_spawned: 3,
+      error_count: 2,
+      error_category: "artifact",
+      error_stage: "workflow",
+      leaked: "private prompt",
+    } as unknown as TelemetryEvent);
+    expect(partial.properties).toMatchObject({
+      error_category: "artifact",
+      error_stage: "workflow",
+    });
+    expect(JSON.stringify(partial)).not.toContain("private prompt");
+
+    const cancelled = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "workflow_completed",
+      invocation: "tool",
+      async: false,
+      completion_policy: "inline",
+      status: "cancelled",
+      terminal_reason: "explicit_cancel",
+      agents_spawned: 0,
+      error_count: 0,
+      error_category: "secret-category",
+      error_stage: "secret-stage",
+    } as unknown as TelemetryEvent);
+    expect(cancelled.properties).not.toHaveProperty("error_category");
+    expect(cancelled.properties).not.toHaveProperty("error_stage");
+
+    const runtime = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "runtime_failure",
+      error_category: "internal",
+      error_stage: "delivery",
+      failure_kind: "artifact_unreadable",
+      error: "private prompt",
+      path: "/Users/alice/private/project",
+      id: "agent-secret",
+    } as unknown as TelemetryEvent);
+    expect(runtime.event).toBe("pi_subagentura_runtime_failure");
+    expect(runtime.properties).toMatchObject({
+      error_category: "internal",
+      error_stage: "delivery",
+      failure_kind: "artifact_unreadable",
+    });
+    expect(JSON.stringify(runtime)).not.toMatch(
+      /private prompt|private\/project|agent-secret/,
+    );
+
+    const malformed = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "runtime_failure",
+      error_category: "secret-category",
+      error_stage: "secret-stage",
+      failure_kind: "secret-failure-kind",
+    } as unknown as TelemetryEvent);
+    expect(malformed.properties.error_category).toBe("unknown");
+    expect(malformed.properties).not.toHaveProperty("error_stage");
+    expect(malformed.properties).not.toHaveProperty("failure_kind");
+  });
+
+  it("keeps completion delivery failure stages closed", () => {
+    const valid = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "completion_delivery_failed",
+      failure_stage: "notification_dispatch",
+      retry_attempt: 900,
+    } as unknown as TelemetryEvent);
+    expect(valid.properties).toMatchObject({
+      failure_stage: "notification_dispatch",
+      retry_attempt: 32,
+    });
+
+    const invalid = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "completion_delivery_failed",
+      failure_stage: "secret-stage",
+      retry_attempt: Number.POSITIVE_INFINITY,
+    } as unknown as TelemetryEvent);
+    expect(invalid.properties).not.toHaveProperty("failure_stage");
+    expect(invalid.properties.retry_attempt).toBe(0);
+  });
 
   it("emits the complete agent_spawn_failed shape with bounded duration", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
@@ -716,6 +877,7 @@ describe("anonymous product telemetry", () => {
         "duration_bucket",
         "duration_ms",
         "error_count_bucket",
+        "error_category",
         "invocation",
         "mode",
         "schema_version",

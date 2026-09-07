@@ -26,6 +26,8 @@ The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`
 
 ## Source layout (the 30-second tour)
 
+The table below is abbreviated; see [architecture.md §13](./architecture.md#13-complete-src-inventory) for the exhaustive source map.
+
 | File                                                   | Purpose                                                                                                                                                                                                           |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/subagent.ts`                                      | **Entrypoint/barrel.** Default export registers all tool groups and session handlers; re-exports internals for test access.                                                                                       |
@@ -94,15 +96,27 @@ invalid candidate, and continue to the next applicable scope or default.
 
 ### Telemetry schema v4 invariants
 
+- Schema v4 is unreleased and targeted for the 3.6.2 release; never describe it
+  as part of shipped 3.6.1 telemetry.
 - Telemetry dimensions are closed enums. Use only the literals in the schema
   (and `unknown` only where that field permits it); never forward arbitrary
   strings. Counts remain bounded and duration/latency numbers remain rounded
   to the existing `0..30`-day representation.
+- Diagnostic fields are status-scoped: `task_completed` carries
+  `error_category` and `error_stage` only for errors, `agent_stop_reason`
+  (`error` or `aborted`) for errors or cancellations, and `exit_code_bucket`
+  only when `terminal_reason` is `process_exit`; `workflow_completed` carries
+  `error_category` and `error_stage` only for `error` or `partial` status.
+  `runtime_failure` carries only its closed category, stage, and failure kind.
 - Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `terminal_reason`, result-outcome, and error-category values;
-  error counts use bounded buckets. Never send exception text or stacks, prompts,
-  tasks, personas, tool arguments, message content, outputs, paths, or
-  agent/job/workflow/session identifiers.
+  `failure_stage`, `terminal_reason`, result-outcome, error-category, and
+  error-stage values; error counts use bounded buckets. Invalid categories map
+  to `unknown`; invalid stages, stop reasons, exit buckets, and failure kinds
+  are omitted. Cancellation is not an error, and runtime failures are reported
+  once per failure episode rather than once per poll.
+- Never send exception text or stacks, prompts, tasks, personas, tool
+  arguments, message content, outputs, paths, or agent/job/workflow/session
+  identifiers.
 - The workflow runner is the sole owner of the aggregate lifecycle pair:
   exactly one `workflow_started` and one `workflow_completed` for an accepted
   invocation. Child agent/task records must not emit duplicate workflow
@@ -303,6 +317,8 @@ remain process/session scoped and are retired rather than rehydrated.
 
 ## File map at a glance
 
+This abbreviated map is not exhaustive; see [architecture.md §13](./architecture.md#13-complete-src-inventory) for the complete source inventory.
+
 ```
 src/
   subagent.ts                      # Entrypoint/barrel — registers tools, re-exports internals
@@ -323,7 +339,7 @@ src/
   notifications.ts                 # upgrade-only legacy completion broker
   rendering.ts                     # TUI render helpers
   schemas.ts                       # TypeBox tool-param schemas
-  workflow.ts                      # workflow tool
+  workflow.ts                      # Internal workflow barrel and registration re-export
   ndjson.d.ts                      # ambient types for the ndjson dep
   usage.ts                         # SDK-free usage normalization and aggregation
 

@@ -1602,20 +1602,25 @@ function appendConsumption(
     debugLog("warn", "completion_consumption_ledger_write_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
+    reportCompletionDeliveryFailure(state, "consumption_persistence", 0);
     // Retirement must still suppress jobs that shutdown removes permanently.
     if (consumption.reason !== "lifecycle") return false;
   }
-  try {
-    if (typeof state.pi.appendEntry === "function") {
+  if (typeof state.pi.appendEntry === "function") {
+    try {
       state.pi.appendEntry(COMPLETION_CONSUMED_ENTRY_TYPE, consumption);
       durable = true;
+    } catch (error) {
+      debugLog("warn", "completion_consumption_persist_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      reportCompletionDeliveryFailure(state, "consumption_persistence");
     }
-  } catch (error) {
-    debugLog("warn", "completion_consumption_persist_failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } else if (!durable) {
+    reportCompletionDeliveryFailure(state, "consumption_persistence");
   }
   if (!durable) return false;
+  state.reportedDeliveryFailures?.delete("consumption_persistence");
   state.sourceConsumptions.push(consumption);
   if (state.sourceConsumptions.length > MAX_COMPLETION_RECORDS) {
     state.sourceConsumptions.shift();
@@ -1638,24 +1643,29 @@ function appendConsumption(
 function reportCompletionDeliveryFailure(
   state: CompletionCoordinatorState,
   failureStage: TelemetryCompletionFailureStage,
+  retryAttempt = state.manifestRetryAttempt,
 ): void {
   const telemetry = resolveLiveSessionScope(state.owner)?.telemetry;
   if (!telemetry?.enabled || !telemetry.active) return;
-  // One event per stage until a manifest dispatch succeeds or is reconciled
-  // from the parent session. Polling and exhausted retries must not flood capture.
+  // One event per failure episode and stage; successful persistence or
+  // manifest delivery clears the episode. Polling and exhausted retries must
+  // not flood capture.
   const reported = (state.reportedDeliveryFailures ??= new Set());
   if (reported.has(failureStage)) return;
   reported.add(failureStage);
   captureTelemetry(telemetry, {
     event: "completion_delivery_failed",
     failure_stage: failureStage,
-    retry_attempt: state.manifestRetryAttempt,
+    retry_attempt: retryAttempt,
   });
 }
 
 function persistPendingNotices(state: CompletionCoordinatorState): boolean {
   const appendEntry = state.pi.appendEntry;
-  if (typeof appendEntry !== "function") return false;
+  if (typeof appendEntry !== "function") {
+    reportCompletionDeliveryFailure(state, "completion_publication", 0);
+    return false;
+  }
   for (const [completionId, record] of state.pendingNotices) {
     try {
       appendEntry.call(state.pi, COMPLETION_ENTRY_TYPE, record);
@@ -1665,10 +1675,11 @@ function persistPendingNotices(state: CompletionCoordinatorState): boolean {
         completionId,
         error: error instanceof Error ? error.message : String(error),
       });
-      reportCompletionDeliveryFailure(state, "notice_persistence");
+      reportCompletionDeliveryFailure(state, "completion_publication", 0);
       return false;
     }
   }
+  state.reportedDeliveryFailures?.delete("completion_publication");
   return true;
 }
 

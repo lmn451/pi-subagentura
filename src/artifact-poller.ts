@@ -24,6 +24,7 @@ import {
   updateInteractiveStates,
   type CompletionEvent,
   type CompletionOutcome,
+  type EventReadIssue,
   type SubagentArtifact,
   type SubagentEvent,
   type InteractiveSubagentPersistedStateV2,
@@ -76,6 +77,9 @@ import { isAgentListHidden } from "./settings";
 import {
   captureTelemetry,
   type TelemetryErrorCategory,
+  type TelemetryErrorStage,
+  type TelemetryRuntimeFailureKind,
+  type TelemetrySession,
   type TelemetryTerminalReason,
 } from "./telemetry";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
@@ -556,6 +560,162 @@ function errorCategoryFromEvent(
   }
   return "unknown";
 }
+function taskErrorStageFromEvent(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+  terminalReason: TelemetryTerminalReason,
+): TelemetryErrorStage | undefined {
+  if (status !== "error") return undefined;
+  if (
+    event.type === "completion" &&
+    event.source === "agent_settled" &&
+    event.agentStopReason === "error"
+  ) {
+    return "provider";
+  }
+  if (event.type === "process_exited" || terminalReason === "process_exit") {
+    return "completion";
+  }
+  return "turn";
+}
+
+function taskAgentStopReason(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+): "error" | "aborted" | undefined {
+  if (
+    status === "error" &&
+    event.type === "completion" &&
+    event.source === "agent_settled"
+  ) {
+    return event.agentStopReason;
+  }
+  return undefined;
+}
+
+function taskExitCodeBucket(
+  event: SubagentEvent,
+): "zero" | "nonzero" | "unknown" | undefined {
+  if (event.type !== "process_exited") return undefined;
+  return Number.isSafeInteger(event.exitCode)
+    ? event.exitCode === 0
+      ? "zero"
+      : "nonzero"
+    : "unknown";
+}
+
+type ArtifactRuntimeFailureKind = Extract<
+  TelemetryRuntimeFailureKind,
+  | "artifact_unreadable"
+  | "artifact_malformed"
+  | "artifact_oversized"
+  | "mux_probe"
+>;
+
+interface RuntimeFailureEpisodeState {
+  active: Set<ArtifactRuntimeFailureKind>;
+  sequence: Map<ArtifactRuntimeFailureKind, number>;
+}
+
+const runtimeFailureEpisodes = new Map<string, RuntimeFailureEpisodeState>();
+
+function runtimeFailureKindForIssue(
+  issue: EventReadIssue,
+): ArtifactRuntimeFailureKind | undefined {
+  switch (issue.kind) {
+    case "artifact_unreadable":
+      return "artifact_unreadable";
+    case "artifact_malformed":
+      return "artifact_malformed";
+    case "record_too_large":
+      return "artifact_oversized";
+    default:
+      return undefined;
+  }
+}
+
+function runtimeFailureEpisodeState(
+  artifactDir: string,
+): RuntimeFailureEpisodeState {
+  const existing = runtimeFailureEpisodes.get(artifactDir);
+  if (existing) return existing;
+  const created: RuntimeFailureEpisodeState = {
+    active: new Set(),
+    sequence: new Map(),
+  };
+  runtimeFailureEpisodes.set(artifactDir, created);
+  return created;
+}
+
+function reportRuntimeFailure(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+  kind: ArtifactRuntimeFailureKind,
+  category: TelemetryErrorCategory,
+  stage: TelemetryErrorStage,
+): void {
+  if (
+    !telemetry ||
+    !state.telemetryEligible ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const episode = runtimeFailureEpisodeState(state.artifactDir);
+  if (episode.active.has(kind)) return;
+  episode.active.add(kind);
+  const sequence = (episode.sequence.get(kind) ?? 0) + 1;
+  episode.sequence.set(kind, sequence);
+  captureTelemetry(
+    telemetry,
+    {
+      event: "runtime_failure",
+      error_category: category,
+      error_stage: stage,
+      failure_kind: kind,
+    },
+    {
+      dedupeKey: `runtime-failure:interactive:${state.id}:${kind}:${sequence}`,
+    },
+  );
+}
+
+function clearRuntimeFailureEpisode(
+  state: InteractiveSubagentState,
+  kind: ArtifactRuntimeFailureKind,
+): void {
+  const episode = runtimeFailureEpisodes.get(state.artifactDir);
+  episode?.active.delete(kind);
+}
+
+function clearRuntimeFailureEpisodes(state: InteractiveSubagentState): void {
+  const episode = runtimeFailureEpisodes.get(state.artifactDir);
+  if (!episode) return;
+  episode.active.clear();
+}
+
+function reportArtifactReadIssues(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+  issues: readonly EventReadIssue[],
+): void {
+  const observedKinds = new Set<ArtifactRuntimeFailureKind>();
+  for (const issue of issues) {
+    const kind = runtimeFailureKindForIssue(issue);
+    if (kind === undefined) continue;
+    observedKinds.add(kind);
+    reportRuntimeFailure(state, telemetry, kind, "artifact", "polling");
+  }
+  for (const kind of [
+    "artifact_unreadable",
+    "artifact_malformed",
+    "artifact_oversized",
+  ] as const) {
+    if (!observedKinds.has(kind)) {
+      clearRuntimeFailureEpisode(state, kind);
+    }
+  }
+}
 
 const pollsInFlight = new Map<string, Promise<void>>();
 // ── Poller ─────────────────────────────────────────────────────────────
@@ -727,6 +887,17 @@ async function runPollArtifactChanges(
     const persistedStates: InteractiveSubagentState[] = [];
     for (const [state, paneLiveness] of liveness) {
       if (stateMap.get(state.id) !== state) continue;
+      if (paneLiveness === "unknown") {
+        reportRuntimeFailure(
+          state,
+          ownerContext?.telemetry,
+          "mux_probe",
+          "mux",
+          "polling",
+        );
+      } else {
+        clearRuntimeFailureEpisode(state, "mux_probe");
+      }
       // Cancelled is terminal. Unknown means pane liveness is unavailable, so keep polling
       // the artifact log: a later done/error event must still reach the parent.
       // 'exited' is intentionally not skipped: a follow-up user entry can revive it to "running".
@@ -740,6 +911,7 @@ async function runPollArtifactChanges(
 
       const cursor = state.eventByteCursor ?? 0;
       const batch = readEventBatch(art, cursor);
+      reportArtifactReadIssues(state, ownerContext?.telemetry, batch.issues);
       const records = batch.records;
       const lifecycle = (state.lifecycle ??= {});
       let nextCursor = cursor;
@@ -834,6 +1006,13 @@ async function runPollArtifactChanges(
             status,
             terminalReason,
           );
+          const errorStage = taskErrorStageFromEvent(
+            ev,
+            status,
+            terminalReason,
+          );
+          const agentStopReason = taskAgentStopReason(ev, status);
+          const exitCodeBucket = taskExitCodeBucket(ev);
           captureTelemetry(
             ownerContext?.telemetry,
             {
@@ -853,6 +1032,13 @@ async function runPollArtifactChanges(
               ...(errorCategory === undefined
                 ? {}
                 : { error_category: errorCategory }),
+              ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+              ...(agentStopReason === undefined
+                ? {}
+                : { agent_stop_reason: agentStopReason }),
+              ...(exitCodeBucket === undefined
+                ? {}
+                : { exit_code_bucket: exitCodeBucket }),
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
@@ -925,6 +1111,12 @@ async function runPollArtifactChanges(
       }
       if (!queueBlocked) {
         for (const issue of batch.issues) {
+          if (
+            issue.kind !== "record_too_large" ||
+            issue.endOffset > batch.endOffset
+          ) {
+            continue;
+          }
           if (state.completionOwner === "workflow") continue;
           const mode = state.completionPolicy
             ? "notify"
@@ -995,7 +1187,10 @@ async function runPollArtifactChanges(
       if (stateMap.get(state.id) !== state) continue;
       const terminal =
         state.status === "cancelled" || state.status === "exited";
-      if (terminal) destroySessionParser(state);
+      if (terminal) {
+        destroySessionParser(state);
+        clearRuntimeFailureEpisodes(state);
+      }
       if (
         terminal &&
         state.parentSessionId &&

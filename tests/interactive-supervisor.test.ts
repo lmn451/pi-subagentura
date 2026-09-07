@@ -376,6 +376,40 @@ describe("interactive supervisor", () => {
       component.handleInput("\x1b[A");
     }
   });
+  it("displays parent state cwd and child working cwd distinctly", () => {
+    const item = state("cwd-display", {
+      cwd: "/parent/project",
+      workingCwd: "/child/worktree",
+    });
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
+    });
+
+    component.handleInput("\r");
+    const rendered = component.render(160).join("\n");
+
+    expect(rendered).toContain("State cwd: /parent/project");
+    expect(rendered).toContain("Working cwd: /child/worktree");
+
+    const legacy = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        {
+          kind: "interactive",
+          state: state("legacy-cwd", { cwd: "/parent/project" }),
+          depth: 0,
+          actionable: true,
+        },
+      ],
+    });
+    legacy.handleInput("\r");
+    const legacyRendered = legacy.render(160).join("\n");
+    expect(legacyRendered).toContain("Working cwd: unknown");
+    expect(legacyRendered).not.toContain("Working cwd: /parent/project");
+  });
 
   it("opens and collapses details with right and left arrows", () => {
     const item = state("right-arrow");
@@ -1212,7 +1246,10 @@ describe("interactive supervisor", () => {
         line.includes("Task: First line of the prompt Second line Third line"),
       ),
     ).toBe(true);
-    expect(lines.some((line) => line.includes("cwd: /repo with-newline"))).toBe(
+    expect(
+      lines.some((line) => line.includes("State cwd: /repo with-newline")),
+    ).toBe(true);
+    expect(lines.some((line) => line.includes("Working cwd: unknown"))).toBe(
       true,
     );
     expect(lines.some((line) => line.includes("line breaking"))).toBe(true);
@@ -2030,9 +2067,14 @@ describe("interactive supervisor", () => {
       }),
     } as never);
 
-    const { rendered } = await harness.open();
+    let details = "";
+    const { rendered } = await harness.open((component) => {
+      component.handleInput("\r");
+      details = component.render(200).join("\n");
+    });
 
     expect(rendered).toContain("agent-unknown");
+    expect(details).toContain(`Working cwd: ${harness.sessionRoot}`);
     expect(await harness.nodeFiles()).toEqual(["unknown.json"]);
   });
 

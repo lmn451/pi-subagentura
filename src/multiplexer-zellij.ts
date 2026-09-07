@@ -909,6 +909,8 @@ export class ZellijMultiplexer implements Multiplexer {
       "--floating",
       "--name",
       sanitizeViewerTitle(title),
+      "--blocking",
+      "--close-on-exit",
       "--",
       "sh",
       "-lc",

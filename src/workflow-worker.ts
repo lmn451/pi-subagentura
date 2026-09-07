@@ -41,23 +41,28 @@ import {
   type Semaphore,
   type WorkflowAgentOpts,
   type WorkflowAgentRunner,
+  type WorkflowFailureClassification,
   type WorkflowMeta,
   type WorkflowProgress,
   type WorkflowProgressUpdate,
   type WorkflowRunResultWithUsage,
   WorkflowExecutionError,
+  WorkflowFailureError,
   WorkflowWallTimeoutError,
   type WorkflowUsage,
   addWorkflowUsage,
+  attachWorkflowFailure,
+  workflowFailureClassification,
   workflowUsageFromUsage,
   zeroWorkflowUsage,
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
 import {
   cancelInteractiveSubagent,
-  isPaneAliveAsync,
+  getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
+import type { PaneLiveness } from "./multiplexer-contracts";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
 
 // ── Engine (shared across nested workflows) ──────────────────────────
@@ -84,11 +89,13 @@ interface Engine {
   counters: {
     agentsSpawned: number;
     errorCount: number;
+    cancelledCount: number;
     /** @deprecated Output-token count; use usage.output. */
     tokensSpent: number;
     runningCount: number;
   };
   nextAgentAttemptId: number;
+  failure?: WorkflowFailureClassification;
 
   usage: WorkflowUsage;
   activeAgentRuns: Set<ActiveAgentRun>;
@@ -211,6 +218,7 @@ export async function runWorkflow(
     counters: {
       agentsSpawned: 0,
       errorCount: 0,
+      cancelledCount: 0,
       tokensSpent: 0,
       runningCount: 0,
     },
@@ -228,6 +236,10 @@ export async function runWorkflow(
       result,
       agentsSpawned: engine.counters.agentsSpawned,
       errorCount: engine.counters.errorCount,
+      ...(engine.counters.cancelledCount > 0
+        ? { cancelledCount: engine.counters.cancelledCount }
+        : {}),
+      ...(engine.failure ? { failure: engine.failure } : {}),
       tokensSpent: engine.counters.tokensSpent,
       usage: { ...engine.usage },
       phases: [...engine.phases],
@@ -266,7 +278,9 @@ class WorkerRpcFailure extends Error {
     tokensDelta: number,
     runnerFailure?: { cause: unknown },
   ) {
-    super(error instanceof Error ? error.message : String(error));
+    super(error instanceof Error ? error.message : String(error), {
+      cause: error,
+    });
     this.name = "WorkerRpcFailure";
     this.tokensDelta = tokensDelta;
     this.runnerFailure = runnerFailure;
@@ -317,8 +331,12 @@ async function executeScript(
     if (hasSchema) {
       const schemaValidation = validateSchemaDefinition(agentOpts.schema);
       if (schemaValidation.length > 0) {
-        throw new Error(
+        throw new WorkflowFailureError(
           `Invalid workflow schema: ${schemaValidation.join("; ")}`,
+          {
+            errorCategory: "schema",
+            errorStage: "schema_validation",
+          },
         );
       }
     }
@@ -336,15 +354,19 @@ async function executeScript(
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (engine.signal?.aborted) throw new Error("Workflow aborted.");
         if (engine.counters.agentsSpawned >= MAX_TOTAL_AGENTS) {
-          throw new Error(
+          throw new WorkflowFailureError(
             `Workflow exceeded the ${MAX_TOTAL_AGENTS}-agent lifetime cap.`,
+            {
+              errorCategory: "capacity",
+              errorStage: "workflow",
+            },
           );
         }
         engine.counters.agentsSpawned++;
+        let status: "done" | "error" | "cancelled" = "done";
+        let agentUsage: WorkflowUsage | undefined;
         const agentId = ++engine.nextAgentAttemptId;
         engine.counters.runningCount++;
-        let status: "done" | "error" = "done";
-        let agentUsage: WorkflowUsage | undefined;
         let finalModel = agentOpts.model;
         try {
           emit({
@@ -406,6 +428,10 @@ async function executeScript(
             try {
               res = await agentRun;
               finalModel = res.model ?? agentOpts.model;
+              const resultFailure = workflowFailureClassification(res);
+              if (resultFailure && engine.failure === undefined) {
+                engine.failure = resultFailure;
+              }
             } catch (error) {
               const errorUsage = (error as { usage?: Usage } | null)?.usage;
               const terminalAgentUsage = workflowUsageFromUsage(errorUsage);
@@ -419,9 +445,17 @@ async function executeScript(
                 terminalAgentUsage ?? workflowUsageFromUsage(partialUsage);
               tokensDelta += agentUsage?.output ?? 0;
               accountAgentUsage(engine, activeRun, partialUsage);
-              status = "error";
+              const failure = workflowFailureClassification(error);
+              if (failure && engine.failure === undefined)
+                engine.failure = failure;
+              if (engine.signal.aborted) {
+                status = "cancelled";
+                engine.counters.cancelledCount++;
+              } else {
+                status = "error";
+                engine.counters.errorCount++;
+              }
               runnerFailure = { cause: error };
-              if (!engine.signal.aborted) engine.counters.errorCount++;
               throw error;
             }
           } finally {
@@ -431,7 +465,12 @@ async function executeScript(
           const outTokens = agentUsage?.output ?? 0;
           tokensDelta += outTokens;
           accountAgentUsage(engine, activeRun, res.usage);
-          if (res.isError || res.cancelled) {
+          if (res.cancelled) {
+            status = "cancelled";
+            engine.counters.cancelledCount++;
+            return { value: null, tokensDelta };
+          }
+          if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
             return { value: null, tokensDelta };
@@ -441,6 +480,10 @@ async function executeScript(
             const schemaCapture = res.workflowStructuredOutput;
             if (!schemaCapture?.called) {
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = "No structured_output call found.";
               continue;
             }
@@ -448,6 +491,10 @@ async function executeScript(
             if (verrs.length === 0)
               return { value: schemaCapture.value, tokensDelta };
             status = "error";
+            engine.failure ??= {
+              errorCategory: "schema",
+              errorStage: "schema_validation",
+            };
             lastErr = verrs.slice(0, 5).join("; ");
             continue;
           }
@@ -458,15 +505,27 @@ async function executeScript(
               const verrs = validateSchema(parsed, agentOpts.schema);
               if (verrs.length === 0) return { value: parsed, tokensDelta };
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = `JSON parse error: ${
                 e instanceof Error ? e.message : String(e)
               }`;
             }
           } else {
             status = "error";
+            engine.failure ??= {
+              errorCategory: "schema",
+              errorStage: "schema_validation",
+            };
             lastErr = "no JSON object/array found in output";
           }
         } finally {
@@ -596,6 +655,8 @@ function runWorkflowWorker(
       ).catch((err) => {
         if (err instanceof WorkerRpcFailure && err.runnerFailure) {
           runnerFailures.set(msg.id, err.runnerFailure.cause);
+        } else if (workflowFailureClassification(err)) {
+          runnerFailures.set(msg.id, err);
         }
         const error = err instanceof Error ? err.message : String(err);
         const tokensDelta =
@@ -718,6 +779,7 @@ function artifactFor(state: InteractiveSubagentState) {
 }
 
 const SESSION_USAGE_READ_CHUNK_BYTES = 64 * 1024;
+export const SESSION_USAGE_MAX_RECORD_BYTES = 2 * 1024 * 1024;
 
 interface SessionUsageAccumulator {
   total: Usage;
@@ -745,28 +807,56 @@ function consumeSessionUsageLine(
   accumulator.total = addUsageSamples(accumulator.total, usage);
 }
 
-/** Process decoded text while retaining only the current incomplete line. */
+interface SessionUsageLineState {
+  parts: string[];
+  byteLength: number;
+  discardUntilNewline: boolean;
+}
+
+/** Process decoded text while retaining only the current bounded line. */
 function consumeSessionUsageText(
   text: string,
-  lineParts: string[],
+  lineState: SessionUsageLineState,
   accumulator: SessionUsageAccumulator,
 ): void {
   let start = 0;
   for (;;) {
     const lineEnd = text.indexOf("\n", start);
-    if (lineEnd < 0) break;
-    lineParts.push(text.slice(start, lineEnd));
-    consumeSessionUsageLine(lineParts.join(""), accumulator);
-    lineParts.length = 0;
+    const segmentEnd = lineEnd < 0 ? text.length : lineEnd;
+    const segment = text.slice(start, segmentEnd);
+
+    if (lineState.discardUntilNewline) {
+      if (lineEnd < 0) return;
+    } else {
+      const segmentBytes = Buffer.byteLength(segment);
+      if (
+        lineState.byteLength + segmentBytes >
+        SESSION_USAGE_MAX_RECORD_BYTES
+      ) {
+        lineState.parts.length = 0;
+        lineState.byteLength = 0;
+        lineState.discardUntilNewline = true;
+      } else {
+        if (segment.length > 0) lineState.parts.push(segment);
+        lineState.byteLength += segmentBytes;
+      }
+    }
+
+    if (lineEnd < 0) return;
+    if (!lineState.discardUntilNewline) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
+    }
+    lineState.parts.length = 0;
+    lineState.byteLength = 0;
+    lineState.discardUntilNewline = false;
     start = lineEnd + 1;
   }
-  if (start < text.length) lineParts.push(text.slice(start));
 }
 
 /**
  * Parse token usage from a child Pi's session JSONL file.
  * Reads assistant messages with `usage` data and aggregates them while
- * retaining only one incomplete line and one bounded read chunk in memory.
+ * retaining only one bounded incomplete line and one bounded read chunk in memory.
  * Returns zeroUsage() if the file is missing, unparseable, or has no usage data.
  */
 export async function parseUsageFromSessionFile(
@@ -780,7 +870,11 @@ export async function parseUsageFromSessionFile(
       total: zeroUsage(),
       found: false,
     };
-    const lineParts: string[] = [];
+    const lineState: SessionUsageLineState = {
+      parts: [],
+      byteLength: 0,
+      discardUntilNewline: false,
+    };
     const decoder = new StringDecoder("utf8");
     const buffer = Buffer.allocUnsafe(SESSION_USAGE_READ_CHUNK_BYTES);
     const fileSize = (await handle.stat()).size;
@@ -792,13 +886,13 @@ export async function parseUsageFromSessionFile(
       position += bytesRead;
       consumeSessionUsageText(
         decoder.write(buffer.subarray(0, bytesRead)),
-        lineParts,
+        lineState,
         accumulator,
       );
     }
-    consumeSessionUsageText(decoder.end(), lineParts, accumulator);
-    if (lineParts.length > 0) {
-      consumeSessionUsageLine(lineParts.join(""), accumulator);
+    consumeSessionUsageText(decoder.end(), lineState, accumulator);
+    if (!lineState.discardUntilNewline && lineState.parts.length > 0) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
     }
     return accumulator.found ? accumulator.total : zeroUsage();
   } catch {
@@ -900,6 +994,7 @@ export async function awaitInteractiveResult(
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
+  let muxProbeFailureTicks = 0;
   const eventCursor: InteractiveResultEventCursor = {
     byteOffset: 0,
     sawTurnStart: false,
@@ -977,15 +1072,17 @@ export async function awaitInteractiveResult(
             return assertNever(terminal);
         }
       }
-      // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
-      let alive = true;
+      // A dead pane is only confirmed by a successful probe. Probe failures are
+      // unknown and must not be turned into a fabricated process exit.
+      let liveness: PaneLiveness = "unknown";
       try {
-        alive = await isPaneAliveAsync(state);
+        liveness = await getInteractivePaneLivenessAsync(state);
       } catch {
-        alive = false;
+        liveness = "unknown";
       }
-      if (!alive) {
+      if (liveness === "dead") {
         deadTicks++;
+        muxProbeFailureTicks = 0;
         debugLog("warn", "interactive_dead_pane", {
           deadTicks,
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
@@ -1004,8 +1101,37 @@ export async function awaitInteractiveResult(
             errorMessage: "interactive sub-agent pane exited before completing",
           };
         }
+      } else if (liveness === "unknown") {
+        deadTicks = 0;
+        muxProbeFailureTicks++;
+        debugLog("warn", "interactive_mux_probe_unknown", {
+          probeFailureTicks: muxProbeFailureTicks,
+          graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
+        });
+        if (muxProbeFailureTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
+          const output = readOutput(art) ?? "(no output)";
+          const usage = await parseUsageFromSessionFile(state.sessionFile);
+          if (signal?.aborted) {
+            requestCancellationOnce();
+            return abortedInteractiveResult(usage);
+          }
+          return attachWorkflowFailure(
+            {
+              isError: true,
+              output,
+              usage,
+              errorMessage: "interactive sub-agent pane liveness unavailable",
+            },
+            {
+              errorCategory: "mux",
+              errorStage: "polling",
+              runtimeFailureKind: "mux_probe",
+            },
+          );
+        }
       } else {
         deadTicks = 0;
+        muxProbeFailureTicks = 0;
       }
       await new Promise<void>((resolve) => {
         let settled = false;

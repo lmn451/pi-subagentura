@@ -643,8 +643,12 @@ export function countLineageManifestsSync(nodesDir: string): number {
   try {
     return readdirSync(nodesDir).filter((entry) => entry.endsWith(".json"))
       .length;
-  } catch {
-    return 0;
+  } catch (error) {
+    // A missing nodes directory is normal before the first spawn; every other
+    // listing failure must propagate so admission cannot treat an unknown set
+    // of nodes as empty.
+    if (isNodeError(error, "ENOENT")) return 0;
+    throw error;
   }
 }
 
@@ -659,8 +663,14 @@ export function pruneTerminalLineageNodesSync(
   let names: string[];
   try {
     names = readdirSync(nodesDir).filter((entry) => entry.endsWith(".json"));
-  } catch {
-    return { pruned: [], retained: 0, active: 0 };
+  } catch (error) {
+    // A missing nodes directory is normal before the first spawn; every other
+    // listing failure must propagate so admission cannot treat an unknown set
+    // of nodes as empty.
+    if (isNodeError(error, "ENOENT")) {
+      return { pruned: [], retained: 0, active: 0 };
+    }
+    throw error;
   }
   let missing = 0;
   for (const name of names) {

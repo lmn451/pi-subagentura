@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  MAX_PERSISTED_STATE_COUNT,
+  MAX_PERSISTED_STATE_FILE_BYTES,
   appendCompletionEvent,
   appendEvent,
   appendInteractiveState,
@@ -28,6 +30,7 @@ import {
   isTurnTerminal,
   lastEvent,
   listArtifacts,
+  MAX_EVENT_ISSUES,
   MAX_EVENT_RECORD_BYTES,
   listOutputTurns,
   loadInteractiveStates,
@@ -193,6 +196,70 @@ describe("artifact", () => {
       );
       const events = readEvents(art);
       expect(events).toHaveLength(2);
+    });
+    it("returns a bounded structured issue for malformed records while advancing the byte cursor", () => {
+      const art = artifactPath(root, "malformed-diagnostic");
+      ensureArtifactDir(art);
+      const secret = "malformed secret bearer token";
+      const valid =
+        JSON.stringify({
+          ts: 1,
+          type: "started",
+          status: "running",
+        }) + "\n";
+      const malformed = `${secret}\n`;
+      const done =
+        JSON.stringify({ ts: 2, type: "done", status: "done" }) + "\n";
+      writeFileSync(art.statusFile, valid + malformed + done);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toHaveLength(2);
+      expect(batch.endOffset).toBe(statSync(art.statusFile).size);
+      expect(batch.issues).toHaveLength(1);
+      expect(batch.issues[0]).toMatchObject({
+        startOffset: Buffer.byteLength(valid),
+        endOffset: Buffer.byteLength(valid + malformed),
+      });
+      expect(batch.issues[0].kind).toMatch(/malformed/);
+      expect(JSON.stringify(batch.issues)).not.toContain(secret);
+      expect(readEventBatch(art, batch.endOffset).issues).toEqual([]);
+    });
+
+    it("keeps a missing status file as a normal empty read", () => {
+      const art = artifactPath(root, "missing-status-diagnostic");
+
+      expect(readEventBatch(art, 0)).toEqual({
+        records: [],
+        issues: [],
+        endOffset: 0,
+      });
+    });
+    it("reports an unreadable status file without fabricating offsets", () => {
+      const art = artifactPath(root, "unreadable-status-diagnostic");
+      ensureArtifactDir(art);
+      mkdirSync(art.statusFile);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toEqual([]);
+      expect(batch.issues).toEqual([{ kind: "artifact_unreadable" }]);
+      expect(batch.endOffset).toBe(0);
+    });
+    it("caps malformed issue accumulation without pinning the cursor", () => {
+      const art = artifactPath(root, "malformed-issue-cap");
+      ensureArtifactDir(art);
+      const malformedLines = Array.from(
+        { length: MAX_EVENT_ISSUES + 10 },
+        () => "not-json\n",
+      ).join("");
+      writeFileSync(art.statusFile, malformedLines);
+
+      const batch = readEventBatch(art, 0);
+
+      expect(batch.records).toEqual([]);
+      expect(batch.issues).toHaveLength(MAX_EVENT_ISSUES);
+      expect(batch.endOffset).toBe(statSync(art.statusFile).size);
     });
 
     it("normalizes malformed object fields and bounds adversarial text", () => {
@@ -456,6 +523,49 @@ describe("artifact", () => {
       issues: [],
       endOffset: expectedEnd,
     });
+  });
+  it("holds an oversized unterminated record until its physical newline", () => {
+    const art = artifactPath(root, "oversized-partial");
+    ensureArtifactDir(art);
+    writeFileSync(
+      art.statusFile,
+      Buffer.alloc(MAX_EVENT_RECORD_BYTES + 1, 120),
+    );
+
+    const partial = readEventBatch(art, 0);
+    const partialEnd = statSync(art.statusFile).size;
+    expect(partial.records).toEqual([]);
+    expect(partial.issues).toEqual([
+      {
+        kind: "record_too_large",
+        startOffset: 0,
+        endOffset: partialEnd,
+        maxBytes: MAX_EVENT_RECORD_BYTES,
+      },
+    ]);
+    expect(partial.endOffset).toBe(0);
+
+    const forgedSuffix =
+      JSON.stringify({ ts: 1, type: "done", status: "done" }) + "\n";
+    appendFileSync(art.statusFile, forgedSuffix);
+    const committed = readEventBatch(art, partial.endOffset);
+    const committedEnd = statSync(art.statusFile).size;
+    expect(committed.records).toEqual([]);
+    expect(committed.issues).toEqual([
+      {
+        kind: "record_too_large",
+        startOffset: 0,
+        endOffset: committedEnd,
+        maxBytes: MAX_EVENT_RECORD_BYTES,
+      },
+    ]);
+    expect(committed.endOffset).toBe(committedEnd);
+
+    appendEvent(art, { ts: 2, type: "started", status: "running" });
+    const recovered = readEventBatch(art, committed.endOffset);
+    expect(recovered.records.map(({ event }) => event.type)).toEqual([
+      "started",
+    ]);
   });
 
   describe("readOutput", () => {
@@ -976,6 +1086,38 @@ describe("persisted interactive state helpers", () => {
 
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
+  it("round-trips only bounded absolute working cwd values", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: { ...SAMPLE, workingCwd: "/workspace/project" },
+          relative: {
+            ...SAMPLE,
+            id: "relative",
+            artifactDir: "/tmp/artifacts/relative",
+            workingCwd: "workspace/project",
+          },
+          oversized: {
+            ...SAMPLE,
+            id: "oversized",
+            artifactDir: "/tmp/artifacts/oversized",
+            workingCwd: `/x${"y".repeat(4096)}`,
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const states = loadInteractiveStates(root)?.states;
+    expect(states?.[SAMPLE.id].workingCwd).toBe("/workspace/project");
+    expect(states?.relative).not.toHaveProperty("workingCwd");
+    expect(states?.oversized).not.toHaveProperty("workingCwd");
+  });
 
   it("loadInteractiveStates returns null when the file is missing", () => {
     expect(loadInteractiveStates(root)).toBeNull();
@@ -1003,6 +1145,81 @@ describe("persisted interactive state helpers", () => {
     );
 
     expect(loadInteractiveStates(root)).toBeNull();
+  });
+  it("rejects an oversized raw state file without allowing append to replace it", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const raw = JSON.stringify({
+      schemaVersion: 2,
+      parent: "pi",
+      states: {},
+      padding: "x".repeat(MAX_PERSISTED_STATE_FILE_BYTES),
+    });
+    expect(Buffer.byteLength(raw)).toBeGreaterThan(
+      MAX_PERSISTED_STATE_FILE_BYTES,
+    );
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  it("rejects a state file with more than the top-level state cap", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const states = Object.fromEntries(
+      Array.from({ length: MAX_PERSISTED_STATE_COUNT + 1 }, (_, index) => [
+        `entry-${index}`,
+        {},
+      ]),
+    );
+    const raw = JSON.stringify({ schemaVersion: 2, parent: "pi", states });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+  });
+
+  it.each([
+    ["malformed", "not-json{"],
+    ["unsupported", JSON.stringify({ schemaVersion: 99, states: {} })],
+  ])(
+    "preserves an existing %s state file when append and update are attempted",
+    (_label, raw) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(file, raw, { mode: 0o600 });
+      const before = readFileSync(file);
+
+      expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+      expect(readFileSync(file)).toEqual(before);
+      expect(() =>
+        updateInteractiveStates(root, [
+          { id: SAMPLE.id, update: () => undefined },
+        ]),
+      ).toThrow(/state file/i);
+      expect(readFileSync(file)).toEqual(before);
+    },
+  );
+
+  it("enforces persisted file bounds before writing", () => {
+    expect(() =>
+      saveInteractiveStates(root, {
+        schemaVersion: 2,
+        parent: "pi",
+        states: Object.fromEntries(
+          Array.from({ length: MAX_PERSISTED_STATE_COUNT + 1 }, (_, index) => [
+            `entry-${index}`,
+            SAMPLE,
+          ]),
+        ),
+      } as never),
+    ).toThrow(/state file|states/i);
+    expect(existsSync(stateFilePath(root))).toBe(false);
   });
 
   it("migrates safe telemetry dimensions and message-turn IDs", () => {
@@ -1254,6 +1471,14 @@ describe("persisted interactive state helpers", () => {
       ["a file with no telemetry key", '{"schemaVersion":2,"states":{}}'],
     ])("reports nothing to clear for %s", (_label, body) => {
       writeRaw(body);
+      expect(hasPersistedTelemetryField(root)).toBe(false);
+    });
+    it("does not inspect an oversized file for persisted telemetry", () => {
+      writeRaw(
+        `{"schemaVersion":2,"states":{},"telemetry":"junk","padding":"${"x".repeat(
+          MAX_PERSISTED_STATE_FILE_BYTES,
+        )}"}`,
+      );
       expect(hasPersistedTelemetryField(root)).toBe(false);
     });
 

@@ -96,6 +96,26 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(rehydrated?.completionPolicy).toBe("group");
     expect(rehydrated?.completionGroupId).toBe("review");
   });
+  it("rehydrates parent state cwd separately from the child working cwd", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const childCwd = join(cwd, "child");
+    const state = makeState(cwd, "custom-cwd");
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: state.paneId,
+      mux: state.mux,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+      workingCwd: childCwd,
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd);
+
+    const rehydrated = interactiveSubagentRegistry.get(state.id);
+    expect(rehydrated?.cwd).toBe(cwd);
+    expect(rehydrated?.workingCwd).toBe(childCwd);
+  });
 
   it("preserves an explicit false trigger override across rehydrate", async () => {
     const mod =

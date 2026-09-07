@@ -23,7 +23,12 @@ export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";
 export type TelemetryCompletionFailureStage =
-  "notice_persistence" | "manifest_dispatch" | "retry_exhausted";
+  | "notice_persistence"
+  | "manifest_dispatch"
+  | "retry_exhausted"
+  | "consumption_persistence"
+  | "notification_dispatch"
+  | "completion_publication";
 export type TelemetryWorkflowInvocation = "tool" | "saved_command";
 export type TelemetryWorkflowStatus =
   "success" | "partial" | "error" | "cancelled";
@@ -72,7 +77,29 @@ export type TelemetryErrorCategory =
   | "session"
   | "mux"
   | "transport"
+  | "artifact"
+  | "internal"
   | "unknown";
+export type TelemetryErrorStage =
+  | "spawn"
+  | "turn"
+  | "provider"
+  | "completion"
+  | "polling"
+  | "delivery"
+  | "schema_validation"
+  | "workflow";
+export type TelemetryAgentStopReason = "error" | "aborted";
+export type TelemetryExitCodeBucket = "zero" | "nonzero" | "unknown";
+export type TelemetryRuntimeFailureKind =
+  | "artifact_unreadable"
+  | "artifact_malformed"
+  | "artifact_oversized"
+  | "mux_probe"
+  | "workflow_capacity"
+  | "consumption_persistence"
+  | "notification_dispatch"
+  | "completion_publication";
 export type TelemetryErrorCountBucket = "0" | "1" | "2+" | "unknown";
 
 export const TELEMETRY_OPERATION_NAMES = {
@@ -206,6 +233,9 @@ export type TelemetryEvent =
       status: TelemetryAgentStatus;
       terminal_reason: TelemetryTerminalReason;
       error_category?: TelemetryErrorCategory;
+      error_stage?: TelemetryErrorStage;
+      agent_stop_reason?: TelemetryAgentStopReason;
+      exit_code_bucket?: TelemetryExitCodeBucket;
       duration_ms: number | undefined;
       child_conversation_message_count: number | undefined;
     } & TelemetryAgentDimensions)
@@ -224,6 +254,8 @@ export type TelemetryEvent =
       terminal_reason: TelemetryTerminalReason;
       agents_spawned: number;
       error_count: number;
+      error_category?: TelemetryErrorCategory;
+      error_stage?: TelemetryErrorStage;
       duration_ms?: number;
     }
   | {
@@ -244,6 +276,12 @@ export type TelemetryEvent =
       event: "completion_delivery_failed";
       failure_stage: TelemetryCompletionFailureStage;
       retry_attempt: number;
+    }
+  | {
+      event: "runtime_failure";
+      error_category: TelemetryErrorCategory;
+      error_stage: TelemetryErrorStage;
+      failure_kind: TelemetryRuntimeFailureKind;
     }
   | {
       event: "result_read";
@@ -389,8 +427,54 @@ const TELEMETRY_ERROR_CATEGORIES: readonly TelemetryErrorCategory[] = [
   "session",
   "mux",
   "transport",
+  "artifact",
+  "internal",
   "unknown",
 ];
+
+const TELEMETRY_ERROR_STAGES: readonly TelemetryErrorStage[] = [
+  "spawn",
+  "turn",
+  "provider",
+  "completion",
+  "polling",
+  "delivery",
+  "schema_validation",
+  "workflow",
+];
+
+const TELEMETRY_AGENT_STOP_REASONS: readonly TelemetryAgentStopReason[] = [
+  "error",
+  "aborted",
+];
+
+const TELEMETRY_EXIT_CODE_BUCKETS: readonly TelemetryExitCodeBucket[] = [
+  "zero",
+  "nonzero",
+  "unknown",
+];
+
+const TELEMETRY_RUNTIME_FAILURE_KINDS: readonly TelemetryRuntimeFailureKind[] =
+  [
+    "artifact_unreadable",
+    "artifact_malformed",
+    "artifact_oversized",
+    "mux_probe",
+    "workflow_capacity",
+    "consumption_persistence",
+    "notification_dispatch",
+    "completion_publication",
+  ];
+
+const TELEMETRY_COMPLETION_FAILURE_STAGES: readonly TelemetryCompletionFailureStage[] =
+  [
+    "notice_persistence",
+    "manifest_dispatch",
+    "retry_exhausted",
+    "consumption_persistence",
+    "notification_dispatch",
+    "completion_publication",
+  ];
 
 /** Never forward arbitrary error categories into telemetry. */
 export function sanitizeTelemetryErrorCategory(
@@ -400,6 +484,60 @@ export function sanitizeTelemetryErrorCategory(
     TELEMETRY_ERROR_CATEGORIES.includes(value as TelemetryErrorCategory)
     ? (value as TelemetryErrorCategory)
     : "unknown";
+}
+
+/** Never forward arbitrary error stages into telemetry. */
+export function sanitizeTelemetryErrorStage(
+  value: unknown,
+): TelemetryErrorStage | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_ERROR_STAGES.includes(value as TelemetryErrorStage)
+    ? (value as TelemetryErrorStage)
+    : undefined;
+}
+
+/** Never forward arbitrary stop reasons into telemetry. */
+export function sanitizeTelemetryAgentStopReason(
+  value: unknown,
+): TelemetryAgentStopReason | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_AGENT_STOP_REASONS.includes(value as TelemetryAgentStopReason)
+    ? (value as TelemetryAgentStopReason)
+    : undefined;
+}
+
+/** Never forward arbitrary process exit buckets into telemetry. */
+export function sanitizeTelemetryExitCodeBucket(
+  value: unknown,
+): TelemetryExitCodeBucket | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_EXIT_CODE_BUCKETS.includes(value as TelemetryExitCodeBucket)
+    ? (value as TelemetryExitCodeBucket)
+    : undefined;
+}
+
+/** Never forward arbitrary runtime failure kinds into telemetry. */
+export function sanitizeTelemetryRuntimeFailureKind(
+  value: unknown,
+): TelemetryRuntimeFailureKind | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_RUNTIME_FAILURE_KINDS.includes(
+      value as TelemetryRuntimeFailureKind,
+    )
+    ? (value as TelemetryRuntimeFailureKind)
+    : undefined;
+}
+
+/** Never forward arbitrary completion failure stages into telemetry. */
+export function sanitizeTelemetryCompletionFailureStage(
+  value: unknown,
+): TelemetryCompletionFailureStage | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_COMPLETION_FAILURE_STAGES.includes(
+      value as TelemetryCompletionFailureStage,
+    )
+    ? (value as TelemetryCompletionFailureStage)
+    : undefined;
 }
 
 export function telemetryErrorCountBucket(
@@ -586,7 +724,19 @@ export function buildTelemetryPayload(
         count: boundedCount(event.count, 128),
       };
       break;
-    case "task_completed":
+    case "task_completed": {
+      const errorStage =
+        event.status === "error"
+          ? sanitizeTelemetryErrorStage(event.error_stage)
+          : undefined;
+      const agentStopReason =
+        event.status === "error" || event.status === "cancelled"
+          ? sanitizeTelemetryAgentStopReason(event.agent_stop_reason)
+          : undefined;
+      const exitCodeBucket =
+        event.terminal_reason === "process_exit"
+          ? sanitizeTelemetryExitCodeBucket(event.exit_code_bucket)
+          : undefined;
       properties = {
         ...common,
         execution: event.execution,
@@ -605,8 +755,15 @@ export function buildTelemetryPayload(
               error_category: sanitizeTelemetryErrorCategory(
                 event.error_category,
               ),
+              ...(errorStage === undefined ? {} : { error_stage: errorStage }),
             }
           : {}),
+        ...(agentStopReason === undefined
+          ? {}
+          : { agent_stop_reason: agentStopReason }),
+        ...(exitCodeBucket === undefined
+          ? {}
+          : { exit_code_bucket: exitCodeBucket }),
         ...durationProperties("duration", event.duration_ms),
         ...(event.child_conversation_message_count === undefined
           ? {}
@@ -618,6 +775,7 @@ export function buildTelemetryPayload(
             }),
       };
       break;
+    }
     case "workflow_started":
       properties = {
         ...common,
@@ -626,7 +784,15 @@ export function buildTelemetryPayload(
         completion_policy: event.completion_policy,
       };
       break;
-    case "workflow_completed":
+    case "workflow_completed": {
+      const diagnosticStatus =
+        event.status === "error" || event.status === "partial";
+      const errorCategory = diagnosticStatus
+        ? sanitizeTelemetryErrorCategory(event.error_category)
+        : undefined;
+      const errorStage = diagnosticStatus
+        ? sanitizeTelemetryErrorStage(event.error_stage)
+        : undefined;
       properties = {
         ...common,
         invocation: event.invocation,
@@ -634,11 +800,16 @@ export function buildTelemetryPayload(
         completion_policy: event.completion_policy,
         status: event.status,
         terminal_reason: event.terminal_reason,
+        ...(errorCategory === undefined
+          ? {}
+          : { error_category: errorCategory }),
+        ...(errorStage === undefined ? {} : { error_stage: errorStage }),
         ...durationProperties("duration", event.duration_ms),
         agents_spawned: boundedCount(event.agents_spawned, 1_000),
         error_count_bucket: telemetryErrorCountBucket(event.error_count),
       };
       break;
+    }
     case "session_recovered":
       properties = {
         ...common,
@@ -657,14 +828,34 @@ export function buildTelemetryPayload(
         ...durationProperties("delivery_latency", event.delivery_latency_ms),
       };
       break;
-    case "completion_delivery_failed":
+    case "completion_delivery_failed": {
+      const failureStage = sanitizeTelemetryCompletionFailureStage(
+        event.failure_stage,
+      );
       properties = {
         ...common,
         delivery: "manifest",
-        failure_stage: event.failure_stage,
+        ...(failureStage === undefined ? {} : { failure_stage: failureStage }),
         retry_attempt: boundedCount(event.retry_attempt, 32),
       };
       break;
+    }
+    case "runtime_failure": {
+      const errorCategory = sanitizeTelemetryErrorCategory(
+        event.error_category,
+      );
+      const errorStage = sanitizeTelemetryErrorStage(event.error_stage);
+      const failureKind = sanitizeTelemetryRuntimeFailureKind(
+        event.failure_kind,
+      );
+      properties = {
+        ...common,
+        error_category: errorCategory,
+        ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+        ...(failureKind === undefined ? {} : { failure_kind: failureKind }),
+      };
+      break;
+    }
     case "result_read":
       properties = {
         ...common,

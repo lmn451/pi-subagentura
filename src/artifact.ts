@@ -41,6 +41,12 @@ import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
+/** Maximum raw bytes read from one persisted interactive state file. */
+export const MAX_PERSISTED_STATE_FILE_BYTES = 8 * 1024 * 1024;
+/** Maximum number of top-level interactive states in one persisted file. */
+export const MAX_PERSISTED_STATE_COUNT = 512;
+/** Maximum UTF-8 bytes for a persisted child working directory. */
+export const MAX_PERSISTED_WORKING_CWD_BYTES = 4096;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -260,11 +266,36 @@ export interface EventRecord {
   legacy: boolean;
 }
 
-export interface EventReadIssue {
-  kind: "record_too_large";
-  startOffset: number;
-  endOffset: number;
-  maxBytes: number;
+export type EventReadIssue =
+  | {
+      kind: "record_too_large";
+      startOffset: number;
+      endOffset: number;
+      maxBytes: number;
+    }
+  | {
+      kind: "artifact_malformed";
+      startOffset: number;
+      endOffset: number;
+    }
+  | {
+      kind: "artifact_unreadable";
+    };
+
+export const MAX_EVENT_ISSUES = 64;
+
+function isMissingArtifactError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+  return error.code === "ENOENT";
+}
+
+function appendEventReadIssue(
+  issues: EventReadIssue[],
+  issue: EventReadIssue,
+): void {
+  if (issues.length < MAX_EVENT_ISSUES) issues.push(issue);
 }
 
 export const MAX_EVENT_BATCH_BYTES = 256 * 1024;
@@ -921,9 +952,9 @@ function normalizeEvent(
 
 /**
  * Read all events for a sub-agent. If `since` is provided, only events with
- * ts >= since are returned. Malformed lines are silently skipped (the
- * sub-agent CLI is the only writer, but a partial write could in theory
- * leave a truncated line).
+ * ts >= since are returned. Malformed complete lines are skipped from the
+ * returned records and surfaced as bounded issues by `readEventBatch`.
+ * A partial final line remains uncommitted until its newline is observed.
  *
  * Reads through the same bounded validator as the incremental poller.
  */
@@ -956,6 +987,11 @@ export function readEventRecords(
   return readEventBatch(art, fromOffset).records;
 }
 
+/**
+ * Read a bounded physical batch. Complete malformed records are skipped and
+ * reported without exposing their contents; unreadable files keep the cursor
+ * unchanged. Missing files are normal during launch and report no issue.
+ */
 export function readEventBatch(
   art: SubagentArtifact,
   fromOffset = 0,
@@ -965,15 +1001,35 @@ export function readEventBatch(
   try {
     fd = openSync(art.statusFile, "r");
     size = statSync(art.statusFile).size;
-  } catch {
-    return { records: [], issues: [], endOffset: fromOffset };
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+    if (isMissingArtifactError(error)) {
+      return { records: [], issues: [], endOffset: fromOffset };
+    }
+    return {
+      records: [],
+      issues: [{ kind: "artifact_unreadable" }],
+      endOffset: fromOffset,
+    };
   }
+
   const offset = Math.max(0, Math.min(fromOffset, size));
   let content = Buffer.alloc(Math.min(MAX_EVENT_BATCH_BYTES, size - offset));
   let oversizedEndOffset: number | undefined;
+  let oversizedRecordComplete = false;
+  let readFailed = false;
   try {
     if (content.byteLength > 0) {
-      readSync(fd, content, 0, content.length, offset);
+      const bytesRead = readSync(fd, content, 0, content.length, offset);
+      if (bytesRead < content.byteLength) {
+        content = content.subarray(0, Math.max(0, bytesRead));
+      }
       while (
         content.indexOf(0x0a) < 0 &&
         offset + content.byteLength < size &&
@@ -984,100 +1040,142 @@ export function readEventBatch(
           size - offset - content.byteLength,
           MAX_EVENT_RECORD_BYTES - content.byteLength,
         );
+        if (remaining <= 0) break;
         const next = Buffer.alloc(remaining);
-        readSync(fd, next, 0, next.length, offset + content.byteLength);
-        content = Buffer.concat([content, next]);
+        const nextBytesRead = readSync(
+          fd,
+          next,
+          0,
+          next.length,
+          offset + content.byteLength,
+        );
+        if (nextBytesRead > 0) {
+          content = Buffer.concat([content, next.subarray(0, nextBytesRead)]);
+        }
+        if (nextBytesRead < next.length) break;
       }
       if (
         content.indexOf(0x0a) < 0 &&
-        content.byteLength >= MAX_EVENT_RECORD_BYTES &&
-        offset + content.byteLength < size
+        content.byteLength >= MAX_EVENT_RECORD_BYTES
       ) {
-        let scanOffset = offset + content.byteLength;
-        const scan = Buffer.alloc(MAX_EVENT_BATCH_BYTES);
-        while (scanOffset < size) {
-          const bytesRead = readSync(
-            fd,
-            scan,
-            0,
-            Math.min(scan.length, size - scanOffset),
-            scanOffset,
-          );
-          if (bytesRead === 0) break;
-          const newline = scan.subarray(0, bytesRead).indexOf(0x0a);
-          if (newline >= 0) {
-            const lineBytes = scanOffset + newline - offset;
-            if (lineBytes > MAX_EVENT_RECORD_BYTES) {
-              oversizedEndOffset = scanOffset + newline + 1;
-            } else {
-              content = Buffer.concat([content, Buffer.from("\n")]);
+        if (offset + content.byteLength < size) {
+          let scanOffset = offset + content.byteLength;
+          const scan = Buffer.alloc(MAX_EVENT_BATCH_BYTES);
+          while (scanOffset < size) {
+            const bytesRead = readSync(
+              fd,
+              scan,
+              0,
+              Math.min(scan.length, size - scanOffset),
+              scanOffset,
+            );
+            if (bytesRead === 0) break;
+            const newline = scan.subarray(0, bytesRead).indexOf(0x0a);
+            if (newline >= 0) {
+              const lineBytes = scanOffset + newline - offset;
+              if (lineBytes > MAX_EVENT_RECORD_BYTES) {
+                oversizedEndOffset = scanOffset + newline + 1;
+                oversizedRecordComplete = true;
+              } else {
+                content = Buffer.concat([content, Buffer.from("\n")]);
+              }
+              break;
             }
-            break;
+            scanOffset += bytesRead;
           }
-          scanOffset += bytesRead;
+          if (oversizedEndOffset === undefined && scanOffset >= size) {
+            // Keep the cursor at the record start until a physical newline commits
+            // the discard boundary. The observed extent is still reported.
+            oversizedEndOffset = size;
+          }
+        } else if (size - offset > MAX_EVENT_RECORD_BYTES) {
+          // An unterminated oversized record is not consumed yet. Reporting its
+          // observed extent must not make a later suffix look like a new event.
+          oversizedEndOffset = size;
         }
       }
     }
+  } catch {
+    readFailed = true;
   } finally {
-    closeSync(fd);
+    try {
+      closeSync(fd);
+    } catch {
+      /* fd is already closed or unreadable */
+    }
   }
+  if (readFailed) {
+    return {
+      records: [],
+      issues: [{ kind: "artifact_unreadable" }],
+      endOffset: fromOffset,
+    };
+  }
+
   const records: EventRecord[] = [];
   const issues: EventReadIssue[] = [];
   if (oversizedEndOffset !== undefined) {
-    issues.push({
+    appendEventReadIssue(issues, {
       kind: "record_too_large",
       startOffset: offset,
       endOffset: oversizedEndOffset,
       maxBytes: MAX_EVENT_RECORD_BYTES,
     });
-    return { records, issues, endOffset: oversizedEndOffset };
+    return {
+      records,
+      issues,
+      endOffset: oversizedRecordComplete ? oversizedEndOffset : offset,
+    };
   }
+
   let start = 0;
   let endOffset = offset;
   while (start < content.byteLength) {
     const newline = content.indexOf(0x0a, start);
     if (newline < 0) break;
     const lineEnd = newline + 1;
+    const recordStart = offset + start;
+    const recordEnd = offset + lineEnd;
     const raw = content.subarray(start, newline).toString("utf8");
+    let normalized: { event: SubagentEvent; legacy: boolean } | null = null;
     try {
-      const normalized = normalizeEvent(JSON.parse(raw), offset + start, raw);
-      if (normalized) {
-        if (normalized.legacy) {
-          Object.defineProperties(normalized.event, {
-            eventId: {
-              value: `legacy-${createHash("sha256")
-                .update(`${offset + start}:`)
-                .update(raw)
-                .digest("hex")
-                .slice(0, 24)}`,
-              enumerable: false,
-            },
-            turnId: {
-              value: `legacy-${offset + start}`,
-              enumerable: false,
-            },
-          });
-        }
-        records.push({
-          event: normalized.event,
-          startOffset: offset + start,
-          endOffset: offset + lineEnd,
-          raw,
-          legacy: normalized.legacy,
+      normalized = normalizeEvent(JSON.parse(raw), recordStart, raw);
+    } catch {
+      normalized = null;
+    }
+    if (normalized) {
+      if (normalized.legacy) {
+        Object.defineProperties(normalized.event, {
+          eventId: {
+            value: `legacy-${createHash("sha256")
+              .update(`${recordStart}:`)
+              .update(raw)
+              .digest("hex")
+              .slice(0, 24)}`,
+            enumerable: false,
+          },
+          turnId: {
+            value: `legacy-${recordStart}`,
+            enumerable: false,
+          },
         });
       }
-    } catch {
-      /* malformed complete lines are skipped; physical cursor still advances */
+      records.push({
+        event: normalized.event,
+        startOffset: recordStart,
+        endOffset: recordEnd,
+        raw,
+        legacy: normalized.legacy,
+      });
+    } else {
+      appendEventReadIssue(issues, {
+        kind: "artifact_malformed",
+        startOffset: recordStart,
+        endOffset: recordEnd,
+      });
     }
     start = lineEnd;
-    endOffset = offset + start;
-  }
-  if (
-    endOffset === offset &&
-    content.byteLength > 0 &&
-    offset + content.byteLength < size
-  ) {
-    endOffset = offset + content.byteLength;
+    endOffset = recordEnd;
   }
   return { records, issues, endOffset };
 }
@@ -1360,15 +1458,15 @@ export function cleanupOldArtifacts(
 }
 
 /**
-
+ 
  * Per-entry shape. The minimum to drive sendCommandToPane (src/interactive-tmux.ts:533),
-
+ 
  * isPaneAlive (:525), cancelInteractiveSubagent (:557), and the poller's tailReadSessionLog
-
+ 
  * (:714). Fields like task/model/startedAt are intentionally not persisted — they're
-
+ 
  * recoverable from the launch script + prompt file on demand, or not needed for live ops.
-
+ 
  */
 
 export interface InteractiveSubagentPersistedStateV1 {
@@ -1388,6 +1486,11 @@ export interface InteractiveSubagentPersistedStateV1 {
   artifactDir: string;
 
   sessionFile: string;
+  /**
+   * Resolved child process working directory. `cwd` remains the parent
+   * state-file scope used by poll, delivery, and removal.
+   */
+  workingCwd?: string;
 
   notifyOnComplete?: "notify" | "inject";
   triggerTurnOnComplete?: boolean;
@@ -1496,6 +1599,134 @@ export function stateFilePath(cwd: string): string {
   return join(cwd, ".pi", "subagentura-state.json");
 }
 
+type StateLoadResult =
+  | { kind: "missing" }
+  | { kind: "valid"; payload: InteractiveSubagentStateFile }
+  | {
+      kind: "invalid";
+      reason: "unreadable" | "oversized" | "malformed" | "unsupported";
+    };
+
+type StateReadResult =
+  | { kind: "ok"; content: string }
+  | { kind: "missing" }
+  | { kind: "invalid"; reason: "unreadable" | "oversized" };
+
+/**
+ * Read one fixed descriptor snapshot. The descriptor is opened before its
+ * size is measured, so a path replacement cannot make the bounded read switch
+ * to a different file.
+ */
+function readStateFileSnapshot(file: string): StateReadResult {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { kind: "missing" }
+      : { kind: "invalid", reason: "unreadable" };
+  }
+
+  try {
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile()) {
+      return { kind: "invalid", reason: "unreadable" };
+    }
+    if (
+      !Number.isSafeInteger(metadata.size) ||
+      metadata.size < 0 ||
+      metadata.size > MAX_PERSISTED_STATE_FILE_BYTES
+    ) {
+      return {
+        kind: "invalid",
+        reason:
+          metadata.size > MAX_PERSISTED_STATE_FILE_BYTES
+            ? "oversized"
+            : "unreadable",
+      };
+    }
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < metadata.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        metadata.size - offset,
+        null,
+      );
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+    }
+    if (offset !== metadata.size) {
+      return { kind: "invalid", reason: "unreadable" };
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    } catch {
+      return { kind: "invalid", reason: "unreadable" };
+    }
+    return { kind: "ok", content };
+  } catch {
+    return { kind: "invalid", reason: "unreadable" };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* The descriptor is already bounded and no longer usable. */
+    }
+  }
+}
+
+function loadInteractiveStatesResult(cwd: string): StateLoadResult {
+  const file = stateFilePath(cwd);
+  const read = readStateFileSnapshot(file);
+  if (read.kind !== "ok") {
+    return read.kind === "missing"
+      ? { kind: "missing" }
+      : { kind: "invalid", reason: read.reason };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.content);
+  } catch {
+    return { kind: "invalid", reason: "malformed" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "invalid", reason: "malformed" };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const rawStates = obj.states;
+  if (
+    rawStates &&
+    typeof rawStates === "object" &&
+    Object.keys(rawStates).length > MAX_PERSISTED_STATE_COUNT
+  ) {
+    return { kind: "invalid", reason: "oversized" };
+  }
+  const version = obj.schemaVersion;
+  if (
+    version !== undefined &&
+    version !== null &&
+    version !== 1 &&
+    version !== CURRENT_STATE_SCHEMA_VERSION &&
+    !(typeof version === "number" && version < 1)
+  ) {
+    return { kind: "invalid", reason: "unsupported" };
+  }
+  try {
+    const payload = migrateStatePayload(obj);
+    return payload
+      ? { kind: "valid", payload }
+      : { kind: "invalid", reason: "unsupported" };
+  } catch {
+    return { kind: "invalid", reason: "malformed" };
+  }
+}
+
 /**
  * Read the state file. Returns null on missing file, malformed
  * JSON, or unsupported schemaVersion. Never throws — defensive readers for untrusted input
@@ -1504,30 +1735,17 @@ export function stateFilePath(cwd: string): string {
 export function loadInteractiveStates(
   cwd: string,
 ): InteractiveSubagentStateFile | null {
-  const file = stateFilePath(cwd);
-
-  let content: string;
-  try {
-    content = readFileSync(file, "utf8");
-  } catch {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return null;
-  }
-
-  if (!parsed || typeof parsed !== "object") return null;
-
-  const obj = parsed as Record<string, unknown>;
-  try {
-    return migrateStatePayload(obj);
-  } catch {
-    return null;
-  }
+  const result = loadInteractiveStatesResult(cwd);
+  return result.kind === "valid" ? result.payload : null;
+}
+function validatedWorkingCwd(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    isAbsolute(value) &&
+    !value.includes("\0") &&
+    Buffer.byteLength(value, "utf8") <= MAX_PERSISTED_WORKING_CWD_BYTES
+    ? value
+    : undefined;
 }
 
 /**
@@ -1543,6 +1761,13 @@ function migrateStatePayload(
 ): InteractiveSubagentStateFile | null {
   const version = obj.schemaVersion;
   const rawStates = obj.states;
+  if (
+    rawStates &&
+    typeof rawStates === "object" &&
+    Object.keys(rawStates).length > MAX_PERSISTED_STATE_COUNT
+  ) {
+    return null;
+  }
   const parent =
     typeof obj.parent === "string" && obj.parent.length > 0 ? obj.parent : "pi";
   const rawTelemetry =
@@ -1606,6 +1831,7 @@ function migrateStatePayload(
           : undefined;
       const entry = raw as unknown as InteractiveSubagentPersistedStateV1 &
         Partial<InteractiveSubagentPersistedStateV2>;
+      const workingCwd = validatedWorkingCwd(entry.workingCwd);
       const art = artifactPath(
         dirname(entry.artifactDir),
         basename(entry.artifactDir),
@@ -1897,6 +2123,7 @@ function migrateStatePayload(
           : {}),
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,
+        ...(workingCwd !== undefined ? { workingCwd } : {}),
         ...(entry.notifyOnComplete === "notify" ||
         entry.notifyOnComplete === "inject"
           ? { notifyOnComplete: entry.notifyOnComplete }
@@ -2017,6 +2244,54 @@ function migrateStatePayload(
   });
   return null;
 }
+function stateLoadError(
+  cwd: string,
+  result: Extract<StateLoadResult, { kind: "invalid" }>,
+): Error {
+  return new Error(
+    `cannot mutate interactive state file ${stateFilePath(cwd)}: ${result.reason}`,
+  );
+}
+
+function serializeInteractiveStates(
+  payload: InteractiveSubagentStateFile,
+): string {
+  if (
+    !payload ||
+    payload.schemaVersion !== CURRENT_STATE_SCHEMA_VERSION ||
+    !payload.states ||
+    typeof payload.states !== "object" ||
+    Array.isArray(payload.states)
+  ) {
+    throw new Error("invalid interactive state file payload");
+  }
+  const entries = Object.entries(payload.states);
+  if (entries.length > MAX_PERSISTED_STATE_COUNT) {
+    throw new Error(
+      `interactive state file exceeds ${MAX_PERSISTED_STATE_COUNT} states`,
+    );
+  }
+  for (const [, entry] of entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("invalid interactive state entry");
+    }
+    if (
+      "workingCwd" in entry &&
+      entry.workingCwd !== undefined &&
+      validatedWorkingCwd(entry.workingCwd) !== entry.workingCwd
+    ) {
+      throw new Error("invalid interactive state workingCwd");
+    }
+  }
+  const content = JSON.stringify(payload, null, 2);
+  if (Buffer.byteLength(content, "utf8") > MAX_PERSISTED_STATE_FILE_BYTES) {
+    throw new Error(
+      `interactive state file exceeds ${MAX_PERSISTED_STATE_FILE_BYTES} bytes`,
+    );
+  }
+  return content;
+}
+
 /**
  * Atomically write the state file. Creates .pi/ if needed.
  * Mode 0o700 on .pi/, mode 0o600 on the file. Atomic via *.tmp + rename.
@@ -2033,7 +2308,15 @@ export function saveInteractiveStates(
     throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
   }
   withInteractiveStateLock(cwd, () => {
-    const existing = loadInteractiveStates(cwd);
+    const result = loadInteractiveStatesResult(cwd);
+    const existing =
+      result.kind === "valid"
+        ? result.payload
+        : result.kind === "missing"
+          ? undefined
+          : (() => {
+              throw stateLoadError(cwd, result);
+            })();
     writeInteractiveStatesUnlocked(cwd, {
       ...current,
       states: { ...(existing?.states ?? {}), ...current.states },
@@ -2230,8 +2513,15 @@ function writeInteractiveStatesUnlocked(
 ): void {
   const file = stateFilePath(cwd);
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-  renameSync(tmp, file);
+  const content = serializeInteractiveStates(payload);
+  let renamed = false;
+  try {
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, file);
+    renamed = true;
+  } finally {
+    if (!renamed) rmSync(tmp, { force: true });
+  }
 }
 
 /**
@@ -2244,11 +2534,25 @@ export function appendInteractiveState(
     InteractiveSubagentPersistedStateV1 | InteractiveSubagentPersistedStateV2,
 ): void {
   withInteractiveStateLock(cwd, () => {
-    const current = loadInteractiveStates(cwd) ?? {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent: "pi",
-      states: {},
-    };
+    const result = loadInteractiveStatesResult(cwd);
+    let current: InteractiveSubagentStateFile;
+    if (result.kind === "valid") {
+      current = result.payload;
+    } else if (result.kind === "missing") {
+      current = {
+        schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+        parent: "pi",
+        states: {},
+      };
+    } else {
+      throw stateLoadError(cwd, result);
+    }
+    if (
+      entry.workingCwd !== undefined &&
+      validatedWorkingCwd(entry.workingCwd) !== entry.workingCwd
+    ) {
+      throw new Error("invalid interactive state workingCwd");
+    }
     const art = artifactPath(
       dirname(entry.artifactDir),
       basename(entry.artifactDir),
@@ -2271,38 +2575,44 @@ export function appendInteractiveState(
   });
 }
 
-/**
- * Read-only probe for a telemetry field on disk. Opt-out must be inert: with
- * telemetry disabled the extension must not create `.pi/`, take the state lock,
- * or rewrite the state file — it only has work to do when a previous run left a
- * correlation behind to clear.
- */
 export function hasPersistedTelemetryField(cwd: string): boolean {
+  const read = readStateFileSnapshot(stateFilePath(cwd));
+  if (read.kind !== "ok") return false;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(stateFilePath(cwd), "utf8"));
+    parsed = JSON.parse(read.content);
   } catch {
     return false;
   }
   return (
     !!parsed &&
     typeof parsed === "object" &&
-    (parsed as Record<string, unknown>).telemetry !== undefined
+    !Array.isArray(parsed) &&
+    Object.prototype.hasOwnProperty.call(
+      parsed as Record<string, unknown>,
+      "telemetry",
+    )
   );
 }
-
-/** Persist or clear the random logical-session telemetry correlation. */
 export function updatePersistedTelemetrySession(
   cwd: string,
   parentSessionId: string,
   telemetry: PersistedTelemetrySession | undefined,
 ): void {
   withInteractiveStateLock(cwd, () => {
-    const current = loadInteractiveStates(cwd) ?? {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent: parentSessionId,
-      states: {},
-    };
+    const result = loadInteractiveStatesResult(cwd);
+    let current: InteractiveSubagentStateFile;
+    if (result.kind === "valid") {
+      current = result.payload;
+    } else if (result.kind === "missing") {
+      current = {
+        schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+        parent: parentSessionId,
+        states: {},
+      };
+    } else {
+      throw stateLoadError(cwd, result);
+    }
     current.parent = parentSessionId;
     current.telemetry = telemetry;
     writeInteractiveStatesUnlocked(cwd, current);
@@ -2321,8 +2631,10 @@ export function updateInteractiveStates(
 ): void {
   if (updates.length === 0) return;
   withInteractiveStateLock(cwd, () => {
-    const current = loadInteractiveStates(cwd);
-    if (!current) return;
+    const result = loadInteractiveStatesResult(cwd);
+    if (result.kind === "missing") return;
+    if (result.kind === "invalid") throw stateLoadError(cwd, result);
+    const current = result.payload;
     let changed = false;
     for (const update of updates) {
       const entry = current.states[update.id];
@@ -2346,8 +2658,11 @@ export function updateInteractiveState(
  */
 export function removeInteractiveState(cwd: string, id: string): void {
   withInteractiveStateLock(cwd, () => {
-    const current = loadInteractiveStates(cwd);
-    if (!current || !(id in current.states)) return;
+    const result = loadInteractiveStatesResult(cwd);
+    if (result.kind === "missing") return;
+    if (result.kind === "invalid") throw stateLoadError(cwd, result);
+    const current = result.payload;
+    if (!(id in current.states)) return;
     delete current.states[id];
     writeInteractiveStatesUnlocked(cwd, current);
   });
