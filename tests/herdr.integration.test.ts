@@ -51,6 +51,13 @@ const hasHerdr =
   !!process.env.HERDR_SOCKET_PATH &&
   !!process.env.HERDR_PANE_ID;
 
+if (process.env.PI_SUBAGENTURA_HERDR_REQUIRED === "1" && !hasHerdr) {
+  throw new Error(
+    "Herdr integration requires the binary and a managed pane " +
+      "(HERDR_ENV=1, HERDR_SOCKET_PATH, HERDR_PANE_ID)",
+  );
+}
+
 /** Panes created by the current test, torn down in afterEach. */
 let panes: { paneId: string; session?: string }[] = [];
 let tempRoot: string;

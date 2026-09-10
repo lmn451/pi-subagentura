@@ -152,6 +152,22 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
     );
   });
 
+  it("runs real Herdr coverage on hosted runners with failure diagnostics", () => {
+    const install = stepBlock("Install Herdr");
+    expect(install).toContain("HERDR_VERSION: v0.9.0");
+    expect(install).toContain("herdr-linux-x86_64");
+    expect(install).toContain("sha256sum -c -");
+    expect(stepBlock("Run headless Herdr integration tests")).toContain(
+      "run: npm run test:herdr:headless",
+    );
+    expect(stepBlock("Upload Herdr diagnostics")).toContain("if: failure()");
+    expect(workflow).not.toMatch(/run: npm run test:herdr\s*\n/);
+    expect(workflow).not.toContain("self-hosted");
+    expect(packageJson.scripts["test:herdr:headless"]).toBe(
+      "node --experimental-strip-types tests/helpers/herdr-headless.ts",
+    );
+  });
+
   it("keeps random and mutation scripts but runs them only as deep checks", () => {
     const random = stepBlock("Run randomized-order tests");
     const mutation = stepBlock("Run non-blocking mutation pilot");

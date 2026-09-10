@@ -31,6 +31,40 @@ The separate minimum-Node check makes runtime support visible rather than hiding
 it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
 coordinated ruleset update by a repository administrator.
 
+### Real Herdr integration coverage
+
+Both Pi SDK matrix legs run Herdr on GitHub-hosted Ubuntu. CI downloads the
+pinned Herdr 0.9.0 Linux binary, verifies its SHA-256, and runs:
+
+```bash
+npm run test:herdr:headless
+```
+
+With Herdr installed, the same command works locally on Linux or macOS; it
+does not require an existing Herdr pane. The harness starts a headless server
+in a temporary named session with isolated configuration, state, and sockets.
+It creates a real managed pane and runs `npm run test:herdr` there. Before
+Vitest starts, it checks the binary, all three injected `HERDR_*` markers, and
+the live pane. A successful run must report at least 14 passed tests, with no
+skips, todos, or failures. Adding more tests does not require changing that
+minimum.
+
+Startup, test execution, and shutdown are bounded. The harness stops its server
+on completion or interruption; it never targets a developer's existing Herdr
+session. Failures retain the temporary directory printed in the output. Set
+`SUBAGENTURA_HERDR_DIAGNOSTICS` to copy logs and the Vitest JSON report to a
+chosen directory; CI uploads these as `herdr-<Pi version>` artifacts. If the
+test pane or socket disappears, the job fails. Rerun the command or CI job to
+create a fresh server; there is no persistent runner to recover or keep online.
+
+This coverage is part of the existing required `Test (Pi ...)` checks for PRs
+and master, rather than a manual self-hosted job. Fork PRs use disposable
+GitHub-hosted runners. It is not a separate tag-publish gate. When upgrading
+Herdr, update both the version and checksum in `.github/workflows/ci.yml` and
+verify both SDK legs. The current suite covers the multiplexer contract;
+full child Pi launch, completion, and rehydration remain a separate coverage
+extension.
+
 ## Property and mutation testing
 
 Property tests run as part of `npm test`; use the focused command while

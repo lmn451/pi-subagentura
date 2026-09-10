@@ -140,6 +140,12 @@ npm run test:zellij
 npm run test:herdr
 ```
 
+`test:herdr` uses the current managed Herdr pane and skips when none is
+available. Use `npm run test:herdr:headless` to start an isolated temporary
+Herdr server on Linux or macOS, run the suite inside a real pane, and require
+zero skipped tests. CI uses this command on both SDK legs. See
+[Herdr CI setup and diagnostics](../CONTRIBUTING.md#real-herdr-integration-coverage).
+
 `tests/tmux.integration.test.ts` installs a fake `pi` executable, forces the
 detached tmux path, and routes operations through
 `PI_SUBAGENTURA_TMUX_SOCKET`. The test file uses a process-specific socket by
