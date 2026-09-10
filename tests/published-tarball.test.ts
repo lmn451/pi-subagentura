@@ -362,6 +362,8 @@ describe("published tarball", () => {
         "install",
         "--omit=dev",
         "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
         tgz,
         "jiti",
         "@earendil-works/pi-server@latest",

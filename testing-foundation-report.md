@@ -11,6 +11,54 @@ The implementation adds `fast-check@^4.9.0` and
 `@stryker-mutator/core@^10.0.0` as development dependencies. The package now
 requires Node.js 22.23.2 or newer, the current official Node 22 LTS patch.
 
+## Vitest 5 migration review
+
+A follow-up migration was validated in `../pi-subagentura-vitest-5` on branch
+`chore/vitest-5-migration`; the parent worktree's uncommitted changes were not
+modified.
+
+Vitest 5.0.0 requires Node.js `>=22.12.0` and Vite `>=6.4.0`. This package already
+requires Node.js `>=22.23.2`; npm resolves Vite `8.2.2` and pnpm resolves Vite
+`7.3.3`, both within Vitest 5's supported range. `vitest` and
+`@vitest/coverage-v8` now resolve to `5.0.0`. See the [migration guide](https://vitest.dev/guide/migration.html)
+and [release announcement](https://vitest.dev/blog/vitest-5.html).
+
+The source suite required no Vitest API rewrite:
+
+- all `vi.mock`, `vi.unmock`, and `vi.hoisted` calls are at module top level;
+- no removed sequential or benchmark APIs, deprecated Vitest entrypoints,
+  browser-mode APIs, or custom assertion type augmentations were found;
+- the `clearMocks` default change is compatible with the existing suite, so no
+  explicit override was needed.
+
+The ten existing properties in two files remain unchanged and pass under Vitest 5. They intentionally use direct `fast-check` assertions. Although the official
+[fast-check Vitest guide](https://fast-check.dev/docs/tutorials/setting-up-your-test-environment/property-based-testing-with-vitest/)
+recommends `@fast-check/vitest`, the current `@fast-check/vitest@0.4.1` declares
+the peer range `vitest: ^4.1.0`; no connector was added until it supports Vitest 5.
+
+Two test-harness adjustments were required for reliable verification:
+
+- `published-tarball.test.ts` passes `--no-audit` and `--no-fund` to the clean
+  consumer install. Without those network operations, local runs exceeded the
+  test's 60-second timeout.
+- `coverage:check` excludes `tests/performance-regression.test.ts`. Its 100 ms
+  wall-clock assertion observed 106.1 ms under V8 coverage, while the normal
+  Vitest 5 run passed; timing assertions are not coverage targets.
+
+### Vitest 5 verification
+
+| Command                  | Result                                               |
+| ------------------------ | ---------------------------------------------------- |
+| `npm run typecheck`      | Passed                                               |
+| `npm test`               | 84 files, 2,115 tests passed                         |
+| `npm run test:random`    | Seed 424242; 84 files, 2,115 tests passed            |
+| `npm run test:property`  | 2 files, 10 tests passed                             |
+| `npm run coverage:check` | 82 files, 2,103 tests; thresholds passed             |
+| `npm run mutation:pilot` | 22 mutants; 21 killed, 1 equivalent survivor; 95.45% |
+| `npm run format:check`   | Passed                                               |
+| `npm run pack:check`     | Passed; `pi-subagentura-3.6.0.tgz` dry run           |
+| `git diff --check`       | Passed                                               |
+
 ## Review findings and changes
 
 - Property inputs, run counts, collection sizes, and mutation concurrency are
