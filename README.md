@@ -201,24 +201,35 @@ The defaults prefer async `subagent_isolated` for fresh scouts/reviewers, `subag
 
 ### Orchestratorv2 thin-router mode
 
-Enable the separate interactive-only thin router with:
+Enable the separate prompt-directed thin router with:
 
 ```bash
 pi --orchestratorv2
 ```
 
 This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
-verify the parent model. Select the intended Luna-compatible model separately,
-and do not enable `--orchestrator` and `--orchestratorv2` together. The thin
-router delegates only through attachable interactive children and uses
-project-local confirmed descriptions and aliases to route continuations.
+verify the parent model and does not enforce a host-level tool allowlist. Select
+the intended Luna-compatible model separately, and do not enable
+`--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
+tools remain registered for compatibility, while the Orchestratorv2 prompt
+directs the parent to delegate only through attachable interactive children and
+use project-local confirmed descriptions and aliases to route continuations.
 
 Routing metadata is capped at 128 records and is never evicted automatically.
-If stale history reaches that cap, inspect it with `list_orchestrator_agents`,
-ask the user which entry may be retired, and call
-`remove_orchestrator_agent_description` with `confirmed: true` before retrying
-the metadata update. Removal changes only routing metadata; it does not cancel
-a child or delete its artifacts.
+The interactive runtime launches before its initial routing metadata is
+persisted. If persistence fails, the child intentionally remains live and the
+spawn result includes an explicit warning; the extension does not cancel or roll
+back that child. Inspect stale history with `list_orchestrator_agents`, ask the
+user which entry may be retired, call
+`remove_orchestrator_agent_description` with `confirmed: true`, and retry the
+metadata update for the live child. Removal changes only routing metadata; it
+does not cancel a child or delete its artifacts.
+
+Interactive children retain `subagent_interactive` and may autonomously create
+nested children without top-level approval. Nested children belong to the
+immediate child session and are not automatically actionable in the top-level
+Orchestratorv2 routing registry; their important outcomes return through that
+child or the existing artifact and notification paths.
 
 ## Cancellation context snapshots (opt-in)
 
