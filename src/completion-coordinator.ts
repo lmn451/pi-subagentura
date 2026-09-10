@@ -1,5 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  writeCompletionGroup,
+  readCompletionGroups,
+  hasCompletionGroups,
+} from "./completion-group-store";
+import {
   appendLedgerLine,
   appendLedgerLineLossless,
   getProcessPrivateLedgerRoot,
@@ -1437,6 +1442,7 @@ function pruneCoordinatorState(state: CompletionCoordinatorState): void {
 }
 
 function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
+  if (recoveringGroupOwners.has(ownerKey(state.owner))) return [];
   reconcileState(state);
   pruneCoordinatorState(state);
   const records = [...state.records.values()];
@@ -1891,7 +1897,12 @@ export function registerCompletionMember(
   ) {
     throw new Error(`Completion group ${normalizedGroupId} is full`);
   }
-  group.members.add(memberKey);
+  const members = new Set([...group.members, memberKey]);
+  writeCompletionGroup(
+    sessionLedgerFile(state.owner, "subagentura-completion-groups") + ".groups",
+    { groupId: group.groupId, members: [...members], sealed: group.sealed },
+  );
+  group.members = members;
   state.groups.set(normalizedGroupId, group);
 }
 
@@ -1899,7 +1910,53 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
   const state = getState(owner);
   if (!state) return;
   state.groupsSealed = true;
-  for (const group of state.groups.values()) group.sealed = true;
+  for (const group of state.groups.values()) {
+    writeCompletionGroup(
+      sessionLedgerFile(state.owner, "subagentura-completion-groups") +
+        ".groups",
+      { groupId: group.groupId, members: [...group.members], sealed: true },
+    );
+    group.sealed = true;
+  }
+}
+
+/** Restore pending mixed-source barriers before any durable workflow notices. */
+const recoveringGroupOwners = new Set<string>();
+
+export async function restoreDurableCompletionGroups(
+  owner: SessionOwnerToken,
+): Promise<void> {
+  const state = getState(owner);
+  if (!state) return;
+  const directory =
+    sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
+  if (!hasCompletionGroups(directory)) return;
+  recoveringGroupOwners.add(ownerKey(owner));
+  const groups = await readCompletionGroups(directory);
+  if (!resolveLiveSessionScope(owner)) return;
+  for (const saved of groups) {
+    const existing = state.groups.get(saved.groupId);
+    const members = new Set([...(existing?.members ?? []), ...saved.members]);
+    if (members.size > MAX_GROUP_MEMBERS)
+      throw new Error("Recovered completion group exceeds its member cap.");
+    const terminalMembers = existing?.terminalMembers ?? new Set<string>();
+    for (const member of members) {
+      // These execution modes cannot outlive the old Pi session generation.
+      if (
+        member.startsWith("in-process:") ||
+        (member.startsWith("workflow:") && !member.startsWith("workflow:wfd_"))
+      )
+        terminalMembers.add(member);
+    }
+    state.groups.set(saved.groupId, {
+      groupId: saved.groupId,
+      members,
+      terminalMembers,
+      sealed: true,
+    });
+  }
+  reconcileState(state);
+  recoveringGroupOwners.delete(ownerKey(owner));
 }
 
 export function registerCompletionExpectations(
@@ -2265,7 +2322,14 @@ export function retireSessionScopedCompletions(
   if (!state) return;
   reconcileState(state);
   const completionIds = [...state.records.values()]
-    .filter((record) => includeInteractive || record.source !== "interactive")
+    .filter(
+      (record) =>
+        includeInteractive ||
+        (record.source !== "interactive" &&
+          !(
+            record.source === "workflow" && record.sourceId.startsWith("wfd_")
+          )),
+    )
     .filter((record) => !state.consumed.has(record.completionId))
     .map((record) => record.completionId);
   if (completionIds.length === 0) return;
@@ -2285,6 +2349,7 @@ export function retireSessionScopedCompletions(
 }
 
 export function clearCompletionCoordinator(owner: SessionOwnerToken): void {
+  recoveringGroupOwners.delete(ownerKey(owner));
   const state = coordinatorRegistry().get(ownerKey(owner));
   if (state?.manifestRetryTimer) clearTimeout(state.manifestRetryTimer);
   coordinatorRegistry().delete(ownerKey(owner));

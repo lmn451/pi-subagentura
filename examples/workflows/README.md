@@ -174,7 +174,7 @@ source is parsed in the test suite before it is accepted.
 ## Limitations
 
 - Scripts are trusted JavaScript, not untrusted-input sandboxes.
-- Workflow jobs are async by default and live only for the current parent
+- By default, workflow jobs are async and live only for the current parent
   session. Reload, resume, quit, and new-session transitions cancel them.
 - Process-isolated agents require tmux or Zellij; otherwise the runtime falls
   back to in-process execution.
@@ -183,3 +183,17 @@ source is parsed in the test suite before it is accepted.
 - File-writing examples depend on the delegated agents having appropriate read
   and write tools and permissions.
 - Model overrides must name models configured in the active Pi installation.
+
+## Explicit durable execution and retries
+
+`durable-review.mjs` demonstrates stable per-item/per-attempt ids, explicit
+bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, then
+run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
+durable: true})`. Use `async: false` for an immediate result. After an
+interruption, use `resume_workflow({workflowId})` in the same Pi session/cwd.
+Other examples are not automatically durable merely because they are saved.
+
+`retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
+and `null`, but never cancellation. Every attempt may repeat agent side effects;
+use read-only work or application-specific idempotency. See
+[the runtime contract](../../WORKFLOW_RUNTIME.md).
