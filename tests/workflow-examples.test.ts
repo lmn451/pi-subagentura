@@ -65,6 +65,7 @@ describe("bundled workflow examples", () => {
       .sort();
 
     expect(files).toEqual([
+      "durable-review.mjs",
       "package-to-skill.mjs",
       "ralplan-consensus.mjs",
       "ralplan-from-skill.mjs",
