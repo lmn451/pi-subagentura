@@ -6,92 +6,177 @@ keywords:
 
 # Interactive Sub-Agent Test Isolation
 
-## Problem
+Interactive sub-agent tests touch process environment, module-level registries,
+temporary artifact trees, and multiplexer backends. Keep those resources
+explicitly scoped to the test or session under test.
 
-Interactive Pi sub-agents use private bootstrap variables such as:
+## Vitest worker quarantine
 
-```bash
-PI_SUBAGENTURA_CHILD=1
-ARTIFACT_DIR=<sub-agent artifact directory>
+`vitest.config.ts` removes `PI_SUBAGENTURA_CHILD` while Vitest configuration is
+loaded. The setup file `tests/setup-lineage-env.ts` then calls
+`clearLiveLineageEnvironment()` and removes the complete live lineage set:
+
+```text
+PI_SUBAGENTURA_CHILD
+ARTIFACT_DIR
+PI_SUBAGENTURA_AGENT_ID
+PI_SUBAGENTURA_ROOT_ID
+PI_SUBAGENTURA_LINEAGE_SESSION_ROOT
+PI_SUBAGENTURA_DEPTH
+PI_SUBAGENTURA_MAX_DEPTH
+PI_SUBAGENTURA_MAX_NODES
+PI_SUBAGENTURA_LINEAGE_BOOTSTRAP
 ```
 
-Commands launched by the sub-agent inherit those variables. If a test process loads the pi-subagentura extension and creates fake Pi sessions, the extension can enter child mode and attach lifecycle handlers to the real sub-agent artifact.
+This is why a normal Vitest invocation starts in parent mode even when the
+process that launched it was an interactive child. The setup file deliberately
+does not restore these values: each Vitest worker is treated as a disposable
+quarantine. A command that bypasses Vitest configuration and setup files still
+needs to provide its own environment isolation.
 
-The fake sessions may then write `turn_started` and `completion` events, reset `output.md`, or reuse `active-turn.json`. The parent poller cannot distinguish those events from genuine child activity, so it may deliver false empty completions.
+## Creating a child-mode Pi fixture
 
-One sub-agent running the affected tests is sufficient. Multiple sub-agents only make the resulting activity more frequent and harder to diagnose.
-
-## Why ordinary CI may miss it
-
-In normal local and CI runs, `PI_SUBAGENTURA_CHILD` is usually absent, so tests load the extension in parent mode. The problem appears when the same test command is run from inside an interactive sub-agent, where the child environment is inherited.
-
-The risk is an ambient-mode decision in the test harness: a harness without an explicit `childArtifactDir` can accidentally use the invoking process's child mode and artifact path.
-
-## Current mitigation
-
-`vitest.config.ts` removes `PI_SUBAGENTURA_CHILD` before test configuration is loaded:
+`tests/helpers/pi-session-harness.ts` exports `createPiSessionHarness`. It
+creates a temporary agent directory, registers the deterministic
+`subagentura-faux` provider, and uses an in-memory `SessionManager` unless the
+caller supplies one. With the standard Vitest setup active, a normal harness
+call loads the extension in parent mode:
 
 ```ts
-delete process.env.PI_SUBAGENTURA_CHILD;
+const harness = await createPiSessionHarness(repoRoot);
 ```
 
-This keeps ordinary Vitest runs in parent mode across supported Node platforms without relying on shell-specific environment syntax. `ARTIFACT_DIR` is intentionally preserved because terminal E2E fixtures may use it independently.
+To exercise the child protocol, create a unique artifact directory and pass it
+as `childArtifactDir`:
 
-Tests that intentionally exercise the child protocol must opt in explicitly by setting `PI_SUBAGENTURA_CHILD=1` and an isolated `ARTIFACT_DIR` while loading the extension, then restoring both variables.
+```ts
+const harness = await createPiSessionHarness(repoRoot, {
+  childArtifactDir: artifactDir,
+});
+```
 
-## Immediate workaround
+The fixture sets `PI_SUBAGENTURA_CHILD=1` and `ARTIFACT_DIR` only while
+`resourceLoader.reload()` loads the extension, then restores both previous
+values in a `finally` block. `harness.dispose()` disposes the session and
+removes its temporary agent directory. Tests that create artifact roots still
+own those roots and must remove them in their hooks; the Pi-session delivery
+suite keeps both harnesses and artifact roots in arrays for this purpose.
 
-For a worktree that does not contain the mitigation, run tests with the child variables removed:
+Child lifecycle coverage lives in `tests/pi-session-delivery.integration.test.ts`
+and `tests/child-protocol.test.ts`. Tests that invoke the generated CLI directly
+pass an explicit artifact directory in the spawned process environment, for
+example:
+
+```ts
+spawnSync(process.execPath, [cliPath, "done", "0"], {
+  env: { ...process.env, ARTIFACT_DIR: artifactDir },
+});
+```
+
+Do not reuse a child artifact directory between tests. The child protocol
+mutates `events.ndjson`, `active-turn.json`, `output.md`, and immutable output
+snapshots.
+
+## Module and registry reset
+
+`tests/test-utils.ts#importFresh()` calls `vi.resetModules()` and then performs
+a dynamic import. Use it after changing environment values or installing a
+`vi.doMock()` for `node:child_process` so the module reads the intended fixture
+state. The multiplexer unit suites use this pattern to test command selection
+without invoking a real backend.
+
+Module reset does not clear state stored on `globalThis`. The interactive
+registry is deliberately held at
+`globalThis.__piSubagenturaInteractiveRegistry`, so it survives a module
+reload. Tests that populate it clear it in `beforeEach` or `afterEach`. Session
+scopes and cached mux instances need their own cleanup:
+
+```ts
+interactiveSubagentRegistry.clear();
+clearSessionScopes();
+__setTmuxMultiplexer(undefined);
+__resetMuxInstances();
+```
+
+Use `__setTmuxMultiplexer()` or `__setZellijMultiplexer()` from
+`src/multiplexer.ts` to install a fake backend with only the methods the test
+needs. Restore the injected backend after each test. A fake backend makes
+liveness, send, focus, and kill behavior deterministic; it does not validate
+the command line accepted by a real tmux or Zellij process.
+
+## Ownership and cancellation
+
+`registerInteractiveSubagentState(state, scope)` inserts the same state into
+both `scope.interactiveStates` and the global compatibility registry. The
+owner-scoped poller and `cancelAllFlows(owner)` use the scope map; ownerless
+operations can fall back to the global registry. A state left in either map can
+therefore be observed or cancelled by a later test.
+
+When testing ownership, register each fake state with its exact
+`SessionScope`, pass that owner to poll/cancel helpers, and clear both scope and
+global registries in teardown. Give every state a temporary artifact directory
+and a fake mux whose `getPaneLiveness` and `killPane` behavior is explicit.
+`tests/artifact-delivery.integration.test.ts`,
+`tests/subagent-poll.test.ts`, and `tests/subagent-shutdown.test.ts` exercise
+these paths. Shutdown cancellation receives a complete state snapshot because
+the live registry is cleared before pane teardown; tests must not assume an id
+lookup will still find it.
+
+The cancellation path attempts to write `.cancelled`, append a parent
+cancellation event, and ask the recorded mux to kill the pane. The marker and
+some lifecycle cleanup are best effort, but a test that asserts cancellation
+must still provide valid temporary artifact paths and a mux spy. Do not put a
+real child state in a shared fixture registry merely to inspect its status.
+
+## Real multiplexer tests
+
+The ordinary `npm test` command excludes the real tmux, Zellij, and Herdr
+integration files. Use the backend-specific scripts when command and process
+behavior matters:
 
 ```bash
-env -u PI_SUBAGENTURA_CHILD -u ARTIFACT_DIR npm test -- --run
+npm run test:tmux
+npm run test:zellij
+npm run test:herdr
 ```
 
-This workaround is suitable for Unix-like systems. It applies only to the command that uses it; arbitrary commands or alternate test runners may still inherit the variables.
-
-## Recommended test-harness hardening
-
-The Vitest guard is a low-risk first layer. The stronger test-infrastructure fix is to make `createPiSessionHarness` explicitly own its mode:
-
-- with `childArtifactDir`, set child mode and use that isolated artifact;
-- without `childArtifactDir`, temporarily remove child mode;
-- restore the previous environment in `finally`.
-
-Add a regression that starts with inherited child variables, creates a parent-mode harness, settles a fake turn, and verifies that a sentinel artifact remains untouched. Retain positive child-protocol tests to verify explicit opt-in still works.
-
-## Longer-term production hardening
-
-A stronger runtime design would treat these variables as bootstrap-only rather than relying on inherited environment state:
-
-1. Capture and validate child runtime state during real child startup.
-2. Store the state in process-local runtime data that survives extension reloads but is not inherited by tools.
-3. Make `cli.mjs` resolve its artifact directory from its own path.
-4. Allow child tool processes to run without the private child marker and artifact variable.
-5. Keep event/session validation as defense in depth; do not reject legitimate empty completions solely because they are empty.
-
-This should be a separate compatibility-sensitive change because it affects CLI invocation, reload behavior, descendant sub-agents, lineage, and terminal E2E fixtures.
-
-## Recovery guidance
-
-When contamination is detected:
-
-1. Cancel affected sub-agents through the normal lifecycle.
-2. Preserve append-only event logs for diagnosis.
-3. Do not truncate or rewrite `events.ndjson`.
-4. Start replacement work with fresh sub-agent IDs and fresh artifact directories.
-5. Do not treat empty completion events as valid reports without checking their source and session context.
-
-## Verification
-
-The mitigation should be verified with both normal and inherited-environment runs:
+`tests/tmux.integration.test.ts` installs a fake `pi` executable, forces the
+detached tmux path, and routes operations through
+`PI_SUBAGENTURA_TMUX_SOCKET`. The test file uses a process-specific socket by
+default, kills that server in `afterEach`, resets the registry and mux cache,
+restores environment variables, and removes its temporary root. For a manual
+run, choose a unique socket name rather than the default tmux server:
 
 ```bash
-npm run typecheck
-npm test
-npm run format:check
-npm run pack:check
-PI_SUBAGENTURA_CHILD=1 ARTIFACT_DIR=<temporary-sentinel> \
-  npm test -- --run tests/pi-session-delivery.integration.test.ts
+PI_SUBAGENTURA_TMUX_SOCKET=pi-subagentura-check-$$ npm run test:tmux
 ```
 
-The inherited-environment run must leave the sentinel artifact untouched while explicit child-protocol tests continue to pass.
+The socket setting is consumed by `src/multiplexer-tmux.ts`, which adds
+`-L <socket>` to every tmux operation. A shared socket still permits collisions,
+and an abruptly terminated test process may skip hook cleanup; inspect the
+named server before reusing it.
+
+For full Pi and TUI behavior, use `npm run test:tui`. The terminal harness in
+`tests/terminal-e2e/harness.mjs` creates a random per-harness tmux socket and
+session, uses deterministic provider fixtures, and tears down its process
+groups and tmux server. Its network guard and assertion rules are documented in
+[`terminal-e2e.md`](./terminal-e2e.md).
+
+## Test commands and boundaries
+
+Use the smallest command that covers the behavior under change:
+
+| Command                 | Coverage boundary                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm test`              | Vitest suite excluding real mux integration and `tests/terminal-e2e/**`; includes the provider and network-guard contract tests in `tests/`. |
+| `npm run test:unit`     | Unit-oriented suite; also excludes Pi-session delivery, property, published-tarball, real mux, and terminal suites.                          |
+| `npm run test:pi`       | Pi-session delivery integration tests using the faux provider and session harness.                                                           |
+| `npm run test:property` | Fast-check property suites.                                                                                                                  |
+| `npm run test:tui`      | Real Pi CLI inside the isolated terminal E2E harness; requires tmux and a resolvable Pi binary.                                              |
+
+The Vitest environment and mux fakes isolate Node-side tests, but they do not
+provide OS-level isolation. `createPiSessionHarness` defaults to an in-memory
+session and faux provider, so it does not prove real pane creation, shell
+quoting, process lifetime, or terminal rendering. Use the real backend or
+terminal scripts for those contracts, and run the standard typecheck, format,
+and package checks before delivery.

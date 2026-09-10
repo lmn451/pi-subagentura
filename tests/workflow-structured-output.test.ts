@@ -29,4 +29,12 @@ describe("workflow structured output tool", () => {
     const tool = createWorkflowStructuredOutputTool({ type: "string" });
     expect(tool.tool.executionMode).toBe("sequential");
   });
+
+  it("requests preferred JSON-schema constrained sampling", () => {
+    const tool = createWorkflowStructuredOutputTool({ type: "string" });
+    expect(tool.tool.constrainedSampling).toEqual({
+      type: "json_schema",
+      strict: "prefer",
+    });
+  });
 });

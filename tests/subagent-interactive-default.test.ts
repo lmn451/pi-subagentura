@@ -341,6 +341,7 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(callArgs.notifyOnComplete).toBeUndefined();
     expect(callArgs.triggerTurnOnComplete).toBeUndefined();
     expect(callArgs.completionPolicy).toBe("each");
+    expect(callArgs.deferAgentCreatedTelemetry).toBe(true);
     expect(callArgs.spawnTreeContext).toMatchObject({
       role: "root",
       rootId: "test-session-id",
@@ -591,6 +592,28 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
+  it("uses the tool-entry clock for a context-inclusive spawn", async () => {
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(2_000);
+    try {
+      await getInteractiveToolDef(api).execute(
+        "call-spawn-clock",
+        { task: "review context", includeContext: true },
+        undefined,
+        undefined,
+        mockCtx(),
+      );
+
+      expect(mockLaunchInteractiveSubagent).toHaveBeenCalledWith(
+        expect.objectContaining({ spawnRequestedAt: 1_000 }),
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("forwards an explicit related completion group", async () => {
     const toolDef = getInteractiveToolDef(api);
     const result = await toolDef.execute(
@@ -609,6 +632,7 @@ describe("subagent_interactive tool lifecycle", () => {
       expect.objectContaining({
         completionPolicy: "group",
         completionGroupId: "review",
+        deferAgentCreatedTelemetry: true,
       }),
     );
     expect(result.content[0].text).toContain("group review");

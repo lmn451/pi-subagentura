@@ -29,6 +29,7 @@ import {
   buildSessionOptions,
   copyProviderConfig,
   createCompatibleSessionRuntime,
+  type CompatibleSessionRuntime,
 } from "./pi-sdk-compat";
 import {
   createWorkflowStructuredOutputTool,
@@ -53,7 +54,24 @@ import {
   telemetryDepthBucket,
   type AgentTelemetryContext,
   type TelemetryAgentStatus,
+  type TelemetryAgentStopReason,
+  type TelemetryErrorCategory,
+  type TelemetryErrorStage,
 } from "./telemetry";
+import {
+  addUsageSamples,
+  normalizeUsage,
+  usageFromAssistantMessage,
+  usageFromAssistantMessages,
+  zeroUsage,
+  type Usage,
+} from "./usage";
+export {
+  normalizeUsage,
+  usageFromAssistantMessage,
+  usageFromAssistantMessages,
+} from "./usage";
+export type { Usage } from "./usage";
 // ── Debug Logging ─────────────────────────────────────────────────
 
 const DEBUG_LOG_DIR = process.env.SUBAGENT_DEBUG_LOG_DIR
@@ -125,153 +143,65 @@ export const ACTIVE_TOOL_DEBOUNCE_MS = 150;
 
 // ── Types ───────────────────────────────────────────────────────────
 
-export interface Usage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
-  /** Pricing provenance; "mixed" is used only for aggregated samples. */
-  costSource?: "provider" | "estimated" | "unavailable" | "mixed";
-  turns: number;
-}
+/** Use Pi's aggregate session accounting when the SDK exposes it. */
+function usageFromSessionStats(session: unknown, fallback: Usage): Usage {
+  const getSessionStats = (
+    session as {
+      getSessionStats?: () => unknown;
+    }
+  ).getSessionStats;
+  if (typeof getSessionStats !== "function") return { ...fallback };
 
-function usageNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value
-    : 0;
-}
-
-export function normalizeUsage(usage: Usage | undefined): Usage | undefined {
-  if (!usage) return undefined;
-  const input = usageNumber(usage.input);
-  const output = usageNumber(usage.output);
-  const cacheRead = usageNumber(usage.cacheRead);
-  const cacheWrite = usageNumber(usage.cacheWrite);
-  const cost = usageNumber(usage.cost);
-  const hasAccounting =
-    input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0 || cost > 0;
-  return {
-    input,
-    output,
-    cacheRead,
-    cacheWrite,
-    cost,
-    ...(hasAccounting && usage.costSource
-      ? { costSource: usage.costSource }
-      : {}),
-    turns: usageNumber(usage.turns),
-  };
-}
-
-type AssistantCostSource = Exclude<NonNullable<Usage["costSource"]>, "mixed">;
-
-function mergeUsageCostSource(
-  existing: Usage["costSource"],
-  next: Usage["costSource"],
-): Usage["costSource"] {
-  if (!next) return existing;
-  if (!existing) return next;
-  if (existing === next) return existing;
-  return "mixed";
-}
-
-function addUsageSamples(total: Usage, next: Usage): Usage {
-  const costSource = mergeUsageCostSource(total.costSource, next.costSource);
-  return {
-    input: total.input + next.input,
-    output: total.output + next.output,
-    cacheRead: total.cacheRead + next.cacheRead,
-    cacheWrite: total.cacheWrite + next.cacheWrite,
-    cost: total.cost + next.cost,
-    ...(costSource ? { costSource } : {}),
-    turns: total.turns + next.turns,
-  };
-}
-
-/** Extract one assistant-message usage record without mutating it. */
-export function usageFromAssistantMessage(
-  message: unknown,
-  turns = 1,
-): Usage | undefined {
-  if (!message || typeof message !== "object") return undefined;
-  const candidate = message as { role?: unknown; usage?: unknown };
+  let stats: unknown;
+  try {
+    stats = getSessionStats.call(session);
+  } catch {
+    // Stats are an optional compatibility enhancement, not a spawn failure.
+    return { ...fallback };
+  }
+  if (!stats || typeof stats !== "object" || Array.isArray(stats)) {
+    return { ...fallback };
+  }
+  const rawStats = stats as Record<string, unknown>;
+  const rawTokens = rawStats.tokens;
+  if (!rawTokens || typeof rawTokens !== "object" || Array.isArray(rawTokens)) {
+    return { ...fallback };
+  }
+  const tokens = rawTokens as Record<string, unknown>;
+  const input = nonNegativeFiniteNumber(tokens.input);
+  const output = nonNegativeFiniteNumber(tokens.output);
+  const cacheRead = nonNegativeFiniteNumber(tokens.cacheRead);
+  const cacheWrite = nonNegativeFiniteNumber(tokens.cacheWrite);
+  const cost = nonNegativeFiniteNumber(rawStats.cost);
   if (
-    candidate.role !== "assistant" ||
-    !candidate.usage ||
-    typeof candidate.usage !== "object"
+    input === undefined ||
+    output === undefined ||
+    cacheRead === undefined ||
+    cacheWrite === undefined ||
+    cost === undefined
   ) {
-    return undefined;
+    return { ...fallback };
   }
-  const raw = candidate.usage as Record<string, unknown>;
-  const rawCost = raw.cost;
-  const cost =
-    typeof rawCost === "number"
-      ? usageNumber(rawCost)
-      : rawCost && typeof rawCost === "object"
-        ? usageNumber((rawCost as Record<string, unknown>).total)
-        : 0;
-  const input = usageNumber(raw.input);
-  const output = usageNumber(raw.output);
-  const cacheRead = usageNumber(raw.cacheRead);
-  const cacheWrite = usageNumber(raw.cacheWrite);
-  const rawCostSource = raw.costSource;
-  const explicitSource: AssistantCostSource | undefined =
-    rawCostSource === "provider" ||
-    rawCostSource === "estimated" ||
-    rawCostSource === "unavailable"
-      ? rawCostSource
-      : undefined;
-  const hasAccounting =
-    input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0 || cost > 0;
-  const costSource = hasAccounting
-    ? (explicitSource ?? (cost > 0 ? "estimated" : "unavailable"))
-    : undefined;
+  if (input + output + cacheRead + cacheWrite + cost === 0) {
+    return { ...fallback };
+  }
+  const costSource =
+    fallback.costSource ?? (cost > 0 ? "estimated" : "unavailable");
   return {
     input,
     output,
     cacheRead,
     cacheWrite,
     cost,
-    ...(costSource ? { costSource } : {}),
-    turns: Math.max(0, turns),
+    costSource,
+    turns: fallback.turns,
   };
 }
 
-/** Aggregate assistant usage from a session, falling back to the live sample. */
-export function usageFromAssistantMessages(
-  messages: readonly unknown[],
-  fallback: Usage,
-): Usage {
-  const total = zeroUsageShape();
-  let found = false;
-  let costSource: Usage["costSource"];
-  for (const message of messages) {
-    const usage = usageFromAssistantMessage(message);
-    if (!usage) continue;
-    found = true;
-    costSource = mergeUsageCostSource(costSource, usage.costSource);
-    total.input += usage.input;
-    total.output += usage.output;
-    total.cacheRead += usage.cacheRead;
-    total.cacheWrite += usage.cacheWrite;
-    total.cost += usage.cost;
-    total.turns += usage.turns;
-  }
-  if (!found) return { ...fallback };
-  if (costSource) total.costSource = costSource;
-  return total;
-}
-
-function zeroUsageShape(): Usage {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  };
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 export type SubagentResult =
@@ -306,6 +236,67 @@ export interface SubagentLiveStatus {
   thinkingLevel?: ThinkingLevel;
 }
 
+/** Closed stages used when an in-process spawn is observed to fail. */
+export type InProcessSpawnFailureStage =
+  | "depth_limit"
+  | "capacity"
+  | "context"
+  | "model_resolution"
+  | "session_creation"
+  | "registration"
+  | "parent_shutdown"
+  | "unknown";
+
+const SPAWN_FAILURE_STAGE_KEY = "__piSubagenturaSpawnFailureStage";
+const SPAWN_FAILURE_STAGES: readonly InProcessSpawnFailureStage[] = [
+  "depth_limit",
+  "capacity",
+  "context",
+  "model_resolution",
+  "session_creation",
+  "registration",
+  "parent_shutdown",
+  "unknown",
+];
+
+/** Attach a bounded stage to an error without exposing it in user telemetry. */
+export function annotateSpawnFailure(
+  error: unknown,
+  stage: InProcessSpawnFailureStage,
+): Error {
+  const base = error instanceof Error ? error : new Error(String(error));
+  try {
+    Object.defineProperty(base, SPAWN_FAILURE_STAGE_KEY, {
+      configurable: true,
+      enumerable: false,
+      value: stage,
+      writable: false,
+    });
+    return base;
+  } catch {
+    const wrapped = new Error(base.message);
+    Object.defineProperty(wrapped, SPAWN_FAILURE_STAGE_KEY, {
+      configurable: true,
+      enumerable: false,
+      value: stage,
+      writable: false,
+    });
+    return wrapped;
+  }
+}
+
+/** Recover a stage attached by a preparation boundary, if one is present. */
+export function spawnFailureStage(
+  error: unknown,
+): InProcessSpawnFailureStage | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const stage = (error as Record<string, unknown>)[SPAWN_FAILURE_STAGE_KEY];
+  return typeof stage === "string" &&
+    SPAWN_FAILURE_STAGES.includes(stage as InProcessSpawnFailureStage)
+    ? (stage as InProcessSpawnFailureStage)
+    : undefined;
+}
+
 // ── Async Job Types ─────────────────────────────────────────────────
 
 export type JobStatus = "running" | "done" | "error" | "cancelled";
@@ -328,11 +319,15 @@ export interface JobState {
   result?: SubagentResult;
   session: AgentSession;
   startedAt: number;
+  /** Terminal settlement time, when the job has reached a terminal state. */
+  completedAt?: number;
   cwd?: string;
   promise: Promise<SubagentResult>;
   modelLabel?: string;
   /** Effective level after Pi's model-capability clamping. */
   thinkingLevel?: ThinkingLevel;
+  /** Anonymous telemetry context retained for post-shutdown result reads. */
+  telemetry?: AgentTelemetryContext;
   /** Deprecated legacy pointer/output delivery mode. */
   notifyOnComplete?: NotifyOnComplete;
   /** Delivery owner captured at async spawn time. */
@@ -381,6 +376,92 @@ export interface CancellationInfo {
   initiator?: string;
   /** Human-readable reason preserved in logs and the snapshot. */
   reason?: string;
+}
+type InProcessTerminalReason =
+  | "completed"
+  | "agent_error"
+  | "process_exit"
+  | "timeout"
+  | "explicit_cancel"
+  | "parent_cancelled"
+  | "session_shutdown"
+  | "fresh_session"
+  | "unknown";
+
+/**
+ * Map an in-process result to a closed terminal reason. Cancellation sources
+ * are authoritative; an unannotated cancelled result is intentionally unknown.
+ */
+function terminalReasonForResult(
+  result: SubagentResult,
+  signal: AbortSignal | undefined,
+): InProcessTerminalReason {
+  if (result.cancelled) {
+    if (!signal?.aborted) return "unknown";
+    const info = readCancellationInfo(signal, "signal");
+    if (info.reason === "timeout") return "timeout";
+    switch (info.source) {
+      case "cancel_subagent":
+      case "cancel_all":
+        return "explicit_cancel";
+      case "session_shutdown":
+        switch (info.reason) {
+          case "session_start (new)":
+          case "session_start (fork)":
+          case "session_shutdown (new)":
+          case "session_shutdown (fork)":
+            return "fresh_session";
+          default:
+            return "session_shutdown";
+        }
+      case "signal":
+      case "workflow":
+      case "supervisor":
+        return "parent_cancelled";
+      default:
+        return "unknown";
+    }
+  }
+  if (result.isError) {
+    return result.errorMessage === "timeout" ||
+      result.errorMessage === "TimeoutError"
+      ? "timeout"
+      : "agent_error";
+  }
+  return "completed";
+}
+function authoritativeAgentStopReason(
+  session: AgentSession,
+): TelemetryAgentStopReason | undefined {
+  const messages = session.agent.state.messages;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    return message.stopReason === "error" || message.stopReason === "aborted"
+      ? message.stopReason
+      : undefined;
+  }
+  return undefined;
+}
+
+function telemetryErrorStageForResult(
+  result: SubagentResult,
+  terminalReason: InProcessTerminalReason,
+  providerError: boolean,
+): TelemetryErrorStage | undefined {
+  if (result.cancelled || !result.isError) return undefined;
+  if (terminalReason === "timeout") return "turn";
+  return providerError ? "provider" : "turn";
+}
+
+function telemetryErrorCategoryForResult(
+  result: SubagentResult,
+  terminalReason: InProcessTerminalReason,
+  providerError: boolean,
+): TelemetryErrorCategory | undefined {
+  if (result.cancelled || !result.isError) return undefined;
+  if (terminalReason === "timeout") return "timeout";
+  return providerError ? "provider" : "unknown";
 }
 
 // ── Job Registry ────────────────────────────────────────────────────
@@ -628,10 +709,12 @@ export function cascadeChildAborts(
   for (const [childId, child] of inProcessJobsForOwner(owner)) {
     if (child.parentJobId !== ownerJobId) continue;
     if (child.status !== "running") continue;
-    child.cancellation = { ...info, at: Date.now() };
+    const cancelledAt = Date.now();
+    child.cancellation = { ...info, at: cancelledAt };
     // Mark cancelled up front so late settlement cannot flip it to done/error
     // and no completion notification fires for an aborted child.
     child.status = "cancelled";
+    child.completedAt ??= cancelledAt;
     scheduleJobCleanup(childId, true, undefined, owner);
     signalled.push(childId);
     if (child.abort) {
@@ -814,6 +897,8 @@ export interface StartSubagentJobParams {
   owner?: SessionOwnerToken;
   /** Anonymous lifecycle metadata resolved at the invoking tool boundary. */
   telemetry?: AgentTelemetryContext;
+  /** Wall-clock time captured at the tool boundary, for spawn latency only. */
+  spawnRequestedAt?: number;
 }
 
 export interface StartSubagentJobResult {
@@ -862,6 +947,7 @@ export async function startSubagentJob(
     rootSessionId,
     owner,
     telemetry,
+    spawnRequestedAt,
   } = params;
 
   // Enforce the cap within this exact scope; peer sessions never evict each other.
@@ -870,21 +956,31 @@ export async function startSubagentJob(
   }
 
   const jobId = generateJobId();
-  const sessionRuntime = await createCompatibleSessionRuntime();
+  let sessionRuntime: CompatibleSessionRuntime;
+  try {
+    sessionRuntime = await createCompatibleSessionRuntime();
+  } catch (error) {
+    throw annotateSpawnFailure(error, "session_creation");
+  }
 
   // Resolve model: exact match only, fallback to default
   // Uses parent's modelRegistry to find extension-added models (e.g. minimax)
-  const targetModel = resolveModel(
-    modelOverride,
-    defaultModel,
-    parentModelRegistry,
-  );
-  if (targetModel) {
-    copyProviderConfig(
-      sessionRuntime,
+  let targetModel: Model<any> | undefined;
+  try {
+    targetModel = resolveModel(
+      modelOverride,
+      defaultModel,
       parentModelRegistry,
-      targetModel.provider,
     );
+    if (targetModel) {
+      copyProviderConfig(
+        sessionRuntime,
+        parentModelRegistry,
+        targetModel.provider,
+      );
+    }
+  } catch (error) {
+    throw annotateSpawnFailure(error, "model_resolution");
   }
   const modelLabel = targetModel
     ? `${targetModel.provider}/${targetModel.id}`
@@ -893,14 +989,18 @@ export async function startSubagentJob(
   // Build model warning when override was specified (helps AI discover valid models)
   let modelWarning: string | undefined;
   if (modelOverride && parentModelRegistry) {
-    const available = parentModelRegistry.getAvailable();
-    const modelList = available
-      .map((m) => `  ${m.provider}/${m.id}${m.name ? ` (${m.name})` : ""}`)
-      .join("\n");
-    modelWarning =
-      `Requested model "${modelOverride}" resolved to ${modelLabel ?? "none"}. ` +
-      `Available models:\n${modelList || "  (none)"}\n` +
-      `Use list_available_models to discover more.`;
+    try {
+      const available = parentModelRegistry.getAvailable();
+      const modelList = available
+        .map((m) => `  ${m.provider}/${m.id}${m.name ? ` (${m.name})` : ""}`)
+        .join("\n");
+      modelWarning =
+        `Requested model "${modelOverride}" resolved to ${modelLabel ?? "none"}. ` +
+        `Available models:\n${modelList || "  (none)"}\n` +
+        `Use list_available_models to discover more.`;
+    } catch (error) {
+      throw annotateSpawnFailure(error, "model_resolution");
+    }
   }
 
   let handleAbort: (() => void) | undefined;
@@ -964,20 +1064,25 @@ export async function startSubagentJob(
       ? { tool: undefined, capture: undefined }
       : createWorkflowStructuredOutputTool(workflowStructuredOutputSchema);
 
-  const sessionOptions = buildSessionOptions(sessionRuntime, {
-    sessionManager: SessionManager.inMemory(),
-    model: targetModel,
-    cwd,
-    ...(thinkingLevel ? { thinkingLevel } : {}),
-    ...(workflowStructuredOutputTool
-      ? { customTools: [workflowStructuredOutputTool] }
-      : {}),
-  });
-  const session = (
-    await createAgentSession(
-      sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-    )
-  ).session;
+  let session: AgentSession;
+  try {
+    const sessionOptions = buildSessionOptions(sessionRuntime, {
+      sessionManager: SessionManager.inMemory(),
+      model: targetModel,
+      cwd,
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+      ...(workflowStructuredOutputTool
+        ? { customTools: [workflowStructuredOutputTool] }
+        : {}),
+    });
+    session = (
+      await createAgentSession(
+        sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
+      )
+    ).session;
+  } catch (error) {
+    throw annotateSpawnFailure(error, "session_creation");
+  }
   const effectiveThinkingLevel =
     thinkingLevel === undefined ? undefined : session.thinkingLevel;
   liveStatus.thinkingLevel = effectiveThinkingLevel;
@@ -1030,7 +1135,7 @@ export async function startSubagentJob(
     }
   }
 
-  let completedLiveUsage = zeroUsageShape();
+  let completedLiveUsage = zeroUsage();
   let observedUsageEvent = false;
   const updateLiveUsageFromMessage = (message: unknown): void => {
     const currentTurnUsage = usageFromAssistantMessage(message);
@@ -1155,7 +1260,8 @@ export async function startSubagentJob(
   const start = (): void => {
     if (started || disposedBeforeStart) return;
     started = true;
-    telemetryStartedAt = Date.now();
+    const startedAt = Date.now();
+    telemetryStartedAt = startedAt;
     const telemetryAgentDimensions = {
       execution: "in-process" as const,
       mux: "none" as const,
@@ -1169,6 +1275,10 @@ export async function startSubagentJob(
     captureTelemetry(telemetry?.session, {
       event: "agent_created",
       ...telemetryAgentDimensions,
+      spawn_duration_ms:
+        spawnRequestedAt === undefined
+          ? undefined
+          : startedAt - spawnRequestedAt,
     });
     captureTelemetry(telemetry?.session, {
       event: "task_started",
@@ -1197,13 +1307,15 @@ export async function startSubagentJob(
     thinkingLevel: effectiveThinkingLevel,
     errorMessage: "No subagent result captured.",
   };
-  const currentSessionUsage = (): Usage =>
-    observedUsageEvent
+  const currentSessionUsage = (): Usage => {
+    const fallback = observedUsageEvent
       ? { ...liveStatus.usage }
       : usageFromAssistantMessages(
           session.agent.state.messages as readonly unknown[],
           liveStatus.usage,
         );
+    return usageFromSessionStats(session, fallback);
+  };
   const jobPromise = (async (): Promise<SubagentResult> => {
     try {
       await startGate;
@@ -1324,14 +1436,31 @@ export async function startSubagentJob(
         stack: stack ?? null,
         errorName: err instanceof Error ? err.name : typeof err,
       });
-      result = attachWorkflowStructuredOutput({
-        output: `Sub-agent crashed: ${msg}`,
-        usage: currentSessionUsage(),
-        model: undefined,
-        thinkingLevel: effectiveThinkingLevel,
-        isError: true,
-        errorMessage: msg,
-      });
+      if (signal?.aborted) {
+        const info = readCancellationInfo(
+          signal,
+          cancellationSource ?? "signal",
+        );
+        result = attachWorkflowStructuredOutput({
+          output: `Sub-agent cancelled before completion${info.reason ? `: ${info.reason}` : ""}.`,
+          usage: currentSessionUsage(),
+          model: session.model
+            ? `${session.model.provider}/${session.model.id}`
+            : undefined,
+          thinkingLevel: effectiveThinkingLevel,
+          isError: false,
+          cancelled: true,
+        });
+      } else {
+        result = attachWorkflowStructuredOutput({
+          output: `Sub-agent crashed: ${msg}`,
+          usage: currentSessionUsage(),
+          model: undefined,
+          thinkingLevel: effectiveThinkingLevel,
+          isError: true,
+          errorMessage: msg,
+        });
+      }
     } finally {
       if (started) {
         const status: TelemetryAgentStatus = result.cancelled
@@ -1339,6 +1468,26 @@ export async function startSubagentJob(
           : result.isError
             ? "error"
             : "success";
+        const terminalReason = terminalReasonForResult(result, signal);
+        const structuredStopReason = authoritativeAgentStopReason(session);
+        const providerError =
+          result.isError &&
+          (Boolean(session.agent.state.errorMessage) ||
+            structuredStopReason === "error");
+        const errorCategory = telemetryErrorCategoryForResult(
+          result,
+          terminalReason,
+          providerError,
+        );
+        const errorStage = telemetryErrorStageForResult(
+          result,
+          terminalReason,
+          providerError,
+        );
+        const agentStopReason =
+          status === "error" || status === "cancelled"
+            ? structuredStopReason
+            : undefined;
         captureTelemetry(
           telemetry?.session,
           {
@@ -1353,6 +1502,14 @@ export async function startSubagentJob(
             depth_bucket: telemetryDepthBucket(telemetry?.depth),
             completion_policy: telemetry?.completionPolicy ?? "inline",
             status,
+            terminal_reason: terminalReason,
+            ...(errorCategory === undefined
+              ? {}
+              : { error_category: errorCategory }),
+            ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+            ...(agentStopReason === undefined
+              ? {}
+              : { agent_stop_reason: agentStopReason }),
             duration_ms:
               telemetryStartedAt === undefined
                 ? undefined

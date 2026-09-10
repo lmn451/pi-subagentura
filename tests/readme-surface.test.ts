@@ -56,7 +56,7 @@ describe("README public surface", () => {
     );
     const coordinatedDelivery = section(
       "#### Coordinated completion delivery",
-      "#### Consumption-receipt fallback",
+      "#### Consumption-receipt persistence",
     );
     expect(tools).toHaveLength(24);
     expect(

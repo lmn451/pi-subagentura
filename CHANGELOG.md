@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-09-06
+
+### Added
+
+- Added anonymous telemetry schema v4 diagnostics: closed runtime failure
+  categories, stages, and kinds; conditional
+  task and workflow diagnostics; process-exit code buckets; and completion
+  delivery failure stages. Payload allowlists omit arbitrary values and raw
+  diagnostic content.
+
+### Fixed
+
+- Process-backed workflow usage accounting reads session logs incrementally and
+  skips individual records above 2 MiB, preserving later usage without
+  unbounded parent memory growth.
+- Workflow cancellation tears down the child pane and records its receipt
+  promptly while session usage accounting finishes.
+- Zellij native viewers now use the backend's blocking pane lifecycle instead
+  of reporting a successfully created floating pane as unavailable.
+- Persisted interactive state reads, migration, and writes enforce file and
+  entry bounds, preserve invalid existing files, and keep child working
+  directories distinct from parent persistence roots across rehydration.
+- Lineage admission fails closed when its node directory cannot be listed.
+- Async job TTLs reject values outside Node's safe timer range, and invalid
+  persisted activity-list values remain redacted in diagnostics.
+- Corrected release, completion-receipt, pane-lifecycle, runtime, and workflow
+  documentation, including obsolete instructions in the review workflow.
+
+### Changed
+
+- Bounded the TypeBox peer dependency to the tested compatible 1.x range.
+- Separated shared usage utilities and multiplexer contracts from their runtime
+  adapters while preserving existing exports.
+- Removed the stale pnpm lockfile and obsolete manual interactive smoke script;
+  npm and the maintained multiplexer/TUI test harnesses remain the supported paths.
+- Consolidated documentation into current runtime and testing guidance, removing
+  obsolete design plans and review reports preserved in Git history.
+
+## [3.6.1] - 2026-09-04
+
+### Added
+
+- Added persisted telemetry controls with project-over-global precedence while
+  preserving environment and negative launch-flag opt-outs.
+- Expanded anonymous telemetry to cover lifecycle outcomes, tool and command
+  operations, setup and delivery failures, and closed error categories.
+  Payloads use bounded counts and durations without prompts, outputs, raw
+  errors, paths, or agent identifiers.
+- Added Pi SDK support for native provider registrations, JSON-schema constrained
+  sampling, session usage totals, and completion deferral during UI prompts.
+
+### Changed
+
+- Development fixtures now use Pi 0.85.0; minimum supported Pi remains 0.80.6.
+  Declared the Pi server peer needed by newer SDK installations.
+- Manual result collection now syncs a private consumption receipt before
+  returning output. A writable receipt ledger is required; storage failures
+  report an error and retain results for retry. Historical session receipts
+  remain compatible.
+
+### Fixed
+
+- Interactive cancellation attempts pane teardown even when recording the
+  cancellation fails, including descendant and fresh-session cleanup.
+- Consumption recovery no longer accepts Pi's memory-only entries or unsynced
+  ledger writes after storage failures.
+- Cancelled workflow children stop schema retries and report cancellation.
+- Invalid project max-depth settings fall back to the global value or default.
+- Herdr capture widens bounded reads when blank viewport rows hide recent output.
+- Terminal cancellation tests verify recovery by completing a subsequent turn.
+
 ## [3.6.0] - 2026-09-02
 
 ### Added
@@ -210,7 +281,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.2...HEAD
+[3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
+[3.6.1]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/lmn451/pi-subagentura/compare/v3.4.2...v3.5.0
 [3.4.2]: https://github.com/lmn451/pi-subagentura/compare/v3.4.0...v3.4.2

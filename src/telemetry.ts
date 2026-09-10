@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 2;
+export const TELEMETRY_SCHEMA_VERSION = 4;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -15,15 +15,166 @@ const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
+export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
   "with_context" | "isolated" | "interactive" | "workflow";
 export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";
+export type TelemetryCompletionFailureStage =
+  | "notice_persistence"
+  | "manifest_dispatch"
+  | "retry_exhausted"
+  | "consumption_persistence"
+  | "notification_dispatch"
+  | "completion_publication";
+export type TelemetryWorkflowInvocation = "tool" | "saved_command";
+export type TelemetryWorkflowStatus =
+  "success" | "partial" | "error" | "cancelled";
+export type TelemetryRecoveryReason = "startup" | "reload" | "resume";
+export type TelemetryResultReadOutcome =
+  | "consumed"
+  | "already_consumed"
+  | "empty"
+  | "running"
+  | "error"
+  | "cancelled"
+  | "wait_timeout"
+  | "wait_cancelled"
+  | "unavailable";
+export type TelemetrySpawnFailureStage =
+  | "depth_limit"
+  | "capacity"
+  | "context"
+  | "model_resolution"
+  | "session_creation"
+  | "mux_resolution"
+  | "pane_launch"
+  | "state_persistence"
+  | "registration"
+  | "parent_shutdown"
+  | "unknown";
+export type TelemetryTerminalReason =
+  | "completed"
+  | "agent_error"
+  | "process_exit"
+  | "timeout"
+  | "explicit_cancel"
+  | "parent_cancelled"
+  | "session_shutdown"
+  | "fresh_session"
+  | "unknown";
 export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
   "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
+
+export type TelemetryErrorCategory =
+  | "provider"
+  | "timeout"
+  | "schema"
+  | "capacity"
+  | "session"
+  | "mux"
+  | "transport"
+  | "artifact"
+  | "internal"
+  | "unknown";
+export type TelemetryErrorStage =
+  | "spawn"
+  | "turn"
+  | "provider"
+  | "completion"
+  | "polling"
+  | "delivery"
+  | "schema_validation"
+  | "workflow";
+export type TelemetryAgentStopReason = "error" | "aborted";
+export type TelemetryExitCodeBucket = "zero" | "nonzero" | "unknown";
+export type TelemetryRuntimeFailureKind =
+  | "artifact_unreadable"
+  | "artifact_malformed"
+  | "artifact_oversized"
+  | "mux_probe"
+  | "workflow_capacity"
+  | "consumption_persistence"
+  | "notification_dispatch"
+  | "completion_publication";
+export type TelemetryErrorCountBucket = "0" | "1" | "2+" | "unknown";
+
+export const TELEMETRY_OPERATION_NAMES = {
+  tool: [
+    "subagent_with_context",
+    "subagent_isolated",
+    "subagent_interactive",
+    "get_subagent_status",
+    "get_subagent_result",
+    "cancel_subagent",
+    "prune_subagent_jobs",
+    "list_available_models",
+    "cleanup_subagent_artifacts",
+    "get_current_pane_activity",
+    "get_interactive_subagent_status",
+    "cancel_interactive_subagent",
+    "send_interactive_subagent_message",
+    "read_subagent_artifact",
+    "list_subagent_artifacts",
+    "list_orchestrator_agents",
+    "update_orchestrator_agent_description",
+    "workflow",
+    "get_workflow_status",
+    "get_workflow_result",
+    "cancel_workflow",
+    "save_workflow",
+    "list_workflows",
+    "delete_workflow",
+  ],
+  command: [
+    "workflow",
+    "workflows",
+    "list-workflows",
+    "workflow-status",
+    "workflow-tree",
+    "delete-workflow",
+    "subagents",
+    "cancel-all-flows",
+  ],
+  shortcut: ["ctrl+alt+a", "ctrl+alt+x"],
+} as const;
+export type TelemetrySurface = keyof typeof TELEMETRY_OPERATION_NAMES;
+export type TelemetryOperation =
+  (typeof TELEMETRY_OPERATION_NAMES)[TelemetrySurface][number];
+export type TelemetryOperationOutcome =
+  "returned" | "reported_error" | "threw" | "aborted";
+export type TelemetryOperationResultStatus =
+  | "ok"
+  | "started"
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "wait_timeout"
+  | "wait_cancelled"
+  | "unavailable"
+  | "invalid_input"
+  | "confirmation_required"
+  | "error"
+  | "unknown";
+export type TelemetrySessionFailureStage =
+  | "telemetry_persistence"
+  | "routing_recovery"
+  | "state_recovery"
+  | "wake_recovery";
+
+export function telemetryOperationName(
+  surface: TelemetrySurface,
+  name: string,
+): TelemetryOperation | undefined {
+  return (TELEMETRY_OPERATION_NAMES[surface] as readonly string[]).includes(
+    name,
+  )
+    ? (name as TelemetryOperation)
+    : undefined;
+}
 
 interface TelemetryAgentDimensions {
   execution: TelemetryExecution;
@@ -36,9 +187,40 @@ interface TelemetryAgentDimensions {
   completion_policy: TelemetryCompletionPolicy;
 }
 
+type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
+  mux: TelemetrySpawnFailureMux;
+};
+
 export type TelemetryEvent =
   | { event: "session_started" }
-  | ({ event: "agent_created" } & TelemetryAgentDimensions)
+  | {
+      event: "session_setup_failed";
+      failure_stage: TelemetrySessionFailureStage;
+    }
+  | {
+      event: "operation_started";
+      surface: TelemetrySurface;
+      operation: TelemetryOperation;
+      session_role: "root" | "child";
+    }
+  | {
+      event: "operation_completed";
+      surface: TelemetrySurface;
+      operation: TelemetryOperation;
+      session_role: "root" | "child";
+      outcome: TelemetryOperationOutcome;
+      result_status: TelemetryOperationResultStatus;
+      duration_ms?: number;
+    }
+  | ({
+      event: "agent_created";
+      spawn_duration_ms?: number;
+    } & TelemetryAgentDimensions)
+  | ({
+      event: "agent_spawn_failed";
+      failure_stage: TelemetrySpawnFailureStage;
+      spawn_duration_ms?: number;
+    } & TelemetrySpawnFailureDimensions)
   | ({ event: "task_started"; unit: "job" | "turn" } & TelemetryAgentDimensions)
   | {
       event: "interactive_message_sent";
@@ -49,15 +231,64 @@ export type TelemetryEvent =
       event: "task_completed";
       unit: "job" | "turn";
       status: TelemetryAgentStatus;
+      terminal_reason: TelemetryTerminalReason;
+      error_category?: TelemetryErrorCategory;
+      error_stage?: TelemetryErrorStage;
+      agent_stop_reason?: TelemetryAgentStopReason;
+      exit_code_bucket?: TelemetryExitCodeBucket;
       duration_ms: number | undefined;
       child_conversation_message_count: number | undefined;
     } & TelemetryAgentDimensions)
   | {
+      event: "workflow_started";
+      invocation: TelemetryWorkflowInvocation;
+      async: boolean;
+      completion_policy: TelemetryCompletionPolicy;
+    }
+  | {
+      event: "workflow_completed";
+      invocation: TelemetryWorkflowInvocation;
+      async: boolean;
+      completion_policy: TelemetryCompletionPolicy;
+      status: TelemetryWorkflowStatus;
+      terminal_reason: TelemetryTerminalReason;
+      agents_spawned: number;
+      error_count: number;
+      error_category?: TelemetryErrorCategory;
+      error_stage?: TelemetryErrorStage;
+      duration_ms?: number;
+    }
+  | {
+      event: "session_recovered";
+      reason: TelemetryRecoveryReason;
+      total_count: number;
+      alive_count: number;
+      terminal_count: number;
+      unknown_count: number;
+    }
+  | {
       event: "completion_delivered";
       delivery: TelemetryDelivery;
       count: number;
+      delivery_latency_ms?: number;
     }
-  | { event: "result_consumed"; source: TelemetryResultSource };
+  | {
+      event: "completion_delivery_failed";
+      failure_stage: TelemetryCompletionFailureStage;
+      retry_attempt: number;
+    }
+  | {
+      event: "runtime_failure";
+      error_category: TelemetryErrorCategory;
+      error_stage: TelemetryErrorStage;
+      failure_kind: TelemetryRuntimeFailureKind;
+    }
+  | {
+      event: "result_read";
+      source: TelemetryResultSource;
+      outcome: TelemetryResultReadOutcome;
+      read_latency_ms?: number;
+    };
 
 export interface TelemetrySession {
   readonly enabled: boolean;
@@ -188,6 +419,137 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
   return "custom";
 }
 
+const TELEMETRY_ERROR_CATEGORIES: readonly TelemetryErrorCategory[] = [
+  "provider",
+  "timeout",
+  "schema",
+  "capacity",
+  "session",
+  "mux",
+  "transport",
+  "artifact",
+  "internal",
+  "unknown",
+];
+
+const TELEMETRY_ERROR_STAGES: readonly TelemetryErrorStage[] = [
+  "spawn",
+  "turn",
+  "provider",
+  "completion",
+  "polling",
+  "delivery",
+  "schema_validation",
+  "workflow",
+];
+
+const TELEMETRY_AGENT_STOP_REASONS: readonly TelemetryAgentStopReason[] = [
+  "error",
+  "aborted",
+];
+
+const TELEMETRY_EXIT_CODE_BUCKETS: readonly TelemetryExitCodeBucket[] = [
+  "zero",
+  "nonzero",
+  "unknown",
+];
+
+const TELEMETRY_RUNTIME_FAILURE_KINDS: readonly TelemetryRuntimeFailureKind[] =
+  [
+    "artifact_unreadable",
+    "artifact_malformed",
+    "artifact_oversized",
+    "mux_probe",
+    "workflow_capacity",
+    "consumption_persistence",
+    "notification_dispatch",
+    "completion_publication",
+  ];
+
+const TELEMETRY_COMPLETION_FAILURE_STAGES: readonly TelemetryCompletionFailureStage[] =
+  [
+    "notice_persistence",
+    "manifest_dispatch",
+    "retry_exhausted",
+    "consumption_persistence",
+    "notification_dispatch",
+    "completion_publication",
+  ];
+
+/** Never forward arbitrary error categories into telemetry. */
+export function sanitizeTelemetryErrorCategory(
+  value: unknown,
+): TelemetryErrorCategory {
+  return typeof value === "string" &&
+    TELEMETRY_ERROR_CATEGORIES.includes(value as TelemetryErrorCategory)
+    ? (value as TelemetryErrorCategory)
+    : "unknown";
+}
+
+/** Never forward arbitrary error stages into telemetry. */
+export function sanitizeTelemetryErrorStage(
+  value: unknown,
+): TelemetryErrorStage | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_ERROR_STAGES.includes(value as TelemetryErrorStage)
+    ? (value as TelemetryErrorStage)
+    : undefined;
+}
+
+/** Never forward arbitrary stop reasons into telemetry. */
+export function sanitizeTelemetryAgentStopReason(
+  value: unknown,
+): TelemetryAgentStopReason | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_AGENT_STOP_REASONS.includes(value as TelemetryAgentStopReason)
+    ? (value as TelemetryAgentStopReason)
+    : undefined;
+}
+
+/** Never forward arbitrary process exit buckets into telemetry. */
+export function sanitizeTelemetryExitCodeBucket(
+  value: unknown,
+): TelemetryExitCodeBucket | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_EXIT_CODE_BUCKETS.includes(value as TelemetryExitCodeBucket)
+    ? (value as TelemetryExitCodeBucket)
+    : undefined;
+}
+
+/** Never forward arbitrary runtime failure kinds into telemetry. */
+export function sanitizeTelemetryRuntimeFailureKind(
+  value: unknown,
+): TelemetryRuntimeFailureKind | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_RUNTIME_FAILURE_KINDS.includes(
+      value as TelemetryRuntimeFailureKind,
+    )
+    ? (value as TelemetryRuntimeFailureKind)
+    : undefined;
+}
+
+/** Never forward arbitrary completion failure stages into telemetry. */
+export function sanitizeTelemetryCompletionFailureStage(
+  value: unknown,
+): TelemetryCompletionFailureStage | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_COMPLETION_FAILURE_STAGES.includes(
+      value as TelemetryCompletionFailureStage,
+    )
+    ? (value as TelemetryCompletionFailureStage)
+    : undefined;
+}
+
+export function telemetryErrorCountBucket(
+  value: number | undefined,
+): TelemetryErrorCountBucket {
+  if (value === undefined || !Number.isFinite(value) || value < 0) {
+    return "unknown";
+  }
+  const count = Math.trunc(value);
+  return count === 0 ? "0" : count === 1 ? "1" : "2+";
+}
+
 export function telemetryDepthBucket(
   depth: number | undefined,
 ): TelemetryDepthBucket {
@@ -250,11 +612,20 @@ function depthProperty(depth: number | undefined): { depth?: number } {
   return boundedDepth === undefined ? {} : { depth: boundedDepth };
 }
 
-function durationProperty(durationMs: number | undefined): {
-  duration_ms?: number;
-} {
+type TelemetryDurationPropertyPrefix =
+  "spawn_duration" | "duration" | "delivery_latency" | "read_latency";
+
+function durationProperties(
+  prefix: TelemetryDurationPropertyPrefix,
+  durationMs: number | undefined,
+): Record<string, number | string> {
   const boundedDuration = telemetryDurationMs(durationMs);
-  return boundedDuration === undefined ? {} : { duration_ms: boundedDuration };
+  return {
+    [`${prefix}_bucket`]: telemetryDurationBucket(durationMs),
+    ...(boundedDuration === undefined
+      ? {}
+      : { [`${prefix}_ms`]: boundedDuration }),
+  };
 }
 
 function boundedCount(value: number | undefined, max: number): number {
@@ -281,6 +652,28 @@ export function buildTelemetryPayload(
     case "session_started":
       properties = common;
       break;
+    case "session_setup_failed":
+      properties = { ...common, failure_stage: event.failure_stage };
+      break;
+    case "operation_started":
+      properties = {
+        ...common,
+        surface: event.surface,
+        operation: event.operation,
+        session_role: event.session_role,
+      };
+      break;
+    case "operation_completed":
+      properties = {
+        ...common,
+        surface: event.surface,
+        operation: event.operation,
+        session_role: event.session_role,
+        outcome: event.outcome,
+        result_status: event.result_status,
+        ...durationProperties("duration", event.duration_ms),
+      };
+      break;
     case "agent_created":
       properties = {
         ...common,
@@ -292,6 +685,22 @@ export function buildTelemetryPayload(
         ...depthProperty(event.depth),
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
+        ...durationProperties("spawn_duration", event.spawn_duration_ms),
+      };
+      break;
+    case "agent_spawn_failed":
+      properties = {
+        ...common,
+        execution: event.execution,
+        mux: event.mux,
+        invocation_source: event.invocation_source,
+        model: sanitizeTelemetryModel(event.model),
+        async: event.async,
+        ...depthProperty(event.depth),
+        depth_bucket: event.depth_bucket,
+        completion_policy: event.completion_policy,
+        failure_stage: event.failure_stage,
+        ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
     case "task_started":
@@ -315,7 +724,19 @@ export function buildTelemetryPayload(
         count: boundedCount(event.count, 128),
       };
       break;
-    case "task_completed":
+    case "task_completed": {
+      const errorStage =
+        event.status === "error"
+          ? sanitizeTelemetryErrorStage(event.error_stage)
+          : undefined;
+      const agentStopReason =
+        event.status === "error" || event.status === "cancelled"
+          ? sanitizeTelemetryAgentStopReason(event.agent_stop_reason)
+          : undefined;
+      const exitCodeBucket =
+        event.terminal_reason === "process_exit"
+          ? sanitizeTelemetryExitCodeBucket(event.exit_code_bucket)
+          : undefined;
       properties = {
         ...common,
         execution: event.execution,
@@ -328,8 +749,22 @@ export function buildTelemetryPayload(
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
         status: event.status,
-        duration_bucket: telemetryDurationBucket(event.duration_ms),
-        ...durationProperty(event.duration_ms),
+        terminal_reason: event.terminal_reason,
+        ...(event.status === "error"
+          ? {
+              error_category: sanitizeTelemetryErrorCategory(
+                event.error_category,
+              ),
+              ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+            }
+          : {}),
+        ...(agentStopReason === undefined
+          ? {}
+          : { agent_stop_reason: agentStopReason }),
+        ...(exitCodeBucket === undefined
+          ? {}
+          : { exit_code_bucket: exitCodeBucket }),
+        ...durationProperties("duration", event.duration_ms),
         ...(event.child_conversation_message_count === undefined
           ? {}
           : {
@@ -340,15 +775,95 @@ export function buildTelemetryPayload(
             }),
       };
       break;
+    }
+    case "workflow_started":
+      properties = {
+        ...common,
+        invocation: event.invocation,
+        async: event.async,
+        completion_policy: event.completion_policy,
+      };
+      break;
+    case "workflow_completed": {
+      const diagnosticStatus =
+        event.status === "error" || event.status === "partial";
+      const errorCategory = diagnosticStatus
+        ? sanitizeTelemetryErrorCategory(event.error_category)
+        : undefined;
+      const errorStage = diagnosticStatus
+        ? sanitizeTelemetryErrorStage(event.error_stage)
+        : undefined;
+      properties = {
+        ...common,
+        invocation: event.invocation,
+        async: event.async,
+        completion_policy: event.completion_policy,
+        status: event.status,
+        terminal_reason: event.terminal_reason,
+        ...(errorCategory === undefined
+          ? {}
+          : { error_category: errorCategory }),
+        ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+        ...durationProperties("duration", event.duration_ms),
+        agents_spawned: boundedCount(event.agents_spawned, 1_000),
+        error_count_bucket: telemetryErrorCountBucket(event.error_count),
+      };
+      break;
+    }
+    case "session_recovered":
+      properties = {
+        ...common,
+        reason: event.reason,
+        total_count: boundedCount(event.total_count, 1_000),
+        alive_count: boundedCount(event.alive_count, 1_000),
+        terminal_count: boundedCount(event.terminal_count, 1_000),
+        unknown_count: boundedCount(event.unknown_count, 1_000),
+      };
+      break;
     case "completion_delivered":
       properties = {
         ...common,
         delivery: event.delivery,
         count: boundedCount(event.count, 128),
+        ...durationProperties("delivery_latency", event.delivery_latency_ms),
       };
       break;
-    case "result_consumed":
-      properties = { ...common, source: event.source };
+    case "completion_delivery_failed": {
+      const failureStage = sanitizeTelemetryCompletionFailureStage(
+        event.failure_stage,
+      );
+      properties = {
+        ...common,
+        delivery: "manifest",
+        ...(failureStage === undefined ? {} : { failure_stage: failureStage }),
+        retry_attempt: boundedCount(event.retry_attempt, 32),
+      };
+      break;
+    }
+    case "runtime_failure": {
+      const errorCategory = sanitizeTelemetryErrorCategory(
+        event.error_category,
+      );
+      const errorStage = sanitizeTelemetryErrorStage(event.error_stage);
+      const failureKind = sanitizeTelemetryRuntimeFailureKind(
+        event.failure_kind,
+      );
+      properties = {
+        ...common,
+        error_category: errorCategory,
+        ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+        ...(failureKind === undefined ? {} : { failure_kind: failureKind }),
+      };
+      break;
+    }
+    case "result_read":
+      properties = {
+        ...common,
+        source: event.source,
+        outcome: event.outcome,
+        ...durationProperties("read_latency", event.read_latency_ms),
+      };
+      break;
   }
   return {
     api_key: TELEMETRY_PROJECT_TOKEN,

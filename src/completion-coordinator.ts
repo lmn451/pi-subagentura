@@ -20,7 +20,11 @@ import {
 } from "./session-scope";
 import { debugLog } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
-import { captureTelemetry, manifestDeliveryDedupeKey } from "./telemetry";
+import {
+  captureTelemetry,
+  manifestDeliveryDedupeKey,
+  type TelemetryCompletionFailureStage,
+} from "./telemetry";
 
 export const COMPLETION_ENTRY_TYPE = "subagentura-completion";
 export const COMPLETION_CONSUMED_ENTRY_TYPE = "subagentura-completion-consumed";
@@ -72,6 +76,12 @@ export interface CompletionRecord {
   groupComplete?: boolean;
   references: CompletionReference[];
   completedAt: number;
+  /**
+   * Source completion time for delivery-latency analytics. Interactive
+   * completions recovered from legacy state may not have one; the required
+   * `completedAt` remains the coordinator publication timestamp.
+   */
+  telemetryCompletedAt?: number;
   /** Monotonic publication sequence used to retire spilled session entries. */
   sequence?: number;
   ownerSessionId?: string;
@@ -230,6 +240,7 @@ interface CompletionCoordinatorState {
   overflow: CompletionOverflowState;
   manifestRetryAttempt: number;
   manifestRetryExhausted: boolean;
+  reportedDeliveryFailures?: Set<TelemetryCompletionFailureStage>;
   manifestRetryTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -359,6 +370,12 @@ function normalizeRecord(value: unknown): CompletionRecord {
     raw.completedAt >= 0
       ? raw.completedAt
       : Date.now();
+  const telemetryCompletedAt =
+    typeof raw.telemetryCompletedAt === "number" &&
+    Number.isFinite(raw.telemetryCompletedAt) &&
+    raw.telemetryCompletedAt >= 0
+      ? raw.telemetryCompletedAt
+      : undefined;
   const sequence =
     typeof raw.sequence === "number" &&
     Number.isSafeInteger(raw.sequence) &&
@@ -388,6 +405,7 @@ function normalizeRecord(value: unknown): CompletionRecord {
     ...(groupComplete === true ? { groupComplete } : {}),
     references,
     completedAt,
+    ...(telemetryCompletedAt !== undefined ? { telemetryCompletedAt } : {}),
     ...(sequence !== undefined ? { sequence } : {}),
     ...(typeof raw.ownerSessionId === "string" && raw.ownerSessionId.length > 0
       ? { ownerSessionId: raw.ownerSessionId.slice(0, MAX_SOURCE_ID_LENGTH) }
@@ -788,7 +806,9 @@ function loadFallbackConsumptions(
 ): CompletionConsumption[] {
   const consumptions: CompletionConsumption[] = [];
   try {
-    const loaded = readLedgerLines(path, MAX_LEDGER_BYTES);
+    const loaded = readLedgerLines(path, MAX_LEDGER_BYTES, {
+      syncBeforeRead: true,
+    });
     if (
       loaded.truncated ||
       loaded.lines.length > MAX_FALLBACK_RECEIPT_RECORDS
@@ -879,6 +899,7 @@ function reconcileFallbackConsumptions(
         if (consumption) scannedConsumptions.push(consumption);
       },
       {
+        syncBeforeRead: true,
         startOffset: state.fallbackReceiptOffset,
         includeUnterminated: false,
         dropping: state.fallbackReceiptDropping,
@@ -1228,6 +1249,7 @@ function reconcileState(state: CompletionCoordinatorState): void {
     if (entryCustomType(entry) === COMPLETION_MANIFEST_TYPE) {
       const data = objectRecord(entryData(entry));
       if (data?.overflowPath === state.overflow.path) {
+        state.reportedDeliveryFailures?.clear();
         const generation =
           typeof data.overflowNoticeGeneration === "number" &&
           Number.isSafeInteger(data.overflowNoticeGeneration) &&
@@ -1286,7 +1308,10 @@ function reconcileState(state: CompletionCoordinatorState): void {
   }
   for (const completionId of manifestIds) {
     const record = state.records.get(completionId);
-    if (record) markConsumed(record);
+    if (record) {
+      state.reportedDeliveryFailures?.clear();
+      markConsumed(record);
+    }
   }
   if (consumptions.length === 0) return;
   for (const record of state.records.values()) {
@@ -1423,6 +1448,49 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
   );
 }
 
+function maxKnownCompletionAge(
+  records: readonly CompletionRecord[],
+  now = Date.now(),
+): number | undefined {
+  let maximum: number | undefined;
+  for (const record of records) {
+    const timestamp =
+      record.source === "interactive"
+        ? record.telemetryCompletedAt
+        : record.completedAt;
+    if (
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp) ||
+      timestamp < 0
+    ) {
+      continue;
+    }
+    const age = now - timestamp;
+    if (!Number.isFinite(age) || age < 0) continue;
+    maximum = Math.max(maximum ?? 0, age);
+  }
+  return maximum;
+}
+
+/**
+ * Return the oldest known completion age for a manifest batch. The caller
+ * supplies only coordinator-owned completion ids; missing records/timestamps
+ * are deliberately ignored so unavailable latency is not reported as zero.
+ */
+export function completionLatencyForIds(
+  completionIds: readonly string[],
+  owner?: SessionOwnerToken,
+): number | undefined {
+  const state = getState(owner);
+  if (!state || completionIds.length === 0) return undefined;
+  return maxKnownCompletionAge(
+    completionIds.flatMap((completionId) => {
+      const record = state.records.get(completionId);
+      return record ? [record] : [];
+    }),
+  );
+}
+
 function retrievalCall(record: CompletionRecord): string {
   if (record.source === "interactive") {
     const turn = record.turnId
@@ -1520,30 +1588,39 @@ function manifestMessage(
 function appendConsumption(
   state: CompletionCoordinatorState,
   consumption: CompletionConsumption,
-): void {
+): boolean {
+  // Pi exposes new entries in memory before its disk write can fail. Persist
+  // our receipt first so reconciliation never sees an uncommitted consumption.
   let durable = false;
   try {
-    if (typeof state.pi.appendEntry === "function") {
-      state.pi.appendEntry(COMPLETION_CONSUMED_ENTRY_TYPE, consumption);
-      durable = true;
-    }
+    appendLedgerLineLossless(
+      state.consumptionLedgerPath,
+      JSON.stringify(consumption),
+    );
+    durable = true;
   } catch (error) {
-    debugLog("warn", "completion_consumption_persist_failed", {
+    debugLog("warn", "completion_consumption_ledger_write_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
+    reportCompletionDeliveryFailure(state, "consumption_persistence", 0);
+    // Retirement must still suppress jobs that shutdown removes permanently.
+    if (consumption.reason !== "lifecycle") return false;
   }
-  if (!durable) {
+  if (typeof state.pi.appendEntry === "function") {
     try {
-      appendLedgerLineLossless(
-        state.consumptionLedgerPath,
-        JSON.stringify(consumption),
-      );
+      state.pi.appendEntry(COMPLETION_CONSUMED_ENTRY_TYPE, consumption);
+      durable = true;
     } catch (error) {
-      debugLog("warn", "completion_consumption_ledger_write_failed", {
+      debugLog("warn", "completion_consumption_persist_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
+      reportCompletionDeliveryFailure(state, "consumption_persistence");
     }
+  } else if (!durable) {
+    reportCompletionDeliveryFailure(state, "consumption_persistence");
   }
+  if (!durable) return false;
+  state.reportedDeliveryFailures?.delete("consumption_persistence");
   state.sourceConsumptions.push(consumption);
   if (state.sourceConsumptions.length > MAX_COMPLETION_RECORDS) {
     state.sourceConsumptions.shift();
@@ -1560,11 +1637,35 @@ function appendConsumption(
       state.fallbackExpectations.delete(record.completionId);
     }
   }
+  return true;
+}
+
+function reportCompletionDeliveryFailure(
+  state: CompletionCoordinatorState,
+  failureStage: TelemetryCompletionFailureStage,
+  retryAttempt = state.manifestRetryAttempt,
+): void {
+  const telemetry = resolveLiveSessionScope(state.owner)?.telemetry;
+  if (!telemetry?.enabled || !telemetry.active) return;
+  // One event per failure episode and stage; successful persistence or
+  // manifest delivery clears the episode. Polling and exhausted retries must
+  // not flood capture.
+  const reported = (state.reportedDeliveryFailures ??= new Set());
+  if (reported.has(failureStage)) return;
+  reported.add(failureStage);
+  captureTelemetry(telemetry, {
+    event: "completion_delivery_failed",
+    failure_stage: failureStage,
+    retry_attempt: retryAttempt,
+  });
 }
 
 function persistPendingNotices(state: CompletionCoordinatorState): boolean {
   const appendEntry = state.pi.appendEntry;
-  if (typeof appendEntry !== "function") return false;
+  if (typeof appendEntry !== "function") {
+    reportCompletionDeliveryFailure(state, "completion_publication", 0);
+    return false;
+  }
   for (const [completionId, record] of state.pendingNotices) {
     try {
       appendEntry.call(state.pi, COMPLETION_ENTRY_TYPE, record);
@@ -1574,9 +1675,11 @@ function persistPendingNotices(state: CompletionCoordinatorState): boolean {
         completionId,
         error: error instanceof Error ? error.message : String(error),
       });
+      reportCompletionDeliveryFailure(state, "completion_publication", 0);
       return false;
     }
   }
+  state.reportedDeliveryFailures?.delete("completion_publication");
   return true;
 }
 
@@ -1603,6 +1706,7 @@ function scheduleManifestRetry(state: CompletionCoordinatorState): void {
     debugLog("warn", "completion_manifest_retry_exhausted", {
       attempts: state.manifestRetryAttempt,
     });
+    reportCompletionDeliveryFailure(state, "retry_exhausted");
     return;
   }
   const delay = Math.min(
@@ -1969,12 +2073,17 @@ export function consumeCompletionSource(
           }
       : { source: selector.source, sourceId: normalizedSourceId };
   if (fallbackConsumptionMatches(state, normalizedSelector)) return false;
-  appendConsumption(state, {
+  const persisted = appendConsumption(state, {
     schemaVersion: COMPLETION_RECORD_SCHEMA_VERSION,
     ...normalizedSelector,
     consumedAt: Date.now(),
     reason: "manual",
   });
+  if (!persisted) {
+    throw new Error(
+      "Could not persist the result consumption receipt. The result is retained; retry collection when storage is available.",
+    );
+  }
   return true;
 }
 
@@ -2111,15 +2220,23 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
     debugLog("warn", "completion_manifest_dispatch_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
+    reportCompletionDeliveryFailure(state, "manifest_dispatch");
     scheduleManifestRetry(state);
     return;
   }
+  const deliveryLatencyMs = completionLatencyForIds(
+    message.details.completionIds,
+    state.owner,
+  );
   captureTelemetry(
     resolveLiveSessionScope(state.owner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "manifest",
       count: message.details.completionIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     {
       dedupeKey: manifestDeliveryDedupeKey(message.details.completionIds),
@@ -2127,6 +2244,7 @@ export function flushCompletionManifests(owner?: SessionOwnerToken): void {
   );
   state.manifestRetryAttempt = 0;
   state.manifestRetryExhausted = false;
+  state.reportedDeliveryFailures?.clear();
   if (message.details.overflowPath === state.overflow.path) {
     const generation =
       message.details.overflowNoticeGeneration ??

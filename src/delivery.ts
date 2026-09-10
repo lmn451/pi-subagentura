@@ -44,7 +44,10 @@ import {
 } from "./session-scope";
 import { inProcessJobOwner, inProcessJobsForOwner } from "./helpers";
 import { sendCompletionTurn } from "./completion-turn";
-import { captureTelemetry } from "./telemetry";
+import {
+  captureTelemetry,
+  type TelemetryCompletionFailureStage,
+} from "./telemetry";
 
 export const MAX_DELIVERY_RECORDS = 32;
 export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
@@ -58,6 +61,10 @@ interface DeliveryGlobalState {
 }
 
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
+const reportedNotificationFailures = new WeakMap<
+  InteractiveSubagentState,
+  Set<TelemetryCompletionFailureStage>
+>();
 
 function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
   return globalThis as typeof globalThis & DeliveryGlobalState;
@@ -184,6 +191,26 @@ function queueBytes(queue: PersistedDeliveryIntent[]): number {
   return Buffer.byteLength(JSON.stringify(queue), "utf8");
 }
 
+function maxKnownCompletionAge(
+  completedAt: readonly (number | undefined)[],
+  now = Date.now(),
+): number | undefined {
+  let maximum: number | undefined;
+  for (const timestamp of completedAt) {
+    if (
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp) ||
+      timestamp < 0
+    ) {
+      continue;
+    }
+    const age = now - timestamp;
+    if (!Number.isFinite(age) || age < 0) continue;
+    maximum = Math.max(maximum ?? 0, age);
+  }
+  return maximum;
+}
+
 function persistOverflowIdentity(
   state: InteractiveSubagentState,
   intent: PersistedDeliveryIntent,
@@ -199,6 +226,9 @@ function persistOverflowIdentity(
       mode: intent.mode,
       triggerTurn: intent.triggerTurn,
       status: intent.status,
+      ...(intent.completedAt === undefined
+        ? {}
+        : { completedAt: intent.completedAt }),
     })}\n`,
     { mode: 0o600 },
   );
@@ -213,6 +243,12 @@ function mergeOverflowSemantics(
   if (collapsed.status === "error") summary.status = "error";
   else if (collapsed.status === "cancelled" && summary.status !== "error") {
     summary.status = "cancelled";
+  }
+  if (collapsed.completedAt !== undefined) {
+    summary.completedAt =
+      summary.completedAt === undefined
+        ? collapsed.completedAt
+        : Math.min(summary.completedAt, collapsed.completedAt);
   }
 }
 
@@ -267,6 +303,14 @@ export function enqueueDelivery(
     intent.message = undefined;
   } else if (intent.message.length > 500) {
     intent.message = `${intent.message.slice(0, 500)}…`;
+  }
+  if (
+    intent.completedAt !== undefined &&
+    (typeof intent.completedAt !== "number" ||
+      !Number.isFinite(intent.completedAt) ||
+      intent.completedAt < 0)
+  ) {
+    intent.completedAt = undefined;
   }
   const queue = (state.pendingDeliveries ??= []);
   if (
@@ -346,6 +390,7 @@ function readBoundedOutput(intent: PersistedDeliveryIntent): string | null {
       content.subarray(0, MAX_OUTPUT_BYTES).toString("utf8"),
     );
   } catch {
+    // Any artifact read or integrity failure must fail closed.
     return null;
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -424,10 +469,41 @@ function publishCoordinatedInteractiveCompletion(
         ? { groupId: intent.completionGroupId }
         : {}),
       references,
-      completedAt: Date.now(),
+      completedAt: intent.completedAt ?? Date.now(),
+      ...(intent.completedAt === undefined
+        ? {}
+        : { telemetryCompletedAt: intent.completedAt }),
     },
     owner,
   );
+}
+
+function reportNotificationDispatchFailure(
+  states: readonly InteractiveSubagentState[],
+  owner?: SessionOwnerToken,
+): void {
+  const telemetry = resolveLiveSessionScope(owner)?.telemetry;
+  if (!telemetry?.enabled || !telemetry.active) return;
+  let alreadyReported = false;
+  for (const state of states) {
+    if (reportedNotificationFailures.get(state)?.has("notification_dispatch")) {
+      alreadyReported = true;
+      break;
+    }
+  }
+  if (alreadyReported) return;
+  for (const state of states) {
+    const reported =
+      reportedNotificationFailures.get(state) ??
+      new Set<TelemetryCompletionFailureStage>();
+    reported.add("notification_dispatch");
+    reportedNotificationFailures.set(state, reported);
+  }
+  captureTelemetry(telemetry, {
+    event: "completion_delivery_failed",
+    failure_stage: "notification_dispatch",
+    retry_attempt: 0,
+  });
 }
 
 export function flushDeliveries(
@@ -503,14 +579,28 @@ export function flushDeliveries(
       },
     );
   } catch {
+    // Keep intents pending so a later flush can retry the dispatch.
+    reportNotificationDispatchFailure(
+      selected.map(({ state }) => state),
+      owner,
+    );
     return;
   }
+  for (const { state } of selected) {
+    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
+  }
+  const deliveryLatencyMs = maxKnownCompletionAge(
+    selected.map(({ intent }) => intent.completedAt),
+  );
   captureTelemetry(
     resolveLiveSessionScope(owner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "notification",
       count: deliveryIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     { dedupeKey: `notification:${deliveryIds.join(":")}` },
   );
@@ -598,11 +688,13 @@ function reconcileDeliveryReceiptsInMemory(
     for (const id of ids) if (typeof id === "string") seen.add(id);
   }
   let changed = false;
+  let reconciledDelivery = false;
   const canRetryUncommittedDispatch = !resolveStreamingFlag(owner);
   for (const intent of state.pendingDeliveries ?? []) {
     if (seen.has(intent.deliveryId)) {
       (state.deliveryReceipts ??= []).push(intent.deliveryId);
       changed = true;
+      reconciledDelivery = true;
     } else if (
       intent.state === "dispatchAttempted" &&
       canRetryUncommittedDispatch
@@ -615,6 +707,9 @@ function reconcileDeliveryReceiptsInMemory(
     (intent) => !seen.has(intent.deliveryId),
   );
   if (changed) compactDeliveryReceipts(state);
+  if (reconciledDelivery) {
+    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
+  }
   return changed;
 }
 

@@ -80,6 +80,7 @@ interface PendingJobOverflow {
   mode: NotifyOnComplete;
   triggerTurn: boolean;
   status: "done" | "error";
+  completedAt?: number;
 }
 
 export type PendingJobDelivery = PendingJobCompletion | PendingJobOverflow;
@@ -123,6 +124,26 @@ function pendingDeliveryBytes(queue: PendingJobDelivery[]): number {
   }, 0);
 }
 
+function maxKnownCompletionAge(
+  completedAt: readonly (number | undefined)[],
+  now = Date.now(),
+): number | undefined {
+  let maximum: number | undefined;
+  for (const timestamp of completedAt) {
+    if (
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp) ||
+      timestamp < 0
+    ) {
+      continue;
+    }
+    const age = now - timestamp;
+    if (!Number.isFinite(age) || age < 0) continue;
+    maximum = Math.max(maximum ?? 0, age);
+  }
+  return maximum;
+}
+
 function appendOverflowIdentity(
   path: string,
   pending: PendingJobCompletion,
@@ -138,6 +159,9 @@ function appendOverflowIdentity(
           ? pending.jobState.triggerTurnOnComplete !== false
           : pending.jobState.triggerTurnOnComplete === true,
       status: pending.result.isError ? "error" : "done",
+      ...(pending.jobState.completedAt === undefined
+        ? {}
+        : { completedAt: pending.jobState.completedAt }),
     })}\n`,
     { mode: 0o600 },
   );
@@ -155,6 +179,12 @@ function mergeJobOverflowSemantics(
   if (mode === "inject") summary.mode = "inject";
   if (trigger) summary.triggerTurn = true;
   if (collapsed.result.isError) summary.status = "error";
+  if (collapsed.jobState.completedAt !== undefined) {
+    summary.completedAt =
+      summary.completedAt === undefined
+        ? collapsed.jobState.completedAt
+        : Math.min(summary.completedAt, collapsed.jobState.completedAt);
+  }
 }
 
 function ownerSessionScopeOf(
@@ -697,12 +727,22 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   } catch {
     return;
   }
+  const deliveryLatencyMs = maxKnownCompletionAge(
+    llm.map(({ pending }) =>
+      pending.kind === "completion"
+        ? pending.jobState.completedAt
+        : pending.completedAt,
+    ),
+  );
   captureTelemetry(
     resolveLiveSessionScope(effectiveOwner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "notification",
       count: deliveryIds.length,
+      ...(deliveryLatencyMs === undefined
+        ? {}
+        : { delivery_latency_ms: deliveryLatencyMs }),
     },
     { dedupeKey: `notification:${deliveryIds.join(":")}` },
   );

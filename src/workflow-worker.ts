@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
-import { existsSync, readFileSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { join } from "node:path";
 import {
   assertNever,
@@ -12,8 +13,14 @@ import {
   type SubagentEvent,
   type TurnTerminalEvent,
 } from "./artifact";
-import { debugLog, usageFromAssistantMessages } from "./helpers";
-import type { SubagentResult, Usage } from "./helpers";
+import { debugLog } from "./helpers";
+import type { SubagentResult } from "./helpers";
+import {
+  addUsageSamples,
+  usageFromAssistantMessage,
+  zeroUsage,
+  type Usage,
+} from "./usage";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   INTERACTIVE_DEAD_GRACE_TICKS,
@@ -34,23 +41,28 @@ import {
   type Semaphore,
   type WorkflowAgentOpts,
   type WorkflowAgentRunner,
+  type WorkflowFailureClassification,
   type WorkflowMeta,
   type WorkflowProgress,
   type WorkflowProgressUpdate,
   type WorkflowRunResultWithUsage,
   WorkflowExecutionError,
+  WorkflowFailureError,
+  WorkflowWallTimeoutError,
   type WorkflowUsage,
   addWorkflowUsage,
+  attachWorkflowFailure,
+  workflowFailureClassification,
   workflowUsageFromUsage,
-  zeroUsage,
   zeroWorkflowUsage,
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
 import {
   cancelInteractiveSubagent,
-  isPaneAliveAsync,
+  getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
+import type { PaneLiveness } from "./multiplexer-contracts";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
 
 // ── Engine (shared across nested workflows) ──────────────────────────
@@ -77,11 +89,13 @@ interface Engine {
   counters: {
     agentsSpawned: number;
     errorCount: number;
+    cancelledCount: number;
     /** @deprecated Output-token count; use usage.output. */
     tokensSpent: number;
     runningCount: number;
   };
   nextAgentAttemptId: number;
+  failure?: WorkflowFailureClassification;
 
   usage: WorkflowUsage;
   activeAgentRuns: Set<ActiveAgentRun>;
@@ -204,6 +218,7 @@ export async function runWorkflow(
     counters: {
       agentsSpawned: 0,
       errorCount: 0,
+      cancelledCount: 0,
       tokensSpent: 0,
       runningCount: 0,
     },
@@ -221,6 +236,10 @@ export async function runWorkflow(
       result,
       agentsSpawned: engine.counters.agentsSpawned,
       errorCount: engine.counters.errorCount,
+      ...(engine.counters.cancelledCount > 0
+        ? { cancelledCount: engine.counters.cancelledCount }
+        : {}),
+      ...(engine.failure ? { failure: engine.failure } : {}),
       tokensSpent: engine.counters.tokensSpent,
       usage: { ...engine.usage },
       phases: [...engine.phases],
@@ -259,7 +278,9 @@ class WorkerRpcFailure extends Error {
     tokensDelta: number,
     runnerFailure?: { cause: unknown },
   ) {
-    super(error instanceof Error ? error.message : String(error));
+    super(error instanceof Error ? error.message : String(error), {
+      cause: error,
+    });
     this.name = "WorkerRpcFailure";
     this.tokensDelta = tokensDelta;
     this.runnerFailure = runnerFailure;
@@ -310,8 +331,12 @@ async function executeScript(
     if (hasSchema) {
       const schemaValidation = validateSchemaDefinition(agentOpts.schema);
       if (schemaValidation.length > 0) {
-        throw new Error(
+        throw new WorkflowFailureError(
           `Invalid workflow schema: ${schemaValidation.join("; ")}`,
+          {
+            errorCategory: "schema",
+            errorStage: "schema_validation",
+          },
         );
       }
     }
@@ -329,15 +354,19 @@ async function executeScript(
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (engine.signal?.aborted) throw new Error("Workflow aborted.");
         if (engine.counters.agentsSpawned >= MAX_TOTAL_AGENTS) {
-          throw new Error(
+          throw new WorkflowFailureError(
             `Workflow exceeded the ${MAX_TOTAL_AGENTS}-agent lifetime cap.`,
+            {
+              errorCategory: "capacity",
+              errorStage: "workflow",
+            },
           );
         }
         engine.counters.agentsSpawned++;
+        let status: "done" | "error" | "cancelled" = "done";
+        let agentUsage: WorkflowUsage | undefined;
         const agentId = ++engine.nextAgentAttemptId;
         engine.counters.runningCount++;
-        let status: "done" | "error" = "done";
-        let agentUsage: WorkflowUsage | undefined;
         let finalModel = agentOpts.model;
         try {
           emit({
@@ -399,6 +428,10 @@ async function executeScript(
             try {
               res = await agentRun;
               finalModel = res.model ?? agentOpts.model;
+              const resultFailure = workflowFailureClassification(res);
+              if (resultFailure && engine.failure === undefined) {
+                engine.failure = resultFailure;
+              }
             } catch (error) {
               const errorUsage = (error as { usage?: Usage } | null)?.usage;
               const terminalAgentUsage = workflowUsageFromUsage(errorUsage);
@@ -412,9 +445,17 @@ async function executeScript(
                 terminalAgentUsage ?? workflowUsageFromUsage(partialUsage);
               tokensDelta += agentUsage?.output ?? 0;
               accountAgentUsage(engine, activeRun, partialUsage);
-              status = "error";
+              const failure = workflowFailureClassification(error);
+              if (failure && engine.failure === undefined)
+                engine.failure = failure;
+              if (engine.signal.aborted) {
+                status = "cancelled";
+                engine.counters.cancelledCount++;
+              } else {
+                status = "error";
+                engine.counters.errorCount++;
+              }
               runnerFailure = { cause: error };
-              if (!engine.signal.aborted) engine.counters.errorCount++;
               throw error;
             }
           } finally {
@@ -424,6 +465,11 @@ async function executeScript(
           const outTokens = agentUsage?.output ?? 0;
           tokensDelta += outTokens;
           accountAgentUsage(engine, activeRun, res.usage);
+          if (res.cancelled) {
+            status = "cancelled";
+            engine.counters.cancelledCount++;
+            return { value: null, tokensDelta };
+          }
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
@@ -434,6 +480,10 @@ async function executeScript(
             const schemaCapture = res.workflowStructuredOutput;
             if (!schemaCapture?.called) {
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = "No structured_output call found.";
               continue;
             }
@@ -441,6 +491,10 @@ async function executeScript(
             if (verrs.length === 0)
               return { value: schemaCapture.value, tokensDelta };
             status = "error";
+            engine.failure ??= {
+              errorCategory: "schema",
+              errorStage: "schema_validation",
+            };
             lastErr = verrs.slice(0, 5).join("; ");
             continue;
           }
@@ -451,15 +505,27 @@ async function executeScript(
               const verrs = validateSchema(parsed, agentOpts.schema);
               if (verrs.length === 0) return { value: parsed, tokensDelta };
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
               status = "error";
+              engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = `JSON parse error: ${
                 e instanceof Error ? e.message : String(e)
               }`;
             }
           } else {
             status = "error";
+            engine.failure ??= {
+              errorCategory: "schema",
+              errorStage: "schema_validation",
+            };
             lastErr = "no JSON object/array found in output";
           }
         } finally {
@@ -542,9 +608,7 @@ function runWorkflowWorker(
     };
     const onAbort = () => fail(new Error("Workflow aborted."));
     const timeout = setTimeout(() => {
-      const err = new Error(
-        `Workflow timed out after ${engine.workflowTimeoutMs}ms; the worker was terminated.`,
-      );
+      const err = new WorkflowWallTimeoutError(engine.workflowTimeoutMs);
       fail(err);
       engine.abort.abort(err);
     }, engine.workflowTimeoutMs);
@@ -591,6 +655,8 @@ function runWorkflowWorker(
       ).catch((err) => {
         if (err instanceof WorkerRpcFailure && err.runnerFailure) {
           runnerFailures.set(msg.id, err.runnerFailure.cause);
+        } else if (workflowFailureClassification(err)) {
+          runnerFailures.set(msg.id, err);
         }
         const error = err instanceof Error ? err.message : String(err);
         const tokensDelta =
@@ -712,30 +778,134 @@ function artifactFor(state: InteractiveSubagentState) {
   };
 }
 
-/**
- * Parse token usage from a child Pi's session JSONL file.
- * Reads assistant messages with `usage` data and aggregates them,
- * mirroring the in-process path in helpers.ts.
- * Returns zeroUsage() if the file is missing, unparseable, or has no usage data.
- */
-function parseUsageFromSessionFile(sessionFile: string | undefined): Usage {
+const SESSION_USAGE_READ_CHUNK_BYTES = 64 * 1024;
+export const SESSION_USAGE_MAX_RECORD_BYTES = 2 * 1024 * 1024;
+
+interface SessionUsageAccumulator {
+  total: Usage;
+  found: boolean;
+}
+
+function consumeSessionUsageLine(
+  line: string,
+  accumulator: SessionUsageAccumulator,
+): void {
+  if (!line.trim()) return;
+  let entry: unknown;
   try {
-    if (!sessionFile || !existsSync(sessionFile)) return zeroUsage();
-    const raw = readFileSync(sessionFile, "utf8");
-    const messages: unknown[] = [];
-    for (const line of raw.split("\n").filter((l) => l.trim())) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry?.type === "message" && entry.message) {
-          messages.push(entry.message);
-        }
-      } catch {
-        /* skip malformed lines */
+    entry = JSON.parse(line);
+  } catch {
+    /* skip malformed lines */
+    return;
+  }
+  if (!entry || typeof entry !== "object") return;
+  const candidate = entry as { type?: unknown; message?: unknown };
+  if (candidate.type !== "message" || !candidate.message) return;
+  const usage = usageFromAssistantMessage(candidate.message);
+  if (!usage) return;
+  accumulator.found = true;
+  accumulator.total = addUsageSamples(accumulator.total, usage);
+}
+
+interface SessionUsageLineState {
+  parts: string[];
+  byteLength: number;
+  discardUntilNewline: boolean;
+}
+
+/** Process decoded text while retaining only the current bounded line. */
+function consumeSessionUsageText(
+  text: string,
+  lineState: SessionUsageLineState,
+  accumulator: SessionUsageAccumulator,
+): void {
+  let start = 0;
+  for (;;) {
+    const lineEnd = text.indexOf("\n", start);
+    const segmentEnd = lineEnd < 0 ? text.length : lineEnd;
+    const segment = text.slice(start, segmentEnd);
+
+    if (lineState.discardUntilNewline) {
+      if (lineEnd < 0) return;
+    } else {
+      const segmentBytes = Buffer.byteLength(segment);
+      if (
+        lineState.byteLength + segmentBytes >
+        SESSION_USAGE_MAX_RECORD_BYTES
+      ) {
+        lineState.parts.length = 0;
+        lineState.byteLength = 0;
+        lineState.discardUntilNewline = true;
+      } else {
+        if (segment.length > 0) lineState.parts.push(segment);
+        lineState.byteLength += segmentBytes;
       }
     }
-    return usageFromAssistantMessages(messages, zeroUsage());
+
+    if (lineEnd < 0) return;
+    if (!lineState.discardUntilNewline) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
+    }
+    lineState.parts.length = 0;
+    lineState.byteLength = 0;
+    lineState.discardUntilNewline = false;
+    start = lineEnd + 1;
+  }
+}
+
+/**
+ * Parse token usage from a child Pi's session JSONL file.
+ * Reads assistant messages with `usage` data and aggregates them while
+ * retaining only one bounded incomplete line and one bounded read chunk in memory.
+ * Returns zeroUsage() if the file is missing, unparseable, or has no usage data.
+ */
+export async function parseUsageFromSessionFile(
+  sessionFile: string | undefined,
+): Promise<Usage> {
+  if (!sessionFile) return zeroUsage();
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(sessionFile, "r");
+    const accumulator: SessionUsageAccumulator = {
+      total: zeroUsage(),
+      found: false,
+    };
+    const lineState: SessionUsageLineState = {
+      parts: [],
+      byteLength: 0,
+      discardUntilNewline: false,
+    };
+    const decoder = new StringDecoder("utf8");
+    const buffer = Buffer.allocUnsafe(SESSION_USAGE_READ_CHUNK_BYTES);
+    const fileSize = (await handle.stat()).size;
+    let position = 0;
+    while (position < fileSize) {
+      const length = Math.min(buffer.byteLength, fileSize - position);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      consumeSessionUsageText(
+        decoder.write(buffer.subarray(0, bytesRead)),
+        lineState,
+        accumulator,
+      );
+    }
+    consumeSessionUsageText(decoder.end(), lineState, accumulator);
+    if (!lineState.discardUntilNewline && lineState.parts.length > 0) {
+      consumeSessionUsageLine(lineState.parts.join(""), accumulator);
+    }
+    return accumulator.found ? accumulator.total : zeroUsage();
   } catch {
+    /* Missing or unreadable session files do not invalidate the terminal result. */
     return zeroUsage();
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        /* The file may already be closed after an interrupted read. */
+      }
+    }
   }
 }
 
@@ -787,6 +957,30 @@ function readCurrentTurnTerminal(
   return cursor.terminal;
 }
 
+function requestInteractiveCancellation(
+  state: InteractiveSubagentState,
+  onCancellationSnapshot:
+    ((receipt: CancellationSnapshotReceipt) => void) | undefined,
+): void {
+  try {
+    const cancelled = cancelInteractiveSubagent(state.id, "workflow", state);
+    if (cancelled?.cancellationSnapshot) {
+      onCancellationSnapshot?.(cancelled.cancellationSnapshot);
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
+function abortedInteractiveResult(usage: Usage): SubagentResult {
+  return {
+    isError: true,
+    output: "",
+    usage,
+    errorMessage: "aborted",
+  };
+}
+
 /**
  * Await a process-backed sub-agent's owned terminal artifact event, then read the
  * matching immutable `outputs/<eventId>.md` snapshot by turnId. Mutable output.md
@@ -800,120 +994,160 @@ export async function awaitInteractiveResult(
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
+  let muxProbeFailureTicks = 0;
   const eventCursor: InteractiveResultEventCursor = {
     byteOffset: 0,
     sawTurnStart: false,
     terminal: null,
   };
-  for (;;) {
-    let terminal: TurnTerminalEvent | null;
-    if (signal?.aborted) {
-      try {
-        const cancelled = cancelInteractiveSubagent(
-          state.id,
-          "workflow",
-          state,
+  let cancellationRequested = false;
+  const requestCancellationOnce = () => {
+    if (cancellationRequested) return;
+    cancellationRequested = true;
+    requestInteractiveCancellation(state, onCancellationSnapshot);
+  };
+  const onAbort = () => requestCancellationOnce();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  try {
+    for (;;) {
+      let terminal: TurnTerminalEvent | null;
+      if (signal?.aborted) {
+        requestCancellationOnce();
+        const cancellationUsage = await parseUsageFromSessionFile(
+          state.sessionFile,
         );
-        if (cancelled?.cancellationSnapshot) {
-          onCancellationSnapshot?.(cancelled.cancellationSnapshot);
-        }
-      } catch {
-        /* best effort */
+        return abortedInteractiveResult(cancellationUsage);
       }
-      const cancellationUsage = parseUsageFromSessionFile(state.sessionFile);
-      return {
-        isError: true,
-        output: "",
-        usage: cancellationUsage,
-        errorMessage: "aborted",
-      };
-    }
-    terminal = readCurrentTurnTerminal(art, eventCursor);
-    if (terminal) {
-      const usage = parseUsageFromSessionFile(state.sessionFile);
-      switch (terminal.type) {
-        case "completion":
-          switch (terminal.outcome) {
-            case "done":
-              return {
-                isError: false,
-                output:
-                  readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                usage,
-                ...(state.model !== undefined ? { model: state.model } : {}),
-              };
-            case "error":
-            case "cancelled":
-              return {
-                isError: true,
-                output:
-                  readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                usage,
-                errorMessage:
-                  terminal.errorMessage ??
-                  terminal.message ??
-                  `interactive sub-agent ${terminal.outcome}`,
-              };
-            default:
-              return assertNever(terminal.outcome);
+      terminal = readCurrentTurnTerminal(art, eventCursor);
+      if (terminal) {
+        const usage = await parseUsageFromSessionFile(state.sessionFile);
+        if (signal?.aborted) {
+          requestCancellationOnce();
+          return abortedInteractiveResult(usage);
+        }
+        switch (terminal.type) {
+          case "completion":
+            switch (terminal.outcome) {
+              case "done":
+                return {
+                  isError: false,
+                  output:
+                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
+                  usage,
+                  ...(state.model !== undefined ? { model: state.model } : {}),
+                };
+              case "error":
+              case "cancelled":
+                return {
+                  isError: true,
+                  output:
+                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
+                  usage,
+                  errorMessage:
+                    terminal.errorMessage ??
+                    terminal.message ??
+                    `interactive sub-agent ${terminal.outcome}`,
+                };
+              default:
+                return assertNever(terminal.outcome);
+            }
+          case "done":
+            return {
+              isError: false,
+              output: readOutput(art) ?? "(no output)",
+              usage,
+              ...(state.model !== undefined ? { model: state.model } : {}),
+            };
+          case "error":
+          case "cancelled":
+            return {
+              isError: true,
+              output: readOutput(art) ?? "(no output)",
+              usage,
+              errorMessage:
+                terminal.message ?? `interactive sub-agent ${terminal.type}`,
+            };
+          default:
+            return assertNever(terminal);
+        }
+      }
+      // A dead pane is only confirmed by a successful probe. Probe failures are
+      // unknown and must not be turned into a fabricated process exit.
+      let liveness: PaneLiveness = "unknown";
+      try {
+        liveness = await getInteractivePaneLivenessAsync(state);
+      } catch {
+        liveness = "unknown";
+      }
+      if (liveness === "dead") {
+        deadTicks++;
+        muxProbeFailureTicks = 0;
+        debugLog("warn", "interactive_dead_pane", {
+          deadTicks,
+          graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
+        });
+        if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
+          const output = readOutput(art) ?? "(no output)";
+          const usage = await parseUsageFromSessionFile(state.sessionFile);
+          if (signal?.aborted) {
+            requestCancellationOnce();
+            return abortedInteractiveResult(usage);
           }
-        case "done":
-          return {
-            isError: false,
-            output: readOutput(art) ?? "(no output)",
-            usage,
-            ...(state.model !== undefined ? { model: state.model } : {}),
-          };
-        case "error":
-        case "cancelled":
           return {
             isError: true,
-            output: readOutput(art) ?? "(no output)",
+            output,
             usage,
-            errorMessage:
-              terminal.message ?? `interactive sub-agent ${terminal.type}`,
+            errorMessage: "interactive sub-agent pane exited before completing",
           };
-        default:
-          return assertNever(terminal);
+        }
+      } else if (liveness === "unknown") {
+        deadTicks = 0;
+        muxProbeFailureTicks++;
+        debugLog("warn", "interactive_mux_probe_unknown", {
+          probeFailureTicks: muxProbeFailureTicks,
+          graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
+        });
+        if (muxProbeFailureTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
+          const output = readOutput(art) ?? "(no output)";
+          const usage = await parseUsageFromSessionFile(state.sessionFile);
+          if (signal?.aborted) {
+            requestCancellationOnce();
+            return abortedInteractiveResult(usage);
+          }
+          return attachWorkflowFailure(
+            {
+              isError: true,
+              output,
+              usage,
+              errorMessage: "interactive sub-agent pane liveness unavailable",
+            },
+            {
+              errorCategory: "mux",
+              errorStage: "polling",
+              runtimeFailureKind: "mux_probe",
+            },
+          );
+        }
+      } else {
+        deadTicks = 0;
+        muxProbeFailureTicks = 0;
       }
-    }
-    // No terminal event yet — if the pane has died, give it a few grace ticks for a final flush.
-    let alive = true;
-    try {
-      alive = await isPaneAliveAsync(state);
-    } catch {
-      alive = false;
-    }
-    if (!alive) {
-      deadTicks++;
-      debugLog("warn", "interactive_dead_pane", {
-        deadTicks,
-        graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
-      });
-      if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-        const output = readOutput(art) ?? "(no output)";
-        return {
-          isError: true,
-          output,
-          usage: parseUsageFromSessionFile(state.sessionFile),
-          errorMessage: "interactive sub-agent pane exited before completing",
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", finish);
+          resolve();
         };
-      }
-    } else {
-      deadTicks = 0;
+        const timer = setTimeout(finish, pollMs);
+        signal?.addEventListener("abort", finish, { once: true });
+        if (signal?.aborted) finish();
+      });
     }
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, pollMs);
-      signal?.addEventListener("abort", finish, { once: true });
-      if (signal?.aborted) finish();
-    });
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }

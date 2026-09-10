@@ -674,10 +674,16 @@ describe("real Pi terminal E2E", () => {
           ),
         "synchronous child abort",
       );
-      await harness.waitForScreen(
-        (screen) => screen.includes("Parent settled for [E2E:SYNC_CONTEXT]"),
-        "parent idle after synchronous cancellation",
+      // An aborted turn need not produce another provider response. Verify
+      // recovery by completing a distinct turn through the same editor.
+      const recovery = getScenario("sync-isolated");
+      await harness.sendPrompt(recovery.prompt);
+      await harness.waitForProvider(
+        (events) => hasStage(events, recovery.child!, "gated"),
+        "new child after synchronous cancellation",
       );
+      harness.release(recovery.gate!);
+      await waitForParentSettled(recovery.marker);
       await harness.assertNoNetwork();
     },
     timeout,

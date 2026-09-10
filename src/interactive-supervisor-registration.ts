@@ -1,5 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { basename } from "node:path";
+import {
+  registerCommandWithTelemetry,
+  registerShortcutWithTelemetry,
+} from "./telemetry-operations";
+import { basename, isAbsolute } from "node:path";
 import {
   compareByStartedAt,
   INTERACTIVE_SUPERVISOR_SHORTCUT,
@@ -41,10 +45,7 @@ import {
 } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import { updateRunningSubagentFooter } from "./artifact-poller";
-import {
-  normalizeCancelledWorkflowState,
-  workflowJobsForOwner,
-} from "./workflow-jobs";
+import { cancelWorkflowJob, workflowJobsForOwner } from "./workflow-jobs";
 import {
   interactiveStateBelongsToOwner,
   ownerlessEntitiesVisible,
@@ -304,6 +305,9 @@ function stateForNode(
     muxSession: manifest.pane.muxSession,
     sessionFile: manifest.childSessionFile ?? "unknown",
     cwd: manifest.cwd,
+    ...(isAbsolute(manifest.cwd) && !manifest.cwd.includes("\0")
+      ? { workingCwd: manifest.cwd }
+      : {}),
     parentSessionId: manifest.ownerSessionId,
     startedAt: parseStartedAt(manifest.startedAt),
     status:
@@ -555,9 +559,7 @@ export function registerInteractiveSupervisor(
         },
         cancelWorkflow: (job) => {
           if (job.status !== "running") return false;
-          job.abort.abort();
-          job.status = "cancelled";
-          normalizeCancelledWorkflowState(job);
+          cancelWorkflowJob(job, "explicit_cancel");
           return true;
         },
         cancel: (id) => {
@@ -652,13 +654,13 @@ export function registerInteractiveSupervisor(
   };
 
   if (typeof pi.registerShortcut === "function") {
-    pi.registerShortcut(INTERACTIVE_SUPERVISOR_SHORTCUT, {
+    registerShortcutWithTelemetry(pi, INTERACTIVE_SUPERVISOR_SHORTCUT, {
       description: "Open the async subagent supervisor",
       handler: open,
     });
   }
   if (typeof pi.registerCommand === "function") {
-    pi.registerCommand("subagents", {
+    registerCommandWithTelemetry(pi, "subagents", {
       description: "Open the async subagent supervisor",
       handler: async (_args, ctx) => open(ctx),
     });
@@ -755,6 +757,7 @@ function cancelInProcessFromSupervisor(
   });
   abortJobTree(job.id, info, owner);
   job.status = "cancelled";
+  job.completedAt ??= Date.now();
   scheduleJobCleanup(job.id, true, undefined, owner);
   return true;
 }

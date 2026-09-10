@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   mkdirSync,
   appendFileSync,
+  fsyncSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -19,6 +20,7 @@ import {
 } from "../src/session-scope";
 import {
   clearCompletionCoordinator,
+  completionLatencyForIds,
   MAX_COMPLETION_RECORDS,
   assertCompletionGroupOpen,
   consumeCompletionSource,
@@ -38,6 +40,12 @@ import {
   type CompletionRecord,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
+import { createTelemetrySession } from "../src/telemetry";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync) };
+});
 const coordinatorLedgerRoots: string[] = [];
 
 function record(
@@ -138,6 +146,7 @@ describe("completion coordinator", () => {
   afterEach(() => {
     if (scope) clearCompletionCoordinator(sessionOwner(scope));
     clearSessionScopes();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
     for (const root of coordinatorLedgerRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
@@ -164,6 +173,42 @@ describe("completion coordinator", () => {
       .render(200)
       .join("\n");
     expect(expanded).toContain('("worker", turn "turn-worker")');
+  });
+  it("uses known interactive telemetry timestamps and omits legacy latency", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    vi.setSystemTime(10_000);
+
+    publishCompletion(record("legacy-latency", { completedAt: 9_000 }), owner);
+    expect(
+      completionLatencyForIds(["completion-legacy-latency"], owner),
+    ).toBeUndefined();
+
+    publishCompletion(
+      record("known-latency", {
+        completedAt: 9_000,
+        telemetryCompletedAt: 8_000,
+      }),
+      owner,
+    );
+    expect(completionLatencyForIds(["completion-known-latency"], owner)).toBe(
+      2_000,
+    );
+  });
+
+  it("defers completion manifests while a UI prompt is active", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.uiPromptActive = true;
+
+    publishCompletion(record("ui-prompt"), sessionOwner(scope));
+    await Promise.resolve();
+
+    expect(manifests(setupResult.pi)).toHaveLength(0);
+    scope.uiPromptActive = false;
+    flushCompletionManifests(sessionOwner(scope));
+    expect(manifests(setupResult.pi)).toHaveLength(1);
   });
 
   it("notifies the user once and sends one independent reference manifest", () => {
@@ -992,9 +1037,145 @@ describe("completion coordinator", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(["completion_publication", "manifest_dispatch"])(
+    "reports bounded %s failures and retry exhaustion without content",
+    async (failureStage) => {
+      const setupResult = setup();
+      scope = setupResult.scope;
+      scope.telemetry = createTelemetrySession(true);
+      const payloads: any[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url, init) => {
+          payloads.push(JSON.parse(init.body));
+          return Promise.resolve({ body: null });
+        }),
+      );
+      const failedMethod =
+        failureStage === "completion_publication"
+          ? setupResult.pi.appendEntry
+          : setupResult.pi.sendMessage;
+      failedMethod.mockImplementation(() => {
+        throw new Error("private prompt /private/project customer-secret");
+      });
+      scope.parentStreaming = true;
+      publishCompletion(record("private-agent"), sessionOwner(scope));
+      scope.parentStreaming = false;
+      flushCompletionManifests(sessionOwner(scope));
+      await vi.runAllTimersAsync();
+      for (let index = 0; index < 20; index++) {
+        flushCompletionManifests(sessionOwner(scope));
+      }
+      await Promise.resolve();
+
+      expect(
+        payloads.map((payload) => payload.properties.failure_stage),
+      ).toEqual([failureStage, "retry_exhausted"]);
+      expect(
+        payloads.map((payload) => payload.properties.retry_attempt),
+      ).toEqual([0, 8]);
+      expect(
+        payloads.every(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(payloads)).not.toMatch(/private|customer-secret/);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(setupResult.entries).toHaveLength(
+        failureStage === "completion_publication" ? 0 : 1,
+      );
+    },
+  );
+
+  it.each(["automatic", "human"])(
+    "reports a new failure after %s delivery recovers",
+    (recovery) => {
+      const setupResult = setup();
+      scope = setupResult.scope;
+      scope.telemetry = createTelemetrySession(true);
+      const payloads: any[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url, init) => {
+          payloads.push(JSON.parse(init.body));
+          return Promise.resolve({ body: null });
+        }),
+      );
+      const sendMessage = setupResult.pi.sendMessage.getMockImplementation()!;
+      setupResult.pi.sendMessage.mockImplementationOnce(() => {
+        throw new Error("dispatch failed");
+      });
+      const owner = sessionOwner(scope);
+      scope.parentStreaming = true;
+      publishCompletion(record("first-failure"), owner);
+      scope.parentStreaming = false;
+      flushCompletionManifests(owner);
+      if (recovery === "human") {
+        const message = prepareCompletionManifest(owner)!;
+        setupResult.entries.push({ type: "custom_message", ...message });
+      } else {
+        flushCompletionManifests(owner);
+      }
+      settleCompletionParentTurn(owner);
+      setupResult.pi.sendMessage.mockImplementationOnce(() => {
+        throw new Error("another dispatch failed");
+      });
+      scope.parentStreaming = true;
+      publishCompletion(record("second-failure"), owner);
+      scope.parentStreaming = false;
+      flushCompletionManifests(owner);
+
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(2);
+      setupResult.pi.sendMessage.mockImplementation(sendMessage);
+    },
+  );
+
+  it("does not send completion failure telemetry when opted out or retired", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    scope.telemetry = createTelemetrySession(false);
+    setupResult.pi.sendMessage.mockImplementation(() => {
+      throw new Error("dispatch failed");
+    });
+    scope.parentStreaming = true;
+    publishCompletion(record("opted-out"), sessionOwner(scope));
+    scope.parentStreaming = false;
+    flushCompletionManifests(sessionOwner(scope));
+    scope.telemetry = createTelemetrySession(true);
+    scope.telemetry.active = false;
+    vi.runAllTimers();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("keeps successful consumption durable when the receipt append fails", () => {
     const setupResult = setup();
     scope = setupResult.scope;
+    scope.telemetry = createTelemetrySession(true);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init: RequestInit) => {
+        payloads.push(
+          JSON.parse(String(init.body)) as {
+            event?: string;
+            properties?: Record<string, unknown>;
+          },
+        );
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }),
+    );
     scope.cwd = mkdtempSync(join(tmpdir(), "completion-receipt-"));
     setupResult.pi.appendEntry.mockImplementationOnce(() => {
       throw new Error("receipt storage unavailable");
@@ -1011,6 +1192,15 @@ describe("completion coordinator", () => {
           sessionOwner(scope),
         ),
       ).not.toThrow();
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(1);
+      expect(payloads[0]?.properties).toMatchObject({
+        failure_stage: "consumption_persistence",
+      });
       publishCompletion(
         record("consumed", { turnId: "turn-consumed" }),
         sessionOwner(scope),
@@ -1022,6 +1212,151 @@ describe("completion coordinator", () => {
     } finally {
       rmSync(scope.cwd, { recursive: true, force: true });
     }
+  });
+
+  it("does not accept a visible receipt until disk sync succeeds", async () => {
+    const { pi, scope, ledgerRoot } = setup();
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    publishCompletion(record("sync-failure"), owner);
+    const selector = {
+      source: "interactive" as const,
+      sourceId: "sync-failure",
+      turnId: "turn-sync-failure",
+    };
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(fsyncSync).mockImplementation(() => {
+      throw new Error("disk sync unavailable");
+    });
+    try {
+      expect(() =>
+        consumeCompletionSource(pi as never, selector, owner),
+      ).toThrow(/persist.*receipt/i);
+      const path = sessionLedgerPath(
+        ledgerRoot,
+        "parent-session",
+        "subagentura-completion-consumed",
+      );
+      expect(readFileSync(path, "utf8")).toContain("sync-failure");
+      clearCompletionCoordinator(owner);
+      expect(prepareCompletionManifest(owner)).toBeDefined();
+      expect(() =>
+        consumeCompletionSource(pi as never, selector, owner),
+      ).toThrow(/persist.*receipt/i);
+    } finally {
+      vi.mocked(fsyncSync).mockImplementation(actual.fsyncSync);
+    }
+    expect(consumeCompletionSource(pi as never, selector, owner)).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+  });
+
+  it("persists lifecycle retirement through Pi when the receipt ledger is unavailable", () => {
+    const { pi, scope, ledgerRoot, entries } = setup();
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    publishCompletion(
+      record("retired-job", {
+        source: "in-process",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    const path = sessionLedgerPath(
+      ledgerRoot,
+      "parent-session",
+      "subagentura-completion-consumed",
+    );
+    mkdirSync(path, { recursive: true });
+
+    retireSessionScopedCompletions(owner);
+
+    expect(
+      entries.some(
+        (entry) =>
+          entry.customType === "subagentura-completion-consumed" &&
+          entry.data.reason === "lifecycle",
+      ),
+    ).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+  });
+
+  it("rejects consumption when both receipt stores fail and allows a durable retry", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    scope.parentStreaming = true;
+    scope.telemetry = createTelemetrySession(true);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init: RequestInit) => {
+        payloads.push(
+          JSON.parse(String(init.body)) as {
+            event?: string;
+            properties?: Record<string, unknown>;
+          },
+        );
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }),
+    );
+    const owner = sessionOwner(scope);
+    publishCompletion(record("receipt-retry"), owner);
+    const ledgerPath = sessionLedgerPath(
+      setupResult.ledgerRoot,
+      "parent-session",
+      "subagentura-completion-consumed",
+    );
+    mkdirSync(ledgerPath, { recursive: true });
+    let unavailable = true;
+    setupResult.pi.appendEntry.mockImplementation((customType, data) => {
+      if (unavailable && customType === "subagentura-completion-consumed") {
+        throw new Error("receipt storage unavailable /private/project-secret");
+      }
+      setupResult.entries.push({ type: "custom", customType, data });
+    });
+    const consume = () =>
+      consumeCompletionSource(
+        setupResult.pi as never,
+        {
+          source: "interactive",
+          sourceId: "receipt-retry",
+          turnId: "turn-receipt-retry",
+        },
+        owner,
+      );
+
+    expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    expect(consume).toThrow(/receipt.*persist|persist.*receipt/i);
+    expect(
+      payloads.filter(
+        (payload) =>
+          payload.event === "pi_subagentura_completion_delivery_failed",
+      ),
+    ).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) =>
+            payload.event === "pi_subagentura_completion_delivery_failed",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(payloads[0]?.properties).toMatchObject({
+      failure_stage: "consumption_persistence",
+    });
+    expect(JSON.stringify(payloads)).not.toMatch(
+      /receipt storage unavailable|private|project-secret/,
+    );
+    expect(prepareCompletionManifest(owner)).toBeDefined();
+    rmSync(ledgerPath, { recursive: true });
+    unavailable = false;
+    expect(consume()).toBe(true);
+    clearCompletionCoordinator(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
   });
 
   it("ignores forged project-local consumption and overflow ledgers", () => {

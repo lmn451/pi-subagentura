@@ -366,6 +366,7 @@ describe("published tarball", () => {
         "--no-fund",
         tgz,
         "jiti",
+        "@earendil-works/pi-server@latest",
       ],
       { cwd: consumer, encoding: "utf8" },
     );

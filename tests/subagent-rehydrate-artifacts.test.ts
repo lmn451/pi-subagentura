@@ -15,6 +15,7 @@ import {
 } from "../src/artifact";
 import {
   clearCompletionCoordinator,
+  completionLatencyForIds,
   MAX_COMPLETION_RECORDS,
   prepareCompletionManifest,
   registerCompletionCoordinator,
@@ -328,7 +329,15 @@ describe("rehydrateInteractiveSubagents", () => {
       sourceId: id,
       policy: "group",
       groupId: "reload-group",
+      completedAt: expect.any(Number),
     });
+    expect(completion?.data).not.toHaveProperty("telemetryCompletedAt");
+    expect(
+      completionLatencyForIds(
+        ["grouped-delivery"],
+        sessionOwner(completionScope),
+      ),
+    ).toBeUndefined();
   });
 
   it("registers pending receipt expectations before scanning fallback history", async () => {

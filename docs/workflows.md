@@ -160,35 +160,16 @@ const _a = _parseArgs(args);
 
 All bundled examples normalize both forms, and the behavior tests exercise each script with object and JSON-string arguments.
 
-### 2. JSON-stringified payloads for large content
+### 2. Structured payloads and large content
 
-Schema validation breaks on multi-KB string fields. The workflow runtime's `validateSchema` (in `src/workflow-core.ts`) handles a small subset: `type`, `enum`, `properties`, `required`, `additionalProperties: false`, `items`, `minItems`, and `maxItems`. Anything >10KB inline is risky. Wrap large structured data in a single string field:
-
-```js
-// BAD — critic.md at 22KB breaks validation
-{
-  schema: {
-    type: "object",
-    properties: {
-      rolePrompts: {
-        type: "array",
-        items: { type: "object", properties: { content: { type: "string" } } },
-      },
-    },
-  },
-}
-
-// GOOD — wrap as JSON-stringified
-{
-  schema: {
-    type: "object",
-    properties: { distilledJson: { type: "string" } },
-    required: ["distilledJson"],
-  },
-}
-// agent returns: { "distilledJson": "{\"rolePrompts\":[{\"content\":\"...22KB...\"}]}" }
-// script: const data = JSON.parse(agent.distilledJson);
-```
+The workflow runtime's `validateSchema` (in `src/workflow-core.ts`) supports a
+bounded JSON Schema subset: `type`, `enum`, `properties`, `required`,
+`additionalProperties: false`, `items`, `minItems`, and `maxItems`. The
+validator has no fixed 10KB ceiling: nested objects, arrays, and multi-KB string
+values are validated according to that schema. Provider limits and other
+resource limits are separate concerns. For large content, prefer passing
+bounded metadata or a path for a later agent to read instead of repeating the
+content in every structured result.
 
 ### 3. Metadata-only distillation > content passthrough
 
@@ -304,7 +285,7 @@ Use `/workflow-status` for the full textual status dump, or `/workflow-tree` for
 #### 2. Per-agent visibility
 
 Workflow `agent()` calls default to process isolation. Each process-backed agent
-runs in tmux/zellij and is also shown by the interactive sub-agent widget below
+runs in tmux, Zellij, or Herdr and is also shown by the interactive sub-agent widget below
 the editor. In-process agents still forward live `activeTool` / output-preview
 updates as workflow log events when the underlying runner exposes them.
 
@@ -333,8 +314,8 @@ are still deferred because widgets are intentionally passive status surfaces.
 
 ### Process isolation
 
-By default, each `agent()` call spawns a separate `pi` process inside tmux or
-zellij:
+By default, each `agent()` call spawns a separate `pi` process inside tmux,
+Zellij, or Herdr:
 
 ```js
 await agent(prompt, { label: "verify:claim-x" });
@@ -382,11 +363,12 @@ The `list_subagent_artifacts` tool lists all known sub-agents (including past on
 
 #### Backend support
 
-| Backend    | `createPane` behavior                                                                  | Available outside mux?                                           |
-| ---------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`) | ✅ Creates a new detached session if `process.env.TMUX` is unset |
-| **zellij** | Detached named tab                                                                     | ❌ Requires existing zellij session                              |
-| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                   | N/A — falls back to in-process                                   |
+| Backend    | `createPane` behavior                                                                        | Available outside mux?                                           |
+| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset |
+| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached |
+| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                        |
+| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — falls back to in-process                                   |
 
 ### Scaling
 

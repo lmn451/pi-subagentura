@@ -9,6 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import registerSettingsPanel from "@juanibiapina/pi-extension-settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Helpers from "../src/helpers";
+const { mockDebugLog } = vi.hoisted(() => ({ mockDebugLog: vi.fn() }));
+
+vi.mock("../src/helpers", async (importOriginal) => {
+  const actual = await importOriginal<typeof Helpers>();
+  return { ...actual, debugLog: mockDebugLog };
+});
+
 import registerExtension from "../src/subagent";
 import { parseArgs } from "@earendil-works/pi-coding-agent";
 import {
@@ -294,6 +302,36 @@ describe("generic extension settings", () => {
     }
   });
 
+  it.each([
+    '{"pi-subagentura":{"max-depth":"private-invalid-depth"}}',
+    '{"pi-subagentura":{"max-depth":false}}',
+    '{"pi-subagentura":{"max-depth":null}}',
+    '{"pi-subagentura":"private-invalid-depth"}',
+    "null",
+    "{private-invalid-depth",
+  ])(
+    "falls back to global max-depth after invalid local settings %s",
+    (local) => {
+      writeFileSync(
+        join(settingsSandbox.agentDir, "settings-extensions.json"),
+        JSON.stringify({ "pi-subagentura": { "max-depth": "0" } }),
+      );
+      writeFileSync(
+        join(settingsSandbox.cwd, ".pi", "settings-extensions.json"),
+        local,
+      );
+      const onInvalid = vi.fn();
+
+      expect(readTestSettings(mockApi() as any, onInvalid).maxDepth).toBe(0);
+      expect(onInvalid).toHaveBeenCalledWith(
+        expect.stringContaining("max-depth"),
+      );
+      expect(JSON.stringify(onInvalid.mock.calls)).not.toContain(
+        "private-invalid-depth",
+      );
+    },
+  );
+
   it("ignores a repo-controlled project-local hide-agent-list", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");
@@ -482,29 +520,44 @@ describe("generic extension settings", () => {
     },
   );
 
-  it("degrades a malformed persisted hide-agent-list to false", () => {
+  it("redacts malformed persisted hide-agent-list values in reports", () => {
     const root = mkdtempSync(join(tmpdir(), "subagentura-settings-"));
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
+    const malformed = "hide-agent-list-internal-value";
     mkdirSync(agentDir, { recursive: true });
 
     try {
       writeFileSync(
         join(agentDir, "settings-extensions.json"),
         JSON.stringify({
-          "pi-subagentura": { "hide-agent-list": "yes please" },
+          "pi-subagentura": { "hide-agent-list": malformed },
         }),
       );
       const onInvalid = vi.fn();
-      expect(
-        readExtensionSettings(mockApi() as any, { agentDir, cwd }, onInvalid),
-      ).toEqual({ maxDepth: 2, hideAgentList: false });
+      const api = mockApi() as unknown as Parameters<
+        typeof readExtensionSettings
+      >[0];
+      mockDebugLog.mockClear();
+      expect(readExtensionSettings(api, { agentDir, cwd }, onInvalid)).toEqual({
+        maxDepth: 2,
+        hideAgentList: false,
+      });
       expect(onInvalid).toHaveBeenCalledWith(
         expect.stringContaining("hide-agent-list"),
       );
-      expect(isAgentListHidden(mockApi() as any, { agentDir, cwd })).toBe(
-        false,
+      expect(JSON.stringify(onInvalid.mock.calls)).not.toContain(malformed);
+      expect(mockDebugLog).toHaveBeenCalledWith(
+        "warn",
+        "extension_setting_invalid",
+        {
+          setting: "hide-agent-list",
+          value: "<redacted invalid hide-agent-list value>",
+        },
       );
+      expect(JSON.stringify(mockDebugLog.mock.calls)).not.toContain(malformed);
+      expect(isAgentListHidden(api, { agentDir, cwd })).toBe(false);
+      expect(JSON.stringify(mockDebugLog.mock.calls)).not.toContain(malformed);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

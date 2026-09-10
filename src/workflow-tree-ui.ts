@@ -1,7 +1,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
+  cancelWorkflowJob,
   getWorkflowCompletionPresentation,
-  normalizeCancelledWorkflowState,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -152,9 +152,7 @@ export class WorkflowTreeComponent {
       );
       return;
     }
-    job.abort.abort();
-    job.status = "cancelled";
-    normalizeCancelledWorkflowState(job);
+    cancelWorkflowJob(job, "explicit_cancel");
     this.opts.notify?.(`Cancelled workflow ${job.id}.`);
     this.changed();
     this.opts.done({ kind: "cancel", workflowId: job.id });

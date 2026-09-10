@@ -150,6 +150,109 @@ describe("startSubagentJob effective thinking level", () => {
     }
   });
 
+  it("classifies provider errors without serializing the error message", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const errorMessage =
+      "provider rejected request: secret-token /Users/alice/project";
+    const session = {
+      ...createSession("low"),
+      agent: { state: { messages: [], errorMessage } },
+    };
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        telemetry: {
+          session: createTelemetrySession(true, "orchestrator_v2"),
+          invocationSource: "isolated",
+          async: false,
+          depth: 1,
+          completionPolicy: "inline",
+        },
+      });
+      started.start();
+      const result = await started.jobPromise;
+
+      expect(result).toMatchObject({ isError: true, errorMessage });
+      expect(payloads[2]?.properties).toMatchObject({
+        status: "error",
+        error_category: "provider",
+      });
+      expect(JSON.stringify(payloads)).not.toContain(errorMessage);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("exposes only the SDK assistant stop reason in task diagnostics", async () => {
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const errorMessage =
+      "provider rejected request: secret-token /Users/alice/project";
+    const session = {
+      ...createSession("low"),
+      agent: {
+        state: {
+          messages: [
+            {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              diagnostics: [{ message: errorMessage }],
+            },
+          ],
+          errorMessage,
+        },
+      },
+    };
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    try {
+      const started = await startSubagentJob({
+        ...params(),
+        telemetry: {
+          session: createTelemetrySession(true, "orchestrator_v2"),
+          invocationSource: "isolated",
+          async: false,
+          depth: 1,
+          completionPolicy: "inline",
+        },
+      });
+      started.start();
+      await started.jobPromise;
+
+      expect(payloads[2]?.properties).toMatchObject({
+        status: "error",
+        error_category: "provider",
+        error_stage: "provider",
+        agent_stop_reason: "error",
+      });
+      expect(JSON.stringify(payloads)).not.toContain(errorMessage);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("records cancellation after lifecycle cleanup retires the session", async () => {
     const payloads: Array<{
       event: string;
@@ -174,6 +277,11 @@ describe("startSubagentJob effective thinking level", () => {
       ),
       abort: vi.fn(async () => releasePrompt()),
     };
+    session.agent.state.messages.push({
+      role: "assistant",
+      content: [],
+      stopReason: "aborted",
+    } as never);
     mockCreateAgentSession.mockResolvedValue({ session });
     const telemetrySession = createTelemetrySession(true, "orchestrator_v2");
 
@@ -206,6 +314,7 @@ describe("startSubagentJob effective thinking level", () => {
           properties: expect.objectContaining({
             status: "cancelled",
             mux: "none",
+            agent_stop_reason: "aborted",
           }),
         }),
       ]);
@@ -213,6 +322,72 @@ describe("startSubagentJob effective thinking level", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each([
+    ["session_start (new)", "fresh_session"],
+    ["session_start (fork)", "fresh_session"],
+    ["session_shutdown (new)", "fresh_session"],
+    ["session_shutdown (fork)", "fresh_session"],
+    ["session_start (new) with extra text", "session_shutdown"],
+    ["session_shutdown (fork) with extra text", "session_shutdown"],
+  ] as const)(
+    "maps the exact lifecycle reason %s to %s",
+    async (reason, expectedReason) => {
+      const payloads: Array<{
+        event: string;
+        properties: Record<string, unknown>;
+      }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          payloads.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const controller = new AbortController();
+      const promptGate = Promise.withResolvers<void>();
+      const session = {
+        ...createSession("medium"),
+        prompt: vi.fn(() => promptGate.promise),
+        abort: vi.fn(async () => {
+          promptGate.resolve();
+        }),
+      };
+      const telemetrySession = createTelemetrySession(true, "orchestrator_v2");
+      mockCreateAgentSession.mockResolvedValue({ session });
+
+      try {
+        const started = await startSubagentJob({
+          ...params(),
+          signal: controller.signal,
+          cancellationSource: "workflow",
+          telemetry: {
+            session: telemetrySession,
+            invocationSource: "workflow",
+            async: true,
+            depth: 1,
+            completionPolicy: "each",
+          },
+        });
+        started.start();
+        await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+        controller.abort({ source: "session_shutdown", reason });
+        const result = await started.jobPromise;
+
+        expect(result.cancelled).toBe(true);
+        const completions = payloads.filter(
+          ({ event }) => event === "pi_subagentura_task_completed",
+        );
+        expect(completions).toHaveLength(1);
+        expect(completions[0]?.properties?.terminal_reason).toBe(
+          expectedReason,
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("keeps thinking-level details omitted when the request omits it", async () => {
     const session = createSession("medium");
@@ -243,6 +418,33 @@ describe("startSubagentJob effective thinking level", () => {
     expect(result.cancelled).toBe(true);
     expect(session.prompt).not.toHaveBeenCalled();
     expect(session.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("includes session-level usage totals from Pi session stats", async () => {
+    const session = createSession("medium") as any;
+    session.getSessionStats = vi.fn(() => ({
+      tokens: {
+        input: 40,
+        output: 12,
+        cacheRead: 5,
+        cacheWrite: 2,
+      },
+      cost: 1.25,
+    }));
+    mockCreateAgentSession.mockResolvedValue({ session });
+
+    const started = await startSubagentJob(params());
+    started.start();
+    const result = await started.jobPromise;
+
+    expect(result.usage).toMatchObject({
+      input: 40,
+      output: 12,
+      cacheRead: 5,
+      cacheWrite: 2,
+      cost: 1.25,
+      turns: 0,
+    });
   });
 
   it("keeps live usage cumulative across turns without counting the current message twice", async () => {

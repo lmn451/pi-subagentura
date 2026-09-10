@@ -2,6 +2,33 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
 
+describe("multiplexer module boundary", () => {
+  it("loads concrete backends without importing the registry", async () => {
+    vi.doMock("../src/multiplexer", () => {
+      throw new Error("concrete backends must not import the registry");
+    });
+
+    try {
+      const { TmuxMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-tmux")
+      >("../src/multiplexer-tmux");
+      expect(new TmuxMultiplexer().name).toBe("tmux");
+
+      const { ZellijMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-zellij")
+      >("../src/multiplexer-zellij");
+      expect(new ZellijMultiplexer().name).toBe("zellij");
+
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      expect(new HerdrMultiplexer().name).toBe("herdr");
+    } finally {
+      vi.doUnmock("../src/multiplexer");
+    }
+  });
+});
+
 /**
  * Test that `getMux({ preference: "auto" })` can find a backend when the
  * user is NOT inside any mux session but the binary is on PATH.

@@ -239,27 +239,34 @@ describe("BaseParams", () => {
     ).toBe(true);
   });
 
-  /* ---------- optional `maxAge` (number) ---------- */
+  /* ---------- optional `maxAge` (integer milliseconds) ---------- */
 
   it("accepts missing maxAge", () => {
     expect(check(BaseParams)({ task: "t" })).toBe(true);
   });
 
-  it("accepts maxAge as positive integer", () => {
+  it("accepts maxAge as a positive integer", () => {
     expect(check(BaseParams)({ task: "t", maxAge: 5000 })).toBe(true);
   });
 
-  it("accepts maxAge as zero", () => {
+  it("accepts maxAge as zero for indefinite retention", () => {
     expect(check(BaseParams)({ task: "t", maxAge: 0 })).toBe(true);
   });
 
-  it("accepts maxAge as negative number", () => {
-    // The schema is `Type.Number()` with no min constraint, so negative is valid
-    expect(check(BaseParams)({ task: "t", maxAge: -1 })).toBe(true);
+  it("accepts maxAge at the Node timer maximum", () => {
+    expect(check(BaseParams)({ task: "t", maxAge: 2_147_483_647 })).toBe(true);
   });
 
-  it("accepts maxAge as float", () => {
-    expect(check(BaseParams)({ task: "t", maxAge: 1.5 })).toBe(true);
+  it("rejects maxAge as a negative number", () => {
+    expect(check(BaseParams)({ task: "t", maxAge: -1 })).toBe(false);
+  });
+
+  it("rejects maxAge as a fraction", () => {
+    expect(check(BaseParams)({ task: "t", maxAge: 1.5 })).toBe(false);
+  });
+
+  it("rejects maxAge beyond the Node timer maximum", () => {
+    expect(check(BaseParams)({ task: "t", maxAge: 2_147_483_648 })).toBe(false);
   });
 
   it("rejects maxAge as string", () => {

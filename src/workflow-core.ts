@@ -9,7 +9,15 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { normalizeUsage, type SubagentResult, type Usage } from "./helpers";
+import type { SubagentResult } from "./helpers";
+import { normalizeUsage, zeroUsage, type Usage } from "./usage";
+import type {
+  TelemetryErrorCategory,
+  TelemetryErrorStage,
+  TelemetryRuntimeFailureKind,
+} from "./telemetry";
+
+export { zeroUsage };
 
 // ── Limits ───────────────────────────────────────────────────────────
 export const MAX_TOTAL_AGENTS = 1000;
@@ -30,16 +38,6 @@ export function defaultConcurrency(): number {
 export function defaultProcessConcurrency(): number {
   const n = cpus()?.length ?? 4;
   return Math.max(1, Math.min(4, n - 2));
-}
-export function zeroUsage(): Usage {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  };
 }
 
 export type WorkflowCostSource =
@@ -374,7 +372,7 @@ export type WorkflowProgress =
       phase?: string;
       message?: string;
       label?: string;
-      status?: "done" | "error";
+      status?: "done" | "error" | "cancelled";
       agentId?: number;
       agentsSpawned: number;
       errorCount: number;
@@ -414,12 +412,80 @@ export type WorkflowProgressUpdate = {
   >;
 }[WorkflowProgress["kind"]];
 
+export interface WorkflowFailureClassification {
+  errorCategory: TelemetryErrorCategory;
+  errorStage: TelemetryErrorStage;
+  runtimeFailureKind?: TelemetryRuntimeFailureKind;
+}
+
+const WORKFLOW_FAILURE_CLASSIFICATION = Symbol(
+  "pi-subagentura.workflowFailureClassification",
+);
+
+interface WorkflowFailureCarrier {
+  [WORKFLOW_FAILURE_CLASSIFICATION]?: WorkflowFailureClassification;
+}
+
+/** Typed, privacy-safe evidence that a workflow operation failed. */
+export class WorkflowFailureError extends Error {
+  readonly classification: WorkflowFailureClassification;
+
+  constructor(
+    message: string,
+    classification: WorkflowFailureClassification,
+    cause?: unknown,
+  ) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "WorkflowFailureError";
+    this.classification = classification;
+  }
+}
+
+/** Attach closed workflow-failure evidence without changing a public result shape. */
+export function attachWorkflowFailure<T extends object>(
+  value: T,
+  classification: WorkflowFailureClassification,
+): T {
+  Object.defineProperty(value, WORKFLOW_FAILURE_CLASSIFICATION, {
+    configurable: false,
+    enumerable: false,
+    value: classification,
+    writable: false,
+  });
+  return value;
+}
+
+/** Recover structured workflow evidence across result and error boundaries. */
+export function workflowFailureClassification(
+  value: unknown,
+): WorkflowFailureClassification | undefined {
+  const seen = new Set<object>();
+  let current: unknown = value;
+  for (let depth = 0; depth < 4; depth++) {
+    if (current instanceof WorkflowFailureError) {
+      return current.classification;
+    }
+    if (!current || typeof current !== "object") return undefined;
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    const carrier = current as WorkflowFailureCarrier;
+    const attached = carrier[WORKFLOW_FAILURE_CLASSIFICATION];
+    if (attached) return attached;
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return undefined;
+}
+
 /** Legacy-compatible public result shape; v3.0.x producers populate `usage`. */
 export interface WorkflowRunResult {
   meta: WorkflowMeta;
   result: unknown;
   agentsSpawned: number;
   errorCount: number;
+  /** Number of agent attempts that ended by cancellation, not an error. */
+  cancelledCount?: number;
+  /** Structured evidence for the aggregate workflow terminal event. */
+  failure?: WorkflowFailureClassification;
   /** @deprecated Output-token count; use usage.output. */
   tokensSpent: number;
   usage?: WorkflowUsage;
@@ -438,6 +504,18 @@ export class WorkflowExecutionError extends Error {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "WorkflowExecutionError";
     this.usage = usage;
+  }
+}
+/** Typed evidence for the workflow VM's exact wall-clock timeout branch. */
+export class WorkflowWallTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(
+      `Workflow timed out after ${timeoutMs}ms; the worker was terminated.`,
+    );
+    this.name = "WorkflowWallTimeoutError";
+    this.timeoutMs = timeoutMs;
   }
 }
 

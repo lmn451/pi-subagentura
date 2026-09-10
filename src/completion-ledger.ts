@@ -62,6 +62,8 @@ export interface LedgerAppendResult {
 }
 
 export interface LedgerScanOptions {
+  /** Do not expose receipts from a prior append whose sync may have failed. */
+  syncBeforeRead?: boolean;
   startOffset?: number;
   includeUnterminated?: boolean;
   dropping?: boolean;
@@ -157,11 +159,13 @@ export function sessionLedgerPath(
 export function readLedgerLines(
   path: string,
   maxBytes: number,
+  options: Pick<LedgerScanOptions, "syncBeforeRead"> = {},
 ): LedgerReadResult {
   let fd: number | undefined;
   try {
     fd = openLedger(path, constants.O_RDONLY);
     const stat = fstatSync(fd);
+    if (options.syncBeforeRead) fsyncSync(fd);
     const start = Math.max(0, stat.size - maxBytes);
     const length = stat.size - start;
     const buffer = Buffer.alloc(length);
@@ -312,6 +316,7 @@ export function scanLedgerLines(
   try {
     fd = openLedger(path, constants.O_RDONLY);
     const snapshotSize = fstatSync(fd).size;
+    if (options.syncBeforeRead) fsyncSync(fd);
     const requestedStart =
       typeof options.startOffset === "number" &&
       Number.isSafeInteger(options.startOffset)

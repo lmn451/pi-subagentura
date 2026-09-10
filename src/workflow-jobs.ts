@@ -3,6 +3,7 @@ import { debugLog } from "./helpers";
 import {
   getActiveSessionOwner,
   isSessionOwnerLive,
+  resolveLiveSessionScope,
   type SessionOwnerToken,
 } from "./session-scope";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
@@ -12,17 +13,230 @@ import {
   type RunWorkflowOptions,
   type WorkflowAgentRunner,
   type WorkflowAgentRecord,
+  type WorkflowFailureClassification,
   type WorkflowProgress,
   type WorkflowRunResult,
   type WorkflowRunResultWithUsage,
   type WorkflowUsage,
   WorkflowExecutionError,
+  WorkflowWallTimeoutError,
   MAX_WORKFLOW_AGENT_RECORDS,
+  workflowFailureClassification,
   zeroWorkflowUsage,
 } from "./workflow-core";
+import {
+  captureTelemetry,
+  type TelemetryCompletionPolicy,
+  type TelemetrySession,
+  type TelemetryTerminalReason,
+  type TelemetryWorkflowInvocation,
+  type TelemetryWorkflowStatus,
+} from "./telemetry";
 import type { CompletionPolicy } from "./completion-coordinator";
 
 // ── Background workflow-job registry ─────────────────────────────────
+export interface WorkflowJobTelemetry {
+  /** Session captured at acceptance so settlement cannot drift to a new owner. */
+  session?: TelemetrySession;
+  invocation: TelemetryWorkflowInvocation;
+  async: boolean;
+  completionPolicy: TelemetryCompletionPolicy;
+}
+
+export type WorkflowJobTelemetryOptions = Omit<WorkflowJobTelemetry, "session">;
+
+function normalizeWorkflowInvocation(
+  value: WorkflowJobTelemetryOptions["invocation"] | undefined,
+): TelemetryWorkflowInvocation {
+  return value === "saved_command" ? "saved_command" : "tool";
+}
+
+function normalizeWorkflowCompletionPolicy(
+  value: WorkflowJobTelemetryOptions["completionPolicy"] | undefined,
+  fallback: TelemetryCompletionPolicy,
+): TelemetryCompletionPolicy {
+  return value === "inline" ||
+    value === "each" ||
+    value === "group" ||
+    value === "legacy"
+    ? value
+    : fallback;
+}
+
+function safeTelemetryNow(): number | undefined {
+  try {
+    const now = Date.now();
+    return Number.isFinite(now) && now >= 0 ? now : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function workflowTelemetryDuration(
+  startedAt: number,
+  completedAt: number | undefined,
+): number | undefined {
+  if (
+    completedAt === undefined ||
+    !Number.isFinite(startedAt) ||
+    startedAt < 0 ||
+    completedAt < startedAt
+  ) {
+    return undefined;
+  }
+  return completedAt - startedAt;
+}
+
+function boundedWorkflowTelemetryCount(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(Math.trunc(value!), 0), 1_000);
+}
+
+function terminalReasonFromAbortReason(
+  reason: unknown,
+): TelemetryTerminalReason | undefined {
+  if (!reason || typeof reason !== "object" || !("source" in reason)) {
+    return undefined;
+  }
+  const source = reason.source;
+  switch (source) {
+    case "session_shutdown":
+      return "session_shutdown";
+    case "fresh_session":
+      return "fresh_session";
+    case "timeout":
+      return "timeout";
+    case "cancel_subagent":
+      return "explicit_cancel";
+    case "cancel_all":
+    case "signal":
+    case "workflow":
+    case "supervisor":
+      return "parent_cancelled";
+    default:
+      return undefined;
+  }
+}
+function workflowTelemetryStatus(
+  job: WorkflowJobState,
+  result: WorkflowRunResult | undefined,
+): TelemetryWorkflowStatus {
+  if (job.status === "cancelled" || job.abort.signal.aborted) {
+    return "cancelled";
+  }
+  if ((result?.cancelledCount ?? job.snapshot.cancelledCount ?? 0) > 0) {
+    return "cancelled";
+  }
+  if (job.status === "error") return "error";
+  return result && result.errorCount > 0 ? "partial" : "success";
+}
+
+function workflowFailureForError(
+  error: unknown,
+): WorkflowFailureClassification | undefined {
+  return workflowFailureClassification(error);
+}
+
+function emitWorkflowRuntimeFailure(
+  session: TelemetrySession | undefined,
+  failure: WorkflowFailureClassification | undefined,
+): void {
+  if (!session || !failure?.runtimeFailureKind) return;
+  captureTelemetry(
+    session,
+    {
+      event: "runtime_failure",
+      error_category: failure.errorCategory,
+      error_stage: failure.errorStage,
+      failure_kind: failure.runtimeFailureKind,
+    },
+    { allowInactive: true },
+  );
+}
+
+function isWorkflowWallTimeout(error: unknown): boolean {
+  if (error instanceof WorkflowWallTimeoutError) return true;
+  if (!(error instanceof WorkflowExecutionError)) return false;
+  return (
+    (error as WorkflowExecutionError & { cause?: unknown }).cause instanceof
+    WorkflowWallTimeoutError
+  );
+}
+
+function workflowTelemetryTerminalReason(
+  job: WorkflowJobState,
+  status: TelemetryWorkflowStatus,
+): TelemetryTerminalReason {
+  if (status === "success") return "completed";
+  if (status === "partial") return "agent_error";
+  if (status === "error") return job.telemetryTerminalReason ?? "agent_error";
+  return (
+    job.telemetryTerminalReason ??
+    terminalReasonFromAbortReason(job.abort.signal.reason) ??
+    "unknown"
+  );
+}
+
+function emitWorkflowStartedTelemetry(job: WorkflowJobState): void {
+  const telemetry = job.telemetry;
+  if (!telemetry) return;
+  captureTelemetry(telemetry.session, {
+    event: "workflow_started",
+    invocation: telemetry.invocation,
+    async: telemetry.async,
+    completion_policy: telemetry.completionPolicy,
+  });
+}
+
+function emitWorkflowCompletedTelemetry(
+  job: WorkflowJobState,
+  result: WorkflowRunResult | undefined,
+): void {
+  if (job.telemetryCompleted) return;
+  job.telemetryCompleted = true;
+  if (job.completedAt === undefined) job.completedAt = safeTelemetryNow();
+  const status = workflowTelemetryStatus(job, result);
+  const telemetry = job.telemetry;
+  if (!telemetry) return;
+  const failure =
+    result?.failure ??
+    job.telemetryFailure ??
+    (status === "error"
+      ? { errorCategory: "unknown", errorStage: "workflow" }
+      : undefined);
+  if (failure?.runtimeFailureKind && !job.telemetryRuntimeFailureReported) {
+    job.telemetryRuntimeFailureReported = true;
+    emitWorkflowRuntimeFailure(telemetry.session, failure);
+  }
+  const agentsSpawned = boundedWorkflowTelemetryCount(
+    result?.agentsSpawned ?? job.snapshot.agentsSpawned,
+  );
+  const errorCount = boundedWorkflowTelemetryCount(
+    result?.errorCount ?? job.snapshot.errorCount,
+  );
+  const durationMs = workflowTelemetryDuration(job.startedAt, job.completedAt);
+  captureTelemetry(
+    telemetry.session,
+    {
+      event: "workflow_completed",
+      invocation: telemetry.invocation,
+      async: telemetry.async,
+      completion_policy: telemetry.completionPolicy,
+      status,
+      terminal_reason: workflowTelemetryTerminalReason(job, status),
+      agents_spawned: agentsSpawned,
+      error_count: errorCount,
+      ...(status === "cancelled" || failure === undefined
+        ? {}
+        : {
+            error_category: failure.errorCategory,
+            error_stage: failure.errorStage,
+          }),
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+    },
+    { allowInactive: true },
+  );
+}
 
 export type WorkflowJobStatus = "running" | "done" | "error" | "cancelled";
 
@@ -32,6 +246,7 @@ export interface WorkflowJobState {
   status: WorkflowJobStatus;
   executionMode?: "async" | "sync";
   startedAt: number;
+  completedAt?: number;
   /**
    * Settles with the runner's own result shape, where `usage` is always present.
    * Widening to {@link WorkflowRunResult} here would force every consumer to
@@ -42,6 +257,7 @@ export interface WorkflowJobState {
   snapshot: {
     agentsSpawned: number;
     errorCount: number;
+    cancelledCount?: number;
     /** @deprecated Output-token count; use usage.output. */
     tokensSpent: number;
     /** Soft completed-output-token target, if configured. */
@@ -81,8 +297,18 @@ export interface WorkflowJobState {
   notificationAttempt?: number;
   /** Parent session lifecycle that owns this workflow job. */
   parentSessionOwner?: SessionOwnerToken;
+  /** Guards the aggregate terminal event against reentrant settlement paths. */
+  telemetryCompleted?: boolean;
   completionPolicy?: CompletionPolicy;
   completionGroupId?: string;
+  /** Telemetry metadata captured at acceptance for aggregate lifecycle events. */
+  telemetry?: WorkflowJobTelemetry;
+  /** Evidence-backed cancellation reason for the aggregate terminal event. */
+  telemetryTerminalReason?: TelemetryTerminalReason;
+  /** Structured workflow failure evidence retained for aggregate telemetry. */
+  telemetryFailure?: WorkflowFailureClassification;
+  /** Runtime failures are emitted once per workflow operation. */
+  telemetryRuntimeFailureReported?: boolean;
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -156,17 +382,56 @@ export function workflowJobsForOwner(
 
 export function cleanupWorkflowJobsForOwner(
   owner: SessionOwnerToken | undefined,
+  terminalReason: TelemetryTerminalReason = "session_shutdown",
 ): void {
   for (const [id, job] of workflowJobRegistry) {
     if (!workflowJobBelongsToOwner(job, owner)) continue;
     job.suppressCompletionNotification = true;
-    if (job.status === "running") {
-      job.abort.abort();
-      job.status = "cancelled";
+    if (job.status === "running" || job.status === "cancelled") {
+      cancelWorkflowJob(job, terminalReason);
     }
-    if (job.status === "cancelled") normalizeCancelledWorkflowState(job);
     workflowJobRegistry.delete(id);
   }
+}
+
+/**
+ * Cancel one workflow exactly once while retaining typed terminal evidence for
+ * settlement telemetry and result-read latency.
+ */
+export function cancelWorkflowJob(
+  job: WorkflowJobState,
+  terminalReason: TelemetryTerminalReason,
+): void {
+  if (job.status !== "running" && job.status !== "cancelled") return;
+  if (job.telemetryTerminalReason === undefined) {
+    job.telemetryTerminalReason = terminalReason;
+  }
+  if (job.completedAt === undefined) job.completedAt = safeTelemetryNow();
+  const wasRunning = job.status === "running";
+  if (wasRunning) {
+    job.status = "cancelled";
+    normalizeCancelledWorkflowState(job);
+    try {
+      job.abort.abort({
+        source:
+          terminalReason === "explicit_cancel"
+            ? "cancel_subagent"
+            : terminalReason === "session_shutdown" ||
+                terminalReason === "fresh_session"
+              ? "session_shutdown"
+              : "workflow",
+        reason:
+          terminalReason === "fresh_session"
+            ? "session_start (new)"
+            : terminalReason,
+      });
+    } catch {
+      /* The workflow may already be aborting. */
+    }
+  } else {
+    normalizeCancelledWorkflowState(job);
+  }
+  invokeWorkflowCompletionHook(job);
 }
 
 /** Roll back a just-created workflow whose completion registration failed. */
@@ -227,8 +492,11 @@ export function startWorkflowJob(
   onComplete?: (job: WorkflowJobState) => boolean | void,
   owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
   executionMode: "async" | "sync" = "async",
+  telemetryOptions?: WorkflowJobTelemetryOptions,
 ): WorkflowJobState {
   const parentSessionOwner = owner;
+  const telemetrySession =
+    resolveLiveSessionScope(parentSessionOwner)?.telemetry;
   // A blocking sync workflow ran unconditionally before it was tracked here.
   // Subjecting it to the cap would turn an always-succeeding call into a new
   // user-visible failure, so sync jobs are exempt — they are also removed from
@@ -253,6 +521,11 @@ export function startWorkflowJob(
       }
     }
     if (!evicted) {
+      emitWorkflowRuntimeFailure(telemetrySession, {
+        errorCategory: "capacity",
+        errorStage: "workflow",
+        runtimeFailureKind: "workflow_capacity",
+      });
       throw new Error(
         `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
@@ -260,6 +533,23 @@ export function startWorkflowJob(
   }
 
   const id = `wf_${randomBytes(5).toString("hex")}`;
+  const defaultAsync = executionMode === "async";
+  const defaultCompletionPolicy: TelemetryCompletionPolicy = defaultAsync
+    ? "legacy"
+    : "inline";
+  const telemetryAsync =
+    typeof telemetryOptions?.async === "boolean"
+      ? telemetryOptions.async
+      : defaultAsync;
+  const telemetry: WorkflowJobTelemetry = {
+    session: telemetrySession,
+    invocation: normalizeWorkflowInvocation(telemetryOptions?.invocation),
+    async: telemetryAsync,
+    completionPolicy: normalizeWorkflowCompletionPolicy(
+      telemetryOptions?.completionPolicy,
+      defaultCompletionPolicy,
+    ),
+  };
   const opts =
     typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
   const abort = new AbortController();
@@ -278,6 +568,7 @@ export function startWorkflowJob(
     snapshot: {
       agentsSpawned: 0,
       errorCount: 0,
+      cancelledCount: 0,
       tokensSpent: 0,
       budgetTotal: opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
       usage: zeroWorkflowUsage(),
@@ -291,7 +582,9 @@ export function startWorkflowJob(
     cancellationSnapshots: [],
     activeAgentRuns: new Set(),
     parentSessionOwner,
+    telemetry,
   };
+  emitWorkflowStartedTelemetry(state);
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
   state.promise = runWorkflow(script, {
     ...opts,
@@ -336,16 +629,28 @@ export function startWorkflowJob(
     .then((r) => {
       if (state.status === "running") state.status = "done";
       state.result = r;
+      state.snapshot.cancelledCount = r.cancelledCount ?? 0;
+      if (r.failure) state.telemetryFailure = r.failure;
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      emitWorkflowCompletedTelemetry(state, r);
       invokeWorkflowCompletionHook(state);
       return r;
     })
     .catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
+      const timedOut = isWorkflowWallTimeout(err);
+      if (timedOut) state.telemetryTerminalReason = "timeout";
       state.status = abort.signal.aborted ? "cancelled" : "error";
       state.error = msg;
+      if (state.status !== "cancelled") {
+        state.telemetryFailure =
+          workflowFailureForError(err) ??
+          (timedOut
+            ? { errorCategory: "timeout", errorStage: "workflow" }
+            : { errorCategory: "unknown", errorStage: "workflow" });
+      }
       if (err instanceof WorkflowExecutionError && err.usage) {
         state.snapshot.usage = { ...err.usage };
         state.snapshot.tokensSpent = err.usage.output;
@@ -353,6 +658,7 @@ export function startWorkflowJob(
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      emitWorkflowCompletedTelemetry(state, undefined);
       invokeWorkflowCompletionHook(state);
       throw err;
     })

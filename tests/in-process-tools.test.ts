@@ -102,6 +102,7 @@ import { Text } from "@earendil-works/pi-tui";
 import {
   type JobState,
   type SubagentResult,
+  annotateSpawnFailure,
   inProcessJobsForOwner,
   jobRegistry,
   MAX_REGISTRY_SIZE,
@@ -180,6 +181,22 @@ function createJobState(overrides: Partial<JobState> = {}): JobState {
     modelLabel: "test/model",
     ...overrides,
   };
+}
+interface TelemetryPayloadForTest {
+  event?: string;
+  properties?: Record<string, unknown>;
+}
+
+function captureTelemetryPayloads(): TelemetryPayloadForTest[] {
+  const payloads: TelemetryPayloadForTest[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    }),
+  );
+  return payloads;
 }
 
 function createExtensionApi() {
@@ -472,6 +489,34 @@ describe("subagent_with_context tool", () => {
     expect(mockConvertToLlm).not.toHaveBeenCalled();
   });
 
+  it("records one context-stage failure for missing history", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(718);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, "subagent_with_context");
+    const result = await scopedTool.execute(
+      "missing-context",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.isError).toBeFalsy();
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+      )?.properties?.failure_stage,
+    ).toBe("context");
+  });
+
   it("registers with BaseParams schema", () => {
     const params = toolDef.parameters;
     const props = (params as any).properties;
@@ -602,6 +647,112 @@ describe("subagent_isolated tool", () => {
     expect(mockStartSubagentJob).not.toHaveBeenCalled();
   });
 
+  it("records exactly one bounded depth-limit spawn failure", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(716);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, "subagent_isolated");
+    const result = await withOrchestrationContext(
+      { ownerJobId: "deep-parent", depth: DEFAULT_MAX_ORCHESTRATION_DEPTH },
+      () =>
+        scopedTool.execute(
+          "call-too-deep-telemetry",
+          { task: "spawn yet another reviewer" },
+          undefined,
+          undefined,
+          mockCtx(),
+        ),
+    );
+
+    expect(result.isError).toBe(true);
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+        ),
+      ).toHaveLength(1),
+    );
+    const failure = payloads.find(
+      (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+    );
+    expect(failure?.properties).toMatchObject({
+      execution: "in-process",
+      mux: "none",
+      failure_stage: "depth_limit",
+      spawn_duration_bucket: expect.any(String),
+    });
+  });
+
+  it.each(["model_resolution", "session_creation"] as const)(
+    "records one %s failure when preparation rejects",
+    async (failureStage) => {
+      const payloads = captureTelemetryPayloads();
+      mockStartSubagentJob.mockRejectedValue(
+        annotateSpawnFailure(new Error("preparation failed"), failureStage),
+      );
+      const scoped = setupScopedExtension(717);
+      scoped.scope.telemetry = createTelemetrySession(true);
+      const scopedTool = getToolDef(scoped.api, "subagent_isolated");
+      const result = await scopedTool.execute(
+        "call-preparation-failure",
+        { task: "analyze code", async: false },
+        undefined,
+        undefined,
+        mockCtx(),
+      );
+
+      expect(result.isError).toBe(true);
+      await vi.waitFor(() =>
+        expect(
+          payloads.filter(
+            (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+          ),
+        ).toHaveLength(1),
+      );
+      expect(
+        payloads.find(
+          (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+        )?.properties?.failure_stage,
+      ).toBe(failureStage);
+    },
+  );
+
+  it("records one capacity-stage failure when the owner is full", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(719);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scoped.scope);
+    for (let index = 0; index < MAX_REGISTRY_SIZE; index++) {
+      const id = `capacity-${index}`;
+      const job = createJobState({ id });
+      scoped.scope.inProcessJobs.set(id, job);
+      jobRegistry.set(id, job);
+    }
+
+    const scopedTool = getToolDef(scoped.api, "subagent_isolated");
+    const result = await scopedTool.execute(
+      "capacity-failure",
+      { task: "analyze code" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(owner).toEqual(sessionOwner(scoped.scope));
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+      )?.properties?.failure_stage,
+    ).toBe("capacity");
+  });
   it("registers with BaseParams schema", () => {
     const params = toolDef.parameters;
     const props = (params as any).properties;
@@ -616,14 +767,14 @@ describe("subagent_isolated tool", () => {
   });
 });
 
-// ── synchronous result consumption ───────────────────────────────────
+// ── synchronous in-process result reads ───────────────────────────────
 
 /**
- * A synchronous spawn hands its output straight back to the caller, so there is
- * no later `get_subagent_result` for `result_consumed` to be emitted from. Both
- * sync tools take their own return path, so both are exercised here.
+ * A synchronous spawn hands its output straight back to the caller, so that
+ * return path is the result read for telemetry purposes. Both sync tools take
+ * their own return path, so both are exercised here.
  */
-describe("synchronous in-process result consumption", () => {
+describe("synchronous in-process result reads", () => {
   const SYNC_TOOLS = [
     ["subagent_isolated", () => mockCtx()],
     [
@@ -660,31 +811,40 @@ describe("synchronous in-process result consumption", () => {
     return payloads;
   }
 
-  function consumedEvents(payloads: readonly TelemetryPost[]) {
+  function resultReadEvents(payloads: readonly TelemetryPost[]) {
     return payloads.filter(
-      (payload) => payload.event === "pi_subagentura_result_consumed",
+      (payload) => payload.event === "pi_subagentura_result_read",
     );
   }
 
-  it.each(SYNC_TOOLS)("records consumption for %s", async (name, makeCtx) => {
-    const payloads = captureTelemetryPosts();
-    const scoped = setupScopedExtension(714);
-    scoped.scope.telemetry = createTelemetrySession(true);
-    const scopedTool = getToolDef(scoped.api, name);
+  it.each(SYNC_TOOLS)(
+    "records a consumed result read for %s",
+    async (name, makeCtx) => {
+      const payloads = captureTelemetryPosts();
+      const scoped = setupScopedExtension(714);
+      scoped.scope.telemetry = createTelemetrySession(true);
+      const scopedTool = getToolDef(scoped.api, name);
 
-    const result = await scopedTool.execute(
-      "sync-consumed",
-      { task: "analyze code", async: false },
-      undefined,
-      undefined,
-      makeCtx(),
-    );
+      const result = await scopedTool.execute(
+        "sync-consumed",
+        { task: "analyze code", async: false },
+        undefined,
+        undefined,
+        makeCtx(),
+      );
 
-    expect(result.details.status).toBe("done");
-    await vi.waitFor(() => expect(consumedEvents(payloads)).toHaveLength(1));
-    expect(consumedEvents(payloads)[0]?.properties?.source).toBe("in-process");
-  });
-
+      expect(result.details.status).toBe("done");
+      await vi.waitFor(() =>
+        expect(resultReadEvents(payloads)).toHaveLength(1),
+      );
+      expect(resultReadEvents(payloads)[0]?.properties?.source).toBe(
+        "in-process",
+      );
+      expect(resultReadEvents(payloads)[0]?.properties?.outcome).toBe(
+        "consumed",
+      );
+    },
+  );
   it.each(
     SYNC_TOOLS.flatMap(([name, makeCtx]) =>
       (
@@ -702,7 +862,7 @@ describe("synchronous in-process result consumption", () => {
       ).map(([label, jobResult]) => [name, label, jobResult, makeCtx] as const),
     ),
   )(
-    "records no consumption for %s on %s",
+    "records the terminal result-read outcome for %s on %s",
     async (name, _label, jobResult, makeCtx) => {
       const payloads = captureTelemetryPosts();
       mockStartSubagentJob.mockResolvedValue({
@@ -721,7 +881,17 @@ describe("synchronous in-process result consumption", () => {
         makeCtx(),
       );
 
-      expect(consumedEvents(payloads)).toHaveLength(0);
+      await vi.waitFor(() =>
+        expect(resultReadEvents(payloads)).toHaveLength(1),
+      );
+      const expectedOutcome = jobResult.isError
+        ? "error"
+        : jobResult.cancelled
+          ? "cancelled"
+          : "empty";
+      expect(resultReadEvents(payloads)[0]?.properties?.outcome).toBe(
+        expectedOutcome,
+      );
     },
   );
 });
@@ -1006,6 +1176,54 @@ describe("get_subagent_result tool", () => {
     expect(result.details.jobId).toBe("missing");
   });
 
+  it("records unavailable reads for missing and pruned jobs", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(721);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scoped.scope);
+    const pruned = createJobState({
+      id: "pruned",
+      status: "done",
+      result: defaultSuccessResult,
+      promise: Promise.resolve(defaultSuccessResult),
+    });
+    registerInProcessJob(pruned, owner);
+    expect(pruneCompletedJobs(owner)).toBe(1);
+
+    const resultTool = getToolDef(scoped.api, "get_subagent_result");
+    for (const jobId of ["missing", pruned.id]) {
+      const result = await resultTool.execute(
+        `read-${jobId}`,
+        { jobId },
+        undefined,
+        undefined,
+      );
+      expect(result.details.jobId).toBe(jobId);
+      expect(result.isError).toBe(true);
+    }
+
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_result_read",
+        ),
+      ).toHaveLength(2),
+    );
+    const reads = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(reads.map((payload) => payload.properties?.outcome)).toEqual([
+      "unavailable",
+      "unavailable",
+    ]);
+    for (const read of reads) {
+      expect(read.properties).toMatchObject({
+        read_latency_bucket: "unknown",
+      });
+      expect(read.properties).not.toHaveProperty("read_latency_ms");
+    }
+  });
+
   it("returns cancelled when job status is already cancelled", async () => {
     const jobId = "cancelled-result";
     jobRegistry.set(jobId, createJobState({ id: jobId, status: "cancelled" }));
@@ -1066,8 +1284,53 @@ describe("get_subagent_result tool", () => {
     expect(job.resultRetrieved).toBe(true);
   });
 
+  it("classifies a repeated empty terminal read as already_consumed", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(722);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scoped.scope);
+    const completedAt = Date.now() - 1_250;
+    const emptyResult: SubagentResult = {
+      ...defaultSuccessResult,
+      output: "",
+    };
+    const job = createJobState({
+      id: "empty-read",
+      status: "done",
+      result: emptyResult,
+      promise: Promise.resolve(emptyResult),
+      completedAt,
+    });
+    registerInProcessJob(job, owner);
+    const resultTool = getToolDef(scoped.api, "get_subagent_result");
+
+    await resultTool.execute("empty-1", { jobId: job.id });
+    await resultTool.execute("empty-2", { jobId: job.id });
+
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_result_read",
+        ),
+      ).toHaveLength(2),
+    );
+    const reads = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(reads.map((payload) => payload.properties?.outcome)).toEqual([
+      "empty",
+      "already_consumed",
+    ]);
+    for (const read of reads) {
+      expect(read.properties).toMatchObject({
+        read_latency_bucket: expect.any(String),
+        read_latency_ms: expect.any(Number),
+      });
+    }
+  });
+
   it("records only the first successful output-bearing result read", async () => {
-    const telemetryPayloads: Array<{ event?: string }> = [];
+    const telemetryPayloads: TelemetryPayloadForTest[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input, init) => {
@@ -1140,11 +1403,64 @@ describe("get_subagent_result tool", () => {
       undefined,
     );
 
-    expect(
-      telemetryPayloads.filter(
-        (payload) => payload.event === "pi_subagentura_result_consumed",
-      ),
-    ).toHaveLength(1);
+    const resultReads = telemetryPayloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(resultReads).toHaveLength(4);
+    expect(resultReads.map((payload) => payload.properties?.outcome)).toEqual([
+      "error",
+      "cancelled",
+      "consumed",
+      "already_consumed",
+    ]);
+  });
+
+  it("reports rounded read latency only when completedAt is known", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(720);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scoped.scope);
+    const completedAt = Date.now() - 1_250;
+    const known = createJobState({
+      id: "known-completed-at",
+      status: "done",
+      result: defaultSuccessResult,
+      promise: Promise.resolve(defaultSuccessResult),
+      completedAt,
+    });
+    const unknown = createJobState({
+      id: "unknown-completed-at",
+      status: "done",
+      result: defaultSuccessResult,
+      promise: Promise.resolve(defaultSuccessResult),
+    });
+    registerInProcessJob(known, owner);
+    registerInProcessJob(unknown, owner);
+    const scopedTool = getToolDef(scoped.api, "get_subagent_result");
+
+    await scopedTool.execute("known-read", { jobId: known.id });
+    await scopedTool.execute("unknown-read", { jobId: unknown.id });
+
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_result_read",
+        ),
+      ).toHaveLength(2),
+    );
+    const reads = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_result_read",
+    );
+    expect(reads[0]?.properties).toMatchObject({
+      outcome: "consumed",
+      read_latency_bucket: expect.any(String),
+      read_latency_ms: expect.any(Number),
+    });
+    expect(reads[1]?.properties).toMatchObject({
+      outcome: "consumed",
+      read_latency_bucket: "unknown",
+    });
+    expect(reads[1]?.properties).not.toHaveProperty("read_latency_ms");
   });
   it("keeps a grouped result through TTL, prune, and cap pressure until collection", async () => {
     vi.useFakeTimers();

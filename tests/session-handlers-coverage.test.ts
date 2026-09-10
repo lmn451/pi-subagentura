@@ -252,6 +252,54 @@ describe("session handler lifecycle callbacks", () => {
     expect(ui.notify).toHaveBeenCalledWith("invalid telemetry", "warning");
   });
 
+  it("uses Pi UI prompt events to defer completion delivery", async () => {
+    const registration = registerHandlers();
+    const ctx = startSession(registration, root, "session-a");
+    const promptStart = registration.handlers.get("ui_prompt_start")?.[0];
+    const promptEnd = registration.handlers.get("ui_prompt_end")?.[0];
+    expect(promptStart).toBeTypeOf("function");
+    expect(promptEnd).toBeTypeOf("function");
+
+    promptStart!(
+      {
+        type: "ui_prompt_start",
+        reason: "ui_prompt",
+        kind: "input",
+      },
+      ctx,
+    );
+    expect(registration.sessionScope.uiPromptActive).toBe(true);
+
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: "ui-prompt-event",
+        source: "in-process",
+        sourceId: "ui-prompt-event",
+        label: "UI prompt event",
+        status: "done",
+        policy: "each",
+        references: [{ label: "result", value: "job" }],
+        completedAt: 1,
+      },
+      sessionOwner(registration.sessionScope),
+    );
+    await Promise.resolve();
+    expect(registration.pi.sendMessage).not.toHaveBeenCalled();
+
+    promptEnd!(
+      {
+        type: "ui_prompt_end",
+        reason: "ui_prompt",
+        kind: "input",
+      },
+      ctx,
+    );
+    await Promise.resolve();
+    expect(registration.sessionScope.uiPromptActive).toBe(false);
+    expect(registration.pi.sendMessage).toHaveBeenCalled();
+  });
+
   it.each(["reload", "resume"] as const)(
     "preserves one telemetry session across %s without another root start",
     (reason) => {
@@ -338,11 +386,24 @@ describe("session handler lifecycle callbacks", () => {
 
       startSession(registration, root, "session-a");
 
-      expect(captured).toHaveLength(1);
+      expect(captured.map(({ event }) => event)).toEqual([
+        "pi_subagentura_session_started",
+        "pi_subagentura_session_recovered",
+      ]);
       expect(captured[0]).toMatchObject({
         event: "pi_subagentura_session_started",
         distinct_id: loadInteractiveStates(root)?.telemetry?.correlationId,
         properties: { mode: "orchestrator_v2" },
+      });
+      expect(captured[1]).toMatchObject({
+        event: "pi_subagentura_session_recovered",
+        properties: {
+          reason: "startup",
+          total_count: 0,
+          alive_count: 0,
+          terminal_count: 0,
+          unknown_count: 0,
+        },
       });
     });
 
@@ -362,6 +423,36 @@ describe("session handler lifecycle callbacks", () => {
         parent: "session-a",
         telemetry: { correlationId, mode: "orchestrator_v2" },
       });
+    });
+
+    it("reports recovery failures without sending exception text or stopping startup", () => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      ctx.sessionManager.getEntries = () => {
+        throw new Error("private state /home/customer");
+      };
+      ctx.sessionManager.getBranch = () => {
+        throw new Error("private branch /home/customer");
+      };
+      captured.length = 0;
+      expect(() =>
+        registration.handlers.get("session_start")![0](
+          { reason: "reload" },
+          ctx,
+        ),
+      ).not.toThrow();
+      expect(
+        captured
+          .filter((p) => p.event === "pi_subagentura_session_setup_failed")
+          .map((p) => p.properties.failure_stage),
+      ).toEqual(["state_recovery", "wake_recovery"]);
+      expect(registration.sessionScope.lifecycle).toBe("started");
+      expect(JSON.stringify(captured)).not.toMatch(/private|customer/);
     });
 
     it("hands the same correlation to the root lineage bootstrap", () => {
@@ -726,6 +817,27 @@ describe("session handler lifecycle callbacks", () => {
     expect(getSessionScopes()).toEqual([]);
     expect((globalThis as any).__piSubagenturaPiRef).toBeUndefined();
   });
+  it.each(["new", "fork"] as const)(
+    "classifies workflow cleanup as fresh_session for %s",
+    (reason) => {
+      const registration = registerHandlers();
+      const ctx = startSession(
+        registration,
+        root,
+        `session-${reason}`,
+        undefined,
+        reason,
+      );
+      const workflow = ownedWorkflow(
+        registration.sessionScope,
+        `workflow-${reason}`,
+      ).workflow;
+
+      registration.handlers.get("session_shutdown")![0]({ reason }, ctx);
+
+      expect(workflow.telemetryTerminalReason).toBe("fresh_session");
+    },
+  );
 
   it("continues shutdown when lifecycle completion receipt persistence fails", () => {
     const registration = registerHandlers();

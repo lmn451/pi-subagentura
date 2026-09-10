@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -40,6 +41,7 @@ import {
   removeSessionScope,
 } from "../src/session-scope";
 import { responsiveFlowMinimumWidth } from "../src/rendering";
+import { createTelemetrySession } from "../src/telemetry";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
@@ -235,6 +237,104 @@ describe("pollArtifactChanges", () => {
     const sendMessage = installDeliverySpies();
     await mod.pollArtifactChanges({ sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "cancel_all",
+      origin: "cancel_all",
+      expected: "explicit_cancel",
+    },
+    {
+      label: "new",
+      origin: "session_shutdown",
+      lifecycleReason: "new",
+      expected: "fresh_session",
+    },
+    {
+      label: "fork",
+      origin: "session_shutdown",
+      lifecycleReason: "fork",
+      expected: "fresh_session",
+    },
+    {
+      label: "startup",
+      origin: "session_start",
+      lifecycleReason: "startup",
+      expected: "session_shutdown",
+    },
+    {
+      label: "reload",
+      origin: "session_start",
+      lifecycleReason: "reload",
+      expected: "session_shutdown",
+    },
+    {
+      label: "resume",
+      origin: "session_start",
+      lifecycleReason: "resume",
+      expected: "session_shutdown",
+    },
+  ] as const)("maps $label cancellation to $expected", async (testCase) => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    const session = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 811, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      pi: {} as unknown as ExtensionAPI,
+      telemetry: session,
+      sessionManager: { getSessionId: () => "poll-telemetry" },
+    });
+    item.state.telemetryEligible = true;
+    item.state.telemetryCorrelationId = session.correlationId;
+    item.state.telemetryActiveTurnId = "turn";
+    item.state.telemetryTurnStartedAt = 1;
+    item.state.telemetryTurnMessageCounts = new Map();
+    item.state.telemetryInvocationSource = "interactive";
+    item.state.telemetryCompletionPolicy = "each";
+    item.state.telemetryAsync = true;
+    item.state.telemetryDepth = 1;
+    item.state.telemetryDepthBucket = "1";
+    item.state.telemetryModel = "default";
+    item.state.completionOwner = "workflow";
+    scope.interactiveStates.set(item.id, item.state);
+    mod.interactiveSubagentRegistry.set(item.id, item.state);
+    const art = artifactPath(join(item.artifactDir, ".."), item.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: `event-${testCase.label}`,
+      turnId: "turn",
+      ts: 2,
+      type: "completion",
+      status: "cancelled",
+      outcome: "cancelled",
+      source: "parent",
+      cancellationOrigin: testCase.origin,
+      ...(testCase.lifecycleReason
+        ? { cancellationLifecycleReason: testCase.lifecycleReason }
+        : {}),
+    });
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive" as const,
+    } as unknown as Multiplexer);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+
+    await mod.pollArtifactChanges({} as unknown as ExtensionAPI, owner);
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_task_completed",
+    );
+    expect(completed?.properties?.terminal_reason).toBe(testCase.expected);
   });
 
   it("clears the activity widget on an empty tick with a malformed setting", async () => {
@@ -1207,6 +1307,81 @@ describe("pollArtifactChanges", () => {
     expect(item.state.status).toBe("unknown");
     expect(mod.interactiveSubagentRegistry.get(item.id)).toBe(item.state);
     expect(item.state.eventByteCursor).toBeGreaterThan(0);
+  });
+  it("reports one mux probe runtime failure per outage episode", async () => {
+    vi.resetModules();
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const { state } = makeState();
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 908, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      lifecycle: "started",
+      pi: { sendMessage: vi.fn() } as any,
+      ui: {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+      } as any,
+      sessionManager: { getSessionId: () => "pi" },
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepth = 1;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(state.id, state);
+    mod.interactiveSubagentRegistry.set(state.id, state);
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "unknown",
+    } as never);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+    installDeliverySpies();
+
+    await mod.pollArtifactChanges({} as any, owner);
+    await mod.pollArtifactChanges({} as any, owner);
+    let runtimeFailures = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(runtimeFailures).toHaveLength(1);
+    expect(runtimeFailures[0]?.properties).toMatchObject({
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+    });
+    expect(state.status).toBe("unknown");
+
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive",
+    } as never);
+    await mod.pollArtifactChanges({} as any, owner);
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "unknown",
+    } as never);
+    await mod.pollArtifactChanges({} as any, owner);
+
+    runtimeFailures = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(runtimeFailures).toHaveLength(2);
+    expect(
+      payloads.some(
+        (payload) => payload.event === "pi_subagentura_task_completed",
+      ),
+    ).toBe(false);
   });
 
   it("truncates overflowing activity and workflow widget rows", async () => {
@@ -2750,6 +2925,358 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
 
     expect(state.status).toBe("idle");
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
+  });
+
+  it.each([
+    ["agent_settled", "error", "provider"],
+    ["agent_settled", "aborted", "unknown"],
+    ["agent_settled", undefined, "unknown"],
+    ["agent_end", undefined, "unknown"],
+    ["explicit", undefined, "unknown"],
+    ["process_exit", undefined, "transport"],
+  ] as const)(
+    "classifies %s/%s errors as %s without serializing details",
+    async (source, agentStopReason, expectedCategory) => {
+      vi.resetModules();
+      vi.doMock("node:child_process", () => ({
+        execFileSync: () => Buffer.from("%99\n"),
+        execFile: (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null, stdout?: string) => void,
+        ) => callback(null, "%99\n"),
+      }));
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const { cwd, id, state } = makePersistedState();
+      const telemetry = createTelemetrySession(true, "orchestrator_v2");
+      const owner = { id: 904, generation: 1 };
+      const scope = registerSessionScope({
+        ...owner,
+        lifecycle: "started",
+        pi: { sendMessage: vi.fn() } as any,
+        ui: {
+          notify: vi.fn(),
+          setStatus: vi.fn(),
+          setWidget: vi.fn(),
+        } as any,
+        sessionManager: { getSessionId: () => "pi" },
+        telemetry,
+      });
+      state.telemetryEligible = true;
+      state.telemetryCorrelationId = telemetry.correlationId;
+      state.telemetryActiveTurnId = "turn-error";
+      state.telemetryTurnStartedAt = 1;
+      state.telemetryInvocationSource = "interactive";
+      state.telemetryCompletionPolicy = "each";
+      state.telemetryAsync = true;
+      state.telemetryDepth = 1;
+      state.telemetryDepthBucket = "1";
+      state.telemetryModel = "default";
+      scope.interactiveStates.set(id, state);
+      mod.interactiveSubagentRegistry.set(id, state);
+      const art = artifactPath(join(state.artifactDir, ".."), id);
+      const secret =
+        "provider failed: Bearer secret https://private.example/token /Users/alice/project";
+      appendEvent(art, {
+        version: 2,
+        eventId: "error-completion-sensitive",
+        turnId: "turn-error",
+        ts: 2,
+        type: "completion",
+        status: "error",
+        outcome: "error",
+        source,
+        ...(agentStopReason === undefined ? {} : { agentStopReason }),
+        message: secret,
+        errorMessage: secret,
+        summary: secret,
+      });
+      const payloads: Array<{
+        event?: string;
+        properties?: Record<string, unknown>;
+      }> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      });
+      installDeliverySpies();
+
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+      const completed = payloads.find(
+        (payload) => payload.event === "pi_subagentura_task_completed",
+      );
+      expect(completed?.properties).toMatchObject({
+        status: "error",
+        error_category: expectedCategory,
+      });
+      if (source === "agent_settled" && agentStopReason !== undefined) {
+        expect(completed?.properties).toMatchObject({
+          agent_stop_reason: agentStopReason,
+        });
+      } else {
+        expect(completed?.properties).not.toHaveProperty("agent_stop_reason");
+      }
+      expect(completed?.properties).not.toHaveProperty("exit_code_bucket");
+      expect(JSON.stringify(payloads)).not.toContain(secret);
+    },
+  );
+
+  it("reports the bounded process-exit code without borrowing completion metadata", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => Buffer.from("%99\n"),
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout?: string) => void,
+      ) => callback(null, "%99\n"),
+    }));
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { cwd, id, state } = makePersistedState();
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 906, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      lifecycle: "started",
+      pi: { sendMessage: vi.fn() } as any,
+      ui: {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+      } as any,
+      sessionManager: { getSessionId: () => "pi" },
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepth = 1;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(id, state);
+    mod.interactiveSubagentRegistry.set(id, state);
+    const art = artifactPath(join(state.artifactDir, ".."), id);
+    appendEvent(art, {
+      version: 2,
+      eventId: "turn-started-for-exit",
+      turnId: "turn-exited",
+      ts: 1,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "process-exited-with-code",
+      turnId: "turn-exited",
+      ts: 2,
+      type: "process_exited",
+      status: "error",
+      exitCode: 17,
+    });
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+    installDeliverySpies();
+
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_task_completed",
+    );
+    expect(completed?.properties).toMatchObject({
+      status: "error",
+      terminal_reason: "process_exit",
+      error_category: "transport",
+      error_stage: "completion",
+      exit_code_bucket: "nonzero",
+    });
+    expect(completed?.properties).not.toHaveProperty("agent_stop_reason");
+  });
+
+  it("emits one privacy-safe runtime failure per malformed artifact episode", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => Buffer.from("%99\n"),
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout?: string) => void,
+      ) => callback(null, "%99\n"),
+    }));
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { cwd, id, state } = makePersistedState();
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 905, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      lifecycle: "started",
+      pi: { sendMessage: vi.fn() } as any,
+      ui: {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+      } as any,
+      sessionManager: { getSessionId: () => "pi" },
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepth = 1;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(id, state);
+    mod.interactiveSubagentRegistry.set(id, state);
+
+    const art = artifactPath(join(state.artifactDir, ".."), id);
+    const secret = "malformed secret bearer token";
+    mkdirSync(art.dir, { recursive: true });
+    writeFileSync(art.statusFile, `${secret}\n`);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+    installDeliverySpies();
+
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+    const runtimeFailures = () =>
+      payloads.filter(
+        (payload) => payload.event === "pi_subagentura_runtime_failure",
+      );
+    expect(runtimeFailures()).toHaveLength(1);
+    expect(runtimeFailures()[0]?.properties).toMatchObject({
+      error_category: "artifact",
+      error_stage: "polling",
+      failure_kind: "artifact_malformed",
+    });
+    expect(
+      payloads.some(
+        (payload) => payload.event === "pi_subagentura_task_completed",
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(payloads)).not.toContain(secret);
+
+    appendEvent(art, { ts: 2, type: "started", status: "running" });
+    appendFileSync(art.statusFile, `${secret}-again\n`);
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+    expect(runtimeFailures()).toHaveLength(2);
+    expect(JSON.stringify(payloads)).not.toContain(secret);
+  });
+
+  it("reports unreadable and oversized artifact episodes without terminal events", async () => {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => Buffer.from("%99\n"),
+      execFile: (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout?: string) => void,
+      ) => callback(null, "%99\n"),
+    }));
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const { state } = makePersistedState();
+    const telemetry = createTelemetrySession(true, "orchestrator_v2");
+    const owner = { id: 907, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      lifecycle: "started",
+      pi: { sendMessage: vi.fn() } as any,
+      ui: {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+      } as any,
+      sessionManager: { getSessionId: () => "pi" },
+      telemetry,
+    });
+    state.telemetryEligible = true;
+    state.telemetryCorrelationId = telemetry.correlationId;
+    state.telemetryInvocationSource = "interactive";
+    state.telemetryCompletionPolicy = "each";
+    state.telemetryAsync = true;
+    state.telemetryDepth = 1;
+    state.telemetryDepthBucket = "1";
+    state.telemetryModel = "default";
+    scope.interactiveStates.set(state.id, state);
+    mod.interactiveSubagentRegistry.set(state.id, state);
+
+    const art = artifactPath(join(state.artifactDir, ".."), state.id);
+    mkdirSync(art.dir, { recursive: true });
+    mkdirSync(art.statusFile);
+    const payloads: Array<{
+      event?: string;
+      properties?: Record<string, unknown>;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 200 });
+    });
+    installDeliverySpies();
+
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+    const runtimeFailures = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(runtimeFailures).toHaveLength(1);
+    expect(runtimeFailures[0]?.properties).toMatchObject({
+      error_category: "artifact",
+      error_stage: "polling",
+      failure_kind: "artifact_unreadable",
+    });
+    expect(state.eventByteCursor ?? 0).toBe(0);
+
+    rmSync(art.statusFile, { recursive: true, force: true });
+    writeFileSync(
+      art.statusFile,
+      Buffer.concat([
+        Buffer.alloc(MAX_EVENT_RECORD_BYTES + 1, 120),
+        Buffer.from("\n"),
+      ]),
+    );
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+    const allRuntimeFailures = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(allRuntimeFailures).toHaveLength(2);
+    expect(allRuntimeFailures[1]?.properties).toMatchObject({
+      error_category: "artifact",
+      error_stage: "polling",
+      failure_kind: "artifact_oversized",
+    });
+    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
+    expect(
+      payloads.some(
+        (payload) => payload.event === "pi_subagentura_task_completed",
+      ),
+    ).toBe(false);
   });
 
   it("removes state after process_exited even if pane liveness reports true", async () => {

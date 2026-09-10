@@ -24,6 +24,7 @@ import {
   updateInteractiveStates,
   type CompletionEvent,
   type CompletionOutcome,
+  type EventReadIssue,
   type SubagentArtifact,
   type SubagentEvent,
   type InteractiveSubagentPersistedStateV2,
@@ -73,7 +74,14 @@ import {
   resolveLiveSessionScope,
 } from "./session-scope";
 import { isAgentListHidden } from "./settings";
-import { captureTelemetry } from "./telemetry";
+import {
+  captureTelemetry,
+  type TelemetryErrorCategory,
+  type TelemetryErrorStage,
+  type TelemetryRuntimeFailureKind,
+  type TelemetrySession,
+  type TelemetryTerminalReason,
+} from "./telemetry";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -473,6 +481,242 @@ function deliveryMessageFromEvent(ev: CompletionEvent): string | undefined {
   return ev.outputError?.message;
 }
 
+function terminalReasonFromEvent(ev: SubagentEvent): TelemetryTerminalReason {
+  switch (ev.type) {
+    case "done":
+      return "completed";
+    case "error":
+      return "agent_error";
+    case "cancelled":
+      // Legacy cancellation events carry no source or cancellation origin.
+      return "unknown";
+    case "process_exited":
+      return "process_exit";
+    case "completion":
+      if (ev.outcome === "done") return "completed";
+      if (ev.outcome === "error") {
+        return ev.source === "process_exit" ? "process_exit" : "agent_error";
+      }
+      if (ev.source === "explicit") return "explicit_cancel";
+      if (ev.source === "process_exit") return "process_exit";
+      if (ev.source === "parent") {
+        // An explicit cancel-all operation is authoritative even if a caller
+        // also supplied stale lifecycle metadata.
+        if (ev.cancellationOrigin === "cancel_all") {
+          return "explicit_cancel";
+        }
+        // New/fork replace the logical session; startup/reload/resume only
+        // recover the existing one and therefore are ordinary shutdowns.
+        if (
+          ev.cancellationLifecycleReason === "new" ||
+          ev.cancellationLifecycleReason === "fork"
+        ) {
+          return "fresh_session";
+        }
+        if (
+          ev.cancellationOrigin === "cancel_interactive_subagent" ||
+          ev.cancellationOrigin === "cancel_subagent"
+        ) {
+          return "explicit_cancel";
+        }
+        if (
+          ev.cancellationLifecycleReason === "startup" ||
+          ev.cancellationLifecycleReason === "reload" ||
+          ev.cancellationLifecycleReason === "resume" ||
+          ev.cancellationLifecycleReason === "quit" ||
+          ev.cancellationOrigin === "session_start" ||
+          ev.cancellationOrigin === "session_shutdown"
+        ) {
+          return "session_shutdown";
+        }
+        return "parent_cancelled";
+      }
+      return "unknown";
+    case "started":
+    case "tool_activity":
+    case "turn_started":
+      return "unknown";
+    default:
+      return assertNever(ev);
+  }
+}
+
+function errorCategoryFromEvent(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+  terminalReason: TelemetryTerminalReason,
+): TelemetryErrorCategory | undefined {
+  if (status !== "error") return undefined;
+  if (terminalReason === "timeout") return "timeout";
+  if (event.type === "process_exited" || terminalReason === "process_exit") {
+    return "transport";
+  }
+  if (
+    event.type === "completion" &&
+    event.source === "agent_settled" &&
+    event.agentStopReason === "error"
+  ) {
+    return "provider";
+  }
+  return "unknown";
+}
+function taskErrorStageFromEvent(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+  terminalReason: TelemetryTerminalReason,
+): TelemetryErrorStage | undefined {
+  if (status !== "error") return undefined;
+  if (
+    event.type === "completion" &&
+    event.source === "agent_settled" &&
+    event.agentStopReason === "error"
+  ) {
+    return "provider";
+  }
+  if (event.type === "process_exited" || terminalReason === "process_exit") {
+    return "completion";
+  }
+  return "turn";
+}
+
+function taskAgentStopReason(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+): "error" | "aborted" | undefined {
+  if (
+    status === "error" &&
+    event.type === "completion" &&
+    event.source === "agent_settled"
+  ) {
+    return event.agentStopReason;
+  }
+  return undefined;
+}
+
+function taskExitCodeBucket(
+  event: SubagentEvent,
+): "zero" | "nonzero" | "unknown" | undefined {
+  if (event.type !== "process_exited") return undefined;
+  return Number.isSafeInteger(event.exitCode)
+    ? event.exitCode === 0
+      ? "zero"
+      : "nonzero"
+    : "unknown";
+}
+
+type ArtifactRuntimeFailureKind = Extract<
+  TelemetryRuntimeFailureKind,
+  | "artifact_unreadable"
+  | "artifact_malformed"
+  | "artifact_oversized"
+  | "mux_probe"
+>;
+
+interface RuntimeFailureEpisodeState {
+  active: Set<ArtifactRuntimeFailureKind>;
+  sequence: Map<ArtifactRuntimeFailureKind, number>;
+}
+
+const runtimeFailureEpisodes = new Map<string, RuntimeFailureEpisodeState>();
+
+function runtimeFailureKindForIssue(
+  issue: EventReadIssue,
+): ArtifactRuntimeFailureKind | undefined {
+  switch (issue.kind) {
+    case "artifact_unreadable":
+      return "artifact_unreadable";
+    case "artifact_malformed":
+      return "artifact_malformed";
+    case "record_too_large":
+      return "artifact_oversized";
+    default:
+      return undefined;
+  }
+}
+
+function runtimeFailureEpisodeState(
+  artifactDir: string,
+): RuntimeFailureEpisodeState {
+  const existing = runtimeFailureEpisodes.get(artifactDir);
+  if (existing) return existing;
+  const created: RuntimeFailureEpisodeState = {
+    active: new Set(),
+    sequence: new Map(),
+  };
+  runtimeFailureEpisodes.set(artifactDir, created);
+  return created;
+}
+
+function reportRuntimeFailure(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+  kind: ArtifactRuntimeFailureKind,
+  category: TelemetryErrorCategory,
+  stage: TelemetryErrorStage,
+): void {
+  if (
+    !telemetry ||
+    !state.telemetryEligible ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const episode = runtimeFailureEpisodeState(state.artifactDir);
+  if (episode.active.has(kind)) return;
+  episode.active.add(kind);
+  const sequence = (episode.sequence.get(kind) ?? 0) + 1;
+  episode.sequence.set(kind, sequence);
+  captureTelemetry(
+    telemetry,
+    {
+      event: "runtime_failure",
+      error_category: category,
+      error_stage: stage,
+      failure_kind: kind,
+    },
+    {
+      dedupeKey: `runtime-failure:interactive:${state.id}:${kind}:${sequence}`,
+    },
+  );
+}
+
+function clearRuntimeFailureEpisode(
+  state: InteractiveSubagentState,
+  kind: ArtifactRuntimeFailureKind,
+): void {
+  const episode = runtimeFailureEpisodes.get(state.artifactDir);
+  episode?.active.delete(kind);
+}
+
+function clearRuntimeFailureEpisodes(state: InteractiveSubagentState): void {
+  const episode = runtimeFailureEpisodes.get(state.artifactDir);
+  if (!episode) return;
+  episode.active.clear();
+}
+
+function reportArtifactReadIssues(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+  issues: readonly EventReadIssue[],
+): void {
+  const observedKinds = new Set<ArtifactRuntimeFailureKind>();
+  for (const issue of issues) {
+    const kind = runtimeFailureKindForIssue(issue);
+    if (kind === undefined) continue;
+    observedKinds.add(kind);
+    reportRuntimeFailure(state, telemetry, kind, "artifact", "polling");
+  }
+  for (const kind of [
+    "artifact_unreadable",
+    "artifact_malformed",
+    "artifact_oversized",
+  ] as const) {
+    if (!observedKinds.has(kind)) {
+      clearRuntimeFailureEpisode(state, kind);
+    }
+  }
+}
+
 const pollsInFlight = new Map<string, Promise<void>>();
 // ── Poller ─────────────────────────────────────────────────────────────
 
@@ -643,6 +887,17 @@ async function runPollArtifactChanges(
     const persistedStates: InteractiveSubagentState[] = [];
     for (const [state, paneLiveness] of liveness) {
       if (stateMap.get(state.id) !== state) continue;
+      if (paneLiveness === "unknown") {
+        reportRuntimeFailure(
+          state,
+          ownerContext?.telemetry,
+          "mux_probe",
+          "mux",
+          "polling",
+        );
+      } else {
+        clearRuntimeFailureEpisode(state, "mux_probe");
+      }
       // Cancelled is terminal. Unknown means pane liveness is unavailable, so keep polling
       // the artifact log: a later done/error event must still reach the parent.
       // 'exited' is intentionally not skipped: a follow-up user entry can revive it to "running".
@@ -656,6 +911,7 @@ async function runPollArtifactChanges(
 
       const cursor = state.eventByteCursor ?? 0;
       const batch = readEventBatch(art, cursor);
+      reportArtifactReadIssues(state, ownerContext?.telemetry, batch.issues);
       const records = batch.records;
       const lifecycle = (state.lifecycle ??= {});
       let nextCursor = cursor;
@@ -714,24 +970,49 @@ async function runPollArtifactChanges(
             }
           }
         }
+        const terminalTelemetryEvent =
+          ev.type === "completion" ||
+          ev.type === "done" ||
+          ev.type === "error" ||
+          ev.type === "cancelled" ||
+          ev.type === "process_exited";
+        const terminalTurnId =
+          ev.type === "completion" ? ev.turnId : state.telemetryActiveTurnId;
         if (
-          ev.type === "completion" &&
-          state.telemetryActiveTurnId === ev.turnId &&
+          terminalTelemetryEvent &&
+          terminalTurnId !== undefined &&
+          (ev.type !== "completion" ||
+            state.telemetryActiveTurnId === ev.turnId) &&
           state.telemetryCorrelationId ===
             ownerContext?.telemetry?.correlationId
         ) {
-          const status = deliveryStatusFromEvent(ev);
+          const status =
+            ev.type === "process_exited"
+              ? ev.status
+              : deliveryStatusFromEvent(ev);
           const messageTurnId = state.telemetryMessageTurnId;
-          const directMessageCount = state.telemetryTurnMessageCounts?.get(
-            ev.turnId,
-          );
+          const directMessageCount =
+            state.telemetryTurnMessageCounts?.get(terminalTurnId);
           const fallbackMessageCount =
             directMessageCount === undefined &&
             messageTurnId !== undefined &&
-            messageTurnId !== ev.turnId
+            messageTurnId !== terminalTurnId
               ? state.telemetryTurnMessageCounts?.get(messageTurnId)
               : undefined;
           const messageCount = directMessageCount ?? fallbackMessageCount;
+          const terminalReason = terminalReasonFromEvent(ev);
+          const errorCategory = errorCategoryFromEvent(
+            ev,
+            status,
+            terminalReason,
+          );
+          const errorStage = taskErrorStageFromEvent(
+            ev,
+            status,
+            terminalReason,
+          );
+          const agentStopReason = taskAgentStopReason(ev, status);
+          const exitCodeBucket = taskExitCodeBucket(ev);
           captureTelemetry(
             ownerContext?.telemetry,
             {
@@ -747,6 +1028,17 @@ async function runPollArtifactChanges(
               depth_bucket: state.telemetryDepthBucket ?? "unknown",
               completion_policy: state.telemetryCompletionPolicy ?? "legacy",
               status: status === "done" ? "success" : status,
+              terminal_reason: terminalReason,
+              ...(errorCategory === undefined
+                ? {}
+                : { error_category: errorCategory }),
+              ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+              ...(agentStopReason === undefined
+                ? {}
+                : { agent_stop_reason: agentStopReason }),
+              ...(exitCodeBucket === undefined
+                ? {}
+                : { exit_code_bucket: exitCodeBucket }),
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
@@ -754,22 +1046,22 @@ async function runPollArtifactChanges(
               child_conversation_message_count: messageCount,
             },
             {
-              dedupeKey: `task-completed:interactive:${state.id}:${ev.turnId}`,
+              dedupeKey: `task-completed:interactive:${state.id}:${terminalTurnId}:${ev.type}:${record.startOffset}`,
             },
           );
           state.telemetryActiveTurnId = undefined;
           state.telemetryTurnStartedAt = undefined;
           if (directMessageCount !== undefined) {
-            state.telemetryTurnMessageCounts?.delete(ev.turnId);
+            state.telemetryTurnMessageCounts?.delete(terminalTurnId);
           } else if (
             messageTurnId !== undefined &&
-            messageTurnId !== ev.turnId &&
+            messageTurnId !== terminalTurnId &&
             fallbackMessageCount !== undefined
           ) {
             state.telemetryTurnMessageCounts?.delete(messageTurnId);
           }
           if (
-            messageTurnId === ev.turnId ||
+            messageTurnId === terminalTurnId ||
             (directMessageCount === undefined &&
               fallbackMessageCount !== undefined)
           ) {
@@ -807,6 +1099,7 @@ async function runPollArtifactChanges(
             triggerTurn,
             status,
             artifactDir: state.artifactDir,
+            completedAt: ev.ts,
             output: v2?.output,
             message: deliveryMessageFromEvent(ev),
             completionPolicy: state.completionPolicy,
@@ -818,6 +1111,12 @@ async function runPollArtifactChanges(
       }
       if (!queueBlocked) {
         for (const issue of batch.issues) {
+          if (
+            issue.kind !== "record_too_large" ||
+            issue.endOffset > batch.endOffset
+          ) {
+            continue;
+          }
           if (state.completionOwner === "workflow") continue;
           const mode = state.completionPolicy
             ? "notify"
@@ -888,7 +1187,10 @@ async function runPollArtifactChanges(
       if (stateMap.get(state.id) !== state) continue;
       const terminal =
         state.status === "cancelled" || state.status === "exited";
-      if (terminal) destroySessionParser(state);
+      if (terminal) {
+        destroySessionParser(state);
+        clearRuntimeFailureEpisodes(state);
+      }
       if (
         terminal &&
         state.parentSessionId &&

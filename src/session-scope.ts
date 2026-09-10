@@ -35,6 +35,8 @@ export interface SessionScope {
   spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
   isParentIdle?: () => boolean;
+  /** True while Pi is waiting on a blocking extension UI prompt. */
+  uiPromptActive?: boolean;
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
   pendingInProcessDeliveries: PendingJobDelivery[];
@@ -55,6 +57,8 @@ export interface SessionScopeRegistration {
   spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
   isParentIdle?: () => boolean;
+  /** True while Pi is waiting on a blocking extension UI prompt. */
+  uiPromptActive?: boolean;
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
   pendingInProcessDeliveries?: PendingJobDelivery[];
@@ -80,6 +84,7 @@ interface SessionScopeGlobalState {
   __piSubagenturaUi?: ExtensionUIContext;
   __piSubagenturaSessionManager?: SessionScopeManager;
   __piSubagenturaParentStreaming?: boolean;
+  __piSubagenturaUiPromptActive?: boolean;
 }
 
 function getGlobalState(): typeof globalThis & SessionScopeGlobalState {
@@ -124,6 +129,7 @@ export function createSessionScope(
     spawnTreeContext,
     lineageMode,
     parentStreaming: false,
+    uiPromptActive: false,
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
@@ -175,6 +181,9 @@ export function registerSessionScope(
     if (registration.isParentIdle !== undefined) {
       existing.isParentIdle = registration.isParentIdle;
     }
+    if (registration.uiPromptActive !== undefined) {
+      existing.uiPromptActive = registration.uiPromptActive;
+    }
     if (registration.inProcessJobs !== undefined) {
       existing.inProcessJobs = registration.inProcessJobs;
     }
@@ -204,6 +213,7 @@ export function registerSessionScope(
         spawnTreeContext: registration.spawnTreeContext,
         lineageMode: registration.lineageMode ?? "root",
         isParentIdle: registration.isParentIdle,
+        uiPromptActive: registration.uiPromptActive ?? false,
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),
         pendingInProcessDeliveries:
@@ -312,6 +322,7 @@ export function setLegacyActiveSessionRefs(scope?: SessionScope): void {
     state[ACTIVE_SESSION_SCOPE_ID_KEY] = undefined;
     state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = undefined;
     state.__piSubagenturaParentStreaming = false;
+    state.__piSubagenturaUiPromptActive = false;
     return;
   }
 
@@ -321,6 +332,7 @@ export function setLegacyActiveSessionRefs(scope?: SessionScope): void {
   state[ACTIVE_SESSION_SCOPE_ID_KEY] = scope.id;
   state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = scope.generation;
   state.__piSubagenturaParentStreaming = scope.parentStreaming;
+  state.__piSubagenturaUiPromptActive = scope.uiPromptActive === true;
 }
 
 export function getActiveSessionOwner(): SessionOwnerToken | undefined {
@@ -338,12 +350,18 @@ export function getActiveSessionScopeId(): number | undefined {
 }
 
 export function resolveStreamingFlag(owner?: SessionOwnerToken): boolean {
-  if (owner) return resolveLiveSessionScope(owner)?.parentStreaming ?? false;
-  return Boolean(getGlobalState().__piSubagenturaParentStreaming);
+  const scope = owner ? resolveLiveSessionScope(owner) : undefined;
+  const state = getGlobalState();
+  if (owner) {
+    return Boolean(scope?.parentStreaming || scope?.uiPromptActive);
+  }
+  return Boolean(
+    state.__piSubagenturaParentStreaming || state.__piSubagenturaUiPromptActive,
+  );
 }
-
 export function resolveActualStreamingFlag(owner?: SessionOwnerToken): boolean {
   const scope = owner ? resolveLiveSessionScope(owner) : undefined;
+  if (scope?.uiPromptActive) return true;
   if (scope?.isParentIdle) {
     try {
       return !scope.isParentIdle();
