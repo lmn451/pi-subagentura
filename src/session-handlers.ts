@@ -44,6 +44,7 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
+import { restoreDurableWorkflowRuns } from "./workflow-durable-tools";
 import {
   deleteOrchestratorRoutingFile,
   loadOrchestratorRoutingMetadata,
@@ -129,8 +130,9 @@ function recordPreparedManifest(
 
 function isInMemoryWorkflowPane(state: InteractiveSubagentState): boolean {
   return (
-    state.completionOwner === "workflow" ||
-    state.workflowResultConsumed === true
+    !state.durableWorkflowAttempt &&
+    (state.completionOwner === "workflow" ||
+      state.workflowResultConsumed === true)
   );
 }
 
@@ -484,7 +486,7 @@ export function registerSessionHandlers(
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
   });
 
-  pi.on("session_start", (event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     scope.workflowAdmissionClosed = true;
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
@@ -706,7 +708,11 @@ export function registerSessionHandlers(
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
     }
+    const durableRecovery = continuityReason
+      ? restoreDurableWorkflowRuns(pi, sessionOwner(scope), ctx)
+      : undefined;
     ensureInteractivePoller(globalState);
+    await durableRecovery;
     scope.workflowAdmissionClosed = false;
   });
 

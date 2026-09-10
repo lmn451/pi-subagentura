@@ -1,4 +1,10 @@
 import { Type } from "typebox";
+import { registerDurableWorkflowTools } from "./workflow-durable-tools";
+import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
+import {
+  prepareDurableProcess,
+  cancelDurableProcess,
+} from "./workflow-durable-process";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
@@ -335,6 +341,7 @@ export function registerWorkflowTool(
       thinkingLevel,
       onProgress,
       onCancellationSnapshot,
+      durableAttempt,
     }) => {
       const launchRequestedAt = Date.now();
       const tryProcess = isolation !== "in-process";
@@ -407,8 +414,19 @@ export function registerWorkflowTool(
 
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
+        const durableProcess = durableAttempt
+          ? await prepareDurableProcess(durableAttempt)
+          : undefined;
         try {
-          state = launchInteractiveSubagent({
+          if (durableAttempt && !durableProcess?.previous)
+            await durableAttempt.recordDispatch?.();
+          if (signal?.aborted)
+            throw new Error("Workflow interrupted before process launch.");
+          state =
+            durableProcess?.previous ??
+            launchInteractiveSubagent({
+            wrapCommand: durableProcess?.wrapCommand,
+            beforeDispatch: durableProcess?.beforeDispatch,
             name: (label || "wf-agent").slice(0, 40),
             task: prompt,
             persona,
@@ -430,8 +448,13 @@ export function registerWorkflowTool(
             onSpawnFailure: (failure) => {
               initialFailure = failure;
             },
-          });
+            });
         } catch (err) {
+          if (durableAttempt)
+            throw new WorkflowRecoveryRequiredError(
+              "Durable process launch did not finish cleanly; inspect its attempt before resuming.",
+              err,
+            );
           initialFailure ??= {
             stage: spawnFailureStage(err) ?? "unknown",
           };
@@ -450,12 +473,29 @@ export function registerWorkflowTool(
             mux: state.mux,
             fallback_attempted: false,
           });
+          state.supervisorOwner = supervisorOwner;
+          state.workflowId = ownedWorkflowId;
+          state.completionOwner = "workflow";
+          // launchInteractiveSubagent performs this registration itself. Repeating
+          // the idempotent synchronization here keeps alternate launch adapters and
+          // test doubles on the same production contract: the owner scope is the
+          // authoritative index, while the process-global registry is compatibility.
+          registerInteractiveSubagentState(state, childScope);
           const result = await awaitInteractiveResult(
             state,
             signal,
             undefined,
             onCancellationSnapshot,
             childTelemetry,
+            durableProcess
+              ? () => {
+                  if (
+                    (signal?.reason as { source?: string } | undefined)
+                      ?.source !== "durable_interrupt"
+                  )
+                    cancelDurableProcess(durableProcess.path);
+                }
+              : undefined,
           );
           state.workflowResultConsumed = true;
           return result;
@@ -730,6 +770,21 @@ export function registerWorkflowTool(
     );
   }
 
+  const durableTools = registerDurableWorkflowTools(
+    pi,
+    owner,
+    (ctx, id, runAsync, completion) =>
+      makeRunAgent(
+        ctx,
+        id,
+        owner(),
+        runAsync,
+        workflowTelemetryCompletionPolicy(runAsync, completion),
+        resolveWorkflowSpawn(ctx),
+      ),
+    notifyWorkflowCompletion,
+  );
+
   registerToolWithDefaultGuidance(pi, {
     name: "workflow",
     label: "Workflow",
@@ -779,11 +834,14 @@ export function registerWorkflowTool(
     promptSnippet:
       "Orchestrate decomposable multi-agent work with trusted raw JavaScript workflows.",
     promptGuidelines: [
-      "Use workflows only for decomposable multi-agent work; handle simple or sequential tasks directly.",
+      "Use workflows for repeatable multi-agent work, including sequential pipelines; handle simple one-off tasks directly.",
+      "A vague workflow request means suggest a reusable script and confirm before saving/running; explicit /workflow creation or run requests authorize that action.",
+      "Durability is opt-in with durable:true. Durable calls need unique stable id options on agent() and workflow(); include item keys and retry attempt numbers. Resume interrupted runs explicitly with resume_workflow.",
       "Omit async for the default background behavior; use async: false only when synchronous execution is required.",
       "Pass raw JavaScript with no markdown fences. Include a top-level pure-literal `export const meta = { name, description, phases? }`.",
       "Do not use TypeScript, imports, require, fs, or other Node APIs. Date.now(), Math.random(), and argless new Date() are unavailable.",
-      "Available globals are agent, parallel, pipeline, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
+      "Available globals are agent, parallel, pipeline, retry, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
+      "retry(work, {attempts:3, retryOnNull:true}) explicitly repeats thrown/null failures with a one-based attempt argument (1–10 attempts). Agent schema repair separately uses up to three total attempts. Side effects may repeat.",
       "Call phase(title) at real work-group transitions. Agent phase defaults to the current phase; an explicit agent phase overrides it.",
       "parallel() takes thunks such as `() => agent(...)`; pipeline() streams each item through every stage independently, with no barrier between stages.",
       "Give agent calls unique short labels, include enough task context and relevant paths, and treat failed agents or stages as null.",
@@ -794,6 +852,12 @@ export function registerWorkflowTool(
       "Filter or handle null results, then use a final synthesis agent when the workflow needs one coherent answer.",
     ],
     parameters: Type.Object({
+      durable: Type.Optional(
+        Type.Boolean({
+          description:
+            "Persist this run for explicit restart recovery in the same host/cwd/Pi session. Requires stable operation ids; not exactly-once side effects or an always-on coordinator.",
+        }),
+      ),
       script: Type.Optional(
         Type.String({
           description:
@@ -861,6 +925,9 @@ export function registerWorkflowTool(
           isError: true,
         };
       }
+
+      if (params.durable === true)
+        return durableTools.run(params, signal, onUpdate, ctx);
 
       let completion: ResolvedCompletionPolicy;
       try {
@@ -1148,9 +1215,17 @@ export function registerWorkflowTool(
       }),
     }),
     outputSchema: WorkflowStatusOutputSchema,
-    async execute(_id, params): Promise<AgentToolResult<unknown>> {
+    async execute(
+      _id: string,
+      params: any,
+      _signal?: AbortSignal,
+      _update?: any,
+      ctx?: any,
+    ): Promise<AgentToolResult<unknown>> {
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
+        const persisted = await durableTools.inspect(params.workflowId, ctx);
+        if (persisted) return persisted;
         return {
           content: [
             { type: "text", text: workflowNotFoundMessage(params.workflowId) },
@@ -1236,10 +1311,22 @@ export function registerWorkflowTool(
       }),
     }),
     outputSchema: WorkflowResultOutputSchema,
-    async execute(_id, params, signal): Promise<AgentToolResult<unknown>> {
+    async execute(
+      _id: string,
+      params: any,
+      signal?: AbortSignal,
+      _update?: any,
+      ctx?: any,
+    ): Promise<AgentToolResult<unknown>> {
       const workflowOwner = owner();
       const st = getWorkflowJobForOwner(params.workflowId, workflowOwner);
       if (!st) {
+        const persisted = await durableTools.inspect(
+          params.workflowId,
+          ctx,
+          true,
+        );
+        if (persisted) return persisted;
         emitWorkflowResultReadTelemetry(
           undefined,
           workflowOwner,
@@ -1432,9 +1519,17 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(_id, params): Promise<AgentToolResult<unknown>> {
+    async execute(
+      _id: string,
+      params: any,
+      _signal?: AbortSignal,
+      _update?: any,
+      ctx?: any,
+    ): Promise<AgentToolResult<unknown>> {
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
+        const persisted = await durableTools.cancel(params.workflowId, ctx);
+        if (persisted) return persisted;
         return {
           content: [
             { type: "text", text: workflowNotFoundMessage(params.workflowId) },
@@ -1475,6 +1570,11 @@ export function registerWorkflowTool(
           },
         };
       }
+      if (st.durable)
+        await st.durable.store.append("cancelled", {
+          status: "cancelled",
+          completedAt: Date.now(),
+        });
       cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);
