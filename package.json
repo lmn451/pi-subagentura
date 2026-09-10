@@ -123,6 +123,7 @@
     "test:tmux": "vitest run tests/tmux.integration.test.ts",
     "test:zellij": "vitest run tests/zellij.integration.test.ts",
     "test:herdr": "vitest run tests/herdr.integration.test.ts",
+    "test:herdr:headless": "node --experimental-strip-types tests/helpers/herdr-headless.ts",
     "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/published-tarball.test.ts --exclude tests/performance-regression.test.ts --exclude 'tests/terminal-e2e/**'",
     "mutation:pilot": "stryker run",
     "typecheck": "tsc --noEmit",
