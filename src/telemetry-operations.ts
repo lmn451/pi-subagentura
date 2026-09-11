@@ -32,6 +32,18 @@ function resultStatus(result: unknown): TelemetryOperationResultStatus {
     case "updated":
     case "sent":
       return "ok";
+    case "discovered":
+    case "reconciled":
+    case "registered":
+    case "released":
+    case "assigned":
+    case "adopted":
+    case "recovered":
+    case "observed":
+    case "recorded":
+    case "reported":
+    case "duplicate":
+      return "ok";
     case "started":
       return "started";
     case "running":
@@ -63,6 +75,9 @@ function resultStatus(result: unknown): TelemetryOperationResultStatus {
     case "confirmation_required":
     case "user_confirmation_required":
       return "confirmation_required";
+    case "stale":
+    case "child_idle":
+      return "unavailable";
     case "error":
     case "send_failed":
     case "routing_metadata_error":

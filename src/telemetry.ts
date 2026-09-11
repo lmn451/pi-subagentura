@@ -121,6 +121,17 @@ export const TELEMETRY_OPERATION_NAMES = {
     "list_subagent_artifacts",
     "list_orchestrator_agents",
     "update_orchestrator_agent_description",
+    "workspace_discover",
+    "workspace_reconcile",
+    "workspace_register_slot",
+    "workspace_release",
+    "workspace_assign",
+    "workspace_adopt",
+    "workspace_recover",
+    "workspace_observe_publication",
+    "workspace_record_pr",
+    "workspace_observe_pr",
+    "workspace_report",
     "workflow",
     "get_workflow_status",
     "get_workflow_result",
@@ -157,6 +168,19 @@ export type TelemetryOperationResultStatus =
   | "unavailable"
   | "invalid_input"
   | "confirmation_required"
+  | "discovered"
+  | "reconciled"
+  | "registered"
+  | "released"
+  | "assigned"
+  | "adopted"
+  | "recovered"
+  | "observed"
+  | "recorded"
+  | "reported"
+  | "duplicate"
+  | "stale"
+  | "child_idle"
   | "error"
   | "unknown";
 export type TelemetrySessionFailureStage =

@@ -1491,6 +1491,12 @@ export interface InteractiveSubagentPersistedStateV1 {
    * state-file scope used by poll, delivery, and removal.
    */
   workingCwd?: string;
+  /** Durable workspace assignment identity; omitted for legacy children. */
+  workspaceRepoId?: string;
+  workspaceSlotId?: string;
+  workspaceAssignmentId?: string;
+  workspaceAssignmentEpoch?: number;
+  workspaceBranchRef?: string;
 
   notifyOnComplete?: "notify" | "inject";
   triggerTurnOnComplete?: boolean;
@@ -1832,6 +1838,40 @@ function migrateStatePayload(
       const entry = raw as unknown as InteractiveSubagentPersistedStateV1 &
         Partial<InteractiveSubagentPersistedStateV2>;
       const workingCwd = validatedWorkingCwd(entry.workingCwd);
+      const workspaceRepoId =
+        typeof entry.workspaceRepoId === "string" &&
+        /^[a-f0-9]{64}$/i.test(entry.workspaceRepoId)
+          ? entry.workspaceRepoId.toLowerCase()
+          : undefined;
+      const workspaceSlotId =
+        typeof entry.workspaceSlotId === "string" &&
+        /^[A-Za-z0-9._:-]{1,256}$/.test(entry.workspaceSlotId)
+          ? entry.workspaceSlotId
+          : undefined;
+      const workspaceAssignmentId =
+        typeof entry.workspaceAssignmentId === "string" &&
+        /^[A-Za-z0-9._:-]{1,256}$/.test(entry.workspaceAssignmentId)
+          ? entry.workspaceAssignmentId
+          : undefined;
+      const workspaceAssignmentEpoch =
+        typeof entry.workspaceAssignmentEpoch === "number" &&
+        Number.isSafeInteger(entry.workspaceAssignmentEpoch) &&
+        entry.workspaceAssignmentEpoch >= 0
+          ? entry.workspaceAssignmentEpoch
+          : undefined;
+      const workspaceBranchRef =
+        typeof entry.workspaceBranchRef === "string" &&
+        /^refs\/heads\/[A-Za-z0-9._/@+-]+$/.test(entry.workspaceBranchRef) &&
+        !entry.workspaceBranchRef.includes("..") &&
+        !entry.workspaceBranchRef.includes("//")
+          ? entry.workspaceBranchRef
+          : undefined;
+      const workspaceBindingComplete =
+        workspaceRepoId !== undefined &&
+        workspaceSlotId !== undefined &&
+        workspaceAssignmentId !== undefined &&
+        workspaceAssignmentEpoch !== undefined &&
+        workspaceBranchRef !== undefined;
       const art = artifactPath(
         dirname(entry.artifactDir),
         basename(entry.artifactDir),
@@ -2124,6 +2164,15 @@ function migrateStatePayload(
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,
         ...(workingCwd !== undefined ? { workingCwd } : {}),
+        ...(workspaceBindingComplete
+          ? {
+              workspaceRepoId,
+              workspaceSlotId,
+              workspaceAssignmentId,
+              workspaceAssignmentEpoch,
+              workspaceBranchRef,
+            }
+          : {}),
         ...(entry.notifyOnComplete === "notify" ||
         entry.notifyOnComplete === "inject"
           ? { notifyOnComplete: entry.notifyOnComplete }

@@ -295,6 +295,24 @@ remain process/session scoped and are retired rather than rehydrated.
 - The schema is versioned (`schemaVersion: 2`) with explicit v1 migration so
   coexist with older state files on upgrades.
 
+### Durable workspace state
+
+The repository-scoped `subagentura-workspace.json` ledger is separate from
+`.pi/subagentura-state.json`, routing metadata, artifacts, and delivery cursors.
+Only fresh `workspace-git.ts` probes establish current path, branch, head, status,
+index/filter/admin state, and occupancy. Claims, revisions, and operation intents
+are durable; an fsynced intent is written before any allowlisted non-force switch
+or branch creation. Unknown, dirty, ignored, conflicted, hidden-index, filtered,
+in-progress, locked, prunable, foreign, legacy, malformed, or capacity-exhausted
+state blocks rather than repairs or takes over automatically.
+
+Workspace child identity is carried only by a preallocated ID and the private
+`workspace-assignment.json` marker. `workspace_report` writes canonical bounded
+advisory proposals; it cannot change parent authority. `/new` and `/fork` preserve
+the repository ledger, while cross-session assignment ownership requires explicit
+user-confirmed adoption. Never add workspace events to `events.ndjson` or use child
+prose, PID liveness, PR state, or cached observations as release authority.
+
 ## Git
 
 - **Conventional Commits**: `feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:` / `perf:`. Scopes are welcome but not required.
@@ -328,6 +346,7 @@ src/
   tools/
     in-process.ts                  # subagent_with_context, subagent_isolated, async tools
     interactive.ts                 # subagent_interactive, get/send/cancel/read/list tools
+  tools/workspace.ts                # parent workspace manager and child report tool
   session-handlers.ts              # session_start/shutdown handlers, poller setup
   artifact-poller.ts               # byte-ordered event fold, durable enqueue, activity UI
   child-protocol.ts                # child-only Pi lifecycle hooks and completion writer
@@ -342,6 +361,11 @@ src/
   notifications.ts                 # upgrade-only legacy completion broker
   rendering.ts                     # TUI render helpers
   schemas.ts                       # TypeBox tool-param schemas
+  workspace-ledger.ts                # repository-scoped bounded ledger and CAS persistence
+  workspace-git.ts                   # sanitized argv-only Git adapter and probes
+  workspace-manager.ts               # slot discovery, assignment, release, recovery
+  workspace-reports.ts               # assignment markers and advisory proposals
+  workspace-pr.ts                    # provider-neutral PR records
   workflow.ts                      # Internal workflow barrel and registration re-export
   ndjson.d.ts                      # ambient types for the ndjson dep
   usage.ts                         # SDK-free usage normalization and aggregation
