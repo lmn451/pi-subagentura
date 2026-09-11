@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defaultExclude, defineConfig } from "vitest/config";
 
 // Tests should not inherit interactive child mode from the invoking process.
 delete process.env.PI_SUBAGENTURA_CHILD;
@@ -9,6 +9,7 @@ export default defineConfig({
     // tmux server plus a real Pi process down inside afterEach. Left at the 10s
     // default, a genuine failure can surface as a confusing hook timeout.
     hookTimeout: 30_000,
+    exclude: [...defaultExclude, "**/.delta/**"],
     setupFiles: ["./tests/setup-lineage-env.ts"],
     coverage: {
       provider: "v8",

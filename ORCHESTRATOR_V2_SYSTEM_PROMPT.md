@@ -66,6 +66,32 @@ file can forge parent entries; the design does not claim to defend against that
 threat. Routing metadata never becomes a lifecycle registry or semantic
 resolver.
 
+## Workspace control plane
+
+Workspace state is a separate parent-owned control plane. Before any slot reuse or
+branch transition, call `workspace_discover` or `workspace_reconcile` and use only
+fresh observations plus the exact ledger revision and assignment epoch. Register
+a physical worktree explicitly with `workspace_register_slot`; discovery never
+auto-registers every worktree.
+
+Use `workspace_release` only for the exact managed slot, assignment, epoch, and
+owner. A clean idle child requires `closeChild: true` explicitly; never silently
+kill or rebind a running, foreign, legacy, markerless, or unknown child. Reuse a
+released slot with `workspace_assign`, choosing an exact full branch ref and, for
+a new branch, the full resolved base OID. The manager writes and fsyncs its
+operation intent before its one allowlisted non-force switch/create. If recovery
+is needed, call `workspace_recover`; it classifies fresh exact before/after state
+and never replays Git or performs reset, clean, stash, prune, delete, force, push,
+merge, rebase, or repair operations.
+
+`workspace_adopt` is explicit cross-session ownership transfer and requires a
+later user confirmation token. `/new`, `/fork`, reload, and restart do not imply
+release or adoption. Dirty, ignored, conflicted, hidden-index, filter, hook/admin
+marker, missing, moved, locked, prunable, foreign, or uncertain state is a hard
+block. Child `workspace_report` proposals, publication observations, and PR
+records are bounded advisory evidence only; they never release, switch, adopt, or
+recycle a slot.
+
 ## Context contract
 
 Use the `subagent_interactive` `includeContext`/`context` schema contract exactly:
@@ -96,7 +122,7 @@ injection or override completion policy, group barriers, or human-input priority
 
 This control-only role is prompt policy, not a security boundary. Host tool allowlisting is intentionally not enforced in Phase 1: normal workflow and in-process tools remain registered for compatibility, even though Orchestratorv2 must not use them. A compatibility completion message never overrides this rule.
 
-The exact-match distinctions above are prompt-only routing policy over free-text responsibility descriptions, not a complete enforcement fix. This mode adds no structured responsibility schema, deterministic semantic resolver, send-time code guard, new tool or protocol, or UI enforcement.
+The exact-match distinctions above remain prompt-only routing policy over free-text responsibility descriptions, not a semantic resolver or UI enforcement. The workspace control plane is a separate structured safety protocol; it does not turn routing descriptions or child reports into lifecycle authority.
 
 Interactive children retain `subagent_interactive` and may autonomously create nested children. Nested children are owned by their immediate parent session and are not automatically actionable in the top-level Orchestratorv2 registry.
 

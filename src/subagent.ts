@@ -38,6 +38,7 @@ import {
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
+import { registerWorkspaceTools } from "./tools/workspace";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
@@ -115,6 +116,7 @@ export default function (pi: ExtensionAPI) {
     );
     registerInteractiveSubagentTools(pi, sessionScope);
     registerSubagentArtifactsCleanupTool(pi, sessionScope);
+    registerWorkspaceTools(pi, sessionScope, true);
     registerSubagentModelListTool(pi);
     registerInteractiveSupervisor(pi, sessionScope);
     return;
@@ -152,6 +154,7 @@ export default function (pi: ExtensionAPI) {
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);
   registerOrchestratorTools(pi, sessionScope);
+  registerWorkspaceTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);
   registerWorkflowTool(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);
