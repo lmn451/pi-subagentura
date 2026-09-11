@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { WorkflowPersistenceError } from "./workflow-run-store";
 import { open, type FileHandle } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { join } from "node:path";
@@ -74,6 +75,7 @@ interface ActiveAgentRun {
 }
 
 interface Engine {
+  durable?: RunWorkflowOptions["durable"];
   runAgent: WorkflowAgentRunner;
   abort: AbortController;
   signal: AbortSignal;
@@ -202,6 +204,7 @@ export async function runWorkflow(
     opts.signal?.addEventListener("abort", forwardAbort, { once: true });
   }
   const engine: Engine = {
+    durable: opts.durable,
     runAgent: opts.runAgent,
     abort,
     signal: abort.signal,
@@ -231,7 +234,7 @@ export async function runWorkflow(
   };
   try {
     const { meta, result } = await executeScript(script, engine, opts.args, 0);
-    return {
+    const completed = {
       meta,
       result,
       agentsSpawned: engine.counters.agentsSpawned,
@@ -244,6 +247,7 @@ export async function runWorkflow(
       usage: { ...engine.usage },
       phases: [...engine.phases],
     };
+    return engine.durable ? engine.durable.result(completed) : completed;
   } catch (error) {
     const cause = workflowFailureCause(error, opts.signal);
     if (!abort.signal.aborted) abort.abort(error);
@@ -267,6 +271,18 @@ type WorkerRpcResponse = {
   value?: unknown;
   error?: string;
   tokensDelta: number;
+  stats?: {
+    errorCount?: number;
+    cancelledCount?: number;
+    failure?: WorkflowFailureClassification;
+  };
+};
+
+type AgentCallResponse = {
+  value: unknown;
+  tokensDelta: number;
+  errorCount?: number;
+  cancelledCount?: number;
 };
 
 class WorkerRpcFailure extends Error {
@@ -311,16 +327,27 @@ async function executeScript(
     engine.onProgress?.(
       withProgressCounters(
         p,
-        engine.counters,
-        engine.usage,
+        engine.durable
+          ? {
+              ...engine.counters,
+              agentsSpawned: engine.durable.agentsSpawned,
+              tokensSpent: engine.durable.usage().output,
+              errorCount:
+                engine.durable.priorErrorCount + engine.counters.errorCount,
+            }
+          : engine.counters,
+        engine.durable?.usage() ?? engine.usage,
         engine.budgetTotal,
       ),
     );
   };
-  const runAgentCall = async (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }): Promise<{ value: unknown; tokensDelta: number }> => {
+  const runAgentCall = async (
+    payload: {
+      prompt: unknown;
+      opts?: WorkflowAgentOpts;
+    },
+    requestId: number,
+  ): Promise<AgentCallResponse> => {
     if (typeof payload.prompt !== "string" || payload.prompt.trim() === "") {
       throw new Error("agent(prompt): prompt must be a non-empty string.");
     }
@@ -391,8 +418,17 @@ async function executeScript(
             promise: undefined as unknown as Promise<SubagentResult>,
             usageAccounted: false,
           };
+          const invokeAgent: WorkflowAgentRunner = (request) =>
+            engine.durable
+              ? engine.durable.runAttempt(
+                  requestId,
+                  attempt,
+                  request,
+                  engine.runAgent,
+                )
+              : engine.runAgent(request);
           const agentRun = Promise.resolve().then(() =>
-            engine.runAgent({
+            invokeAgent({
               prompt: finalPrompt,
               persona: agentOpts.persona,
               model: agentOpts.model,
@@ -468,12 +504,12 @@ async function executeScript(
           if (res.cancelled) {
             status = "cancelled";
             engine.counters.cancelledCount++;
-            return { value: null, tokensDelta };
+            return { value: null, tokensDelta, cancelledCount: 1 };
           }
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
-            return { value: null, tokensDelta };
+            return { value: null, tokensDelta, errorCount: 1 };
           }
           if (!hasSchema) return { value: res.output, tokensDelta };
           if (!isProcess && res.workflowStructuredOutput != null) {
@@ -546,7 +582,7 @@ async function executeScript(
         kind: "log",
         message: `agent(schema) failed after ${attempts} attempts: ${lastErr}`,
       });
-      return { value: null, tokensDelta };
+      return { value: null, tokensDelta, errorCount: 1 };
     } catch (error) {
       throw new WorkerRpcFailure(error, tokensDelta, runnerFailure);
     } finally {
@@ -571,10 +607,13 @@ function runWorkflowWorker(
   args: unknown,
   engine: Engine,
   emit: (p: WorkflowProgressUpdate) => void,
-  runAgentCall: (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }) => Promise<{ value: unknown; tokensDelta: number }>,
+  runAgentCall: (
+    payload: {
+      prompt: unknown;
+      opts?: WorkflowAgentOpts;
+    },
+    requestId: number,
+  ) => Promise<AgentCallResponse>,
 ): Promise<{ meta: WorkflowMeta; result: unknown }> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -594,12 +633,19 @@ function runWorkflowWorker(
       if (settled) return;
       settled = true;
       engine.closed = true;
+      engine.durable?.stop();
       cleanup();
       terminateWorker();
       reject(err instanceof Error ? err : new Error(String(err)));
     };
     const done = (value: { meta: WorkflowMeta; result: unknown }) => {
       if (settled) return;
+      try {
+        engine.durable?.assertComplete();
+      } catch (error) {
+        fail(error);
+        return;
+      }
       settled = true;
       engine.closed = true;
       cleanup();
@@ -620,6 +666,7 @@ function runWorkflowWorker(
     };
 
     engine.signal?.addEventListener("abort", onAbort, { once: true });
+    engine.durable?.bind((value) => worker.postMessage(value), fail);
     if (engine.signal?.aborted) {
       onAbort();
       return;
@@ -646,28 +693,48 @@ function runWorkflowWorker(
         emit(msg.payload);
         return;
       }
+      if (msg.type === "response_ready") {
+        engine.durable?.acceptResponse(msg.id, msg.frontier);
+        return;
+      }
       if (typeof msg.id !== "number" || typeof msg.method !== "string") return;
-      handleWorkerRpc(
-        msg as WorkerRpcRequest,
-        worker,
-        engine,
-        runAgentCall,
-      ).catch((err) => {
-        if (err instanceof WorkerRpcFailure && err.runnerFailure) {
-          runnerFailures.set(msg.id, err.runnerFailure.cause);
-        } else if (workflowFailureClassification(err)) {
-          runnerFailures.set(msg.id, err);
+      const execute = async (): Promise<WorkerRpcResponse> => {
+        try {
+          return await handleWorkerRpc(msg, engine, runAgentCall);
+        } catch (err) {
+          if (
+            err instanceof WorkflowPersistenceError ||
+            (err instanceof Error &&
+              err.cause instanceof WorkflowPersistenceError)
+          )
+            throw err;
+          if (err instanceof WorkerRpcFailure && err.runnerFailure) {
+            runnerFailures.set(msg.id, err.runnerFailure.cause);
+          } else if (workflowFailureClassification(err)) {
+            runnerFailures.set(msg.id, err);
+          }
+          const error = err instanceof Error ? err.message : String(err);
+          const tokensDelta =
+            err instanceof WorkerRpcFailure ? err.tokensDelta : 0;
+          return {
+            id: msg.id,
+            ok: false,
+            error,
+            tokensDelta,
+            stats: {
+              errorCount:
+                err instanceof WorkerRpcFailure && err.runnerFailure ? 1 : 0,
+              failure: engine.failure,
+            },
+          };
         }
-        const error = err instanceof Error ? err.message : String(err);
-        const tokensDelta =
-          err instanceof WorkerRpcFailure ? err.tokensDelta : 0;
-        postWorkerResponse(worker, {
-          id: msg.id,
-          ok: false,
-          error,
-          tokensDelta,
-        });
-      });
+      };
+      if (engine.durable) engine.durable.dispatch(msg, execute);
+      else
+        void execute().then(
+          (response) => postWorkerResponse(worker, response),
+          fail,
+        );
     });
     worker.on("error", fail);
     worker.on("exit", (code) => {
@@ -683,41 +750,48 @@ function runWorkflowWorker(
       syncTimeoutMs: WORKFLOW_SYNC_TIMEOUT_MS,
       maxItemsPerCall: MAX_ITEMS_PER_CALL,
       maxWorkflowDepth: MAX_WORKFLOW_DEPTH,
+      durable: !!engine.durable,
     });
   });
 }
 
 async function handleWorkerRpc(
   msg: WorkerRpcRequest,
-  worker: Worker,
   engine: Engine,
-  runAgentCall: (payload: {
-    prompt: unknown;
-    opts?: WorkflowAgentOpts;
-  }) => Promise<{ value: unknown; tokensDelta: number }>,
-): Promise<void> {
+  runAgentCall: (
+    payload: {
+      prompt: unknown;
+      opts?: WorkflowAgentOpts;
+    },
+    requestId: number,
+  ) => Promise<AgentCallResponse>,
+): Promise<WorkerRpcResponse> {
   if (msg.method === "agent") {
-    const response = await runAgentCall(msg.payload);
-    postWorkerResponse(worker, {
+    const response = await runAgentCall(msg.payload, msg.id);
+    return {
       id: msg.id,
       ok: true,
       value: response.value,
       tokensDelta: response.tokensDelta,
-    });
-    return;
+      stats: {
+        errorCount: response.errorCount,
+        cancelledCount: response.cancelledCount,
+        failure: engine.failure,
+      },
+    };
   }
   if (msg.method === "loadWorkflow") {
-    const script = loadWorkflowRef(msg.payload, engine);
-    if (script == null && typeof msg.payload === "string") {
-      throw new Error(`workflow(): no saved workflow named "${msg.payload}".`);
+    const name = engine.durable ? msg.payload.name : msg.payload;
+    const script = loadWorkflowRef(name, engine);
+    if (script == null && typeof name === "string") {
+      throw new Error(`workflow(): no saved workflow named "${name}".`);
     }
-    postWorkerResponse(worker, {
+    return {
       id: msg.id,
       ok: true,
       value: script,
       tokensDelta: 0,
-    });
-    return;
+    };
   }
   throw new Error(`Unknown workflow worker RPC method: ${msg.method}`);
 }
@@ -991,6 +1065,8 @@ export async function awaitInteractiveResult(
   signal: AbortSignal | undefined,
   pollMs = INTERACTIVE_POLL_MS,
   onCancellationSnapshot?: (receipt: CancellationSnapshotReceipt) => void,
+  /** Durable callers cancel through the exact one-use child supervisor. */
+  requestCancellation?: () => void,
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
@@ -1001,10 +1077,17 @@ export async function awaitInteractiveResult(
     terminal: null,
   };
   let cancellationRequested = false;
+  let cancellationError: unknown;
   const requestCancellationOnce = () => {
     if (cancellationRequested) return;
     cancellationRequested = true;
-    requestInteractiveCancellation(state, onCancellationSnapshot);
+    if (requestCancellation) {
+      try {
+        requestCancellation();
+      } catch (error) {
+        cancellationError = error;
+      }
+    } else requestInteractiveCancellation(state, onCancellationSnapshot);
   };
   const onAbort = () => requestCancellationOnce();
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -1014,6 +1097,7 @@ export async function awaitInteractiveResult(
       let terminal: TurnTerminalEvent | null;
       if (signal?.aborted) {
         requestCancellationOnce();
+        if (cancellationError) throw cancellationError;
         const cancellationUsage = await parseUsageFromSessionFile(
           state.sessionFile,
         );

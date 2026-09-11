@@ -24,6 +24,8 @@
  * of the codebase compiles unchanged.
  */
 
+import { cancelDurableProcess } from "./workflow-durable-process";
+import { debugLog } from "./helpers";
 import {
   findSessionScope,
   sessionOwner,
@@ -239,6 +241,8 @@ export interface InteractiveSubagentState {
   sessionOwner?: SessionOwnerToken;
   /** Workflow that owns this child, when completion is aggregated by the workflow. */
   workflowId?: string;
+  /** Private one-use durable attempt manifest; not a user-controlled pane target. */
+  durableWorkflowAttempt?: string;
   /** Completion is delivered standalone or consumed by a workflow aggregate. */
   completionOwner?: "standalone" | "workflow";
   /** Workflow-runner acknowledgement that this child's result was consumed; runtime-only and intentionally not persisted. */
@@ -618,6 +622,9 @@ export function captureInteractiveSubagentCreatedTelemetry(
 }
 
 export function launchInteractiveSubagent(params: {
+  /** Internal durable launcher hooks, executed before any provider work starts. */
+  wrapCommand?: (command: string) => string;
+  beforeDispatch?: (state: InteractiveSubagentState) => void;
   name: string;
   task: string;
   persona?: string;
@@ -1086,13 +1093,6 @@ export function launchInteractiveSubagent(params: {
     throw err;
   }
   try {
-    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-    mux.sendKeys(
-      paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
-      muxSession,
-    );
-    mux.sendEnter(paneId, muxSession);
     attach = mux.buildAttachCommands({
       paneId,
       terminalId: muxTerminalId,
@@ -1153,6 +1153,17 @@ export function launchInteractiveSubagent(params: {
       spawnStartedAt: spawnStartedAt,
       captured: false,
     });
+  }
+  try {
+    params.beforeDispatch?.(state);
+    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+    const launch = `exec bash ${escape(paths.launchScriptFile)}`;
+    mux.sendKeys(paneId, params.wrapCommand?.(launch) ?? launch, muxSession);
+    mux.sendEnter(paneId, muxSession);
+  } catch (error) {
+    reportSpawnFailure("pane_launch", mux.name);
+    cleanupFailedSpawn();
+    throw error;
   }
   try {
     registerInteractiveSubagentState(state, liveScope);
@@ -1415,6 +1426,16 @@ interface ParentCancellationContext {
   lifecycleReason?: ParentCancellationLifecycleReason;
 }
 
+function terminateOwnedInteractivePane(state: InteractiveSubagentState): void {
+  if (state.durableWorkflowAttempt) {
+    cancelDurableProcess(state.durableWorkflowAttempt);
+    return;
+  }
+  const mux = getMuxForState(state);
+  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead")
+    mux.killPane(state.paneId, state.muxSession);
+}
+
 export function cancelInteractiveSubagent(
   id: string,
   source: CancellationSnapshotSource = "cancel_interactive_subagent",
@@ -1453,10 +1474,7 @@ export function cancelInteractiveSubagent(
   } finally {
     // A failed artifact write must not prevent the requested stop.
     state.status = "cancelled";
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
-    }
+    terminateOwnedInteractivePane(state);
   }
   return state;
 }
@@ -1541,10 +1559,7 @@ export function cancelInteractiveDescendantByState(
     appendCancellation(state, { origin: "supervisor_descendant" }, false);
   } finally {
     state.status = "cancelled";
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
-    }
+    terminateOwnedInteractivePane(state);
   }
   return state;
 }
@@ -1601,13 +1616,12 @@ export function cancelInteractiveSubagentByState(
     appendCancellation(state, context);
   } finally {
     // Teardown must outlive artifact failures during destructive transitions.
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      try {
-        mux.killPane(state.paneId, state.muxSession);
-      } catch {
-        /* best-effort */
-      }
+    try {
+      terminateOwnedInteractivePane(state);
+    } catch (error) {
+      debugLog("warn", "interactive_cancel_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   // Does NOT update state.status — see JSDoc point 2.

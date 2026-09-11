@@ -51,6 +51,15 @@ parentPort.on("message", (msg) => {
     return;
   }
 
+  if (msg.type === "response_offer") {
+    parentPort.postMessage({
+      type: "response_ready",
+      id: msg.id,
+      frontier: nextRpcId - 1,
+    });
+    return;
+  }
+
   if (msg.type === "init") {
     workerConfig = {
       syncTimeoutMs: msg.syncTimeoutMs,
@@ -58,6 +67,7 @@ parentPort.on("message", (msg) => {
       maxWorkflowDepth: msg.maxWorkflowDepth,
       budgetTotal: msg.budgetTotal,
       cwd: msg.cwd,
+      durable: msg.durable === true,
     };
     executeScript(msg.script, msg.args, 0)
       .then((value) => parentPort.postMessage({ type: "result", value }))
@@ -86,16 +96,22 @@ parentPort.on("message", (msg) => {
   }
 });
 
-async function executeScript(script, args, depth) {
+async function executeScript(script, args, depth, operationPath = []) {
   const parsed = parseWorkflow(script);
-  const result = await executeBody(parsed.meta, parsed.body, args, depth);
-  while (outstandingAgentCalls.size > 0) {
+  const result = await executeBody(
+    parsed.meta,
+    parsed.body,
+    args,
+    depth,
+    operationPath,
+  );
+  while (depth === 0 && outstandingAgentCalls.size > 0) {
     await Promise.all([...outstandingAgentCalls]);
   }
   return { meta: parsed.meta, result };
 }
 
-async function executeBody(meta, body, args, depth) {
+async function executeBody(meta, body, args, depth, operationPath) {
   let currentPhase;
 
   function checkAbort() {
@@ -123,6 +139,9 @@ async function executeBody(meta, body, args, depth) {
       return await rpc("agent", {
         prompt,
         opts: callOpts,
+        ...(workerConfig.durable
+          ? { operationPath: [...operationPath, opts.id] }
+          : {}),
       });
     })();
     outstandingAgentCalls.add(call);
@@ -194,6 +213,31 @@ async function executeBody(meta, body, args, depth) {
     );
   }
 
+  async function retry(work, { attempts = 3, retryOnNull = true } = {}) {
+    if (typeof work !== "function") {
+      throw new Error("retry(work): expected a function.");
+    }
+    if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10) {
+      throw new Error("retry(): attempts must be an integer in 1–10.");
+    }
+    if (typeof retryOnNull !== "boolean") {
+      throw new Error("retry(): retryOnNull must be a boolean.");
+    }
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      checkAbort();
+      try {
+        const result = await work(attempt);
+        checkAbort();
+        if (result !== null || !retryOnNull || attempt === attempts) {
+          return result;
+        }
+      } catch (error) {
+        checkAbort();
+        if (attempt === attempts) throw error;
+      }
+    }
+  }
+
   function phase(title) {
     const t = String(title ?? "");
     currentPhase = t;
@@ -210,14 +254,33 @@ async function executeBody(meta, body, args, depth) {
     });
   }
 
-  async function workflow(nameOrRef, childArgs) {
-    checkAbort();
-    if (depth >= workerConfig.maxWorkflowDepth) {
-      throw new Error("workflow() composition is one level deep only.");
-    }
-    const childScript = await rpc("loadWorkflow", nameOrRef);
-    const child = await executeScript(childScript, childArgs, depth + 1);
-    return child.result;
+  function workflow(nameOrRef, childArgs, options = {}) {
+    const call = (async () => {
+      checkAbort();
+      if (depth >= workerConfig.maxWorkflowDepth) {
+        throw new Error("workflow() composition is one level deep only.");
+      }
+      const childPath = [...operationPath, options.id];
+      const childScript = await rpc(
+        "loadWorkflow",
+        workerConfig.durable
+          ? { name: nameOrRef, args: childArgs, operationPath: childPath }
+          : nameOrRef,
+      );
+      const child = await executeScript(
+        childScript,
+        childArgs,
+        depth + 1,
+        childPath,
+      );
+      return child.result;
+    })();
+    outstandingAgentCalls.add(call);
+    void call.then(
+      () => outstandingAgentCalls.delete(call),
+      () => outstandingAgentCalls.delete(call),
+    );
+    return call;
   }
 
   const budget = {
@@ -230,6 +293,7 @@ async function executeBody(meta, body, args, depth) {
     agent,
     parallel,
     pipeline,
+    retry,
     phase,
     log,
     workflow,

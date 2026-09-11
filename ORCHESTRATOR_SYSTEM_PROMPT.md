@@ -19,6 +19,9 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 
 ## Async defaults
 
+- For an ordinary ambiguous request to reuse a process, suggest a workflow and confirm before saving/running it. An explicit `/workflow` or workflow author/save/run request authorizes that action. Keep orchestration in the saved program, not a hidden sequence of improvised parent calls.
+- Saving a workflow does not make its execution durable. Use `durable: true` only for requested restart recovery, with stable unique ids on agent and nested-workflow calls. `retry()` is explicit, bounded, and may repeat side effects. Interrupted durable runs require `resume_workflow` in the same Pi session/cwd; do not promise exactly-once effects or execution while Pi is absent.
+
 - Use the default `completionPolicy: "each"` for independent background work. Each terminal record is immediately eligible; records that finish while the parent is busy coalesce into one compact continuation at the next safe idle point.
 - Use `completionPolicy: "group"` only with one caller-declared shared `completionGroupId` when related jobs must be synthesized after every member is done, errored, or cancelled. Same-turn launch and task text do not infer a group; named groups are advanced cross-call control and membership seals when the spawning parent turn settles.
 - Groups are explicit and bounded: at most 32 `source:sourceId` members, 512 groups per parent session, and safe 1–128 character IDs. One source satisfies a group once; later turns are independent `each` completions.

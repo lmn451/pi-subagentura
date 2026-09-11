@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Explicit bounded `retry()` workflow primitive, independent of existing
+  three-attempt schema repair, with typed attempt numbers and cancellation guards.
+- Opt-in durable code workflows: private request/response and agent-attempt
+  journals, stable operation ids, manual same-session recovery, persisted
+  results/cancellation, source inspection, and run listing. Root definitions,
+  arguments, effective settings, and nested definitions are recorded; parallel
+  response ordering and worker-visible budget deltas replay without new agent calls.
+- One-use process attempt supervisors and persisted unfinished completion
+  barriers for durable workflows. Existing non-durable execution remains the
+  compatibility default; no daemon, remote execution, VM snapshots, or
+  exactly-once external-side-effect guarantee is introduced.
+
 ## [3.6.2] - 2026-09-06
 
 ### Added

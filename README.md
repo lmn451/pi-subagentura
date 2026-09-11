@@ -87,6 +87,9 @@ of injected orchestration primitives:
   barrier before continuing.
 - `pipeline()` streams each item through a sequence of stages without waiting
   for every item to finish a stage first.
+- `retry(work, { attempts: 3 })` explicitly retries exceptions and `null`
+  failures, with a one-based attempt argument and a maximum of ten attempts.
+  Schema repair separately permits three total agent attempts.
 - `phase()` names progress in the TUI. Saved workflows may call another saved
   workflow with `workflow(name, args)`, with one level of nesting.
 
@@ -106,12 +109,26 @@ Existing agent/item caps, concurrency, timeouts, cancellation, and errors still 
 
 Workflow scripts are trusted agent-authored JavaScript. The VM improves
 determinism but is not a security boundary, so never run untrusted JavaScript.
-Background workflow jobs are scoped to the current parent session and are
+By default, background workflow jobs are scoped to the current parent session and are
 cancelled by reload, resume, quit, or a new session. Standalone attachable
 interactive sub-agents use durable artifacts and survive parent `reload`,
 `resume`, and `quit` continuity transitions. A fresh `new` or `fork` transition
 cleans up their owned panes and state entries; workflow-owned interactive panes
 are also cleaned up with their owning workflow.
+
+For explicitly restart-resumable execution, use `workflow({ name, args,
+durable: true })`. Give every `agent()` and nested `workflow()` call a unique
+stable `id`; include item keys and retry attempt numbers. Use
+`list_workflow_runs`, `get_workflow_status`, `get_workflow_result`,
+`cancel_workflow`, and `resume_workflow` to inspect and control saved runs.
+Recovery re-executes the recorded script and replays committed outcomes in their
+recorded response order. It requires the same host, canonical cwd, Pi session,
+and Node major version. It is manual, not an always-on coordinator, and agent
+side effects are **not exactly-once**. Process children can finish while Pi is
+absent; new workflow steps cannot start until Pi resumes the run. Durable
+process attempts fail closed instead of falling back after a failed launch.
+See [durable runtime semantics](./WORKFLOW_RUNTIME.md) for the recovery and
+cancellation contract, storage limits, and failure handling.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
@@ -121,7 +138,7 @@ See the [workflow guide](./docs/workflows.md) and
 - Route work to attachable interactive specialists with `--orchestratorv2`
 - Resume interactive artifacts, routing state, pending deliveries, and receipts
   within the matching parent session; delivery is bounded and at-least-once,
-  while in-process jobs and background workflows remain session-scoped
+  while in-process jobs and default background workflows remain session-scoped
 - Watch a real child Pi session and its tool activity live in tmux, Zellij, or Herdr
 - Supervise a bounded recursive tree of interactive children and grandchildren
 - Focus or capture a descendant pane locally, or attach from another terminal
@@ -158,6 +175,9 @@ The extension registers these public tools for parent agents.
 | `workflow`                              | Run a trusted workflow script or saved workflow                   |
 | `save_workflow`                         | Validate and save a reusable workflow                             |
 | `list_workflows`                        | List saved workflows                                              |
+| `inspect_workflow`                      | Read and validate a saved definition without running it           |
+| `list_workflow_runs`                    | List durable runs in this Pi session and cwd                      |
+| `resume_workflow`                       | Explicitly resume an interrupted durable run                      |
 | `delete_workflow`                       | Delete a saved workflow                                           |
 | `get_workflow_status`                   | Inspect a background workflow                                     |
 | `get_workflow_result`                   | Wait for and return a workflow result                             |
@@ -186,13 +206,13 @@ There is no single best extension; the useful distinction is what kind of
 control you want after delegation. This table compares the most widely used Pi
 sub-agent extensions as of July 2026, based on their published documentation.
 
-| Extension                                                                                | Strongest fit                                                        | Pros                                                                                                                                                                                                                                                                                   | Cons / tradeoffs                                                                                                                                                                                                                                                 |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **pi-subagentura**                                                                       | Work you may want to watch, attach to, or continue interactively     | Combines lightweight in-process jobs with real child Pi sessions; recursive supervisor with focus, bounded capture, and subtree cancellation; tmux/Zellij/Herdr attach; mid-session follow-ups; durable per-turn artifacts; parent restart/reload rehydration; bounded workflow runner | Interactive mode requires tmux, Zellij, or Herdr and starts another process; in-process jobs and workflows do not survive parent-session replacement; workflow JavaScript is trusted code, not a security sandbox; smaller community than the alternatives below |
-| [`@adamjen/pi-interactive-subagents`](https://github.com/HazAT/pi-interactive-subagents) | Fully asynchronous, multiplexer-native agent workflows               | Dedicated panes in cmux, tmux, Zellij, or WezTerm; live status widget; interruption and session resume; custom agents; child-to-parent help requests; bundled `/plan` and `/iterate` workflows                                                                                         | Child-process/multiplexer-only design with no lightweight in-process path; its help-request flow exits and later resumes the child; no documented immutable per-turn output and durable delivery-receipt protocol comparable to pi-subagentura's                 |
-| [`pi-subagents`](https://github.com/nicobailon/pi-subagents)                             | Feature-rich orchestration and automated multi-step coding workflows | Large built-in agent/workflow set; foreground and background runs; chains, parallel groups, worktrees, lifecycle artifacts, fleet UI, watchdog review, supervisor messaging, and nested delegation                                                                                     | Much larger configuration and tool surface; more concepts to learn; does not provide an attachable terminal session—the fleet view is an inspector inside Pi                                                                                                     |
-| [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)                   | Claude Code-style sub-agents inside Pi                               | Polished live widget and FleetView; foreground/background execution; steering and resume; custom agent definitions; worktree isolation; scheduling; model/tool/extension controls                                                                                                      | Broad feature/configuration surface; UI and control stay inside the parent Pi experience rather than exposing a normal attachable child terminal; persistent sessions/artifacts are optional rather than the default source of truth                             |
-| [`@mjakl/pi-subagent`](https://github.com/mjakl/pi-subagent)                             | A small, predictable delegation primitive                            | Simple tool shape; fresh or parent-seeded context; parallel calls; named persistent sessions; depth/cycle guards; rich streaming TUI                                                                                                                                                   | Fewer orchestration features; no background job manager or durable event protocol; no live attachable pane; a stale persistent-session lock can require manual cleanup after a killed process                                                                    |
+| Extension                                                                                | Strongest fit                                                        | Pros                                                                                                                                                                                                                                                                                   | Cons / tradeoffs                                                                                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **pi-subagentura**                                                                       | Work you may want to watch, attach to, or continue interactively     | Combines lightweight in-process jobs with real child Pi sessions; recursive supervisor with focus, bounded capture, and subtree cancellation; tmux/Zellij/Herdr attach; mid-session follow-ups; durable per-turn artifacts; parent restart/reload rehydration; bounded workflow runner | Interactive mode requires tmux, Zellij, or Herdr and starts another process; in-process jobs and default workflows do not survive parent-session replacement; workflow JavaScript is trusted code, not a security sandbox; smaller community than the alternatives below |
+| [`@adamjen/pi-interactive-subagents`](https://github.com/HazAT/pi-interactive-subagents) | Fully asynchronous, multiplexer-native agent workflows               | Dedicated panes in cmux, tmux, Zellij, or WezTerm; live status widget; interruption and session resume; custom agents; child-to-parent help requests; bundled `/plan` and `/iterate` workflows                                                                                         | Child-process/multiplexer-only design with no lightweight in-process path; its help-request flow exits and later resumes the child; no documented immutable per-turn output and durable delivery-receipt protocol comparable to pi-subagentura's                         |
+| [`pi-subagents`](https://github.com/nicobailon/pi-subagents)                             | Feature-rich orchestration and automated multi-step coding workflows | Large built-in agent/workflow set; foreground and background runs; chains, parallel groups, worktrees, lifecycle artifacts, fleet UI, watchdog review, supervisor messaging, and nested delegation                                                                                     | Much larger configuration and tool surface; more concepts to learn; does not provide an attachable terminal session—the fleet view is an inspector inside Pi                                                                                                             |
+| [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)                   | Claude Code-style sub-agents inside Pi                               | Polished live widget and FleetView; foreground/background execution; steering and resume; custom agent definitions; worktree isolation; scheduling; model/tool/extension controls                                                                                                      | Broad feature/configuration surface; UI and control stay inside the parent Pi experience rather than exposing a normal attachable child terminal; persistent sessions/artifacts are optional rather than the default source of truth                                     |
+| [`@mjakl/pi-subagent`](https://github.com/mjakl/pi-subagent)                             | A small, predictable delegation primitive                            | Simple tool shape; fresh or parent-seeded context; parallel calls; named persistent sessions; depth/cycle guards; rich streaming TUI                                                                                                                                                   | Fewer orchestration features; no background job manager or durable event protocol; no live attachable pane; a stale persistent-session lock can require manual cleanup after a killed process                                                                            |
 
 If you want multiplexer-native async agents with broader terminal support, try
 `@adamjen/pi-interactive-subagents`. If you want the broadest orchestration
@@ -373,7 +393,8 @@ those children; this is prompt guidance, not an enforced routing boundary.
 For interactive children in the matching parent session, artifacts, routing state,
 pending deliveries, and receipts persist and rehydrate across same-session
 restart, reload, and resume paths. Delivery is bounded and at-least-once; in-process
-jobs and background workflows remain session-scoped.
+jobs and default background workflows remain session-scoped. Opt-in durable
+workflow runs require explicit recovery; see [the runtime contract](WORKFLOW_RUNTIME.md).
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
@@ -806,9 +827,15 @@ parent session entries. Manual consumption first persists its receipt to a
 private, session-scoped ledger beneath the parent Pi session directory, then
 best-effort mirrors it into a parent session entry. If the ledger write fails,
 result collection fails before the mirror is attempted; lifecycle retirement
-has a separate best-effort path. In-process jobs and background workflows
+has a separate best-effort path. In-process jobs and default background workflows
 remain parent-session scoped and are retired on session replacement. `new` and
 `fork` do not import prior completion work.
+
+Opt-in durable workflow aggregate notices retain their result references across
+continuity transitions. Unfinished groups containing durable workflows persist
+their membership and sealing; recovery retains interactive/durable peers and
+retires non-resumable in-process/default-workflow members. Child reports still
+never enter parent context automatically.
 
 Parent delivery fails closed behind durable notice storage. If `appendEntry`
 fails, the notice remains pending and the manifest is withheld; later coordinator
