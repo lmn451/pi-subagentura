@@ -22,3 +22,9 @@ npm-debug.log*
 
 # npm package output
 *.tgz
+
+# Generated Delta worktrees are test fixtures, not package source.
+**/.delta/**
+
+# Planning artifacts are reviewed as source inputs, not formatted package files.
+plans/**

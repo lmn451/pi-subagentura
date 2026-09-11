@@ -46,6 +46,19 @@ const ORCHESTRATOR_TOOL_NAMES = [
   "update_orchestrator_agent_description",
 ].sort();
 
+const WORKSPACE_TOOL_NAMES = [
+  "workspace_adopt",
+  "workspace_assign",
+  "workspace_discover",
+  "workspace_observe_pr",
+  "workspace_observe_publication",
+  "workspace_reconcile",
+  "workspace_record_pr",
+  "workspace_recover",
+  "workspace_register_slot",
+  "workspace_release",
+].sort();
+
 const WORKFLOW_TOOL_NAMES = [
   "cancel_workflow",
   "delete_workflow",
@@ -104,6 +117,7 @@ describe("extension registration", () => {
         ...IN_PROCESS_TOOL_NAMES,
         ...ORCHESTRATOR_TOOL_NAMES,
         ...WORKFLOW_TOOL_NAMES,
+        ...WORKSPACE_TOOL_NAMES,
       ].sort(),
     );
     expect(api.registerCommand).toHaveBeenCalledWith(
@@ -332,6 +346,7 @@ describe("extension registration", () => {
         "read_subagent_artifact",
         "send_interactive_subagent_message",
         "subagent_interactive",
+        "workspace_report",
       ].sort(),
     );
     expect(names).not.toContain("workflow");

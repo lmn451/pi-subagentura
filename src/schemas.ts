@@ -5,6 +5,12 @@ import {
   MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
   MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
 } from "./orchestrator-routing";
+import {
+  MAX_WORKSPACE_ID_BYTES,
+  MAX_WORKSPACE_PATH_BYTES,
+  MAX_WORKSPACE_REF_BYTES,
+  MAX_WORKSPACE_PUBLICATION_REFS,
+} from "./workspace-ledger";
 
 const THINKING_LEVELS = [
   "off",
@@ -308,3 +314,214 @@ export const InteractiveParams = exposeProviderObjectShape(
   }),
   InteractiveProviderFields,
 );
+
+const WORKSPACE_CHILD_ID_PATTERN = "^(?:[a-f0-9]{8}|[a-f0-9]{16})$";
+const WORKSPACE_FULL_REF_PATTERN = "^refs/heads/[A-Za-z0-9._/@+-]+$";
+const WORKSPACE_OID_PATTERN = "^[a-f0-9]{40,64}$";
+
+export const WorkspaceDiscoverParams = Type.Object({});
+export const WorkspaceReconcileParams = Type.Object({});
+export const WorkspaceRegisterSlotParams = Type.Object({
+  slotId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  root: Type.Optional(
+    Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_PATH_BYTES }),
+  ),
+  adminKey: Type.Optional(
+    Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  ),
+  expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
+  publicationRefs: Type.Optional(
+    Type.Array(
+      Type.Object(
+        {
+          remote: Type.String({ minLength: 1, maxLength: 512 }),
+          ref: Type.String({
+            minLength: 1,
+            maxLength: MAX_WORKSPACE_REF_BYTES,
+            pattern: WORKSPACE_FULL_REF_PATTERN,
+          }),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: MAX_WORKSPACE_PUBLICATION_REFS },
+    ),
+  ),
+});
+export const WorkspaceReleaseParams = Type.Object({
+  slotId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  assignmentId: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_ID_BYTES,
+  }),
+  expectedRevision: Type.Integer({ minimum: 0 }),
+  expectedEpoch: Type.Integer({ minimum: 0 }),
+  childId: Type.Optional(Type.String({ pattern: WORKSPACE_CHILD_ID_PATTERN })),
+  closeChild: Type.Optional(Type.Boolean()),
+});
+export const WorkspaceAssignParams = Type.Object({
+  slotId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  workItemId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  branchRef: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_REF_BYTES,
+    pattern: WORKSPACE_FULL_REF_PATTERN,
+  }),
+  action: Type.Optional(
+    Type.Union([
+      Type.Literal("switch_existing"),
+      Type.Literal("create_branch"),
+    ]),
+  ),
+  baseOid: Type.Optional(Type.String({ pattern: WORKSPACE_OID_PATTERN })),
+  expectedRevision: Type.Integer({ minimum: 0 }),
+  expectedEpoch: Type.Integer({ minimum: 0 }),
+  assignmentId: Type.Optional(
+    Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  ),
+  operationId: Type.Optional(
+    Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  ),
+  childMode: Type.Optional(
+    Type.Union([
+      Type.Literal("none"),
+      Type.Literal("new"),
+      Type.Literal("existing"),
+    ]),
+  ),
+  childId: Type.Optional(Type.String({ pattern: WORKSPACE_CHILD_ID_PATTERN })),
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  task: Type.Optional(Type.String({ minLength: 1, maxLength: 64 * 1024 })),
+  persona: Type.Optional(Type.String({ maxLength: 64 * 1024 })),
+  model: Type.Optional(Type.String({ maxLength: 512 })),
+});
+export const WorkspaceAdoptParams = Type.Object({
+  repoId: Type.String({ minLength: 1, maxLength: 64 }),
+  slotId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  assignmentId: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_ID_BYTES,
+  }),
+  expectedRevision: Type.Integer({ minimum: 0 }),
+  expectedEpoch: Type.Integer({ minimum: 0 }),
+  confirmed: Type.Boolean(),
+  confirmationToken: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 128 }),
+  ),
+});
+export const WorkspaceRecoverParams = Type.Object({
+  operationId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  expectedRevision: Type.Integer({ minimum: 0 }),
+  action: Type.Union([
+    Type.Literal("reconcile"),
+    Type.Literal("abandon-before-state"),
+  ]),
+  confirmed: Type.Boolean(),
+  confirmationToken: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 128 }),
+  ),
+});
+export const WorkspacePublicationParams = Type.Object({
+  workItemId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  assignmentEpoch: Type.Integer({ minimum: 0 }),
+  remote: Type.String({ minLength: 1, maxLength: 512 }),
+  ref: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_REF_BYTES,
+    pattern: WORKSPACE_FULL_REF_PATTERN,
+  }),
+  candidateOid: Type.String({ pattern: WORKSPACE_OID_PATTERN }),
+  candidateBranchRef: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_REF_BYTES,
+    pattern: WORKSPACE_FULL_REF_PATTERN,
+  }),
+});
+export const WorkspaceRecordPrParams = Type.Object({
+  workItemId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  provider: Type.String({ minLength: 1, maxLength: 128 }),
+  externalId: Type.String({ minLength: 1, maxLength: 512 }),
+  claimedHeadOid: Type.Optional(
+    Type.String({ pattern: WORKSPACE_OID_PATTERN }),
+  ),
+  claimedBaseRef: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: MAX_WORKSPACE_REF_BYTES,
+      pattern: WORKSPACE_FULL_REF_PATTERN,
+    }),
+  ),
+  provenance: Type.Optional(
+    Type.Union([Type.Literal("parent"), Type.Literal("child_proposal")]),
+  ),
+});
+export const WorkspaceObservePrParams = Type.Object({
+  associationId: Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_ID_BYTES,
+  }),
+  state: Type.Union([
+    Type.Literal("unknown"),
+    Type.Literal("open"),
+    Type.Literal("closed"),
+    Type.Literal("merged"),
+  ]),
+  draft: Type.Optional(Type.Boolean()),
+  verification: Type.Union([
+    Type.Literal("unsupported"),
+    Type.Literal("unverified"),
+    Type.Literal("verified"),
+    Type.Literal("unavailable"),
+    Type.Literal("mismatch"),
+  ]),
+  headRepo: Type.Optional(Type.String({ maxLength: MAX_WORKSPACE_PATH_BYTES })),
+  headRef: Type.Optional(
+    Type.String({
+      maxLength: MAX_WORKSPACE_REF_BYTES,
+      pattern: WORKSPACE_FULL_REF_PATTERN,
+    }),
+  ),
+  headOid: Type.Optional(Type.String({ pattern: WORKSPACE_OID_PATTERN })),
+  baseRef: Type.Optional(
+    Type.String({
+      maxLength: MAX_WORKSPACE_REF_BYTES,
+      pattern: WORKSPACE_FULL_REF_PATTERN,
+    }),
+  ),
+  freshness: Type.Union([
+    Type.Literal("fresh"),
+    Type.Literal("stale"),
+    Type.Literal("unknown"),
+  ]),
+  source: Type.Optional(
+    Type.Union([Type.Literal("provider"), Type.Literal("manual_parent")]),
+  ),
+});
+export const WorkspaceReportParams = Type.Object({
+  proposalId: Type.String({ minLength: 1, maxLength: MAX_WORKSPACE_ID_BYTES }),
+  turnId: Type.String({ minLength: 1, maxLength: 256 }),
+  kind: Type.Union([
+    Type.Literal("status"),
+    Type.Literal("observation"),
+    Type.Literal("publication"),
+    Type.Literal("pr"),
+    Type.Literal("progress"),
+  ]),
+  facts: Type.Record(Type.String({ maxLength: 128 }), Type.Any()),
+  reportedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+});
+
+for (const schema of [
+  WorkspaceDiscoverParams,
+  WorkspaceReconcileParams,
+  WorkspaceRegisterSlotParams,
+  WorkspaceReleaseParams,
+  WorkspaceAssignParams,
+  WorkspaceAdoptParams,
+  WorkspaceRecoverParams,
+  WorkspacePublicationParams,
+  WorkspaceRecordPrParams,
+  WorkspaceObservePrParams,
+  WorkspaceReportParams,
+]) {
+  Object.assign(schema, { additionalProperties: false });
+}
