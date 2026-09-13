@@ -145,6 +145,14 @@ describe("Orchestratorv2 managed Git workspaces", () => {
         "utf8",
       ),
     ).toBe(before);
+    const remaining = await new OrchestratorWorkspaceGit().listWorktrees(
+      provisioned.repository,
+    );
+    expect(
+      remaining.some(
+        (worktree) => worktree.root === provisioned.assignment.worktreeRoot,
+      ),
+    ).toBe(true);
   }, 60_000);
 
   it("retains a blocked reservation when provisioning fails before Git creation", async () => {
