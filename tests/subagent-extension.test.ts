@@ -241,6 +241,12 @@ describe("extension registration", () => {
       "Do not ask the user for permission merely to create that specialist",
     );
     expect(result.systemPrompt).toContain(
+      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
+    );
+    expect(result.systemPrompt).toContain(
+      "exactly one interactive child for each part",
+    );
+    expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
     expect(result.systemPrompt).toContain(
