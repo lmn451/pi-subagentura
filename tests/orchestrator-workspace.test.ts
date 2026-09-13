@@ -146,4 +146,45 @@ describe("Orchestratorv2 managed Git workspaces", () => {
       ),
     ).toBe(before);
   }, 60_000);
+
+  it("retains a blocked reservation when provisioning fails before Git creation", async () => {
+    const { root } = fixture();
+    const repository = {
+      root,
+      commonDir: root,
+      gitDir: join(root, ".git"),
+      repoId: "b".repeat(64),
+      objectFormat: "sha1" as const,
+    };
+    const mainWorktree = {
+      root,
+      adminDir: join(root, ".git"),
+      adminKey: "main",
+      branchRef: "refs/heads/master",
+      headOid: "c".repeat(40),
+      locked: false,
+      prunable: false,
+      workingTree: "clean" as const,
+    };
+    const failingGit = {
+      probeRepository: async () => repository,
+      listWorktrees: async () => [mainWorktree],
+      addLockedWorktree: async () => {
+        throw new Error("simulated Git creation failure");
+      },
+      observeWorktree: async () => undefined,
+    };
+    const manager = new OrchestratorWorkspaceManager(failingGit as any);
+    const reserved = await manager.reserve({
+      agentId: "deadbeefdeadbeef",
+      workItemId: "partial",
+      sourceCwd: root,
+    });
+    await expect(manager.provision(reserved)).rejects.toMatchObject({
+      code: "provision_failed",
+    });
+    const state = loadOrchestratorWorkspace(root)!;
+    expect(state.assignments[0]?.lifecycle).toBe("blocked");
+    expect(state.assignments[0]?.closedErrorCode).toBe("Error");
+  }, 60_000);
 });
