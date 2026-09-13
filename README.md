@@ -453,6 +453,26 @@ recovery classifies exact before/after state and never replays Git automatically
 Reload, restart, `/new`, and `/fork` preserve the repository ledger. Cross-session
 ownership requires explicit user-confirmed adoption; a dead PID is not authority.
 
+**Top-level Orchestratorv2 provisioning (v1).** A top-level V2 `subagent_interactive` call
+
+must include a bounded `workItemId`. Before child input, the manager records a durable
+
+assignment under `<git-common-dir>/subagentura/workspaces.json`, creates one unique
+
+locked linked worktree with `git worktree add --lock -b`, writes a no-clobber owner
+
+marker in its Git admin directory, and appends a parent authority receipt. The child
+
+launch is finalized only after a fresh branch/HEAD/path/lock/status verification. The
+
+new state is retained across reload, restart, completion, cancellation, `/new`, `/fork`,
+
+and `/quit`; missing, drifted, foreign, or unknown state remains visible but cannot be
+
+automatically adopted, repaired, relaunched, or removed. A future `jj` backend is
+
+intentionally deferred.
+
 ## Cancellation context snapshots (opt-in)
 
 Cancellation snapshots are **disabled by default**. To enable bounded snapshots before parent-initiated cancellation, set:

@@ -58,6 +58,8 @@ import {
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
 import { reconcileWorkspaceSession } from "./workspace-manager";
+import { OrchestratorWorkspaceManager } from "./orchestrator-workspace-manager";
+import { hasManagedWorkspaceCandidate } from "./orchestrator-workspace-view";
 import { WORKSPACE_LEDGER_FILE } from "./workspace-ledger";
 import {
   advanceSessionScopeGeneration,
@@ -718,6 +720,18 @@ export function registerSessionHandlers(
     if (!isChild && ctx.cwd && hasWorkspaceLedgerCandidate(ctx.cwd)) {
       const workspaceOwner = sessionOwner(scope);
       void reconcileWorkspaceSession(ctx.cwd, workspaceOwner, scope);
+    }
+    if (
+      !isChild &&
+      orchestratorV2Mode &&
+      ctx.cwd &&
+      hasManagedWorkspaceCandidate(ctx.cwd)
+    ) {
+      // Fresh Git reads are intentionally awaited by the manager before the
+      // next poller tick; reconciliation itself never mutates assignments.
+      void new OrchestratorWorkspaceManager().reconcile(ctx.cwd).catch(() => {
+        // A non-Git cwd or unavailable repository must not block session start.
+      });
     }
     ensureInteractivePoller(globalState);
   });
