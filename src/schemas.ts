@@ -151,6 +151,15 @@ const InteractiveSpawnFields = Type.Object({
   task: Type.String({
     description: "Task to start in the interactive sub-agent",
   }),
+  workItemId: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 128,
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      description:
+        "Bounded top-level Orchestratorv2 work item identity; V2 spawns require it.",
+    }),
+  ),
   persona: Type.Optional(
     Type.String({
       description:
@@ -277,8 +286,15 @@ const InteractiveContextMode = Type.Union([
   ),
 ]);
 
+const {
+  workItemId: _workspaceWorkItemId,
+  ...interactiveProviderSpawnProperties
+} = InteractiveSpawnFields.properties;
+
 const InteractiveProviderFields = Type.Object({
-  ...InteractiveSpawnFields.properties,
+  // Keep the internal workspace identity out of Pi's legacy provider projection;
+  // direct V2 callers still validate it through InteractiveParams.
+  ...interactiveProviderSpawnProperties,
   includeContext: Type.Optional(
     Type.Boolean({
       description:
