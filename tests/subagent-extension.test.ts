@@ -80,8 +80,12 @@ describe("extension registration", () => {
   beforeEach(() => {
     previousChild = process.env.PI_SUBAGENTURA_CHILD;
     delete process.env.PI_SUBAGENTURA_CHILD;
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    vi.stubEnv("TYPESAFE_API_KEY", undefined);
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     if (previousChild === undefined) {
       delete process.env.PI_SUBAGENTURA_CHILD;
     } else {
@@ -257,6 +261,78 @@ describe("extension registration", () => {
       resetRuntimeSpawnTreeContextForTests();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    { flag: "orchestratorv2", router: undefined, key: undefined },
+    { flag: "", router: "jev", key: "fake-key" },
+    { flag: "orchestratorv2", router: undefined, key: "fake-key" },
+    { flag: "orchestratorv2", router: "JEV", key: "fake-key" },
+    { flag: "orchestratorv2", router: "deterministic", key: "fake-key" },
+    { flag: "orchestrator", router: "jev", key: "fake-key" },
+  ])(
+    "keeps Jev disabled for $flag / $router",
+    async ({ flag, router, key }) => {
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", router);
+      vi.stubEnv("TYPESAFE_API_KEY", key);
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = mockApi({ getFlag: vi.fn((name: string) => name === flag) });
+
+      registerExtension(api as any);
+      const beforeAgentStart = api.on.mock.calls.find(
+        ([event]: any[]) => event === "before_agent_start",
+      )?.[1];
+      const result = await beforeAgentStart(
+        { systemPrompt: "base prompt" },
+        {},
+      );
+
+      expect(getRegisteredToolNames(api)).not.toContain(
+        "resolve_orchestrator_route",
+      );
+      expect(result?.systemPrompt ?? "").not.toContain(
+        "## Optional Jev routing advisor",
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("delivers enabled advisor guidance and registers the tool without making a request", async () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+    vi.stubEnv("TYPESAFE_API_KEY", "fake-key");
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const api = mockApi({
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    });
+
+    registerExtension(api as any);
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    // The emitted system prompt is the interface delivered to the parent.
+    // These assertions do not claim to test an LLM's interpretation of it.
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
+
+    expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
+    expect(result.systemPrompt).toContain("## Optional Jev routing advisor");
+    expect(
+      result.systemPrompt.indexOf("If multiple children plausibly match"),
+    ).toBeLessThan(
+      result.systemPrompt.indexOf("## Optional Jev routing advisor"),
+    );
+    expect(result.systemPrompt).toContain(
+      "this section overrides the earlier instruction",
+    );
+    expect(result.systemPrompt).toContain('On kind="reuse"');
+    expect(result.systemPrompt).toContain('On kind="ask"');
+    expect(result.systemPrompt).toContain('On kind="cancelled"');
+    expect(result.systemPrompt).toContain(
+      "send_interactive_subagent_message and send the original task",
+    );
+    expect(result.systemPrompt).toContain("requests bypass the advisor");
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("does not acknowledge a completion wake during preflight", async () => {

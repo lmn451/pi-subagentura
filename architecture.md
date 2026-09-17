@@ -208,6 +208,16 @@ the routing-metadata tools `list_orchestrator_agents` and
 enforce a host-level tool allowlist; normal tools remain registered for legacy
 compatibility, while the prompt directs this mode to interactive children.
 
+The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds an advisory
+`resolve_orchestrator_route` tool only in v2 mode. `tools/orchestrator-router.ts`
+builds fresh candidates from parent authority and current runtime state;
+`jev-routing.ts` performs the bounded external Choice request and
+`routing-engine.ts` applies confidence and probability-margin policy. The
+advisor revalidates state before returning a child ID, but does not reserve,
+send to, create, or attach to a child. The parent remains the caller of the
+existing messaging tool. Enabled-only prompt guidance permits Jev to resolve
+child-selection ambiguity while retaining clarification for unclear work or
+access. See [Jev routing](docs/jev-routing.md) for configuration and disclosure.
 `src/orchestrator-routing.ts` keeps two related representations:
 
 1. the current parent session branch, whose latest valid

@@ -385,5 +385,34 @@ describe("published tarball", () => {
       { cwd: consumer, encoding: "utf8" },
     );
     expect(smoke.status, smoke.stderr || smoke.stdout).toBe(0);
+    const jevSmoke = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { createJiti } from "jiti";
+         const jiti = createJiti(import.meta.url);
+         const mod = await jiti.import("pi-subagentura", { default: false });
+         globalThis.fetch = () => { throw new Error("registration must not fetch"); };
+         const tools = [];
+         mod.default({
+           registerTool: (tool) => tools.push(tool.name),
+           registerMessageRenderer() {}, registerFlag() {}, registerCommand() {},
+           registerShortcut() {}, on() {},
+           getFlag: (name) => name === "orchestratorv2",
+         });
+         if (!tools.includes("resolve_orchestrator_route")) process.exit(5);`,
+      ],
+      {
+        cwd: consumer,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PI_ORCHESTRATOR_ROUTER: "jev",
+          TYPESAFE_API_KEY: "synthetic-no-network",
+        },
+      },
+    );
+    expect(jevSmoke.status, jevSmoke.stderr || jevSmoke.stdout).toBe(0);
   }, 60_000);
 });
