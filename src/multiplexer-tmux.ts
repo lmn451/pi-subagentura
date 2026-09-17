@@ -37,6 +37,7 @@ import {
   execMuxOrThrow,
   MAX_CAPTURE_READ_BYTES,
   MUX_CAPABILITIES,
+  type PaneLivenessOptions,
   safeSegment,
   sanitizeViewerTitle,
   shellEscape,
@@ -364,12 +365,15 @@ export class TmuxMultiplexer implements Multiplexer {
     }
   }
 
-  private listPanesAsync(): Promise<ReadonlySet<string> | undefined> {
+  private listPanesAsync(
+    options?: PaneLivenessOptions,
+  ): Promise<ReadonlySet<string> | undefined> {
+    const fresh = options?.fresh === true;
     const cached = this.paneListingCache;
-    if (cached && Date.now() - cached.at < PANE_LIVENESS_CACHE_MS) {
+    if (!fresh && cached && Date.now() - cached.at < PANE_LIVENESS_CACHE_MS) {
       return Promise.resolve(cached.panes);
     }
-    if (this.paneListingInFlight) return this.paneListingInFlight;
+    if (!fresh && this.paneListingInFlight) return this.paneListingInFlight;
     const request = new Promise<ReadonlySet<string> | undefined>((resolve) => {
       try {
         execFile(
@@ -394,17 +398,22 @@ export class TmuxMultiplexer implements Multiplexer {
     });
     this.paneListingInFlight = request;
     void request.then((panes) => {
+      // A fresh probe may have superseded this request. Only the newest
+      // observation may become the shared cache or clear the active request.
+      if (this.paneListingInFlight !== request) return;
       this.paneListingCache = { at: Date.now(), panes };
-      if (this.paneListingInFlight === request) {
-        this.paneListingInFlight = undefined;
-      }
+      this.paneListingInFlight = undefined;
     });
     return request;
   }
 
-  async getPaneLivenessAsync(paneId: string): Promise<PaneLiveness> {
+  async getPaneLivenessAsync(
+    paneId: string,
+    _session?: string,
+    options?: PaneLivenessOptions,
+  ): Promise<PaneLiveness> {
     if (!/^%\d+$/.test(paneId)) return "unknown";
-    const panes = await this.listPanesAsync();
+    const panes = await this.listPanesAsync(options);
     return panes ? (panes.has(paneId) ? "alive" : "dead") : "unknown";
   }
 

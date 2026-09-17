@@ -10,7 +10,10 @@ export default defineConfig({
     // default, a genuine failure can surface as a confusing hook timeout.
     hookTimeout: 30_000,
     exclude: [...defaultExclude, "**/.delta/**"],
-    setupFiles: ["./tests/setup-lineage-env.ts"],
+    setupFiles: [
+      "./tests/setup-lineage-env.ts",
+      "./tests/setup-routing-env.ts",
+    ],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
