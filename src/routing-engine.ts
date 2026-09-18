@@ -25,30 +25,31 @@ export interface RoutingEvidence {
   margin: number;
 }
 
-export type RoutingAskReason =
+export const ROUTING_PROVIDER_ENV = "PI_ORCHESTRATOR_ROUTER";
+export type RoutingProvider = "jev" | "openjev" | "llm";
+
+export type RoutingNoMatchReason = "none" | "low_confidence" | "ambiguous";
+
+export type RoutingErrorReason =
   | "disabled"
   | "missing_key"
   | "invalid_config"
-  | "no_candidates"
   | "invalid_input"
   | "payload_too_large"
   | "timeout"
   | "unavailable"
   | "invalid_response"
-  | "no_match"
-  | "low_confidence"
-  | "ambiguous"
   | "state_changed"
   | "incomplete_registry";
 
 export type RoutingDecision =
-  | { kind: "reuse"; childId: string; evidence: RoutingEvidence }
+  | { kind: "match"; childId: string; evidence: RoutingEvidence }
   | {
-      kind: "ask";
-      reason: RoutingAskReason;
-      candidateIds: string[];
+      kind: "no_match";
+      reason: RoutingNoMatchReason;
       evidence?: RoutingEvidence;
     }
+  | { kind: "error"; reason: RoutingErrorReason }
   | { kind: "cancelled" };
 
 export interface RoutingEngine {
@@ -68,7 +69,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze({
 });
 
 /**
- * Return the closed policy reason for evidence that cannot authorize reuse.
+ * Return the closed policy reason for evidence that cannot authorize a match.
  * An exact tie remains ambiguous even when a trusted caller sets the minimum
  * margin to zero.
  */
@@ -110,31 +111,28 @@ export function decideFromRoutingChoice(
   evidence: RoutingEvidence,
   policy: RoutingPolicy = DEFAULT_ROUTING_POLICY,
 ): RoutingDecision {
-  const ids = [...candidateIds];
   if (!isValidRoutingEvidence(evidence)) {
-    return { kind: "ask", reason: "invalid_response", candidateIds: ids };
+    return { kind: "error", reason: "invalid_response" };
   }
   if (choice === "none") {
     return {
-      kind: "ask",
-      reason: "no_match",
-      candidateIds: ids,
+      kind: "no_match",
+      reason: "none",
       evidence,
     };
   }
-  if (!ids.includes(choice)) {
-    return { kind: "ask", reason: "invalid_response", candidateIds: ids };
+  if (!candidateIds.includes(choice)) {
+    return { kind: "error", reason: "invalid_response" };
   }
   const failureReason = routingEvidenceFailureReason(evidence, policy);
   if (failureReason !== undefined) {
     return {
-      kind: "ask",
+      kind: "no_match",
       reason: failureReason,
-      candidateIds: ids,
       evidence,
     };
   }
-  return { kind: "reuse", childId: choice, evidence };
+  return { kind: "match", childId: choice, evidence };
 }
 
 export function isValidRoutingEvidence(

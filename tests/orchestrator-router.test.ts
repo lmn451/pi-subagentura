@@ -95,7 +95,7 @@ function context(
   };
 }
 
-describe("Jev orchestrator routing advisor", () => {
+describe("orchestrator routing advisor", () => {
   let root: string;
 
   beforeEach(() => {
@@ -116,7 +116,7 @@ describe("Jev orchestrator routing advisor", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("returns a trusted reuse decision without dispatch side effects", async () => {
+  it("returns a trusted match from an injected engine without dispatch side effects", async () => {
     const value = api();
     const scope = registerSessionScope({
       id: 1,
@@ -131,7 +131,7 @@ describe("Jev orchestrator routing advisor", () => {
     const entries = [routingEntry(CHILD_A)];
     upsertOrchestratorRoutingEntry(root, entries[0]);
     const decide = vi.fn().mockResolvedValue({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -153,7 +153,7 @@ describe("Jev orchestrator routing advisor", () => {
     );
 
     expect(result.details.decision).toMatchObject({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
     });
     expect(result.content[0].text).toContain(CHILD_A);
@@ -199,9 +199,8 @@ describe("Jev orchestrator routing advisor", () => {
     );
 
     expect(result.details.decision).toEqual({
-      kind: "ask",
-      reason: "no_candidates",
-      candidateIds: [],
+      kind: "no_match",
+      reason: "none",
     });
     expect(decide).not.toHaveBeenCalled();
   });
@@ -222,7 +221,7 @@ describe("Jev orchestrator routing advisor", () => {
     registerOrchestratorRouterTool(value as never, scope, {
       createEngine: () => ({
         decide: async () => ({
-          kind: "reuse",
+          kind: "match",
           childId: CHILD_B,
           evidence: {
             confidence: 0.95,
@@ -243,9 +242,8 @@ describe("Jev orchestrator routing advisor", () => {
     );
 
     expect(result.details.decision).toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "invalid_response",
-      candidateIds: [],
     });
   });
 
@@ -291,7 +289,7 @@ describe("Jev orchestrator routing advisor", () => {
     const currentContext = context(root, entries);
     upsertOrchestratorRoutingEntry(root, entries[0]);
     release({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -303,9 +301,8 @@ describe("Jev orchestrator routing advisor", () => {
     const result = await route;
 
     expect(result.details.decision).toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "state_changed",
-      candidateIds: [],
     });
     expect(currentContext.cwd).toBe(root);
   });
@@ -329,7 +326,7 @@ describe("Jev orchestrator routing advisor", () => {
       "{malformed cache",
     );
     const decide = vi.fn().mockResolvedValue({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -351,7 +348,7 @@ describe("Jev orchestrator routing advisor", () => {
     );
 
     expect(result.details.decision).toMatchObject({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
     });
     expect(decide).toHaveBeenCalledOnce();
@@ -394,7 +391,7 @@ describe("Jev orchestrator routing advisor", () => {
     await vi.waitFor(() => expect(started).toBe(true));
     state.sessionFile = "/sessions/replaced.jsonl";
     release({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -406,9 +403,8 @@ describe("Jev orchestrator routing advisor", () => {
 
     const result = await route;
     expect(result.details.decision).toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "state_changed",
-      candidateIds: [],
     });
   });
 
@@ -457,7 +453,7 @@ describe("Jev orchestrator routing advisor", () => {
         state.workingCwd = "/repo/replaced-child";
       }
       release({
-        kind: "reuse",
+        kind: "match",
         childId: CHILD_A,
         evidence: {
           confidence: 0.95,
@@ -469,9 +465,8 @@ describe("Jev orchestrator routing advisor", () => {
 
       const result = await route;
       expect(result.details.decision).toEqual({
-        kind: "ask",
+        kind: "error",
         reason: "state_changed",
-        candidateIds: [],
       });
     },
   );
@@ -512,7 +507,7 @@ describe("Jev orchestrator routing advisor", () => {
     await vi.waitFor(() => expect(started).toBe(true));
     advanceSessionScopeGeneration(scope.id);
     release({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -580,7 +575,7 @@ describe("Jev orchestrator routing advisor", () => {
     await vi.waitFor(() => expect(started).toBe(true));
     userId = "user-2";
     release({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -624,7 +619,7 @@ describe("Jev orchestrator routing advisor", () => {
     );
     controller.abort();
     release({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,

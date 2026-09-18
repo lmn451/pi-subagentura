@@ -4,7 +4,7 @@ import {
   isOrchestratorV2Enabled,
   isOrchestratorV2WakeupMessage,
 } from "../completion-turn";
-import { createJevRoutingEngine, isJevRoutingEnabled } from "../jev-routing";
+import { createRoutingEngine, isRoutingEnabled } from "../routing-factory";
 import {
   listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
@@ -21,11 +21,12 @@ import {
 } from "../session-scope";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import type {
-  RoutingAskReason,
   RoutingCandidate,
   RoutingDecision,
   RoutingEngine,
+  RoutingErrorReason,
   RoutingEvidence,
+  RoutingNoMatchReason,
 } from "../routing-engine";
 import { isValidRoutingEvidence } from "../routing-engine";
 
@@ -42,21 +43,22 @@ const ResolveOrchestratorRouteParams = Type.Object({
   }),
 });
 
-const ROUTING_ASK_REASONS: ReadonlySet<string> = new Set([
+const ROUTING_ERROR_REASONS: ReadonlySet<string> = new Set([
   "disabled",
   "missing_key",
   "invalid_config",
-  "no_candidates",
   "invalid_input",
   "payload_too_large",
   "timeout",
   "unavailable",
   "invalid_response",
-  "no_match",
-  "low_confidence",
-  "ambiguous",
   "state_changed",
   "incomplete_registry",
+]);
+const ROUTING_NO_MATCH_REASONS: ReadonlySet<string> = new Set([
+  "none",
+  "low_confidence",
+  "ambiguous",
 ]);
 
 interface UserRequestIdentity {
@@ -94,19 +96,19 @@ interface RuntimeSnapshot {
 }
 
 interface RouterRegistrationOptions {
-  createEngine?: () => RoutingEngine;
+  createEngine?: () => RoutingEngine | undefined;
 }
 
 /**
- * Register the Jev advisor. The registration gate is repeated here because
- * this helper is also used directly by focused tests and internal hosts.
+ * Register the configured routing advisor. The registration gate is repeated
+ * here because this helper is also used directly by focused tests and hosts.
  */
 export function registerOrchestratorRouterTool(
   pi: ExtensionAPI,
   registrationScope?: SessionScope,
   options: RouterRegistrationOptions = {},
 ): void {
-  if (!isOrchestratorV2Enabled(pi) || !isJevRoutingEnabled()) return;
+  if (!isOrchestratorV2Enabled(pi) || !isRoutingEnabled()) return;
 
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
@@ -116,7 +118,7 @@ export function registerOrchestratorRouterTool(
     name: "resolve_orchestrator_route",
     label: "Resolve Orchestrator Route",
     description:
-      "Ask the explicitly enabled Jev routing advisor which current, confirmed Orchestratorv2 child best matches the original task. The tool only advises; it never sends, spawns, attaches, or reserves a child.",
+      "Ask the explicitly enabled routing advisor which current, confirmed Orchestratorv2 child best matches the original task. The tool only advises; it never sends, spawns, attaches, or reserves a child.",
     parameters: ResolveOrchestratorRouteParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       return resolveOrchestratorRoute({
@@ -137,14 +139,14 @@ async function resolveOrchestratorRoute(params: {
   params: { task: string };
   signal?: AbortSignal;
   ctx: unknown;
-  createEngine?: () => RoutingEngine;
+  createEngine?: () => RoutingEngine | undefined;
 }): Promise<{
   content: [{ type: "text"; text: string }];
   details: { status: "advice"; decision: RoutingDecision };
 }> {
   let decision: RoutingDecision;
-  if (!isOrchestratorV2Enabled(params.pi) || !isJevRoutingEnabled()) {
-    decision = askDecision("disabled");
+  if (!isOrchestratorV2Enabled(params.pi) || !isRoutingEnabled()) {
+    decision = errorDecision("disabled");
     return routingAdviceResult(decision);
   }
   if (params.signal?.aborted) {
@@ -162,11 +164,10 @@ async function resolveOrchestratorRoute(params: {
     task.trim().length === 0 ||
     Buffer.byteLength(task, "utf8") > MAX_ORCHESTRATOR_ROUTE_TASK_BYTES
   ) {
-    return routingAdviceResult(askDecision("invalid_input"));
+    return routingAdviceResult(errorDecision("invalid_input"));
   }
-
   const cwd = contextCwd(params.ctx, scope);
-  if (!cwd) return routingAdviceResult(askDecision("invalid_input"));
+  if (!cwd) return routingAdviceResult(errorDecision("invalid_input"));
 
   const owner = sessionOwner(scope);
   const sessionId = sessionIdForScope(scope);
@@ -192,7 +193,7 @@ async function resolveOrchestratorRoute(params: {
     ) {
       return routingAdviceResult({ kind: "cancelled" });
     }
-    return routingAdviceResult(askDecision("incomplete_registry"));
+    return routingAdviceResult(errorDecision("incomplete_registry"));
   }
   if (params.signal?.aborted) {
     return routingAdviceResult({ kind: "cancelled" });
@@ -220,10 +221,10 @@ async function resolveOrchestratorRoute(params: {
       sessionId,
     )
   ) {
-    return routingAdviceResult(askDecision("incomplete_registry"));
+    return routingAdviceResult(errorDecision("incomplete_registry"));
   }
   if (initialCandidates.length === 0) {
-    return routingAdviceResult(askDecision("no_candidates"));
+    return routingAdviceResult({ kind: "no_match", reason: "none" });
   }
 
   const snapshots = initialCandidates.map((entry) => ({
@@ -239,7 +240,8 @@ async function resolveOrchestratorRoute(params: {
 
   let engineDecision: unknown;
   try {
-    const engine = params.createEngine?.() ?? createJevRoutingEngine();
+    const engine = params.createEngine?.() ?? createRoutingEngine();
+    if (!engine) return routingAdviceResult(errorDecision("unavailable"));
     engineDecision = await engine.decide(input, params.signal);
   } catch {
     if (params.signal?.aborted) {
@@ -251,7 +253,7 @@ async function resolveOrchestratorRoute(params: {
     ) {
       return routingAdviceResult({ kind: "cancelled" });
     }
-    return routingAdviceResult(askDecision("unavailable"));
+    return routingAdviceResult(errorDecision("unavailable"));
   }
   if (params.signal?.aborted) {
     return routingAdviceResult({ kind: "cancelled" });
@@ -267,7 +269,7 @@ async function resolveOrchestratorRoute(params: {
   if (decision.kind === "cancelled") {
     return routingAdviceResult(decision);
   }
-  if (decision.kind === "ask" && decision.reason === "invalid_response") {
+  if (decision.kind === "error") {
     return routingAdviceResult(decision);
   }
 
@@ -291,7 +293,7 @@ async function resolveOrchestratorRoute(params: {
     ) {
       return routingAdviceResult({ kind: "cancelled" });
     }
-    return routingAdviceResult(askDecision("state_changed"));
+    return routingAdviceResult(errorDecision("state_changed"));
   }
   if (params.signal?.aborted) {
     return routingAdviceResult({ kind: "cancelled" });
@@ -313,7 +315,7 @@ async function resolveOrchestratorRoute(params: {
       sessionId,
     )
   ) {
-    return routingAdviceResult(askDecision("state_changed"));
+    return routingAdviceResult(errorDecision("state_changed"));
   }
 
   return routingAdviceResult(decision);
@@ -669,36 +671,38 @@ function sanitizeDecision(
     snapshots.map(({ candidate }) => candidate.childId),
   );
   if (!value || typeof value !== "object") {
-    return askDecision("invalid_response");
+    return errorDecision("invalid_response");
   }
   const raw = value as Record<string, unknown>;
   if (raw.kind === "cancelled") return { kind: "cancelled" };
   const evidence = safeEvidence(raw.evidence);
-  if (raw.kind === "reuse") {
+  if (raw.kind === "match") {
     if (
       typeof raw.childId !== "string" ||
       !candidateIds.has(raw.childId) ||
       !evidence
     ) {
-      return askDecision("invalid_response");
+      return errorDecision("invalid_response");
     }
-    return { kind: "reuse", childId: raw.childId, evidence };
+    return { kind: "match", childId: raw.childId, evidence };
   }
-  if (raw.kind !== "ask" || !isRoutingAskReason(raw.reason)) {
-    return askDecision("invalid_response");
+  if (raw.kind === "no_match") {
+    if (!isRoutingNoMatchReason(raw.reason)) {
+      return errorDecision("invalid_response");
+    }
+    if (raw.evidence !== undefined && evidence === undefined) {
+      return errorDecision("invalid_response");
+    }
+    return {
+      kind: "no_match",
+      reason: raw.reason,
+      ...(evidence === undefined ? {} : { evidence }),
+    };
   }
-  const rawCandidateIds = Array.isArray(raw.candidateIds)
-    ? raw.candidateIds
-    : [];
-  const safeCandidateIds = rawCandidateIds.filter(
-    (id): id is string => typeof id === "string" && candidateIds.has(id),
-  );
-  return {
-    kind: "ask",
-    reason: raw.reason,
-    candidateIds: [...new Set(safeCandidateIds)],
-    ...(evidence === undefined ? {} : { evidence }),
-  };
+  if (raw.kind === "error" && isRoutingErrorReason(raw.reason)) {
+    return { kind: "error", reason: raw.reason };
+  }
+  return errorDecision("invalid_response");
 }
 
 function safeEvidence(value: unknown): RoutingEvidence | undefined {
@@ -729,12 +733,16 @@ function boundedProbability(value: unknown): number | undefined {
     : undefined;
 }
 
-function isRoutingAskReason(value: unknown): value is RoutingAskReason {
-  return typeof value === "string" && ROUTING_ASK_REASONS.has(value);
+function isRoutingErrorReason(value: unknown): value is RoutingErrorReason {
+  return typeof value === "string" && ROUTING_ERROR_REASONS.has(value);
 }
 
-function askDecision(reason: RoutingAskReason): RoutingDecision {
-  return { kind: "ask", reason, candidateIds: [] };
+function isRoutingNoMatchReason(value: unknown): value is RoutingNoMatchReason {
+  return typeof value === "string" && ROUTING_NO_MATCH_REASONS.has(value);
+}
+
+function errorDecision(reason: RoutingErrorReason): RoutingDecision {
+  return { kind: "error", reason };
 }
 
 function routingAdviceResult(decision: RoutingDecision): {
@@ -742,11 +750,13 @@ function routingAdviceResult(decision: RoutingDecision): {
   details: { status: "advice"; decision: RoutingDecision };
 } {
   const text =
-    decision.kind === "reuse"
+    decision.kind === "match"
       ? `Routing advisor selected existing child ${decision.childId}.`
-      : decision.kind === "cancelled"
-        ? "Routing advisor cancelled this routing request."
-        : `Routing advisor asks for clarification (${decision.reason}).`;
+      : decision.kind === "no_match"
+        ? `No existing child matches this task (${decision.reason}).`
+        : decision.kind === "cancelled"
+          ? "Routing advisor cancelled this routing request."
+          : `Routing advisor could not decide (${decision.reason}).`;
   return {
     content: [{ type: "text", text: `${text}\n${JSON.stringify(decision)}` }],
     details: { status: "advice", decision },

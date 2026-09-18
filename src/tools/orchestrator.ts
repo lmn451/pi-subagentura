@@ -17,7 +17,7 @@ import {
   isOrchestratorV2Enabled,
   isOrchestratorV2WakeupMessage,
 } from "../completion-turn";
-import { isJevRoutingEnabled } from "../jev-routing";
+import { isRoutingEnabled } from "../routing-factory";
 import {
   resolveToolSessionScope,
   type SessionScope,
@@ -110,7 +110,7 @@ export function registerOrchestratorTools(
   let routerRegistered = false;
   const registerRouterWhenEnabled = (): void => {
     if (routerRegistered) return;
-    if (!isOrchestratorV2Enabled(pi) || !isJevRoutingEnabled()) return;
+    if (!isOrchestratorV2Enabled(pi) || !isRoutingEnabled()) return;
     registerOrchestratorRouterTool(pi, registrationScope);
     routerRegistered = true;
   };
@@ -256,7 +256,7 @@ export function registerOrchestratorTools(
   // Pi resolves CLI flags after extension factories register their tools. Keep
   // the opt-in check at the event boundary so a real startup can enable the
   // advisor without exposing it in legacy/default mode.
-  if (isJevRoutingEnabled() && typeof pi.on === "function") {
+  if (isRoutingEnabled() && typeof pi.on === "function") {
     pi.on("session_start", registerRouterWhenEnabled);
   }
 }

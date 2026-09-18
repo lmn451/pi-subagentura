@@ -64,6 +64,7 @@
     "src/usage.ts",
     "src/orchestrator-routing.ts",
     "src/routing-engine.ts",
+    "src/routing-factory.ts",
     "src/jev-routing.ts",
     "src/orchestration-context.ts",
     "src/pi-sdk-compat.ts",
