@@ -12,11 +12,6 @@ import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 export type MuxName = "tmux" | "zellij" | "herdr";
 /** Result of a backend pane-listing liveness probe. */
 export type PaneLiveness = "alive" | "dead" | "unknown";
-/** Controls optional freshness semantics for an asynchronous liveness probe. */
-export interface PaneLivenessOptions {
-  /** Bypass cached observations and any older in-flight probe. */
-  readonly fresh?: boolean;
-}
 /** Result of a pane-focus activity probe for the user's mux client. */
 export type PaneActivity = "active" | "inactive" | "unknown";
 
@@ -203,11 +198,7 @@ export interface Multiplexer {
   getPaneLiveness(paneId: string, session?: string): PaneLiveness;
 
   /** Asynchronously perform the same tri-state pane-listing probe. */
-  getPaneLivenessAsync(
-    paneId: string,
-    session?: string,
-    options?: PaneLivenessOptions,
-  ): Promise<PaneLiveness>;
+  getPaneLivenessAsync(paneId: string, session?: string): Promise<PaneLiveness>;
 
   /**
    * Probe whether the pane is focused in the user's currently attached mux

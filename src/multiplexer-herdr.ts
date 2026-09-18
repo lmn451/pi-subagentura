@@ -24,7 +24,6 @@ import {
   execMuxOrThrow,
   MAX_CAPTURE_READ_BYTES,
   MUX_CAPABILITIES,
-  type PaneLivenessOptions,
   safeSegment,
   shellEscape,
 } from "./multiplexer-contracts";
@@ -650,17 +649,16 @@ export class HerdrMultiplexer implements Multiplexer {
   async getPaneLivenessAsync(
     paneId: string,
     session?: string,
-    options?: PaneLivenessOptions,
   ): Promise<PaneLiveness> {
     if (!isHerdrPaneId(paneId)) return "unknown";
     const target = this.canonicalPaneId(paneId, session);
-    const result = await this.probeLivenessAsync(target, session, options);
+    const result = await this.probeLivenessAsync(target, session);
     if (result.kind === "missing" && target !== paneId) {
       this.retireCanonical(paneId, target, session);
       return this.livenessFrom(
         paneId,
         session,
-        await this.probeLivenessAsync(paneId, session, options),
+        await this.probeLivenessAsync(paneId, session),
       );
     }
     return this.livenessFrom(paneId, session, result);
@@ -777,14 +775,10 @@ export class HerdrMultiplexer implements Multiplexer {
   private probeLivenessAsync(
     paneId: string,
     session?: string,
-    options?: PaneLivenessOptions,
   ): Promise<PaneLookupResult> {
     const probe = this.livenessProbe(paneId, session);
-    const fresh = options?.fresh === true;
-    if (!fresh && this.isProbeFresh(probe)) {
-      return Promise.resolve(probe.result!);
-    }
-    if (!fresh && probe.inFlight) return probe.inFlight;
+    if (this.isProbeFresh(probe)) return Promise.resolve(probe.result!);
+    if (probe.inFlight) return probe.inFlight;
     const issuedSeq = nextProbeSeq++;
     const request = this.lookupPaneAsync(paneId, session);
     probe.inFlight = request;

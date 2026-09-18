@@ -49,14 +49,14 @@ clarification; routing confidence never grants new permissions.
    CLI flag values after the extension factory; also allow immediate
    registration when flags are already bound. A real-SDK startup/reload test
    must prove the tool becomes active in the opted-in mode.
-   It builds its own fresh registry view from current parent authority, rather
+   It builds its own current registry view from current parent authority, rather
    than trusting model-supplied agents.
    Filter to actionable, alive, non-stale, direct children with trusted
    responsibility metadata. Capture parent session generation and candidate
-   identity/metadata; after the network call, refresh and reject changed
-   identity, working directory, responsibility, ownership, or liveness. Final
-   liveness probes bypass cached observations and older in-flight probes in all
-   three multiplexer backends. On cancellation, produce
+   identity/metadata; after the network call, refresh the normal bounded
+   projection and reject changed identity, working directory, responsibility,
+   ownership, or liveness. Do not force an extra uncached multiplexer probe.
+   On cancellation, produce
    no route or clarification side effects. The tool never sends or spawns.
 5. Return structured advice with child ID and evidence. The parent sends the
    original task with existing messaging tools, whose existing runtime guards
@@ -168,12 +168,12 @@ from implementing and checking this feature.
 
 ## Implementation validation
 
-Final runtime review identified missing working-directory snapshots and cached
-final liveness probes. Both findings were fixed and covered by regression tests
-before the final validation below.
+Final runtime review identified missing working-directory snapshots. This
+follow-up retains the normal cached liveness projection so routing does not add
+an extra uncached multiplexer probe.
 
 - `npm run typecheck`: passed.
-- `npm test -- --maxWorkers=2`: all 98 files and 2299 tests passed. Limiting
+- `npm test -- --maxWorkers=2`: all 98 files and 2292 tests passed. Limiting
   workers avoids contention with timing-sensitive existing regression tests.
 - `npm run format:check`: passed.
 - `npm run pack:check`: passed; new runtime modules and setup documentation
@@ -183,9 +183,8 @@ before the final validation below.
   and mock provider transport.
 - Independent Luna / max review of the adapter and confidence policy found
   no actionable issues.
-- Fresh liveness and out-of-order completion regressions pass for tmux,
-  zellij, and Herdr. Independent mutations of `cwd` and `workingCwd`, plus
-  the end-to-end stale-liveness routing case, are covered.
+- Runtime identity, working-directory, and stale-state routing regressions are
+  covered across the multiplexer backends.
 - `git diff --check`: passed.
 
 No live Jev request was made because `TYPESAFE_API_KEY` was absent. The mocked

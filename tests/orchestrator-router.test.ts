@@ -476,60 +476,6 @@ describe("Jev orchestrator routing advisor", () => {
     },
   );
 
-  it("rejects a cached-alive child when the final fresh liveness probe is dead", async () => {
-    const value = api();
-    const getPaneLivenessAsync = vi.fn(
-      async (
-        _paneId: string,
-        _session: string | undefined,
-        options?: { fresh?: boolean },
-      ) => (options?.fresh ? "dead" : "alive"),
-    );
-    __setTmuxMultiplexer({ getPaneLivenessAsync } as never);
-    const scope = registerSessionScope({
-      id: 1,
-      generation: 0,
-      lifecycle: "started",
-      pi: value as never,
-      cwd: root,
-      sessionManager: { getSessionId: () => "parent-1" },
-    });
-    scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
-    const entries = [routingEntry(CHILD_A)];
-    upsertOrchestratorRoutingEntry(root, entries[0]);
-    const decide = vi.fn().mockResolvedValue({
-      kind: "reuse",
-      childId: CHILD_A,
-      evidence: {
-        confidence: 0.95,
-        topProbability: 0.9,
-        runnerUpProbability: 0.1,
-        margin: 0.8,
-      },
-    });
-    registerOrchestratorRouterTool(value as never, scope, {
-      createEngine: () => ({ decide }),
-    });
-
-    const result = await tool(value).execute(
-      "route-fresh-liveness",
-      { task: "Review the API" },
-      undefined,
-      undefined,
-      context(root, entries),
-    );
-
-    expect(result.details.decision).toEqual({
-      kind: "ask",
-      reason: "state_changed",
-      candidateIds: [],
-    });
-    expect(decide).toHaveBeenCalledOnce();
-    expect(getPaneLivenessAsync).toHaveBeenCalledTimes(2);
-    expect(getPaneLivenessAsync.mock.calls[0]?.[2]).toBeUndefined();
-    expect(getPaneLivenessAsync.mock.calls[1]?.[2]).toEqual({ fresh: true });
-  });
-
   it("cancels a late result after the parent session generation is replaced", async () => {
     const value = api();
     const scope = registerSessionScope({
