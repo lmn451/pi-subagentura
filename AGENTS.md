@@ -210,6 +210,19 @@ exists only to drain persisted pre-coordinator state and support internal tests.
 
 ### Background workflows are parent-session scoped
 
+This section describes the compatibility default. Opt-in `durable:true` code
+workflows use `workflow-run-store.ts` and `workflow-durable.ts`: immutable root
+inputs/settings, fsynced request/response transcripts, stable operation ids,
+explicit same-session recovery, and one-use process attempt wrappers. See
+`WORKFLOW_RUNTIME.md`. Durable continuity interrupts the controller and releases
+it only after its runners drain; never retain a stale `runAgent` closure across
+generations. Replay divergence must terminate the host worker, not become a
+catchable script error. Persisted mux pane ids alone never authorize cancellation.
+Durable aggregate notices use the existing completion coordinator and unfinished
+mixed-source group barriers; do not add another notification scheduler. Saving
+a script or running asynchronously without `durable:true` changes none of the
+session-scoped behavior below.
+
 Background workflow jobs and in-process async sub-agent jobs do **not** survive
 parent session replacement. On every `session_shutdown` reason (`reload`,
 `resume`, `quit`, `new`, and similar), `src/session-handlers.ts` suppresses late

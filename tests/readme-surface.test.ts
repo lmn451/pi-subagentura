@@ -58,7 +58,7 @@ describe("README public surface", () => {
       "#### Coordinated completion delivery",
       "#### Consumption-receipt persistence",
     );
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(27);
     expect(
       tools.filter((name) => name.includes("orchestrator")).sort(),
     ).toEqual(

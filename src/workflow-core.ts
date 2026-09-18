@@ -253,6 +253,8 @@ export function formatWorkflowUsageLegend(ascii = false): string {
 
 /** Options accepted by the injected `agent()` helper. */
 export interface WorkflowAgentOpts {
+  /** Stable operation identity; required only for durable execution. */
+  id?: string;
   schema?: unknown;
   label?: string;
   phase?: string;
@@ -288,6 +290,8 @@ export type WorkflowAgentProgress =
 /** Injectable spawn function — wraps in-process or process-backed agents. */
 export type WorkflowAgentRunner = (req: {
   prompt: string;
+  /** Internal recovery context, never exposed as a script-controlled option. */
+  durableAttempt?: import("./workflow-durable").DurableAttemptContext;
   persona?: string;
   model?: string;
   signal?: AbortSignal;
@@ -520,6 +524,8 @@ export class WorkflowWallTimeoutError extends Error {
 }
 
 export interface RunWorkflowOptions {
+  /** Internal opt-in durable transcript; plain calls remain session-scoped. */
+  durable?: import("./workflow-durable").DurableWorkflow;
   args?: unknown;
   /** Parent execution directory exposed to workflow scripts as immutable `cwd`. */
   cwd?: string;

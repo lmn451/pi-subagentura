@@ -39,6 +39,8 @@ export type WorkflowThinkingLevel =
   "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface WorkflowAgentOptions {
+  /** Required for durable runs; unique stable id per item and retry attempt. */
+  readonly id?: string;
   readonly schema?: WorkflowJSONSchema;
   readonly label?: string;
   readonly phase?: string;
@@ -51,6 +53,13 @@ export interface WorkflowAgentOptions {
 }
 
 export type WorkflowThunk<T> = () => T | PromiseLike<T>;
+
+export interface WorkflowRetryOptions {
+  /** Total attempts, including the first. Integer 1–10; defaults to 3. */
+  readonly attempts?: number;
+  /** Retry null agent failures as well as exceptions. Defaults to true. */
+  readonly retryOnNull?: boolean;
+}
 
 export type WorkflowPipelineStage<TItem, TPrevious, TResult> = (
   previous: TPrevious,
@@ -65,6 +74,12 @@ export interface WorkflowBudget {
 }
 
 declare global {
+  /** Explicitly repeat work. Side effects may repeat; cancellation never retries. */
+  function retry<T>(
+    work: (attempt: number) => T | PromiseLike<T>,
+    options?: WorkflowRetryOptions,
+  ): Promise<Awaited<T>>;
+
   function agent(
     prompt: string,
     options?: WorkflowAgentOptions & { readonly schema?: undefined },
@@ -101,6 +116,7 @@ declare global {
   function workflow(
     name: string,
     childArgs?: WorkflowJSONValue,
+    options?: { readonly id?: string },
   ): Promise<unknown>;
   function phase(title: string): void;
   function log(message: unknown): void;
