@@ -36,7 +36,11 @@ export type CancellationSnapshotSource =
   | "cancel_interactive_subagent"
   | "session_shutdown";
 export type CancellationSnapshotStatus =
-  "disabled" | "written" | "truncated" | "deduplicated" | "error";
+  | "disabled"
+  | "written"
+  | "truncated"
+  | "deduplicated"
+  | "error";
 
 export interface CancellationSnapshotReceipt {
   schemaVersion: typeof CANCELLATION_SNAPSHOT_SCHEMA_VERSION;

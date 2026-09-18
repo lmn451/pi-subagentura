@@ -17,7 +17,10 @@ export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
 export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
-  "with_context" | "isolated" | "interactive" | "workflow";
+  | "with_context"
+  | "isolated"
+  | "interactive"
+  | "workflow";
 export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
@@ -31,7 +34,10 @@ export type TelemetryCompletionFailureStage =
   | "completion_publication";
 export type TelemetryWorkflowInvocation = "tool" | "saved_command";
 export type TelemetryWorkflowStatus =
-  "success" | "partial" | "error" | "cancelled";
+  | "success"
+  | "partial"
+  | "error"
+  | "cancelled";
 export type TelemetryRecoveryReason = "startup" | "reload" | "resume";
 export type TelemetryResultReadOutcome =
   | "consumed"
@@ -67,7 +73,13 @@ export type TelemetryTerminalReason =
   | "unknown";
 export type TelemetryDepthBucket = "1" | "2" | "3" | "4-7" | "8+" | "unknown";
 export type TelemetryDurationBucket =
-  "<1s" | "1-5s" | "5-30s" | "30s-2m" | "2-10m" | "10m+" | "unknown";
+  | "<1s"
+  | "1-5s"
+  | "5-30s"
+  | "30s-2m"
+  | "2-10m"
+  | "10m+"
+  | "unknown";
 
 export type TelemetryErrorCategory =
   | "provider"
@@ -145,7 +157,10 @@ export type TelemetrySurface = keyof typeof TELEMETRY_OPERATION_NAMES;
 export type TelemetryOperation =
   (typeof TELEMETRY_OPERATION_NAMES)[TelemetrySurface][number];
 export type TelemetryOperationOutcome =
-  "returned" | "reported_error" | "threw" | "aborted";
+  | "returned"
+  | "reported_error"
+  | "threw"
+  | "aborted";
 export type TelemetryOperationResultStatus =
   | "ok"
   | "started"
@@ -613,7 +628,10 @@ function depthProperty(depth: number | undefined): { depth?: number } {
 }
 
 type TelemetryDurationPropertyPrefix =
-  "spawn_duration" | "duration" | "delivery_latency" | "read_latency";
+  | "spawn_duration"
+  | "duration"
+  | "delivery_latency"
+  | "read_latency";
 
 function durationProperties(
   prefix: TelemetryDurationPropertyPrefix,

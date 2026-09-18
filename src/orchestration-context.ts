@@ -50,7 +50,8 @@ const g = typeof global !== "undefined" ? global : globalThis;
 declare global {
   // eslint-disable-next-line no-var
   var __piSubagenturaOrchestrationStore:
-    AsyncLocalStorage<OrchestrationContext> | undefined;
+    | AsyncLocalStorage<OrchestrationContext>
+    | undefined;
 }
 if (!g.__piSubagenturaOrchestrationStore) {
   g.__piSubagenturaOrchestrationStore =

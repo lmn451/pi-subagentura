@@ -617,14 +617,17 @@ function ensureInProcessJobCapacity(owner?: SessionOwnerToken): boolean {
 declare global {
   var __piSubagenturaRegistry: Map<string, JobState> | undefined;
   var __piSubagenturaInteractiveRegistry:
-    Map<string, InteractiveSubagentState> | undefined;
+    | Map<string, InteractiveSubagentState>
+    | undefined;
   var __piSubagenturaPiRef: ExtensionAPI | undefined;
   var __piSubagenturaUi: ExtensionUIContext | undefined;
   var __piSubagenturaSessionManager:
-    { getEntries?: () => unknown[]; getSessionId?: () => string } | undefined;
+    | { getEntries?: () => unknown[]; getSessionId?: () => string }
+    | undefined;
   var __piSubagenturaInjectCount: number | undefined;
   var __piSubagenturaInteractivePollerHandle:
-    ReturnType<typeof setInterval> | undefined;
+    | ReturnType<typeof setInterval>
+    | undefined;
 }
 
 // Initialize the global pi ref

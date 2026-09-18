@@ -80,7 +80,8 @@ describe("session_start rehydrate integration", () => {
     ).default;
     mod(api as any);
     let startHandler:
-      ((event: any, ctx: any) => void | Promise<void>) | undefined;
+      | ((event: any, ctx: any) => void | Promise<void>)
+      | undefined;
     for (const [event, handler] of (api.on as any).mock.calls) {
       if (event === "session_start") startHandler = handler;
     }

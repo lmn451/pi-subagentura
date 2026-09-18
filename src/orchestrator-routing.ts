@@ -178,7 +178,12 @@ export interface OrchestratorAgentProjection {
 }
 
 export type OrchestratorRoutingMetadataStatus =
-  "missing" | "empty" | "loaded" | "malformed" | "unsupported" | "unreadable";
+  | "missing"
+  | "empty"
+  | "loaded"
+  | "malformed"
+  | "unsupported"
+  | "unreadable";
 
 export interface OrchestratorRoutingMetadataView {
   status: "missing" | "empty" | "loaded";

@@ -487,7 +487,8 @@ export function startWorkflowJob(
   name: string,
   script: string,
   optsOrBuilder:
-    StartWorkflowJobOptions | ((workflowId: string) => StartWorkflowJobOptions),
+    | StartWorkflowJobOptions
+    | ((workflowId: string) => StartWorkflowJobOptions),
   startedAt?: number,
   onComplete?: (job: WorkflowJobState) => boolean | void,
   owner: SessionOwnerToken | undefined = getActiveSessionOwner(),

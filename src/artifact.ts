@@ -78,7 +78,11 @@ export interface OutputHistoryEntry {
 
 export type CompletionOutcome = "done" | "error" | "cancelled";
 export type CompletionSource =
-  "agent_settled" | "agent_end" | "explicit" | "process_exit" | "parent";
+  | "agent_settled"
+  | "agent_end"
+  | "explicit"
+  | "process_exit"
+  | "parent";
 export type ParentCancellationOrigin =
   | "signal"
   | "cancel_subagent"
@@ -90,7 +94,13 @@ export type ParentCancellationOrigin =
   | "session_shutdown"
   | "supervisor_descendant";
 export type ParentCancellationLifecycleReason =
-  "startup" | "reload" | "resume" | "quit" | "new" | "fork" | "unknown";
+  | "startup"
+  | "reload"
+  | "resume"
+  | "quit"
+  | "new"
+  | "fork"
+  | "unknown";
 
 export type SubagentEventV2 =
   | {
@@ -870,7 +880,8 @@ function normalizeEvent(
           }
         : undefined;
     const rawOutputError = obj.outputError as
-      Record<string, unknown> | undefined;
+      | Record<string, unknown>
+      | undefined;
     const outputError: OutputSnapshotError | undefined =
       rawOutputError?.code === "output_too_large" &&
       typeof rawOutputError.bytes === "number" &&
@@ -2531,7 +2542,8 @@ function writeInteractiveStatesUnlocked(
 export function appendInteractiveState(
   cwd: string,
   entry:
-    InteractiveSubagentPersistedStateV1 | InteractiveSubagentPersistedStateV2,
+    | InteractiveSubagentPersistedStateV1
+    | InteractiveSubagentPersistedStateV2,
 ): void {
   withInteractiveStateLock(cwd, () => {
     const result = loadInteractiveStatesResult(cwd);

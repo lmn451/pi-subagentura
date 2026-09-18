@@ -275,7 +275,8 @@ describe("scripted terminal provider contract", () => {
     };
     const request = async (
       marker:
-        "[E2E:INTERACTIVE_FOLLOWUP_PARENT]" | "[E2E:INTERACTIVE_CANCEL_PARENT]",
+        | "[E2E:INTERACTIVE_FOLLOWUP_PARENT]"
+        | "[E2E:INTERACTIVE_CANCEL_PARENT]",
       details: Record<string, unknown>,
     ) => {
       const result = await events(

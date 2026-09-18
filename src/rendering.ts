@@ -106,7 +106,8 @@ export function renderSubagentResult(
       (c): c is { type: "text"; text: string } => c.type === "text",
     )?.text ?? "";
   const resultDetails = result.details as
-    { usageSummary?: string; thinkingLevel?: ThinkingLevel } | undefined;
+    | { usageSummary?: string; thinkingLevel?: ThinkingLevel }
+    | undefined;
 
   if (result.isError) {
     const thinking = thinkingSuffix(resultDetails?.thinkingLevel);

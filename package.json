@@ -127,8 +127,8 @@
     "coverage:check": "vitest run --coverage --exclude tests/tmux.integration.test.ts --exclude tests/zellij.integration.test.ts --exclude tests/herdr.integration.test.ts --exclude tests/published-tarball.test.ts --exclude tests/performance-regression.test.ts --exclude 'tests/terminal-e2e/**'",
     "mutation:pilot": "stryker run",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "hooks:install": "simple-git-hooks",
     "pack:check": "npm pack --dry-run",
     "test:tui": "vitest run --testTimeout=60000 tests/terminal-e2e/",
@@ -140,7 +140,7 @@
     "pre-push": "npm run format:check"
   },
   "lint-staged": {
-    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css,html}": "prettier --write"
+    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css,html}": "oxfmt --no-error-on-unmatched-pattern"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": ">=0.80.6",
@@ -161,7 +161,7 @@
     "@vitest/coverage-v8": "^5.0.0",
     "fast-check": "^4.10.0",
     "lint-staged": "^17.0.7",
-    "prettier": "^3.9.0",
+    "oxfmt": "^0.68.0",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"

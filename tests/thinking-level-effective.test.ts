@@ -48,7 +48,13 @@ function createSession(thinkingLevel: string) {
 
 function params(
   thinkingLevel?:
-    "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+    | "off"
+    | "minimal"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max",
 ) {
   return {
     task: "test task",
