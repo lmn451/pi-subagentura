@@ -294,6 +294,21 @@ export function rehydrateInteractiveSubagents(
       ...(entry.workingCwd !== undefined
         ? { workingCwd: entry.workingCwd }
         : {}),
+      ...(entry.workspaceRepoId
+        ? { workspaceRepoId: entry.workspaceRepoId }
+        : {}),
+      ...(entry.workspaceSlotId
+        ? { workspaceSlotId: entry.workspaceSlotId }
+        : {}),
+      ...(entry.workspaceAssignmentId
+        ? { workspaceAssignmentId: entry.workspaceAssignmentId }
+        : {}),
+      ...(entry.workspaceAssignmentEpoch !== undefined
+        ? { workspaceAssignmentEpoch: entry.workspaceAssignmentEpoch }
+        : {}),
+      ...(entry.workspaceBranchRef
+        ? { workspaceBranchRef: entry.workspaceBranchRef }
+        : {}),
       cwd,
       startedAt,
       status: "running",

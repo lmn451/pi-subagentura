@@ -172,6 +172,16 @@ The extension registers these public tools for parent agents.
 | `get_current_pane_activity`             | Check whether this Pi pane is active for user attention           |
 | `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers |
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases        |
+| `workspace_discover`                    | Fresh repository-scoped slot and occupancy discovery              |
+| `workspace_reconcile`                   | Reconcile fresh observations and advisory child proposals         |
+| `workspace_register_slot`               | Explicitly register one clean Git worktree slot                   |
+| `workspace_release`                     | Release an exact managed assignment with optional child closure   |
+| `workspace_assign`                      | Reserve or reuse a slot with durable branch transition            |
+| `workspace_adopt`                       | Explicitly adopt a stale assignment after user confirmation       |
+| `workspace_recover`                     | Classify an interrupted transition without replaying Git          |
+| `workspace_observe_publication`         | Record exact candidate-OID publication evidence                   |
+| `workspace_record_pr`                   | Record a provider-neutral PR association                          |
+| `workspace_observe_pr`                  | Record a provider-neutral PR observation                          |
 | `subagent_interactive`                  | Launch an attachable Pi session in tmux, Zellij, or Herdr         |
 | `get_interactive_subagent_status`       | Inspect attachable child sessions                                 |
 | `cancel_interactive_subagent`           | Kill an attachable child pane                                     |
@@ -415,6 +425,53 @@ nested children without top-level approval. Nested children belong to the
 immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
+
+### Durable Orchestratorv2 workspace state
+
+Workspace tools are parent-only except for the child-only `workspace_report`.
+The parent keeps a bounded ledger beside the canonical Git common directory:
+
+```text
+<git-common-dir>/subagentura-workspace.json
+<git-common-dir>/subagentura-workspace.lock
+```
+
+Slots have stable `main` or linked-worktree administrative identities. Every
+assignment carries a durable owner, branch ref, expected path/head, and
+monotonic epoch; releasing a clean managed slot preserves its branch/work-item
+history so a later `workspace_assign` can switch or create a new branch in the
+same physical worktree. Git mutation is argv-only and follows an fsynced intent;
+the manager never uses reset, clean, stash, prune, delete, force, push, merge,
+rebase, or automatic repair.
+
+A fresh probe is authoritative. Dirty, ignored, conflicted, hidden-index,
+filter, hook/admin-marker, missing, moved, foreign, legacy, locked, prunable,
+or uncertain occupancy blocks release and reuse. Child reports and PR/publication
+observations are bounded advisory evidence and never release a slot. Operation
+recovery classifies exact before/after state and never replays Git automatically.
+
+Reload, restart, `/new`, and `/fork` preserve the repository ledger. Cross-session
+ownership requires explicit user-confirmed adoption; a dead PID is not authority.
+
+**Top-level Orchestratorv2 provisioning (v1).** A top-level V2 `subagent_interactive` call
+
+must include a bounded `workItemId`. Before child input, the manager records a durable
+
+assignment under `<git-common-dir>/subagentura/workspaces.json`, creates one unique
+
+locked linked worktree with `git worktree add --lock -b`, writes a no-clobber owner
+
+marker in its Git admin directory, and appends a parent authority receipt. The child
+
+launch is finalized only after a fresh branch/HEAD/path/lock/status verification. The
+
+new state is retained across reload, restart, completion, cancellation, `/new`, `/fork`,
+
+and `/quit`; missing, drifted, foreign, or unknown state remains visible but cannot be
+
+automatically adopted, repaired, relaunched, or removed. A future `jj` backend is
+
+intentionally deferred.
 
 ## Cancellation context snapshots (opt-in)
 

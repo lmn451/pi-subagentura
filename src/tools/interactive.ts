@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   convertToLlm,
   serializeConversation,
@@ -6,7 +7,13 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import isPathInside from "is-path-inside";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -73,6 +80,10 @@ import {
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
 import { InteractiveParams, MAX_INTERACTIVE_CONTEXT_BYTES } from "../schemas";
+import {
+  OrchestratorWorkspaceManager,
+  type WorkspaceProvisioned,
+} from "../orchestrator-workspace-manager";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import { updateRunningSubagentFooter } from "../artifact-poller";
 import {
@@ -624,6 +635,23 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
+      if (
+        topLevelOrchestratorV2 &&
+        !params.workItemId &&
+        existsSync(join(params.cwd ?? ctx.cwd, ".git"))
+      ) {
+        reportSpawnFailure("context");
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Orchestratorv2 interactive children require a bounded workItemId.",
+            },
+          ],
+          details: { status: "workspace_assignment_required" },
+          isError: true,
+        };
+      }
       const contextParams = params as typeof params & {
         includeContext?: boolean;
         context?: string;
@@ -749,6 +777,49 @@ export function registerInteractiveSubagentTools(
       const taskPreview = params.task.replace(/\s+/g, " ").slice(0, 48);
       const name = params.name ?? `Subagent: ${taskPreview || "interactive"}`;
       const targetCwd = params.cwd ?? ctx.cwd;
+      const preallocatedId = randomBytes(8).toString("hex");
+      let workspaceManager: OrchestratorWorkspaceManager | undefined;
+      let managedWorkspace: WorkspaceProvisioned | undefined;
+      if (topLevelOrchestratorV2 && params.workItemId) {
+        try {
+          workspaceManager = new OrchestratorWorkspaceManager();
+          const reserved = await workspaceManager.reserve({
+            agentId: preallocatedId,
+            workItemId: params.workItemId!,
+            sourceCwd: targetCwd,
+            parentSessionId,
+          });
+          managedWorkspace = await workspaceManager.provision(reserved);
+          if (typeof pi.appendEntry !== "function") {
+            throw new Error(
+              "Orchestratorv2 workspace authority receipt is unavailable",
+            );
+          }
+          workspaceManager.authorize(
+            managedWorkspace.repository,
+            managedWorkspace.assignment.assignmentId,
+            preallocatedId,
+            (assignment) => {
+              pi.appendEntry!("orchestratorv2-workspace-authority", {
+                schemaVersion: 1,
+                repository: managedWorkspace!.repository,
+                assignment,
+              });
+            },
+          );
+        } catch (error) {
+          reportSpawnFailure("state_persistence");
+          const message =
+            error instanceof Error ? error.message : String(error);
+          return {
+            content: [
+              { type: "text", text: `Workspace not provisioned: ${message}` },
+            ],
+            details: { status: "workspace_provision_failed", error: message },
+            isError: true,
+          };
+        }
+      }
 
       try {
         const state = launchInteractiveSubagent({
@@ -756,7 +827,7 @@ export function registerInteractiveSubagentTools(
           task: params.task,
           persona: params.persona,
           model: params.model,
-          cwd: targetCwd,
+          cwd: managedWorkspace?.assignment.workingCwd ?? targetCwd,
           contextText,
           background: params.background, // defaults to true (hidden) inside the helper
           notifyOnComplete: completion.legacy ? completionMode : undefined,
@@ -775,7 +846,27 @@ export function registerInteractiveSubagentTools(
           spawnRequestedAt: spawnStartedAt,
           deferAgentCreatedTelemetry:
             registration.scope !== undefined && completion.policy !== undefined,
+          preallocatedId: managedWorkspace ? preallocatedId : undefined,
+          workspaceAssignment: managedWorkspace
+            ? {
+                schemaVersion: 1,
+                repoId: managedWorkspace.repository.repoId,
+                slotId: managedWorkspace.worktree.adminKey,
+                assignmentId: managedWorkspace.assignment.assignmentId,
+                assignmentEpoch: managedWorkspace.assignment.generation,
+                childId: preallocatedId,
+                root: managedWorkspace.assignment.workingCwd,
+                branchRef: managedWorkspace.assignment.branchRef,
+              }
+            : undefined,
         });
+        if (managedWorkspace && workspaceManager) {
+          await workspaceManager.finalize(
+            managedWorkspace.repository,
+            managedWorkspace.assignment.assignmentId,
+            managedWorkspace.assignment.generation,
+          );
+        }
         if (registration.scope && completion.policy) {
           try {
             registerCompletionMember(

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the first Orchestratorv2 workspace-state slice: a repository-scoped
+  durable slot ledger, fail-closed Git probes, epoch-bound assignments,
+  crash-classified branch transitions, advisory child reports, and neutral PR
+  and publication observations.
+
 ## [3.6.2] - 2026-09-06
 
 ### Added

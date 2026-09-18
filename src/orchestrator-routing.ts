@@ -169,6 +169,7 @@ export interface OrchestratorAgentView {
   focusCommand?: string;
   artifactDir?: string;
   sessionFile?: string;
+  workspace?: import("./orchestrator-workspace-view").ManagedWorkspaceView;
 }
 
 export interface OrchestratorAgentProjection {
@@ -629,13 +630,21 @@ export async function loadOrchestratorAgentRegistryView(
     cwd,
     options.authorityEntries,
   );
-  const projection = await buildOrchestratorAgentProjection(
+  const baseProjection = await buildOrchestratorAgentProjection(
     metadata.entries,
     interactiveStates,
     {
       ...options,
       untrustedEntries: metadata.untrustedEntries,
     },
+  );
+  const { attachManagedWorkspaceViews } =
+    await import("./orchestrator-workspace-view");
+  const projection = await attachManagedWorkspaceViews(
+    cwd,
+    baseProjection,
+    interactiveStates,
+    options.authorityEntries,
   );
   return {
     routingMetadataStatus: metadata.status,

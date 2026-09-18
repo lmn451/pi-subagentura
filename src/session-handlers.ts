@@ -5,6 +5,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   deleteInteractiveStatesFile,
   hasPersistedTelemetryField,
@@ -55,6 +57,10 @@ import {
   type InteractiveSubagentState,
 } from "./interactive-tmux";
 import { cleanupWorkflowJobsForOwner } from "./workflow-jobs";
+import { reconcileWorkspaceSession } from "./workspace-manager";
+import { OrchestratorWorkspaceManager } from "./orchestrator-workspace-manager";
+import { hasManagedWorkspaceCandidate } from "./orchestrator-workspace-view";
+import { WORKSPACE_LEDGER_FILE } from "./workspace-ledger";
 import {
   advanceSessionScopeGeneration,
   createSessionScope,
@@ -98,6 +104,26 @@ function logSessionError(event: string, error: unknown): void {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   debugLog("error", event, { error: message });
+}
+
+function hasWorkspaceLedgerCandidate(cwd: string): boolean {
+  const gitMarker = join(cwd, ".git");
+  try {
+    const metadata = lstatSync(gitMarker);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      return existsSync(join(gitMarker, WORKSPACE_LEDGER_FILE));
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return false;
+    const content = readFileSync(gitMarker, "utf8");
+    const match = /^gitdir:\s*(.+?)(?:\n)?$/.exec(content);
+    if (!match) return false;
+    const adminDir = realpathSync(resolve(cwd, match[1]));
+    const commonDir = realpathSync(resolve(adminDir, "..", ".."));
+    return existsSync(join(commonDir, WORKSPACE_LEDGER_FILE));
+  } catch {
+    // A missing or changing Git marker simply defers reconciliation to the workspace tool.
+    return false;
+  }
 }
 
 function recordPreparedManifest(
@@ -690,6 +716,22 @@ export function registerSessionHandlers(
         });
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
+    }
+    if (!isChild && ctx.cwd && hasWorkspaceLedgerCandidate(ctx.cwd)) {
+      const workspaceOwner = sessionOwner(scope);
+      void reconcileWorkspaceSession(ctx.cwd, workspaceOwner, scope);
+    }
+    if (
+      !isChild &&
+      orchestratorV2Mode &&
+      ctx.cwd &&
+      hasManagedWorkspaceCandidate(ctx.cwd)
+    ) {
+      // Fresh Git reads are intentionally awaited by the manager before the
+      // next poller tick; reconciliation itself never mutates assignments.
+      void new OrchestratorWorkspaceManager().reconcile(ctx.cwd).catch(() => {
+        // A non-Git cwd or unavailable repository must not block session start.
+      });
     }
     ensureInteractivePoller(globalState);
   });
