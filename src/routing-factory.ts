@@ -1,3 +1,4 @@
+import { createOpenRouterJevRoutingEngine } from "./openrouter-jev-routing";
 import { createJevRoutingEngine } from "./jev-routing";
 import {
   ROUTING_PROVIDER_ENV,
@@ -14,15 +15,19 @@ export function configuredRoutingProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): RoutingProvider | undefined {
   const value = env[ROUTING_PROVIDER_ENV];
-  return value === "jev" || value === "openjev" || value === "llm"
+  return value === "jev" ||
+    value === "openrouter" ||
+    value === "openjev" ||
+    value === "llm"
     ? value
     : undefined;
 }
 
 /**
  * Select the explicitly configured provider without making routing semantics
- * depend on a provider-specific adapter. Only the direct Jev adapter exists
- * in this release; other provider names remain deliberately inactive.
+ * depend on a provider-specific adapter. Direct TypeSafe Jev and the
+ * explicitly opted-in OpenRouter Jev adapter are active; other provider names
+ * remain deliberately inactive.
  */
 export function createRoutingEngine(
   options: RoutingEngineFactoryOptions = {},
@@ -31,6 +36,11 @@ export function createRoutingEngine(
   switch (configuredRoutingProvider(env)) {
     case "jev":
       return createJevRoutingEngine({ env, fetch: options.fetch });
+    case "openrouter":
+      return createOpenRouterJevRoutingEngine({
+        env,
+        fetch: options.fetch,
+      });
     case "openjev":
     case "llm":
     case undefined:
