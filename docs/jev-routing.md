@@ -59,7 +59,7 @@ instead of silently excluding potentially suitable children.
 4. On `kind: "ask"`, ask one concise clarification. On `kind: "cancelled"`,
    stop routing the cancelled request.
 
-The advisor builds a fresh candidate list internally from the current parent
+The advisor builds a current candidate list internally from the current parent
 session's authority records and runtime state. It does not trust a candidate
 list supplied by the parent model. Only live, actionable, non-stale direct
 children with confirmed responsibilities are eligible. The project routing
@@ -75,10 +75,10 @@ The host checks the response probabilities, confidence, and separation between
 the two leading options. A high score never expands a child's permissions or
 responsibility. There is no model-driven creation decision in this release.
 
-After a recommendation, the tool checks fresh state again. Changed authority,
+After a recommendation, the tool rechecks current state. Changed authority,
 runtime identity, working directory, session ownership, or availability
-invalidates the result. The final liveness probes bypass cached observations
-and older in-flight probes in tmux, zellij, and Herdr.
+invalidates the result. This recheck uses the normal bounded liveness
+projection; it does not force an extra uncached multiplexer probe.
 The recommendation does not reserve the child: existing messaging checks still
 apply when the parent sends the task. A failed send must be surfaced to the user,
 without silently spawning a replacement.

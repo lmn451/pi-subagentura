@@ -279,7 +279,6 @@ async function resolveOrchestratorRoute(params: {
       {
         signal: params.signal,
         authorityEntries: parentBranchEntries(params.ctx),
-        freshLiveness: true,
       },
     );
   } catch {

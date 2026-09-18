@@ -42,7 +42,6 @@ import {
   commandExists,
   execMuxOrThrow,
   MUX_CAPABILITIES,
-  type PaneLivenessOptions,
   safeSegment,
   sanitizeViewerTitle,
   shellEscape,
@@ -512,20 +511,17 @@ export class ZellijMultiplexer implements Multiplexer {
 
   private listPanesAsync(
     session?: string,
-    options?: PaneLivenessOptions,
   ): Promise<readonly ZellijPaneRow[] | undefined> {
-    const fresh = options?.fresh === true;
     const key = session ?? "";
     const probe = this.paneListingProbes.get(key) ?? {};
     this.paneListingProbes.set(key, probe);
     if (
-      !fresh &&
       probe.cachedAt !== undefined &&
       Date.now() - probe.cachedAt < PANE_LIVENESS_CACHE_MS
     ) {
       return Promise.resolve(probe.panes);
     }
-    if (!fresh && probe.inFlight) return probe.inFlight;
+    if (probe.inFlight) return probe.inFlight;
     const request = new Promise<readonly ZellijPaneRow[] | undefined>(
       (resolve) => {
         try {
@@ -552,12 +548,9 @@ export class ZellijMultiplexer implements Multiplexer {
     );
     probe.inFlight = request;
     void request.then((panes) => {
-      // A fresh probe may have superseded this request. Only the newest
-      // observation may become the shared cache or clear the active request.
-      if (probe.inFlight !== request) return;
       probe.cachedAt = Date.now();
       probe.panes = panes;
-      probe.inFlight = undefined;
+      if (probe.inFlight === request) probe.inFlight = undefined;
     });
     return request;
   }
@@ -565,11 +558,10 @@ export class ZellijMultiplexer implements Multiplexer {
   async getPaneLivenessAsync(
     paneId: string,
     session?: string,
-    options?: PaneLivenessOptions,
   ): Promise<PaneLiveness> {
     const target = normalizePaneId(paneId);
     if (!/^\d+$/.test(target)) return "unknown";
-    const panes = await this.listPanesAsync(session, options);
+    const panes = await this.listPanesAsync(session);
     if (!panes) return "unknown";
     return panes.some((pane) => this.paneRowMatches(pane, target))
       ? "alive"

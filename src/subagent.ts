@@ -103,7 +103,7 @@ For this enabled mode, this section overrides the earlier instruction to ask
 whenever multiple children plausibly match. If the user's action, scope,
 deliverable, and required access are clear and only the choice of child is
 unresolved, call list_orchestrator_agents, then resolve_orchestrator_route with
-the user's original task. The advisor obtains fresh authoritative candidates
+the user's original task. The advisor obtains current authoritative candidates
 itself; do not pass it transcripts, file contents, secrets, or unrelated context.
 
 On kind="reuse", use the returned childId as the id of

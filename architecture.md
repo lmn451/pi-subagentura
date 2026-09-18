@@ -210,7 +210,7 @@ compatibility, while the prompt directs this mode to interactive children.
 
 The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds an advisory
 `resolve_orchestrator_route` tool only in v2 mode. `tools/orchestrator-router.ts`
-builds fresh candidates from parent authority and current runtime state;
+builds current candidates from parent authority and current runtime state;
 `jev-routing.ts` performs the bounded external Choice request and
 `routing-engine.ts` applies confidence and probability-margin policy. The
 advisor revalidates state before returning a child ID, but does not reserve,
