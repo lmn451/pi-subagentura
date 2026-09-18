@@ -238,7 +238,11 @@ describe("operation telemetry", () => {
     registerExtension(pi as any);
     expect(
       pi.registerTool.mock.calls.map(([entry]) => entry.name).sort(),
-    ).toEqual([...TELEMETRY_OPERATION_NAMES.tool].sort());
+    ).toEqual(
+      TELEMETRY_OPERATION_NAMES.tool
+        .filter((name) => name !== "workspace_report")
+        .sort(),
+    );
     expect(pi.registerCommand.mock.calls.map(([name]) => name).sort()).toEqual(
       [...TELEMETRY_OPERATION_NAMES.command].sort(),
     );

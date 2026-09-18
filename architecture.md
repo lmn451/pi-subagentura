@@ -208,6 +208,24 @@ the routing-metadata tools `list_orchestrator_agents` and
 enforce a host-level tool allowlist; normal tools remain registered for legacy
 compatibility, while the prompt directs this mode to interactive children.
 
+The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds an advisory
+`resolve_orchestrator_route` tool only in v2 mode. `tools/orchestrator-router.ts`
+builds fresh candidates from parent authority and current runtime state;
+`jev-routing.ts` performs the bounded external Choice request and
+`routing-engine.ts` applies confidence and probability-margin policy. The
+advisor revalidates state before returning a child ID, but does not reserve,
+send to, create, or attach to a child. The parent remains the caller of the
+existing messaging tool. Enabled-only prompt guidance permits Jev to resolve
+child-selection ambiguity while retaining clarification for unclear work or
+access. See [Jev routing](docs/jev-routing.md) for configuration and disclosure.
+
+Parent workspace state is registered separately: `workspace_discover`,
+`workspace_reconcile`, `workspace_register_slot`, `workspace_release`,
+`workspace_assign`, `workspace_adopt`, `workspace_recover`,
+`workspace_observe_publication`, `workspace_record_pr`, and
+`workspace_observe_pr` are parent-only. Child mode receives only
+`workspace_report`; it can append advisory proposals but cannot mutate the ledger.
+
 `src/orchestrator-routing.ts` keeps two related representations:
 
 1. the current parent session branch, whose latest valid
@@ -237,6 +255,31 @@ it does not cancel, roll back, replace, or respawn the child. Capacity failures
 close the write without evicting metadata. Nested children remain owned by
 their immediate child session and are not automatically top-level routes.
 
+### 3.2 Durable workspace slots
+
+Orchestratorv2 workspace state is separate from routing, artifact cursors, and
+interactive session persistence. `workspace-git.ts` performs bounded argv-only
+Git probes and non-force switch/create operations. `workspace-ledger.ts` stores
+a versioned repository-scoped JSON ledger beside the canonical Git common
+directory; its private lock, atomic replacement, file/directory fsync, revision
+CAS, claims, assignment epochs, and complete operation intents are the durable
+mutation boundary.
+
+`workspace-manager.ts` fresh-probes every transition. It never trusts child prose,
+cached observations, mux screens, PID liveness, or PR state for release. Dirty,
+ignored, conflicted, hidden-index, filter, in-progress, missing, moved, locked,
+prunable, legacy, foreign, or unknown occupancy blocks reuse. Recovery records
+classify exact before/after state and never replay Git. `workspace-reports.ts`
+accepts only marker-bound, canonical, bounded child proposals; `workspace-pr.ts`
+defines provider-neutral PR association and observation records without network
+provider integration.
+
+Parent-only manager tools cover discovery, reconciliation, registration, release,
+assignment, adoption, recovery, publication, and PR observations. Children receive
+only `workspace_report`; the launcher seam carries a preallocated child ID and
+an assignment marker, leaving artifact, delivery, and routing protocols unchanged.
+/new and /fork do not delete the repository ledger.
+
 ---
 
 ## 4. Dependency layers
@@ -254,11 +297,12 @@ multiplexer-contracts, usage,
 workflow parser and structured output]
 
   L1[Protocols and platform adapters
-artifact, child protocol, generated CLI,
-multiplexer contract/backends,
-delivery, notifications,
-completion coordinator, completion-turn,
-orchestrator routing]
+  artifact, child protocol, generated CLI,
+  multiplexer contract/backends,
+  delivery, notifications,
+  completion coordinator, completion-turn,
+  workspace-ledger, workspace-git, workspace-reports, workspace-pr,
+  orchestrator routing]
 
   L2[Execution kernels
 helpers, interactive-tmux,
@@ -1102,6 +1146,12 @@ The following table inventories the tracked runtime source modules and companion
 |  54 | `src/telemetry-operations.ts`                | Tool-operation telemetry projection and lifecycle capture                                                                       | `session-scope`, `telemetry`                                                                                                                                                                                                                                                                         |
 |  55 | `src/multiplexer-contracts.ts`               | Dependency-light multiplexer contracts, capability matrix, subprocess and bounded capture helpers                               | None                                                                                                                                                                                                                                                                                                 |
 |  56 | `src/usage.ts`                               | Dependency-light usage normalization and aggregation primitives shared by workflow and Pi helpers                               | None                                                                                                                                                                                                                                                                                                 |
+|  57 | `src/workspace-ledger.ts`                    | Versioned repository-scoped workspace ledger, locks, fsync persistence, CAS, claims, and bounded recovery records               | None                                                                                                                                                                                                                                                                                                 |
+|  58 | `src/workspace-git.ts`                       | Sanitized argv-only Git identity, NUL-safe probes, occupancy gates, and non-force branch transitions                            | `workspace-ledger`                                                                                                                                                                                                                                                                                   |
+|  59 | `src/workspace-manager.ts`                   | Fresh-probe workspace discovery, slot assignment/release/adoption, recovery, proposals, publication, and PR records             | `workspace-ledger`, `workspace-git`, `workspace-reports`; type-only `session-scope`                                                                                                                                                                                                                  |
+|  60 | `src/workspace-reports.ts`                   | Assignment markers and canonical bounded advisory child proposal persistence                                                    | `workspace-ledger`                                                                                                                                                                                                                                                                                   |
+|  61 | `src/workspace-pr.ts`                        | Provider-neutral PR association and observation constructors                                                                    | `workspace-ledger`, `workspace-git`                                                                                                                                                                                                                                                                  |
+|  62 | `src/tools/workspace.ts`                     | Parent workspace manager tools and child-only advisory report registration                                                      | `workspace-manager`, `workspace-reports`, `interactive-tmux`, `schemas`, `tool-guidance`                                                                                                                                                                                                             |
 
 ---
 

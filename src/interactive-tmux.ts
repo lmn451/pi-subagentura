@@ -69,6 +69,7 @@ import {
   type Multiplexer,
   type PaneActivity,
   type PaneLiveness,
+  type PaneLivenessOptions,
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
@@ -110,6 +111,10 @@ import {
   type TelemetrySession,
   type TelemetrySpawnFailureStage,
 } from "./telemetry";
+import {
+  writeWorkspaceAssignmentMarker,
+  type WorkspaceAssignmentMarker,
+} from "./workspace-reports";
 
 // Re-export the tmux-specific `readPaneExitCode` for the test suite. The
 // launch script's EXIT trap still writes the @pi-exit-code pane option
@@ -142,6 +147,8 @@ export function buildChildSubagentProtocol(
   const userAttentionGuidance = requireActivePaneForUserAttention
     ? "USER ATTENTION AND PANE ACTIVITY. Before calling any tool or extension that may wait for user input, call get_current_pane_activity immediately first. If it reports active, continue with the user-attention call in this pane. If it reports inactive or unknown, do not open a prompt here; include the exact decision needed in your result so the orchestrator can ask the user."
     : "";
+  const workspaceGuidance =
+    "If workspace-assignment.json is present in this artifact directory, workspace_report is advisory only: report bounded facts with the exact proposal and turn identifiers; never treat a child report as permission to switch, release, adopt, or recycle a slot.";
   return `You are running inside a Pi sub-agent launched by a parent agent. The parent agent reads your work from two files in your artifact directory and from one CLI command. You MUST follow this protocol or your work will be lost.
 
 BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
@@ -149,6 +156,7 @@ BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs
 COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
 
 ${userAttentionGuidance}
+${workspaceGuidance}
 
 Your artifact directory is: ${artifactDir}
 
@@ -226,6 +234,12 @@ export interface InteractiveSubagentState {
   cwd: string;
   /** Resolved child process working directory. */
   workingCwd?: string;
+  /** Optional durable workspace-slot binding; absent for legacy children. */
+  workspaceRepoId?: string;
+  workspaceSlotId?: string;
+  workspaceAssignmentId?: string;
+  workspaceAssignmentEpoch?: number;
+  workspaceBranchRef?: string;
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
    * (see src/artifact.ts: stateFilePath). Required for terminal-event cleanup to
@@ -659,6 +673,9 @@ export function launchInteractiveSubagent(params: {
    * If omitted, falls back to `cwd` (backward-compatible for tests).
    */
   parentCwd?: string;
+  /** Narrow workspace integration seam: the manager allocates this id and marker. */
+  preallocatedId?: string;
+  workspaceAssignment?: WorkspaceAssignmentMarker;
   /** Thinking/reasoning level for the child Pi process. */
   thinkingLevel?: ThinkingLevel;
   /** Closed telemetry source; never derived from user-authored names. */
@@ -700,11 +717,23 @@ export function launchInteractiveSubagent(params: {
   // remote, and the duplicate-id path only degrades gracefully — it does not
   // recover the shadowed agent.
   let id: string;
-  try {
-    id = randomBytes(8).toString("hex");
-  } catch (error) {
-    reportSpawnFailure("unknown");
-    throw error;
+  if (params.preallocatedId !== undefined) {
+    if (!/^[a-f0-9]{8}$|^[a-f0-9]{16}$/.test(params.preallocatedId)) {
+      reportSpawnFailure("context");
+      throw new Error("preallocated child id is invalid");
+    }
+    if (interactiveSubagentRegistry.has(params.preallocatedId)) {
+      reportSpawnFailure("registration");
+      throw new Error("preallocated child id is already registered");
+    }
+    id = params.preallocatedId;
+  } else {
+    try {
+      id = randomBytes(8).toString("hex");
+    } catch (error) {
+      reportSpawnFailure("unknown");
+      throw error;
+    }
   }
   let cwd: string;
   try {
@@ -806,7 +835,7 @@ export function launchInteractiveSubagent(params: {
     contextText: params.contextText,
   });
   try {
-    mkdirSync(paths.artifactDir, { recursive: true });
+    mkdirSync(paths.artifactDir, { recursive: true, mode: 0o700 });
     if (artifactOwnerSessionId) {
       writeFileSync(
         join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),
@@ -815,6 +844,19 @@ export function launchInteractiveSubagent(params: {
       );
     }
     writeFileSync(paths.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
+    if (params.workspaceAssignment) {
+      if (
+        params.workspaceAssignment.childId !== id ||
+        params.workspaceAssignment.root !== cwd
+      ) {
+        reportSpawnFailure("context");
+        throw new Error("workspace assignment marker does not match the child");
+      }
+      writeWorkspaceAssignmentMarker(
+        paths.artifactDir,
+        params.workspaceAssignment,
+      );
+    }
   } catch (error) {
     reportSpawnFailure("state_persistence");
     throw error;
@@ -960,6 +1002,24 @@ export function launchInteractiveSubagent(params: {
         artifactDir: paths.artifactDir,
         sessionFile: paths.sessionFile,
         workingCwd: cwd,
+        ...(params.workspaceAssignment?.repoId
+          ? { workspaceRepoId: params.workspaceAssignment.repoId }
+          : {}),
+        ...(params.workspaceAssignment?.slotId
+          ? { workspaceSlotId: params.workspaceAssignment.slotId }
+          : {}),
+        ...(params.workspaceAssignment?.assignmentId
+          ? { workspaceAssignmentId: params.workspaceAssignment.assignmentId }
+          : {}),
+        ...(params.workspaceAssignment
+          ? {
+              workspaceAssignmentEpoch:
+                params.workspaceAssignment.assignmentEpoch,
+            }
+          : {}),
+        ...(params.workspaceAssignment?.branchRef
+          ? { workspaceBranchRef: params.workspaceAssignment.branchRef }
+          : {}),
         notifyOnComplete: params.completionPolicy
           ? undefined
           : (params.notifyOnComplete ?? "inject"),
@@ -1117,6 +1177,21 @@ export function launchInteractiveSubagent(params: {
     sessionFile: paths.sessionFile,
     cwd: stateCwd,
     workingCwd: cwd,
+    ...(params.workspaceAssignment?.repoId
+      ? { workspaceRepoId: params.workspaceAssignment.repoId }
+      : {}),
+    ...(params.workspaceAssignment?.slotId
+      ? { workspaceSlotId: params.workspaceAssignment.slotId }
+      : {}),
+    ...(params.workspaceAssignment?.assignmentId
+      ? { workspaceAssignmentId: params.workspaceAssignment.assignmentId }
+      : {}),
+    ...(params.workspaceAssignment
+      ? { workspaceAssignmentEpoch: params.workspaceAssignment.assignmentEpoch }
+      : {}),
+    ...(params.workspaceAssignment?.branchRef
+      ? { workspaceBranchRef: params.workspaceAssignment.branchRef }
+      : {}),
     model: params.model,
     startedAt: Date.now(),
     status: "running",
@@ -1300,11 +1375,12 @@ export function isPaneAlive(state: InteractiveSubagentState): boolean {
 /** Probe pane liveness without blocking the parent event loop. */
 export function getInteractivePaneLivenessAsync(
   state: InteractiveSubagentState,
+  options?: PaneLivenessOptions,
 ): Promise<PaneLiveness> {
-  return getMuxForState(state).getPaneLivenessAsync(
-    state.paneId,
-    state.muxSession,
-  );
+  const mux = getMuxForState(state);
+  return options?.fresh
+    ? mux.getPaneLivenessAsync(state.paneId, state.muxSession, options)
+    : mux.getPaneLivenessAsync(state.paneId, state.muxSession);
 }
 
 /** Preserve active state unless the async backend explicitly confirms death. */

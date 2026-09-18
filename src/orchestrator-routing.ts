@@ -622,6 +622,7 @@ export async function loadOrchestratorAgentRegistryView(
   options: {
     signal?: AbortSignal;
     livenessDeadlineMs?: number;
+    freshLiveness?: boolean;
     authorityEntries?: readonly unknown[];
   } = {},
 ): Promise<OrchestratorAgentRegistryView> {
@@ -649,6 +650,8 @@ export async function loadOrchestratorAgentRegistryView(
 export interface OrchestratorAgentProjectionOptions {
   signal?: AbortSignal;
   livenessDeadlineMs?: number;
+  /** Bypass observations and probes begun before this projection. */
+  freshLiveness?: boolean;
   untrustedEntries?: readonly OrchestratorRoutingEntry[];
 }
 
@@ -681,6 +684,7 @@ export async function buildOrchestratorAgentProjection(
         options.signal,
         deadlineAt,
         trusted !== undefined || untrusted === undefined,
+        options.freshLiveness,
       );
     },
   );
@@ -775,6 +779,7 @@ async function projectOrchestratorAgent(
   signal?: AbortSignal,
   deadlineAt = Number.POSITIVE_INFINITY,
   metadataTrusted = true,
+  freshLiveness = false,
 ): Promise<OrchestratorAgentView> {
   const routingFields = metadata
     ? {
@@ -806,7 +811,12 @@ async function projectOrchestratorAgent(
     };
   }
 
-  const liveness = await probeInteractiveLiveness(state, signal, deadlineAt);
+  const liveness = await probeInteractiveLiveness(
+    state,
+    signal,
+    deadlineAt,
+    freshLiveness,
+  );
   const attachable =
     isValidOrchestratorChildId(childId) && isRuntimeActionable(state, liveness);
   const actionable = attachable && metadata !== undefined && metadataTrusted;
@@ -844,6 +854,7 @@ async function probeInteractiveLiveness(
   state: InteractiveSubagentState,
   signal: AbortSignal | undefined,
   deadlineAt: number,
+  fresh = false,
 ): Promise<PaneLiveness> {
   if (signal?.aborted || Date.now() >= deadlineAt) return "unknown";
   return await new Promise<PaneLiveness>((resolve) => {
@@ -862,7 +873,10 @@ async function probeInteractiveLiveness(
     );
     timer.unref?.();
     signal?.addEventListener("abort", abort, { once: true });
-    void getInteractivePaneLivenessAsync(state).then(
+    const probe = fresh
+      ? getInteractivePaneLivenessAsync(state, { fresh: true })
+      : getInteractivePaneLivenessAsync(state);
+    void probe.then(
       (liveness) => finish(liveness),
       () => finish("unknown"),
     );

@@ -443,6 +443,71 @@ describe("multiplexer-zellij", () => {
     expect(execFile).toHaveBeenCalledTimes(1);
   });
 
+  it("fresh async liveness bypasses the cached pane listing", async () => {
+    vi.resetModules();
+    let listing = JSON.stringify([{ id: 42 }]);
+    const execFile = vi.fn(
+      (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => queueMicrotask(() => callback(null, listing)),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+      spawn: vi.fn(),
+    }));
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+
+    await expect(mux.getPaneLivenessAsync("42", "shared")).resolves.toBe(
+      "alive",
+    );
+    listing = JSON.stringify([{ id: 1 }]);
+    await expect(
+      mux.getPaneLivenessAsync("42", "shared", { fresh: true }),
+    ).resolves.toBe("dead");
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("fresh async liveness supersedes an older in-flight listing", async () => {
+    vi.resetModules();
+    type Callback = (error: Error | null, stdout: string) => void;
+    const callbacks: Callback[] = [];
+    const execFile = vi.fn(
+      (_file: string, _args: string[], _options: object, callback: Callback) =>
+        callbacks.push(callback),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+      spawn: vi.fn(),
+    }));
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    const mux = new ZellijMultiplexer();
+
+    const older = mux.getPaneLivenessAsync("42", "shared");
+    const fresh = mux.getPaneLivenessAsync("42", "shared", {
+      fresh: true,
+    });
+    expect(execFile).toHaveBeenCalledTimes(2);
+
+    callbacks[1]!(null, JSON.stringify([{ id: 1 }]));
+    await expect(fresh).resolves.toBe("dead");
+    callbacks[0]!(null, JSON.stringify([{ id: 42 }]));
+    await expect(older).resolves.toBe("alive");
+    await expect(mux.getPaneLivenessAsync("42", "shared")).resolves.toBe(
+      "dead",
+    );
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
   /* ------------------------------------------------------------------ */
   /*  sendKeys + sendEnter                                               */
   /* ------------------------------------------------------------------ */

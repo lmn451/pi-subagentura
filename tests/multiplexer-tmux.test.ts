@@ -650,6 +650,65 @@ describe("multiplexer-tmux", () => {
     expect(execFile).toHaveBeenCalledTimes(1);
   });
 
+  it("fresh async liveness bypasses the cached pane listing", async () => {
+    vi.resetModules();
+    let listing = "%42\n";
+    const execFile = vi.fn(
+      (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => queueMicrotask(() => callback(null, listing)),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+    }));
+    const { TmuxMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+    const mux = new TmuxMultiplexer();
+
+    await expect(mux.getPaneLivenessAsync("%42")).resolves.toBe("alive");
+    listing = "%1\n";
+    await expect(
+      mux.getPaneLivenessAsync("%42", undefined, { fresh: true }),
+    ).resolves.toBe("dead");
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("fresh async liveness supersedes an older in-flight listing", async () => {
+    vi.resetModules();
+    type Callback = (error: Error | null, stdout: string) => void;
+    const callbacks: Callback[] = [];
+    const execFile = vi.fn(
+      (_file: string, _args: string[], _options: object, callback: Callback) =>
+        callbacks.push(callback),
+    );
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(),
+      execFile,
+    }));
+    const { TmuxMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-tmux")
+    >("../src/multiplexer-tmux");
+    const mux = new TmuxMultiplexer();
+
+    const older = mux.getPaneLivenessAsync("%42");
+    const fresh = mux.getPaneLivenessAsync("%42", undefined, {
+      fresh: true,
+    });
+    expect(execFile).toHaveBeenCalledTimes(2);
+
+    callbacks[1]!(null, "%1\n");
+    await expect(fresh).resolves.toBe("dead");
+    callbacks[0]!(null, "%42\n");
+    await expect(older).resolves.toBe("alive");
+    await expect(mux.getPaneLivenessAsync("%42")).resolves.toBe("dead");
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
   it("treats a successful blank listing as dead", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
