@@ -106,7 +106,42 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(completions).toHaveLength(1);
     expect(completions[0].exitCode).toBe(0);
     expect(exits).toHaveLength(1);
+    expect(exits[0]).toMatchObject({
+      exitCode: 0,
+      terminationReason: "normal_exit",
+    });
     expect(exits[0].exitCode).toBe(0);
+  });
+
+  it("records an active-tool reason for an rc=0 abrupt exit", () => {
+    const artDir = join(tmp, "artifacts", "active-tool");
+    const launchScript = join(artDir, "launch.sh");
+    mkdirSync(artDir, { recursive: true });
+    writeFileSync(
+      join(artDir, "active-turn.json"),
+      JSON.stringify({
+        turnId: "active-turn",
+        started: true,
+        activeTools: [
+          { name: "bash", callId: "tool-1", startedAt: Date.now() },
+        ],
+        lastTool: "bash",
+        command: "secret must not be persisted",
+      }),
+    );
+
+    expect(runLaunchScript(artDir, launchScript, "exit 0")).toBe(0);
+    const events = readEvents(artDir);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "process_exited",
+        status: "done",
+        exitCode: 0,
+        terminationReason: "active_tool",
+        lastTool: "bash",
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain("secret must not");
   });
 
   it("preserves a non-zero wrapper rc in completion and process_exited", () => {

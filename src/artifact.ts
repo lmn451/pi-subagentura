@@ -92,6 +92,45 @@ export type ParentCancellationOrigin =
 export type ParentCancellationLifecycleReason =
   "startup" | "reload" | "resume" | "quit" | "new" | "fork" | "unknown";
 
+export type ProcessTerminationReason =
+  | "normal_exit"
+  | "active_tool"
+  | "active_turn"
+  | "signal"
+  | "nonzero_exit"
+  | "cancelled"
+  | "unknown";
+export type ProcessSignal =
+  | "SIGHUP"
+  | "SIGINT"
+  | "SIGQUIT"
+  | "SIGILL"
+  | "SIGTRAP"
+  | "SIGABRT"
+  | "SIGBUS"
+  | "SIGFPE"
+  | "SIGKILL"
+  | "SIGUSR1"
+  | "SIGSEGV"
+  | "SIGUSR2"
+  | "SIGPIPE"
+  | "SIGALRM"
+  | "SIGTERM"
+  | "SIGCHLD"
+  | "SIGCONT"
+  | "SIGSTOP"
+  | "SIGTSTP"
+  | "SIGTTIN"
+  | "SIGTTOU"
+  | "SIGURG"
+  | "SIGXCPU"
+  | "SIGXFSZ"
+  | "SIGVTALRM"
+  | "SIGPROF"
+  | "SIGWINCH"
+  | "SIGIO"
+  | "SIGPWR"
+  | "SIGSYS";
 export type SubagentEventV2 =
   | {
       version: 2;
@@ -141,6 +180,9 @@ export type SubagentEventV2 =
       type: "process_exited";
       status: "done" | "error" | "cancelled";
       exitCode: number;
+      terminationReason?: ProcessTerminationReason;
+      signal?: ProcessSignal;
+      lastTool?: string;
       message?: string;
     };
 
@@ -306,6 +348,12 @@ export const MAX_EVENT_TEXT_LENGTH = 2_000;
 export const MAX_TOOL_NAME_LENGTH = 128;
 export const MAX_OUTPUT_SNAPSHOT_BYTES = 1024 * 1024;
 export const MAX_MUX_TERMINAL_ID_BYTES = 256;
+/** Maximum bytes accepted for child active-turn diagnostic metadata. */
+export const MAX_ACTIVE_TURN_BYTES = 8 * 1024;
+/** Maximum concurrently persisted tool records in active-turn metadata. */
+export const MAX_ACTIVE_TOOL_RECORDS = 16;
+/** Maximum bytes accepted for an opaque tool-call identifier. */
+export const MAX_ACTIVE_TOOL_ID_LENGTH = 128;
 
 export function boundedOptionalEventText(
   value: unknown,
@@ -348,6 +396,70 @@ function normalizeParentCancellationLifecycleReason(
     default:
       return undefined;
   }
+}
+
+function normalizeProcessTerminationReason(
+  value: unknown,
+): ProcessTerminationReason | undefined {
+  switch (value) {
+    case "normal_exit":
+    case "active_tool":
+    case "active_turn":
+    case "signal":
+    case "nonzero_exit":
+    case "cancelled":
+    case "unknown":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeProcessSignal(value: unknown): ProcessSignal | undefined {
+  switch (value) {
+    case "SIGHUP":
+    case "SIGINT":
+    case "SIGQUIT":
+    case "SIGILL":
+    case "SIGTRAP":
+    case "SIGABRT":
+    case "SIGBUS":
+    case "SIGFPE":
+    case "SIGKILL":
+    case "SIGUSR1":
+    case "SIGSEGV":
+    case "SIGUSR2":
+    case "SIGPIPE":
+    case "SIGALRM":
+    case "SIGTERM":
+    case "SIGCHLD":
+    case "SIGCONT":
+    case "SIGSTOP":
+    case "SIGTSTP":
+    case "SIGTTIN":
+    case "SIGTTOU":
+    case "SIGURG":
+    case "SIGXCPU":
+    case "SIGXFSZ":
+    case "SIGVTALRM":
+    case "SIGPROF":
+    case "SIGWINCH":
+    case "SIGIO":
+    case "SIGPWR":
+    case "SIGSYS":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeDiagnosticTool(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_TOOL_NAME_LENGTH &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+    ? value
+    : undefined;
 }
 
 export interface SubagentArtifact {
@@ -936,17 +1048,26 @@ function normalizeEvent(
       obj.status === "error" ||
       obj.status === "cancelled") &&
     exitCode !== undefined
-  )
+  ) {
+    const terminationReason = normalizeProcessTerminationReason(
+      obj.terminationReason,
+    );
+    const signal = normalizeProcessSignal(obj.signal);
+    const lastTool = normalizeDiagnosticTool(obj.lastTool);
     return {
       event: {
         ...base,
         type: "process_exited",
         status: obj.status,
         exitCode,
+        ...(terminationReason === undefined ? {} : { terminationReason }),
+        ...(signal === undefined ? {} : { signal }),
+        ...(lastTool === undefined ? {} : { lastTool }),
         message,
       },
       legacy: false,
     };
+  }
   return null;
 }
 
