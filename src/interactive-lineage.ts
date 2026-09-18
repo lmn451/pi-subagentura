@@ -84,7 +84,11 @@ export interface LineageStorePaths {
 }
 
 export type ProjectionIssueKind =
-  "cycle" | "malformed" | "orphan" | "stale" | "truncated";
+  | "cycle"
+  | "malformed"
+  | "orphan"
+  | "stale"
+  | "truncated";
 
 export interface ProjectionIssue {
   kind: ProjectionIssueKind;

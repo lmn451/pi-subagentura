@@ -6,7 +6,13 @@ export type WorkflowJSONValue =
   | readonly WorkflowJSONValue[];
 
 export type WorkflowJSONSchemaType =
-  "object" | "array" | "string" | "number" | "integer" | "boolean" | "null";
+  | "object"
+  | "array"
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "null";
 
 /** Plain JSON Schema subset validated by the workflow runtime. */
 export interface WorkflowJSONSchema {
@@ -32,11 +38,19 @@ export interface WorkflowMeta {
   readonly whenToUse?: string;
   readonly phases?: readonly WorkflowPhase[];
   readonly [key: string]:
-    WorkflowJSONValue | readonly WorkflowPhase[] | undefined;
+    | WorkflowJSONValue
+    | readonly WorkflowPhase[]
+    | undefined;
 }
 
 export type WorkflowThinkingLevel =
-  "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 export interface WorkflowAgentOptions {
   readonly schema?: WorkflowJSONSchema;

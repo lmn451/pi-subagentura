@@ -960,7 +960,8 @@ function readCurrentTurnTerminal(
 function requestInteractiveCancellation(
   state: InteractiveSubagentState,
   onCancellationSnapshot:
-    ((receipt: CancellationSnapshotReceipt) => void) | undefined,
+    | ((receipt: CancellationSnapshotReceipt) => void)
+    | undefined,
 ): void {
   try {
     const cancelled = cancelInteractiveSubagent(state.id, "workflow", state);

@@ -37,7 +37,8 @@ function createLiveStatus(): SubagentLiveStatus {
       cost: 0,
     },
     activeTool: undefined as
-      { name: string; args: Record<string, unknown> } | undefined,
+      | { name: string; args: Record<string, unknown> }
+      | undefined,
   };
 }
 
@@ -61,7 +62,8 @@ function simulateTurnEnd(status: SubagentLiveStatus) {
 function createDebounceHarness() {
   let activeToolTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingActiveTool:
-    { name: string; args: Record<string, unknown> } | undefined;
+    | { name: string; args: Record<string, unknown> }
+    | undefined;
   const state = { activeTool: undefined as typeof pendingActiveTool };
 
   function setActiveToolDebounced(tool: typeof pendingActiveTool) {

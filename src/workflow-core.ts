@@ -41,7 +41,10 @@ export function defaultProcessConcurrency(): number {
 }
 
 export type WorkflowCostSource =
-  "provider" | "estimated" | "unavailable" | "mixed";
+  | "provider"
+  | "estimated"
+  | "unavailable"
+  | "mixed";
 
 export interface WorkflowUsage {
   input: number;

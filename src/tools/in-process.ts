@@ -1803,7 +1803,8 @@ function registerCancelSubagentTool(
 
     renderResult(result, _options, theme, _context) {
       const details = result.details as
-        (InProcessSubagentDetails & { jobId?: string }) | undefined;
+        | (InProcessSubagentDetails & { jobId?: string })
+        | undefined;
       const jobId = String(details?.jobId ?? "unknown");
       const cancelled = details?.status === "cancelled";
       const firstContent = result.content?.[0];

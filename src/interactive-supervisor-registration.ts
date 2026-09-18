@@ -190,7 +190,8 @@ export function buildAsyncSupervisorItems(
 
 /** Items that can sit under a workflow root; workflow rows are always roots. */
 type GroupableSupervisorItem =
-  InProcessSupervisorItem | InteractiveSupervisorItem;
+  | InProcessSupervisorItem
+  | InteractiveSupervisorItem;
 
 function addWorkflowChild(
   groups: Map<string, GroupableSupervisorItem[]>,

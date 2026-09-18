@@ -18,11 +18,11 @@ Always run all of these before committing:
 ```bash
 npm run typecheck   # tsc --noEmit, catches TDZ / no-use-before-define
 npm test            # vitest run
-npm run format:check  # prettier --check .
+npm run format:check  # oxfmt --check
 npm run pack:check  # npm pack --dry-run, mirrors the publish step
 ```
 
-The pre-commit hook (`simple-git-hooks` → `lint-staged` → `prettier --write`) formats staged files. The pre-push hook runs the third command across the repository. Install or refresh both with `npm run hooks:install`. Skip either for emergencies with `SKIP_SIMPLE_GIT_HOOKS=1`.
+The pre-commit hook (`simple-git-hooks` → `lint-staged` → `oxfmt`) formats staged files. The pre-push hook runs the third command across the repository. Install or refresh both with `npm run hooks:install`. Skip either for emergencies with `SKIP_SIMPLE_GIT_HOOKS=1`.
 
 ## Source layout (the 30-second tour)
 
@@ -53,7 +53,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 
 ## Code conventions
 
-- **Follow existing project style.** This codebase uses 2-space indents, double quotes, semicolons, trailing commas, and ~80-char lines (matches prettier defaults with `{}` config). Don't reformat unrelated code.
+- **Follow existing project style.** This codebase uses 2-space indents, double quotes, semicolons, trailing commas, and ~80-char lines (matches the `.oxfmtrc.json` configuration). Don't reformat unrelated code.
 - **Functions under ~50 lines** is the soft guideline; the per-tool blocks in `src/tools/in-process.ts` and `src/tools/interactive.ts`, and the per-test `it()` blocks run longer when they need to.
 - **Comments only for non-obvious logic** — protocol invariants, the "why" of a guard, the "what this is NOT" of a deliberate limitation. No restating the code.
 - **Declare all variables BEFORE conditional blocks that may return early.** `const`/`let` are hoisted into the TDZ; `if (cond) { return ... }` references before declaration throw at runtime. TypeScript's `no-use-before-define` (strict mode) catches this.

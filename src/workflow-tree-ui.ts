@@ -16,7 +16,8 @@ import type { SessionOwnerToken } from "./session-scope";
 const MAX_WORKFLOW_TREE_AGENT_ROWS = 20;
 
 export type WorkflowTreeAction =
-  { kind: "cancel"; workflowId: string } | { kind: "close" };
+  | { kind: "cancel"; workflowId: string }
+  | { kind: "close" };
 
 type WorkflowTreeDone = (action: WorkflowTreeAction) => void;
 

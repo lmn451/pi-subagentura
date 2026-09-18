@@ -101,7 +101,9 @@ export interface WorkflowSupervisorItem extends SupervisorItemBase {
 }
 
 export type AsyncSupervisorItem =
-  InteractiveSupervisorItem | InProcessSupervisorItem | WorkflowSupervisorItem;
+  | InteractiveSupervisorItem
+  | InProcessSupervisorItem
+  | WorkflowSupervisorItem;
 
 export interface InteractiveSupervisorOptions {
   done: SupervisorDone;

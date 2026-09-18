@@ -121,7 +121,8 @@ export function findModel(
     return runtime.modelRuntime.getModel(provider, modelId);
   }
   return runtime.modelRegistry.find(provider, modelId) as
-    Model<any> | undefined;
+    | Model<any>
+    | undefined;
 }
 
 export function copyProviderConfig(
