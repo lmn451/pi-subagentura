@@ -38,7 +38,7 @@ import {
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
-import { isJevRoutingEnabled } from "./jev-routing";
+import { isRoutingEnabled } from "./routing-factory";
 import { registerWorkspaceTools } from "./tools/workspace";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
@@ -96,8 +96,8 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   "utf8",
 ).trim();
 
-const ORCHESTRATOR_V2_JEV_GUIDANCE = `
-## Optional Jev routing advisor
+const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
+## Optional routing advisor
 
 For this enabled mode, this section overrides the earlier instruction to ask
 whenever multiple children plausibly match. If the user's action, scope,
@@ -106,13 +106,17 @@ unresolved, call list_orchestrator_agents, then resolve_orchestrator_route with
 the user's original task. The advisor obtains current authoritative candidates
 itself; do not pass it transcripts, file contents, secrets, or unrelated context.
 
-On kind="reuse", use the returned childId as the id of
+On kind="match", use the returned childId as the id of
 send_interactive_subagent_message and send the original task. The recommendation
 does not expand the child's responsibility or permissions. If the send fails
 because the child is unavailable, surface that state instead of replacing it.
-On kind="ask", ask one concise clarification using the listed responsibilities;
-do not silently pick another child or create one. On kind="cancelled", stop
-routing that request and do not send a task or ask a follow-up about it.
+On kind="no_match", apply the existing orchestrator policy: ask, create a child,
+handle the task, or fail as appropriate. Do not treat no_match as a clarification
+request by itself. In particular, reason="none" means no existing child owns the
+task; low confidence and ambiguity mean that the advisor cannot safely select one.
+On kind="error", do not send a task based on the advisor; follow the existing
+fallback policy. On kind="cancelled", stop routing that request and do not send
+a task or ask a follow-up about it.
 
 Explicit child identity, explicit new-child instructions, and attach/focus
 requests bypass the advisor and follow the existing policy. A clear exact
@@ -164,7 +168,7 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
-  const jevRoutingEnabled = isJevRoutingEnabled();
+  const routingEnabled = isRoutingEnabled();
   pi.on("before_agent_start", (event) => {
     const prompts: string[] = [];
     if (pi.getFlag("orchestrator") === true) {
@@ -172,7 +176,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (pi.getFlag("orchestratorv2") === true) {
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
-      if (jevRoutingEnabled) prompts.push(ORCHESTRATOR_V2_JEV_GUIDANCE);
+      if (routingEnabled) prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
     }
     if (prompts.length === 0) return;
     return {

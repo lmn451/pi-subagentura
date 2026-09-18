@@ -285,7 +285,7 @@ describe("extension registration", () => {
     { flag: "orchestratorv2", router: "deterministic", key: "fake-key" },
     { flag: "orchestrator", router: "jev", key: "fake-key" },
   ])(
-    "keeps Jev disabled for $flag / $router",
+    "keeps routing disabled for $flag / $router",
     async ({ flag, router, key }) => {
       vi.stubEnv("PI_ORCHESTRATOR_ROUTER", router);
       vi.stubEnv("TYPESAFE_API_KEY", key);
@@ -306,7 +306,7 @@ describe("extension registration", () => {
         "resolve_orchestrator_route",
       );
       expect(result?.systemPrompt ?? "").not.toContain(
-        "## Optional Jev routing advisor",
+        "## Optional routing advisor",
       );
       expect(fetch).not.toHaveBeenCalled();
     },
@@ -330,17 +330,16 @@ describe("extension registration", () => {
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
     expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
-    expect(result.systemPrompt).toContain("## Optional Jev routing advisor");
+    expect(result.systemPrompt).toContain("## Optional routing advisor");
     expect(
       result.systemPrompt.indexOf("If multiple children plausibly match"),
-    ).toBeLessThan(
-      result.systemPrompt.indexOf("## Optional Jev routing advisor"),
-    );
+    ).toBeLessThan(result.systemPrompt.indexOf("## Optional routing advisor"));
     expect(result.systemPrompt).toContain(
       "this section overrides the earlier instruction",
     );
-    expect(result.systemPrompt).toContain('On kind="reuse"');
-    expect(result.systemPrompt).toContain('On kind="ask"');
+    expect(result.systemPrompt).toContain('On kind="match"');
+    expect(result.systemPrompt).toContain('On kind="no_match"');
+    expect(result.systemPrompt).toContain('On kind="error"');
     expect(result.systemPrompt).toContain('On kind="cancelled"');
     expect(result.systemPrompt).toContain(
       "send_interactive_subagent_message and send the original task",

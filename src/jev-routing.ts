@@ -1,6 +1,7 @@
 import {
   DEFAULT_ROUTING_POLICY,
   decideFromRoutingChoice,
+  ROUTING_PROVIDER_ENV,
   type RoutingCandidate,
   type RoutingDecision,
   type RoutingEngine,
@@ -11,7 +12,8 @@ import {
 
 export const JEV_ROUTING_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const JEV_ROUTING_MODEL = "jev-latest";
-export const JEV_ROUTER_ENV = "PI_ORCHESTRATOR_ROUTER";
+/** @deprecated Use ROUTING_PROVIDER_ENV for provider-neutral activation. */
+export const JEV_ROUTER_ENV = ROUTING_PROVIDER_ENV;
 export const JEV_API_KEY_ENV = "TYPESAFE_API_KEY";
 export const JEV_TIMEOUT_ENV = "PI_ORCHESTRATOR_ROUTER_TIMEOUT_MS";
 export const JEV_MIN_CONFIDENCE_ENV = "PI_ORCHESTRATOR_ROUTER_MIN_CONFIDENCE";
@@ -104,7 +106,7 @@ interface ParsedResponse {
 export function isJevRoutingEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return env[JEV_ROUTER_ENV] === "jev";
+  return env[ROUTING_PROVIDER_ENV] === "jev";
 }
 
 export function createJevRoutingEngine(
@@ -122,20 +124,14 @@ export function createJevRoutingEngine(
 
       const configResult = readConfig(env);
       if (configResult.kind !== "ready") {
-        return {
-          kind: "ask",
-          reason: configResult.kind,
-          candidateIds: [],
-        };
+        return { kind: "error", reason: configResult.kind };
       }
 
       const inputResult = prepareInput(input, configResult.config);
       if (inputResult.kind !== "ready") {
-        return {
-          kind: "ask",
-          reason: inputResult.kind,
-          candidateIds: [],
-        };
+        return inputResult.kind === "no_candidates"
+          ? { kind: "no_match", reason: "none" }
+          : { kind: "error", reason: inputResult.kind };
       }
 
       const prepared = inputResult.input;
@@ -146,19 +142,11 @@ export function createJevRoutingEngine(
       const payload = buildRequestPayload(prepared, secrets);
       const serialized = JSON.stringify(payload);
       if (byteLength(serialized) > configResult.config.maxRequestBytes) {
-        return {
-          kind: "ask",
-          reason: "payload_too_large",
-          candidateIds: [],
-        };
+        return { kind: "error", reason: "payload_too_large" };
       }
       if (signal?.aborted) return { kind: "cancelled" };
       if (typeof fetchImpl !== "function") {
-        return {
-          kind: "ask",
-          reason: "unavailable",
-          candidateIds: [],
-        };
+        return { kind: "error", reason: "unavailable" };
       }
 
       let transport: TransportOutcome<TransportBody>;
@@ -176,31 +164,23 @@ export function createJevRoutingEngine(
         );
       } catch {
         if (signal?.aborted) return { kind: "cancelled" };
-        return {
-          kind: "ask",
-          reason: "unavailable",
-          candidateIds: [],
-        };
+        return { kind: "error", reason: "unavailable" };
       }
 
       if (transport.kind === "cancelled" || signal?.aborted) {
         return { kind: "cancelled" };
       }
       if (transport.kind === "timeout") {
-        return { kind: "ask", reason: "timeout", candidateIds: [] };
+        return { kind: "error", reason: "timeout" };
       }
       if (transport.kind !== "ok") {
-        return { kind: "ask", reason: "unavailable", candidateIds: [] };
+        return { kind: "error", reason: "unavailable" };
       }
       if (transport.value.kind === "payload_too_large") {
-        return {
-          kind: "ask",
-          reason: "payload_too_large",
-          candidateIds: [],
-        };
+        return { kind: "error", reason: "payload_too_large" };
       }
       if (transport.value.kind === "unavailable") {
-        return { kind: "ask", reason: "unavailable", candidateIds: [] };
+        return { kind: "error", reason: "unavailable" };
       }
 
       const parsed = parseResponse(
@@ -208,11 +188,7 @@ export function createJevRoutingEngine(
         prepared.candidates.map((candidate) => candidate.token),
       );
       if (!parsed) {
-        return {
-          kind: "ask",
-          reason: "invalid_response",
-          candidateIds: [],
-        };
+        return { kind: "error", reason: "invalid_response" };
       }
       if (signal?.aborted) return { kind: "cancelled" };
       return decideFromRoutingChoice(
@@ -230,7 +206,7 @@ export function createJevRoutingEngine(
 }
 
 function readConfig(env: NodeJS.ProcessEnv): ConfigResult {
-  if (env[JEV_ROUTER_ENV] !== "jev") return { kind: "disabled" };
+  if (env[ROUTING_PROVIDER_ENV] !== "jev") return { kind: "disabled" };
 
   const rawKey = env[JEV_API_KEY_ENV];
   const apiKey = rawKey?.trim();
@@ -420,8 +396,7 @@ function buildRequestPayload(
       secrets,
     );
   }
-  criteria[NONE_OPTION] =
-    "No existing child is an appropriate match; ask the parent for clarification.";
+  criteria[NONE_OPTION] = "No existing child has responsibility for this task.";
   return {
     state: {
       task: scrubFreeText(input.task, secrets),

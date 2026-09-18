@@ -78,9 +78,8 @@ describe("Jev routing adapter", () => {
       fetch: fetchMock,
     });
     await expect(disabled.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "disabled",
-      candidateIds: [],
     });
 
     const missingKey = createJevRoutingEngine({
@@ -88,9 +87,8 @@ describe("Jev routing adapter", () => {
       fetch: fetchMock,
     });
     await expect(missingKey.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "missing_key",
-      candidateIds: [],
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -119,7 +117,7 @@ describe("Jev routing adapter", () => {
     });
 
     expect(result).toEqual({
-      kind: "reuse",
+      kind: "match",
       childId: CHILD_A,
       evidence: {
         confidence: 0.95,
@@ -151,6 +149,9 @@ describe("Jev routing adapter", () => {
       "candidate_1",
       "none",
     ]);
+    expect(body.questions.route.criteria.none).toBe(
+      "No existing child has responsibility for this task.",
+    );
     expect(JSON.stringify(body)).not.toContain(CHILD_A);
     expect(JSON.stringify(body)).not.toContain(CHILD_B);
     expect(JSON.stringify(body)).not.toContain("test-key");
@@ -172,12 +173,11 @@ describe("Jev routing adapter", () => {
     });
     const noMatch = await engine.decide(input);
     expect(noMatch).toMatchObject({
-      kind: "ask",
-      reason: "no_match",
-      candidateIds: [CHILD_A, CHILD_B],
+      kind: "no_match",
+      reason: "none",
     });
-    expect(noMatch.kind).toBe("ask");
-    if (noMatch.kind === "ask") {
+    expect(noMatch.kind).toBe("no_match");
+    if (noMatch.kind === "no_match") {
       expect(noMatch.evidence).toMatchObject({
         confidence: 0.95,
         topProbability: 0.9,
@@ -199,9 +199,8 @@ describe("Jev routing adapter", () => {
         candidates: [{ ...input.candidates[0], description: "  " }],
       }),
     ).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "invalid_input",
-      candidateIds: [],
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -218,7 +217,7 @@ describe("Jev routing adapter", () => {
       ),
     });
     await expect(lowConfidence.decide(input)).resolves.toMatchObject({
-      kind: "ask",
+      kind: "no_match",
       reason: "low_confidence",
     });
 
@@ -236,7 +235,7 @@ describe("Jev routing adapter", () => {
       ),
     });
     await expect(ambiguous.decide(input)).resolves.toMatchObject({
-      kind: "ask",
+      kind: "no_match",
       reason: "ambiguous",
     });
 
@@ -255,7 +254,7 @@ describe("Jev routing adapter", () => {
       ),
     });
     await expect(tie.decide(input)).resolves.toMatchObject({
-      kind: "ask",
+      kind: "no_match",
       reason: "ambiguous",
     });
   });
@@ -297,7 +296,7 @@ describe("Jev routing adapter", () => {
         fetch: fetchReturning(body),
       });
       await expect(engine.decide(input)).resolves.toMatchObject({
-        kind: "ask",
+        kind: "error",
         reason: "invalid_response",
       });
     }
@@ -311,9 +310,8 @@ describe("Jev routing adapter", () => {
       }) as unknown as typeof fetch,
     });
     await expect(unavailable.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "unavailable",
-      candidateIds: [],
     });
 
     const tooLargeRequest = createJevRoutingEngine({
@@ -321,9 +319,8 @@ describe("Jev routing adapter", () => {
       fetch: vi.fn() as unknown as typeof fetch,
     });
     await expect(tooLargeRequest.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "payload_too_large",
-      candidateIds: [],
     });
 
     const tooLargeResponse = createJevRoutingEngine({
@@ -337,9 +334,8 @@ describe("Jev routing adapter", () => {
       ),
     });
     await expect(tooLargeResponse.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "payload_too_large",
-      candidateIds: [],
     });
   });
 
@@ -350,9 +346,8 @@ describe("Jev routing adapter", () => {
       fetch: fetchMock,
     });
     await expect(engine.decide(input)).resolves.toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "invalid_config",
-      candidateIds: [],
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -366,9 +361,8 @@ describe("Jev routing adapter", () => {
     });
     const timeoutResult = await timeout.decide(input);
     expect(timeoutResult).toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "timeout",
-      candidateIds: [],
     });
 
     let releaseBody!: () => void;
@@ -428,9 +422,8 @@ describe("routing evidence policy", () => {
         margin: 0.7,
       }),
     ).toEqual({
-      kind: "ask",
+      kind: "error",
       reason: "invalid_response",
-      candidateIds: [CHILD_A, CHILD_B],
     });
   });
 });
