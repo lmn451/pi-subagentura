@@ -26,7 +26,7 @@ export interface RoutingEvidence {
 }
 
 export const ROUTING_PROVIDER_ENV = "PI_ORCHESTRATOR_ROUTER";
-export type RoutingProvider = "jev" | "openrouter" | "openjev" | "llm";
+export type RoutingProvider = "jev" | "openrouter";
 
 export type RoutingNoMatchReason = "none" | "low_confidence" | "ambiguous";
 

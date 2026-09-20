@@ -17,11 +17,6 @@ export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 export const OPENROUTER_JEV_MODEL_ENV = "OPENROUTER_JEV_MODEL";
 export const MAX_OPENROUTER_JEV_MODEL_BYTES = 256;
 
-/** Compatibility aliases for callers that name the provider without Jev. */
-export const OPENROUTER_ROUTING_ENDPOINT = OPENROUTER_JEV_ROUTING_ENDPOINT;
-export const OPENROUTER_ROUTING_MODEL = OPENROUTER_JEV_ROUTING_MODEL;
-export const OPENROUTER_MODEL_ENV = OPENROUTER_JEV_MODEL_ENV;
-
 export interface OpenRouterJevRoutingEngineOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
@@ -80,15 +75,6 @@ export function createOpenRouterJevRoutingEngine(
       );
     },
   };
-}
-
-/** Alias for integrations that use the provider-neutral adapter name. */
-export const createOpenRouterRoutingEngine = createOpenRouterJevRoutingEngine;
-
-export function isOpenRouterRoutingEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return isOpenRouterJevRoutingEnabled(env);
 }
 
 function readConfig(env: NodeJS.ProcessEnv): ConfigResult {

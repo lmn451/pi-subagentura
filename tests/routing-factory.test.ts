@@ -26,9 +26,9 @@ describe("routing engine activation", () => {
   });
 
   it.each(["openjev", "llm"])(
-    "keeps recognized but unimplemented provider disabled: %s",
+    "rejects unsupported provider values: %s",
     (router) => {
-      expect(configuredRoutingProvider(env(router))).toBe(router);
+      expect(configuredRoutingProvider(env(router))).toBeUndefined();
       expect(createRoutingEngine({ env: env(router) })).toBeUndefined();
       expect(isRoutingEnabled(env(router))).toBe(false);
     },

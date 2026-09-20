@@ -15,12 +15,7 @@ export function configuredRoutingProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): RoutingProvider | undefined {
   const value = env[ROUTING_PROVIDER_ENV];
-  return value === "jev" ||
-    value === "openrouter" ||
-    value === "openjev" ||
-    value === "llm"
-    ? value
-    : undefined;
+  return value === "jev" || value === "openrouter" ? value : undefined;
 }
 
 /**
@@ -41,8 +36,6 @@ export function createRoutingEngine(
         env,
         fetch: options.fetch,
       });
-    case "openjev":
-    case "llm":
     case undefined:
       return undefined;
   }

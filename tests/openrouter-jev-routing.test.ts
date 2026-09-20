@@ -110,7 +110,7 @@ describe("OpenRouter Jev routing adapter", () => {
 
     for (const provider of ["openjev", "llm"]) {
       const inactive = { ...configured, PI_ORCHESTRATOR_ROUTER: provider };
-      expect(configuredRoutingProvider(inactive)).toBe(provider);
+      expect(configuredRoutingProvider(inactive)).toBeUndefined();
       expect(createRoutingEngine({ env: inactive })).toBeUndefined();
       expect(isRoutingEnabled(inactive)).toBe(false);
     }
