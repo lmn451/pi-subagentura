@@ -98,7 +98,20 @@ export async function createPiSessionHarness(
       },
     ],
     streamSimple: (_model: unknown, context: Context) => {
-      contexts.push(context);
+      // Pi 0.86 passes providers a normalized transcript: the leading system
+      // prompt is represented as a system message instead of Context.systemPrompt.
+      // Keep the harness' observable context shape stable across SDK versions.
+      const leadingSystem = (
+        context.messages as Array<{ role?: string; content?: unknown }>
+      ).find((message) => message.role === "system");
+      const systemPrompt =
+        context.systemPrompt ??
+        (typeof leadingSystem?.content === "string"
+          ? leadingSystem.content
+          : undefined);
+      contexts.push(
+        systemPrompt === undefined ? context : { ...context, systemPrompt },
+      );
       const stream = createAssistantMessageEventStream();
       pending.push(stream);
       return stream;
