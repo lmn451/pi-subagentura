@@ -88,11 +88,6 @@ interface RuntimeSnapshot {
   parentSessionId?: string;
   workflowId?: string;
   completionOwner?: "standalone" | "workflow";
-  workspaceRepoId?: string;
-  workspaceSlotId?: string;
-  workspaceAssignmentId?: string;
-  workspaceAssignmentEpoch?: number;
-  workspaceBranchRef?: string;
 }
 
 interface RouterRegistrationOptions {
@@ -565,21 +560,6 @@ function snapshotRuntime(state: InteractiveSubagentState): RuntimeSnapshot {
     ...(state.completionOwner === undefined
       ? {}
       : { completionOwner: state.completionOwner }),
-    ...(state.workspaceRepoId === undefined
-      ? {}
-      : { workspaceRepoId: state.workspaceRepoId }),
-    ...(state.workspaceSlotId === undefined
-      ? {}
-      : { workspaceSlotId: state.workspaceSlotId }),
-    ...(state.workspaceAssignmentId === undefined
-      ? {}
-      : { workspaceAssignmentId: state.workspaceAssignmentId }),
-    ...(state.workspaceAssignmentEpoch === undefined
-      ? {}
-      : { workspaceAssignmentEpoch: state.workspaceAssignmentEpoch }),
-    ...(state.workspaceBranchRef === undefined
-      ? {}
-      : { workspaceBranchRef: state.workspaceBranchRef }),
   };
 }
 
@@ -602,12 +582,7 @@ function sameRuntimeSnapshot(
     sameOwnerToken(left.supervisorOwner, right.supervisorOwner) &&
     left.parentSessionId === right.parentSessionId &&
     left.workflowId === right.workflowId &&
-    left.completionOwner === right.completionOwner &&
-    left.workspaceRepoId === right.workspaceRepoId &&
-    left.workspaceSlotId === right.workspaceSlotId &&
-    left.workspaceAssignmentId === right.workspaceAssignmentId &&
-    left.workspaceAssignmentEpoch === right.workspaceAssignmentEpoch &&
-    left.workspaceBranchRef === right.workspaceBranchRef
+    left.completionOwner === right.completionOwner
   );
 }
 
