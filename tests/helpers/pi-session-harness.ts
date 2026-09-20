@@ -102,15 +102,30 @@ export async function createPiSessionHarness(
       // prompt is represented as a system message instead of Context.systemPrompt.
       // Keep the harness' observable context shape stable across SDK versions.
       const leadingSystem = (
-        context.messages as Array<{ role?: string; content?: unknown }>
+        context.messages as Array<{
+          role?: string;
+          content?: unknown;
+          toolsAdded?: Context["tools"];
+        }>
       ).find((message) => message.role === "system");
       const systemPrompt =
         context.systemPrompt ??
         (typeof leadingSystem?.content === "string"
           ? leadingSystem.content
           : undefined);
+      const tools =
+        context.tools ??
+        (Array.isArray(leadingSystem?.toolsAdded)
+          ? leadingSystem.toolsAdded
+          : undefined);
       contexts.push(
-        systemPrompt === undefined ? context : { ...context, systemPrompt },
+        systemPrompt === undefined && tools === undefined
+          ? context
+          : {
+              ...context,
+              ...(systemPrompt ? { systemPrompt } : {}),
+              ...(tools ? { tools } : {}),
+            },
       );
       const stream = createAssistantMessageEventStream();
       pending.push(stream);
