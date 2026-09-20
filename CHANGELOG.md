@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added optional Jev-assisted Orchestratorv2 routing through OpenRouter or
   direct TypeSafe, with explicit environment opt-in, bounded external payloads,
-  fail-closed selection policy, and no automatic child dispatch.
+  fail-closed selection policy, anonymous operation telemetry, and no automatic
+  child dispatch.
 
 ## [3.6.2] - 2026-09-06
 

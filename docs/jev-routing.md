@@ -122,7 +122,11 @@ every arbitrary secret or confidential passage: do not include sensitive pasted
 content in tasks submitted to this advisor. Review the selected provider's
 privacy policy before enabling external processing.
 
-This feature uploads no routing telemetry. Advice returns only bounded local
+When anonymous product telemetry is enabled, invoking the advisor emits only the
+standard bounded operation events: the allowlisted tool name, root/child role,
+closed operation outcome and result status, and rounded duration. It never sends
+the task, candidate metadata, selected child, decision evidence, provider body,
+credentials, or identifiers as telemetry. Advice returns only bounded local
 candidate IDs, numeric evidence, and closed failure reasons. Raw provider error
 bodies and credentials are never returned to the parent. Ordinary Pi session
 storage may retain the local tool result.
