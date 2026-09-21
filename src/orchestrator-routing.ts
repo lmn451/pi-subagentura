@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { withInteractiveStateLock } from "./artifact";
+import { asStringIdentifier, type ProjectId } from "./identifier-types";
 import {
   getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
@@ -226,7 +227,7 @@ export function deleteOrchestratorRoutingFile(cwd: string): void {
   });
 }
 
-export function routingProjectId(cwd: string): string {
+export function routingProjectId(cwd: string): ProjectId {
   if (
     typeof cwd !== "string" ||
     cwd.length === 0 ||
@@ -235,9 +236,11 @@ export function routingProjectId(cwd: string): string {
     throw new Error("project cwd must be a non-empty bounded path");
   }
   const canonicalCwd = realpathSync(cwd);
-  return createHash("sha256")
-    .update(`pi-subagentura-routing\0${canonicalCwd}`)
-    .digest("hex");
+  return asStringIdentifier<"project">(
+    createHash("sha256")
+      .update(`pi-subagentura-routing\0${canonicalCwd}`)
+      .digest("hex"),
+  );
 }
 type RoutingAuthorityAppender = {
   appendEntry?: (customType: string, data: unknown) => unknown;

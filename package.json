@@ -52,6 +52,7 @@
     "src/schemas.ts",
     "src/tool-guidance.ts",
     "src/artifact.ts",
+    "src/identifier-types.ts",
     "src/artifact-poller.ts",
     "src/child-protocol.ts",
     "src/completion-turn.ts",

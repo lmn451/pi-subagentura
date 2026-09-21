@@ -10,6 +10,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
+import { asStringIdentifier, type HerdrRequestId } from "./identifier-types";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
@@ -23,6 +24,7 @@ import {
   commandExists,
   execMuxOrThrow,
   MAX_CAPTURE_READ_BYTES,
+  PANE_LIVENESS_CACHE_MS,
   MUX_CAPABILITIES,
   safeSegment,
   shellEscape,
@@ -34,7 +36,6 @@ const MAX_HERDR_RESPONSE_BYTES = MAX_CAPTURE_READ_BYTES * 6 + 64 * 1024;
 const MAX_HERDR_READ_LINES = 4096;
 const MAX_HERDR_TERMINAL_ID_BYTES = 256;
 const MAX_HERDR_PANE_ID_LENGTH = 128;
-const PANE_LIVENESS_CACHE_MS = 500;
 /**
  * Upper bound on the alias/probe caches. Both are pure caches keyed by
  * `session\npaneId`, and a long-lived Pi can accumulate an entry per pane per
@@ -413,7 +414,9 @@ function requestHerdrSocket(
   params: Record<string, unknown>,
 ): Promise<HerdrSocketResponse> {
   const socketPath = socketPathFor(session);
-  const id = `pi-subagentura:${method}:${nextHerdrRequestId++}`;
+  const id: HerdrRequestId = asStringIdentifier<"herdr-request">(
+    `pi-subagentura:${method}:${nextHerdrRequestId++}`,
+  );
   const request = `${JSON.stringify({ id, method, params })}\n`;
   const { promise, resolve, reject } =
     Promise.withResolvers<HerdrSocketResponse>();

@@ -21,10 +21,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   MAX_DELIVERY_RECEIPTS,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
   updateInteractiveStates,
   type PersistedDeliveryIntent,
   type InteractiveSubagentPersistedStateV2,
 } from "./artifact";
+import { asStringIdentifier, type DeliveryId } from "./identifier-types";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
 import {
@@ -54,7 +56,7 @@ export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
 export const MAX_OUTPUT_BYTES = 32 * 1024;
 export const MAX_FLUSH_BYTES = 64 * 1024;
 /** Maximum immutable output snapshot accepted from the artifact protocol. */
-export const MAX_ARTIFACT_OUTPUT_BYTES = 1024 * 1024;
+export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_OUTPUT_SNAPSHOT_BYTES;
 interface DeliveryGlobalState {
   __piSubagenturaInteractiveRegistry?: Map<string, InteractiveSubagentState>;
   __piSubagenturaSessionManager?: { getEntries?: () => unknown[] };
@@ -140,13 +142,15 @@ export function deliveryIdFor(params: {
   subagentId: string;
   turnId: string;
   mode: "notify" | "inject";
-}): string {
-  return createHash("sha256")
-    .update(
-      `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}\0${params.mode}`,
-    )
-    .digest("hex")
-    .slice(0, 32);
+}): DeliveryId {
+  return asStringIdentifier<"delivery">(
+    createHash("sha256")
+      .update(
+        `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}\0${params.mode}`,
+      )
+      .digest("hex")
+      .slice(0, 32),
+  );
 }
 
 function copyDeliveryState(

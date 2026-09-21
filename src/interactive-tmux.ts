@@ -35,6 +35,10 @@ import {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { randomBytes } from "node:crypto";
 import {
+  asStringIdentifier,
+  type InteractiveSubagentId,
+} from "./identifier-types";
+import {
   existsSync,
   mkdirSync,
   readFileSync,
@@ -704,9 +708,11 @@ export function launchInteractiveSubagent(params: {
   // 8 bytes, not 4: at 32 bits a birthday collision inside one tree is not
   // remote, and the duplicate-id path only degrades gracefully — it does not
   // recover the shadowed agent.
-  let id: string;
+  let id: InteractiveSubagentId;
   try {
-    id = randomBytes(8).toString("hex");
+    id = asStringIdentifier<"interactive-subagent">(
+      randomBytes(8).toString("hex"),
+    );
   } catch (error) {
     reportSpawnFailure("unknown");
     throw error;
