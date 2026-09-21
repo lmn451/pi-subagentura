@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import * as CodingAgent from "@earendil-works/pi-coding-agent";
+import * as PiAi from "@earendil-works/pi-ai";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
@@ -43,6 +44,66 @@ export type CompatibleSessionRuntime =
       authStorage: unknown;
       modelRegistry: ModelRegistry;
     };
+
+export interface CompatibleProviderTool {
+  name: string;
+}
+
+export interface CompatibleProviderContext {
+  messages: readonly unknown[];
+  systemPrompt?: unknown;
+  tools?: readonly CompatibleProviderTool[];
+}
+
+export interface NormalizedProviderContext {
+  systemPrompt: string;
+  tools: readonly CompatibleProviderTool[];
+}
+
+type ContextSystemMessage = {
+  role: string;
+  content?: unknown;
+  toolsAdded?: readonly CompatibleProviderTool[];
+};
+
+type PiAiContextCompat = {
+  getCurrentSystemPrompt?: (messages: readonly unknown[]) => string;
+  getCurrentTools?: (
+    messages: readonly unknown[],
+  ) => readonly CompatibleProviderTool[];
+};
+
+const piAiContext = PiAi as unknown as PiAiContextCompat;
+
+function findContextSystemMessage(
+  context: CompatibleProviderContext,
+): ContextSystemMessage | undefined {
+  const messages = context.messages as readonly ContextSystemMessage[];
+  return messages.find((message) => message.role === "system");
+}
+
+function contextText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value) ?? "";
+}
+
+export function normalizeProviderContext(
+  context: CompatibleProviderContext,
+): NormalizedProviderContext {
+  const systemMessage = findContextSystemMessage(context);
+  const systemPrompt =
+    typeof context.systemPrompt === "string"
+      ? context.systemPrompt
+      : (piAiContext.getCurrentSystemPrompt?.(context.messages) ??
+        contextText(systemMessage?.content));
+  const tools =
+    context.tools ??
+    piAiContext.getCurrentTools?.(context.messages) ??
+    systemMessage?.toolsAdded ??
+    [];
+  return { systemPrompt, tools };
+}
 
 export async function createCompatibleSessionRuntime(
   options: {
