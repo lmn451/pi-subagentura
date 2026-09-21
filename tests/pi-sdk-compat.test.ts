@@ -131,7 +131,17 @@ describe("Pi SDK session compatibility", () => {
       label: "transcript without system message",
       context: {
         messages: [
-          { role: "assistant", content: "reply" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "assistant-call",
+                name: "not-declared-tool",
+                arguments: {},
+              },
+            ],
+          },
           { role: "toolResult", content: "tool output" },
         ],
       } as CompatibleProviderContext,
