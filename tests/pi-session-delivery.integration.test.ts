@@ -27,6 +27,8 @@ import {
 } from "../src/session-scope";
 import { writeCliScript } from "../src/subagent-artifact-cli";
 import {
+  contextSystemPrompt,
+  contextToolNames,
   createPiSessionHarness,
   type PiSessionHarness,
 } from "./helpers/pi-session-harness";
@@ -676,10 +678,10 @@ describe("Pi session delivery integration", () => {
       triggerTurn: false,
     });
     expect(sendUserMessage).toHaveBeenCalledOnce();
-    expect(harness.contexts[0].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[0])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
-    expect(harness.contexts[0].tools?.map((tool) => tool.name)).toEqual(
+    expect(contextToolNames(harness.contexts[0])).toEqual(
       expect.arrayContaining([
         "read",
         "workflow",
@@ -791,7 +793,7 @@ describe("Pi session delivery integration", () => {
     expect(sendUserMessage).not.toHaveBeenCalled();
     harness.completeNext("parent done");
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(2));
-    expect(harness.contexts[1].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[1])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
     expect(JSON.stringify(harness.contexts[1].messages)).toContain(
@@ -841,7 +843,7 @@ describe("Pi session delivery integration", () => {
 
     expect(sendUserMessage).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(harness.contexts[0].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[0])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
     expect(
@@ -1354,7 +1356,7 @@ describe("persisted delivery Pi session integration", () => {
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
     expect(sendUserMessage).toHaveBeenCalledOnce();
-    expect(harness.contexts[0].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[0])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
     const providerMessages = JSON.stringify(harness.contexts[0].messages);
@@ -1393,7 +1395,7 @@ describe("persisted delivery Pi session integration", () => {
     await harness.reload();
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(harness.contexts[0].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[0])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
     const providerMessages = JSON.stringify(harness.contexts[0].messages);
@@ -1480,7 +1482,7 @@ describe("persisted delivery Pi session integration", () => {
     await harness.reload();
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(harness.contexts[0].systemPrompt).toContain(
+    expect(contextSystemPrompt(harness.contexts[0])).toContain(
       "# Orchestratorv2 Thin Router System Prompt",
     );
     harness.completeNext();
