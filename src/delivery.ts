@@ -21,6 +21,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   MAX_DELIVERY_RECEIPTS,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
   updateInteractiveStates,
   type PersistedDeliveryIntent,
   type InteractiveSubagentPersistedStateV2,
@@ -54,7 +55,7 @@ export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
 export const MAX_OUTPUT_BYTES = 32 * 1024;
 export const MAX_FLUSH_BYTES = 64 * 1024;
 /** Maximum immutable output snapshot accepted from the artifact protocol. */
-export const MAX_ARTIFACT_OUTPUT_BYTES = 1024 * 1024;
+export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_OUTPUT_SNAPSHOT_BYTES;
 interface DeliveryGlobalState {
   __piSubagenturaInteractiveRegistry?: Map<string, InteractiveSubagentState>;
   __piSubagenturaSessionManager?: { getEntries?: () => unknown[] };
