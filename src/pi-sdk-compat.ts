@@ -83,9 +83,7 @@ function findContextSystemMessage(
 }
 
 function contextText(value: unknown): string {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value) ?? "";
+  return typeof value === "string" ? value : "";
 }
 
 export function normalizeProviderContext(
