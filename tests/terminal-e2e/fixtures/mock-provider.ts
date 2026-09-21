@@ -135,7 +135,7 @@ function message(
 function toolCall(
   id: string,
   name: string,
-  args: Record<string, unknown>,
+  args: ToolCall["arguments"],
 ): ToolCall {
   return { type: "toolCall", id, name, arguments: args };
 }

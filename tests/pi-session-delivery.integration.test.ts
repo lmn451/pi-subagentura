@@ -1125,7 +1125,12 @@ describe("child protocol lifecycle integration", () => {
     const art = childArtifact();
     const harness = await createPiSessionHarness(repoRoot, {
       childArtifactDir: art.dir,
-      retrySettings: { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+      retrySettings: {
+        enabled: true,
+        maxRetries: 1,
+        baseDelayMs: 0,
+        maxAgentDelayMs: 0,
+      },
     });
     harnesses.push(harness);
 
@@ -1152,7 +1157,12 @@ describe("child protocol lifecycle integration", () => {
     const art = childArtifact();
     const harness = await createPiSessionHarness(repoRoot, {
       childArtifactDir: art.dir,
-      retrySettings: { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+      retrySettings: {
+        enabled: true,
+        maxRetries: 1,
+        baseDelayMs: 0,
+        maxAgentDelayMs: 0,
+      },
     });
     harnesses.push(harness);
 
