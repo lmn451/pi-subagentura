@@ -24,6 +24,16 @@ npm run pack:check  # npm pack --dry-run, mirrors the publish step
 
 The pre-commit hook (`simple-git-hooks` → `lint-staged` → `oxfmt`) formats staged files. The pre-push hook runs the third command across the repository. Install or refresh both with `npm run hooks:install`. Skip either for emergencies with `SKIP_SIMPLE_GIT_HOOKS=1`.
 
+## Agent edit flow
+
+After completing semantic edits, run the pinned formatter once on the changed files instead of hand-formatting them:
+
+```bash
+npx oxfmt src/changed-file.ts tests/changed-file.test.ts
+```
+
+Then inspect the formatted diff and run the relevant tests, typecheck, and `npm run format:check`. The pre-commit hook and CI are the final formatting gates. Run `npm run hooks:install` once in each new clone or worktree.
+
 ## Source layout (the 30-second tour)
 
 The table below is abbreviated; see [architecture.md §13](./architecture.md#13-complete-src-inventory) for the exhaustive source map.

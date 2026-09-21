@@ -40,6 +40,12 @@ Before reporting a behavioral bug, require evidence: a failing test, repro comma
 
 When child reports conflict, resolve it in the parent by checking files/tests yourself or state uncertainty.
 
+## Edit and formatting flow
+
+- For any child that edits files, make the semantic changes first, then run the repository formatter on changed files (`npm run format -- <changed files>` or equivalent).
+- Do not manually adjust formatter-owned whitespace. Inspect the formatted diff, then run the relevant tests, typecheck, and `npm run format:check` before reporting completion.
+- If a formatter or validation check fails, fix it with the formatter and re-run the check; do not skip or silently downgrade the gate.
+
 ## Routing patterns
 
 - **Small task:** do it directly; optionally use one child for a focused second opinion.

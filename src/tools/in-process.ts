@@ -692,13 +692,16 @@ function registerSubagentWithContextTool(
       '  - task: "Review one module", completionPolicy: "each"',
       '  - task: "Review one shard", completionPolicy: "group", completionGroupId: "review"',
       "",
-      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false only for a single short sub-agent whose result you need inline.",
+      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false for one short, focused task whose answer you need inline; for a broad review, use a small number of focused async reviewers.",
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
-      "Use completionPolicy=group with a shared completionGroupId for related jobs; the parent resumes once its settled-turn group is sealed and every member is terminal.",
+      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
+      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
       "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
-      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection is needed.",
+      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
     parameters: BaseParams,
 
@@ -1063,13 +1066,16 @@ function registerSubagentIsolatedTool(
       '  - task: "Review one module", completionPolicy: "each"',
       '  - task: "Review one shard", completionPolicy: "group", completionGroupId: "review"',
       "",
-      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false only for a single short sub-agent whose result you need inline.",
+      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false for one short, focused task whose answer you need inline; for a broad review, use a small number of focused async reviewers.",
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
-      "Use completionPolicy=group with a shared completionGroupId for related jobs; the parent resumes once its settled-turn group is sealed and every member is terminal.",
+      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
+      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
       "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
-      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection is needed.",
+      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
     parameters: BaseParams,
 
@@ -1368,7 +1374,7 @@ function registerGetSubagentStatusTool(
     name: "get_subagent_status",
     label: "Get Subagent Status",
     description:
-      "Poll an async subagent job by jobId. Returns live preview of the subagent's current turn, active tool, and output.",
+      "Poll an async subagent job by jobId. Returns live preview of the subagent's current turn, active tool, and output. Polling is non-destructive; a running job is normal and is not evidence of a hang.",
     parameters: StatusParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -1457,8 +1463,9 @@ function registerGetSubagentResultTool(
     description: [
       "Retrieve an async subagent job's current or final result and usage summary.",
       "A running job returns immediately with live status unless waiting is explicit. Pass wait: true to wait up to timeoutMs.",
-      "ONLY call this tool when the user explicitly asks you to wait for or collect a specific async result.",
+      "ONLY call this tool when the user explicitly asks you to wait for or collect a specific async result, or when a bounded final synthesis depends on this specific result.",
       "Do not call it immediately after spawning async sub-agents; coordinated completion notices and compact manifests handle normal background fan-out. Successful terminal collection consumes the matching pending automatic delivery.",
+      "A timeout does not cancel the job. It only stops this wait.",
     ].join("\n"),
     parameters: ResultParams,
 
@@ -1690,7 +1697,11 @@ function registerCancelSubagentTool(
   registerToolWithDefaultGuidance(pi, {
     name: "cancel_subagent",
     label: "Cancel Subagent",
-    description: "Abort a running async subagent job by jobId.",
+    description: [
+      "Abort a running async subagent job by jobId.",
+      "This is destructive terminal control: do not use it merely because the job is still running or to reclaim context.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence.",
+    ].join("\n"),
     parameters: CancelParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

@@ -169,6 +169,12 @@ describe("extension registration", () => {
       "# Orchestratorv2 Thin Router System Prompt",
     );
     expect(result.systemPrompt).toContain("`workflow`");
+    expect(result.systemPrompt).toContain(
+      "run the repository formatter on changed files",
+    );
+    expect(result.systemPrompt).toContain(
+      "Do not manually adjust formatter-owned whitespace",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 
