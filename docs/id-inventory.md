@@ -73,7 +73,7 @@ core string and numeric domains. It brands generated `InteractiveSubagentId`,
 `InProcessJobId`, `WorkflowId`, `WorkflowAttemptId`, `EventId`, `DeliveryId`,
 `WakeId`, `TelemetryCorrelationId`, `ProjectId`, `ConfirmationToken`, and
 `HerdrRequestId` values without changing runtime formats or persisted/tool-facing
-field names. The aliases are re-exported from `src/subagent.ts`; JSON, CLI, and
+field names. The aliases remain internal to the implementation; JSON, CLI, and
 SDK boundaries remain plain strings.
 
 The compile-time proof is in `tests/identifier-types.test.ts`; the existing
