@@ -85,6 +85,36 @@ export type SubagentDetails =
   | { status: "cancelled" | "not_found" }
   | { status: "invalid_id"; id: string };
 
+export type {
+  AgentSessionId,
+  CompletionGroupId,
+  ConfirmationToken,
+  CompletionId,
+  DeliveryId,
+  EventId,
+  HerdrRequestId,
+  IdentifierDomain,
+  InProcessJobId,
+  InteractiveSubagentId,
+  ModelId,
+  MuxSessionId,
+  MuxTerminalId,
+  NumericIdentifier,
+  PaneId,
+  ParentSessionId,
+  ProjectId,
+  RootSessionId,
+  SessionScopeGeneration,
+  SessionScopeId,
+  StringIdentifier,
+  TelemetryCorrelationId,
+  ToolCallId,
+  TurnId,
+  WakeId,
+  WorkflowAttemptId,
+  WorkflowId,
+  WorkerRpcId,
+} from "./identifier-types";
 const ORCHESTRATOR_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",

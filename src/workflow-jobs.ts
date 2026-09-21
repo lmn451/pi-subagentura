@@ -32,6 +32,7 @@ import {
   type TelemetryWorkflowInvocation,
   type TelemetryWorkflowStatus,
 } from "./telemetry";
+import { asStringIdentifier, type WorkflowId } from "./identifier-types";
 import type { CompletionPolicy } from "./completion-coordinator";
 
 // ── Background workflow-job registry ─────────────────────────────────
@@ -533,7 +534,9 @@ export function startWorkflowJob(
     }
   }
 
-  const id = `wf_${randomBytes(5).toString("hex")}`;
+  const id: WorkflowId = asStringIdentifier<"workflow">(
+    `wf_${randomBytes(5).toString("hex")}`,
+  );
   const defaultAsync = executionMode === "async";
   const defaultCompletionPolicy: TelemetryCompletionPolicy = defaultAsync
     ? "legacy"

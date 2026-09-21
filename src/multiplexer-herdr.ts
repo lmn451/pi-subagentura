@@ -10,6 +10,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
+import { asStringIdentifier, type HerdrRequestId } from "./identifier-types";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
@@ -413,7 +414,9 @@ function requestHerdrSocket(
   params: Record<string, unknown>,
 ): Promise<HerdrSocketResponse> {
   const socketPath = socketPathFor(session);
-  const id = `pi-subagentura:${method}:${nextHerdrRequestId++}`;
+  const id: HerdrRequestId = asStringIdentifier<"herdr-request">(
+    `pi-subagentura:${method}:${nextHerdrRequestId++}`,
+  );
   const request = `${JSON.stringify({ id, method, params })}\n`;
   const { promise, resolve, reject } =
     Promise.withResolvers<HerdrSocketResponse>();

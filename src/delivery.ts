@@ -26,6 +26,7 @@ import {
   type PersistedDeliveryIntent,
   type InteractiveSubagentPersistedStateV2,
 } from "./artifact";
+import { asStringIdentifier, type DeliveryId } from "./identifier-types";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
 import {
@@ -141,13 +142,15 @@ export function deliveryIdFor(params: {
   subagentId: string;
   turnId: string;
   mode: "notify" | "inject";
-}): string {
-  return createHash("sha256")
-    .update(
-      `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}\0${params.mode}`,
-    )
-    .digest("hex")
-    .slice(0, 32);
+}): DeliveryId {
+  return asStringIdentifier<"delivery">(
+    createHash("sha256")
+      .update(
+        `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}\0${params.mode}`,
+      )
+      .digest("hex")
+      .slice(0, 32),
+  );
 }
 
 function copyDeliveryState(

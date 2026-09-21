@@ -41,6 +41,7 @@ import {
   type CancellationSnapshotSource,
 } from "./cancellation-snapshots";
 import { withOrchestrationContext } from "./orchestration-context";
+import { asStringIdentifier, type InProcessJobId } from "./identifier-types";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { CompletionPolicy } from "./completion-coordinator";
 import {
@@ -782,8 +783,8 @@ export function scheduleJobCleanup(
 }
 
 /** Generate a unique job ID (16 hex chars from crypto.randomBytes) */
-export function generateJobId(): string {
-  return randomBytes(8).toString("hex");
+export function generateJobId(): InProcessJobId {
+  return asStringIdentifier<"in-process-job">(randomBytes(8).toString("hex"));
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
