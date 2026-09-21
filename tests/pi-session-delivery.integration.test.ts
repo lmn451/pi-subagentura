@@ -26,9 +26,8 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { writeCliScript } from "../src/subagent-artifact-cli";
+import { normalizeProviderContext } from "../src/pi-sdk-compat";
 import {
-  contextSystemPrompt,
-  contextToolNames,
   createPiSessionHarness,
   type PiSessionHarness,
 } from "./helpers/pi-session-harness";
@@ -678,10 +677,14 @@ describe("Pi session delivery integration", () => {
       triggerTurn: false,
     });
     expect(sendUserMessage).toHaveBeenCalledOnce();
-    expect(contextSystemPrompt(harness.contexts[0])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
-    expect(contextToolNames(harness.contexts[0])).toEqual(
+    expect(
+      normalizeProviderContext(harness.contexts[0]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
+    expect(
+      normalizeProviderContext(harness.contexts[0]).tools.map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(
       expect.arrayContaining([
         "read",
         "workflow",
@@ -793,9 +796,9 @@ describe("Pi session delivery integration", () => {
     expect(sendUserMessage).not.toHaveBeenCalled();
     harness.completeNext("parent done");
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(2));
-    expect(contextSystemPrompt(harness.contexts[1])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
+    expect(
+      normalizeProviderContext(harness.contexts[1]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
     expect(JSON.stringify(harness.contexts[1].messages)).toContain(
       "notify completion",
     );
@@ -843,9 +846,9 @@ describe("Pi session delivery integration", () => {
 
     expect(sendUserMessage).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(contextSystemPrompt(harness.contexts[0])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
+    expect(
+      normalizeProviderContext(harness.contexts[0]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
     expect(
       harness.sessionManager
         .getEntries()
@@ -1356,9 +1359,9 @@ describe("persisted delivery Pi session integration", () => {
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
     expect(sendUserMessage).toHaveBeenCalledOnce();
-    expect(contextSystemPrompt(harness.contexts[0])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
+    expect(
+      normalizeProviderContext(harness.contexts[0]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
     const providerMessages = JSON.stringify(harness.contexts[0].messages);
     expect(providerMessages).toContain("persisted immutable result");
     expect(providerMessages).toContain(ORCHESTRATOR_V2_WAKEUP_MESSAGE);
@@ -1395,9 +1398,9 @@ describe("persisted delivery Pi session integration", () => {
     await harness.reload();
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(contextSystemPrompt(harness.contexts[0])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
+    expect(
+      normalizeProviderContext(harness.contexts[0]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
     const providerMessages = JSON.stringify(harness.contexts[0].messages);
     expect(providerMessages).toContain("notify completion");
     expect(providerMessages).toContain(ORCHESTRATOR_V2_WAKEUP_MESSAGE);
@@ -1482,9 +1485,9 @@ describe("persisted delivery Pi session integration", () => {
     await harness.reload();
 
     await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-    expect(contextSystemPrompt(harness.contexts[0])).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
-    );
+    expect(
+      normalizeProviderContext(harness.contexts[0]).systemPrompt,
+    ).toContain("# Orchestratorv2 Thin Router System Prompt");
     harness.completeNext();
     await harness.session.waitForIdle();
   });

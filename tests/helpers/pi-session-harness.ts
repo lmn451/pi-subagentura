@@ -49,34 +49,6 @@ export interface PiSessionHarness {
   reload(): Promise<void>;
   dispose(): void;
 }
-type ContextSystemMessage = {
-  role: string;
-  content?: unknown;
-  toolsAdded?: Array<{ name: string }>;
-};
-
-function findContextSystemMessage(
-  context: Context,
-): ContextSystemMessage | undefined {
-  const messages =
-    context.messages as unknown as readonly ContextSystemMessage[];
-  return messages.find((message) => message.role === "system");
-}
-
-export function contextSystemPrompt(context: Context): string {
-  if (context.systemPrompt !== undefined) return context.systemPrompt;
-  return JSON.stringify(findContextSystemMessage(context)?.content ?? "") ?? "";
-}
-
-export function contextToolNames(context: Context): string[] {
-  if (context.tools !== undefined) {
-    return context.tools.map((tool) => tool.name);
-  }
-  return (
-    findContextSystemMessage(context)?.toolsAdded?.map((tool) => tool.name) ??
-    []
-  );
-}
 
 export async function createPiSessionHarness(
   cwd: string,
