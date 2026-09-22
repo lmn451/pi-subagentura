@@ -2049,7 +2049,8 @@ export function restoreDurableCompletionGroupsSync(
       for (const member of members) {
         if (
           member.startsWith("in-process:") ||
-          (member.startsWith("workflow:") && !member.startsWith("workflow:wfd_"))
+          (member.startsWith("workflow:") &&
+            !member.startsWith("workflow:wfd_"))
         )
           terminalMembers.add(member);
       }

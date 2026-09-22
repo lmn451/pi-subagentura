@@ -605,8 +605,20 @@ describe("completion coordinator", () => {
     scope = setupResult.scope;
     const owner = sessionOwner(scope);
     const group = { policy: "group" as const, groupId: "failed-settle" };
-    registerCompletionMember("workflow", "wfd_a", "group", group.groupId, owner);
-    registerCompletionMember("workflow", "wfd_b", "group", group.groupId, owner);
+    registerCompletionMember(
+      "workflow",
+      "wfd_a",
+      "group",
+      group.groupId,
+      owner,
+    );
+    registerCompletionMember(
+      "workflow",
+      "wfd_b",
+      "group",
+      group.groupId,
+      owner,
+    );
     sealCompletionGroups(owner);
     publishCompletion(
       record("wfd_a", {
@@ -1003,8 +1015,7 @@ describe("completion coordinator", () => {
         setupResult.ledgerRoot,
         "parent-session",
         "subagentura-completion-groups",
-      ) +
-      ".groups";
+      ) + ".groups";
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "a".repeat(64) + ".json"), "broken");
     await expect(restoreDurableCompletionGroups(owner)).rejects.toThrow();

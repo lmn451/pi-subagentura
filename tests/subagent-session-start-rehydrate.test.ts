@@ -136,8 +136,11 @@ describe("session_start rehydrate integration", () => {
 
   it("session_start restores a pending durable group before sealing it", async () => {
     const groupDirectory =
-      sessionLedgerPath(cwd, "rehydrate-parent", "subagentura-completion-groups") +
-      ".groups";
+      sessionLedgerPath(
+        cwd,
+        "rehydrate-parent",
+        "subagentura-completion-groups",
+      ) + ".groups";
     writeCompletionGroup(groupDirectory, {
       groupId: "durable-startup",
       members: ["workflow:wfd_a", "workflow:wfd_b"],
@@ -155,14 +158,17 @@ describe("session_start rehydrate integration", () => {
       completionGroupId: "durable-startup",
     });
     const { startHandler } = await setupExtension();
-    await startHandler!({ type: "session_start", reason: "startup" }, {
-      cwd,
-      sessionManager: {
-        getSessionId: () => "rehydrate-parent",
-        getEntries: () => [],
-        getBranch: () => [],
+    await startHandler!(
+      { type: "session_start", reason: "startup" },
+      {
+        cwd,
+        sessionManager: {
+          getSessionId: () => "rehydrate-parent",
+          getEntries: () => [],
+          getBranch: () => [],
+        },
       },
-    });
+    );
     const snapshot = readFileSync(
       join(
         groupDirectory,

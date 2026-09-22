@@ -176,8 +176,9 @@ source is parsed in the test suite before it is accepted.
 - Scripts are trusted JavaScript, not untrusted-input sandboxes.
 - By default, workflow jobs are async and live only for the current parent
   session. Reload, resume, quit, and new-session transitions cancel them.
-- Process-isolated agents require tmux or Zellij; otherwise the runtime falls
-  back to in-process execution.
+- Process-isolated agents require tmux or Zellij; non-durable runs otherwise
+  fall back to in-process execution. Durable runs fail closed when the
+  process backend is unavailable.
 - Interactive user-question pauses are represented by pending-approval output;
   a workflow cannot suspend and later resume at an `AskUserQuestion` checkpoint.
 - File-writing examples depend on the delegated agents having appropriate read
