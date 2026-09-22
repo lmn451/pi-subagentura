@@ -148,9 +148,10 @@ describe("real Pi terminal E2E", () => {
       // the scripted model is selected and both extensions loaded.
       const screen = harness.renderedScreen();
       expect(screen).toContain("mock • medium");
-      expect(screen).toContain("mock-");
-      expect(screen).toContain("provider.ts");
-      expect(screen).toContain("subagent.ts");
+      // Long checkout paths can wrap a filename across terminal rows.
+      const unwrapped = screen.replace(/\s+/g, "");
+      expect(unwrapped).toContain("mock-provider.ts");
+      expect(unwrapped).toContain("subagent.ts");
       expect(harness.panes()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ session: expect.stringMatching(/^e2e-/) }),
