@@ -551,6 +551,7 @@ export interface RunWorkflowOptions {
 // ── Script parsing ───────────────────────────────────────────────────
 
 import { parseWorkflow } from "./workflow-script";
+import { inspectDurableWorkflow } from "./workflow-durable-preflight";
 export { parseWorkflow };
 
 // ── Minimal JSON-Schema validation (dependency-free) ─────────────────
@@ -867,9 +868,17 @@ export function saveWorkflowScript(
   name: string,
   script: string,
   dir = WORKFLOWS_DIR,
+  options: { requireDurable?: boolean } = {},
 ): string {
   const safe = sanitizeWorkflowName(name);
   parseWorkflow(script); // validate before persisting
+  if (options.requireDurable) {
+    const inspection = inspectSavedWorkflow(script, dir);
+    if (!inspection.durableReady)
+      throw new Error(
+        `Workflow is not durable-ready: ${inspection.errors.join("; ")}`,
+      );
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, `${safe}.js`);
   writeFileSync(file, script, { encoding: "utf8", mode: 0o600 });
@@ -895,22 +904,50 @@ export function loadWorkflowScript(
   }
 }
 
+export function inspectSavedWorkflow(script: string, dir = WORKFLOWS_DIR) {
+  const inspection = inspectDurableWorkflow(script);
+  for (const name of inspection.referencedWorkflows ?? []) {
+    const child = loadWorkflowScript(name, dir);
+    if (!child) {
+      inspection.errors.push(`Nested workflow "${name}" is unavailable.`);
+      continue;
+    }
+    const nested = inspectDurableWorkflow(child);
+    if (!nested.durableReady || (nested.referencedWorkflows?.length ?? 0) > 0)
+      inspection.errors.push(
+        `Nested workflow "${name}" is not durable-ready at the supported nesting depth.`,
+      );
+  }
+  inspection.durableReady = inspection.errors.length === 0;
+  return inspection;
+}
+
+export interface SavedWorkflowSummary {
+  name: string;
+  description: string;
+  durableReady: boolean;
+  definitionDigest?: string;
+}
+
 export function listSavedWorkflows(
   dir = WORKFLOWS_DIR,
-): Array<{ name: string; description: string }> {
+): SavedWorkflowSummary[] {
   if (!existsSync(dir)) return [];
-  const out: Array<{ name: string; description: string }> = [];
+  const out: SavedWorkflowSummary[] = [];
   for (const entry of readdirSync(dir)) {
     const m = /^(.+)\.js$/.exec(entry);
     if (!m) continue;
     let description = "";
+    let durableReady = false;
+    let definitionDigest: string | undefined;
     try {
-      description = parseWorkflow(readFileSync(join(dir, entry), "utf8")).meta
-        .description;
+      const source = readFileSync(join(dir, entry), "utf8");
+      description = parseWorkflow(source).meta.description;
+      ({ durableReady, definitionDigest } = inspectSavedWorkflow(source, dir));
     } catch {
       description = "(unparseable)";
     }
-    out.push({ name: m[1], description });
+    out.push({ name: m[1], description, durableReady, definitionDigest });
   }
   return out;
 }

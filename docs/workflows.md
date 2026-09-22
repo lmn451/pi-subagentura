@@ -5,6 +5,20 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
+`/workflow <task>` creates a reusable script with stable operation IDs, validates
+it with `save_workflow({requireDurable:true})`, and starts a durable background
+run. `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts;
+compatible scripts run durably, while legacy scripts keep session-scoped behavior.
+The `list_workflows` tool also returns readiness and a SHA-256 source digest.
+Computed operation IDs are checked again during execution; static readiness
+does not guarantee that every runtime input will produce unique IDs.
+
+After interruption, use `resume_workflow({workflowId})` in the same Pi session
+and working directory. Recovery is manual and requires Pi to run. Direct calls
+to `workflow` opt into persistence with `durable:true`; saving or using `async`
+alone does not enable it. See [the runtime contract](../WORKFLOW_RUNTIME.md) for
+replay, process adoption, cancellation, and side-effect limits.
+
 This project ships several `.mjs` workflow scripts under
 `examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`
 tool. Two are **generic converters**; the rest are **concrete instantiations**

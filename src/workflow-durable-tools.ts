@@ -166,6 +166,7 @@ export function registerDurableWorkflowTools(
     signal: AbortSignal | undefined,
     onUpdate: any,
     ctx: any,
+    invocation: "tool" | "saved_command" = "tool",
   ): Promise<any> {
     let store: WorkflowRunStore | undefined;
     let accepted = false;
@@ -312,7 +313,7 @@ export function registerDurableWorkflowTools(
         workflowOwner,
         runAsync ? "async" : "sync",
         {
-          invocation: "tool",
+          invocation,
           async: runAsync,
           completionPolicy: runAsync ? (completion.policy ?? "each") : "inline",
         },
