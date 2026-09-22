@@ -83,9 +83,10 @@ pi --orchestrator
 /workflow-tree
 ```
 
-`/workflow` asks the parent to create, save, and immediately run a reusable
-workflow. `/workflows` runs saved workflows, and `/workflow-tree` shows live
-phases, agents, and cancellation controls.
+`/workflow` asks the parent to create, validate, save, and immediately run a
+durable reusable workflow. `/workflows` labels saved scripts as `durable-ready`
+or `session-scoped` and runs compatible scripts durably by default.
+`/workflow-tree` shows live phases, agents, and cancellation controls.
 
 ## Reusable workflows
 
@@ -120,7 +121,7 @@ Existing agent/item caps, concurrency, timeouts, cancellation, and errors still 
 
 Workflow scripts are trusted agent-authored JavaScript. The VM improves
 determinism but is not a security boundary, so never run untrusted JavaScript.
-By default, background workflow jobs are scoped to the current parent session and are
+Without `durable: true`, background workflow jobs are scoped to the current parent session and are
 cancelled by reload, resume, quit, or a new session. Standalone attachable
 interactive sub-agents use durable artifacts and survive parent `reload`,
 `resume`, and `quit` continuity transitions. A fresh `new` or `fork` transition
@@ -140,6 +141,14 @@ absent; new workflow steps cannot start until Pi resumes the run. Durable
 process attempts fail closed instead of falling back after a failed launch.
 See [durable runtime semantics](./WORKFLOW_RUNTIME.md) for the recovery and
 cancellation contract, storage limits, and failure handling.
+
+Use `save_workflow({ name, script, requireDurable: true })` to reject missing or
+ambiguous operation IDs before replacing a saved definition. `list_workflows`
+returns `durableReady` and a source `definitionDigest`; readiness also checks
+the current saved child definitions. Computed IDs remain validated at runtime.
+The `/workflows` command reports durable startup errors without falling back
+to a session-scoped run. Direct `workflow` tool calls still require explicit
+`durable: true`.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).

@@ -27,6 +27,7 @@ import {
   INTERACTIVE_POLL_MS,
   MAX_TOTAL_AGENTS,
   listSavedWorkflows,
+  inspectSavedWorkflow,
   loadWorkflowScript,
   parseWorkflow,
   saveWorkflowScript,
@@ -1471,10 +1472,21 @@ export function registerWorkflowTool(
       script: Type.String({
         description: "The workflow script to save (validated before writing).",
       }),
+      requireDurable: Type.Optional(
+        Type.Boolean({
+          description:
+            "Reject scripts without statically verifiable durable operation IDs before saving.",
+        }),
+      ),
     }),
     async execute(_id: string, params: any): Promise<any> {
       try {
-        const file = saveWorkflowScript(params.name, params.script);
+        const file = saveWorkflowScript(params.name, params.script, undefined, {
+          requireDurable: params.requireDurable === true,
+        });
+        const { durableReady, definitionDigest } = inspectSavedWorkflow(
+          params.script,
+        );
         return {
           content: [
             {
@@ -1482,7 +1494,13 @@ export function registerWorkflowTool(
               text: `Saved workflow "${params.name}" to ${file}.`,
             },
           ],
-          details: { status: "saved", name: params.name, file },
+          details: {
+            status: "saved",
+            name: params.name,
+            file,
+            durableReady,
+            definitionDigest,
+          },
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1504,7 +1522,12 @@ export function registerWorkflowTool(
     async execute(): Promise<any> {
       const items = listSavedWorkflows();
       const text = items.length
-        ? items.map((w) => `- ${w.name}: ${w.description}`).join("\n")
+        ? items
+            .map(
+              (w) =>
+                `- ${w.name} [${w.durableReady ? "durable-ready" : "session-scoped"}]: ${w.description}`,
+            )
+            .join("\n")
         : "(no saved workflows)";
       return {
         content: [{ type: "text", text }],
@@ -1585,14 +1608,34 @@ export function registerWorkflowTool(
       pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     };
 
-    const startSavedWorkflowFromCommand = (
+    const startSavedWorkflowFromCommand = async (
       name: string,
       argsValue: unknown,
       ctx: ExtensionCommandContext,
+      requireDurable: boolean,
     ) => {
       const script = loadWorkflowScript(name);
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
+      const { durableReady } = inspectSavedWorkflow(script);
+      if (requireDurable && !durableReady)
+        throw new Error(
+          `Workflow "${name}" is no longer durable-ready. Inspect the changed definition before starting it again.`,
+        );
+      if (durableReady) {
+        const result = await durableTools.run(
+          { script, args: argsValue, durable: true, async: true },
+          undefined,
+          undefined,
+          ctx,
+          "saved_command",
+        );
+        if (result.isError)
+          throw new Error(
+            result.content?.[0]?.text ?? "Durable workflow did not start.",
+          );
+        return { id: result.details.workflowId as string, meta, durable: true };
+      }
       const workflowOwner = owner();
       if (
         sessionScope &&
@@ -1641,7 +1684,7 @@ export function registerWorkflowTool(
         },
       );
       configureWorkflowCompletion(job, commandCompletion, workflowOwner);
-      return { job, meta };
+      return { id: job.id, meta, durable: false };
     };
 
     const selectSavedWorkflow = async (
@@ -1698,7 +1741,7 @@ export function registerWorkflowTool(
 
       const choices = items.map((w) => ({
         name: w.name,
-        description: w.description || "(no description)",
+        description: `[${w.durableReady ? "durable-ready" : "session-scoped"}] ${w.description || "(no description)"}`,
       }));
 
       if (items.length === 0) {
@@ -1712,7 +1755,12 @@ export function registerWorkflowTool(
       // If name was provided inline, try run it directly
       const inlineName = parsed.name;
       if (inlineName) {
-        await runNamedWorkflow(inlineName, parsed, ctx);
+        await runNamedWorkflow(
+          inlineName,
+          parsed,
+          ctx,
+          items.find((item) => item.name === inlineName)?.durableReady ?? false,
+        );
         return;
       }
 
@@ -1726,13 +1774,19 @@ export function registerWorkflowTool(
         return;
       }
 
-      await runNamedWorkflow(action.name, parsed, ctx);
+      await runNamedWorkflow(
+        action.name,
+        parsed,
+        ctx,
+        items.find((item) => item.name === action.name)?.durableReady ?? false,
+      );
     };
 
     async function runNamedWorkflow(
       name: string,
       parsed: { name: string | null; argsJson: string | null },
       ctx: ExtensionCommandContext,
+      requireDurable: boolean,
     ) {
       const items = listSavedWorkflows();
       const known = items.some((w) => w.name === name);
@@ -1747,14 +1801,18 @@ export function registerWorkflowTool(
           ? parseArgsJson(parsed.argsJson)
           : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
-        const { job, meta } = startSavedWorkflowFromCommand(
+        const { id, meta, durable } = await startSavedWorkflowFromCommand(
           name,
           argsValue,
           ctx,
+          requireDurable,
         );
         const text =
-          `Workflow "${meta.name}" started in background as ${job.id}. ` +
-          `${WORKFLOW_SESSION_SCOPE_MESSAGE} Use /workflow-status to inspect running jobs.`;
+          `Workflow "${meta.name}" started in background as ${id}. ` +
+          (durable
+            ? "Durable run: after interruption use resume_workflow in the same Pi session and cwd. "
+            : `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} `) +
+          "Use /workflow-status to inspect running jobs.";
         ctx.ui.notify(`Started workflow ${meta.name}.`);
         sendCommandMessage(text);
       } catch (err) {
@@ -1909,11 +1967,12 @@ export function registerWorkflowTool(
       "Requirements:",
       "1. Design a bounded workflow script with `export const meta = { name, description, phases }`.",
       "2. The workflow should accept its task/config through `args` so it can be reused later.",
-      "3. Save the script with `save_workflow` using a lowercase slug name.",
-      "4. Immediately start it with the `workflow` tool by saved `name` and suitable `args`.",
-      "5. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
-      "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
-      "7. Report the saved workflow name and returned workflowId.",
+      "3. Give every agent() and nested workflow() call a unique stable `id` option. Derive repeated IDs from stable item keys and retry attempt numbers. Use literal saved names for nested workflows.",
+      "4. Save the script with `save_workflow` using a lowercase slug name and `requireDurable: true`; fix validation errors before proceeding.",
+      "5. Immediately start it with the `workflow` tool by saved `name`, suitable `args`, `durable: true`, and `async: true`. Do not silently fall back to a session-scoped run.",
+      "6. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
+      "7. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
+      "8. Report the saved workflow name and returned workflowId. Explain that recovery is manual in the same Pi session and cwd; execution requires Pi to be running.",
       "",
       "User task:",
       task,

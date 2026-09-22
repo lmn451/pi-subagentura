@@ -95,6 +95,7 @@
     "src/workflow-worker.ts",
     "src/workflow-run-store.ts",
     "src/workflow-durable.ts",
+    "src/workflow-durable-preflight.ts",
     "src/workflow-durable-process.ts",
     "src/workflow-durable-tools.ts",
     "src/workflow-process-worker.mjs",

@@ -14,6 +14,22 @@ the existing session-scoped behavior. Async remains the default; `async:false`
 waits for the result. Saving a definition or running asynchronously does not
 imply durability.
 
+`save_workflow({name, script, requireDurable:true})` also checks explicit operation
+IDs and the current saved child definitions before writing. An incompatible
+script is rejected without replacing the existing file. `list_workflows` exposes
+`durableReady` and a SHA-256 `definitionDigest` of the root source. Readiness is a
+conservative static check: direct calls, explicit option objects, and literal
+nested workflow names are required; computed IDs are checked for validity and
+uniqueness at runtime. Explicit `workflow({durable:true})` execution retains the
+runtime's support for computed names and options.
+
+`/workflow <task>` asks the parent to generate stable IDs, save with
+`requireDurable:true`, and start with `durable:true`. `/workflows` labels saved
+definitions as `durable-ready` or `session-scoped` and starts compatible scripts
+durably by default. Compatibility is rechecked at launch. A failed durable start
+reports its error without falling back to a session-scoped execution. Direct
+tool calls without `durable:true` keep their existing behavior.
+
 `workflow({name, args, durable:true})` creates a separately persisted run. It
 captures the root source, arguments, cwd, model default, concurrency, output
 budget, and absolute wall deadline. Named nested sources are committed before
@@ -85,6 +101,8 @@ The parent receives phase/counter updates and a final result reference, not
 intermediate prompts and answers. Durable aggregates use the current completion
 coordinator, including human-priority delivery, group barriers, and persisted
 result-consumption receipts. Recovery never imports another session's runs.
+If a persisted completion-group file is unreadable, grouped delivery stays
+blocked until recovery succeeds; independent completions remain deliverable.
 
 ## Failure and cancellation contract
 

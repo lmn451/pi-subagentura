@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   barriers for durable workflows. Existing non-durable execution remains the
   compatibility default; no daemon, remote execution, VM snapshots, or
   exactly-once external-side-effect guarantee is introduced.
+- Durable authoring preflight via `save_workflow({ requireDurable: true })`,
+  saved-definition readiness and source digests, and durable execution by default
+  for compatible `/workflows` selections. `/workflow <task>` generates stable
+  IDs, validates before saving, and requests a durable background run.
+
+### Fixed
+
+- A failed durable completion-group recovery no longer suppresses independent
+  completion manifests. Grouped delivery stays blocked until recovery succeeds.
 
 ## [3.6.2] - 2026-09-06
 

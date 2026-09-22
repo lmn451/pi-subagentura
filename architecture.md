@@ -57,6 +57,7 @@ flowchart TB
 
   WfTools[workflow-tool.ts]
   WfJobs[(workflowJobRegistry)]
+  WfDurable[(durable run journal and process attempts)]
   Host[workflow-worker.ts host Engine]
   Worker[workflow-worker-thread.mjs]
   VM[node:vm workflow program]
@@ -90,6 +91,7 @@ flowchart TB
   Delivery -->|upgrade-recovered legacy intent| Parent
 
   WfTools --> WfJobs
+  WfJobs --> WfDurable
   WfJobs --> Host
   Host <-->|worker-thread RPC| Worker
   Worker --> VM
@@ -117,7 +119,7 @@ flowchart TB
 | Property                      | In-process AgentSession                                                                  | Interactive Pi process                                                                        | Workflow Worker + VM                                                                             |
 | ----------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Process boundary              | None for the agent session                                                               | Child OS process                                                                              | Worker thread for script; runner may be in-process or child process                              |
-| Durable across parent restart | No                                                                                       | Yes, through artifacts and `.pi/subagentura-state.json`                                       | No                                                                                               |
+| Durable across parent restart | No                                                                                       | Yes, through artifacts and `.pi/subagentura-state.json`                                       | Durable mode: same host, cwd, Pi session, and Node major; explicit resume required               |
 | Ongoing conversation          | No retained tool-facing conversation after completion                                    | Yes; a completed live pane becomes `idle` and accepts follow-up input                         | Workflow script is one run; nested saved workflows reuse the same worker                         |
 | Progress source               | Pi `session.subscribe` callbacks                                                         | Artifact events and child session observation                                                 | Worker progress/RPC plus runner progress                                                         |
 | Result polling                | Explicit status/result tool reads memory                                                 | Sole recurring artifact poller reads files                                                    | Explicit workflow status/result reads memory; process runner has a private awaited artifact loop |
@@ -771,7 +773,7 @@ It:
 9. registers restored interactive group members and publishes reconstructed state;
 10. seals recovered groups before polling begins.
 
-Recovery is complete before the global interval is ensured. The first later tick resumes from durable physical cursors and can drain a persisted completion without rediscovering committed bytes. The consumption receipt ledger is keyed by the matching parent session and stored beneath its Pi session directory, so same-session startup, reload, resume, or restart can reconcile its receipts. A manager without a session directory uses process-private temporary storage and cannot provide restart recovery. Only matching interactive state survives this path: in-process jobs and background workflows are retired on session replacement, while `new` and `fork` do not import prior coordinated work.
+Recovery is complete before the global interval is ensured. The first later tick resumes from durable physical cursors and can drain a persisted completion without rediscovering committed bytes. The consumption receipt ledger is keyed by the matching parent session and stored beneath its Pi session directory, so same-session startup, reload, resume, or restart can reconcile its receipts. A manager without a session directory uses process-private temporary storage and cannot provide restart recovery. Only matching interactive state survives this path. In-process jobs and non-durable background workflows are retired on session replacement; an interrupted durable workflow leaves its journal for explicit same-scope `resume_workflow`, while `new` and `fork` do not import prior coordinated work.
 
 ### 8.6 Shutdown ordering
 
@@ -806,6 +808,11 @@ It selects inline versus saved source, foreground versus background, owner ident
 `src/workflow-worker.ts` is the host engine and worker RPC server.
 `src/workflow-worker-thread.mjs` evaluates the script and owns DSL calls.
 `src/workflow-jobs.ts` owns background workflow state.
+Opt-in durable runs add `workflow-run-store.ts` journals,
+`workflow-durable.ts` replay/dispatch coordination,
+`workflow-durable-process.ts` process-attempt recovery, and
+`workflow-durable-tools.ts` start/resume/list/inspect integration. The default
+workflow tool path remains non-durable unless `durable: true` is selected.
 
 ### 9.2 Parsing and VM boundary
 
@@ -819,6 +826,11 @@ The worker creates a null-prototype VM context, disables dynamic string/Wasm cod
 
 This VM is **not a security boundary**.
 It is an accidental-global and deterministic-execution guard for trusted workflow scripts, not a sandbox for hostile code.
+
+`workflow-durable-preflight.ts` hashes and statically checks durable
+definitions during save/list and saved-command readiness checks. It requires
+explicit safe operation IDs, reports duplicate literal IDs, and records
+literal nested workflow names without executing the source.
 
 ### 9.3 Foreground lifecycle
 
@@ -897,6 +909,11 @@ It loads the saved child over RPC and evaluates it in the same worker, sharing s
 Only one nested child level is allowed.
 An in-process subagent is forbidden from invoking the top-level Pi workflow tool because cross-registry cancellation for that shape is unsupported.
 
+Saved workflows can also be invoked through their compatible slash-command
+path, which runs definitions durably by default. The workflow tool keeps
+durability opt-in through `durable: true`; saving or inspecting a definition
+alone does not make a run durable.
+
 ### 9.6 Background lifecycle
 
 ```mermaid
@@ -934,7 +951,29 @@ When execution rejects, `WorkflowExecutionError.usage` is copied into the job sn
 
 On completion, `notifyWorkflowCompletion` publishes one coordinated workflow record by default. The aggregate produces a TUI-only terminal entry, and the compact manifest points to `get_workflow_result` when the parent is safely idle; successful terminal retrieval consumes pending automatic delivery. Independent `completionPolicy="each"` records become eligible immediately and coalesce while busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` shares the parent-settlement seal and all-terminal barrier; same-turn launch and task text never infer a group. Workflow-owned process and in-process children are suppressed, so internal fan-out never wakes the parent per child. Publication is owner-fenced and suppressed by owner cleanup.
 
-### 9.7 Usage accounting, pricing provenance, and live projection
+### 9.7 Durable lifecycle and recovery
+
+Durability is opt-in for inline scripts and the workflow tool; saved slash
+commands run durably by default. A durable run records its source, arguments, definition digest,
+request outcomes, usage, and terminal state in a bounded journal under the run
+scope. `resume_workflow` explicitly reclaims an interrupted run only when the
+host, working directory, Pi session, and Node major version match; there is no
+daemon and no exactly-once side-effect guarantee. Uncommitted agent work may
+repeat after an interruption, while committed requests replay from recorded
+outcomes.
+
+The durable runner uses the same worker and runner selection as ordinary
+workflows. Process-backed attempts have a private recovery manifest, and a
+partially dispatched attempt is not duplicated by falling back to an
+in-process runner. Durable workflow-owned child completions are aggregated by
+the parent workflow record.
+
+Persisted completion groups are only used for groups containing durable
+workflow members. If group recovery is malformed or unavailable, all records
+in that group remain blocked for the owner, while independently eligible
+`each` records remain deliverable.
+
+### 9.8 Usage accounting, pricing provenance, and live projection
 
 Usage tracks input, output, cache-read, cache-write, cost, and turns. The compatibility field `tokensSpent` and the workflow `budget` remain completed output-token values; the budget is a soft target that parallel agents may overshoot, never a USD limit.
 
@@ -981,21 +1020,24 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 
 ### 11.1 Persistence table
 
-| State                                   | Owner and location                                                     | Survives module reload | Survives process restart | Recovery path                          |
-| --------------------------------------- | ---------------------------------------------------------------------- | ---------------------: | -----------------------: | -------------------------------------- |
-| In-process jobs                         | `helpers.ts` per-session job maps plus legacy `jobRegistry` index      |                    Yes |                       No | None                                   |
-| Coordinated in-process/workflow state   | `completion-coordinator.ts` plus parent completion/consumption entries |  Yes within live scope |   No job/result recovery | Retired on session replacement         |
-| Interactive live objects                | `interactive-tmux.ts` per-session maps plus legacy aggregate registry  |                    Yes |                       No | Rebuilt from durable state             |
-| Interactive lifecycle/output            | Artifact directory                                                     |                    Yes |                      Yes | Byte-cursor polling and artifact reads |
-| Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                     |                    Yes |                      Yes | `rehydrateInteractiveSubagents`        |
-| Parent completion entries               | Parent Pi session custom entries                                       |                    Yes |         Yes with session | Coordinator reconciliation             |
-| Consumption receipt ledger              | Private ledger beneath parent Pi session directory, keyed by session   |                    Yes |         Yes with session | Bounded snapshot reconciliation        |
-| Child conversation                      | Child Pi session JSONL                                                 |                    Yes |                      Yes | Reopened by Pi; tailed for observation |
-| Workflow jobs/results                   | `workflow-jobs.ts` global registry                                     |                    Yes |                       No | None                                   |
-| Workflow scripts                        | `~/.pi-subagentura/workflows/*.js`                                     |                    Yes |                      Yes | Load by validated name                 |
-| Session ownership                       | `session-scope.ts` live scope registry                                 |                    Yes |                       No | New `session_start` generation         |
-| Interactive lineage                     | bounded lineage manifests                                              |                    Yes |                      Yes | Supervisor projection                  |
-| Cancellation diagnostics                | configured snapshot directory                                          |                    Yes |                      Yes | Explicit inspection only               |
+| State                                   | Owner and location                                                     | Survives module reload | Survives process restart | Recovery path                                                     |
+| --------------------------------------- | ---------------------------------------------------------------------- | ---------------------: | -----------------------: | ----------------------------------------------------------------- |
+| In-process jobs                         | `helpers.ts` per-session job maps plus legacy `jobRegistry` index      |                    Yes |                       No | None                                                              |
+| Coordinated in-process/workflow state   | `completion-coordinator.ts` plus parent completion/consumption entries |  Yes within live scope |   No job/result recovery | Retired on session replacement                                    |
+| Interactive live objects                | `interactive-tmux.ts` per-session maps plus legacy aggregate registry  |                    Yes |                       No | Rebuilt from durable state                                        |
+| Interactive lifecycle/output            | Artifact directory                                                     |                    Yes |                      Yes | Byte-cursor polling and artifact reads                            |
+| Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                     |                    Yes |                      Yes | `rehydrateInteractiveSubagents`                                   |
+| Parent completion entries               | Parent Pi session custom entries                                       |                    Yes |         Yes with session | Coordinator reconciliation                                        |
+| Consumption receipt ledger              | Private ledger beneath parent Pi session directory, keyed by session   |                    Yes |         Yes with session | Bounded snapshot reconciliation                                   |
+| Child conversation                      | Child Pi session JSONL                                                 |                    Yes |                      Yes | Reopened by Pi; tailed for observation                            |
+| Workflow jobs/results                   | `workflow-jobs.ts` global registry                                     |                    Yes |                       No | None                                                              |
+| Durable workflow runs                   | `workflow-run-store.ts` journal under the run scope                    |                    Yes |                      Yes | Explicit same-host/cwd/session/Node-major resume                  |
+| Durable process attempts                | `workflow-durable-process.ts` private attempt manifests                |                    Yes |                      Yes | Durable attempt recovery                                          |
+| Persisted completion groups             | `completion-group-store.ts` parent-session group snapshots             |                    Yes |                      Yes | Failed group recovery blocks that group; `each` remains available |
+| Workflow scripts                        | `~/.pi-subagentura/workflows/*.js`                                     |                    Yes |                      Yes | Load by validated name                                            |
+| Session ownership                       | `session-scope.ts` live scope registry                                 |                    Yes |                       No | New `session_start` generation                                    |
+| Interactive lineage                     | bounded lineage manifests                                              |                    Yes |                      Yes | Supervisor projection                                             |
+| Cancellation diagnostics                | configured snapshot directory                                          |                    Yes |                      Yes | Explicit inspection only                                          |
 
 ### 11.2 Authority table
 
@@ -1103,6 +1145,13 @@ The following table inventories the tracked runtime source modules and companion
 |  55 | `src/multiplexer-contracts.ts`               | Dependency-light multiplexer contracts, capability matrix, subprocess and bounded capture helpers                               | None                                                                                                                                                                                                                                                                                                 |
 |  56 | `src/usage.ts`                               | Dependency-light usage normalization and aggregation primitives shared by workflow and Pi helpers                               | None                                                                                                                                                                                                                                                                                                 |
 |  57 | `src/identifier-types.ts`                    | Compile-time branded taxonomy for generated identifier domains and trusted-boundary casts                                       | None                                                                                                                                                                                                                                                                                                 |
+|  58 | `src/completion-group-store.ts`              | Durable snapshots for completion groups containing workflow runs                                                                | None                                                                                                                                                                                                                                                                                                 |
+|  59 | `src/workflow-durable-preflight.ts`          | Static durable-definition validation, source digest, and nested-name discovery                                                  | `workflow-script`                                                                                                                                                                                                                                                                                    |
+|  60 | `src/workflow-durable.ts`                    | Durable request journal, replay coordination, accounting, and interruption state                                                | `workflow-run-store`, `workflow-core`; type-only `helpers`                                                                                                                                                                                                                                           |
+|  61 | `src/workflow-durable-process.ts`            | Private process-attempt manifests and recovery/cleanup                                                                          | `workflow-run-store`, `multiplexer-contracts`; type-only `interactive-tmux`, `workflow-durable`                                                                                                                                                                                                      |
+|  62 | `src/workflow-durable-tools.ts`              | Durable workflow start, resume, listing, inspection, cancellation, and result integration                                       | `workflow-durable`, `workflow-run-store`, `workflow-worker`, `workflow-core`, `workflow-jobs`, `completion-coordinator`, `session-scope`                                                                                                                                                             |
+|  63 | `src/workflow-run-store.ts`                  | Crash-safe durable run journal, ownership lease, bounded replay, and same-scope recovery                                        | None project-internal                                                                                                                                                                                                                                                                                |
+|  64 | `src/workflow-process-worker.mjs`            | Child supervisor for one process-backed durable attempt                                                                         | None project-internal                                                                                                                                                                                                                                                                                |
 
 ---
 

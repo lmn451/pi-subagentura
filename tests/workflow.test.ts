@@ -1229,7 +1229,14 @@ describe("saved workflows", () => {
     expect(loadWorkflowScript("greet", dir)).toBe(script);
     expect(loadWorkflowScript("nope", dir)).toBeNull();
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "greet", description: "say hi" }]);
+    expect(list).toEqual([
+      {
+        name: "greet",
+        description: "say hi",
+        durableReady: true,
+        definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    ]);
   });
 
   it("rejects an invalid name and an unparseable script", () => {
@@ -1274,7 +1281,14 @@ describe("saved workflows", () => {
       "utf8",
     );
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "broken", description: "(unparseable)" }]);
+    expect(list).toEqual([
+      {
+        name: "broken",
+        description: "(unparseable)",
+        durableReady: false,
+        definitionDigest: undefined,
+      },
+    ]);
   });
 });
 
