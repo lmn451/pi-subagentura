@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, mkdir, writeFile } from "node:fs/promises";
+import { sessionLedgerPath } from "../src/completion-ledger";
 import { prepareDurableProcess } from "../src/workflow-durable-process";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { tmpdir } from "node:os";
@@ -69,6 +70,50 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
+    const { scope } = setup();
+    const owner = sessionOwner(scope);
+    const directory =
+      sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
+      ".groups";
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "a".repeat(64) + ".json"), "broken");
+    await expect(restoreDurableCompletionGroups(owner)).rejects.toThrow();
+    registerCompletionMember(
+      "workflow",
+      "wfd_group",
+      "group",
+      "uncertain",
+      owner,
+    );
+    sealCompletionGroups(owner);
+    const record = (id: string) => ({
+      schemaVersion: 1 as const,
+      completionId: "workflow:" + id,
+      source: "workflow" as const,
+      sourceId: id,
+      label: id,
+      status: "done" as const,
+      policy: "each" as const,
+      references: [{ label: "result", value: "result" }],
+      completedAt: 1,
+    });
+    publishCompletion(
+      { ...record("wfd_group"), policy: "group", groupId: "uncertain" },
+      owner,
+    );
+    publishCompletion(record("independent"), owner);
+    const manifest = prepareCompletionManifest(owner);
+    expect(manifest).toBeDefined();
+    expect(manifest!.details.completionIds).toEqual(["workflow:independent"]);
+    await rm(join(directory, "a".repeat(64) + ".json"));
+    await restoreDurableCompletionGroups(owner);
+    expect(prepareCompletionManifest(owner)!.details.completionIds).toEqual([
+      "workflow:wfd_group",
+    ]);
+    clearCompletionCoordinator(owner);
+  });
+
   it("stops completed durable attempt wrappers instead of retaining idle children", async () => {
     const { pi, scope, ctx } = setup();
     let manifest = "";

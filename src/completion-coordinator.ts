@@ -1449,7 +1449,10 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
     (record) =>
       !state.consumed.has(record.completionId) &&
       !state.dispatchAttempted.has(record.completionId) &&
-      (record.status === "error" || groupIsReady(state, record)),
+      record.status === "error" ||
+        ((record.policy === "each" ||
+          !failedGroupRecoveryOwners.has(ownerKey(state.owner))) &&
+          groupIsReady(state, record)),
   );
 }
 
@@ -1931,6 +1934,7 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
 
 /** Restore pending mixed-source barriers before any durable workflow notices. */
 const recoveringGroupOwners = new Set<string>();
+const failedGroupRecoveryOwners = new Set<string>();
 
 export async function restoreDurableCompletionGroups(
   owner: SessionOwnerToken,
@@ -1940,32 +1944,43 @@ export async function restoreDurableCompletionGroups(
   const directory =
     sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
   if (!hasCompletionGroups(directory)) return;
-  recoveringGroupOwners.add(ownerKey(owner));
-  const groups = await readCompletionGroups(directory);
-  if (!resolveLiveSessionScope(owner)) return;
-  for (const saved of groups) {
-    const existing = state.groups.get(saved.groupId);
-    const members = new Set([...(existing?.members ?? []), ...saved.members]);
-    if (members.size > MAX_GROUP_MEMBERS)
-      throw new Error("Recovered completion group exceeds its member cap.");
-    const terminalMembers = existing?.terminalMembers ?? new Set<string>();
-    for (const member of members) {
-      // These execution modes cannot outlive the old Pi session generation.
-      if (
-        member.startsWith("in-process:") ||
-        (member.startsWith("workflow:") && !member.startsWith("workflow:wfd_"))
-      )
-        terminalMembers.add(member);
+  const key = ownerKey(owner);
+  recoveringGroupOwners.add(key);
+  try {
+    const groups = await readCompletionGroups(directory);
+    if (!resolveLiveSessionScope(owner)) return;
+    for (const saved of groups) {
+      const existing = state.groups.get(saved.groupId);
+      const members = new Set([...(existing?.members ?? []), ...saved.members]);
+      if (members.size > MAX_GROUP_MEMBERS)
+        throw new Error("Recovered completion group exceeds its member cap.");
+      const terminalMembers = existing?.terminalMembers ?? new Set<string>();
+      for (const member of members) {
+        // These execution modes cannot outlive the old Pi session generation.
+        if (
+          member.startsWith("in-process:") ||
+          (member.startsWith("workflow:") &&
+            !member.startsWith("workflow:wfd_"))
+        )
+          terminalMembers.add(member);
+      }
+      state.groups.set(saved.groupId, {
+        groupId: saved.groupId,
+        members,
+        terminalMembers,
+        sealed: true,
+      });
     }
-    state.groups.set(saved.groupId, {
-      groupId: saved.groupId,
-      members,
-      terminalMembers,
-      sealed: true,
-    });
+    reconcileState(state);
+    failedGroupRecoveryOwners.delete(key);
+  } catch (error) {
+    // Unknown group membership must not release a barrier, but independent
+    // completions do not depend on that membership and can still be delivered.
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    throw error;
+  } finally {
+    recoveringGroupOwners.delete(key);
   }
-  reconcileState(state);
-  recoveringGroupOwners.delete(ownerKey(owner));
 }
 
 export function registerCompletionExpectations(
@@ -2359,6 +2374,7 @@ export function retireSessionScopedCompletions(
 
 export function clearCompletionCoordinator(owner: SessionOwnerToken): void {
   recoveringGroupOwners.delete(ownerKey(owner));
+  failedGroupRecoveryOwners.delete(ownerKey(owner));
   const state = coordinatorRegistry().get(ownerKey(owner));
   if (state?.manifestRetryTimer) clearTimeout(state.manifestRetryTimer);
   coordinatorRegistry().delete(ownerKey(owner));
