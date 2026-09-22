@@ -199,7 +199,8 @@ function isEscapedReference(node: any, parent: any): boolean {
   if (
     parent?.type === "Property" &&
     parent.key === node &&
-    parent.computed === false
+    parent.computed === false &&
+    parent.shorthand !== true
   )
     return false;
   if (

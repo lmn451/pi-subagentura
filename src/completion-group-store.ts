@@ -55,6 +55,22 @@ export function writeCompletionGroup(
   }
 }
 
+export function removeCompletionGroup(directory: string, groupId: string): void {
+  const name = createHash("sha256").update(groupId).digest("hex");
+  try {
+    unlinkSync(join(directory, `${name}.json`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return;
+  }
+  const parent = openSync(directory, "r");
+  try {
+    fsyncSync(parent);
+  } finally {
+    closeSync(parent);
+  }
+}
+
 export async function readCompletionGroups(
   directory: string,
 ): Promise<PersistedCompletionGroup[]> {

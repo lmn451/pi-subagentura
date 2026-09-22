@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   writeCompletionGroup,
+  removeCompletionGroup,
   readCompletionGroups,
   hasCompletionGroups,
 } from "./completion-group-store";
@@ -599,6 +600,27 @@ function matchesConsumption(
       : record.turnId === consumption.turnId;
   }
   return record.turnId === undefined;
+}
+
+function reclaimFinishedCompletionGroups(
+  state: CompletionCoordinatorState,
+): void {
+  const directory =
+    sessionLedgerFile(state.owner, "subagentura-completion-groups") + ".groups";
+  for (const group of state.groups.values()) {
+    if (!group.sealed || group.members.size === 0) continue;
+    if ([...group.members].some((member) => !group.terminalMembers.has(member)))
+      continue;
+    const records = [...state.records.values()].filter(
+      (record) => record.policy === "group" && record.groupId === group.groupId,
+    );
+    if (
+      records.length > 0 &&
+      records.every((record) => state.consumed.has(record.completionId))
+    ) {
+      removeCompletionGroup(directory, group.groupId);
+    }
+  }
 }
 
 function entriesFor(state: CompletionCoordinatorState): unknown[] {
@@ -1235,17 +1257,6 @@ function reconcileState(state: CompletionCoordinatorState): void {
             sequence + 1,
           );
           completionEntries.set(record.completionId, record);
-          if (record.policy === "group") {
-            const group = state.groups.get(record.groupId!) ?? {
-              groupId: record.groupId!,
-              members: new Set<string>(),
-              terminalMembers: new Set<string>(),
-              sealed: false,
-            };
-            group.members.add(`${record.source}:${record.sourceId}`);
-            group.terminalMembers.add(`${record.source}:${record.sourceId}`);
-            state.groups.set(group.groupId, group);
-          }
         }
       } catch {
         /* malformed custom entries are ignored */
@@ -1318,17 +1329,49 @@ function reconcileState(state: CompletionCoordinatorState): void {
       markConsumed(record);
     }
   }
-  if (consumptions.length === 0) return;
-  for (const record of state.records.values()) {
-    if (state.fallbackExpectations.has(record.completionId)) continue;
-    if (
-      consumptions.some((consumption) =>
-        matchesConsumption(record, consumption),
-      )
-    ) {
-      markConsumed(record);
+  if (consumptions.length > 0) {
+    for (const record of state.records.values()) {
+      if (state.fallbackExpectations.has(record.completionId)) continue;
+      if (
+        consumptions.some((consumption) =>
+          matchesConsumption(record, consumption),
+        )
+      ) {
+        markConsumed(record);
+      }
     }
   }
+  const groupedRecords = new Map<string, CompletionRecord[]>();
+  for (const record of completionEntries.values()) {
+    if (record.policy !== "group" || !record.groupId) continue;
+    const records = groupedRecords.get(record.groupId) ?? [];
+    records.push(record);
+    groupedRecords.set(record.groupId, records);
+  }
+  for (const [groupId, records] of groupedRecords) {
+    if (records.every((record) => state.consumed.has(record.completionId))) {
+      state.groups.delete(groupId);
+      removeCompletionGroup(
+        sessionLedgerFile(state.owner, "subagentura-completion-groups") +
+          ".groups",
+        groupId,
+      );
+      continue;
+    }
+    const group = state.groups.get(groupId) ?? {
+      groupId,
+      members: new Set<string>(),
+      terminalMembers: new Set<string>(),
+      sealed: false,
+    };
+    for (const record of records) {
+      const member = `${record.source}:${record.sourceId}`;
+      group.members.add(member);
+      group.terminalMembers.add(member);
+    }
+    state.groups.set(groupId, group);
+  }
+  reclaimFinishedCompletionGroups(state);
 }
 function getState(
   owner?: SessionOwnerToken,
@@ -1645,6 +1688,7 @@ function appendConsumption(
       state.fallbackExpectations.delete(record.completionId);
     }
   }
+  reclaimFinishedCompletionGroups(state);
   return true;
 }
 
