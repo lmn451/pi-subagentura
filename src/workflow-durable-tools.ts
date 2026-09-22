@@ -483,7 +483,14 @@ export async function restoreDurableWorkflowRuns(
   ctx: any,
 ): Promise<void> {
   try {
-    await restoreDurableCompletionGroups(currentOwner);
+    try {
+      await restoreDurableCompletionGroups(currentOwner);
+    } catch (error) {
+      ctx.ui?.notify?.(
+        `Durable completion groups need attention: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     const sessionId = ctx.sessionManager?.getSessionId?.();
     if (!sessionId || !ctx.cwd) return;
     const runScope = { sessionId, cwd: ctx.cwd };
