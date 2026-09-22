@@ -114,6 +114,19 @@ describe("inspectDurableWorkflow", () => {
     expect(result.errors.join(" ")).toMatch(/reference|agent/i);
   });
 
+  it("rejects shorthand agent and workflow escapes", () => {
+    const result = inspectDurableWorkflow(
+      script(`
+        const api = { agent, workflow };
+        api.agent("one", { id: "one" });
+        api.workflow("child", {}, { id: "child" });
+      `),
+    );
+
+    expect(result.durableReady).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/reference|agent|workflow/i);
+  });
+
   it("rejects dynamic nested workflow names", () => {
     const result = inspectDurableWorkflow(
       script('await workflow(args.childName, {}, { id: "child" });'),
