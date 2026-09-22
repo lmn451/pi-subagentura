@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, access, mkdir, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  access,
+  mkdir,
+  writeFile,
+  readFile,
+} from "node:fs/promises";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { prepareDurableProcess } from "../src/workflow-durable-process";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
@@ -21,6 +28,7 @@ import {
   sealCompletionGroups,
   clearCompletionCoordinator,
   restoreDurableCompletionGroups,
+  restoreDurableCompletionGroupsSync,
   publishCompletion,
   prepareCompletionManifest,
 } from "../src/completion-coordinator";
@@ -70,6 +78,20 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("does not rewrite a failed group snapshot during later settlement", async () => {
+    const { scope } = setup();
+    const owner = sessionOwner(scope);
+    const directory =
+      sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
+      ".groups";
+    await mkdir(directory, { recursive: true });
+    const snapshot = join(directory, "b".repeat(64) + ".json");
+    await writeFile(snapshot, "corrupt-snapshot");
+    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
+    sealCompletionGroups(owner);
+    expect(await readFile(snapshot, "utf8")).toBe("corrupt-snapshot");
+  });
+
   it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
     const { scope } = setup();
     const owner = sessionOwner(scope);
@@ -79,13 +101,15 @@ describe("durable public tools", () => {
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "a".repeat(64) + ".json"), "broken");
     await expect(restoreDurableCompletionGroups(owner)).rejects.toThrow();
-    registerCompletionMember(
-      "workflow",
-      "wfd_group",
-      "group",
-      "uncertain",
-      owner,
-    );
+    expect(() =>
+      registerCompletionMember(
+        "workflow",
+        "wfd_group",
+        "group",
+        "uncertain",
+        owner,
+      ),
+    ).toThrow("Completion group recovery is unavailable");
     sealCompletionGroups(owner);
     const record = (id: string) => ({
       schemaVersion: 1 as const,
@@ -98,16 +122,24 @@ describe("durable public tools", () => {
       references: [{ label: "result", value: "result" }],
       completedAt: 1,
     });
-    publishCompletion(
-      { ...record("wfd_group"), policy: "group", groupId: "uncertain" },
-      owner,
-    );
     publishCompletion(record("independent"), owner);
     const manifest = prepareCompletionManifest(owner);
     expect(manifest).toBeDefined();
     expect(manifest!.details.completionIds).toEqual(["workflow:independent"]);
     await rm(join(directory, "a".repeat(64) + ".json"));
     await restoreDurableCompletionGroups(owner);
+    registerCompletionMember(
+      "workflow",
+      "wfd_group",
+      "group",
+      "uncertain",
+      owner,
+    );
+    sealCompletionGroups(owner);
+    publishCompletion(
+      { ...record("wfd_group"), policy: "group", groupId: "uncertain" },
+      owner,
+    );
     expect(prepareCompletionManifest(owner)!.details.completionIds).toEqual([
       "workflow:wfd_group",
     ]);
