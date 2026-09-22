@@ -368,14 +368,13 @@ export function buildSystemOneChoicePayload(
     status: scrubFreeText(candidate.status, secrets),
   }));
   const criteria: Record<string, string> = {};
-  for (const candidate of input.candidates) {
+  // Scrub fields separately so an unterminated quote cannot span metadata fields.
+  for (const candidate of candidates) {
     const aliases = candidate.aliases?.length
       ? ` Aliases: ${candidate.aliases.join(", ")}.`
       : "";
-    criteria[candidate.token] = scrubFreeText(
-      `Existing child responsibility: ${candidate.description}.${aliases} Status: ${candidate.status}.`,
-      secrets,
-    );
+    criteria[candidate.option] =
+      `Existing child responsibility: ${candidate.description}.${aliases} Status: ${candidate.status}.`;
   }
   criteria[NONE_OPTION] = "No existing child has responsibility for this task.";
   return {
@@ -591,12 +590,12 @@ function scrubFreeText(value: string, secrets: readonly string[]): string {
     REDACTED,
   );
   text = text.replace(
-    /(\b(?:TYPESAFE_API_KEY|OPENROUTER_API_KEY|AWS_SECRET_ACCESS_KEY)\b\s*[:=]\s*)(["']?)[^\s"',;}]+/gi,
-    `$1${REDACTED}`,
+    /(\b(?:TYPESAFE_API_KEY|OPENROUTER_API_KEY|AWS_SECRET_ACCESS_KEY)\b["']?\s*[:=]\s*)("(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s"',;}]+)/gi,
+    redactCredentialAssignment,
   );
   text = text.replace(
-    /(\b(?:api[_-]?key|access[_-]?token|token|secret|password|passwd|authorization|credential|private[_-]?key)\b\s*[:=]\s*)(["']?)[^\s"',;}]+/gi,
-    `$1${REDACTED}`,
+    /(\b(?:api[_-]?key|access[_-]?token|token|secret|password|passwd|authorization|credential|private[_-]?key)\b["']?\s*[:=]\s*)("(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s"',;}]+)/gi,
+    redactCredentialAssignment,
   );
   text = text.replace(
     /(?:\/(?:Users|home|private|tmp|var\/folders|etc|root|opt)\/[^\s"'<>]+|~\/[^\s"'<>]+|[A-Za-z]:[\\/][^\s"'<>]+|[^\s"'<>]*\/\.pi(?:\/[^\s"'<>]*)?)/g,
@@ -607,6 +606,15 @@ function scrubFreeText(value: string, secrets: readonly string[]): string {
     `$1${REDACTED_PATH}`,
   );
   return text;
+}
+
+function redactCredentialAssignment(
+  _match: string,
+  prefix: string,
+  value: string,
+): string {
+  const quote = value.startsWith('"') ? '"' : value.startsWith("'") ? "'" : "";
+  return `${prefix}${quote}${REDACTED}${quote}`;
 }
 
 function byteLength(value: string): number {
