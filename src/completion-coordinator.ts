@@ -606,6 +606,7 @@ function matchesConsumption(
 function reclaimFinishedCompletionGroups(
   state: CompletionCoordinatorState,
 ): void {
+  if (isCompletionGroupRecoveryBlocked(state.owner)) return;
   const directory =
     sessionLedgerFile(state.owner, "subagentura-completion-groups") + ".groups";
   for (const group of state.groups.values()) {
@@ -1901,6 +1902,9 @@ export function registerCompletionMember(
   if (policy !== "group") return;
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const hasReservation =
     reservation?.active &&
@@ -1946,6 +1950,7 @@ export function registerCompletionMember(
 export function sealCompletionGroups(owner?: SessionOwnerToken): void {
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) return;
   state.groupsSealed = true;
   for (const group of state.groups.values()) {
     writeCompletionGroup(
@@ -1960,6 +1965,16 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
 /** Restore pending mixed-source barriers before any durable workflow notices. */
 const recoveringGroupOwners = new Set<string>();
 const failedGroupRecoveryOwners = new Set<string>();
+
+export function isCompletionGroupRecoveryBlocked(
+  owner?: SessionOwnerToken,
+): boolean {
+  const resolvedOwner = effectiveOwner(owner);
+  return (
+    resolvedOwner !== undefined &&
+    failedGroupRecoveryOwners.has(ownerKey(resolvedOwner))
+  );
+}
 
 export async function restoreDurableCompletionGroups(
   owner: SessionOwnerToken,

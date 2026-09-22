@@ -23,6 +23,7 @@ import { reconcileDeliveryReceipts } from "./delivery";
 import {
   registerCompletionExpectations,
   registerCompletionMember,
+  isCompletionGroupRecoveryBlocked,
   type CompletionExpectation,
 } from "./completion-coordinator";
 import { debugLog } from "./helpers";
@@ -138,6 +139,7 @@ function registerRecoveredGroups(
   failedGroupIds: Set<string>,
 ): Set<string> {
   const affectedGroupIds = new Set<string>();
+  if (isCompletionGroupRecoveryBlocked(owner)) return affectedGroupIds;
   for (const groupId of recoveredGroupIds(state)) {
     if (failedGroupIds.has(groupId)) {
       affectedGroupIds.add(groupId);

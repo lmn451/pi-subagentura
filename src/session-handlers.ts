@@ -670,7 +670,7 @@ export function registerSessionHandlers(
         completionGroupsRestored = false;
         captureTelemetry(scope.telemetry, {
           event: "session_setup_failed",
-          failure_stage: "completion_group_recovery",
+          failure_stage: "state_recovery",
         });
         logSessionError("durable_completion_group_recovery_failed", error);
       }
