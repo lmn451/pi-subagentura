@@ -578,7 +578,7 @@ describe("completion coordinator", () => {
     expect(
       consumeCompletionSource(
         setupResult.pi as never,
-        { source: "workflow", sourceId: "wfd_a", turnId: "turn-a" },
+        { source: "workflow", sourceId: "wfd_a" },
         owner,
       ),
     ).toBe(true);

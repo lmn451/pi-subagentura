@@ -674,31 +674,6 @@ function parseLedgerCompletion(line: string): CompletionRecord | undefined {
   }
 }
 
-function spilledGroupContainsMember(
-  state: CompletionCoordinatorState,
-  groupId: string,
-  memberKey: string,
-): boolean {
-  try {
-    const lines = readLedgerLines(state.overflow.path, MAX_LEDGER_BYTES, {
-      syncBeforeRead: true,
-    }).lines;
-    return lines.some((line) => {
-      const record = parseLedgerCompletion(line);
-      return (
-        record?.ownerSessionId ===
-          sessionId(resolveLiveSessionScope(state.owner)) &&
-        record.policy === "group" &&
-        record.groupId === groupId &&
-        completionMemberKey(record.source, record.sourceId) === memberKey
-      );
-    });
-  } catch {
-    // A missing or unreadable spill cannot authorize reopening a sealed group.
-    return false;
-  }
-}
-
 function overflowLedgerMeta(line: string):
   | {
       rotated: boolean;
@@ -2106,21 +2081,9 @@ export function publishCompletion(
       let group = state.groups.get(record.groupId!);
       if (!group) {
         if (state.groupsSealed) {
-          if (
-            spilledGroupContainsMember(state, record.groupId!, memberKey)
-          ) {
-            group = {
-              groupId: record.groupId!,
-              members: new Set([memberKey]),
-              terminalMembers: new Set([memberKey]),
-              sealed: true,
-            };
-            state.groups.set(record.groupId!, group);
-          } else {
-            throw new Error(
-              `Completion group ${record.groupId} is already sealed`,
-            );
-          }
+          throw new Error(
+            `Completion group ${record.groupId} is already sealed`,
+          );
         }
         if (!group) {
           registerCompletionMember(
