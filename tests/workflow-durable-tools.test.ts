@@ -78,20 +78,6 @@ function setup() {
 }
 
 describe("durable public tools", () => {
-  it("does not rewrite a failed group snapshot during later settlement", async () => {
-    const { scope } = setup();
-    const owner = sessionOwner(scope);
-    const directory =
-      sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
-      ".groups";
-    await mkdir(directory, { recursive: true });
-    const snapshot = join(directory, "b".repeat(64) + ".json");
-    await writeFile(snapshot, "corrupt-snapshot");
-    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
-    sealCompletionGroups(owner);
-    expect(await readFile(snapshot, "utf8")).toBe("corrupt-snapshot");
-  });
-
   it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
     const { scope } = setup();
     const owner = sessionOwner(scope);

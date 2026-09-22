@@ -4,6 +4,7 @@ import {
   appendFileSync,
   fsyncSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -34,6 +35,7 @@ import {
   registerCompletionMember,
   reserveCompletionGroup,
   restoreDurableCompletionGroups,
+  restoreDurableCompletionGroupsSync,
   retireSessionScopedCompletions,
   resolveCompletionPolicy,
   sealCompletionGroups,
@@ -598,6 +600,44 @@ describe("completion coordinator", () => {
     expect(manifest?.details.completionIds).toEqual(["completion-b"]);
   });
 
+  it("does not rewrite a failed group snapshot during later parent settlement", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "failed-settle" };
+    registerCompletionMember("workflow", "wfd_a", "group", group.groupId, owner);
+    registerCompletionMember("workflow", "wfd_b", "group", group.groupId, owner);
+    sealCompletionGroups(owner);
+    publishCompletion(
+      record("wfd_a", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_a",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    consumeCompletionSource(
+      setupResult.pi as never,
+      { source: "workflow", sourceId: "wfd_a" },
+      owner,
+    );
+    clearCompletionCoordinator(owner);
+    registerCompletionCoordinator(setupResult.pi as never, scope);
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    const [name] = readdirSync(directory);
+    const snapshot = join(directory, name!);
+    writeFileSync(snapshot, "corrupt-snapshot");
+    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
+    sealCompletionGroups(owner);
+    expect(readFileSync(snapshot, "utf8")).toBe("corrupt-snapshot");
+  });
+
   it("attaches ready references to a natural turn instead of auto-triggering", () => {
     const setupResult = setup();
     scope = setupResult.scope;
@@ -960,7 +1000,7 @@ describe("completion coordinator", () => {
     const owner = sessionOwner(scope);
     const directory =
       sessionLedgerPath(
-        scope.sessionManager.getSessionDir(),
+        setupResult.ledgerRoot,
         "parent-session",
         "subagentura-completion-groups",
       ) +

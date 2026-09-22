@@ -5,11 +5,14 @@
  * resume) and filters by parentSessionId.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type * as InteractiveTmuxModule from "../src/interactive-tmux";
 import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import { appendInteractiveState } from "../src/artifact";
+import { sessionLedgerPath } from "../src/completion-ledger";
+import { writeCompletionGroup } from "../src/completion-group-store";
 import {
   ORCHESTRATOR_ROUTING_AUTHORITY_ENTRY_TYPE,
   createOrchestratorRoutingAuthorityEntry,
@@ -129,6 +132,45 @@ describe("session_start rehydrate integration", () => {
       ),
     ).not.toThrow();
     expect(interactiveSubagentRegistry.size).toBe(0);
+  });
+
+  it("session_start restores a pending durable group before sealing it", async () => {
+    const groupDirectory =
+      sessionLedgerPath(cwd, "rehydrate-parent", "subagentura-completion-groups") +
+      ".groups";
+    writeCompletionGroup(groupDirectory, {
+      groupId: "durable-startup",
+      members: ["workflow:wfd_a", "workflow:wfd_b"],
+      sealed: true,
+    });
+    appendInteractiveState(cwd, {
+      id: "wfd_c",
+      paneId: "%42",
+      windowName: "durable",
+      mux: "tmux",
+      artifactDir: join(cwd, "wfd_c"),
+      sessionFile: "/tmp/session.jsonl",
+      parentSessionId: "rehydrate-parent",
+      completionPolicy: "group",
+      completionGroupId: "durable-startup",
+    });
+    const { startHandler } = await setupExtension();
+    await startHandler!({ type: "session_start", reason: "startup" }, {
+      cwd,
+      sessionManager: {
+        getSessionId: () => "rehydrate-parent",
+        getEntries: () => [],
+        getBranch: () => [],
+      },
+    });
+    const snapshot = readFileSync(
+      join(
+        groupDirectory,
+        `${createHash("sha256").update("durable-startup").digest("hex")}.json`,
+      ),
+      "utf8",
+    );
+    expect(snapshot).toContain("workflow:wfd_b");
   });
 
   it.each(["startup", "reload", "resume"])(
