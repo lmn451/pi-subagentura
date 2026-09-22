@@ -614,9 +614,18 @@ function reclaimFinishedCompletionGroups(
     const records = [...state.records.values()].filter(
       (record) => record.policy === "group" && record.groupId === group.groupId,
     );
+    const recordsByMember = new Map(
+      records.map((record) => [
+        completionMemberKey(record.source, record.sourceId),
+        record,
+      ]),
+    );
     if (
-      records.length > 0 &&
-      records.every((record) => state.consumed.has(record.completionId))
+      recordsByMember.size === group.members.size &&
+      [...group.members].every((member) => {
+        const record = recordsByMember.get(member);
+        return record !== undefined && state.consumed.has(record.completionId);
+      })
     ) {
       removeCompletionGroup(directory, group.groupId);
     }
@@ -1282,6 +1291,17 @@ function reconcileState(state: CompletionCoordinatorState): void {
             sequence + 1,
           );
           completionEntries.set(record.completionId, record);
+          if (record.policy === "group") {
+            const group = state.groups.get(record.groupId!) ?? {
+              groupId: record.groupId!,
+              members: new Set<string>(),
+              terminalMembers: new Set<string>(),
+              sealed: false,
+            };
+            group.members.add(`${record.source}:${record.sourceId}`);
+            group.terminalMembers.add(`${record.source}:${record.sourceId}`);
+            state.groups.set(group.groupId, group);
+          }
         }
       } catch {
         /* malformed custom entries are ignored */

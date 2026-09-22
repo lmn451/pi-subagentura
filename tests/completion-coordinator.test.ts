@@ -33,6 +33,7 @@ import {
   registerCompletionExpectations,
   registerCompletionMember,
   reserveCompletionGroup,
+  restoreDurableCompletionGroups,
   retireSessionScopedCompletions,
   resolveCompletionPolicy,
   sealCompletionGroups,
@@ -542,6 +543,59 @@ describe("completion coordinator", () => {
     flushCompletionManifests(sessionOwner(scope));
 
     expect(manifests(setupResult.pi)).toHaveLength(0);
+  });
+
+  it("restores consumed durable peers before releasing a remaining group member", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "durable-recovery" };
+    registerCompletionMember(
+      "workflow",
+      "wfd_a",
+      "group",
+      group.groupId,
+      owner,
+    );
+    registerCompletionMember(
+      "workflow",
+      "wfd_b",
+      "group",
+      group.groupId,
+      owner,
+    );
+    sealCompletionGroups(owner);
+
+    publishCompletion(
+      record("a", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_a",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    expect(
+      consumeCompletionSource(
+        setupResult.pi as never,
+        { source: "workflow", sourceId: "wfd_a", turnId: "turn-a" },
+        owner,
+      ),
+    ).toBe(true);
+    clearCompletionCoordinator(owner);
+    await restoreDurableCompletionGroups(owner);
+
+    publishCompletion(
+      record("b", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_b",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    const manifest = prepareCompletionManifest(owner);
+    expect(manifest?.details.completionIds).toEqual(["completion-b"]);
   });
 
   it("attaches ready references to a natural turn instead of auto-triggering", () => {
