@@ -1821,6 +1821,9 @@ export function reserveCompletionGroup(
   if (policy !== "group") return undefined;
   const state = getState(owner);
   if (!state) return undefined;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
   const hasReservation = state.reservedGroups.has(normalizedGroupId);
@@ -1870,6 +1873,9 @@ export function assertCompletionGroupOpen(
   if (policy !== "group") return;
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
   const reserved = state.groupReservations.get(normalizedGroupId) ?? 0;
@@ -1972,7 +1978,8 @@ export function isCompletionGroupRecoveryBlocked(
   const resolvedOwner = effectiveOwner(owner);
   return (
     resolvedOwner !== undefined &&
-    failedGroupRecoveryOwners.has(ownerKey(resolvedOwner))
+    (failedGroupRecoveryOwners.has(ownerKey(resolvedOwner)) ||
+      recoveringGroupOwners.has(ownerKey(resolvedOwner)))
   );
 }
 

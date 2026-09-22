@@ -954,6 +954,28 @@ describe("completion coordinator", () => {
     );
   });
 
+  it("rejects new group authority while recovery is unavailable", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const directory =
+      sessionLedgerPath(
+        scope.sessionManager.getSessionDir(),
+        "parent-session",
+        "subagentura-completion-groups",
+      ) +
+      ".groups";
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "a".repeat(64) + ".json"), "broken");
+    await expect(restoreDurableCompletionGroups(owner)).rejects.toThrow();
+    expect(() => reserveCompletionGroup("group", "fresh", owner)).toThrow(
+      "Completion group recovery is unavailable",
+    );
+    expect(() => assertCompletionGroupOpen("group", "fresh", owner)).toThrow(
+      "Completion group recovery is unavailable",
+    );
+  });
+
   it("clears consumed reservations before sealing a concurrent group", () => {
     const setupResult = setup();
     scope = setupResult.scope;
