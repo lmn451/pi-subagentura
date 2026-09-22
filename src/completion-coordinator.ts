@@ -3,6 +3,7 @@ import {
   writeCompletionGroup,
   removeCompletionGroup,
   readCompletionGroups,
+  readCompletionGroupsSync,
   hasCompletionGroups,
 } from "./completion-group-store";
 import {
@@ -2004,6 +2005,44 @@ export async function restoreDurableCompletionGroups(
     throw error;
   } finally {
     recoveringGroupOwners.delete(key);
+  }
+}
+
+export function restoreDurableCompletionGroupsSync(
+  owner: SessionOwnerToken,
+): void {
+  const state = getState(owner);
+  if (!state) return;
+  const directory =
+    sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
+  if (!hasCompletionGroups(directory)) return;
+  const key = ownerKey(owner);
+  try {
+    for (const saved of readCompletionGroupsSync(directory)) {
+      const existing = state.groups.get(saved.groupId);
+      const members = new Set([...(existing?.members ?? []), ...saved.members]);
+      if (members.size > MAX_GROUP_MEMBERS)
+        throw new Error("Recovered completion group exceeds its member cap.");
+      const terminalMembers = existing?.terminalMembers ?? new Set<string>();
+      for (const member of members) {
+        if (
+          member.startsWith("in-process:") ||
+          (member.startsWith("workflow:") && !member.startsWith("workflow:wfd_"))
+        )
+          terminalMembers.add(member);
+      }
+      state.groups.set(saved.groupId, {
+        groupId: saved.groupId,
+        members,
+        terminalMembers,
+        sealed: true,
+      });
+    }
+    reconcileState(state);
+    failedGroupRecoveryOwners.delete(key);
+  } catch (error) {
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    throw error;
   }
 }
 

@@ -9,6 +9,9 @@ import {
   renameSync,
   unlinkSync,
   constants,
+  readdirSync,
+  readFileSync,
+  fstatSync,
 } from "node:fs";
 import { readdir, open } from "node:fs/promises";
 import { join } from "node:path";
@@ -123,4 +126,49 @@ export async function readCompletionGroups(
     }
   }
   return groups;
+}
+
+export function readCompletionGroupsSync(
+  directory: string,
+): PersistedCompletionGroup[] {
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  names = names.filter((name) => /^[a-f0-9]{64}\.json$/.test(name));
+  if (names.length > 512)
+    throw new Error("Persisted completion group limit exceeded.");
+  return names.map((name) => {
+    const path = join(directory, name);
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let value: any;
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.size > 16 * 1024)
+        throw new Error("Invalid completion group snapshot.");
+      value = JSON.parse(readFileSync(fd, "utf8"));
+    } finally {
+      closeSync(fd);
+    }
+    if (
+      value.version !== 1 ||
+      typeof value.groupId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.groupId) ||
+      typeof value.sealed !== "boolean" ||
+      !Array.isArray(value.members) ||
+      value.members.length > 32 ||
+      value.members.some(
+        (m: unknown) =>
+          typeof m !== "string" ||
+          !/^(workflow|interactive|in-process):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(m),
+      ) ||
+      createHash("sha256").update(value.groupId).digest("hex") + ".json" !== name
+    ) {
+      throw new Error("Invalid completion group snapshot.");
+    }
+    return value as PersistedCompletionGroup;
+  });
 }

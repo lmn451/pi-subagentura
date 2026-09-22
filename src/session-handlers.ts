@@ -37,6 +37,7 @@ import {
   retireSessionScopedCompletions,
   sealCompletionGroups,
   settleCompletionParentTurn,
+  restoreDurableCompletionGroupsSync,
 } from "./completion-coordinator";
 import {
   createRootSpawnTreeContext,
@@ -647,6 +648,7 @@ export function registerSessionHandlers(
         terminal: 0,
         unknown: 0,
       };
+      let completionGroupsRestored = true;
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the
@@ -659,6 +661,18 @@ export function registerSessionHandlers(
           });
           logSessionError("orchestrator_routing_recovery_failed", error);
         }
+      }
+      try {
+        // Restore durable group membership before rehydrated interactive
+        // states can register members or seal a partial in-memory barrier.
+        restoreDurableCompletionGroupsSync(sessionOwner(scope));
+      } catch (error) {
+        completionGroupsRestored = false;
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "completion_group_recovery",
+        });
+        logSessionError("durable_completion_group_recovery_failed", error);
       }
       try {
         recovery = rehydrateInteractiveSubagents(
@@ -682,7 +696,9 @@ export function registerSessionHandlers(
         terminal_count: recovery.terminal,
         unknown_count: recovery.unknown,
       });
-      sealCompletionGroups(sessionOwner(scope));
+      if (completionGroupsRestored) {
+        sealCompletionGroups(sessionOwner(scope));
+      }
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
       } catch (error) {
