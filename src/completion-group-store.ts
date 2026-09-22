@@ -58,7 +58,10 @@ export function writeCompletionGroup(
   }
 }
 
-export function removeCompletionGroup(directory: string, groupId: string): void {
+export function removeCompletionGroup(
+  directory: string,
+  groupId: string,
+): void {
   const name = createHash("sha256").update(groupId).digest("hex");
   try {
     unlinkSync(join(directory, `${name}.json`));
@@ -163,9 +166,12 @@ export function readCompletionGroupsSync(
       value.members.some(
         (m: unknown) =>
           typeof m !== "string" ||
-          !/^(workflow|interactive|in-process):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(m),
+          !/^(workflow|interactive|in-process):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+            m,
+          ),
       ) ||
-      createHash("sha256").update(value.groupId).digest("hex") + ".json" !== name
+      createHash("sha256").update(value.groupId).digest("hex") + ".json" !==
+        name
     ) {
       throw new Error("Invalid completion group snapshot.");
     }
