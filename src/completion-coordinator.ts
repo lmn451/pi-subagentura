@@ -1341,36 +1341,6 @@ function reconcileState(state: CompletionCoordinatorState): void {
       }
     }
   }
-  const groupedRecords = new Map<string, CompletionRecord[]>();
-  for (const record of completionEntries.values()) {
-    if (record.policy !== "group" || !record.groupId) continue;
-    const records = groupedRecords.get(record.groupId) ?? [];
-    records.push(record);
-    groupedRecords.set(record.groupId, records);
-  }
-  for (const [groupId, records] of groupedRecords) {
-    if (records.every((record) => state.consumed.has(record.completionId))) {
-      state.groups.delete(groupId);
-      removeCompletionGroup(
-        sessionLedgerFile(state.owner, "subagentura-completion-groups") +
-          ".groups",
-        groupId,
-      );
-      continue;
-    }
-    const group = state.groups.get(groupId) ?? {
-      groupId,
-      members: new Set<string>(),
-      terminalMembers: new Set<string>(),
-      sealed: false,
-    };
-    for (const record of records) {
-      const member = `${record.source}:${record.sourceId}`;
-      group.members.add(member);
-      group.terminalMembers.add(member);
-    }
-    state.groups.set(groupId, group);
-  }
   reclaimFinishedCompletionGroups(state);
 }
 function getState(
