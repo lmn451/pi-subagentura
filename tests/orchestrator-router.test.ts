@@ -589,6 +589,82 @@ describe("orchestrator routing advisor", () => {
     expect(result.details.decision).toEqual({ kind: "cancelled" });
   });
 
+  it.each([
+    "description",
+    "aliases",
+    "provenance",
+    "updatedAt",
+    "removed",
+    "added",
+    "unchanged",
+  ] as const)(
+    "revalidates %s authority after the final liveness checks",
+    async (change) => {
+      const value = api();
+      const scope = registerSessionScope({
+        id: 1,
+        generation: 0,
+        lifecycle: "started",
+        pi: value as never,
+        cwd: root,
+        sessionManager: { getSessionId: () => "parent-1" },
+      });
+      scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
+      const entries = [routingEntry(CHILD_A)];
+      let release!: (value: "alive") => void;
+      const pendingProbe = new Promise<"alive">((resolve) => {
+        release = resolve;
+      });
+      const probe = vi
+        .fn()
+        .mockResolvedValueOnce("alive")
+        .mockReturnValueOnce(pendingProbe);
+      __setTmuxMultiplexer({ getPaneLivenessAsync: probe } as never);
+      registerOrchestratorRouterTool(value as never, scope, {
+        createEngine: () => ({
+          decide: async () => ({
+            kind: "match",
+            childId: CHILD_A,
+            evidence: {
+              confidence: 0.95,
+              topProbability: 0.9,
+              runnerUpProbability: 0.1,
+              margin: 0.8,
+            },
+          }),
+        }),
+      });
+      const pending = tool(value).execute(
+        "route-final-authority",
+        { task: "Review the API" },
+        undefined,
+        undefined,
+        context(root, entries),
+      );
+      await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+      if (change === "description")
+        entries[0] = { ...entries[0], description: "Own unrelated work only" };
+      if (change === "aliases")
+        entries[0] = { ...entries[0], aliases: ["new-alias"] };
+      if (change === "provenance")
+        entries[0] = { ...entries[0], provenance: "orchestratorv2" };
+      if (change === "updatedAt")
+        entries[0] = { ...entries[0], updatedAt: "2026-08-21T14:49:08.446Z" };
+      if (change === "removed") entries.splice(0);
+      if (change === "added") {
+        scope.interactiveStates.set(CHILD_B, runtimeState(CHILD_B, scope));
+        entries.push(routingEntry(CHILD_B));
+      }
+      release("alive");
+      const result = await pending;
+      expect(result.details.decision).toMatchObject(
+        change === "unchanged"
+          ? { kind: "match", childId: CHILD_A }
+          : { kind: "error", reason: "state_changed" },
+      );
+    },
+  );
+
   it("returns cancelled and performs no late route when aborted", async () => {
     const value = api();
     const scope = registerSessionScope({

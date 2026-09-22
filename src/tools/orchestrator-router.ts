@@ -269,15 +269,25 @@ async function resolveOrchestratorRoute(params: {
   }
 
   let currentView: OrchestratorAgentRegistryView;
+  let authorityUnchanged: boolean;
   try {
+    const currentAuthorityEntries = parentBranchEntries(params.ctx);
+    const authoritySnapshot = routingAuthoritySnapshot(
+      cwd,
+      currentAuthorityEntries,
+    );
     currentView = await loadOrchestratorAgentRegistryView(
       cwd,
       scope.interactiveStates,
       {
         signal: params.signal,
-        authorityEntries: parentBranchEntries(params.ctx),
+        authorityEntries: currentAuthorityEntries,
       },
     );
+    // Liveness probes yield; the authority captured by the view may now be stale.
+    authorityUnchanged =
+      authoritySnapshot ===
+      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx));
   } catch {
     if (params.signal?.aborted) {
       return routingAdviceResult({ kind: "cancelled" });
@@ -300,6 +310,7 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult({ kind: "cancelled" });
   }
   if (
+    !authorityUnchanged ||
     !snapshotsMatchCurrentView(
       snapshots,
       currentView,
@@ -314,6 +325,15 @@ async function resolveOrchestratorRoute(params: {
   }
 
   return routingAdviceResult(decision);
+}
+
+function routingAuthoritySnapshot(
+  cwd: string,
+  authorityEntries: readonly unknown[],
+): string {
+  const records = listOrchestratorRoutingEntries(cwd, authorityEntries);
+  records.sort((left, right) => left.childId.localeCompare(right.childId));
+  return JSON.stringify(records);
 }
 
 function contextCwd(ctx: unknown, scope: SessionScope): string | undefined {
