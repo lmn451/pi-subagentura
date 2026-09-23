@@ -460,6 +460,50 @@ describe("peer session scope isolation", () => {
   });
 });
 
+describe("async review finalization guidance", () => {
+  it.each(["subagent_with_context", "subagent_isolated"])(
+    "%s distinguishes yielding from finalizing the review",
+    (name) => {
+      const tool = getToolDef(setupExtension(), name);
+
+      expect(tool.description).toContain(
+        "yield the parent turn so the group seals",
+      );
+      expect(tool.description).toContain(
+        "label findings as provisional and report pending jobIds",
+      );
+      expect(tool.description).toContain(
+        "disclose any failed or cancelled reviewers as coverage gaps",
+      );
+      expect(tool.description).toContain(
+        "Do not cancel unfinished reviewers merely to finalize an audit.",
+      );
+      expect(tool.parameters.properties.async.description).toContain(
+        "Yield the spawning turn to seal the group",
+      );
+    },
+  );
+
+  it("directs timed-out review waits back to background completion", () => {
+    const tool = getToolDef(setupExtension(), "get_subagent_result");
+
+    expect(tool.description).toContain(
+      "If a bounded wait times out, report the pending jobId and yield",
+    );
+    expect(tool.description).toContain(
+      "do not cancel the job merely to finish a review",
+    );
+  });
+
+  it("forbids using cancellation to finalize an audit", () => {
+    const tool = getToolDef(setupExtension(), "cancel_subagent");
+
+    expect(tool.description).toContain(
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+    );
+  });
+});
+
 // ── subagent_with_context ────────────────────────────────────────────
 
 describe("subagent_with_context tool", () => {

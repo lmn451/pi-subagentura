@@ -49,7 +49,7 @@ export const BaseParams = Type.Object({
   async: Type.Optional(
     Type.Boolean({
       description:
-        "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false for one short, focused task whose answer you need inline; use a small number of focused async reviewers for broad work. A returned jobId is accepted background work: running or delayed is normal, not evidence of a hang. Do not cancel unfinished work merely to finalize or reclaim context; use an explicit group when a final synthesis depends on several reviewers.",
+        "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false for one short, focused task whose answer you need inline; use a small number of focused async reviewers for broad work. A returned jobId is accepted background work: running or delayed is normal, not evidence of a hang. Do not cancel unfinished work merely to finalize or reclaim context; use an explicit group when a final synthesis depends on several reviewers. Yield the spawning turn to seal the group; report pending jobIds in provisional updates rather than cancelling reviewers to finalize.",
     }),
   ),
   notifyOnComplete: Type.Optional(
