@@ -545,6 +545,67 @@ describe("subagent_with_context tool", () => {
     expect(mockConvertToLlm).not.toHaveBeenCalled();
   });
 
+  it("does not inherit a message omitted by the parent session projection", async () => {
+    const sessionManager = {
+      getBranch: vi.fn().mockReturnValue([
+        {
+          type: "message",
+          message: { role: "user", content: "RAW-OMITTED" },
+        },
+      ]),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
+      getSessionId: vi.fn().mockReturnValue("test-session"),
+    };
+    const ctx = mockCtx({ sessionManager });
+
+    const result = await toolDef.execute(
+      "omitted-context",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result.content[0].text).toBe("No conversation history to inherit.");
+    expect(sessionManager.buildSessionProjection).toHaveBeenCalledOnce();
+    expect(sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+  });
+
+  it("inherits replacement messages from the parent session projection", async () => {
+    const projectedMessages = [{ role: "user", content: "EDITED-REPLACEMENT" }];
+    const sessionManager = {
+      getBranch: vi.fn().mockReturnValue([
+        {
+          type: "message",
+          message: { role: "user", content: "RAW-ORIGINAL" },
+        },
+      ]),
+      buildSessionProjection: vi
+        .fn()
+        .mockReturnValue({ messages: projectedMessages }),
+      getSessionId: vi.fn().mockReturnValue("test-session"),
+    };
+    const ctx = mockCtx({ sessionManager });
+    mockConvertToLlm.mockReturnValue(projectedMessages);
+    mockSerializeConversation.mockReturnValue("serialized replacement");
+
+    await toolDef.execute(
+      "replacement-context",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(sessionManager.buildSessionProjection).toHaveBeenCalledOnce();
+    expect(sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(mockConvertToLlm).toHaveBeenCalledWith(projectedMessages);
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({ contextText: "serialized replacement" }),
+    );
+  });
+
   it("records one context-stage failure for missing history", async () => {
     const payloads = captureTelemetryPayloads();
     const scoped = setupScopedExtension(718);

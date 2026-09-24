@@ -39,6 +39,7 @@ import {
   type SubagentResult,
   type Usage,
 } from "../helpers";
+import { getParentContextMessages } from "../pi-sdk-compat";
 import { resolveSpawnDepth } from "../orchestration-context";
 import {
   getStartedSessionScopes,
@@ -783,22 +784,21 @@ function registerSubagentWithContextTool(
         return depthLimitResult(spawn.limit);
       }
 
-      const branchResult = (() => {
+      const contextResult = (() => {
         try {
-          return { ok: true as const, value: ctx.sessionManager.getBranch() };
+          return {
+            ok: true as const,
+            value: getParentContextMessages(ctx.sessionManager),
+          };
         } catch (error) {
           return { ok: false as const, error };
         }
       })();
-      if (!branchResult.ok) {
+      if (!contextResult.ok) {
         captureSpawnFailure(telemetry, "context", spawnRequestedAt);
-        return completionPolicyErrorResult(branchResult.error);
+        return completionPolicyErrorResult(contextResult.error);
       }
-      const messages = branchResult.value
-        .filter(
-          (e): e is typeof e & { type: "message" } => e.type === "message",
-        )
-        .map((e) => e.message);
+      const messages = contextResult.value;
 
       const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       if (runAsync) {

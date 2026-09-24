@@ -4,10 +4,40 @@ import {
   copyProviderConfig,
   createCompatibleSessionRuntime,
   findModel,
+  getParentContextMessages,
   normalizeProviderContext,
   registerProvider,
   type CompatibleProviderContext,
 } from "../src/pi-sdk-compat";
+
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
+const supportsCanonicalContextEdits = (() => {
+  const manager = SessionManager.inMemory("/tmp");
+  const compatibleManager = manager as unknown as {
+    appendContextEdit?: unknown;
+    buildSessionProjection?: unknown;
+  };
+  return (
+    typeof compatibleManager.appendContextEdit === "function" &&
+    typeof compatibleManager.buildSessionProjection === "function"
+  );
+})();
+
+function createEditedSession(replacement: unknown) {
+  const sessionManager = SessionManager.inMemory("/tmp");
+  const manager = sessionManager as unknown as {
+    appendMessage(message: unknown): string;
+    appendContextEdit(targetId: string, replacement: unknown): string;
+    getBranch(): Array<{ message?: { content: unknown } }>;
+  };
+  const targetId = manager.appendMessage({
+    role: "user",
+    content: "RAW-ORIGINAL",
+  });
+  manager.appendContextEdit(targetId, replacement);
+  return { sessionManager, manager };
+}
 
 describe("Pi SDK session compatibility", () => {
   it("passes modern SDK sessions a modelRuntime without legacy options", () => {
@@ -154,4 +184,65 @@ describe("Pi SDK session compatibility", () => {
     expect(normalized.systemPrompt).toBe(prompt);
     expect(normalized.tools.map((tool) => tool.name)).toEqual(toolNames);
   });
+  it("uses canonical projected messages when the SDK supports projection", () => {
+    const messages = [{ role: "user", content: "projected" }];
+    const buildSessionProjection = vi.fn().mockReturnValue({ messages });
+    const getBranch = vi
+      .fn()
+      .mockReturnValue([
+        { type: "message", message: { role: "user", content: "raw" } },
+      ]);
+
+    expect(
+      getParentContextMessages({ buildSessionProjection, getBranch }),
+    ).toBe(messages);
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(getBranch).not.toHaveBeenCalled();
+  });
+
+  it("falls back to message entries on SDKs without projection support", () => {
+    const getBranch = vi.fn().mockReturnValue([
+      { type: "message", message: { role: "user", content: "legacy" } },
+      { type: "custom", data: "ignored" },
+    ]);
+
+    expect(getParentContextMessages({ getBranch })).toEqual([
+      { role: "user", content: "legacy" },
+    ]);
+    expect(getBranch).toHaveBeenCalledOnce();
+  });
+
+  it("does not fall back when an available projection is malformed", () => {
+    const getBranch = vi.fn().mockReturnValue([]);
+    const buildSessionProjection = vi.fn().mockReturnValue({});
+
+    expect(() =>
+      getParentContextMessages({ buildSessionProjection, getBranch }),
+    ).toThrow(/session projection/);
+    expect(getBranch).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!supportsCanonicalContextEdits)(
+    "omits parent messages removed by a context edit",
+    () => {
+      const { sessionManager, manager } = createEditedSession(null);
+
+      expect(manager.getBranch()[0]?.message?.content).toBe("RAW-ORIGINAL");
+      expect(getParentContextMessages(sessionManager)).toEqual([]);
+    },
+  );
+
+  it.skipIf(!supportsCanonicalContextEdits)(
+    "uses replacement content from a context edit",
+    () => {
+      const { sessionManager, manager } = createEditedSession({
+        content: "EDITED-REPLACEMENT",
+      });
+
+      expect(manager.getBranch()[0]?.message?.content).toBe("RAW-ORIGINAL");
+      expect(getParentContextMessages(sessionManager)).toMatchObject([
+        { role: "user", content: "EDITED-REPLACEMENT" },
+      ]);
+    },
+  );
 });

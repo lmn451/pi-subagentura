@@ -408,6 +408,61 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
+  it("uses the projected parent messages after a context replacement", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: "message",
+        message: { role: "user", content: "RAW-ORIGINAL" },
+      },
+    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({
+      messages: [{ role: "user", content: "EDITED-REPLACEMENT" }],
+    });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
+
+    await toolDef.execute(
+      "call-replaced-parent-context",
+      { task: "research X", includeContext: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
+      .contextText as string;
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(contextText).toContain("EDITED-REPLACEMENT");
+    expect(contextText).not.toContain("RAW-ORIGINAL");
+  });
+
+  it("does not inherit a parent message omitted by the session projection", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: "message",
+        message: { role: "user", content: "RAW-OMITTED" },
+      },
+    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({ messages: [] });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
+
+    await toolDef.execute(
+      "call-omitted-parent-context",
+      { task: "research X", includeContext: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
+      .contextText as string;
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(contextText).not.toContain("RAW-OMITTED");
+  });
+
   it("persists initial routing metadata only after a successful spawn", async () => {
     api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
     const toolDef = getInteractiveToolDef(api);
