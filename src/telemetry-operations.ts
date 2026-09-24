@@ -40,6 +40,8 @@ function resultStatus(result: unknown): TelemetryOperationResultStatus {
     case "done":
     case "exited":
       return "completed";
+    case "advice":
+      return "completed";
     case "cancelled":
       return "cancelled";
     case "wait_timeout":

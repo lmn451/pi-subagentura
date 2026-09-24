@@ -21,11 +21,13 @@ import {
   isOrchestratorV2Enabled,
   isOrchestratorV2WakeupMessage,
 } from "../completion-turn";
+import { isRoutingEnabled } from "../routing-factory";
 import {
   resolveToolSessionScope,
   type SessionScope,
   type SessionToolToken,
 } from "../session-scope";
+import { registerOrchestratorRouterTool } from "./orchestrator-router";
 
 const CHILD_ID_PATTERN = "^(?:[a-f0-9]{8}|[a-f0-9]{16})$";
 const CONFIRMATION_TOKEN_PREFIX = "orchestrator-confirm:";
@@ -109,6 +111,13 @@ export function registerOrchestratorTools(
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
+  let routerRegistered = false;
+  const registerRouterWhenEnabled = (): void => {
+    if (routerRegistered) return;
+    if (!isOrchestratorV2Enabled(pi) || !isRoutingEnabled()) return;
+    registerOrchestratorRouterTool(pi, registrationScope);
+    routerRegistered = true;
+  };
   registerToolWithDefaultGuidance(pi, {
     name: "list_orchestrator_agents",
     label: "List Orchestrator Agents",
@@ -246,6 +255,14 @@ export function registerOrchestratorTools(
       }
     },
   });
+
+  registerRouterWhenEnabled();
+  // Pi resolves CLI flags after extension factories register their tools. Keep
+  // the opt-in check at the event boundary so a real startup can enable the
+  // advisor without exposing it in legacy/default mode.
+  if (isRoutingEnabled() && typeof pi.on === "function") {
+    pi.on("session_start", registerRouterWhenEnabled);
+  }
 }
 
 function confirmationMap(

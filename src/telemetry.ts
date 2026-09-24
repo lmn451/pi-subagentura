@@ -137,6 +137,7 @@ export const TELEMETRY_OPERATION_NAMES = {
     "list_subagent_artifacts",
     "list_orchestrator_agents",
     "update_orchestrator_agent_description",
+    "resolve_orchestrator_route",
     "workflow",
     "get_workflow_status",
     "get_workflow_result",

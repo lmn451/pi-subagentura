@@ -388,6 +388,15 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
+An optional Jev advisor adds `resolve_orchestrator_route` when
+`PI_ORCHESTRATOR_ROUTER=openrouter` or `jev` and `--orchestratorv2` are both
+enabled. OpenRouter-hosted Jev is the recommended transport: set
+`OPENROUTER_API_KEY` through the environment. Direct TypeSafe remains supported
+with `TYPESAFE_API_KEY` and `PI_ORCHESTRATOR_ROUTER=jev`. The parent obtains a
+candidate recommendation, then sends the task through its existing messaging
+tool. See [Jev routing](docs/jev-routing.md) for setup, external data
+disclosure, and failure behavior. Without this opt-in, routing remains unchanged.
+
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
 to the exact payload, current session generation, and a later user message; a
