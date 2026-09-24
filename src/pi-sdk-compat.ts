@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { join } from "node:path";
 import * as CodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiAi from "@earendil-works/pi-ai";
@@ -74,6 +75,57 @@ type PiAiContextCompat = {
 };
 
 const piAiContext = PiAi as unknown as PiAiContextCompat;
+
+type CompatibleSessionManagerContext = {
+  getBranch?: () => unknown;
+  buildSessionProjection?: () => unknown;
+};
+
+export function getParentContextMessages(
+  sessionManager: unknown,
+  legacyBranch?: readonly unknown[],
+): AgentMessage[] {
+  if (!sessionManager || typeof sessionManager !== "object") {
+    throw new Error(
+      "Unsupported Pi session manager: context API is unavailable",
+    );
+  }
+
+  const manager = sessionManager as CompatibleSessionManagerContext;
+  if (typeof manager.buildSessionProjection === "function") {
+    const projection = manager.buildSessionProjection.call(sessionManager);
+    if (
+      !projection ||
+      typeof projection !== "object" ||
+      !Array.isArray((projection as { messages?: unknown }).messages)
+    ) {
+      throw new Error(
+        "Unsupported Pi session projection: messages array is unavailable",
+      );
+    }
+    return (projection as { messages: AgentMessage[] }).messages;
+  }
+
+  const branch =
+    legacyBranch ??
+    (typeof manager.getBranch === "function"
+      ? manager.getBranch.call(sessionManager)
+      : undefined);
+  if (!Array.isArray(branch)) {
+    throw new Error(
+      "Unsupported Pi session manager: getBranch() context is unavailable",
+    );
+  }
+
+  return branch
+    .filter(
+      (entry): entry is { type: "message"; message: AgentMessage } =>
+        entry !== null &&
+        typeof entry === "object" &&
+        (entry as { type?: unknown }).type === "message",
+    )
+    .map((entry) => entry.message);
+}
 
 function findContextSystemMessage(
   context: CompatibleProviderContext,

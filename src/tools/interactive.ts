@@ -55,6 +55,7 @@ import {
   type CurrentPaneActivity,
   type InteractiveSubagentState,
 } from "../interactive-tmux";
+import { getParentContextMessages } from "../pi-sdk-compat";
 import { debugLog } from "../helpers";
 import {
   completionTriggersTurn,
@@ -723,13 +724,15 @@ export function registerInteractiveSubagentTools(
       let authorityEntries: readonly unknown[] | undefined;
       try {
         if (contextParams.includeContext === true) {
-          const branch = ctx.sessionManager.getBranch();
-          authorityEntries = branch;
-          const messages = branch
-            .filter(
-              (e): e is typeof e & { type: "message" } => e.type === "message",
-            )
-            .map((e) => e.message);
+          const legacyBranch =
+            params.routingDescription !== undefined
+              ? ctx.sessionManager.getBranch()
+              : undefined;
+          authorityEntries = legacyBranch;
+          const messages = getParentContextMessages(
+            ctx.sessionManager,
+            legacyBranch,
+          );
           contextText = serializeConversation(convertToLlm(messages));
         } else if (topLevelOrchestratorV2) {
           authorityEntries = parentBranchEntries(ctx);
