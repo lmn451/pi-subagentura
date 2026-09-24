@@ -1229,7 +1229,14 @@ describe("saved workflows", () => {
     expect(loadWorkflowScript("greet", dir)).toBe(script);
     expect(loadWorkflowScript("nope", dir)).toBeNull();
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "greet", description: "say hi" }]);
+    expect(list).toEqual([
+      {
+        name: "greet",
+        description: "say hi",
+        durableReady: true,
+        definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    ]);
   });
 
   it("rejects an invalid name and an unparseable script", () => {
@@ -1274,7 +1281,14 @@ describe("saved workflows", () => {
       "utf8",
     );
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "broken", description: "(unparseable)" }]);
+    expect(list).toEqual([
+      {
+        name: "broken",
+        description: "(unparseable)",
+        durableReady: false,
+        definitionDigest: undefined,
+      },
+    ]);
   });
 });
 
@@ -2627,7 +2641,7 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers 6 tools with the Pi SDK", () => {
+  it("registers workflow execution, recovery, and definition tools with the Pi SDK", () => {
     const tools: Array<{ name: string }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -2636,8 +2650,11 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
     registerWorkflowTool(pi as any);
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(10);
     expect(tools.map((t) => t.name)).toEqual([
+      "resume_workflow",
+      "list_workflow_runs",
+      "inspect_workflow",
       "workflow",
       "get_workflow_status",
       "get_workflow_result",

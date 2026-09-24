@@ -1,5 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  writeCompletionGroup,
+  removeCompletionGroup,
+  readCompletionGroups,
+  readCompletionGroupsSync,
+  hasCompletionGroups,
+} from "./completion-group-store";
+import {
   appendLedgerLine,
   appendLedgerLineLossless,
   getProcessPrivateLedgerRoot,
@@ -594,6 +601,37 @@ function matchesConsumption(
       : record.turnId === consumption.turnId;
   }
   return record.turnId === undefined;
+}
+
+function reclaimFinishedCompletionGroups(
+  state: CompletionCoordinatorState,
+): void {
+  if (isCompletionGroupRecoveryBlocked(state.owner)) return;
+  const directory =
+    sessionLedgerFile(state.owner, "subagentura-completion-groups") + ".groups";
+  for (const group of state.groups.values()) {
+    if (!group.sealed || group.members.size === 0) continue;
+    if ([...group.members].some((member) => !group.terminalMembers.has(member)))
+      continue;
+    const records = [...state.records.values()].filter(
+      (record) => record.policy === "group" && record.groupId === group.groupId,
+    );
+    const recordsByMember = new Map(
+      records.map((record) => [
+        completionMemberKey(record.source, record.sourceId),
+        record,
+      ]),
+    );
+    if (
+      recordsByMember.size === group.members.size &&
+      [...group.members].every((member) => {
+        const record = recordsByMember.get(member);
+        return record !== undefined && state.consumed.has(record.completionId);
+      })
+    ) {
+      removeCompletionGroup(directory, group.groupId);
+    }
+  }
 }
 
 function entriesFor(state: CompletionCoordinatorState): unknown[] {
@@ -1313,17 +1351,19 @@ function reconcileState(state: CompletionCoordinatorState): void {
       markConsumed(record);
     }
   }
-  if (consumptions.length === 0) return;
-  for (const record of state.records.values()) {
-    if (state.fallbackExpectations.has(record.completionId)) continue;
-    if (
-      consumptions.some((consumption) =>
-        matchesConsumption(record, consumption),
-      )
-    ) {
-      markConsumed(record);
+  if (consumptions.length > 0) {
+    for (const record of state.records.values()) {
+      if (state.fallbackExpectations.has(record.completionId)) continue;
+      if (
+        consumptions.some((consumption) =>
+          matchesConsumption(record, consumption),
+        )
+      ) {
+        markConsumed(record);
+      }
     }
   }
+  reclaimFinishedCompletionGroups(state);
 }
 function getState(
   owner?: SessionOwnerToken,
@@ -1437,6 +1477,7 @@ function pruneCoordinatorState(state: CompletionCoordinatorState): void {
 }
 
 function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
+  if (recoveringGroupOwners.has(ownerKey(state.owner))) return [];
   reconcileState(state);
   pruneCoordinatorState(state);
   const records = [...state.records.values()];
@@ -1444,6 +1485,8 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
     (record) =>
       !state.consumed.has(record.completionId) &&
       !state.dispatchAttempted.has(record.completionId) &&
+      (record.policy === "each" ||
+        !failedGroupRecoveryOwners.has(ownerKey(state.owner))) &&
       groupIsReady(state, record),
   );
 }
@@ -1637,6 +1680,7 @@ function appendConsumption(
       state.fallbackExpectations.delete(record.completionId);
     }
   }
+  reclaimFinishedCompletionGroups(state);
   return true;
 }
 
@@ -1777,6 +1821,9 @@ export function reserveCompletionGroup(
   if (policy !== "group") return undefined;
   const state = getState(owner);
   if (!state) return undefined;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
   const hasReservation = state.reservedGroups.has(normalizedGroupId);
@@ -1826,6 +1873,9 @@ export function assertCompletionGroupOpen(
   if (policy !== "group") return;
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
   const reserved = state.groupReservations.get(normalizedGroupId) ?? 0;
@@ -1858,6 +1908,9 @@ export function registerCompletionMember(
   if (policy !== "group") return;
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+    throw new Error("Completion group recovery is unavailable");
+  }
   const normalizedGroupId = normalizeGroupId(groupId);
   const hasReservation =
     reservation?.active &&
@@ -1891,15 +1944,129 @@ export function registerCompletionMember(
   ) {
     throw new Error(`Completion group ${normalizedGroupId} is full`);
   }
-  group.members.add(memberKey);
+  const members = new Set([...group.members, memberKey]);
+  writeCompletionGroup(
+    sessionLedgerFile(state.owner, "subagentura-completion-groups") + ".groups",
+    { groupId: group.groupId, members: [...members], sealed: group.sealed },
+  );
+  group.members = members;
   state.groups.set(normalizedGroupId, group);
 }
 
 export function sealCompletionGroups(owner?: SessionOwnerToken): void {
   const state = getState(owner);
   if (!state) return;
+  if (isCompletionGroupRecoveryBlocked(state.owner)) return;
   state.groupsSealed = true;
-  for (const group of state.groups.values()) group.sealed = true;
+  for (const group of state.groups.values()) {
+    writeCompletionGroup(
+      sessionLedgerFile(state.owner, "subagentura-completion-groups") +
+        ".groups",
+      { groupId: group.groupId, members: [...group.members], sealed: true },
+    );
+    group.sealed = true;
+  }
+}
+
+/** Restore pending mixed-source barriers before any durable workflow notices. */
+const recoveringGroupOwners = new Set<string>();
+const failedGroupRecoveryOwners = new Set<string>();
+
+export function isCompletionGroupRecoveryBlocked(
+  owner?: SessionOwnerToken,
+): boolean {
+  const resolvedOwner = effectiveOwner(owner);
+  return (
+    resolvedOwner !== undefined &&
+    (failedGroupRecoveryOwners.has(ownerKey(resolvedOwner)) ||
+      recoveringGroupOwners.has(ownerKey(resolvedOwner)))
+  );
+}
+
+export async function restoreDurableCompletionGroups(
+  owner: SessionOwnerToken,
+): Promise<void> {
+  const state = getState(owner);
+  if (!state) return;
+  const directory =
+    sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
+  if (!hasCompletionGroups(directory)) return;
+  const key = ownerKey(owner);
+  recoveringGroupOwners.add(key);
+  try {
+    const groups = await readCompletionGroups(directory);
+    if (!resolveLiveSessionScope(owner)) return;
+    for (const saved of groups) {
+      const existing = state.groups.get(saved.groupId);
+      const members = new Set([...(existing?.members ?? []), ...saved.members]);
+      if (members.size > MAX_GROUP_MEMBERS)
+        throw new Error("Recovered completion group exceeds its member cap.");
+      const terminalMembers = existing?.terminalMembers ?? new Set<string>();
+      for (const member of members) {
+        // These execution modes cannot outlive the old Pi session generation.
+        if (
+          member.startsWith("in-process:") ||
+          (member.startsWith("workflow:") &&
+            !member.startsWith("workflow:wfd_"))
+        )
+          terminalMembers.add(member);
+      }
+      state.groups.set(saved.groupId, {
+        groupId: saved.groupId,
+        members,
+        terminalMembers,
+        sealed: true,
+      });
+    }
+    reconcileState(state);
+    failedGroupRecoveryOwners.delete(key);
+  } catch (error) {
+    // Unknown group membership must not release a barrier, but independent
+    // completions do not depend on that membership and can still be delivered.
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    throw error;
+  } finally {
+    recoveringGroupOwners.delete(key);
+  }
+}
+
+export function restoreDurableCompletionGroupsSync(
+  owner: SessionOwnerToken,
+): void {
+  const state = getState(owner);
+  if (!state) return;
+  const directory =
+    sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
+  if (!hasCompletionGroups(directory)) return;
+  const key = ownerKey(owner);
+  try {
+    for (const saved of readCompletionGroupsSync(directory)) {
+      const existing = state.groups.get(saved.groupId);
+      const members = new Set([...(existing?.members ?? []), ...saved.members]);
+      if (members.size > MAX_GROUP_MEMBERS)
+        throw new Error("Recovered completion group exceeds its member cap.");
+      const terminalMembers = existing?.terminalMembers ?? new Set<string>();
+      for (const member of members) {
+        if (
+          member.startsWith("in-process:") ||
+          (member.startsWith("workflow:") &&
+            !member.startsWith("workflow:wfd_"))
+        )
+          terminalMembers.add(member);
+      }
+      state.groups.set(saved.groupId, {
+        groupId: saved.groupId,
+        members,
+        terminalMembers,
+        sealed: true,
+      });
+    }
+    reconcileState(state);
+    failedGroupRecoveryOwners.delete(key);
+  } catch (error) {
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    throw error;
+  }
 }
 
 export function registerCompletionExpectations(
@@ -1980,14 +2147,16 @@ export function publishCompletion(
             `Completion group ${record.groupId} is already sealed`,
           );
         }
-        registerCompletionMember(
-          record.source,
-          record.sourceId,
-          record.policy,
-          record.groupId,
-          state.owner,
-        );
-        group = state.groups.get(record.groupId!);
+        if (!group) {
+          registerCompletionMember(
+            record.source,
+            record.sourceId,
+            record.policy,
+            record.groupId,
+            state.owner,
+          );
+          group = state.groups.get(record.groupId!);
+        }
       } else if (!group.members.has(memberKey)) {
         if (group.sealed || state.groupsSealed) {
           throw new Error(
@@ -2265,7 +2434,14 @@ export function retireSessionScopedCompletions(
   if (!state) return;
   reconcileState(state);
   const completionIds = [...state.records.values()]
-    .filter((record) => includeInteractive || record.source !== "interactive")
+    .filter(
+      (record) =>
+        includeInteractive ||
+        (record.source !== "interactive" &&
+          !(
+            record.source === "workflow" && record.sourceId.startsWith("wfd_")
+          )),
+    )
     .filter((record) => !state.consumed.has(record.completionId))
     .map((record) => record.completionId);
   if (completionIds.length === 0) return;
@@ -2285,6 +2461,8 @@ export function retireSessionScopedCompletions(
 }
 
 export function clearCompletionCoordinator(owner: SessionOwnerToken): void {
+  recoveringGroupOwners.delete(ownerKey(owner));
+  failedGroupRecoveryOwners.delete(ownerKey(owner));
   const state = coordinatorRegistry().get(ownerKey(owner));
   if (state?.manifestRetryTimer) clearTimeout(state.manifestRetryTimer);
   coordinatorRegistry().delete(ownerKey(owner));

@@ -37,6 +37,7 @@ import {
   retireSessionScopedCompletions,
   sealCompletionGroups,
   settleCompletionParentTurn,
+  restoreDurableCompletionGroupsSync,
 } from "./completion-coordinator";
 import {
   createRootSpawnTreeContext,
@@ -45,6 +46,7 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
+import { restoreDurableWorkflowRuns } from "./workflow-durable-tools";
 import {
   deleteOrchestratorRoutingFile,
   loadOrchestratorRoutingMetadata,
@@ -129,8 +131,9 @@ function recordPreparedManifest(
 
 function isInMemoryWorkflowPane(state: InteractiveSubagentState): boolean {
   return (
-    state.completionOwner === "workflow" ||
-    state.workflowResultConsumed === true
+    !state.durableWorkflowAttempt &&
+    (state.completionOwner === "workflow" ||
+      state.workflowResultConsumed === true)
   );
 }
 
@@ -493,7 +496,7 @@ export function registerSessionHandlers(
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
   });
 
-  pi.on("session_start", (event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
@@ -645,6 +648,7 @@ export function registerSessionHandlers(
         terminal: 0,
         unknown: 0,
       };
+      let completionGroupsRestored = true;
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the
@@ -657,6 +661,18 @@ export function registerSessionHandlers(
           });
           logSessionError("orchestrator_routing_recovery_failed", error);
         }
+      }
+      try {
+        // Restore durable group membership before rehydrated interactive
+        // states can register members or seal a partial in-memory barrier.
+        restoreDurableCompletionGroupsSync(sessionOwner(scope));
+      } catch (error) {
+        completionGroupsRestored = false;
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "state_recovery",
+        });
+        logSessionError("durable_completion_group_recovery_failed", error);
       }
       try {
         recovery = rehydrateInteractiveSubagents(
@@ -680,7 +696,9 @@ export function registerSessionHandlers(
         terminal_count: recovery.terminal,
         unknown_count: recovery.unknown,
       });
-      sealCompletionGroups(sessionOwner(scope));
+      if (completionGroupsRestored) {
+        sealCompletionGroups(sessionOwner(scope));
+      }
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
       } catch (error) {
@@ -691,7 +709,11 @@ export function registerSessionHandlers(
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
     }
+    const durableRecovery = continuityReason
+      ? restoreDurableWorkflowRuns(pi, sessionOwner(scope), ctx)
+      : undefined;
     ensureInteractivePoller(globalState);
+    await durableRecovery;
   });
 
   (pi as any).on?.(
