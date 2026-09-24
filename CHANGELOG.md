@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.3] - 2026-09-24
+
+### Added
+
+- Added bounded diagnostics for interactive sub-agent processes that exit
+  before completing a turn.
+
+### Fixed
+
+- Corrected opt-in parent context inheritance to use Pi's canonical session
+  projection when available, preserve omission and replacement edits, and fall
+  back on older supported SDKs.
+
 ## [3.6.2] - 2026-09-06
 
 ### Added
