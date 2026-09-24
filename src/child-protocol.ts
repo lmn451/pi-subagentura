@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -11,6 +12,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  MAX_ACTIVE_TOOL_ID_INPUT_BYTES,
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
   MAX_ACTIVE_TURN_BYTES,
@@ -27,6 +29,7 @@ import {
 interface ActiveTool {
   name: string;
   callId?: string;
+  callIdHash?: string;
   startedAt: number;
 }
 
@@ -65,6 +68,26 @@ function boundedMetadataIdentifier(
     : undefined;
 }
 
+interface ActiveToolCorrelation {
+  hasCallId: boolean;
+  callId?: string;
+  callIdHash?: string;
+}
+
+function activeToolCorrelation(value: unknown): ActiveToolCorrelation {
+  if (typeof value !== "string") return { hasCallId: false };
+  if (value.length === 0) return { hasCallId: true };
+  const callId = boundedMetadataIdentifier(value, MAX_ACTIVE_TOOL_ID_LENGTH);
+  if (callId) return { hasCallId: true, callId };
+  if (Buffer.byteLength(value, "utf8") > MAX_ACTIVE_TOOL_ID_INPUT_BYTES) {
+    return { hasCallId: true };
+  }
+  return {
+    hasCallId: true,
+    callIdHash: createHash("sha256").update(value).digest("hex"),
+  };
+}
+
 function normalizeActiveTool(value: unknown): ActiveTool | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -84,9 +107,15 @@ function normalizeActiveTool(value: unknown): ActiveTool | null {
     candidate.callId,
     MAX_ACTIVE_TOOL_ID_LENGTH,
   );
+  const callIdHash =
+    typeof candidate.callIdHash === "string" &&
+    /^[a-f0-9]{64}$/.test(candidate.callIdHash)
+      ? candidate.callIdHash
+      : undefined;
   return {
     name,
     ...(callId ? { callId } : {}),
+    ...(callIdHash ? { callIdHash } : {}),
     startedAt,
   };
 }
@@ -209,19 +238,29 @@ function latestUserEntryId(ctx: any): string | undefined {
 function lastActiveToolIndex(
   tools: readonly ActiveTool[],
   name: string | undefined,
-  callId: string | undefined,
+  correlation: ActiveToolCorrelation,
 ): number {
-  if (callId) {
-    for (let index = tools.length - 1; index >= 0; index--) {
-      if (tools[index]?.callId === callId) return index;
+  if (correlation.hasCallId) {
+    if (correlation.callId) {
+      for (let index = tools.length - 1; index >= 0; index--) {
+        if (tools[index]?.callId === correlation.callId) return index;
+      }
     }
-  }
-  if (name) {
-    for (let index = tools.length - 1; index >= 0; index--) {
-      if (tools[index]?.name === name) return index;
+    if (correlation.callIdHash) {
+      for (let index = tools.length - 1; index >= 0; index--) {
+        if (tools[index]?.callIdHash === correlation.callIdHash) return index;
+      }
     }
+    return -1;
   }
-  return -1;
+  if (!name) return -1;
+  let match = -1;
+  for (let index = tools.length - 1; index >= 0; index--) {
+    if (tools[index]?.name !== name) continue;
+    if (match >= 0) return -1;
+    match = index;
+  }
+  return match;
 }
 
 function updateActiveToolMetadata(
@@ -232,16 +271,21 @@ function updateActiveToolMetadata(
   timestamp: number,
 ): void {
   const name = boundedMetadataIdentifier(event.toolName, MAX_TOOL_NAME_LENGTH);
-  const callId = boundedMetadataIdentifier(
-    event.toolCallId,
-    MAX_ACTIVE_TOOL_ID_LENGTH,
-  );
+  const correlation = activeToolCorrelation(event.toolCallId);
   const tools = [...(active.activeTools ?? [])];
-  const existingIndex = lastActiveToolIndex(tools, name, callId);
+  const existingIndex =
+    phase === "start" && !correlation.hasCallId
+      ? -1
+      : lastActiveToolIndex(tools, name, correlation);
   if (phase === "start") {
     if (!name) return;
     if (existingIndex >= 0) tools.splice(existingIndex, 1);
-    tools.push({ name, ...(callId ? { callId } : {}), startedAt: timestamp });
+    tools.push({
+      name,
+      ...(correlation.callId ? { callId: correlation.callId } : {}),
+      ...(correlation.callIdHash ? { callIdHash: correlation.callIdHash } : {}),
+      startedAt: timestamp,
+    });
     if (tools.length > MAX_ACTIVE_TOOL_RECORDS) {
       tools.splice(0, tools.length - MAX_ACTIVE_TOOL_RECORDS);
     }

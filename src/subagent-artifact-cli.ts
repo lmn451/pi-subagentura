@@ -102,8 +102,17 @@ const normalizeActiveTool = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const name = boundedMetadataIdentifier(value.name, MAX_TOOL_NAME_LENGTH);
   const callId = boundedMetadataIdentifier(value.callId, MAX_ACTIVE_TOOL_ID_LENGTH);
+  const callIdHash =
+    typeof value.callIdHash === "string" && /^[a-f0-9]{64}$/.test(value.callIdHash)
+      ? value.callIdHash
+      : undefined;
   if (!name || !Number.isSafeInteger(value.startedAt) || value.startedAt < 0) return null;
-  return { name, ...(callId ? { callId } : {}), startedAt: value.startedAt };
+  return {
+    name,
+    ...(callId ? { callId } : {}),
+    ...(callIdHash ? { callIdHash } : {}),
+    startedAt: value.startedAt,
+  };
 };
 const activeTurnMetadata = () => {
   let fd;
@@ -183,65 +192,45 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
-const signalNames = [
-  undefined,
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGILL",
-  "SIGTRAP",
-  "SIGABRT",
-  "SIGBUS",
-  "SIGFPE",
-  "SIGKILL",
-  "SIGUSR1",
-  "SIGSEGV",
-  "SIGUSR2",
-  "SIGPIPE",
-  "SIGALRM",
-  "SIGTERM",
-  "SIGCHLD",
-  "SIGCONT",
-  "SIGSTOP",
-  "SIGTSTP",
-  "SIGTTIN",
-  "SIGTTOU",
-  "SIGURG",
-  "SIGXCPU",
-  "SIGXFSZ",
-  "SIGVTALRM",
-  "SIGPROF",
-  "SIGWINCH",
-  "SIGIO",
-  "SIGPWR",
-  "SIGSYS",
-  ];
-const signalForExitCode = (exitCode) => {
-  const signalNumber = exitCode - 128;
-  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
-    ? signalNames[signalNumber]
-    : undefined;
-};
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {
   const activeTool = activeState?.activeTools?.at(-1);
-  const signal = signalForExitCode(exitCode);
-  const terminationReason = alreadyCompleted
-    ? "normal_exit"
-    : cancelled
+  const processExitPhase = alreadyCompleted
+    ? "after_completion"
+    : activeTool
+      ? "active_tool"
+      : activeState?.started
+        ? "active_turn"
+        : "unknown";
+  const processExitKind = cancelled
+    ? "cancelled"
+    : exitCode === 0
+      ? alreadyCompleted
+        ? "normal"
+        : "unknown"
+      : "nonzero";
+  const terminationReason =
+    processExitKind === "cancelled"
       ? "cancelled"
-      : activeTool
-        ? "active_tool"
-        : activeState?.started
-          ? "active_turn"
-          : signal
-            ? "signal"
-            : exitCode === 0
-              ? "unknown"
-              : "nonzero_exit";
+      : processExitKind === "normal"
+        ? "normal_exit"
+        : processExitKind === "nonzero"
+          ? processExitPhase === "active_tool"
+            ? "active_tool"
+            : processExitPhase === "active_turn"
+              ? "active_turn"
+              : "nonzero_exit"
+          : processExitPhase === "active_tool"
+            ? "active_tool"
+            : processExitPhase === "active_turn"
+              ? "active_turn"
+              : "unknown";
   return {
     terminationReason,
-    ...(signal ? { signal } : {}),
-    ...(!alreadyCompleted && (activeTool?.name ?? activeState?.lastTool)
+    processExitPhase,
+    processExitKind,
+    ...((processExitPhase === "active_tool" ||
+      processExitPhase === "active_turn") &&
+    (activeTool?.name ?? activeState?.lastTool)
       ? { lastTool: activeTool?.name ?? activeState?.lastTool }
       : {}),
   };
@@ -347,6 +336,8 @@ switch (cmd) {
     if (!alreadyCompleted) {
       completion(cancelled ? "cancelled" : "error", "process_exit", {
         exitCode,
+        processExitPhase: diagnostics.processExitPhase,
+        processExitKind: diagnostics.processExitKind,
         ...(!cancelled ? { message: "sub-agent process exited before turn completion" } : {}),
       });
     }
