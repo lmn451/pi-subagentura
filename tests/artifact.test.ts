@@ -317,7 +317,7 @@ describe("artifact", () => {
     });
   });
 
-  it("normalizes process-exit diagnostics while preserving legacy events", () => {
+  it("normalizes process-exit context and preserves legacy events", () => {
     const art = artifactPath(root, "process-exit-diagnostics");
     ensureArtifactDir(art);
     appendFileSync(
@@ -343,25 +343,75 @@ describe("artifact", () => {
           exitCode: 17,
           terminationReason: "not-closed",
           signal: "SIGMADEUP",
+          processExitPhase: "not-closed",
+          processExitKind: "not-closed",
           lastTool: "npm test --secret",
+        }),
+        JSON.stringify({
+          version: 2,
+          eventId: "synthetic-process-completion",
+          turnId: "completion-turn",
+          ts: 4,
+          type: "completion",
+          status: "error",
+          outcome: "error",
+          source: "process_exit",
+          exitCode: 1,
+          processExitPhase: "active_tool",
+          processExitKind: "nonzero",
+        }),
+        JSON.stringify({
+          version: 2,
+          eventId: "untrusted-process-context",
+          turnId: "explicit-turn",
+          ts: 5,
+          type: "completion",
+          status: "error",
+          outcome: "error",
+          source: "explicit",
+          processExitPhase: "active_tool",
+          processExitKind: "nonzero",
+        }),
+        JSON.stringify({
+          version: 2,
+          eventId: "valid-process-exit",
+          turnId: "valid-turn",
+          ts: 6,
+          type: "process_exited",
+          status: "error",
+          exitCode: 143,
+          terminationReason: "signal",
+          signal: "SIGTERM",
+          processExitPhase: "after_completion",
+          processExitKind: "signal",
         }),
       ].join("\n") + "\n",
     );
 
     const events = readEvents(art);
+    expect(events).toHaveLength(6);
     expect(events[0]).toMatchObject({ type: "done", exitCode: 0 });
-    expect(events[1]).toMatchObject({
-      type: "process_exited",
-      exitCode: 0,
-    });
-    expect(events[1]).not.toHaveProperty("terminationReason");
-    expect(events[2]).toMatchObject({
-      type: "process_exited",
-      exitCode: 17,
-    });
+    expect(events[1]).toMatchObject({ type: "process_exited", exitCode: 0 });
+    expect(events[1]).not.toHaveProperty("processExitPhase");
     expect(events[2]).not.toHaveProperty("terminationReason");
     expect(events[2]).not.toHaveProperty("signal");
+    expect(events[2]).not.toHaveProperty("processExitPhase");
+    expect(events[2]).not.toHaveProperty("processExitKind");
     expect(events[2]).not.toHaveProperty("lastTool");
+    expect(events[3]).toMatchObject({
+      type: "completion",
+      source: "process_exit",
+      processExitPhase: "active_tool",
+      processExitKind: "nonzero",
+    });
+    expect(events[4]).not.toHaveProperty("processExitPhase");
+    expect(events[4]).not.toHaveProperty("processExitKind");
+    expect(events[5]).toMatchObject({
+      type: "process_exited",
+      processExitPhase: "after_completion",
+      processExitKind: "signal",
+      signal: "SIGTERM",
+    });
   });
 
   it("reads long logs in bounded physical batches", () => {

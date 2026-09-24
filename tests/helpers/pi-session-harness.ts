@@ -63,6 +63,7 @@ export async function createPiSessionHarness(
       enabled: boolean;
       maxRetries: number;
       baseDelayMs: number;
+      maxAgentDelayMs: number;
     };
   } = {},
 ): Promise<PiSessionHarness> {

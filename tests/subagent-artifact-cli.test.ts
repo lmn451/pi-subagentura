@@ -160,6 +160,8 @@ describe("subagent-artifact CLI", () => {
           status: "done",
           exitCode: 0,
           terminationReason: "active_tool",
+          processExitPhase: "active_tool",
+          processExitKind: "unknown",
           lastTool: "bash",
         }),
       );
@@ -180,11 +182,13 @@ describe("subagent-artifact CLI", () => {
         status: "done",
         exitCode: 0,
         terminationReason: "normal_exit",
+        processExitPhase: "after_completion",
+        processExitKind: "normal",
       });
       expect(events.at(-1)).not.toHaveProperty("lastTool");
     });
 
-    it("records a signal alongside an unexpected exit reason", () => {
+    it("does not infer a signal from a signal-like exit status", () => {
       const r = runCli(tmp, ["process-exit", "143"]);
       expect(r.status).toBe(0);
       const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
@@ -195,9 +199,11 @@ describe("subagent-artifact CLI", () => {
         type: "process_exited",
         status: "error",
         exitCode: 143,
-        terminationReason: "signal",
-        signal: "SIGTERM",
+        terminationReason: "nonzero_exit",
+        processExitPhase: "unknown",
+        processExitKind: "nonzero",
       });
+      expect(events.at(-1)).not.toHaveProperty("signal");
     });
 
     it("records nonzero exits without inventing a signal", () => {
@@ -214,6 +220,8 @@ describe("subagent-artifact CLI", () => {
         status: "error",
         exitCode: 17,
         terminationReason: "nonzero_exit",
+        processExitPhase: "unknown",
+        processExitKind: "nonzero",
       });
       expect(event).not.toHaveProperty("signal");
     });
@@ -229,6 +237,8 @@ describe("subagent-artifact CLI", () => {
       expect(malformedEvents.at(-1)).toMatchObject({
         type: "process_exited",
         terminationReason: "unknown",
+        processExitPhase: "unknown",
+        processExitKind: "unknown",
       });
       expect(JSON.stringify(malformedEvents)).not.toContain(secret);
 
@@ -249,6 +259,8 @@ describe("subagent-artifact CLI", () => {
       expect(oversizedEvents.at(-1)).toMatchObject({
         type: "process_exited",
         terminationReason: "unknown",
+        processExitPhase: "unknown",
+        processExitKind: "unknown",
       });
       expect(JSON.stringify(oversizedEvents)).not.toContain("x".repeat(200));
     });
@@ -265,19 +277,28 @@ describe("subagent-artifact CLI", () => {
       );
       writeFileSync(join(tmp, ".cancelled"), "", { mode: 0o600 });
       expect(runCli(tmp, ["process-exit", "143"]).status).toBe(0);
-      let event = JSON.parse(
-        readFileSync(join(tmp, "events.ndjson"), "utf8")
-          .trim()
-          .split("\n")
-          .at(-1)!,
-      );
-      expect(event).toMatchObject({
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        type: "completion",
+        source: "process_exit",
+        outcome: "cancelled",
+        exitCode: 143,
+        processExitPhase: "active_tool",
+        processExitKind: "cancelled",
+      });
+      expect(events[1]).toMatchObject({
         type: "process_exited",
         status: "cancelled",
         terminationReason: "cancelled",
-        signal: "SIGTERM",
+        processExitPhase: "active_tool",
+        processExitKind: "cancelled",
         lastTool: "bash",
       });
+      expect(events[1]).not.toHaveProperty("signal");
 
       rmSync(join(tmp, "events.ndjson"));
       rmSync(join(tmp, ".cancelled"));
@@ -292,7 +313,7 @@ describe("subagent-artifact CLI", () => {
       );
       expect(runCli(tmp, ["done", "0"]).status).toBe(0);
       expect(runCli(tmp, ["process-exit", "0"]).status).toBe(0);
-      event = JSON.parse(
+      const event = JSON.parse(
         readFileSync(join(tmp, "events.ndjson"), "utf8")
           .trim()
           .split("\n")
@@ -301,6 +322,8 @@ describe("subagent-artifact CLI", () => {
       expect(event).toMatchObject({
         type: "process_exited",
         terminationReason: "normal_exit",
+        processExitPhase: "after_completion",
+        processExitKind: "normal",
       });
       expect(event).not.toHaveProperty("lastTool");
     });
@@ -403,6 +426,49 @@ describe("subagent-artifact CLI", () => {
       const r = runCli(tmp, ["bogus"]);
       expect(r.status).toBe(2);
       expect(r.stderr).toContain("Unknown command");
+    });
+  });
+});
+
+describe("process-exit hardening regressions", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = makeTmp();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not infer an observed signal from a numeric exit status", () => {
+    const result = runCli(dir, ["process-exit", "143"]);
+    expect(result.status).toBe(0);
+    const events = readFileSync(join(dir, "events.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.at(-1)).toMatchObject({
+      processExitPhase: "unknown",
+      processExitKind: "nonzero",
+      terminationReason: "nonzero_exit",
+    });
+    expect(events.at(-1)).not.toHaveProperty("signal");
+  });
+
+  it("preserves a nonzero process exit after turn completion", () => {
+    expect(runCli(dir, ["done", "0"]).status).toBe(0);
+    expect(runCli(dir, ["process-exit", "1"]).status).toBe(0);
+    const events = readFileSync(join(dir, "events.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.at(-1)).toMatchObject({
+      status: "error",
+      exitCode: 1,
+      terminationReason: "nonzero_exit",
+      processExitPhase: "after_completion",
+      processExitKind: "nonzero",
     });
   });
 });

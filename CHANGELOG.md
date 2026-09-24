@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added anonymous telemetry schema v5 with status-scoped closed failure codes
+  and separate process-exit phase/kind dimensions; payloads still exclude raw
+  errors, tool names, identifiers, paths, prompts, and outputs.
+- Added a local telemetry diagnostics runbook with explanations and recommended
+  actions for structured failure codes.
+
 ## [3.6.2] - 2026-09-06
 
 ### Added

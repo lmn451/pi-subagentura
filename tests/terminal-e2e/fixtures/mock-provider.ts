@@ -10,6 +10,7 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { normalizeProviderContext } from "../../../src/pi-sdk-compat";
 
 export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
@@ -135,7 +136,7 @@ function message(
 function toolCall(
   id: string,
   name: string,
-  args: Record<string, unknown>,
+  args: ToolCall["arguments"],
 ): ToolCall {
   return { type: "toolCall", id, name, arguments: args };
 }
@@ -444,6 +445,7 @@ async function runRequest(
   ) {
     throw new Error("mock provider received a provider/model/API mismatch");
   }
+  const normalizedContext = normalizeProviderContext(context);
   diagnostic({
     marker,
     requestSeq,
@@ -455,9 +457,9 @@ async function runRequest(
     contextRoles: context.messages.map((entry) => entry.role),
     contextHasParentSentinel: JSON.stringify([
       context.messages,
-      context.systemPrompt,
+      normalizedContext.systemPrompt,
     ]).includes("PARENT_CONTEXT_SENTINEL"),
-    contextToolNames: context.tools?.map((tool) => tool.name) ?? [],
+    contextToolNames: normalizedContext.tools.map((tool) => tool.name),
   });
 
   const isChild = marker.includes("CHILD_");

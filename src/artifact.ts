@@ -100,6 +100,10 @@ export type ProcessTerminationReason =
   | "nonzero_exit"
   | "cancelled"
   | "unknown";
+export type ProcessExitPhase =
+  "active_tool" | "active_turn" | "after_completion" | "unknown";
+export type ProcessExitKind =
+  "normal" | "nonzero" | "signal" | "cancelled" | "unknown";
 export type ProcessSignal =
   | "SIGHUP"
   | "SIGINT"
@@ -168,6 +172,8 @@ export type SubagentEventV2 =
       output?: OutputSnapshot;
       outputError?: OutputSnapshotError;
       exitCode?: number;
+      processExitPhase?: ProcessExitPhase;
+      processExitKind?: ProcessExitKind;
       message?: string;
       errorMessage?: string;
       summary?: string;
@@ -182,6 +188,8 @@ export type SubagentEventV2 =
       exitCode: number;
       terminationReason?: ProcessTerminationReason;
       signal?: ProcessSignal;
+      processExitPhase?: ProcessExitPhase;
+      processExitKind?: ProcessExitKind;
       lastTool?: string;
       message?: string;
     };
@@ -354,6 +362,8 @@ export const MAX_ACTIVE_TURN_BYTES = 8 * 1024;
 export const MAX_ACTIVE_TOOL_RECORDS = 16;
 /** Maximum bytes accepted for an opaque tool-call identifier. */
 export const MAX_ACTIVE_TOOL_ID_LENGTH = 128;
+/** Maximum input bytes hashed for opaque child tool-call correlation. */
+export const MAX_ACTIVE_TOOL_ID_INPUT_BYTES = 4 * 1024;
 
 export function boundedOptionalEventText(
   value: unknown,
@@ -407,6 +417,41 @@ function normalizeProcessTerminationReason(
     case "active_turn":
     case "signal":
     case "nonzero_exit":
+    case "cancelled":
+    case "unknown":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeProcessExitPhase(
+  value: unknown,
+  source: unknown,
+  type: unknown,
+): ProcessExitPhase | undefined {
+  if (type !== "process_exited" && source !== "process_exit") return undefined;
+  switch (value) {
+    case "active_tool":
+    case "active_turn":
+    case "after_completion":
+    case "unknown":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeProcessExitKind(
+  value: unknown,
+  source: unknown,
+  type: unknown,
+): ProcessExitKind | undefined {
+  if (type !== "process_exited" && source !== "process_exit") return undefined;
+  switch (value) {
+    case "normal":
+    case "nonzero":
+    case "signal":
     case "cancelled":
     case "unknown":
       return value;
@@ -1022,6 +1067,16 @@ function normalizeEvent(
       (obj.agentStopReason === "error" || obj.agentStopReason === "aborted")
         ? obj.agentStopReason
         : undefined;
+    const processExitPhase = normalizeProcessExitPhase(
+      obj.processExitPhase,
+      obj.source,
+      obj.type,
+    );
+    const processExitKind = normalizeProcessExitKind(
+      obj.processExitKind,
+      obj.source,
+      obj.type,
+    );
     return {
       event: {
         ...base,
@@ -1032,6 +1087,8 @@ function normalizeEvent(
         output,
         outputError,
         exitCode,
+        ...(processExitPhase === undefined ? {} : { processExitPhase }),
+        ...(processExitKind === undefined ? {} : { processExitKind }),
         message,
         errorMessage: boundedOptionalEventText(obj.errorMessage),
         summary,
@@ -1054,6 +1111,16 @@ function normalizeEvent(
     );
     const signal = normalizeProcessSignal(obj.signal);
     const lastTool = normalizeDiagnosticTool(obj.lastTool);
+    const processExitPhase = normalizeProcessExitPhase(
+      obj.processExitPhase,
+      obj.source,
+      obj.type,
+    );
+    const processExitKind = normalizeProcessExitKind(
+      obj.processExitKind,
+      obj.source,
+      obj.type,
+    );
     return {
       event: {
         ...base,
@@ -1062,6 +1129,8 @@ function normalizeEvent(
         exitCode,
         ...(terminationReason === undefined ? {} : { terminationReason }),
         ...(signal === undefined ? {} : { signal }),
+        ...(processExitPhase === undefined ? {} : { processExitPhase }),
+        ...(processExitKind === undefined ? {} : { processExitKind }),
         ...(lastTool === undefined ? {} : { lastTool }),
         message,
       },

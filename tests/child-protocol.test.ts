@@ -217,3 +217,150 @@ describe("child protocol lifecycle", () => {
     expect(() => registerHandlers()).toThrow(/requires ARTIFACT_DIR/);
   });
 });
+
+describe("active tool correlation regressions", () => {
+  let root: string;
+  let artifactDir: string;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    root = mkdtempSync(
+      join(tmpdir(), "pi-subagentura-child-tools-regression-"),
+    );
+    artifactDir = join(root, "child");
+    process.env.ARTIFACT_DIR = artifactDir;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.ARTIFACT_DIR;
+    rmSync(root, { recursive: true, force: true });
+  });
+  it("keeps concurrent same-name opaque tool IDs distinct", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-opaque-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "call/1" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "call/2" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "call/1" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toHaveLength(1);
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "call/2" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toEqual([]);
+  });
+
+  it("never removes a different known-ID tool by name fallback", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-known-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "call-1" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "call-2" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "unknown-call" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "call-2" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toMatchObject([
+      { name: "bash", callId: "call-1" },
+    ]);
+  });
+
+  it("bounds active tool records while retaining the newest starts", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-overflow-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    for (let index = 0; index < 17; index++) {
+      handlers.get("tool_execution_start")!(
+        { toolName: `tool_${index}`, toolCallId: `call-${index}` },
+        ctx,
+      );
+    }
+
+    const activeTools = readActiveTurn()?.activeTools ?? [];
+    expect(activeTools).toHaveLength(16);
+    expect(activeTools[0]?.name).toBe("tool_1");
+    expect(activeTools.at(-1)?.name).toBe("tool_16");
+  });
+  it("retains concurrent same-name starts without IDs", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-missing-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!({ toolName: "bash" }, ctx);
+    handlers.get("tool_execution_start")!({ toolName: "bash" }, ctx);
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+
+    handlers.get("tool_execution_end")!({ toolName: "bash" }, ctx);
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+  });
+
+  it("does not deduplicate a missing-ID start against a known same-name call", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-mixed-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "call-known" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!({ toolName: "bash" }, ctx);
+    expect(readActiveTurn()?.activeTools).toHaveLength(2);
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "call-known" },
+      ctx,
+    );
+    expect(readActiveTurn()?.activeTools).toHaveLength(1);
+    handlers.get("tool_execution_end")!({ toolName: "bash" }, ctx);
+    expect(readActiveTurn()?.activeTools).toEqual([]);
+  });
+});

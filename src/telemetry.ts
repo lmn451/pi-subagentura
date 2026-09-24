@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import type { ProcessExitKind, ProcessExitPhase } from "./artifact";
+import { isFailureCode, type FailureCode } from "./diagnostics";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 4;
+export const TELEMETRY_SCHEMA_VERSION = 5;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -91,6 +93,7 @@ export type TelemetryErrorStage =
   | "workflow";
 export type TelemetryAgentStopReason = "error" | "aborted";
 export type TelemetryExitCodeBucket = "zero" | "nonzero" | "unknown";
+export type TelemetryFailureCode = FailureCode;
 export type TelemetryRuntimeFailureKind =
   | "artifact_unreadable"
   | "artifact_malformed"
@@ -236,6 +239,9 @@ export type TelemetryEvent =
       error_stage?: TelemetryErrorStage;
       agent_stop_reason?: TelemetryAgentStopReason;
       exit_code_bucket?: TelemetryExitCodeBucket;
+      failure_code?: TelemetryFailureCode;
+      process_exit_phase?: ProcessExitPhase;
+      process_exit_kind?: ProcessExitKind;
       duration_ms: number | undefined;
       child_conversation_message_count: number | undefined;
     } & TelemetryAgentDimensions)
@@ -256,6 +262,7 @@ export type TelemetryEvent =
       error_count: number;
       error_category?: TelemetryErrorCategory;
       error_stage?: TelemetryErrorStage;
+      failure_code?: TelemetryFailureCode;
       duration_ms?: number;
     }
   | {
@@ -516,6 +523,46 @@ export function sanitizeTelemetryExitCodeBucket(
     : undefined;
 }
 
+/** Map arbitrary failure metadata to the closed diagnostic catalog. */
+export function sanitizeTelemetryFailureCode(
+  value: unknown,
+): TelemetryFailureCode {
+  return isFailureCode(value) ? value : "unknown";
+}
+
+const TELEMETRY_PROCESS_EXIT_PHASES: readonly ProcessExitPhase[] = [
+  "active_tool",
+  "active_turn",
+  "after_completion",
+  "unknown",
+];
+
+export function sanitizeTelemetryProcessExitPhase(
+  value: unknown,
+): ProcessExitPhase | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_PROCESS_EXIT_PHASES.includes(value as ProcessExitPhase)
+    ? (value as ProcessExitPhase)
+    : undefined;
+}
+
+const TELEMETRY_PROCESS_EXIT_KINDS: readonly ProcessExitKind[] = [
+  "normal",
+  "nonzero",
+  "signal",
+  "cancelled",
+  "unknown",
+];
+
+export function sanitizeTelemetryProcessExitKind(
+  value: unknown,
+): ProcessExitKind | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_PROCESS_EXIT_KINDS.includes(value as ProcessExitKind)
+    ? (value as ProcessExitKind)
+    : undefined;
+}
+
 /** Never forward arbitrary runtime failure kinds into telemetry. */
 export function sanitizeTelemetryRuntimeFailureKind(
   value: unknown,
@@ -737,6 +784,14 @@ export function buildTelemetryPayload(
         event.terminal_reason === "process_exit"
           ? sanitizeTelemetryExitCodeBucket(event.exit_code_bucket)
           : undefined;
+      const processExitPhase =
+        event.terminal_reason === "process_exit"
+          ? sanitizeTelemetryProcessExitPhase(event.process_exit_phase)
+          : undefined;
+      const processExitKind =
+        event.terminal_reason === "process_exit"
+          ? sanitizeTelemetryProcessExitKind(event.process_exit_kind)
+          : undefined;
       properties = {
         ...common,
         execution: event.execution,
@@ -750,6 +805,15 @@ export function buildTelemetryPayload(
         completion_policy: event.completion_policy,
         status: event.status,
         terminal_reason: event.terminal_reason,
+        ...(event.status === "error"
+          ? { failure_code: sanitizeTelemetryFailureCode(event.failure_code) }
+          : {}),
+        ...(processExitPhase === undefined
+          ? {}
+          : { process_exit_phase: processExitPhase }),
+        ...(processExitKind === undefined
+          ? {}
+          : { process_exit_kind: processExitKind }),
         ...(event.status === "error"
           ? {
               error_category: sanitizeTelemetryErrorCategory(
@@ -793,6 +857,9 @@ export function buildTelemetryPayload(
       const errorStage = diagnosticStatus
         ? sanitizeTelemetryErrorStage(event.error_stage)
         : undefined;
+      const failureCode = diagnosticStatus
+        ? sanitizeTelemetryFailureCode(event.failure_code)
+        : undefined;
       properties = {
         ...common,
         invocation: event.invocation,
@@ -804,6 +871,7 @@ export function buildTelemetryPayload(
           ? {}
           : { error_category: errorCategory }),
         ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+        ...(failureCode === undefined ? {} : { failure_code: failureCode }),
         ...durationProperties("duration", event.duration_ms),
         agents_spawned: boundedCount(event.agents_spawned, 1_000),
         error_count_bucket: telemetryErrorCountBucket(event.error_count),

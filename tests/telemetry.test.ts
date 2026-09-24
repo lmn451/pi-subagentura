@@ -117,7 +117,7 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 4,
+      schema_version: 5,
       mode: "orchestrator_v2",
     });
     expect(agent.properties).toMatchObject({
@@ -435,6 +435,7 @@ describe("anonymous product telemetry", () => {
       status: "error",
       terminal_reason: "agent_error",
       error_category: "provider",
+      failure_code: "provider_error",
       duration_ms: 12_345,
       child_conversation_message_count: 50_000,
     });
@@ -463,6 +464,7 @@ describe("anonymous product telemetry", () => {
         "telemetry_session_id",
         "terminal_reason",
         "error_category",
+        "failure_code",
         "unit",
       ].sort(),
     );
@@ -503,6 +505,7 @@ describe("anonymous product telemetry", () => {
     expect(JSON.stringify(payload)).not.toContain(secret);
     expect(payload.properties).not.toHaveProperty("errorMessage");
     expect(payload.properties.error_category).toBe("unknown");
+    expect(payload.properties.failure_code).toBe("unknown");
   });
   it("conditionally emits sanitized task diagnostics", () => {
     const dimensions = {
@@ -528,6 +531,9 @@ describe("anonymous product telemetry", () => {
       error_stage: "schema_validation",
       agent_stop_reason: "error",
       exit_code_bucket: "nonzero",
+      failure_code: "interactive_process_exit",
+      process_exit_phase: "active_tool",
+      process_exit_kind: "signal",
       rawError: "private prompt",
     } as unknown as TelemetryEvent);
     expect(processExit.properties).toMatchObject({
@@ -535,8 +541,34 @@ describe("anonymous product telemetry", () => {
       error_stage: "schema_validation",
       agent_stop_reason: "error",
       exit_code_bucket: "nonzero",
+      failure_code: "interactive_process_exit",
+      process_exit_phase: "active_tool",
+      process_exit_kind: "signal",
     });
     expect(JSON.stringify(processExit)).not.toContain("private prompt");
+
+    const privateDiagnostic = buildTelemetryPayload(
+      createTelemetrySession(true),
+      {
+        event: "task_completed",
+        ...dimensions,
+        status: "error",
+        terminal_reason: "process_exit",
+        failure_code: "provider failed /private/path",
+        process_exit_phase: "custom-tool-name",
+        process_exit_kind: "SIGTERM-private",
+      } as unknown as TelemetryEvent,
+    );
+    expect(privateDiagnostic.properties.failure_code).toBe("unknown");
+    expect(privateDiagnostic.properties).not.toHaveProperty(
+      "process_exit_phase",
+    );
+    expect(privateDiagnostic.properties).not.toHaveProperty(
+      "process_exit_kind",
+    );
+    expect(JSON.stringify(privateDiagnostic)).not.toMatch(
+      /provider failed|private\/path|custom-tool-name|SIGTERM-private/i,
+    );
 
     const nonProcessExit = buildTelemetryPayload(createTelemetrySession(true), {
       event: "task_completed",
@@ -547,8 +579,13 @@ describe("anonymous product telemetry", () => {
       error_stage: "provider",
       agent_stop_reason: "aborted",
       exit_code_bucket: "nonzero",
+      failure_code: "provider_error",
+      process_exit_phase: "active_tool",
+      process_exit_kind: "nonzero",
     } as unknown as TelemetryEvent);
     expect(nonProcessExit.properties).not.toHaveProperty("exit_code_bucket");
+    expect(nonProcessExit.properties).not.toHaveProperty("process_exit_phase");
+    expect(nonProcessExit.properties).not.toHaveProperty("process_exit_kind");
 
     const cancelled = buildTelemetryPayload(createTelemetrySession(true), {
       event: "task_completed",
@@ -559,11 +596,37 @@ describe("anonymous product telemetry", () => {
       error_stage: "secret-stage",
       agent_stop_reason: "aborted",
       exit_code_bucket: "nonzero",
+      failure_code: "interactive_process_exit",
+      process_exit_phase: "active_turn",
+      process_exit_kind: "cancelled",
     } as unknown as TelemetryEvent);
     expect(cancelled.properties).toHaveProperty("agent_stop_reason", "aborted");
     expect(cancelled.properties).not.toHaveProperty("error_category");
     expect(cancelled.properties).not.toHaveProperty("error_stage");
     expect(cancelled.properties).not.toHaveProperty("exit_code_bucket");
+    expect(cancelled.properties).not.toHaveProperty("failure_code");
+    expect(cancelled.properties).not.toHaveProperty("process_exit_phase");
+    expect(cancelled.properties).not.toHaveProperty("process_exit_kind");
+
+    const processCancelled = buildTelemetryPayload(
+      createTelemetrySession(true),
+      {
+        event: "task_completed",
+        ...dimensions,
+        status: "cancelled",
+        terminal_reason: "process_exit",
+        agent_stop_reason: "aborted",
+        failure_code: "interactive_process_exit",
+        process_exit_phase: "active_turn",
+        process_exit_kind: "cancelled",
+      } as unknown as TelemetryEvent,
+    );
+    expect(processCancelled.properties).toMatchObject({
+      terminal_reason: "process_exit",
+      process_exit_phase: "active_turn",
+      process_exit_kind: "cancelled",
+    });
+    expect(processCancelled.properties).not.toHaveProperty("failure_code");
 
     const success = buildTelemetryPayload(createTelemetrySession(true), {
       event: "task_completed",
@@ -574,11 +637,17 @@ describe("anonymous product telemetry", () => {
       error_stage: "secret-stage",
       agent_stop_reason: "secret-stop-reason",
       exit_code_bucket: "secret-exit-code",
+      failure_code: "workflow_timeout",
+      process_exit_phase: "active_tool",
+      process_exit_kind: "nonzero",
     } as unknown as TelemetryEvent);
     expect(success.properties).not.toHaveProperty("error_category");
     expect(success.properties).not.toHaveProperty("error_stage");
     expect(success.properties).not.toHaveProperty("agent_stop_reason");
     expect(success.properties).not.toHaveProperty("exit_code_bucket");
+    expect(success.properties).not.toHaveProperty("failure_code");
+    expect(success.properties).not.toHaveProperty("process_exit_phase");
+    expect(success.properties).not.toHaveProperty("process_exit_kind");
   });
 
   it("conditionally emits workflow diagnostics and bounds runtime failures", () => {
@@ -593,11 +662,13 @@ describe("anonymous product telemetry", () => {
       error_count: 2,
       error_category: "artifact",
       error_stage: "workflow",
+      failure_code: "workflow_schema_invalid",
       leaked: "private prompt",
     } as unknown as TelemetryEvent);
     expect(partial.properties).toMatchObject({
       error_category: "artifact",
       error_stage: "workflow",
+      failure_code: "workflow_schema_invalid",
     });
     expect(JSON.stringify(partial)).not.toContain("private prompt");
 
@@ -612,9 +683,11 @@ describe("anonymous product telemetry", () => {
       error_count: 0,
       error_category: "secret-category",
       error_stage: "secret-stage",
+      failure_code: "secret-code",
     } as unknown as TelemetryEvent);
     expect(cancelled.properties).not.toHaveProperty("error_category");
     expect(cancelled.properties).not.toHaveProperty("error_stage");
+    expect(cancelled.properties).not.toHaveProperty("failure_code");
 
     const runtime = buildTelemetryPayload(createTelemetrySession(true), {
       event: "runtime_failure",
@@ -712,7 +785,7 @@ describe("anonymous product telemetry", () => {
       failure_stage: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 4,
+      schema_version: 5,
     });
   });
 
@@ -878,6 +951,7 @@ describe("anonymous product telemetry", () => {
         "duration_ms",
         "error_count_bucket",
         "error_category",
+        "failure_code",
         "invocation",
         "mode",
         "schema_version",
@@ -1005,7 +1079,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("keeps every v4 event within the privacy allowlist", () => {
+  it("keeps every v5 event within the privacy allowlist", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
     const dimensions = {
       execution: "in-process" as const,
@@ -1110,6 +1184,9 @@ describe("anonymous product telemetry", () => {
       "error_count_bucket",
       "execution",
       "failure_stage",
+      "failure_code",
+      "process_exit_phase",
+      "process_exit_kind",
       "invocation",
       "invocation_source",
       "mode",
@@ -1139,7 +1216,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(4);
+      expect(payload.properties.schema_version).toBe(5);
     }
   });
 

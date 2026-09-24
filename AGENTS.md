@@ -94,32 +94,36 @@ Malformed persisted files or values are non-fatal in every scope that is read:
 report the validation failure without exposing file contents, ignore the
 invalid candidate, and continue to the next applicable scope or default.
 
-### Telemetry schema v4 invariants
+### Telemetry schema invariants
 
-- Schema v4 shipped in the 3.6.2 release. `TELEMETRY_SCHEMA_VERSION` in
-  `src/telemetry.ts` is the source of truth for the current schema; when
-  documenting telemetry, attribute schema changes to the release that shipped
-  them (per CHANGELOG.md) rather than restating a release status that can go
-  stale.
-- Telemetry dimensions are closed enums. Use only the literals in the schema
-  (and `unknown` only where that field permits it); never forward arbitrary
-  strings. Counts remain bounded and duration/latency numbers remain rounded
-  to the existing `0..30`-day representation.
+- Schema v4 shipped in 3.6.2. `TELEMETRY_SCHEMA_VERSION` in
+  `src/telemetry.ts` is the source of truth for the current schema; attribute
+  historical schema changes to the release in CHANGELOG.md.
+- Telemetry dimensions are closed enums. `failure_code` is limited to the codes
+  in `src/diagnostics.ts`; process-exit phase/kind are the artifact protocol's
+  closed enums. Counts remain bounded and durations remain rounded to the
+  existing `0..30`-day representation.
 - Diagnostic fields are status-scoped: `task_completed` carries
-  `error_category` and `error_stage` only for errors, `agent_stop_reason`
-  (`error` or `aborted`) for errors or cancellations, and `exit_code_bucket`
-  only when `terminal_reason` is `process_exit`; `workflow_completed` carries
-  `error_category` and `error_stage` only for `error` or `partial` status.
-  `runtime_failure` carries only its closed category, stage, and failure kind.
-- Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `terminal_reason`, result-outcome, error-category, and
-  error-stage values; error counts use bounded buckets. Invalid categories map
-  to `unknown`; invalid stages, stop reasons, exit buckets, and failure kinds
-  are omitted. Cancellation is not an error, and runtime failures are reported
-  once per failure episode rather than once per poll.
-- Never send exception text or stacks, prompts, tasks, personas, tool
-  arguments, message content, outputs, paths, or agent/job/workflow/session
-  identifiers.
+  `error_category`, `error_stage`, and `failure_code` only for error status;
+  `agent_stop_reason` (`error` or `aborted`) for errors or cancellations; and
+  `exit_code_bucket`, `process_exit_phase`, and `process_exit_kind` only when
+  `terminal_reason` is `process_exit`. `workflow_completed` carries
+  `error_category`, `error_stage`, and `failure_code` only for `error` or
+  `partial` status. `runtime_failure` carries only its closed category, stage,
+  and failure kind.
+- A later process exit after an authoritative successful completion is local
+  teardown context only; never revise or duplicate its remote `task_completed`.
+- Failure categories, stages, stop reasons, terminal reasons, result outcomes,
+  failure codes, and process-exit context are closed enums; error counts use
+  bounded buckets. Failure codes come only from structured evidence; never
+  parse raw error text. Invalid categories/failure codes map to `unknown`;
+  invalid stages, stop reasons, exit buckets, process-exit dimensions, and
+  runtime/completion failure kinds are omitted. Cancellation is not an error,
+  and runtime failures are reported once per failure episode, not per poll.
+- Never send exception text or stacks, prompts, tasks, personas, tool arguments,
+  message content, outputs, paths, tool names or hashes of tool names, or
+  agent/job/workflow/session identifiers. Local explanations and detailed
+  outputs remain local and must not alter telemetry opt-outs.
 - The workflow runner is the sole owner of the aggregate lifecycle pair:
   exactly one `workflow_started` and one `workflow_completed` for an accepted
   invocation. Child agent/task records must not emit duplicate workflow

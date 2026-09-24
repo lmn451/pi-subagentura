@@ -48,6 +48,7 @@ import {
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
 import { sanitizeOutput } from "./notifications";
+import { formatFailureGuidance } from "./diagnostics";
 import {
   completionDisplayLabel,
   formatCompletionMessage,
@@ -1199,6 +1200,13 @@ export function registerWorkflowTool(
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};
+        const failureCode =
+          st.status === "cancelled"
+            ? undefined
+            : (st.telemetryFailure?.failureCode ?? "unknown");
+        const diagnosticText = failureCode
+          ? `\n\n${formatFailureGuidance(failureCode)}`
+          : "";
         consumeCompletionSource(
           pi,
           { source: "workflow", sourceId: st.id },
@@ -1216,17 +1224,16 @@ export function registerWorkflowTool(
               type: "text",
               text: `Workflow ${st.id} ${st.status}: ${msg}${
                 usage
-                  ? ` (${formatWorkflowUsage(usage, {
-                      outputBudget,
-                    })})`
+                  ? ` (${formatWorkflowUsage(usage, { outputBudget })})`
                   : ""
-              }`,
+              }${diagnosticText}`,
             },
           ],
           details: {
             status: st.status,
             workflowId: st.id,
             error: msg,
+            ...(failureCode === undefined ? {} : { failureCode }),
             ...(outputBudget == null ? {} : { budgetTotal: outputBudget }),
             ...usageDetails,
           },
@@ -1243,6 +1250,15 @@ export function registerWorkflowTool(
         run.errorCount,
       );
       const usage = presentWorkflowUsage(run.usage);
+      const failureCode =
+        st.status === "cancelled" || run.errorCount === 0
+          ? undefined
+          : (run.failure?.failureCode ??
+            st.telemetryFailure?.failureCode ??
+            "unknown");
+      const diagnosticText = failureCode
+        ? `\n\n${formatFailureGuidance(failureCode)}`
+        : "";
       consumeCompletionSource(
         pi,
         { source: "workflow", sourceId: st.id },
@@ -1274,7 +1290,7 @@ export function registerWorkflowTool(
                         outputBudget: st.snapshot.budgetTotal,
                       })}`
                     : ""
-                }.\n\n${resultText}`
+                }.\n\n${resultText}${diagnosticText}`
               );
             })(),
           },
@@ -1286,6 +1302,7 @@ export function registerWorkflowTool(
           name: run.meta.name,
           agentsSpawned: run.agentsSpawned,
           errorCount: run.errorCount,
+          ...(failureCode === undefined ? {} : { failureCode }),
           tokensSpent: run.tokensSpent,
           usage: run.usage,
           budgetTotal: st.snapshot.budgetTotal,

@@ -109,6 +109,8 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(exits[0]).toMatchObject({
       exitCode: 0,
       terminationReason: "normal_exit",
+      processExitPhase: "after_completion",
+      processExitKind: "normal",
     });
     expect(exits[0].exitCode).toBe(0);
   });
@@ -138,6 +140,8 @@ describe("launch script EXIT trap (idempotency)", () => {
         status: "done",
         exitCode: 0,
         terminationReason: "active_tool",
+        processExitPhase: "active_tool",
+        processExitKind: "unknown",
         lastTool: "bash",
       }),
     );
@@ -722,5 +726,41 @@ describe("spawn-time state persistence", () => {
     });
     expect(state.parentSessionId).toBe("pi");
     expect(state.cwd).toBe(cwd);
+  });
+});
+
+describe("numeric signal-like wrapper exits", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = makeTmp();
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("records a nonzero status without claiming an observed signal", () => {
+    const artDir = join(tmp, "artifacts", "signal-like-status");
+    const launchScript = join(artDir, "launch.sh");
+    expect(runLaunchScript(artDir, launchScript, "exit 143")).toBe(143);
+
+    const events = readEvents(artDir);
+    const completion = events.find((event) => event.type === "completion");
+    const processExit = events.find((event) => event.type === "process_exited");
+    expect(completion).toMatchObject({
+      source: "process_exit",
+      exitCode: 143,
+      processExitPhase: "unknown",
+      processExitKind: "nonzero",
+    });
+    expect(processExit).toMatchObject({
+      status: "error",
+      exitCode: 143,
+      terminationReason: "nonzero_exit",
+      processExitPhase: "unknown",
+      processExitKind: "nonzero",
+    });
+    expect(processExit).not.toHaveProperty("signal");
   });
 });

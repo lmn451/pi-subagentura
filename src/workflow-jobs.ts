@@ -202,7 +202,11 @@ function emitWorkflowCompletedTelemetry(
     result?.failure ??
     job.telemetryFailure ??
     (status === "error"
-      ? { errorCategory: "unknown", errorStage: "workflow" }
+      ? {
+          errorCategory: "unknown",
+          errorStage: "workflow",
+          failureCode: "unknown",
+        }
       : undefined);
   if (failure?.runtimeFailureKind && !job.telemetryRuntimeFailureReported) {
     job.telemetryRuntimeFailureReported = true;
@@ -231,6 +235,7 @@ function emitWorkflowCompletedTelemetry(
         : {
             error_category: failure.errorCategory,
             error_stage: failure.errorStage,
+            failure_code: failure.failureCode ?? "unknown",
           }),
       ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     },
@@ -648,8 +653,16 @@ export function startWorkflowJob(
         state.telemetryFailure =
           workflowFailureForError(err) ??
           (timedOut
-            ? { errorCategory: "timeout", errorStage: "workflow" }
-            : { errorCategory: "unknown", errorStage: "workflow" });
+            ? {
+                errorCategory: "timeout",
+                errorStage: "workflow",
+                failureCode: "workflow_timeout",
+              }
+            : {
+                errorCategory: "unknown",
+                errorStage: "workflow",
+                failureCode: "unknown",
+              });
       }
       if (err instanceof WorkflowExecutionError && err.usage) {
         state.snapshot.usage = { ...err.usage };
