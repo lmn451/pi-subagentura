@@ -16,6 +16,7 @@ import type {
   TelemetryErrorStage,
   TelemetryRuntimeFailureKind,
 } from "./telemetry";
+import type { FailureCode } from "./diagnostics";
 
 export { zeroUsage };
 
@@ -415,6 +416,7 @@ export type WorkflowProgressUpdate = {
 export interface WorkflowFailureClassification {
   errorCategory: TelemetryErrorCategory;
   errorStage: TelemetryErrorStage;
+  failureCode?: FailureCode;
   runtimeFailureKind?: TelemetryRuntimeFailureKind;
 }
 

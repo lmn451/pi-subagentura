@@ -184,10 +184,15 @@ describe("startSubagentJob effective thinking level", () => {
       started.start();
       const result = await started.jobPromise;
 
-      expect(result).toMatchObject({ isError: true, errorMessage });
+      expect(result).toMatchObject({
+        isError: true,
+        errorMessage,
+        failureCode: "provider_error",
+      });
       expect(payloads[2]?.properties).toMatchObject({
         status: "error",
         error_category: "provider",
+        failure_code: "provider_error",
       });
       expect(JSON.stringify(payloads)).not.toContain(errorMessage);
     } finally {
@@ -245,6 +250,7 @@ describe("startSubagentJob effective thinking level", () => {
         status: "error",
         error_category: "provider",
         error_stage: "provider",
+        failure_code: "provider_error",
         agent_stop_reason: "error",
       });
       expect(JSON.stringify(payloads)).not.toContain(errorMessage);

@@ -124,7 +124,7 @@ describe("workflow v4 cancellation diagnostics", () => {
     ).toMatchObject({ status: "cancelled" });
   });
 });
-describe("workflow v4 aggregate classifications", () => {
+describe("workflow v5 aggregate classifications", () => {
   it("carries schema validation evidence to one workflow lifecycle pair", async () => {
     const { owner, payloads } = telemetryScope(401);
     const runAgent = vi.fn(async () => successfulResult());
@@ -153,6 +153,7 @@ describe("workflow v4 aggregate classifications", () => {
       status: "error",
       error_category: "schema",
       error_stage: "schema_validation",
+      failure_code: "workflow_schema_invalid",
     });
     expect(runAgent).not.toHaveBeenCalled();
   });
@@ -190,6 +191,7 @@ describe("workflow v4 aggregate classifications", () => {
       status: "error",
       error_category: "timeout",
       error_stage: "workflow",
+      failure_code: "workflow_timeout",
     });
   });
 
@@ -198,7 +200,7 @@ describe("workflow v4 aggregate classifications", () => {
     const fillerIds: string[] = [];
     try {
       for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
-        const id = `v4-capacity-${index}`;
+        const id = `v5-capacity-${index}`;
         workflowJobRegistry.set(id, {
           id,
           name: "capacity-filler",
@@ -245,6 +247,35 @@ describe("workflow v4 aggregate classifications", () => {
     } finally {
       for (const id of fillerIds) workflowJobRegistry.delete(id);
     }
+  });
+});
+
+describe("workflow result diagnostic guidance", () => {
+  it("adds structured schema guidance to local result text", async () => {
+    const tools = new Map<string, any>();
+    const { registerWorkflowTool } = await import("../src/workflow-tool");
+    registerWorkflowTool({
+      registerTool: (tool: any) => tools.set(tool.name, tool),
+    } as any);
+    const job = startWorkflowJob(
+      "schema-result-guidance",
+      'export const meta = { name: "schema-result-guidance", description: "d" };\n' +
+        'return await agent("schema", { schema: { type: "not-a-schema" } });',
+      { runAgent: vi.fn(async () => successfulResult()) },
+    );
+    jobs.push(job);
+    await expect(job.promise).rejects.toBeInstanceOf(Error);
+
+    const result = await tools
+      .get("get_workflow_result")
+      .execute("result", { workflowId: job.id });
+    expect(result.details.failureCode).toBe("workflow_schema_invalid");
+    expect(result.content[0].text).toContain(
+      "Diagnostic [workflow_schema_invalid]: Workflow schema validation failed.",
+    );
+    expect(result.content[0].text).toContain(
+      "Review the schema and the expected output shape",
+    );
   });
 });
 

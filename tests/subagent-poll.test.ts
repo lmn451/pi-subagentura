@@ -3019,7 +3019,11 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       } else {
         expect(completed?.properties).not.toHaveProperty("agent_stop_reason");
       }
-      expect(completed?.properties).not.toHaveProperty("exit_code_bucket");
+      if (source === "process_exit") {
+        expect(completed?.properties?.exit_code_bucket).toBe("unknown");
+      } else {
+        expect(completed?.properties).not.toHaveProperty("exit_code_bucket");
+      }
       expect(JSON.stringify(payloads)).not.toContain(secret);
     },
   );

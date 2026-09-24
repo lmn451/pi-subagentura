@@ -17,7 +17,6 @@ import {
   isArtifactOutputSettled,
   isCompletionEvent,
   loadInteractiveStates,
-  lastEvent,
   MAX_TURN_ID_LENGTH,
   listOutputHistory,
   listOutputTurns,
@@ -61,6 +60,12 @@ import {
   formatCompletionDeliveryBehavior,
   sanitizeOutput,
 } from "../notifications";
+import {
+  failureCodeFromArtifactEvents,
+  failureGuidance,
+  formatFailureGuidance,
+  processExitContextFromArtifactEvents,
+} from "../diagnostics";
 import { isOrchestratorV2Enabled } from "../completion-turn";
 import { completionDisplayLabel } from "../completion-presentation";
 import {
@@ -1426,6 +1431,16 @@ export function registerInteractiveSubagentTools(
           : null;
         const lastEventValue =
           events.length > 0 ? events[events.length - 1] : null;
+        const diagnosticCode = failureCodeFromArtifactEvents(events);
+        const processExitContext = processExitContextFromArtifactEvents(events);
+        const diagnosticLines = [
+          ...(diagnosticCode === undefined
+            ? []
+            : [formatFailureGuidance(diagnosticCode)]),
+          ...(processExitContext === undefined ? [] : [processExitContext]),
+        ];
+        const diagnosticText =
+          diagnosticLines.length > 0 ? `\n${diagnosticLines.join("\n")}\n` : "";
         // Distinguish three cases when output is missing/empty so the caller
         // doesn't see a misleading "not written yet" after the sub-agent has
         // already exited (the common case: model finished without writing).
@@ -1490,6 +1505,7 @@ export function registerInteractiveSubagentTools(
               text:
                 `Artifact for ${params.id} (${events.length} event${events.length === 1 ? "" : "s"}${params.since ? ` since ${params.since}` : ""}).\n` +
                 `Last event: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"}\n` +
+                diagnosticText +
                 (params.turn !== undefined
                   ? `Reading turn: ${params.turn}\n`
                   : "") +
@@ -1508,6 +1524,8 @@ export function registerInteractiveSubagentTools(
             events,
             output,
             lastEvent: lastEventValue,
+            ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
+            ...(processExitContext === undefined ? {} : { processExitContext }),
             availableTurns,
             outputHistory,
           },
@@ -1543,7 +1561,10 @@ export function registerInteractiveSubagentTools(
       const states = visibleStates ? [...visibleStates.values()] : [];
       const summary = states.map((s) => {
         const art = getArtifactForState(s);
-        const last = lastEvent(art);
+        const events = readEvents(art);
+        const last = events.at(-1) ?? null;
+        const diagnosticCode = failureCodeFromArtifactEvents(events);
+        const processExitContext = processExitContextFromArtifactEvents(events);
         return {
           id: s.id,
           name: s.name,
@@ -1552,6 +1573,8 @@ export function registerInteractiveSubagentTools(
           lastEvent: last,
           lastUpdate: last?.ts,
           artifactDir: s.artifactDir,
+          ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
+          ...(processExitContext === undefined ? {} : { processExitContext }),
         };
       });
       if (summary.length === 0) {
@@ -1568,7 +1591,14 @@ export function registerInteractiveSubagentTools(
         const evStr = ev
           ? `last: ${ev.type}${ev.message ? ` (${ev.message.slice(0, 60)})` : ""}`
           : "no events yet";
-        return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${evStr}`;
+        const guidance = s.diagnosticCode
+          ? formatFailureGuidance(s.diagnosticCode).replace(/\s+/g, " ")
+          : "";
+        const processContext = s.processExitContext ?? "";
+        const diagnostic = [guidance, processContext]
+          .filter(Boolean)
+          .join(" · ");
+        return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${evStr}${diagnostic ? ` — ${diagnostic}` : ""}`;
       });
       return {
         content: [{ type: "text", text: lines.join("\n") }],

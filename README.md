@@ -113,8 +113,10 @@ interactive sub-agents use durable artifacts and survive parent `reload`,
 cleans up their owned panes and state entries; workflow-owned interactive panes
 are also cleaned up with their owning workflow.
 
-See the [workflow guide](./docs/workflows.md) and
-[bundled examples](./examples/workflows/README.md).
+See the [workflow guide](./docs/workflows.md),
+[bundled examples](./examples/workflows/README.md), and the
+[telemetry diagnostics runbook](./docs/telemetry-diagnostics.md) for local
+failure-code explanations and recommended next steps.
 
 ## Why use it?
 
@@ -964,24 +966,26 @@ ambient identity environment variables—and never read or write the root state
 file's telemetry metadata. A child without that explicit context starts an
 unrelated anonymous correlation rather than reconstructing identity.
 
-The current payload schema, shipped in the 3.6.2 release, is version `4`;
-it contains these events:
+Schema v4 shipped in 3.6.2. This table describes schema v5;
+`TELEMETRY_SCHEMA_VERSION` in `src/telemetry.ts` is the source of truth for
+the current version. Schema v5 adds structured `failure_code` and process-exit
+context to these events:
 
-| Event                        | Properties                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_started`            | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `agent_created`              | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source (`with_context`, `isolated`, `interactive`, or `workflow`), public/sanitized model, async, exact bounded depth plus bucket, completion policy, and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                                    |
-| `agent_spawn_failed`         | once per observed rejected spawn attempt; the same agent dimensions, except mux may also be `unknown`, plus required `failure_stage` (`depth_limit`, `capacity`, `context`, `model_resolution`, `session_creation`, `mux_resolution`, `pane_launch`, `state_persistence`, `registration`, `parent_shutdown`, or `unknown`) and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                     |
-| `task_started`               | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `unit` (`job` or `turn`)                                                                                                                                                                                                                                                                                                                                                                |
-| `interactive_message_sent`   | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `task_completed`             | repeated closed execution and mux dimensions; `unit` (`job` or `turn`), `success`, `error`, or `cancelled` status, required `terminal_reason`, error-only closed `error_category` and `error_stage`, optional closed `agent_stop_reason` (`error` or `aborted`) for errors or cancellations, `exit_code_bucket` (`zero`, `nonzero`, or `unknown`) only when `terminal_reason` is `process_exit`, optional rounded `duration_ms` plus `duration_bucket`, and bounded child-conversation message count when observable |
-| `workflow_started`           | one aggregate record for an accepted workflow invocation: required `invocation` (`tool` or `saved_command`), `async`, and `completion_policy`                                                                                                                                                                                                                                                                                                                                                                        |
-| `workflow_completed`         | the same invocation dimensions plus required `status` (`success`, `partial`, `error`, or `cancelled`), required `terminal_reason`, optional closed `error_category` and `error_stage` only for `error` or `partial` status, bounded `agents_spawned`, an `error_count_bucket` of `0`, `1`, `2+`, or `unknown`, and optional rounded `duration_ms` plus `duration_bucket`                                                                                                                                             |
-| `session_recovered`          | recovery `reason` (`startup`, `reload`, or `resume`) and bounded `total_count`, `alive_count`, `terminal_count`, and `unknown_count` (each `0..1000`); `total_count` is the eligible recovered count and equals `alive_count + terminal_count + unknown_count`                                                                                                                                                                                                                                                       |
-| `completion_delivered`       | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                                                                                                                             |
-| `completion_delivery_failed` | manifest delivery or standalone completion publication; closed `failure_stage` (`notice_persistence`, `manifest_dispatch`, `retry_exhausted`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`) and bounded `retry_attempt` (`0..32`, currently at most `8`); `completion_publication` identifies standalone publication failure, while `notice_persistence` remains for durable manifest-notice failures; no error text or completion identifiers                                    |
-| `runtime_failure`            | one closed runtime failure category, stage, and kind: kind is `artifact_unreadable`, `artifact_malformed`, `artifact_oversized`, `mux_probe`, `workflow_capacity`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`; no identifiers or raw details                                                                                                                                                                                                                                    |
-| `result_read`                | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                                                                                                                   |
+| Event                        | Properties                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_started`            | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `agent_created`              | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source (`with_context`, `isolated`, `interactive`, or `workflow`), public/sanitized model, async, exact bounded depth plus bucket, completion policy, and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                                                                                             |
+| `agent_spawn_failed`         | once per observed rejected spawn attempt; the same agent dimensions, except mux may also be `unknown`, plus required `failure_stage` (`depth_limit`, `capacity`, `context`, `model_resolution`, `session_creation`, `mux_resolution`, `pane_launch`, `state_persistence`, `registration`, `parent_shutdown`, or `unknown`) and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                                                                              |
+| `task_started`               | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `unit` (`job` or `turn`)                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `interactive_message_sent`   | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `task_completed`             | execution/mux dimensions, `unit`, status, and `terminal_reason`; error-only `error_category`, `error_stage`, and `failure_code` (`provider_error`, `workflow_schema_invalid`, `workflow_timeout`, `workflow_capacity_limit`, `interactive_process_exit`, or `unknown`); optional `agent_stop_reason`; and, only for `process_exit`, `exit_code_bucket`, `process_exit_phase` (`active_tool`, `active_turn`, `after_completion`, `unknown`), and `process_exit_kind` (`normal`, `nonzero`, `signal`, `cancelled`, `unknown`); rounded duration and bounded child-message count |
+| `workflow_started`           | one aggregate record for an accepted workflow invocation: required `invocation` (`tool` or `saved_command`), `async`, and `completion_policy`                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `workflow_completed`         | invocation dimensions, status and `terminal_reason`; `error_category`, `error_stage`, and closed `failure_code` only for `error`/`partial`; bounded `agents_spawned` and `error_count_bucket`; rounded duration                                                                                                                                                                                                                                                                                                                                                               |
+| `session_recovered`          | recovery `reason` (`startup`, `reload`, or `resume`) and bounded `total_count`, `alive_count`, `terminal_count`, and `unknown_count` (each `0..1000`); `total_count` is the eligible recovered count and equals `alive_count + terminal_count + unknown_count`                                                                                                                                                                                                                                                                                                                |
+| `completion_delivered`       | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                                                                                                                                                                                      |
+| `completion_delivery_failed` | manifest delivery or standalone completion publication; closed `failure_stage` (`notice_persistence`, `manifest_dispatch`, `retry_exhausted`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`) and bounded `retry_attempt` (`0..32`, currently at most `8`); `completion_publication` identifies standalone publication failure, while `notice_persistence` remains for durable manifest-notice failures; no error text or completion identifiers                                                                                             |
+| `runtime_failure`            | one closed runtime failure category, stage, and kind: kind is `artifact_unreadable`, `artifact_malformed`, `artifact_oversized`, `mux_probe`, `workflow_capacity`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`; no identifiers or raw details                                                                                                                                                                                                                                                                                             |
+| `result_read`                | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                                                                                                                                                                            |
 
 It also records the following operation and setup events:
 
@@ -1012,32 +1016,39 @@ the `0`/`1`/`2+`/`unknown` bucket; other counts and depth keep their existing sa
 Error categories are closed to `provider`, `timeout`, `schema`, `capacity`,
 `session`, `mux`, `transport`, `artifact`, `internal`, and `unknown`. Error
 stages are closed to `spawn`, `turn`, `provider`, `completion`, `polling`,
-`delivery`, `schema_validation`, and `workflow`. Task error category/stage
-fields are emitted only for `error` status; workflow error category/stage
-fields are emitted only for `error` or `partial` status. Cancellation is not
-an error, but cancelled tasks may include `agent_stop_reason` (`error` or
-`aborted`). `exit_code_bucket` is emitted only with `process_exit` terminal
-evidence.
+`delivery`, `schema_validation`, and `workflow`. Failure codes are closed to
+`provider_error`, `workflow_schema_invalid`, `workflow_timeout`,
+`workflow_capacity_limit`, `interactive_process_exit`, and `unknown`. Task error
+category/stage/code fields appear only for `error`; workflow diagnostics appear
+only for `error` or `partial`. Cancellations are not errors, but cancelled tasks
+may include `agent_stop_reason` (`error` or `aborted`). Exit-code buckets and
+process-exit phase/kind are emitted only with `process_exit` terminal evidence.
+A later nonzero process exit after an authoritative successful completion remains
+local process context: remote `task_completed` stays `success` and is not counted
+again as a task failure.
 
-Schema v4 keeps the existing privacy model. It adds no content
-or stable identity: the random runtime correlation UUID remains scoped to the
-logical session/tree and is never a stable installation, machine, user,
-repository, or project identity. Payloads contain only closed enums, booleans,
-bounded counts, rounded numeric values, bucketed error counts, the package
-version, sanitized public model labels, and that random correlation UUID. The
-extension does **not** send tasks, personas, prompts, message content, outputs,
-error text or stacks, names, group ids, paths, repositories, artifact/agent/Pi
-session ids, token usage, cost, or a persistent installation id. PostHog can
-still observe the connection's source IP while handling the HTTP request. The
-project-level **Discard client IP data** setting should also be enabled; direct
-ingestion cannot prevent PostHog's network edge from receiving the connection
-itself.
+Schema v5 preserves the existing privacy model. It adds only closed failure
+codes and process-exit context; no raw error content or stable identity is added.
+The random runtime correlation UUID remains scoped to the logical session/tree
+and is never a stable installation, machine, user, repository, or project
+identity. Payloads contain only closed enums, booleans, bounded counts, rounded
+numeric values, bucketed error counts, package version, sanitized public model
+labels, and that random correlation UUID. The extension does **not** send tasks,
+personas, prompts, message content, outputs, error text or stacks, names, tool
+names or hashes, group ids, paths, repositories, artifact/agent/Pi session ids,
+token usage, cost, or a persistent installation id. PostHog can still observe
+the connection's source IP while handling the HTTP request. The project-level
+**Discard client IP data** setting should also be enabled; direct ingestion
+cannot prevent PostHog's network edge from receiving the connection itself.
 
-Error categories are classified locally from known execution outcomes. The raw
-error object, message, stack, and any provider response remain local and are
-never used as telemetry properties. Invalid categories fall back to `unknown`;
-invalid stages, stop reasons, exit buckets, and runtime or completion failure
-kinds are omitted.
+Failure codes are assigned locally from structured execution evidence. A
+`provider_error` identifies a structured provider/assistant error stop; it does
+not identify a provider subcode or expose the exact provider response. Exact
+messages remain available only in local results/artifacts. Invalid codes or
+categories map to `unknown`; invalid optional stages, stop reasons, exit buckets,
+process context, and runtime/completion failure kinds are omitted. The
+[telemetry diagnostics runbook](./docs/telemetry-diagnostics.md) explains the
+first-slice code coverage and local next steps.
 
 Coverage is intentionally bounded. A host-level schema rejection or tool
 not-found result that occurs before a telemetry session exists is not observable

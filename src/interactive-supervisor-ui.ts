@@ -27,6 +27,10 @@ import {
   responsiveFlowColumnWidths,
   responsiveFlowMinimumWidth,
 } from "./rendering";
+import {
+  failureCodeFromArtifactEvents,
+  processExitContextFromArtifactEvents,
+} from "./diagnostics";
 
 export const INTERACTIVE_SUPERVISOR_SHORTCUT = "ctrl+alt+a";
 const DEFAULT_REFRESH_INTERVAL_MS = 1_000;
@@ -75,6 +79,7 @@ export interface SupervisorArtifactDetails {
   lifecycle: string;
   events: string;
   output: string;
+  diagnostic?: string;
 }
 
 export interface InteractiveSupervisorOrigin {
@@ -883,6 +888,9 @@ function formatInteractiveDetails(
     `Pi session: ${compactText(state.sessionFile)}`,
     `Lifecycle: ${artifact?.lifecycle ?? "loading…"}`,
     `Recent events: ${artifact?.events ?? "loading…"}`,
+    ...(artifact?.diagnostic
+      ? [`Diagnostic: ${compactText(artifact.diagnostic)}`]
+      : []),
     `Output preview: ${artifact?.output ?? "loading…"}`,
   ];
   if (!(state.mux === "tmux" && process.env.TMUX)) {
@@ -955,10 +963,12 @@ async function readArtifactDetails(
   ]);
   const events = summarizeRecentEvents(eventsTail);
   const output = compactText(outputTail);
+  const diagnostic = summarizeProcessDiagnostic(eventsTail);
   return {
     lifecycle,
     events: events || "none yet",
     output: output || "none yet",
+    ...(diagnostic ? { diagnostic } : {}),
   };
 }
 
@@ -1008,12 +1018,33 @@ function summarizeRecentEvents(content: string): string {
           : typeof event.name === "string"
             ? event.name
             : undefined;
-      summaries.push(detail ? `${event.type}(${detail})` : event.type);
+      const summary = detail ? `${event.type}(${detail})` : event.type;
+      summaries.push(summary);
     } catch {
       /* A bounded tail may begin in the middle of an event record. */
     }
   }
   return summaries.slice(-DETAIL_EVENT_COUNT).join(" → ");
+}
+
+function summarizeProcessDiagnostic(content: string): string | undefined {
+  const events: Record<string, unknown>[] = [];
+  for (const line of content.trim().split("\n")) {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (typeof event.type === "string") events.push(event);
+    } catch {
+      /* A bounded tail may begin in the middle of an event record. */
+    }
+  }
+  const failureCode = failureCodeFromArtifactEvents(events);
+  const processContext = processExitContextFromArtifactEvents(events);
+  return (
+    [
+      ...(failureCode ? [`failure_code=${failureCode}`] : []),
+      ...(processContext ? [processContext] : []),
+    ].join(" · ") || undefined
+  );
 }
 
 function compactText(value: string): string {

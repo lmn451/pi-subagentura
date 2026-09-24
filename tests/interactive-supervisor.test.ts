@@ -1192,6 +1192,103 @@ describe("interactive supervisor", () => {
     });
   });
 
+  it("shows the local runbook for an interactive process exit", async () => {
+    const artifactDir = join(tempDir(), "process-exit-artifact");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(
+      join(artifactDir, "events.ndjson"),
+      [
+        JSON.stringify({
+          type: "completion",
+          source: "process_exit",
+          outcome: "error",
+          processExitPhase: "active_tool",
+          processExitKind: "unknown",
+        }),
+        JSON.stringify({
+          type: "process_exited",
+          status: "done",
+          exitCode: 0,
+          terminationReason: "active_tool",
+          processExitPhase: "active_tool",
+          processExitKind: "unknown",
+        }),
+      ].join("\n") + "\n",
+    );
+    const item = state("process-exit-details", { artifactDir });
+    interactiveSubagentRegistry.set(item.id, item);
+    const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+    component.handleInput("\r");
+    await vi.waitFor(() => {
+      component.invalidate();
+      const rendered = component.render(160).join("\n");
+      expect(rendered).toContain(
+        "Diagnostic: failure_code=interactive_process_exit",
+      );
+      expect(rendered).toContain(
+        "Process context: terminationReason=active_tool, processExitPhase=active_tool, processExitKind=unknown",
+      );
+    });
+  });
+
+  it.each([
+    {
+      label: "a new turn starts",
+      events: [
+        {
+          type: "completion",
+          turnId: "old-turn",
+          status: "error",
+          outcome: "error",
+          source: "agent_settled",
+          agentStopReason: "error",
+        },
+        { type: "turn_started", turnId: "new-turn" },
+      ],
+    },
+    {
+      label: "a new turn is cancelled",
+      events: [
+        {
+          type: "completion",
+          turnId: "old-turn",
+          status: "error",
+          outcome: "error",
+          source: "agent_settled",
+          agentStopReason: "error",
+        },
+        { type: "turn_started", turnId: "new-turn" },
+        {
+          type: "completion",
+          turnId: "new-turn",
+          status: "cancelled",
+          outcome: "cancelled",
+          source: "parent",
+        },
+      ],
+    },
+  ])(
+    "does not carry an old turn's diagnostic when $label",
+    async ({ events }) => {
+      const artifactDir = join(tempDir(), "turn-boundary-artifact");
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(
+        join(artifactDir, "events.ndjson"),
+        events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+      );
+      const item = state("turn-boundary", { artifactDir });
+      interactiveSubagentRegistry.set(item.id, item);
+      const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+      component.handleInput("\r");
+      await vi.waitFor(() => {
+        component.invalidate();
+        const rendered = component.render(200).join("\n");
+        expect(rendered).not.toContain("failure_code=");
+        expect(rendered).not.toContain("Process context:");
+      });
+    },
+  );
+
   it("refuses to follow a symlinked artifact tail", async () => {
     const dir = tempDir();
     const artifactDir = join(dir, "artifact");

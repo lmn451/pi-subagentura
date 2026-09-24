@@ -336,6 +336,7 @@ async function executeScript(
           {
             errorCategory: "schema",
             errorStage: "schema_validation",
+            failureCode: "workflow_schema_invalid",
           },
         );
       }
@@ -359,6 +360,7 @@ async function executeScript(
             {
               errorCategory: "capacity",
               errorStage: "workflow",
+              failureCode: "workflow_capacity_limit",
             },
           );
         }
@@ -431,6 +433,16 @@ async function executeScript(
               const resultFailure = workflowFailureClassification(res);
               if (resultFailure && engine.failure === undefined) {
                 engine.failure = resultFailure;
+              } else if (
+                res.isError &&
+                res.failureCode === "provider_error" &&
+                engine.failure === undefined
+              ) {
+                engine.failure = {
+                  errorCategory: "provider",
+                  errorStage: "provider",
+                  failureCode: res.failureCode,
+                };
               }
             } catch (error) {
               const errorUsage = (error as { usage?: Usage } | null)?.usage;
@@ -483,6 +495,7 @@ async function executeScript(
               engine.failure ??= {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
+                failureCode: "workflow_schema_invalid",
               };
               lastErr = "No structured_output call found.";
               continue;
@@ -494,6 +507,7 @@ async function executeScript(
             engine.failure ??= {
               errorCategory: "schema",
               errorStage: "schema_validation",
+              failureCode: "workflow_schema_invalid",
             };
             lastErr = verrs.slice(0, 5).join("; ");
             continue;
@@ -508,6 +522,7 @@ async function executeScript(
               engine.failure ??= {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
+                failureCode: "workflow_schema_invalid",
               };
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
@@ -515,6 +530,7 @@ async function executeScript(
               engine.failure ??= {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
+                failureCode: "workflow_schema_invalid",
               };
               lastErr = `JSON parse error: ${
                 e instanceof Error ? e.message : String(e)
@@ -525,6 +541,7 @@ async function executeScript(
             engine.failure ??= {
               errorCategory: "schema",
               errorStage: "schema_validation",
+              failureCode: "workflow_schema_invalid",
             };
             lastErr = "no JSON object/array found in output";
           }

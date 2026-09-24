@@ -42,6 +42,7 @@ import {
 } from "./cancellation-snapshots";
 import { withOrchestrationContext } from "./orchestration-context";
 import type { InteractiveSubagentState } from "./interactive-tmux";
+import type { FailureCode } from "./diagnostics";
 import type { CompletionPolicy } from "./completion-coordinator";
 import {
   findSessionScope,
@@ -224,6 +225,7 @@ export type SubagentResult =
       /** Never set on the error branch; present so the union can be probed. */
       cancelled?: undefined;
       errorMessage: string;
+      failureCode?: FailureCode;
       workflowStructuredOutput?: WorkflowStructuredOutputCapture;
     };
 
@@ -1488,6 +1490,15 @@ export async function startSubagentJob(
           status === "error" || status === "cancelled"
             ? structuredStopReason
             : undefined;
+        const failureCode =
+          status === "error"
+            ? providerError
+              ? "provider_error"
+              : "unknown"
+            : undefined;
+        if (result.isError && failureCode !== undefined) {
+          result = { ...result, failureCode };
+        }
         captureTelemetry(
           telemetry?.session,
           {
@@ -1507,6 +1518,7 @@ export async function startSubagentJob(
               ? {}
               : { error_category: errorCategory }),
             ...(errorStage === undefined ? {} : { error_stage: errorStage }),
+            ...(failureCode === undefined ? {} : { failure_code: failureCode }),
             ...(agentStopReason === undefined
               ? {}
               : { agent_stop_reason: agentStopReason }),

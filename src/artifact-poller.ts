@@ -74,6 +74,7 @@ import {
   resolveLiveSessionScope,
 } from "./session-scope";
 import { isAgentListHidden } from "./settings";
+import { failureCodeFromArtifactEvent } from "./diagnostics";
 import {
   captureTelemetry,
   type TelemetryErrorCategory,
@@ -593,12 +594,46 @@ function taskAgentStopReason(
   return undefined;
 }
 
+function taskFailureCodeFromEvent(
+  event: SubagentEvent,
+  status: CompletionOutcome,
+): ReturnType<typeof failureCodeFromArtifactEvent> {
+  return status === "error" ? failureCodeFromArtifactEvent(event) : undefined;
+}
+
+function taskProcessExitContext(
+  event: SubagentEvent,
+  terminalReason: TelemetryTerminalReason,
+) {
+  if (
+    terminalReason !== "process_exit" ||
+    !(
+      event.type === "process_exited" ||
+      (event.type === "completion" && event.source === "process_exit")
+    )
+  ) {
+    return {};
+  }
+  return {
+    ...(event.processExitPhase === undefined
+      ? {}
+      : { process_exit_phase: event.processExitPhase }),
+    ...(event.processExitKind === undefined
+      ? {}
+      : { process_exit_kind: event.processExitKind }),
+  };
+}
+
 function taskExitCodeBucket(
   event: SubagentEvent,
 ): "zero" | "nonzero" | "unknown" | undefined {
-  if (event.type !== "process_exited") return undefined;
-  return Number.isSafeInteger(event.exitCode)
-    ? event.exitCode === 0
+  const processExit =
+    event.type === "process_exited" ||
+    (event.type === "completion" && event.source === "process_exit");
+  if (!processExit) return undefined;
+  const exitCode = event.exitCode;
+  return Number.isSafeInteger(exitCode)
+    ? exitCode === 0
       ? "zero"
       : "nonzero"
     : "unknown";
@@ -1013,6 +1048,8 @@ async function runPollArtifactChanges(
           );
           const agentStopReason = taskAgentStopReason(ev, status);
           const exitCodeBucket = taskExitCodeBucket(ev);
+          const failureCode = taskFailureCodeFromEvent(ev, status);
+          const processExitContext = taskProcessExitContext(ev, terminalReason);
           captureTelemetry(
             ownerContext?.telemetry,
             {
@@ -1039,6 +1076,10 @@ async function runPollArtifactChanges(
               ...(exitCodeBucket === undefined
                 ? {}
                 : { exit_code_bucket: exitCodeBucket }),
+              ...(failureCode === undefined
+                ? {}
+                : { failure_code: failureCode }),
+              ...processExitContext,
               duration_ms:
                 state.telemetryTurnStartedAt === undefined
                   ? undefined
