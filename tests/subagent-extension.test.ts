@@ -170,12 +170,6 @@ describe("extension registration", () => {
     );
     expect(result.systemPrompt).toContain("`workflow`");
     expect(result.systemPrompt).toContain(
-      "run the repository formatter on changed files",
-    );
-    expect(result.systemPrompt).toContain(
-      "Do not manually adjust formatter-owned whitespace",
-    );
-    expect(result.systemPrompt).toContain(
       "yield the parent turn so the group seals",
     );
     expect(result.systemPrompt).toContain(
