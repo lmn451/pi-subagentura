@@ -101,6 +101,9 @@ export function muxCapabilities(name: MuxName): MultiplexerCapabilities {
   return MUX_CAPABILITIES[name];
 }
 
+/** Shared cache window for backend pane-liveness probes. */
+export const PANE_LIVENESS_CACHE_MS = 500;
+
 /** Bounds applied by backend-neutral pane capture. */
 export interface CapturePaneOptions {
   readonly maxBytes: number;

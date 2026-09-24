@@ -4,7 +4,9 @@ import {
   copyProviderConfig,
   createCompatibleSessionRuntime,
   findModel,
+  normalizeProviderContext,
   registerProvider,
+  type CompatibleProviderContext,
 } from "../src/pi-sdk-compat";
 
 describe("Pi SDK session compatibility", () => {
@@ -99,5 +101,57 @@ describe("Pi SDK session compatibility", () => {
   it("creates a default runtime when no auth data is supplied", async () => {
     const runtime = await createCompatibleSessionRuntime();
     expect(["legacy", "modern"]).toContain(runtime.kind);
+  });
+  it.each([
+    {
+      label: "legacy Context fields",
+      context: {
+        systemPrompt: "legacy prompt",
+        messages: [],
+        tools: [{ name: "legacy-tool" }],
+      } as CompatibleProviderContext,
+      prompt: "legacy prompt",
+      toolNames: ["legacy-tool"],
+    },
+    {
+      label: "transcript Context fields",
+      context: {
+        messages: [
+          {
+            role: "system",
+            content: "transcript prompt",
+            toolsAdded: [{ name: "transcript-tool" }],
+          },
+        ],
+      } as CompatibleProviderContext,
+      prompt: "transcript prompt",
+      toolNames: ["transcript-tool"],
+    },
+    {
+      label: "transcript without system message",
+      context: {
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "assistant-call",
+                name: "not-declared-tool",
+                arguments: {},
+              },
+            ],
+          },
+          { role: "toolResult", content: "tool output" },
+        ],
+      } as CompatibleProviderContext,
+      prompt: "",
+      toolNames: [],
+    },
+  ])("normalizes $label", ({ context, prompt, toolNames }) => {
+    const normalized = normalizeProviderContext(context);
+
+    expect(normalized.systemPrompt).toBe(prompt);
+    expect(normalized.tools.map((tool) => tool.name)).toEqual(toolNames);
   });
 });

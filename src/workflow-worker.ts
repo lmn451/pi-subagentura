@@ -13,6 +13,10 @@ import {
   type SubagentEvent,
   type TurnTerminalEvent,
 } from "./artifact";
+import {
+  asNumericIdentifier,
+  type WorkflowAttemptId,
+} from "./identifier-types";
 import { debugLog } from "./helpers";
 import type { SubagentResult } from "./helpers";
 import {
@@ -365,7 +369,8 @@ async function executeScript(
         engine.counters.agentsSpawned++;
         let status: "done" | "error" | "cancelled" = "done";
         let agentUsage: WorkflowUsage | undefined;
-        const agentId = ++engine.nextAgentAttemptId;
+        const agentId: WorkflowAttemptId =
+          asNumericIdentifier<"workflow-attempt">(++engine.nextAgentAttemptId);
         engine.counters.runningCount++;
         let finalModel = agentOpts.model;
         try {

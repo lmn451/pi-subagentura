@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  asStringIdentifier,
+  type ConfirmationToken,
+} from "../identifier-types";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import { Type } from "typebox";
@@ -305,7 +309,10 @@ function confirmOrRequestChange(params: {
       if (!oldest) break;
       entries.delete(oldest);
     }
-    const confirmationToken = `${CONFIRMATION_TOKEN_PREFIX}${randomUUID()}`;
+    const confirmationToken: ConfirmationToken =
+      asStringIdentifier<"confirmation-token">(
+        `${CONFIRMATION_TOKEN_PREFIX}${randomUUID()}`,
+      );
     entries.set(confirmationToken, {
       childId: params.childId,
       payload: params.payload,

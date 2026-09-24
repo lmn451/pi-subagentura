@@ -36,6 +36,7 @@ import {
   commandExists,
   execMuxOrThrow,
   MAX_CAPTURE_READ_BYTES,
+  PANE_LIVENESS_CACHE_MS,
   MUX_CAPABILITIES,
   safeSegment,
   sanitizeViewerTitle,
@@ -106,8 +107,6 @@ function parsePaneListing(output: string): ReadonlySet<string> {
   }
   return new Set(paneIds);
 }
-
-const PANE_LIVENESS_CACHE_MS = 500;
 
 export class TmuxMultiplexer implements Multiplexer {
   readonly name = "tmux" as const;

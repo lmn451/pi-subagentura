@@ -42,6 +42,7 @@ import {
   commandExists,
   execMuxOrThrow,
   MUX_CAPABILITIES,
+  PANE_LIVENESS_CACHE_MS,
   safeSegment,
   sanitizeViewerTitle,
   shellEscape,
@@ -239,8 +240,6 @@ class BoundedByteTail {
     ]);
   }
 }
-
-const PANE_LIVENESS_CACHE_MS = 500;
 
 interface ZellijPaneListingProbe {
   cachedAt?: number;

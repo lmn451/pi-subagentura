@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { debugLog } from "./helpers";
+import { asStringIdentifier, type WakeId } from "./identifier-types";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type CompletionMessage = Parameters<ExtensionAPI["sendMessage"]>[0];
@@ -312,7 +313,7 @@ export function sendCompletionTurn(
 
   let state = wakeStates.get(pi);
   if (!state) {
-    const wakeId = randomUUID();
+    const wakeId: WakeId = asStringIdentifier<"wake">(randomUUID());
     const request: WakeRequestEntry = {
       schemaVersion: 1,
       state: "requested",

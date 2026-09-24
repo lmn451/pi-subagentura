@@ -38,6 +38,7 @@ import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
+import { asStringIdentifier, type EventId } from "./identifier-types";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -392,8 +393,8 @@ export function appendEvent(art: SubagentArtifact, event: SubagentEvent): void {
   appendFileSync(art.statusFile, JSON.stringify(event) + "\n", { mode: 0o600 });
 }
 
-export function newEventId(): string {
-  return randomUUID();
+export function newEventId(): EventId {
+  return asStringIdentifier<"event">(randomUUID());
 }
 
 const COMPLETION_LOCK_TIMEOUT_MS = 2_000;

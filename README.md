@@ -22,6 +22,17 @@ describe the outcome you want. The parent can turn that request into a saved
 workflow, run its agents in the background, and keep their intermediate results
 out of the parent context.
 
+## Demo
+
+[![Watch the pi-subagentura workflow demo (8:06)](https://subagentura.tech/media/pi-subagentura/workflow-poster.webp)](https://subagentura.tech/pi-subagentura/#workflow-video)
+
+Watch a real session in WezTerm + tmux: delegate work to interactive subagents,
+switch between their panes, and follow their progress. The full 97:56 session
+plays in 8:06, with quiet stretches accelerated and English translations included.
+
+[Watch the demo](https://subagentura.tech/pi-subagentura/#workflow-video) ·
+[Read the English transcript](https://subagentura.tech/media/pi-subagentura/workflow.english-transcript.md)
+
 ## Installation
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.

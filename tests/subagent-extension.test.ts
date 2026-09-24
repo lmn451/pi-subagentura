@@ -173,6 +173,18 @@ describe("extension registration", () => {
       "# Orchestratorv2 Thin Router System Prompt",
     );
     expect(result.systemPrompt).toContain("`workflow`");
+    expect(result.systemPrompt).toContain(
+      "yield the parent turn so the group seals",
+    );
+    expect(result.systemPrompt).toContain(
+      "label findings as provisional and report pending jobIds",
+    );
+    expect(result.systemPrompt).toContain(
+      "disclose any failed or cancelled reviewers as coverage gaps",
+    );
+    expect(result.systemPrompt).toContain(
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 

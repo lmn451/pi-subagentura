@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  asStringIdentifier,
+  type TelemetryCorrelationId,
+} from "./identifier-types";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
 export const TELEMETRY_SCHEMA_VERSION = 4;
@@ -351,12 +355,14 @@ function readPackageVersion(): string {
   }
 }
 
-function validCorrelationId(value: string | undefined): string | undefined {
+function validCorrelationId(
+  value: string | undefined,
+): TelemetryCorrelationId | undefined {
   return value &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       value,
     )
-    ? value.toLowerCase()
+    ? asStringIdentifier<"telemetry-correlation">(value.toLowerCase())
     : undefined;
 }
 
@@ -368,7 +374,9 @@ export function createTelemetrySession(
   return {
     enabled,
     mode: mode === "manual" ? "straight" : mode,
-    correlationId: validCorrelationId(inheritedCorrelationId) ?? randomUUID(),
+    correlationId:
+      validCorrelationId(inheritedCorrelationId) ??
+      asStringIdentifier<"telemetry-correlation">(randomUUID()),
     capturedKeys: new Set(),
     active: true,
   };
