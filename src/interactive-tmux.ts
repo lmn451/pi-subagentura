@@ -65,6 +65,7 @@ import {
 import { acknowledgeDeliveryWithoutDispatch, deliveryIdFor } from "./delivery";
 import type { CompletionPolicy } from "./completion-coordinator";
 import {
+  type AgentPromptDeliveryResult,
   type CapturePaneOptions,
   type CapturePaneResult,
   getMux,
@@ -1382,6 +1383,52 @@ export function sendCommandToPane(
   const mux = getMuxForState(state);
   mux.sendKeys(state.paneId, command, state.muxSession);
   mux.sendEnter(state.paneId, state.muxSession);
+}
+
+export type InteractiveFollowupDelivery =
+  | AgentPromptDeliveryResult
+  | { readonly status: "send_failed"; readonly message: string };
+
+/** Route the existing follow-up payload through the persisted mux backend. */
+export async function sendInteractiveSubagentFollowup(
+  state: InteractiveSubagentState,
+  prompt: string,
+): Promise<InteractiveFollowupDelivery> {
+  if (state.mux === "herdr") {
+    const mux = getMuxForState(state);
+    if (!mux.sendAgentPrompt) {
+      return {
+        status: "unsupported",
+        reason: "api",
+        message:
+          "The Herdr backend does not expose agent.prompt; no raw-input fallback was attempted.",
+      };
+    }
+    try {
+      return await mux.sendAgentPrompt(paneRefForState(state), prompt);
+    } catch (error) {
+      return {
+        status: "transport_error",
+        delivery: "uncertain",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  if (state.mux !== "tmux" && state.mux !== "zellij") {
+    return {
+      status: "send_failed",
+      message: "Unknown multiplexer backend; no follow-up was sent.",
+    };
+  }
+  try {
+    sendCommandToPane(state, prompt);
+    return { status: "sent" };
+  } catch (error) {
+    return {
+      status: "send_failed",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 /** Rebuild attach/focus commands for a persisted or rehydrated state. */

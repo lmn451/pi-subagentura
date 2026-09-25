@@ -50,7 +50,7 @@ import {
   interactiveSubagentRegistry,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
-  sendCommandToPane,
+  sendInteractiveSubagentFollowup,
   tmuxSetupHint,
   type CurrentPaneActivity,
   type InteractiveSubagentState,
@@ -1068,10 +1068,8 @@ export function registerInteractiveSubagentTools(
   });
 
   // ── Tool: send a follow-up message to a live interactive sub-agent ──────
-  // The child REPL stays open after `done` (see buildChildSubagentProtocol in
-  // interactive-tmux.ts), so the parent can push a new prompt into the same
-  // session via tmux send-keys. Model context is preserved across messages —
-  // this is a true follow-up turn, not a fresh spawn.
+  // The child REPL stays open after `done`. Dispatch is backend-specific: Herdr
+  // uses its semantic agent API, while tmux/Zellij retain literal text + Enter.
   //
   // Caps: the message must be non-empty (an empty Enter in the REPL would submit a
   // blank prompt) and at most MAX_FOLLOWUP_BYTES UTF-8 bytes (symmetric with
@@ -1081,15 +1079,11 @@ export function registerInteractiveSubagentTools(
     name: "send_interactive_subagent_message",
     label: "Send Interactive Subagent Message",
     description: [
-      "Send a follow-up prompt to a live interactive sub-agent. The message is delivered into the",
-      "child's existing REPL via tmux send-keys, so the child's model context is preserved — this",
-      "is a true follow-up turn, not a fresh spawn. A workflow-owned child can accept a follow-up",
-      "only after its completed turn is idle and its workflow runner has consumed the result. It is",
-      "promoted to standalone only after that follow-up is sent successfully. An idle follow-up resets",
-      "future completion delivery to independent each; a source can satisfy a group only once, so later",
-      "turns from that source/group are also independent. The child will run the new turn and (per its",
-      "system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use",
-      "get_interactive_subagent_status to check the pane state first if you're not sure it's still alive.",
+      "Send a follow-up prompt to a live interactive sub-agent in its existing session, preserving context.",
+      "tmux/Zellij use literal text + Enter; Herdr uses agent.prompt and requires Herdr 0.9.0 or newer. Herdr never falls back to raw pane input.",
+      "A Herdr blocked response may indicate an approval or question UI; inspect it directly. A timeout or transport error after submission is uncertain, so do not resend automatically. Child artifacts remain the completion authority.",
+      "A workflow-owned child can accept a follow-up only after its completed result was consumed and the pane is idle. It is promoted to standalone only after successful delivery. An idle follow-up resets future completion delivery to independent each; later turns cannot satisfy the prior group again.",
+      "The child will run the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use get_interactive_subagent_status if unsure whether it is still alive.",
     ].join("\n"),
     parameters: Type.Object({
       id: Type.String({
@@ -1193,26 +1187,57 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      // sendCommandToPane uses send-keys + Enter; it throws synchronously if the
-      // pane is gone (e.g. the child exited between the status check and now).
-      // Wrap so the parent gets a structured error instead of an exception trace.
+      // A Herdr agent.prompt result is the only semantic prompt acknowledgement;
+      // tmux and Zellij retain their existing literal text + Enter path.
       const startsNewTurn = state.status === "idle";
-      try {
-        sendCommandToPane(state, params.message + FOLLOWUP_COMPLETION_REMINDER);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+      const delivery = await sendInteractiveSubagentFollowup(
+        state,
+        params.message + FOLLOWUP_COMPLETION_REMINDER,
+      );
+      if (delivery.status !== "sent") {
+        const uncertain =
+          delivery.status === "uncertain" ||
+          (delivery.status === "malformed_response" &&
+            delivery.delivery === "uncertain") ||
+          (delivery.status === "transport_error" &&
+            delivery.delivery === "uncertain");
+        const status =
+          delivery.status === "unsupported"
+            ? "unsupported_api"
+            : delivery.status === "blocked"
+              ? "blocked"
+              : uncertain
+                ? "send_uncertain"
+                : delivery.status === "malformed_response"
+                  ? "malformed_response"
+                  : delivery.status === "rejected"
+                    ? "send_rejected"
+                    : "send_failed";
+        const message =
+          delivery.status === "blocked"
+            ? `Herdr reports the agent is blocked, possibly waiting for approval or a question. Inspect and resolve it directly; no prompt was sent. ${delivery.message}`
+            : delivery.status === "unsupported"
+              ? `Herdr agent.prompt is unsupported by this API/version. Upgrade Herdr to at least 0.9.0; no raw-input fallback was attempted. ${delivery.message}`
+              : uncertain
+                ? `Herdr prompt delivery is uncertain. Do not resend automatically; inspect the child artifact/status before deciding. ${delivery.message}`
+                : delivery.status === "malformed_response"
+                  ? `Herdr returned a malformed response before submitting the prompt. ${delivery.message}`
+                  : delivery.status === "transport_error"
+                    ? `Could not contact Herdr before submitting the prompt. ${delivery.message}`
+                    : delivery.status === "rejected"
+                      ? `Herdr rejected the follow-up (${delivery.errorCode}): ${delivery.message}`
+                      : `Failed to send message to interactive sub-agent ${params.id}: ${delivery.message}`;
         return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to send message to interactive sub-agent ${params.id}: ${msg}`,
-            },
-          ],
+          content: [{ type: "text", text: message }],
           details: {
             id: params.id,
-            status: "send_failed",
             paneId: state.paneId,
-            error: msg,
+            status,
+            error: delivery.message,
+            ...("errorCode" in delivery
+              ? { errorCode: delivery.errorCode }
+              : {}),
+            ...(uncertain ? { delivery: "uncertain" } : {}),
           },
           isError: true,
         };
@@ -1233,7 +1258,8 @@ export function registerInteractiveSubagentTools(
       if (
         state.completionOwner === "workflow" &&
         state.workflowResultConsumed &&
-        state.status === "idle"
+        startsNewTurn &&
+        (state.status === "idle" || state.status === "running")
       ) {
         state.completionOwner = "standalone";
         state.workflowId = undefined;

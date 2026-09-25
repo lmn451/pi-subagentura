@@ -14,6 +14,39 @@ export type MuxName = "tmux" | "zellij" | "herdr";
 export type PaneLiveness = "alive" | "dead" | "unknown";
 /** Result of a pane-focus activity probe for the user's mux client. */
 export type PaneActivity = "active" | "inactive" | "unknown";
+/** Structured result of a semantic agent prompt request. */
+export type AgentPromptDeliveryResult =
+  | { readonly status: "sent" }
+  | {
+      readonly status: "unsupported";
+      readonly reason: "api" | "version";
+      readonly message: string;
+    }
+  | {
+      readonly status: "blocked";
+      readonly errorCode: string;
+      readonly message: string;
+    }
+  | {
+      readonly status: "rejected";
+      readonly errorCode: string;
+      readonly message: string;
+    }
+  | {
+      readonly status: "malformed_response";
+      readonly delivery: "not_sent" | "uncertain";
+      readonly message: string;
+    }
+  | {
+      readonly status: "transport_error";
+      readonly delivery: "not_sent" | "uncertain";
+      readonly message: string;
+    }
+  | {
+      readonly status: "uncertain";
+      readonly reason: "timeout" | "server_error";
+      readonly message: string;
+    };
 
 /** Backend-neutral structured reference to a durable mux pane. */
 export interface PaneRef {
@@ -209,6 +242,15 @@ export interface Multiplexer {
    * command, setup, timeout, and parse failures return `unknown`.
    */
   getPaneActivityAsync(paneId: string, session?: string): Promise<PaneActivity>;
+
+  /**
+   * Submit work to a recognized agent through the backend's semantic API,
+   * when available. A missing method means this backend has no agent API.
+   */
+  sendAgentPrompt?(
+    ref: PaneRef,
+    text: string,
+  ): Promise<AgentPromptDeliveryResult>;
 
   /**
    * Send literal text to the pane's shell input buffer, character-by-character.

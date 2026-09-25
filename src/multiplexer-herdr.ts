@@ -12,6 +12,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { asStringIdentifier, type HerdrRequestId } from "./identifier-types";
 import type {
+  AgentPromptDeliveryResult,
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
@@ -31,6 +32,10 @@ import {
 } from "./multiplexer-contracts";
 
 const HERDR_TIMEOUT_MS = 5000;
+// Verified against Herdr release tags: 0.9.0 waits for the queued prompt and
+// Enter submission before returning success. Earlier releases expose agent.prompt,
+// but do not provide the same positive-acceptance result needed by this tool.
+const HERDR_AGENT_PROMPT_MIN_VERSION = "0.9.0";
 const MAX_HERDR_SOCKET_PATH_LENGTH = 4096;
 const MAX_HERDR_RESPONSE_BYTES = MAX_CAPTURE_READ_BYTES * 6 + 64 * 1024;
 const MAX_HERDR_READ_LINES = 4096;
@@ -100,6 +105,13 @@ interface HerdrSocketResponse {
   readonly id: string;
   readonly result?: Record<string, unknown>;
   readonly error?: { readonly code: string; readonly message: string };
+}
+
+class HerdrSocketProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HerdrSocketProtocolError";
+  }
 }
 
 let nextHerdrRequestId = 0;
@@ -316,24 +328,49 @@ function paneLookupFromCommand(result: HerdrCommandResult): PaneLookupResult {
   }
 }
 
+function isUnsupportedAgentPromptError(error: {
+  readonly code: string;
+  readonly message: string;
+}): boolean {
+  return (
+    error.code === "invalid_request" &&
+    error.message.includes("agent.prompt") &&
+    /unknown variant/i.test(error.message)
+  );
+}
+
 function parseSocketResponse(
   output: string,
   expectedId: string,
 ): HerdrSocketResponse {
-  const parsed: unknown = JSON.parse(output);
-  if (
-    !isRecord(parsed) ||
-    typeof parsed.id !== "string" ||
-    parsed.id !== expectedId
-  ) {
-    throw new Error("Mismatched Herdr socket response id");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new HerdrSocketProtocolError("Malformed Herdr socket JSON response");
+  }
+  if (!isRecord(parsed) || typeof parsed.id !== "string") {
+    throw new HerdrSocketProtocolError("Malformed Herdr socket response");
+  }
+  const errorPayload = isRecord(parsed.error) ? parsed.error : undefined;
+  const unsupportedOldApiResponse =
+    parsed.id === "" &&
+    errorPayload !== undefined &&
+    typeof errorPayload.code === "string" &&
+    typeof errorPayload.message === "string" &&
+    isUnsupportedAgentPromptError({
+      code: errorPayload.code,
+      message: errorPayload.message,
+    });
+  if (parsed.id !== expectedId && !unsupportedOldApiResponse) {
+    throw new HerdrSocketProtocolError("Mismatched Herdr socket response id");
   }
   if (isRecord(parsed.error)) {
     if (
       typeof parsed.error.code !== "string" ||
       typeof parsed.error.message !== "string"
     ) {
-      throw new Error("Malformed herdr socket error");
+      throw new HerdrSocketProtocolError("Malformed herdr socket error");
     }
     return {
       id: parsed.id,
@@ -344,7 +381,7 @@ function parseSocketResponse(
     };
   }
   if (!isRecord(parsed.result)) {
-    throw new Error("Malformed herdr socket response");
+    throw new HerdrSocketProtocolError("Malformed herdr socket response");
   }
   return { id: parsed.id, result: parsed.result };
 }
@@ -408,6 +445,64 @@ function socketError(response: HerdrSocketResponse, operation: string): Error {
   return new Error(`Malformed Herdr ${operation} response`);
 }
 
+function isAgentPromptVersionSupported(version: string): boolean | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) return undefined;
+  const current = match.slice(1, 4).map(Number);
+  if (!current.every(Number.isSafeInteger)) return undefined;
+  const minimum = [0, 9, 0];
+  for (let index = 0; index < minimum.length; index++) {
+    if (current[index]! > minimum[index]!) return true;
+    if (current[index]! < minimum[index]!) return false;
+  }
+  return true;
+}
+
+function boundedPromptError(message: string): string {
+  return message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
+}
+
+const HERDR_AGENT_STATUSES = new Set([
+  "idle",
+  "working",
+  "blocked",
+  "done",
+  "unknown",
+]);
+
+function isAgentPromptInfo(value: unknown, paneId: string): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.terminal_id === "string" &&
+    value.terminal_id.length > 0 &&
+    typeof value.workspace_id === "string" &&
+    typeof value.tab_id === "string" &&
+    value.pane_id === paneId &&
+    typeof value.agent_status === "string" &&
+    HERDR_AGENT_STATUSES.has(value.agent_status) &&
+    typeof value.focused === "boolean" &&
+    Number.isSafeInteger(value.revision) &&
+    Number(value.revision) >= 0
+  );
+}
+
+function socketFailure(
+  error: unknown,
+  delivery: "not_sent" | "uncertain",
+): AgentPromptDeliveryResult {
+  const message =
+    error instanceof Error
+      ? boundedPromptError(error.message)
+      : "Herdr socket request failed";
+  if (error instanceof HerdrSocketProtocolError) {
+    return { status: "malformed_response", delivery, message };
+  }
+  if (delivery === "uncertain" && /timed out/i.test(message)) {
+    return { status: "uncertain", reason: "timeout", message };
+  }
+  return { status: "transport_error", delivery, message };
+}
+
 function requestHerdrSocket(
   session: string | undefined,
   method: string,
@@ -465,7 +560,9 @@ function requestHerdrSocket(
       receivedBytes += buffer.length;
       if (receivedBytes > MAX_HERDR_RESPONSE_BYTES) {
         finishError(
-          new Error(`Herdr ${method} response exceeded the byte limit`),
+          new HerdrSocketProtocolError(
+            `Herdr ${method} response exceeded the byte limit`,
+          ),
         );
         return;
       }
@@ -865,6 +962,120 @@ export class HerdrMultiplexer implements Multiplexer {
       "pane send-keys enter",
       session,
     );
+  }
+
+  async sendAgentPrompt(
+    ref: PaneRef,
+    text: string,
+  ): Promise<AgentPromptDeliveryResult> {
+    let target: string;
+    try {
+      target = requirePaneId(this.canonicalPaneId(ref.paneId, ref.session));
+    } catch (error) {
+      return {
+        status: "rejected",
+        errorCode: "invalid_pane_id",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    let ping: HerdrSocketResponse;
+    try {
+      ping = await requestHerdrSocket(ref.session, "ping", {});
+    } catch (error) {
+      return socketFailure(error, "not_sent");
+    }
+    const pingResult = ping.result;
+    if (ping.error || !pingResult || pingResult.type !== "pong") {
+      return {
+        status: "malformed_response",
+        delivery: "not_sent",
+        message: "Could not verify the Herdr server API version.",
+      };
+    }
+    if (
+      typeof pingResult.version !== "string" ||
+      !Number.isSafeInteger(pingResult.protocol)
+    ) {
+      return {
+        status: "malformed_response",
+        delivery: "not_sent",
+        message: "Herdr returned a malformed API version response.",
+      };
+    }
+    const supportsAgentPrompt = isAgentPromptVersionSupported(
+      pingResult.version,
+    );
+    if (supportsAgentPrompt === undefined) {
+      return {
+        status: "malformed_response",
+        delivery: "not_sent",
+        message:
+          "Herdr returned an invalid semantic version in its ping response.",
+      };
+    }
+    if (!supportsAgentPrompt) {
+      return {
+        status: "unsupported",
+        reason: "version",
+        message: `Herdr ${HERDR_AGENT_PROMPT_MIN_VERSION} or newer is required for safe agent.prompt follow-ups; no prompt was sent.`,
+      };
+    }
+
+    let response: HerdrSocketResponse;
+    try {
+      response = await requestHerdrSocket(ref.session, "agent.prompt", {
+        target,
+        text,
+      });
+    } catch (error) {
+      return socketFailure(error, "uncertain");
+    }
+    if (response.error) {
+      if (isUnsupportedAgentPromptError(response.error)) {
+        return {
+          status: "unsupported",
+          reason: "api",
+          message:
+            "The connected Herdr API does not support agent.prompt; no raw-input fallback was attempted.",
+        };
+      }
+      if (response.error.code === "agent_blocked") {
+        return {
+          status: "blocked",
+          errorCode: response.error.code,
+          message: boundedPromptError(response.error.message),
+        };
+      }
+      if (
+        response.error.code === "agent_not_found" ||
+        response.error.code === "agent_not_ready" ||
+        response.error.code === "empty_agent_prompt"
+      ) {
+        return {
+          status: "rejected",
+          errorCode: response.error.code,
+          message: boundedPromptError(response.error.message),
+        };
+      }
+      return {
+        status: "uncertain",
+        reason: response.error.code === "timeout" ? "timeout" : "server_error",
+        message: `${response.error.code}: ${boundedPromptError(response.error.message)}`,
+      };
+    }
+    if (
+      response.result?.type !== "agent_prompted" ||
+      !isAgentPromptInfo(response.result.agent, target)
+    ) {
+      return {
+        status: "malformed_response",
+        delivery: "uncertain",
+        message:
+          "Herdr returned a malformed agent.prompt success response; delivery is uncertain.",
+      };
+    }
+    return { status: "sent" };
   }
 
   private sendPaneDelivery(

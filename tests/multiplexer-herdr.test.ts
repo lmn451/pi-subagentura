@@ -19,7 +19,10 @@ interface SocketRequest {
 
 type SocketScenario = (request: SocketRequest) => Record<string, unknown>;
 
-type SocketBehavior = "respond" | "hang";
+type SocketBehavior =
+  | "respond"
+  | "hang"
+  | ((request: SocketRequest) => "respond" | "hang" | "error");
 function success(result: Record<string, unknown>): string {
   return JSON.stringify({ id: "test", result });
 }
@@ -176,6 +179,17 @@ function installMockExec(
         write: (requestText: string) => {
           call.args = [requestText];
           const request = JSON.parse(requestText) as SocketRequest;
+          const behavior =
+            typeof socketBehavior === "function"
+              ? socketBehavior(request)
+              : socketBehavior;
+          if (behavior === "hang") return true;
+          if (behavior === "error") {
+            queueMicrotask(() =>
+              listeners.get("error")?.(new Error("socket transport failure")),
+            );
+            return true;
+          }
           const response = socketScenario(request);
           const payload =
             response.id === undefined
@@ -190,7 +204,7 @@ function installMockExec(
         },
         destroy: () => socket,
       };
-      if (socketBehavior === "respond") {
+      if (socketBehavior !== "hang") {
         queueMicrotask(() => listeners.get("connect")?.());
       }
       return socket;
@@ -633,6 +647,292 @@ describe("multiplexer-herdr", () => {
       "literal\ntext",
     ]);
     expect(calls[1]!.args).toEqual(["pane", "send-keys", "w1:p2", "enter"]);
+  });
+
+  it("submits follow-ups through agent.prompt on the persisted socket and canonical pane", async () => {
+    const calls = installMockExec(
+      (call) => {
+        if (call.args[0] === "pane" && call.args[1] === "get") {
+          return success({
+            pane: { ...pane("w2:p7"), workspace_id: "w2", tab_id: "w2:t1" },
+          });
+        }
+        return "";
+      },
+      (request) =>
+        request.method === "ping"
+          ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+          : socketSuccess({
+              type: "agent_prompted",
+              agent: {
+                terminal_id: "terminal-w2:p7",
+                agent_status: "working",
+                workspace_id: "w2",
+                tab_id: "w2:t1",
+                pane_id: String(request.params.target),
+                focused: false,
+                revision: 1,
+              },
+            }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+    const mux = new HerdrMultiplexer();
+    expect(mux.getPaneLiveness("w1:p2", "/tmp/other.sock")).toBe("alive");
+
+    await expect(
+      mux.sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/other.sock" },
+        "continue the review",
+      ),
+    ).resolves.toEqual({ status: "sent" });
+
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(requests.map((request) => request.method)).toEqual([
+      "ping",
+      "agent.prompt",
+    ]);
+    expect(requests[1]!.params).toEqual({
+      target: "w2:p7",
+      text: "continue the review",
+    });
+    expect(calls.find((call) => call.file === "node:net")!.options.path).toBe(
+      "/tmp/other.sock",
+    );
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+  });
+
+  it("rejects Herdr versions below the audited prompt-acceptance minimum", async () => {
+    const calls = installMockExec(
+      () => "",
+      () => socketSuccess({ type: "pong", version: "0.8.2", protocol: 22 }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/old-herdr.sock" },
+        "continue",
+      ),
+    ).resolves.toMatchObject({ status: "unsupported", reason: "version" });
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(requests.map((request) => request.method)).toEqual(["ping"]);
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+  });
+
+  it("fails closed on a malformed Herdr version response before agent.prompt", async () => {
+    const calls = installMockExec(
+      () => "",
+      () =>
+        socketSuccess({ type: "pong", version: "not-a-version", protocol: 22 }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/malformed-version.sock" },
+        "follow-up",
+      ),
+    ).resolves.toMatchObject({
+      status: "malformed_response",
+      delivery: "not_sent",
+    });
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(requests.map((request) => request.method)).toEqual(["ping"]);
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+  });
+
+  it.each([
+    ["blocked", { code: "agent_blocked", message: "approval required" }],
+    ["unrecognized", { code: "agent_not_ready", message: "no active agent" }],
+  ] as const)(
+    "surfaces Herdr %s responses without raw-input fallback",
+    async (_label, error) => {
+      const calls = installMockExec(
+        () => "",
+        (request) =>
+          request.method === "ping"
+            ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+            : { error },
+      );
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      const result = await new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/herdr.sock" },
+        "follow-up",
+      );
+      expect(result.status).toBe(
+        error.code === "agent_blocked" ? "blocked" : "rejected",
+      );
+      const requests = calls
+        .filter((call) => call.file === "node:net")
+        .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+      expect(
+        requests.filter((request) => request.method === "agent.prompt"),
+      ).toHaveLength(1);
+      expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+      expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+    },
+  );
+
+  it("surfaces an unsupported agent.prompt API without retrying or raw input", async () => {
+    const calls = installMockExec(
+      () => "",
+      (request) =>
+        request.method === "ping"
+          ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+          : {
+              id: "",
+              error: {
+                code: "invalid_request",
+                message: "invalid request: unknown variant `agent.prompt`",
+              },
+            },
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/old-api.sock" },
+        "follow-up",
+      ),
+    ).resolves.toMatchObject({ status: "unsupported", reason: "api" });
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(
+      requests.filter((request) => request.method === "agent.prompt"),
+    ).toHaveLength(1);
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+  });
+
+  it("treats malformed agent.prompt agent info as uncertain", async () => {
+    const calls = installMockExec(
+      () => "",
+      (request) =>
+        request.method === "ping"
+          ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+          : socketSuccess({
+              type: "agent_prompted",
+              agent: { pane_id: "w1:p2" },
+            }),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/herdr.sock" },
+        "follow-up",
+      ),
+    ).resolves.toMatchObject({
+      status: "malformed_response",
+      delivery: "uncertain",
+    });
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(
+      requests.filter((request) => request.method === "agent.prompt"),
+    ).toHaveLength(1);
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+  });
+
+  it("does not retry after an agent.prompt timeout because delivery is uncertain", async () => {
+    vi.useFakeTimers();
+    try {
+      const promptWritten = Promise.withResolvers<void>();
+      const calls = installMockExec(
+        () => "",
+        (request) =>
+          request.method === "ping"
+            ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+            : socketSuccess({ type: "agent_prompted", agent: {} }),
+        "respond",
+        (line, emit) => {
+          if (line.includes("pi-subagentura:agent.prompt")) {
+            promptWritten.resolve();
+            return;
+          }
+          emit(Buffer.from(line + "\n"));
+        },
+      );
+      const { HerdrMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-herdr")
+      >("../src/multiplexer-herdr");
+      const pending = new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/herdr.sock" },
+        "follow-up",
+      );
+      await promptWritten.promise;
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(pending).resolves.toMatchObject({
+        status: "uncertain",
+        reason: "timeout",
+      });
+      const requests = calls
+        .filter((call) => call.file === "node:net")
+        .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+      expect(
+        requests.filter((request) => request.method === "agent.prompt"),
+      ).toHaveLength(1);
+      expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+      expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports prompt transport failure without attempting pane input", async () => {
+    const calls = installMockExec(
+      () => "",
+      (request) =>
+        request.method === "ping"
+          ? socketSuccess({ type: "pong", version: "0.9.0", protocol: 22 })
+          : socketSuccess({ type: "agent_prompted", agent: {} }),
+      (request) => (request.method === "ping" ? "respond" : "error"),
+    );
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().sendAgentPrompt(
+        { paneId: "w1:p2", session: "/tmp/herdr.sock" },
+        "follow-up",
+      ),
+    ).resolves.toMatchObject({
+      status: "transport_error",
+      delivery: "uncertain",
+    });
+    const requests = calls
+      .filter((call) => call.file === "node:net")
+      .map((call) => JSON.parse(call.args[0]!) as SocketRequest);
+    expect(
+      requests.filter((request) => request.method === "agent.prompt"),
+    ).toHaveLength(1);
+    expect(calls.some((call) => call.args[1] === "send-text")).toBe(false);
+    expect(calls.some((call) => call.args[1] === "send-keys")).toBe(false);
   });
 
   it("messages a moved pane through its canonical id", async () => {
