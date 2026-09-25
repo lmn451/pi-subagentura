@@ -51,6 +51,7 @@ import {
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendInteractiveSubagentFollowup,
+  type InteractiveFollowupDelivery,
   tmuxSetupHint,
   type CurrentPaneActivity,
   type InteractiveSubagentState,
@@ -102,6 +103,86 @@ const FOLLOWUP_COMPLETION_REMINDER =
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
+}
+
+type FollowupFailureSummary = {
+  readonly status:
+    | "unsupported_api"
+    | "blocked"
+    | "send_uncertain"
+    | "malformed_response"
+    | "send_rejected"
+    | "send_failed";
+  readonly message: string;
+};
+
+function uncertainFollowupFailure(message: string): FollowupFailureSummary {
+  return {
+    status: "send_uncertain",
+    message:
+      `Herdr prompt delivery is uncertain. Do not resend automatically; ` +
+      `check the child artifact/status before deciding. ${message}`,
+  };
+}
+
+function summarizeFollowupFailure(
+  delivery: Exclude<InteractiveFollowupDelivery, { status: "sent" }>,
+  id: string,
+): FollowupFailureSummary {
+  switch (delivery.status) {
+    case "unsupported":
+      return {
+        status: "unsupported_api",
+        message:
+          `Herdr agent.prompt is unsupported by this API/version. ` +
+          `Upgrade Herdr to at least 0.9.0; no raw-input fallback was ` +
+          `attempted. ${delivery.message}`,
+      };
+    case "blocked":
+      return {
+        status: "blocked",
+        message:
+          `Herdr reports the agent is blocked, possibly awaiting approval ` +
+          `or a question. Inspect and resolve it directly; no prompt was ` +
+          `sent. ${delivery.message}`,
+      };
+    case "uncertain":
+      return uncertainFollowupFailure(delivery.message);
+    case "malformed_response":
+      return delivery.delivery === "uncertain"
+        ? uncertainFollowupFailure(delivery.message)
+        : {
+            status: "malformed_response",
+            message:
+              `Herdr returned a malformed response before submission. ` +
+              delivery.message,
+          };
+    case "transport_error":
+      return delivery.delivery === "uncertain"
+        ? uncertainFollowupFailure(delivery.message)
+        : {
+            status: "send_failed",
+            message:
+              `Could not contact Herdr before submitting the prompt. ` +
+              delivery.message,
+          };
+    case "rejected":
+      return {
+        status: "send_rejected",
+        message:
+          `Herdr rejected the follow-up (${delivery.errorCode}): ` +
+          delivery.message,
+      };
+    case "send_failed":
+      return {
+        status: "send_failed",
+        message: `Failed to send message to interactive sub-agent ${id}: ${delivery.message}`,
+      };
+  }
+  const exhaustive: never = delivery;
+  throw new Error(
+    `Unexpected follow-up delivery result: ${String(exhaustive)}`,
+  );
 }
 
 function formatArtifactProviderOutput(output: string | null): string {
@@ -1195,49 +1276,20 @@ export function registerInteractiveSubagentTools(
         params.message + FOLLOWUP_COMPLETION_REMINDER,
       );
       if (delivery.status !== "sent") {
-        const uncertain =
-          delivery.status === "uncertain" ||
-          (delivery.status === "malformed_response" &&
-            delivery.delivery === "uncertain") ||
-          (delivery.status === "transport_error" &&
-            delivery.delivery === "uncertain");
-        const status =
-          delivery.status === "unsupported"
-            ? "unsupported_api"
-            : delivery.status === "blocked"
-              ? "blocked"
-              : uncertain
-                ? "send_uncertain"
-                : delivery.status === "malformed_response"
-                  ? "malformed_response"
-                  : delivery.status === "rejected"
-                    ? "send_rejected"
-                    : "send_failed";
-        const message =
-          delivery.status === "blocked"
-            ? `Herdr reports the agent is blocked, possibly waiting for approval or a question. Inspect and resolve it directly; no prompt was sent. ${delivery.message}`
-            : delivery.status === "unsupported"
-              ? `Herdr agent.prompt is unsupported by this API/version. Upgrade Herdr to at least 0.9.0; no raw-input fallback was attempted. ${delivery.message}`
-              : uncertain
-                ? `Herdr prompt delivery is uncertain. Do not resend automatically; inspect the child artifact/status before deciding. ${delivery.message}`
-                : delivery.status === "malformed_response"
-                  ? `Herdr returned a malformed response before submitting the prompt. ${delivery.message}`
-                  : delivery.status === "transport_error"
-                    ? `Could not contact Herdr before submitting the prompt. ${delivery.message}`
-                    : delivery.status === "rejected"
-                      ? `Herdr rejected the follow-up (${delivery.errorCode}): ${delivery.message}`
-                      : `Failed to send message to interactive sub-agent ${params.id}: ${delivery.message}`;
+        const failure = summarizeFollowupFailure(delivery, params.id);
         return {
-          content: [{ type: "text", text: message }],
+          content: [{ type: "text", text: failure.message }],
           details: {
             id: params.id,
             paneId: state.paneId,
-            status,
+            status: failure.status,
             error: delivery.message,
             ...("errorCode" in delivery
               ? { errorCode: delivery.errorCode }
               : {}),
-            ...(uncertain ? { delivery: "uncertain" } : {}),
+            ...(failure.status === "send_uncertain"
+              ? { delivery: "uncertain" }
+              : {}),
           },
           isError: true,
         };
