@@ -51,7 +51,6 @@ import {
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendInteractiveSubagentFollowup,
-  type InteractiveFollowupDelivery,
   tmuxSetupHint,
   type CurrentPaneActivity,
   type InteractiveSubagentState,
@@ -103,86 +102,6 @@ const FOLLOWUP_COMPLETION_REMINDER =
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
-}
-
-type FollowupFailureSummary = {
-  readonly status:
-    | "unsupported_api"
-    | "blocked"
-    | "send_uncertain"
-    | "malformed_response"
-    | "send_rejected"
-    | "send_failed";
-  readonly message: string;
-};
-
-function uncertainFollowupFailure(message: string): FollowupFailureSummary {
-  return {
-    status: "send_uncertain",
-    message:
-      `Herdr prompt delivery is uncertain. Do not resend automatically; ` +
-      `check the child artifact/status before deciding. ${message}`,
-  };
-}
-
-function summarizeFollowupFailure(
-  delivery: Exclude<InteractiveFollowupDelivery, { status: "sent" }>,
-  id: string,
-): FollowupFailureSummary {
-  switch (delivery.status) {
-    case "unsupported":
-      return {
-        status: "unsupported_api",
-        message:
-          `Herdr agent.prompt is unsupported by this API/version. ` +
-          `Upgrade Herdr to at least 0.9.0; no raw-input fallback was ` +
-          `attempted. ${delivery.message}`,
-      };
-    case "blocked":
-      return {
-        status: "blocked",
-        message:
-          `Herdr reports the agent is blocked, possibly awaiting approval ` +
-          `or a question. Inspect and resolve it directly; no prompt was ` +
-          `sent. ${delivery.message}`,
-      };
-    case "uncertain":
-      return uncertainFollowupFailure(delivery.message);
-    case "malformed_response":
-      return delivery.delivery === "uncertain"
-        ? uncertainFollowupFailure(delivery.message)
-        : {
-            status: "malformed_response",
-            message:
-              `Herdr returned a malformed response before submission. ` +
-              delivery.message,
-          };
-    case "transport_error":
-      return delivery.delivery === "uncertain"
-        ? uncertainFollowupFailure(delivery.message)
-        : {
-            status: "send_failed",
-            message:
-              `Could not contact Herdr before submitting the prompt. ` +
-              delivery.message,
-          };
-    case "rejected":
-      return {
-        status: "send_rejected",
-        message:
-          `Herdr rejected the follow-up (${delivery.errorCode}): ` +
-          delivery.message,
-      };
-    case "send_failed":
-      return {
-        status: "send_failed",
-        message: `Failed to send message to interactive sub-agent ${id}: ${delivery.message}`,
-      };
-  }
-  const exhaustive: never = delivery;
-  throw new Error(
-    `Unexpected follow-up delivery result: ${String(exhaustive)}`,
-  );
 }
 
 function formatArtifactProviderOutput(output: string | null): string {
@@ -1148,9 +1067,8 @@ export function registerInteractiveSubagentTools(
     },
   });
 
-  // ── Tool: send a follow-up message to a live interactive sub-agent ──────
-  // The child REPL stays open after `done`. Dispatch is backend-specific: Herdr
-  // uses its semantic agent API, while tmux/Zellij retain literal text + Enter.
+  // The child REPL stays open after `done`; the persisted mux adapter chooses
+  // how to deliver into that session while preserving the child's context.
   //
   // Caps: the message must be non-empty (an empty Enter in the REPL would submit a
   // blank prompt) and at most MAX_FOLLOWUP_BYTES UTF-8 bytes (symmetric with
@@ -1161,8 +1079,7 @@ export function registerInteractiveSubagentTools(
     label: "Send Interactive Subagent Message",
     description: [
       "Send a follow-up prompt to a live interactive sub-agent in its existing session, preserving context.",
-      "tmux/Zellij use literal text + Enter; Herdr uses agent.prompt and requires Herdr 0.9.0 or newer. Herdr never falls back to raw pane input.",
-      "A Herdr blocked response may indicate an approval or question UI; inspect it directly. A timeout or transport error after submission is uncertain, so do not resend automatically. Child artifacts remain the completion authority.",
+      "The persisted mux adapter selects the input mechanism. Blocked and uncertain deliveries are surfaced; uncertain prompts are never resent automatically. Artifacts remain the completion authority.",
       "A workflow-owned child can accept a follow-up only after its completed result was consumed and the pane is idle. It is promoted to standalone only after successful delivery. An idle follow-up resets future completion delivery to independent each; later turns cannot satisfy the prior group again.",
       "The child will run the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use get_interactive_subagent_status if unsure whether it is still alive.",
     ].join("\n"),
@@ -1268,28 +1185,22 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      // A Herdr agent.prompt result is the only semantic prompt acknowledgement;
-      // tmux and Zellij retain their existing literal text + Enter path.
+      // The mux adapter selects the delivery mechanism and returns a structured result.
       const startsNewTurn = state.status === "idle";
       const delivery = await sendInteractiveSubagentFollowup(
         state,
         params.message + FOLLOWUP_COMPLETION_REMINDER,
       );
-      if (delivery.status !== "sent") {
-        const failure = summarizeFollowupFailure(delivery, params.id);
+      if (delivery.status === "failed") {
         return {
-          content: [{ type: "text", text: failure.message }],
+          content: [{ type: "text", text: delivery.message }],
           details: {
             id: params.id,
             paneId: state.paneId,
-            status: failure.status,
-            error: delivery.message,
-            ...("errorCode" in delivery
-              ? { errorCode: delivery.errorCode }
-              : {}),
-            ...(failure.status === "send_uncertain"
-              ? { delivery: "uncertain" }
-              : {}),
+            status: delivery.failureStatus,
+            error: delivery.error,
+            ...(delivery.errorCode ? { errorCode: delivery.errorCode } : {}),
+            ...(delivery.delivery ? { delivery: delivery.delivery } : {}),
           },
           isError: true,
         };
