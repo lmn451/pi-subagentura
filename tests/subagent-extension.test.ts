@@ -266,6 +266,22 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain(
       "prompt-only routing policy over free-text responsibility descriptions",
     );
+    expect(result.systemPrompt).toContain(
+      "Retrieve every completed scout/planner report from this request before",
+    );
+    expect(result.systemPrompt).toContain(
+      "compare the handoff against every retrieved report",
+    );
+    expect(result.systemPrompt).toContain("acceptance");
+    expect(result.systemPrompt).toContain("expected tests/commands");
+    expect(result.systemPrompt).toContain("using `includeContext: false`");
+    expect(result.systemPrompt).toContain(
+      "Never rely on implicit sibling transcript visibility",
+    );
+    expect(result.systemPrompt).toContain(
+      "not to repeat broad scouting or planning",
+    );
+    expect(result.systemPrompt).toContain("inspect the named target");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 

@@ -66,6 +66,41 @@ file can forge parent entries; the design does not claim to defend against that
 threat. Routing metadata never becomes a lifecycle registry or semantic
 resolver.
 
+## Implementation handoff completeness gate
+
+When implementation follows completed scout/planner work, do not spawn an
+implementer until this gate passes:
+
+1. Retrieve every completed scout/planner report from this request before
+   deciding which findings are relevant. Use the exact child ID and `turnId`
+   with `read_subagent_artifact`. Read the artifact output, not the transcript.
+   A manifest, completion summary, task preview, remembered context, or presumed
+   sibling-session visibility is only a pointer, not a substitute for the report.
+   If an expected report is unavailable or ambiguous, do not guess or spawn;
+   obtain the exact result or surface the coverage gap.
+2. Draft one self-contained handoff for the implementer's initial spawn. Put the
+   approved implementation scope in `task` and the consolidated findings in an
+   explicit `context` string using `includeContext: false`. Include all relevant,
+   verified findings; a repo-specific implementation map (exact files, symbols,
+   tests, and conventions); settled decisions, constraints, and non-goals; open
+   questions and version uncertainties clearly labeled as unresolved; acceptance
+   criteria and expected tests/commands; and source references (report child ID
+   plus `turnId`, and file paths/line ranges where available).
+3. Before spawning, compare the handoff against every retrieved report, one by
+   one. Carry forward every relevant finding, constraint, risk, open question,
+   and test expectation, or explicitly mark it out of scope with a reason. Do
+   not omit information merely because it seems duplicative in the combined
+   summary.
+4. Tell the implementer not to repeat broad scouting or planning, and not to ask
+   the user to restate settled information. They may inspect the named target
+   files and relevant tests to implement and validate the approved change; do
+   broader investigation only to resolve a concrete contradiction or blocker.
+   If that requires a new scope or decision, pause and report the exact blocker.
+
+Never rely on implicit sibling transcript visibility: pass the complete handoff
+explicitly in the initial task/context. This gate is parent-side coordination,
+not permission for Orchestratorv2 to inspect or implement repository changes.
+
 ## Context contract
 
 Use the `subagent_interactive` `includeContext`/`context` schema contract exactly:
