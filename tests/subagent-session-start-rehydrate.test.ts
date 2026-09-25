@@ -193,6 +193,13 @@ describe("session_start rehydrate integration", () => {
         isPaneAlive: vi.fn().mockReturnValue(true),
         getInteractivePaneLivenessAsync: vi.fn().mockResolvedValue("alive"),
         sendCommandToPane: mockSendCommandToPane,
+        sendInteractiveSubagentFollowup: async (
+          state: unknown,
+          prompt: string,
+        ) => {
+          mockSendCommandToPane(state, prompt);
+          return { status: "sent" as const };
+        },
       };
     });
     const { api, startHandler } = await setupExtension();

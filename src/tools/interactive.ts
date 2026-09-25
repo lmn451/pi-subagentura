@@ -50,7 +50,7 @@ import {
   interactiveSubagentRegistry,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
-  sendCommandToPane,
+  sendInteractiveSubagentFollowup,
   tmuxSetupHint,
   type CurrentPaneActivity,
   type InteractiveSubagentState,
@@ -1067,11 +1067,8 @@ export function registerInteractiveSubagentTools(
     },
   });
 
-  // ── Tool: send a follow-up message to a live interactive sub-agent ──────
-  // The child REPL stays open after `done` (see buildChildSubagentProtocol in
-  // interactive-tmux.ts), so the parent can push a new prompt into the same
-  // session via tmux send-keys. Model context is preserved across messages —
-  // this is a true follow-up turn, not a fresh spawn.
+  // The child REPL stays open after `done`; the persisted mux adapter chooses
+  // how to deliver into that session while preserving the child's context.
   //
   // Caps: the message must be non-empty (an empty Enter in the REPL would submit a
   // blank prompt) and at most MAX_FOLLOWUP_BYTES UTF-8 bytes (symmetric with
@@ -1081,15 +1078,10 @@ export function registerInteractiveSubagentTools(
     name: "send_interactive_subagent_message",
     label: "Send Interactive Subagent Message",
     description: [
-      "Send a follow-up prompt to a live interactive sub-agent. The message is delivered into the",
-      "child's existing REPL via tmux send-keys, so the child's model context is preserved — this",
-      "is a true follow-up turn, not a fresh spawn. A workflow-owned child can accept a follow-up",
-      "only after its completed turn is idle and its workflow runner has consumed the result. It is",
-      "promoted to standalone only after that follow-up is sent successfully. An idle follow-up resets",
-      "future completion delivery to independent each; a source can satisfy a group only once, so later",
-      "turns from that source/group are also independent. The child will run the new turn and (per its",
-      "system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use",
-      "get_interactive_subagent_status to check the pane state first if you're not sure it's still alive.",
+      "Send a follow-up prompt to a live interactive sub-agent in its existing session, preserving context.",
+      "The persisted mux adapter uses semantic prompt submission when supported and falls back to normal input only when it confirms no submission. Uncertain delivery is never retried; artifacts remain the completion authority.",
+      "A workflow-owned child can accept a follow-up only after its completed result was consumed and the pane is idle. It is promoted to standalone only after successful delivery. An idle follow-up resets future completion delivery to independent each; later turns cannot satisfy the prior group again.",
+      "The child will run the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use get_interactive_subagent_status if unsure whether it is still alive.",
     ].join("\n"),
     parameters: Type.Object({
       id: Type.String({
@@ -1193,26 +1185,22 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      // sendCommandToPane uses send-keys + Enter; it throws synchronously if the
-      // pane is gone (e.g. the child exited between the status check and now).
-      // Wrap so the parent gets a structured error instead of an exception trace.
+      // The mux adapter selects the delivery mechanism and returns a structured result.
       const startsNewTurn = state.status === "idle";
-      try {
-        sendCommandToPane(state, params.message + FOLLOWUP_COMPLETION_REMINDER);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+      const delivery = await sendInteractiveSubagentFollowup(
+        state,
+        params.message + FOLLOWUP_COMPLETION_REMINDER,
+      );
+      if (delivery.status === "failed") {
         return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to send message to interactive sub-agent ${params.id}: ${msg}`,
-            },
-          ],
+          content: [{ type: "text", text: delivery.message }],
           details: {
             id: params.id,
-            status: "send_failed",
             paneId: state.paneId,
-            error: msg,
+            status: delivery.failureStatus,
+            error: delivery.error,
+            ...(delivery.errorCode ? { errorCode: delivery.errorCode } : {}),
+            ...(delivery.delivery ? { delivery: delivery.delivery } : {}),
           },
           isError: true,
         };
@@ -1233,7 +1221,8 @@ export function registerInteractiveSubagentTools(
       if (
         state.completionOwner === "workflow" &&
         state.workflowResultConsumed &&
-        state.status === "idle"
+        startsNewTurn &&
+        (state.status === "idle" || state.status === "running")
       ) {
         state.completionOwner = "standalone";
         state.workflowId = undefined;
