@@ -1079,7 +1079,7 @@ export function registerInteractiveSubagentTools(
     label: "Send Interactive Subagent Message",
     description: [
       "Send a follow-up prompt to a live interactive sub-agent in its existing session, preserving context.",
-      "The persisted mux adapter selects the input mechanism. Blocked and uncertain deliveries are surfaced; uncertain prompts are never resent automatically. Artifacts remain the completion authority.",
+      "The persisted mux adapter uses semantic prompt submission when supported and falls back to normal input only when it confirms no submission. Uncertain delivery is never retried; artifacts remain the completion authority.",
       "A workflow-owned child can accept a follow-up only after its completed result was consumed and the pane is idle. It is promoted to standalone only after successful delivery. An idle follow-up resets future completion delivery to independent each; later turns cannot satisfy the prior group again.",
       "The child will run the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use get_interactive_subagent_status if unsure whether it is still alive.",
     ].join("\n"),

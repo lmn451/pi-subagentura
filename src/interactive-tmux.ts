@@ -1487,6 +1487,42 @@ function summarizeAgentPromptFailure(
   throw new Error(`Unexpected semantic prompt result: ${String(exhaustive)}`);
 }
 
+function shouldFallbackToHerdrPaneInput(
+  result: Exclude<AgentPromptDeliveryResult, { status: "sent" }>,
+): boolean {
+  switch (result.status) {
+    case "unsupported":
+    case "blocked":
+      return true;
+    case "rejected":
+      return result.errorCode !== "invalid_pane_id";
+    case "malformed_response":
+    case "transport_error":
+      return result.delivery === "not_sent";
+    case "uncertain":
+      return false;
+  }
+  const exhaustive: never = result;
+  throw new Error(`Unexpected semantic prompt result: ${String(exhaustive)}`);
+}
+
+function sendHerdrPaneInputFallback(
+  state: InteractiveSubagentState,
+  prompt: string,
+  reason: string,
+): InteractiveFollowupDelivery {
+  try {
+    sendCommandToPane(state, prompt);
+    return { status: "sent" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return uncertainPromptFailure(
+      `Semantic prompt was not submitted (${reason}); raw-input fallback ` +
+        `failed, so delivery is uncertain. ${message}`,
+    );
+  }
+}
+
 /** Route the existing follow-up payload through the persisted mux backend. */
 export async function sendInteractiveSubagentFollowup(
   state: InteractiveSubagentState,
@@ -1495,21 +1531,24 @@ export async function sendInteractiveSubagentFollowup(
   if (state.mux === "herdr") {
     const mux = getMuxForState(state);
     if (!mux.sendAgentPrompt) {
-      return followupFailure({
-        failureStatus: "unsupported_api",
-        message: "This Herdr backend does not expose the semantic prompt API.",
-        error: "agent.prompt is unavailable",
-      });
+      return sendHerdrPaneInputFallback(
+        state,
+        prompt,
+        "semantic prompt API unavailable",
+      );
     }
+    let result: AgentPromptDeliveryResult;
     try {
-      const result = await mux.sendAgentPrompt(paneRefForState(state), prompt);
-      return result.status === "sent"
-        ? result
-        : summarizeAgentPromptFailure(result);
+      result = await mux.sendAgentPrompt(paneRefForState(state), prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return uncertainPromptFailure(message);
     }
+    if (result.status === "sent") return result;
+    if (shouldFallbackToHerdrPaneInput(result)) {
+      return sendHerdrPaneInputFallback(state, prompt, result.message);
+    }
+    return summarizeAgentPromptFailure(result);
   }
   if (state.mux !== "tmux" && state.mux !== "zellij") {
     const message = "Unknown multiplexer backend; no follow-up was sent.";

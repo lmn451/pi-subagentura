@@ -51,7 +51,12 @@ vi.mock("../src/multiplexer", async (importOriginal) => {
     ...actual,
     getMux: vi.fn((options?: { preference?: string }) => {
       if (options?.preference === "herdr") {
-        return { sendAgentPrompt: mockAgentPrompt };
+        return {
+          sendAgentPrompt: mockAgentPrompt,
+          sendKeys: (paneId: string, text: string) =>
+            mockSendCommandToPane(mockStates.get(paneId), text),
+          sendEnter: (paneId: string) => mockSendEnterToPane(paneId),
+        };
       }
       return {
         sendKeys: (paneId: string, text: string) =>
@@ -398,21 +403,10 @@ describe("send_interactive_subagent_message", () => {
         errorCode: "agent_blocked",
         message: "approval required",
       },
-      "blocked",
     ],
     [
       "unsupported API",
       { status: "unsupported", reason: "version", message: "upgrade Herdr" },
-      "unsupported_api",
-    ],
-    [
-      "malformed prompt response",
-      {
-        status: "malformed_response",
-        delivery: "uncertain",
-        message: "bad response",
-      },
-      "send_uncertain",
     ],
     [
       "malformed preflight response",
@@ -421,7 +415,70 @@ describe("send_interactive_subagent_message", () => {
         delivery: "not_sent",
         message: "bad ping",
       },
-      "malformed_response",
+    ],
+    [
+      "transport failure before prompt request",
+      {
+        status: "transport_error",
+        delivery: "not_sent",
+        message: "ping failed",
+      },
+    ],
+    [
+      "unrecognized active agent",
+      {
+        status: "rejected",
+        errorCode: "agent_not_ready",
+        message: "no active agent",
+      },
+    ],
+  ] as const)(
+    "uses the mux input fallback after Herdr confirms no prompt was submitted (%s)",
+    async (_label, promptResult) => {
+      const state = registerState(api.sessionScope, {
+        mux: "herdr",
+        status: "idle",
+        completionOwner: "workflow",
+        workflowId: "workflow-released-after-fallback",
+        workflowResultConsumed: true,
+        completionPolicy: "group",
+        completionGroupId: "group-released-after-fallback",
+      });
+      mockAgentPrompt.mockResolvedValue(promptResult);
+
+      const toolDef = getToolDef(api, "send_interactive_subagent_message");
+      const result = await toolDef.execute("call-herdr-fallback", {
+        id: state.id,
+        message: "continue safely",
+      });
+
+      expect(mockAgentPrompt).toHaveBeenCalledOnce();
+      expect(mockSendCommandToPane).toHaveBeenCalledOnce();
+      expect(mockSendCommandToPane).toHaveBeenCalledWith(
+        state,
+        expect.stringMatching(
+          /^continue safely \[MANDATORY COMPLETION PROTOCOL/,
+        ),
+      );
+      expect(mockSendEnterToPane).toHaveBeenCalledWith(state.paneId);
+      expect(result.isError).toBeFalsy();
+      expect(result.details.status).toBe("sent");
+      expect(state.status).toBe("idle");
+      expect(state.completionOwner).toBe("standalone");
+      expect(state.workflowId).toBeUndefined();
+      expect(state.completionPolicy).toBe("each");
+      expect(state.completionGroupId).toBeUndefined();
+    },
+  );
+
+  it.each([
+    [
+      "malformed prompt response",
+      {
+        status: "malformed_response",
+        delivery: "uncertain",
+        message: "bad response",
+      },
     ],
     [
       "transport failure after request",
@@ -430,42 +487,22 @@ describe("send_interactive_subagent_message", () => {
         delivery: "uncertain",
         message: "socket closed",
       },
-      "send_uncertain",
-    ],
-    [
-      "transport failure before request",
-      {
-        status: "transport_error",
-        delivery: "not_sent",
-        message: "ping failed",
-      },
-      "send_failed",
     ],
     [
       "uncertain timeout",
       { status: "uncertain", reason: "timeout", message: "request timed out" },
-      "send_uncertain",
-    ],
-    [
-      "explicit server rejection",
-      {
-        status: "rejected",
-        errorCode: "agent_not_ready",
-        message: "no active agent",
-      },
-      "send_rejected",
     ],
   ] as const)(
-    "surfaces Herdr %s without changing status, workflow ownership, policy, or telemetry",
-    async (_label, delivery, expectedStatus) => {
+    "does not raw-fallback or change lifecycle state after %s",
+    async (_label, promptResult) => {
       const state = registerState(api.sessionScope, {
         mux: "herdr",
         status: "idle",
         completionOwner: "workflow",
-        workflowId: "workflow-kept-on-failure",
+        workflowId: "workflow-kept-on-uncertainty",
         workflowResultConsumed: true,
         completionPolicy: "group",
-        completionGroupId: "group-kept-on-failure",
+        completionGroupId: "group-kept-on-uncertainty",
         notifyOnComplete: "inject",
         triggerTurnOnComplete: true,
       });
@@ -473,7 +510,6 @@ describe("send_interactive_subagent_message", () => {
         status: state.status,
         completionOwner: state.completionOwner,
         workflowId: state.workflowId,
-        workflowResultConsumed: state.workflowResultConsumed,
         completionPolicy: state.completionPolicy,
         completionGroupId: state.completionGroupId,
         notifyOnComplete: state.notifyOnComplete,
@@ -491,22 +527,60 @@ describe("send_interactive_subagent_message", () => {
         "fetch",
         vi.fn().mockResolvedValue({ body: { cancel: vi.fn() } }),
       );
-      mockAgentPrompt.mockResolvedValue(delivery);
+      mockAgentPrompt.mockResolvedValue(promptResult);
 
       const toolDef = getToolDef(api, "send_interactive_subagent_message");
-      const result = await toolDef.execute("call-herdr-failure", {
+      const result = await toolDef.execute("call-herdr-uncertain", {
         id: state.id,
         message: "continue safely",
       });
 
       expect(mockAgentPrompt).toHaveBeenCalledOnce();
       expect(mockSendCommandToPane).not.toHaveBeenCalled();
+      expect(mockSendEnterToPane).not.toHaveBeenCalled();
       expect(result.isError).toBe(true);
-      expect(result.details.status).toBe(expectedStatus);
+      expect(result.details.status).toBe("send_uncertain");
+      expect(result.details.delivery).toBe("uncertain");
       expect(state).toMatchObject(before);
       expect([...capturedKeys]).toEqual([]);
     },
   );
+
+  it("reports uncertainty if raw input fallback fails", async () => {
+    const state = registerState(api.sessionScope, {
+      mux: "herdr",
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "workflow-kept-on-fallback-error",
+      workflowResultConsumed: true,
+      completionPolicy: "group",
+      completionGroupId: "group-kept-on-fallback-error",
+    });
+    mockAgentPrompt.mockResolvedValue({
+      status: "blocked",
+      errorCode: "agent_blocked",
+      message: "approval required",
+    });
+    mockSendCommandToPane.mockImplementation(() => {
+      throw new Error("raw input failed");
+    });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-herdr-fallback-error", {
+      id: state.id,
+      message: "continue safely",
+    });
+
+    expect(mockAgentPrompt).toHaveBeenCalledOnce();
+    expect(mockSendCommandToPane).toHaveBeenCalledOnce();
+    expect(mockSendEnterToPane).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("send_uncertain");
+    expect(result.details.delivery).toBe("uncertain");
+    expect(state.completionOwner).toBe("workflow");
+    expect(state.completionPolicy).toBe("group");
+    expect(state.completionGroupId).toBe("group-kept-on-fallback-error");
+  });
 
   it("promotes an idle workflow-owned sub-agent after sending a follow-up", async () => {
     const state = registerState(api.sessionScope, {
