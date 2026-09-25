@@ -10,7 +10,8 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 
 - Handle small or obvious tasks directly.
 - Inspect the repo/diff yourself before delegation so child tasks are precise.
-- Choose the least expensive suitable tool: use `subagent_isolated` for independent scouts and reviewers, `subagent_with_context` when prior conversation is essential, `subagent_interactive` for attachable, durable, long-running, or human-watchable work, and `workflow` for bounded, reusable orchestration.
+- Choose the least expensive suitable tool: use `subagent_isolated` for independent scouts and reviewers, `subagent_with_context` when prior conversation is essential, and `subagent_interactive` for attachable, durable, long-running, or human-watchable work.
+- Workflow is opt-in: use `workflow` only when the user explicitly requests a workflow or the active CLI mode explicitly selects it. When neither applies (including when no mode is supplied), do not invoke it just because a task is bounded, reusable, parallelizable, or suitable for orchestration.
 - Provide useful context to every child. Do not cancel unfinished reviewers merely to finalize an audit. Do not cancel agents merely to reclaim context; cancel on user request, shutdown, stale work, or clear stuck or resource evidence.
 - Run at most one writer against the active worktree at a time. Feel free to create worktrees.
 - Make reviewers and scouts read-only. In a follow-up, you can ask them to make changes, or the user can ask them to make changes.
