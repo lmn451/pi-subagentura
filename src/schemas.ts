@@ -33,7 +33,11 @@ export const BaseParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
+        "Optional model override. By default, prefer the current/parent provider and model. " +
+        "Honor any provider or model explicitly requested by the user. " +
+        "If a requested model omits its provider, qualify it with the current/parent provider " +
+        "unless the user explicitly requested another provider. " +
+        "For example, 'anthropic/claude-sonnet-4-5'.",
     }),
   ),
   thinkingLevel: Type.Optional(
@@ -153,7 +157,12 @@ const InteractiveSpawnFields = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Optional model override for the child Pi process",
+      description:
+        "Optional model override for the child Pi process. By default, prefer the current/parent provider and model. " +
+        "Honor any provider or model explicitly requested by the user. " +
+        "If a requested model omits its provider, qualify it with the current/parent provider " +
+        "unless the user explicitly requested another provider. " +
+        "For example, 'anthropic/claude-sonnet-4-5'.",
     }),
   ),
   thinkingLevel: Type.Optional(

@@ -460,6 +460,27 @@ describe("peer session scope isolation", () => {
   });
 });
 
+describe("model selection guidance", () => {
+  const rules = [
+    "By default, prefer the current/parent provider and model.",
+    "Honor any provider or model explicitly requested by the user.",
+    "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+  ];
+
+  it.each(["subagent_with_context", "subagent_isolated"])(
+    "%s describes provider-aware model selection",
+    (name) => {
+      const tool = getToolDef(setupExtension(), name);
+      const modelDescription = tool.parameters.properties.model.description;
+
+      for (const rule of rules) {
+        expect(tool.description).toContain(rule);
+        expect(modelDescription).toContain(rule);
+      }
+    },
+  );
+});
+
 describe("async review finalization guidance", () => {
   it.each(["subagent_with_context", "subagent_isolated"])(
     "%s distinguishes yielding from finalizing the review",
