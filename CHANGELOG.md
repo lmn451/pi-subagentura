@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.4] - 2026-10-03
+
+### Changed
+
+- Clarified provider and model selection guidance across sub-agent tools.
+
+### Fixed
+
+- Require explicit opt-in before workflows are selected by the orchestrator.
+- Distinguish Orchestratorv2 footer status from other interactive sub-agents.
+
 ## [3.6.3] - 2026-09-24
 
 ### Added
