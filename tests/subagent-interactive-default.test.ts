@@ -866,7 +866,7 @@ describe("subagent_interactive tool lifecycle", () => {
 
       expect(ctx.ui.setStatus).toHaveBeenCalledWith(
         "subagentura-running",
-        "⚡ 1 sub-agent alive · 1 working · orchestrator",
+        `⚡ 1 sub-agent alive · 1 working · ${flag}`,
       );
     },
   );
