@@ -651,6 +651,8 @@ export function registerWorkflowTool(
     name: "workflow",
     label: "Workflow",
     description: [
+      "Only use this tool when the user explicitly requests a workflow or the active CLI mode explicitly selects it.",
+      "Without either, do not choose it automatically based on task suitability.",
       "Run an agent-authored JavaScript workflow that deterministically orchestrates ISOLATED",
       "sub-agents. Intermediate results live in script variables, not your context window — fan out",
       "dozens of sub-agents (review pipelines, research sweeps, migrations) without context pressure.",

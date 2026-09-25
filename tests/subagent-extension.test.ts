@@ -128,6 +128,23 @@ describe("extension registration", () => {
     }
   });
 
+  it("marks the workflow tool as explicit opt-in", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    const workflow = api.registerTool.mock.calls.find(
+      ([tool]: any[]) => tool.name === "workflow",
+    )?.[0];
+
+    expect(workflow.description).toContain(
+      "Only use this tool when the user explicitly requests a workflow",
+    );
+    expect(workflow.description).toContain(
+      "Without either, do not choose it automatically based on task suitability.",
+    );
+  });
+
   it("registers the --orchestrator flag", () => {
     const api = mockApi();
 
@@ -182,6 +199,12 @@ describe("extension registration", () => {
       "Do not cancel unfinished reviewers merely to finalize an audit.",
     );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+    expect(result.systemPrompt).toContain(
+      "Workflow is opt-in: use `workflow` only when the user explicitly requests a workflow",
+    );
+    expect(result.systemPrompt).toContain(
+      "When neither applies (including when no mode is supplied), do not invoke it just because a task is bounded, reusable, parallelizable, or suitable for orchestration.",
+    );
   });
 
   it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {

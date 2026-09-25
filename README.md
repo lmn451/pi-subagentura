@@ -17,10 +17,10 @@ for clarification when a request is ambiguous or a narrow request has no matchin
 child, and leave specialist repository work to those children. Compatibility
 workflow and in-process tools remain registered.
 
-For reusable workflows, start Pi with the bundled orchestration guidance and
-describe the outcome you want. The parent can turn that request into a saved
-workflow, run its agents in the background, and keep their intermediate results
-out of the parent context.
+To opt into reusable workflow orchestration, start Pi with the workflow-oriented
+`--orchestrator` mode or explicitly ask for a workflow (for example, with
+`/workflow`). General tasks are not routed to the workflow tool automatically
+when no workflow mode is selected and the user has not asked for one.
 
 ## Demo
 
