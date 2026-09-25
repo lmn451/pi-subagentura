@@ -2726,6 +2726,15 @@ describe("registerWorkflowTool", () => {
     expect(guidance).toContain("plain JSON Schema");
     expect(guidance).toContain("null results");
     expect(guidance).toContain("final synthesis");
+    const modelRules = [
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+    ];
+    for (const rule of modelRules) {
+      expect(wf.description).toContain(rule);
+      expect(guidance).toContain(rule);
+    }
     expect(wf.parameters).toBeDefined();
     expect(wf.parameters.properties).toBeDefined();
     expect(Object.keys(wf.parameters.properties)).toContain("script");

@@ -174,6 +174,21 @@ describe("subagent_interactive tool lifecycle", () => {
     mockLaunchInteractiveSubagent.mockReturnValue(mockInteractiveState());
   });
 
+  it("describes provider-aware model selection", () => {
+    const tool = getInteractiveToolDef(api);
+    const modelDescription = tool.parameters.properties.model.description;
+    const rules = [
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+    ];
+
+    for (const rule of rules) {
+      expect(tool.description).toContain(rule);
+      expect(modelDescription).toContain(rule);
+    }
+  });
+
   afterEach(() => {
     interactiveSubagentRegistry.clear();
     clearSessionScopes();
