@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added telemetry schema v5's optional closed `failure_operation` dimension to
+  distinguish interactive spawn preparation, persistence, and registration
+  failures without collecting exception text or user data.
+
 ## [3.6.4] - 2026-10-03
 
 ### Changed

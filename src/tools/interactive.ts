@@ -87,6 +87,7 @@ import {
 import {
   captureTelemetry,
   type TelemetryResultReadOutcome,
+  type TelemetrySpawnFailureOperation,
   type TelemetrySpawnFailureStage,
 } from "../telemetry";
 
@@ -555,10 +556,12 @@ export function registerInteractiveSubagentTools(
       const reportSpawnFailure = (
         stage: TelemetrySpawnFailureStage,
         mux?: "tmux" | "zellij" | "herdr",
+        operation?: TelemetrySpawnFailureOperation,
       ): void => {
         captureInteractiveSpawnFailure({
           telemetry: registration?.scope?.telemetry ?? staleScope?.telemetry,
           stage,
+          operation,
           startedAt: spawnStartedAt,
           mux,
           invocationSource: "interactive",
@@ -587,7 +590,7 @@ export function registerInteractiveSubagentTools(
         registration.scope?.lineageMode === "child" &&
         !registration.scope.spawnTreeContext
       ) {
-        reportSpawnFailure("context");
+        reportSpawnFailure("context", undefined, "lineage_bootstrap_check");
         return {
           content: [
             {
@@ -613,7 +616,7 @@ export function registerInteractiveSubagentTools(
         params.routingAliases,
       );
       if (routingMetadataError || routingModeError) {
-        reportSpawnFailure("context");
+        reportSpawnFailure("context", undefined, "routing_metadata_validation");
         const error = routingMetadataError ?? routingModeError!;
         return {
           content: [
@@ -638,7 +641,7 @@ export function registerInteractiveSubagentTools(
         Buffer.byteLength(contextParams.context, "utf8") >
           MAX_INTERACTIVE_CONTEXT_BYTES
       ) {
-        reportSpawnFailure("context");
+        reportSpawnFailure("context", undefined, "explicit_context_limit");
         return {
           content: [
             {
@@ -675,7 +678,11 @@ export function registerInteractiveSubagentTools(
           );
         }
       } catch (error) {
-        reportSpawnFailure("context");
+        reportSpawnFailure(
+          "context",
+          undefined,
+          "completion_policy_validation",
+        );
         const message = error instanceof Error ? error.message : String(error);
         return {
           content: [
@@ -699,7 +706,11 @@ export function registerInteractiveSubagentTools(
             sessionOwner(registration.scope),
           );
         } catch (error) {
-          reportSpawnFailure("registration");
+          reportSpawnFailure(
+            "registration",
+            undefined,
+            "completion_registration",
+          );
           const msg = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text", text: `Sub-agent not started: ${msg}` }],
@@ -742,7 +753,11 @@ export function registerInteractiveSubagentTools(
           authorityEntries = parentBranchEntries(ctx);
         }
       } catch (error) {
-        reportSpawnFailure("context");
+        reportSpawnFailure(
+          "context",
+          undefined,
+          "parent_context_serialization",
+        );
         throw error;
       }
       let parentSessionId: string;
@@ -797,6 +812,7 @@ export function registerInteractiveSubagentTools(
             captureInteractiveSpawnFailure({
               telemetry: registration.scope.telemetry,
               stage: "registration",
+              operation: "completion_registration",
               startedAt: spawnStartedAt,
               mux: state.mux,
               invocationSource:
