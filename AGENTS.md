@@ -94,9 +94,10 @@ Malformed persisted files or values are non-fatal in every scope that is read:
 report the validation failure without exposing file contents, ignore the
 invalid candidate, and continue to the next applicable scope or default.
 
-### Telemetry schema v4 invariants
+### Telemetry schema invariants
 
-- Schema v4 shipped in the 3.6.2 release. `TELEMETRY_SCHEMA_VERSION` in
+- Schema v4 shipped in the 3.6.2 release; schema v5 adds the optional closed
+  `failure_operation` dimension. `TELEMETRY_SCHEMA_VERSION` in
   `src/telemetry.ts` is the source of truth for the current schema; when
   documenting telemetry, attribute schema changes to the release that shipped
   them (per CHANGELOG.md) rather than restating a release status that can go
@@ -112,11 +113,12 @@ invalid candidate, and continue to the next applicable scope or default.
   `error_category` and `error_stage` only for `error` or `partial` status.
   `runtime_failure` carries only its closed category, stage, and failure kind.
 - Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `terminal_reason`, result-outcome, error-category, and
-  error-stage values; error counts use bounded buckets. Invalid categories map
-  to `unknown`; invalid stages, stop reasons, exit buckets, and failure kinds
-  are omitted. Cancellation is not an error, and runtime failures are reported
-  once per failure episode rather than once per poll.
+  `failure_stage`, `failure_operation`, `terminal_reason`, result-outcome,
+  error-category, and error-stage values; error counts use bounded buckets.
+  Invalid categories map to `unknown`; invalid stages, operations, stop
+  reasons, exit buckets, and failure kinds are omitted. Cancellation is not an
+  error, and runtime failures are reported once per failure episode rather than
+  once per poll.
 - Never send exception text or stacks, prompts, tasks, personas, tool
   arguments, message content, outputs, paths, or agent/job/workflow/session
   identifiers.

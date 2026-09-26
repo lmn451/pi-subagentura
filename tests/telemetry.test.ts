@@ -117,7 +117,7 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 4,
+      schema_version: 5,
       mode: "orchestrator_v2",
     });
     expect(agent.properties).toMatchObject({
@@ -679,6 +679,7 @@ describe("anonymous product telemetry", () => {
       depth_bucket: "4-7",
       completion_policy: "each",
       failure_stage: "pane_launch",
+      failure_operation: "pane_launch",
       spawn_duration_ms: 12_345,
     });
 
@@ -695,6 +696,7 @@ describe("anonymous product telemetry", () => {
         "depth",
         "depth_bucket",
         "failure_stage",
+        "failure_operation",
         "invocation_source",
         "mode",
         "model",
@@ -710,9 +712,10 @@ describe("anonymous product telemetry", () => {
       execution: "interactive",
       mux: "unknown",
       failure_stage: "pane_launch",
+      failure_operation: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 4,
+      schema_version: 5,
     });
   });
 
@@ -775,6 +778,24 @@ describe("anonymous product telemetry", () => {
     expect(payload.properties.failure_stage).toBe(failure_stage);
     expect(payload.properties.spawn_duration_bucket).toBe("unknown");
     expect(payload.properties).not.toHaveProperty("spawn_duration_ms");
+  });
+
+  it("omits an unrecognized spawn failure operation", () => {
+    const payload = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "agent_spawn_failed",
+      execution: "interactive",
+      mux: "herdr",
+      invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: undefined,
+      depth_bucket: "unknown",
+      completion_policy: "each",
+      failure_stage: "state_persistence",
+      failure_operation: "/private/path" as never,
+    });
+
+    expect(payload.properties).not.toHaveProperty("failure_operation");
   });
 
   it("emits a paired unknown bucket when an optional spawn duration is invalid", () => {
@@ -1110,6 +1131,7 @@ describe("anonymous product telemetry", () => {
       "error_count_bucket",
       "execution",
       "failure_stage",
+      "failure_operation",
       "invocation",
       "invocation_source",
       "mode",
@@ -1139,7 +1161,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(4);
+      expect(payload.properties.schema_version).toBe(5);
     }
   });
 

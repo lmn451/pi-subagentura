@@ -543,7 +543,10 @@ describe("spawn-time state persistence", () => {
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).toMatchObject({
       event: "pi_subagentura_agent_spawn_failed",
-      properties: { failure_stage: "state_persistence" },
+      properties: {
+        failure_stage: "state_persistence",
+        failure_operation: "lineage_bootstrap_write",
+      },
     });
     expect(tmuxCalls.some((args) => args[0] === "send-keys")).toBe(false);
   });
