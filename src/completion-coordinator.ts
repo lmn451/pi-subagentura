@@ -68,6 +68,8 @@ export interface CompletionRecord {
   turnId?: string;
   label: string;
   status: CompletionStatus;
+  /** TUI-only label metadata; status remains authoritative for behavior. */
+  presentation?: "completed-with-errors";
   policy: CompletionPolicy;
   groupId?: string;
   /** Number of registered group members still awaiting terminal completion. */
@@ -317,6 +319,18 @@ function normalizeRecord(value: unknown): CompletionRecord {
   ) {
     throw new Error("Invalid completion status");
   }
+  const presentation =
+    raw.presentation === "completed-with-errors"
+      ? "completed-with-errors"
+      : undefined;
+  if (
+    raw.presentation !== undefined &&
+    (presentation === undefined ||
+      raw.source !== "workflow" ||
+      raw.status !== "error")
+  ) {
+    throw new Error("Invalid completion presentation");
+  }
   if (raw.policy !== "each" && raw.policy !== "group") {
     throw new Error("Invalid completion policy");
   }
@@ -399,6 +413,7 @@ function normalizeRecord(value: unknown): CompletionRecord {
       : {}),
     label: boundedString(raw.label, "label", MAX_COMPLETION_LABEL_LENGTH),
     status: raw.status,
+    ...(presentation ? { presentation } : {}),
     policy: raw.policy,
     ...(groupId ? { groupId } : {}),
     ...(groupRemaining !== undefined ? { groupRemaining } : {}),
@@ -1731,11 +1746,17 @@ export function registerCompletionCoordinator(
         try {
           const record = normalizeRecord(entry.data);
           const icon =
-            record.status === "done"
-              ? "✓"
-              : record.status === "cancelled"
-                ? "○"
-                : "✕";
+            record.presentation === "completed-with-errors"
+              ? "⚠"
+              : record.status === "done"
+                ? "✓"
+                : record.status === "cancelled"
+                  ? "○"
+                  : "✕";
+          const statusLabel =
+            record.presentation === "completed-with-errors"
+              ? "completed with errors"
+              : record.status;
           const identity = record.turnId
             ? `${JSON.stringify(record.sourceId)}, turn ${JSON.stringify(record.turnId)}`
             : JSON.stringify(record.sourceId);
@@ -1754,8 +1775,12 @@ export function registerCompletionCoordinator(
             : "";
           return new Text(
             theme.fg(
-              record.status === "error" ? "error" : "dim",
-              `${formatCompletionMessage(record.label, `${icon} ${record.status}${progress}`)}${details}`,
+              record.presentation === "completed-with-errors"
+                ? "warning"
+                : record.status === "error"
+                  ? "error"
+                  : "dim",
+              `${formatCompletionMessage(record.label, `${icon} ${statusLabel}${progress}`)}${details}`,
             ),
             0,
             0,

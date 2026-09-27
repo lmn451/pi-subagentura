@@ -174,6 +174,76 @@ describe("completion coordinator", () => {
       .join("\n");
     expect(expanded).toContain('("worker", turn "turn-worker")');
   });
+
+  it("renders resolved workflow errors as completed with errors", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const renderer = setupResult.pi.registerEntryRenderer.mock.calls.find(
+      ([type]) => type === "subagentura-completion",
+    )?.[1];
+    const theme = { fg: (_color: string, text: string) => text };
+    const entry = {
+      data: record("workflow-id", {
+        source: "workflow",
+        status: "error",
+        presentation: "completed-with-errors",
+        label: "demo workflow",
+      }),
+    };
+    const rendered = renderer(entry, { expanded: false }, theme)
+      .render(200)
+      .join("\n")
+      .trimEnd();
+    expect(rendered).toBe("from: demo workflow, ⚠ completed with errors");
+
+    publishCompletion(entry.data, sessionOwner(scope));
+    const published = userCompletions(setupResult.entries)[0];
+    expect(published.data.presentation).toBe("completed-with-errors");
+
+    clearCompletionCoordinator(sessionOwner(scope));
+    registerCompletionCoordinator(setupResult.pi as never, scope);
+    const recoveredRenderer = setupResult.pi.registerEntryRenderer.mock.calls
+      .filter(([type]) => type === "subagentura-completion")
+      .at(-1)?.[1];
+    const recovered = recoveredRenderer(
+      { data: published.data },
+      { expanded: false },
+      theme,
+    )
+      .render(200)
+      .join("\n")
+      .trimEnd();
+    expect(recovered).toBe("from: demo workflow, ⚠ completed with errors");
+
+    const legacyWorkflowError = record("legacy-workflow", {
+      source: "workflow",
+      status: "error",
+      label: "legacy workflow",
+    });
+    expect(
+      recoveredRenderer(
+        { data: legacyWorkflowError },
+        { expanded: false },
+        theme,
+      )
+        .render(200)
+        .join("\n")
+        .trimEnd(),
+    ).toBe("from: legacy workflow, ✕ error");
+
+    const manifest = prepareCompletionManifest(sessionOwner(scope));
+    expect(manifest?.content).toContain('"status":"error"');
+    expect(manifest?.content).not.toContain("presentation");
+
+    expect(() =>
+      publishCompletion(
+        record("invalid-presentation", {
+          presentation: "completed-with-errors",
+        }),
+        sessionOwner(scope),
+      ),
+    ).toThrow("Invalid completion presentation");
+  });
   it("uses known interactive telemetry timestamps and omits legacy latency", () => {
     const setupResult = setup();
     scope = setupResult.scope;

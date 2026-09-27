@@ -1816,7 +1816,10 @@ describe("background workflow jobs", () => {
       const published = entries.filter(
         (entry) => entry.customType === "subagentura-completion",
       );
-      expect(published.at(-1)?.data).toMatchObject({ status: "error" });
+      expect(published.at(-1)?.data).toMatchObject({
+        status: "error",
+        presentation: "completed-with-errors",
+      });
       expect(job.status).toBe("done");
     } finally {
       const jobIds = [...workflowJobRegistry.values()]
