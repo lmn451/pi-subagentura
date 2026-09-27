@@ -131,8 +131,9 @@ describe("workflow v4 aggregate classifications", () => {
     const runAgent: WorkflowAgentRunner = async () =>
       attachWorkflowFailure(
         {
-          ...successfulResult(),
           isError: true,
+          output: "",
+          usage: successfulResult().usage,
           errorMessage: "mux probe details stay private",
         },
         {
