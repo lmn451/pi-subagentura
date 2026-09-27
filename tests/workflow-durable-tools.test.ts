@@ -100,8 +100,8 @@ describe("durable public tools", () => {
       () => true,
       root,
     );
+    const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    const originalAppend = append.getMockImplementation()!;
     append.mockImplementation(async function (kind, data) {
       if (kind === "delivery") throw new Error("injected delivery failure");
       return originalAppend.call(this, kind, data);
