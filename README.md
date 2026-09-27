@@ -736,16 +736,22 @@ distinct artifact turn for it. The explicit CLI remains supported:
 # 'cancelled' is only set by the parent via cancel_interactive_subagent
 ```
 
-The explicit completion command is mandatory for every initial and follow-up
-turn. The child must complete these steps in order: write the final result to
-`output.md`, run `cli.mjs done 0`, wait until exactly one completion event is
-recorded successfully, then send its final assistant response. The command must
-be the final tool call of the turn. If it fails to execute, the child must not
-finalize; it fixes the failure and retries until completion is recorded. The
-child lifecycle hook at `agent_settled` is a crash-safety fallback, not a
-substitute for the explicit command. The system prompt, initial task footer,
-and every injected follow-up prompt repeat this requirement so the command
-remains the model's most recent instruction.
+The generated system prompt defines one completion checklist for every initial
+and follow-up turn; task and follow-up reminders refer to it. The child writes
+its result to the literal `output.md` path, runs `cli.mjs done 0` for task success
+or `cli.mjs error "short reason"` for a failed/blocked task, and waits for success
+before its final assistant response. The successful command is the final tool
+call, and the REPL stays open for follow-ups.
+
+If writing the result or invoking the CLI fails, the instructions allow at most
+two corrective retries of that step, only when a safe correction exists within
+scope. The child must not retry an unchanged persistent failure or expand
+permissions. If still blocked, it preserves the result/error if writable and
+reports the blocker without claiming completion was recorded. This failure path
+permits a final response; the `agent_settled` hook remains a recovery path, not
+a substitute for an available CLI. This is prompt guidance, not a runtime retry
+counter or delivery guarantee. Existing child system prompts are not rewritten.
+See [prompt guidance and evaluation scenarios](./docs/prompt-guidance.md).
 
 At each child turn start, mutable `output.md` is atomically reset without
 touching earlier snapshots. Before each completion event, the current staging

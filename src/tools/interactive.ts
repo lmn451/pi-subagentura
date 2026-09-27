@@ -97,7 +97,7 @@ const MAX_FOLLOWUP_BYTES = 64 * 1024;
 const MAX_ARTIFACT_PROVIDER_OUTPUT_BYTES = 64 * 1024;
 const MAX_FOLLOWUP_PREVIEW_CHARS = 500;
 const FOLLOWUP_COMPLETION_REMINDER =
-  ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Before sending your final assistant response, write the result to output.md; make "$ARTIFACT_DIR/cli.mjs" done 0 your final tool call and wait for success. If it fails, do not send the final response; fix the cause and retry until completion is recorded. Do not rely on the lifecycle hook. After completion is recorded, remain in the Pi REPL and wait for follow-up; do not intentionally exit or close the pane unless explicitly asked.]';
+  ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Follow "Completion protocol" in your system prompt, including success, failure, and bounded recovery. Keep the REPL open for follow-ups unless explicitly asked to exit.]';
 
 function formatFollowupPreview(message: string): string {
   if (message.length <= MAX_FOLLOWUP_PREVIEW_CHARS) return message;
@@ -1087,8 +1087,8 @@ export function registerInteractiveSubagentTools(
       "only after its completed turn is idle and its workflow runner has consumed the result. It is",
       "promoted to standalone only after that follow-up is sent successfully. An idle follow-up resets",
       "future completion delivery to independent each; a source can satisfy a group only once, so later",
-      "turns from that source/group are also independent. The child will run the new turn and (per its",
-      "system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use",
+      "turns from that source/group are also independent. The child follows its",
+      "system prompt's completion checklist for success/error and bounded recovery. Use",
       "get_interactive_subagent_status to check the pane state first if you're not sure it's still alive.",
     ].join("\n"),
     parameters: Type.Object({

@@ -40,7 +40,7 @@ Auto-start is slash/flag only. Bare mentions of "ralplan" in prose do **not** re
 
 You are executing a strict multi-agent state machine. Your primary goal is to prevent **Simulated Consensus** — hallucinating all three approvals in a single generation. True consensus requires:
 
-- Adversarial pushback (Architect and Critic must disagree before they agree).
+- Independent challenge of assumptions, with findings supported by evidence. Agreement on the first pass is valid when no material issues remain.
 - Isolated reasoning (each role is a separately invoked agent).
 - Verifiable file-system checkpoints (artifacts written to `plans/` between roles).
 
@@ -50,7 +50,7 @@ You are executing a strict multi-agent state machine. Your primary goal is to pr
 
 1. **Isolated Roles.** Each role (Planner, Architect, Critic) MUST be executed by a separately invoked agent. The parent agent MUST NOT perform the work of any role itself.
 2. **No Single-Turn Consensus.** The Planner's draft, the Architect's review, and the Critic's approval MUST NOT appear in the same output block.
-3. **Mandatory Pushback.** The Architect or Critic must provide genuine pushback on the first pass. Rubber-stamping a first draft is a violation of the protocol.
+3. **Evidence-based Review.** The Architect and Critic must examine the plan independently. Report supported findings and unresolved questions; do not manufacture objections to require another round. A first-pass approval is valid after the required review criteria are satisfied.
 4. **Auto-start is slash/flag only.** The pipeline auto-starts ONLY when the prompt begins with `/ralplan` or `/brainstorm` (or uses `--ralplan` / `--brainstorm` flags). Bare mentions of "ralplan" in prose do NOT trigger auto-start, because role prompts reference the skill name naturally and must not re-trigger a fresh pipeline for each consensus round.
 
 ## Iteration Loop

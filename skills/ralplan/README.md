@@ -49,7 +49,7 @@ ralplan/
 - Each role MUST be a separately invoked agent.
 - The parent agent MUST NOT perform role work itself.
 - No single-turn consensus — drafts, reviews, and approvals come from different generations.
-- The Architect and Critic must provide genuine pushback on first pass.
+- The Architect and Critic must review independently and support findings with evidence; first-pass approval is valid when the review criteria are satisfied.
 
 ## Install / wire up
 

@@ -10,16 +10,17 @@ maintained in this repository and is the documentation source of truth;
 [`pi-docs`](https://github.com/lmn451/pi-docs) indexes these files for its
 published injector.
 
-| Doc                                                                                | Purpose                                                                |
-| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| [README.md](../README.md)                                                          | Installation, configuration, tools, and user-facing behavior           |
-| [architecture.md](../architecture.md)                                              | Runtime boundaries, ownership, completion, and persistence contracts   |
-| [CONTRIBUTING.md](../CONTRIBUTING.md)                                              | Development checks, CI, and release procedure                          |
-| [bun.md](./bun.md)                                                                 | JavaScript runtime and package manager conventions                     |
-| [publish.md](./publish.md)                                                         | OIDC publishing and the authoritative release procedure                |
-| [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools           |
-| [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                            |
-| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters |
+| Doc                                                                                | Purpose                                                                  |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [README.md](../README.md)                                                          | Installation, configuration, tools, and user-facing behavior             |
+| [architecture.md](../architecture.md)                                              | Runtime boundaries, ownership, completion, and persistence contracts     |
+| [CONTRIBUTING.md](../CONTRIBUTING.md)                                              | Development checks, CI, and release procedure                            |
+| [bun.md](./bun.md)                                                                 | JavaScript runtime and package manager conventions                       |
+| [publish.md](./publish.md)                                                         | OIDC publishing and the authoritative release procedure                  |
+| [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools             |
+| [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                              |
+| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters   |
+| [prompt-guidance.md](./prompt-guidance.md)                                         | Prompt design boundaries and development-only model evaluation scenarios |
 
 ## Known limitations
 

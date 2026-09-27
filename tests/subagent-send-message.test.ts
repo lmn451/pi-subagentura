@@ -144,6 +144,30 @@ describe("send_interactive_subagent_message", () => {
     expect(result.content[0].text).toContain("Message sent:\nnow do step 2");
   });
 
+  it("sends the follow-up with a reference to the system completion checklist", async () => {
+    registerState(api.sessionScope);
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-reminder", {
+      id: "abc12345def67890",
+      message: "Review the failed check",
+    });
+    const delivered = mockSendCommandToPane.mock.calls[0]?.[1];
+
+    expect(result.isError).toBeFalsy();
+    expect(delivered).toContain("Review the failed check");
+    expect(delivered).toContain('"Completion protocol" in your system prompt');
+    expect(delivered).toContain("bounded recovery");
+    expect(delivered).not.toContain("cli.mjs");
+  });
+
+  it("registers follow-up guidance for both outcomes and bounded recovery", () => {
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+
+    expect(toolDef.description).toContain(
+      "system prompt's completion checklist for success/error and bounded recovery",
+    );
+  });
+
   it("identifies an Orchestratorv2 recipient by display name while retaining its id", async () => {
     registerState(api.sessionScope, { name: "Release verification" });
     mockSendCommandToPane.mockReturnValue(undefined);
@@ -217,7 +241,7 @@ describe("send_interactive_subagent_message", () => {
     expect(firstLine).not.toContain("x".repeat(152));
   });
 
-  it("appends the mandatory done reminder to every follow-up turn", async () => {
+  it("appends the completion checklist reference to idle-child follow-ups", async () => {
     registerState(api.sessionScope, { status: "idle" });
     mockSendCommandToPane.mockReturnValue(undefined);
 
@@ -230,11 +254,10 @@ describe("send_interactive_subagent_message", () => {
     const forwarded = mockSendCommandToPane.mock.calls[0][1] as string;
     expect(forwarded).toMatch(/^inspect the second case/);
     expect(forwarded).toMatch(/mandatory.*every.*turn/i);
-    expect(forwarded).toContain('"$ARTIFACT_DIR/cli.mjs" done 0');
-    expect(forwarded).toMatch(/before.*final assistant response/i);
-    expect(forwarded).toMatch(/if.*fails.*do not.*final.*retry/i);
-    expect(forwarded).toMatch(/remain in the Pi REPL and wait for follow-up/i);
-    expect(forwarded).toMatch(/do not intentionally exit or close the pane/i);
+    expect(forwarded).toContain('"Completion protocol" in your system prompt');
+    expect(forwarded).toContain("success, failure, and bounded recovery");
+    expect(forwarded).toContain("Keep the REPL open for follow-ups");
+    expect(forwarded).toContain("unless explicitly asked to exit");
   });
 
   it("shows the sent message and trims an oversized preview", async () => {
@@ -471,7 +494,7 @@ describe("send_interactive_subagent_message", () => {
 
     const forwarded = mockSendCommandToPane.mock.calls[0][1] as string;
     expect(forwarded.startsWith(message)).toBe(true);
-    expect(forwarded).toContain('"$ARTIFACT_DIR/cli.mjs" done 0');
+    expect(forwarded).toContain('"Completion protocol" in your system prompt');
     expect(result.isError).toBeFalsy();
     expect(result.details.status).toBe("sent");
     expect(result.details.messageLength).toBe(64 * 1024);
