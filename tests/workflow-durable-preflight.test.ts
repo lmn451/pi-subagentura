@@ -29,6 +29,19 @@ describe("inspectDurableWorkflow", () => {
     expect(result.errors.join(" ")).toMatch(/agent\(\).*id|workflow\(\).*id/i);
   });
 
+  it("checks stable ids on globalThis agent calls", () => {
+    const missing = inspectDurableWorkflow(
+      script('await globalThis.agent("review", {});'),
+    );
+    const stable = inspectDurableWorkflow(
+      script('await globalThis.agent("review", { id: "review" });'),
+    );
+
+    expect(missing.durableReady).toBe(false);
+    expect(missing.errors.join(" ")).toMatch(/agent\(\).*id/i);
+    expect(stable.durableReady).toBe(true);
+  });
+
   it("allows computed ids used by map and pipeline callbacks", () => {
     const result = inspectDurableWorkflow(
       script(`

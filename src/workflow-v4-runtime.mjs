@@ -405,6 +405,10 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
               timeoutMs,
             );
       timer?.unref?.();
+      const budgetCounters = [
+        ...(parentScope.budgetCounters ?? []),
+        budgetCounter,
+      ];
       try {
         const value = await Effect.runPromise(
           Effect.tryPromise({
@@ -416,17 +420,14 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
                     counters: new Map(),
                     stepCounter: parentScope.stepCounter,
                     seenPaths: parentScope.seenPaths,
-                    budgetCounters: [
-                      ...(parentScope.budgetCounters ?? []),
-                      budgetCounter,
-                    ],
+                    budgetCounters,
                     signal: operationSignal,
                     retryFrames: [
                       ...(parentScope.retryFrames ?? []),
                       { path, attempt },
                     ],
                   },
-                  () => run(operationSignal, entered),
+                  () => run(operationSignal, entered, budgetCounters),
                 ),
               ),
             catch: (error) => error,
@@ -933,14 +934,30 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
         title: options.title ?? name,
         input: childArgs,
       },
-      (stepSignal, entered) =>
-        bridge.workflow(name, childArgs, {
-          ...options,
-          stepPath: currentScope().path,
-          idempotencyKey: entered?.idempotencyKey,
-          id: `${entered?.idempotencyKey ?? pathKey(childPath(id))}:${entered?.attempt ?? 1}`,
-          signal: stepSignal,
-        }),
+      (stepSignal, entered, budgetCounters) => {
+        let nestedUsage = 0;
+        return Promise.resolve()
+          .then(() =>
+            bridge.workflow(
+              name,
+              childArgs,
+              {
+                ...options,
+                stepPath: currentScope().path,
+                idempotencyKey: entered?.idempotencyKey,
+                id: `${entered?.idempotencyKey ?? pathKey(childPath(id))}:${entered?.attempt ?? 1}`,
+                signal: stepSignal,
+              },
+              (amount) => {
+                if (typeof amount === "number" && Number.isFinite(amount))
+                  nestedUsage += amount;
+              },
+            ),
+          )
+          .finally(() => {
+            for (const counter of budgetCounters) counter.spent += nestedUsage;
+          });
+      },
     );
   };
 

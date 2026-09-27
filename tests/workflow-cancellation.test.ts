@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SubagentResult } from "../src/helpers";
 import {
   cancelWorkflowJob,
@@ -8,12 +11,6 @@ import {
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { cancelAllFlows } from "../src/cancel-all-flows";
-import {
-  clearSessionScopes,
-  sessionOwner,
-  type SessionScope,
-} from "../src/session-scope";
-import { createTestSessionScope } from "./session-scope-fixture";
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 const SCRIPT =
@@ -21,12 +18,6 @@ const SCRIPT =
   'return await agent("in flight");';
 
 let jobs: WorkflowJobState[] = [];
-let scope: SessionScope;
-
-beforeEach(() => {
-  clearSessionScopes();
-  scope = createTestSessionScope();
-});
 
 afterEach(async () => {
   for (const job of jobs) {
@@ -39,7 +30,6 @@ afterEach(async () => {
     workflowJobRegistry.delete(job.id);
   }
   jobs = [];
-  clearSessionScopes();
 });
 
 async function startInFlightWorkflow(): Promise<WorkflowJobState> {
@@ -47,42 +37,35 @@ async function startInFlightWorkflow(): Promise<WorkflowJobState> {
   const agentEntered = new Promise<void>((resolve) => {
     entered = resolve;
   });
-  const job = startWorkflowJob(
-    "cancel-race",
-    SCRIPT,
-    {
-      runAgent: async ({ signal }) => {
-        entered();
-        await new Promise<never>((_resolve, reject) => {
-          if (signal?.aborted) {
-            reject(signal.reason ?? new Error("aborted"));
-            return;
-          }
-          signal?.addEventListener(
-            "abort",
-            () => reject(signal.reason ?? new Error("aborted")),
-            { once: true },
-          );
-        });
-        return {
-          isError: false,
-          output: "ok",
-          usage: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            cost: 0,
-            turns: 1,
-          },
-          model: "test/model",
-        } as any;
-      },
+  const job = startWorkflowJob("cancel-race", SCRIPT, {
+    runAgent: async ({ signal }) => {
+      entered();
+      await new Promise<never>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new Error("aborted"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () => reject(signal.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+      return {
+        isError: false,
+        output: "ok",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turns: 1,
+        },
+        model: "test/model",
+      } as any;
     },
-    undefined,
-    undefined,
-    sessionOwner(scope),
-  );
+  });
   jobs.push(job);
   await agentEntered;
   await tick();
@@ -93,14 +76,12 @@ async function startInFlightWorkflow(): Promise<WorkflowJobState> {
 
 function workflowTools(): Record<string, any> {
   const tools: Record<string, any> = {};
-  const pi = {
+  registerWorkflowTool({
     registerTool: (tool: any) => {
       tools[tool.name] = tool;
     },
     registerCommand: () => {},
-  } as any;
-  scope.pi = pi;
-  registerWorkflowTool(pi, scope);
+  } as any);
   return tools;
 }
 
@@ -147,9 +128,6 @@ describe("cancelled workflow snapshot normalization", () => {
         'export const meta = { name: "cancel-child", description: "d" };\n' +
           `return await agent("task", { isolation: "in-process"${withSchema ? ', schema: { type: "object" }' : ""} });`,
         { runAgent },
-        undefined,
-        undefined,
-        sessionOwner(scope),
       );
       jobs.push(job);
 
@@ -195,11 +173,60 @@ describe("cancelled workflow snapshot normalization", () => {
     expect(afterSettlementStatus.details.runningCount).toBe(0);
   });
 
+  it("keeps durable cancellation retryable when marker persistence fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflow-cancel-marker-"));
+    try {
+      const job = await startInFlightWorkflow();
+      const attempts = join(directory, "attempts");
+      await writeFile(attempts, "not a directory");
+      const events: any[] = [{ kind: "accepted" }];
+      let markerAtTerminal = false;
+      job.durable = {
+        store: {
+          directory,
+          events,
+          append: async (kind: string, data: unknown) => {
+            if (kind === "cancelled") {
+              markerAtTerminal = await access(
+                join(attempts, "1-1.json.cancel"),
+              ).then(
+                () => true,
+                () => false,
+              );
+            }
+            events.push({ kind, data });
+          },
+          close: async () => {},
+        },
+        stop: () => {},
+        drain: async () => {},
+        usage: () => ({}),
+      } as any;
+
+      const cancel = workflowTools().cancel_workflow;
+      const first = await cancel.execute("cancel", { workflowId: job.id });
+      expect(first.isError).toBe(true);
+      expect(job.abort.signal.aborted).toBe(true);
+      expect(events.some((event) => event.kind === "cancelled")).toBe(false);
+
+      await expect(job.promise).rejects.toThrow();
+      await rm(attempts, { force: true });
+      await mkdir(attempts);
+      await writeFile(join(attempts, "1-1.json"), "{}");
+
+      const retried = await cancel.execute("cancel", { workflowId: job.id });
+      expect(retried.details.status).toBe("cancelled");
+      expect(markerAtTerminal).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes cancelAllFlows immediately and after settlement", async () => {
     const job = await startInFlightWorkflow();
     const getStatus = workflowTools().get_workflow_status;
 
-    const immediate = await cancelAllFlows(sessionOwner(scope));
+    const immediate = await cancelAllFlows();
     expect(immediate.workflowsAborted).toBe(1);
     expect(job.snapshot.runningCount).toBe(0);
     expect(job.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
@@ -209,7 +236,7 @@ describe("cancelled workflow snapshot normalization", () => {
     expect(immediateStatus.details.runningCount).toBe(0);
 
     await expect(job.promise).rejects.toThrow(/aborted/i);
-    const afterSettlement = await cancelAllFlows(sessionOwner(scope));
+    const afterSettlement = await cancelAllFlows();
     expect(afterSettlement.workflowsAborted).toBe(0);
     expect(job.snapshot.runningCount).toBe(0);
     expect(job.snapshot.agentRecords?.[0]?.status).toBe("cancelled");
@@ -222,50 +249,43 @@ describe("cancelled workflow snapshot normalization", () => {
   it("clears live usage when cancellation makes the workflow terminal", async () => {
     let entered!: () => void;
     const enteredPromise = new Promise<void>((resolve) => (entered = resolve));
-    const job = startWorkflowJob(
-      "cancel-live-usage",
-      SCRIPT,
-      {
-        runAgent: async ({ signal, onProgress }) => {
-          onProgress?.({
-            kind: "log",
-            message: "usage",
-            liveUsage: {
-              input: 4,
-              output: 2,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 6,
-              costUsd: 0,
-              turns: 1,
-              costSource: "provider",
-            },
-          });
-          entered();
-          await new Promise<void>((resolve) => {
-            if (signal?.aborted) return resolve();
-            signal?.addEventListener("abort", () => resolve(), { once: true });
-          });
-          return {
-            isError: true,
-            output: "",
-            usage: {
-              input: 4,
-              output: 2,
-              cacheRead: 0,
-              cacheWrite: 0,
-              cost: 0,
-              turns: 1,
-            },
-            model: undefined,
-            errorMessage: "aborted",
-          } as any;
-        },
+    const job = startWorkflowJob("cancel-live-usage", SCRIPT, {
+      runAgent: async ({ signal, onProgress }) => {
+        onProgress?.({
+          kind: "log",
+          message: "usage",
+          liveUsage: {
+            input: 4,
+            output: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 6,
+            costUsd: 0,
+            turns: 1,
+            costSource: "provider",
+          },
+        });
+        entered();
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return {
+          isError: true,
+          output: "",
+          usage: {
+            input: 4,
+            output: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0,
+            turns: 1,
+          },
+          model: undefined,
+          errorMessage: "aborted",
+        } as any;
       },
-      undefined,
-      undefined,
-      sessionOwner(scope),
-    );
+    });
     jobs.push(job);
     await enteredPromise;
     expect(job.snapshot.liveUsage).toBeDefined();
@@ -286,44 +306,37 @@ describe("cancelled workflow snapshot normalization", () => {
   });
 
   it("clears live usage when the active agent finishes", async () => {
-    const job = startWorkflowJob(
-      "finish-live-usage",
-      SCRIPT,
-      {
-        runAgent: async ({ onProgress }) => {
-          onProgress?.({
-            kind: "log",
-            message: "usage",
-            liveUsage: {
-              input: 1,
-              output: 1,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 2,
-              costUsd: 0.01,
-              turns: 1,
-              costSource: "provider",
-            },
-          });
-          return {
-            isError: false,
-            output: "ok",
-            usage: {
-              input: 1,
-              output: 1,
-              cacheRead: 0,
-              cacheWrite: 0,
-              cost: 0.01,
-              turns: 1,
-            },
-            model: "test/model",
-          } as any;
-        },
+    const job = startWorkflowJob("finish-live-usage", SCRIPT, {
+      runAgent: async ({ onProgress }) => {
+        onProgress?.({
+          kind: "log",
+          message: "usage",
+          liveUsage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            costUsd: 0.01,
+            turns: 1,
+            costSource: "provider",
+          },
+        });
+        return {
+          isError: false,
+          output: "ok",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0.01,
+            turns: 1,
+          },
+          model: "test/model",
+        } as any;
       },
-      undefined,
-      undefined,
-      sessionOwner(scope),
-    );
+    });
     jobs.push(job);
     await job.promise;
     expect(job.snapshot.liveUsage).toBeUndefined();

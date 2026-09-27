@@ -134,6 +134,7 @@ async function executeScript(
   ancestors = [],
   signal = workflowAbort.signal,
   invocationKey,
+  inheritedUsage,
 ) {
   const parsed = parseWorkflow(script);
   const identity = createHash("sha256").update(script).digest("hex");
@@ -150,6 +151,7 @@ async function executeScript(
     script,
     parsed.format,
     invocationKey,
+    inheritedUsage,
   );
   while (depth === 0 && outstandingAgentCalls.size > 0) {
     await Promise.all([...outstandingAgentCalls]);
@@ -168,6 +170,7 @@ async function executeBody(
   source,
   format,
   invocationKey,
+  inheritedUsage,
 ) {
   const runWorkflowDefinition =
     format === "definition"
@@ -224,7 +227,10 @@ async function executeBody(
             : {}),
         },
         agentSignal,
-        onUsage,
+        (amount) => {
+          onUsage?.(amount);
+          inheritedUsage?.(amount);
+        },
       );
     })();
     outstandingAgentCalls.add(call);
@@ -337,7 +343,7 @@ async function executeBody(
     });
   }
 
-  function workflow(nameOrRef, childArgs, options = {}) {
+  function workflow(nameOrRef, childArgs, options = {}, onUsage) {
     const call = (async () => {
       checkAbort();
       if (depth >= workerConfig.maxWorkflowDepth) {
@@ -371,6 +377,10 @@ async function executeBody(
         ancestors,
         options.signal ?? signal,
         workerConfig.stepBased ? options.id : undefined,
+        (amount) => {
+          onUsage?.(amount);
+          inheritedUsage?.(amount);
+        },
       );
       return child.result;
     })();

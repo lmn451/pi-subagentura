@@ -430,7 +430,11 @@ describe("v4 workflow public tools", () => {
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
     let markerExistedAtTerminal = false;
-    append.mockImplementation(async function (kind: string, data: any) {
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind: string,
+      data: any,
+    ) {
       if (kind === "cancelled") {
         try {
           await access(join(attempts, "1-1.json.cancel"));
@@ -492,7 +496,11 @@ describe("v4 workflow public tools", () => {
     );
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    append.mockImplementation(async function (kind: string, data: any) {
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind: string,
+      data: any,
+    ) {
       if (kind === "accepted") throw new Error("simulated acceptance crash");
       return originalAppend.call(this, kind, data);
     });

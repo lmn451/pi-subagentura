@@ -612,4 +612,54 @@ describe("v4 workflow runtime", () => {
       affordable: { ok: true, value: "affordable" },
     });
   });
+
+  it("charges nested workflow usage to enclosing step budgets", async () => {
+    const bridge = makeBridge({
+      async workflow(
+        name: string,
+        _args: unknown,
+        _options: unknown,
+        onUsage: (tokens: number) => void,
+      ) {
+        onUsage(name === "expensive" ? 3 : 1);
+        return name;
+      },
+    });
+
+    await expect(
+      runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.step("parent", { policy: { budget: 2 } }, () =>
+            ctx.workflow("expensive", {}, { id: "child" }),
+          ),
+        ),
+        {},
+        bridge,
+      ),
+    ).rejects.toThrow(/exceeded its budget of 2/i);
+
+    const siblings = await runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.parallel(
+          {
+            expensive: () =>
+              ctx.step("expensive-step", { policy: { budget: 2 } }, () =>
+                ctx.workflow("expensive", {}, { id: "expensive-call" }),
+              ),
+            affordable: () =>
+              ctx.step("affordable-step", { policy: { budget: 2 } }, () =>
+                ctx.workflow("affordable", {}, { id: "affordable-call" }),
+              ),
+          },
+          { concurrency: 2, failure: "collect" },
+        ),
+      ),
+      {},
+      bridge,
+    );
+    expect(siblings).toMatchObject({
+      expensive: { ok: false, error: { category: "budget" } },
+      affordable: { ok: true, value: "affordable" },
+    });
+  });
 });
