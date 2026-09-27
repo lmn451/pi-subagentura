@@ -30,6 +30,7 @@ const EVENT_KINDS = new Set([
   "terminal",
   "cancelled",
   "accepted",
+  "rejected",
   "dispatch",
   "delivery",
   "v4.step",
