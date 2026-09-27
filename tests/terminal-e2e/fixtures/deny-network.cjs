@@ -192,7 +192,7 @@ function patchMethods(target, moduleName, names) {
 }
 
 if (typeof globalThis.fetch === "function") {
-  globalThis.fetch = async (...args) => {
+  const guardedFetch = async (...args) => {
     const url = String(args[0]?.url ?? args[0]);
     if (
       telemetryLogPath &&
@@ -205,6 +205,15 @@ if (typeof globalThis.fetch === "function") {
     }
     return deny("fetch", args);
   };
+  // Some host bootstraps replace global fetch after NODE_OPTIONS preloads run.
+  // Keep the transport guard installed while allowing that host implementation
+  // to become the delegated implementation.
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    enumerable: true,
+    get: () => guardedFetch,
+    set: () => {},
+  });
 }
 
 if (typeof globalThis.WebSocket === "function") {

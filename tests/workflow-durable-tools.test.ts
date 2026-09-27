@@ -38,8 +38,29 @@ import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
 import { createTelemetrySession } from "../src/telemetry";
 
+const durableProcessControl = vi.hoisted(() => ({
+  markerFailure: undefined as Error | undefined,
+}));
+vi.mock("../src/workflow-durable-process", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../src/workflow-durable-process")
+  >();
+  return {
+    ...actual,
+    stopDurableProcessAttempts: async (directory: string) => {
+      if (durableProcessControl.markerFailure) {
+        const error = durableProcessControl.markerFailure;
+        durableProcessControl.markerFailure = undefined;
+        throw error;
+      }
+      return actual.stopDurableProcessAttempts(directory);
+    },
+  };
+});
+
 let root: string;
 beforeEach(async () => {
+  durableProcessControl.markerFailure = undefined;
   root = await mkdtemp(join(tmpdir(), "durable-tools-"));
 });
 afterEach(async () => {
@@ -722,6 +743,78 @@ describe("durable public tools", () => {
       ) * 100,
     );
     expect(JSON.stringify(lifecycle[1])).not.toContain(id);
+  });
+
+  it("keeps persisted cancellation retryable when an attempt marker fails", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
+    let started!: () => void;
+    const agentStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () =>
+        ({ signal }) =>
+          new Promise((_, reject) => {
+            started();
+            signal!.addEventListener(
+              "abort",
+              () => reject(new Error("interrupted")),
+              { once: true },
+            );
+          }),
+      () => true,
+      root,
+    );
+    const response = await api.run(
+      {
+        script:
+          'export const meta={name:"marker-failure",description:"d"}; return await agent("work", {id:"work",isolation:"in-process"});',
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const id = response.details.workflowId;
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted;
+    cleanupWorkflowJobsForOwner(sessionOwner(scope));
+    await expect(job.promise).rejects.toThrow();
+
+    durableProcessControl.markerFailure = new Error("marker write failed");
+    expect((await api.cancel(id, ctx)).isError).toBe(true);
+    let events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
+    expect(
+      payloads.filter((event) =>
+        event.event.endsWith("workflow_completed"),
+      ),
+    ).toEqual([]);
+
+    expect((await api.cancel(id, ctx)).details.status).toBe("cancelled");
+    events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(1);
+    expect(
+      payloads.filter((event) =>
+        event.event.endsWith("workflow_completed"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("restores unfinished mixed completion barriers before a durable aggregate", async () => {

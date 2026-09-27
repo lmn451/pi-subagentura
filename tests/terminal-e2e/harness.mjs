@@ -254,6 +254,7 @@ export class TerminalHarness {
     this.networkLog = join(this.root, "network.ndjson");
     this.telemetryLog = join(this.root, "telemetry.ndjson");
     this.captureTelemetry = false;
+    this.telemetryOptOut = false;
     this.diagnosticsDir =
       process.env.SUBAGENTURA_E2E_DIAGNOSTICS ?? join(this.root, "diagnostics");
     this.socket = `subagentura-e2e-${process.pid}-${Math.random().toString(16).slice(2)}`;
@@ -400,6 +401,7 @@ export class TerminalHarness {
       "--verbose",
       ...(!this.captureTelemetry ? ["--offline"] : []),
       ...(this.captureTelemetry ? ["--subagentura-telemetry"] : []),
+      ...(this.telemetryOptOut ? ["--no-subagentura-telemetry"] : []),
       "--approve",
       "--api-key",
       "subagentura-e2e-test-key",

@@ -560,6 +560,9 @@ export function registerDurableWorkflowTools(
             }>(event.data.value).stats?.errorCount ?? 0),
           0,
         );
+      // Persist cancellation requests before making cancellation terminal.
+      // A failed marker write must leave the run retryable and its child active.
+      await stopDurableProcessAttempts(store.directory);
       await store.append("cancelled", {
         status: "cancelled",
         completedAt,
@@ -586,9 +589,6 @@ export function registerDurableWorkflowTools(
           responseStats,
         );
       }
-      // A persistent cancel request is consumed by each exact attempt supervisor;
-      // never kill a potentially recycled mux pane ID recovered from old disk state.
-      await stopDurableProcessAttempts(store.directory);
       return {
         content: [
           {

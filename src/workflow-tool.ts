@@ -4,6 +4,7 @@ import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
 import {
   prepareDurableProcess,
   cancelDurableProcess,
+  stopDurableProcessAttempts,
 } from "./workflow-durable-process";
 import { abortableWait } from "./abortable-wait";
 import {
@@ -1446,11 +1447,15 @@ export function registerWorkflowTool(
           },
         };
       }
-      if (st.durable)
+      // A failed durable marker write must leave both the journal and the live
+      // cancellation signal untouched so the caller can retry safely.
+      if (st.durable) {
+        await stopDurableProcessAttempts(st.durable.store.directory);
         await st.durable.store.append("cancelled", {
           status: "cancelled",
           completedAt: Date.now(),
         });
+      }
       cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);
