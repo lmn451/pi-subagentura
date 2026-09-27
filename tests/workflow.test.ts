@@ -2650,8 +2650,9 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
     registerWorkflowTool(pi as any);
-    expect(tools).toHaveLength(10);
+    expect(tools).toHaveLength(11);
     expect(tools.map((t) => t.name)).toEqual([
+      "respond_workflow_input",
       "resume_workflow",
       "list_workflow_runs",
       "inspect_workflow",
@@ -2732,7 +2733,7 @@ describe("registerWorkflowTool", () => {
     expect(wf.description).toContain("immutable parent working directory");
     expect(wf.promptSnippet).toContain("decomposable multi-agent work");
     const guidance = wf.promptGuidelines.join("\n");
-    expect(guidance).toContain("raw JavaScript");
+    expect(guidance).toContain("raw defineWorkflow module");
     expect(guidance).toContain("Omit async");
     expect(guidance).toContain("top-level");
     expect(guidance).not.toContain("first statement");

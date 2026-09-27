@@ -705,7 +705,7 @@ export function registerWorkflowTool(
     description: [
       "Only use this tool when the user explicitly requests a workflow or the active CLI mode explicitly selects it.",
       "Without either, do not choose it automatically based on task suitability.",
-      "Run an agent-authored JavaScript workflow that deterministically orchestrates ISOLATED",
+      "Run an agent-authored TypeScript or JavaScript workflow that deterministically orchestrates ISOLATED",
       "sub-agents. Intermediate results live in script variables, not your context window — fan out",
       "dozens of sub-agents (review pipelines, research sweeps, migrations) without context pressure.",
       "Workflow scripts are trusted agent-authored code, not arbitrary user input;",
@@ -714,13 +714,23 @@ export function registerWorkflowTool(
       "In-process sub-agents cannot invoke this tool; this topology is unsupported",
       "until cross-registry cancellation is implemented (GitHub issue #62).",
       "",
-      "Script shape:",
+      "V4 shape (preferred for new workflows):",
+      "  import { defineWorkflow, schema } from 'pi-subagentura/workflow';",
+      "  export default defineWorkflow({ name: 'my-flow', version: 1, async run(ctx, args) {",
+      "    return ctx.agent('review', { prompt: 'Review the change', output: schema.object({ ok: schema.boolean() }) });",
+      "  } });",
+      "V4 ctx exposes step, agent, group, named-object parallel, map, streaming pipeline, repeat, workflow, ask, gate, checkpoint, artifact, log, budget, and signal.",
+      "Use stable explicit step IDs and item keys; repeat requires maxIterations. Steps throw failures by default; collection policies return typed TaskResult errors. Agent output uses the supported schema subset.",
+      "V4 definitions are durable by default and can resume in a new Pi session in the same cwd. respond_workflow_input asks the human to answer waiting questions or approvals. async:false collects input directly through Pi UI.",
+      "Erasable TypeScript and named imports of defineWorkflow/schema from pi-subagentura/workflow are supported; other runtime imports and dynamic imports are rejected.",
+      "",
+      "Legacy script shape:",
       "  export const meta = { name: 'my-flow', description: '...', phases: [{ title: 'Scan' }] };",
       "  phase('Scan');",
       "  const out = await parallel([() => agent('task A'), () => agent('task B')]);",
       "  return out;",
       "",
-      "Injected helpers/globals:",
+      "Legacy injected helpers/globals:",
       "  agent(prompt, opts?)   -> spawn one isolated sub-agent. opts: { schema?, label?, phase?,",
       "                            model?, persona?, isolation?, agentType? (compatibility no-op), thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
       "                            with schema returns a value validated against the supported JSON Schema",
@@ -750,11 +760,11 @@ export function registerWorkflowTool(
     promptGuidelines: [
       "Use workflows for repeatable multi-agent work, including sequential pipelines; handle simple one-off tasks directly.",
       "A vague workflow request means suggest a reusable script and confirm before saving/running; explicit /workflow creation or run requests authorize that action.",
-      "Durability is opt-in with durable:true. Durable calls need unique stable id options on agent() and workflow(); include item keys and retry attempt numbers. Resume interrupted runs explicitly with resume_workflow.",
+      "V4 definitions are durable by default. Legacy durability is opt-in with durable:true and requires unique stable id options on agent() and workflow(). Resume interrupted runs explicitly with resume_workflow.",
       "Omit async for the default background behavior; use async: false only when synchronous execution is required.",
-      "Pass raw JavaScript with no markdown fences. Include a top-level pure-literal `export const meta = { name, description, phases? }`.",
-      "Do not use TypeScript, imports, require, fs, or other Node APIs. Date.now(), Math.random(), and argless new Date() are unavailable.",
-      "Available globals are agent, parallel, pipeline, retry, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
+      "For new workflows pass a raw defineWorkflow module with no markdown fences. Legacy scripts may use top-level pure-literal `export const meta = { name, description, phases? }`.",
+      "Use erasable TypeScript with only the pi-subagentura/workflow SDK import. Do not use require, fs, other Node APIs, or dynamic imports. Date.now(), Math.random(), and argless new Date() are unavailable.",
+      "V4 orchestration uses ctx; legacy globals are agent, parallel, pipeline, retry, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
       "retry(work, {attempts:3, retryOnNull:true}) explicitly repeats thrown/null failures with a one-based attempt argument (1–10 attempts). Agent schema repair separately uses up to three total attempts. Side effects may repeat.",
       "Call phase(title) at real work-group transitions. Agent phase defaults to the current phase; an explicit agent phase overrides it.",
       "parallel() takes thunks such as `() => agent(...)`; pipeline() streams each item through every stage independently, with no barrier between stages.",
@@ -769,13 +779,13 @@ export function registerWorkflowTool(
       durable: Type.Optional(
         Type.Boolean({
           description:
-            "Persist this run for explicit restart recovery in the same host/cwd/Pi session. Requires stable operation ids; not exactly-once side effects or an always-on coordinator.",
+            "Persist this run for explicit restart recovery in the same host/cwd. Defaults true for v4 definitions; legacy runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
         }),
       ),
       script: Type.Optional(
         Type.String({
           description:
-            "The workflow script (export const meta + top-level body). Omit if using `name`.",
+            "A defineWorkflow TypeScript/JavaScript module or legacy export const meta + top-level body. Omit if using name.",
         }),
       ),
       name: Type.Optional(
@@ -905,6 +915,26 @@ export function registerWorkflowTool(
         return {
           content: [{ type: "text", text: `Workflow not run: ${why}.` }],
           details: { status: "error", error: why },
+          isError: true,
+        };
+      }
+
+      try {
+        if (
+          parseWorkflow(script).format === "definition" &&
+          params.durable !== false
+        )
+          return durableTools.run(
+            { ...params, script, durable: true },
+            signal,
+            onUpdate,
+            ctx,
+          );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: `Workflow not run: ${message}` }],
+          details: { status: "error", error: message },
           isError: true,
         };
       }
@@ -1176,6 +1206,12 @@ export function registerWorkflowTool(
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
       const usage = presentWorkflowUsage(st.snapshot.usage);
       const liveUsage = presentWorkflowUsage(st.snapshot.liveUsage);
+      const waiting =
+        st.status === "running"
+          ? (st.snapshot.steps?.filter(
+              (step) => step.status === "waiting_for_input",
+            ) ?? [])
+          : [];
       return {
         content: [
           {
@@ -1197,7 +1233,11 @@ export function registerWorkflowTool(
           },
         ],
         details: {
-          status: st.status,
+          status:
+            st.status === "running" && waiting.length
+              ? "waiting_for_input"
+              : st.status,
+          waiting,
           presentationStatus: presentation.label,
           workflowId: st.id,
           name: st.name,
@@ -1971,17 +2011,17 @@ export function registerWorkflowTool(
     return [
       "You are handling the `/workflow <task>` command.",
       "",
-      "Create a reusable JavaScript workflow for the user's task, save it, and run it immediately.",
+      "Create a reusable TypeScript v4 workflow for the user's task, save it, and run it immediately.",
       "",
       "Requirements:",
-      "1. Design a bounded workflow script with `export const meta = { name, description, phases }`.",
+      "1. Import defineWorkflow/schema from pi-subagentura/workflow and export default defineWorkflow({ name, version: 1, description, input, output, async run(ctx, args) { ... } }).",
       "2. The workflow should accept its task/config through `args` so it can be reused later.",
-      "3. Give every agent() and nested workflow() call a unique stable `id` option. Derive repeated IDs from stable item keys and retry attempt numbers. Use literal saved names for nested workflows.",
+      "3. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow with stable step IDs and item keys; repeat requires a hard iteration cap. Use literal saved names for nested workflows and handle TaskResult values when collecting failures.",
       "4. Save the script with `save_workflow` using a lowercase slug name and `requireDurable: true`; fix validation errors before proceeding.",
       "5. Immediately start it with the `workflow` tool by saved `name`, suitable `args`, `durable: true`, and `async: true`. Do not silently fall back to a session-scoped run.",
       "6. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
       "7. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
-      "8. Report the saved workflow name and returned workflowId. Explain that recovery is manual in the same Pi session and cwd; execution requires Pi to be running.",
+      "8. Report the saved workflow name and returned workflowId. Explain that recovery is manual in the same cwd, including new Pi sessions; execution requires Pi to be running. Human gates wait for respond_workflow_input.",
       "",
       "User task:",
       task,

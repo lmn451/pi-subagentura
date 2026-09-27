@@ -260,6 +260,7 @@ export interface WorkflowJobState {
   promise: Promise<WorkflowRunResultWithUsage>;
   abort: AbortController;
   snapshot: {
+    steps?: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>;
     agentsSpawned: number;
     errorCount: number;
     cancelledCount?: number;
@@ -395,7 +396,7 @@ export function cleanupWorkflowJobsForOwner(
     if (
       job.durable &&
       job.status === "running" &&
-      terminalReason !== "fresh_session"
+      (terminalReason !== "fresh_session" || job.durable.stepBased)
     ) {
       job.durableInterrupted = true;
       job.abort.abort({ source: "durable_interrupt" });
@@ -608,6 +609,10 @@ export function startWorkflowJob(
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
   state.promise = runWorkflow(script, {
     ...opts,
+    onStep: (steps) => {
+      state.snapshot.steps = steps;
+      opts.onStep?.(steps);
+    },
     runAgent: (request) =>
       runTrackedWorkflowAgent(state, opts.runAgent, request),
     signal: abort.signal,
@@ -664,6 +669,7 @@ export function startWorkflowJob(
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      else normalizeTerminalWorkflowSteps(state, "done");
       emitWorkflowCompletedTelemetry(state, r);
       invokeWorkflowCompletionHook(state);
       return r;
@@ -706,7 +712,11 @@ export function startWorkflowJob(
       }
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
-      if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      if (!state.durableInterrupted) {
+        if (state.status === "cancelled")
+          normalizeCancelledWorkflowState(state);
+        else normalizeTerminalWorkflowSteps(state, "error");
+      }
       if (!state.durableInterrupted)
         emitWorkflowCompletedTelemetry(state, undefined);
       invokeWorkflowCompletionHook(state);
@@ -808,6 +818,24 @@ export function normalizeCancelledWorkflowState(state: WorkflowJobState): void {
   for (const record of state.snapshot.agentRecords ?? []) {
     if (record.status === "running") record.status = "cancelled";
   }
+  normalizeTerminalWorkflowSteps(state, "cancelled");
+}
+
+function normalizeTerminalWorkflowSteps(
+  state: WorkflowJobState,
+  status: "cancelled" | "error" | "done",
+): void {
+  const retiredStatus =
+    status === "cancelled"
+      ? "cancelled"
+      : status === "error"
+        ? "failed"
+        : "skipped";
+  state.snapshot.steps = state.snapshot.steps?.map((step) =>
+    ["waiting_for_input", "running", "pending"].includes(step.status)
+      ? { ...step, status: retiredStatus }
+      : step,
+  ) as WorkflowJobState["snapshot"]["steps"];
 }
 
 /** Count running workflow jobs (status === "running"). */

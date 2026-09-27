@@ -527,6 +527,10 @@ export class WorkflowWallTimeoutError extends Error {
 }
 
 export interface RunWorkflowOptions {
+  requestInput?: (request: unknown, signal?: AbortSignal) => Promise<unknown>;
+  onStep?: (
+    steps: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>,
+  ) => void;
   /** Internal opt-in durable transcript; plain calls remain session-scoped. */
   durable?: import("./workflow-durable").DurableWorkflow;
   args?: unknown;
@@ -871,7 +875,7 @@ export function saveWorkflowScript(
   options: { requireDurable?: boolean } = {},
 ): string {
   const safe = sanitizeWorkflowName(name);
-  parseWorkflow(script); // validate before persisting
+  const parsed = parseWorkflow(script); // validate before persisting
   if (options.requireDurable) {
     const inspection = inspectSavedWorkflow(script, dir);
     if (!inspection.durableReady)
@@ -880,8 +884,20 @@ export function saveWorkflowScript(
       );
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = join(dir, `${safe}.js`);
+  const file = join(
+    dir,
+    `${safe}.${parsed.format === "definition" ? "ts" : "js"}`,
+  );
   writeFileSync(file, script, { encoding: "utf8", mode: 0o600 });
+  const replaced = join(
+    dir,
+    `${safe}.${parsed.format === "definition" ? "js" : "ts"}`,
+  );
+  try {
+    unlinkSync(replaced);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   return file;
 }
 
@@ -895,7 +911,8 @@ export function loadWorkflowScript(
   } catch {
     return null;
   }
-  const file = join(dir, `${safe}.js`);
+  const typed = join(dir, `${safe}.ts`);
+  const file = existsSync(typed) ? typed : join(dir, `${safe}.js`);
   if (!existsSync(file)) return null;
   try {
     return readFileSync(file, "utf8");
@@ -934,9 +951,14 @@ export function listSavedWorkflows(
 ): SavedWorkflowSummary[] {
   if (!existsSync(dir)) return [];
   const out: SavedWorkflowSummary[] = [];
-  for (const entry of readdirSync(dir)) {
-    const m = /^(.+)\.js$/.exec(entry);
+  const seen = new Set<string>();
+  for (const entry of readdirSync(dir).sort(
+    (a, b) => Number(b.endsWith(".ts")) - Number(a.endsWith(".ts")),
+  )) {
+    const m = /^(.+)\.(?:js|ts)$/.exec(entry);
     if (!m) continue;
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
     let description = "";
     let durableReady = false;
     let definitionDigest: string | undefined;
@@ -957,12 +979,14 @@ export function deleteWorkflowScript(
   dir = WORKFLOWS_DIR,
 ): boolean {
   const safe = sanitizeWorkflowName(name);
-  const file = join(dir, `${safe}.js`);
-  try {
-    unlinkSync(file);
-    return true;
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return false;
-    throw err;
+  let removed = false;
+  for (const extension of ["ts", "js"]) {
+    try {
+      unlinkSync(join(dir, `${safe}.${extension}`));
+      removed = true;
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+    }
   }
+  return removed;
 }

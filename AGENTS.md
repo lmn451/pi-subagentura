@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 0.80.6. CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `is-path-inside`, and `ndjson`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 24.12.0, Pi SDK ≥ 0.80.6. CI verifies Node 24/26 and both the minimum and latest published Pi SDKs. V4 workflow definitions use a private, exactly pinned Effect v4 runtime; Effect types do not enter the public SDK.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `effect`, `is-path-inside`, and `ndjson`. Effect v4 is pinned and loaded only inside v4 workflow workers. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
@@ -210,7 +210,7 @@ exists only to drain persisted pre-coordinator state and support internal tests.
 
 ### Background workflows are parent-session scoped
 
-This section describes the compatibility default. Opt-in `durable:true` code
+This section describes legacy workflows. Opt-in `durable:true` code
 workflows use `workflow-run-store.ts` and `workflow-durable.ts`: immutable root
 inputs/settings, fsynced request/response transcripts, stable operation ids,
 explicit same-session recovery, and one-use process attempt wrappers. See
@@ -220,8 +220,22 @@ generations. Replay divergence must terminate the host worker, not become a
 catchable script error. Persisted mux pane ids alone never authorize cancellation.
 Durable aggregate notices use the existing completion coordinator and unfinished
 mixed-source group barriers; do not add another notification scheduler. Saving
-a script or running asynchronously without `durable:true` changes none of the
-session-scoped behavior below.
+a legacy script or running it asynchronously without `durable:true` changes none
+of the session-scoped behavior below.
+
+V4 `defineWorkflow` modules default to project-scoped durability, with explicit
+`durable:false` available. Their worker/controller is still retired on every
+parent shutdown, including `new`/`fork`, but their step journal and artifacts
+remain available for explicit resume from a new session in the same cwd. Never
+reuse a prior session's runner closure or completion group. V4 step identity
+includes the stable path, original definition, input, policy, and execution
+generation; completed reusable values must bypass agent dispatch. Disabled
+caching starts a fresh execution identity. Human input is private durable data
+collected through Pi UI only; local step abort must dismiss the dialog and clear
+its pending RPC without preventing the failure record from being persisted.
+The workflow watchdog excludes time waiting for human input. Ordinary custom
+callbacks can repeat side effects after interruption and must be idempotent.
+The public SDK remains Promise/TypeScript based; Effect stays internal.
 
 Background workflow jobs and in-process async sub-agent jobs do **not** survive
 parent session replacement. On every `session_shutdown` reason (`reload`,

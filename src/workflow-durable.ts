@@ -1,4 +1,5 @@
 import type { SubagentResult } from "./helpers";
+import { parseWorkflow } from "./workflow-script";
 import {
   MAX_TOTAL_AGENTS,
   addWorkflowUsage,
@@ -46,6 +47,7 @@ export class WorkflowReplayError extends WorkflowPersistenceError {
 
 /** One transcript across root and nested scripts; no per-branch replay lanes. */
 export class DurableWorkflow {
+  readonly stepBased: boolean;
   readonly definition: any;
   readonly replaying: boolean;
   private requests: any[];
@@ -75,13 +77,18 @@ export class DurableWorkflow {
 
   constructor(readonly store: WorkflowRunStore) {
     this.definition = store.events[0].data;
+    this.stepBased =
+      parseWorkflow(this.definition.script).format === "definition";
     this.requests = store.events
       .filter((e) => e.kind === "request")
       .map((e) => e.data);
     this.responses = store.events
       .filter((e) => e.kind === "response")
       .map((e) => e.data);
-    this.replaying = this.requests.length > 0;
+    this.replaying =
+      this.requests.length > 0 ||
+      (this.stepBased &&
+        store.events.some((event) => event.kind === "accepted"));
     this.priorErrorCount = this.responses.reduce(
       (total, row) =>
         total +
@@ -255,7 +262,7 @@ export class DurableWorkflow {
   }
 
   async runAttempt(
-    requestId: number,
+    requestId: number | string,
     attempt: number,
     request: Parameters<WorkflowAgentRunner>[0],
     run: WorkflowAgentRunner,
@@ -380,6 +387,25 @@ export class DurableWorkflow {
 
   result(result: WorkflowRunResultWithUsage): WorkflowRunResultWithUsage {
     const usage = this.usage();
+    if (this.stepBased) {
+      let errors = 0;
+      let cancelled = 0;
+      for (const outcome of this.attemptOutcomes.values()) {
+        const value = outcome.ok
+          ? decodeRunValue<SubagentResult>(outcome.value)
+          : undefined;
+        if (value?.cancelled) cancelled++;
+        else if (!outcome.ok || value?.isError) errors++;
+      }
+      return {
+        ...result,
+        usage,
+        tokensSpent: usage.output,
+        errorCount: Math.max(result.errorCount, errors),
+        cancelledCount: Math.max(result.cancelledCount ?? 0, cancelled),
+        agentsSpawned: this.agentsSpawned,
+      };
+    }
     let errorCount = 0;
     let cancelledCount = 0;
     let failure = result.failure;
