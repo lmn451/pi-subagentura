@@ -17,10 +17,10 @@ for clarification when a request is ambiguous or a narrow request has no matchin
 child, and leave specialist repository work to those children. Compatibility
 workflow and in-process tools remain registered.
 
-For reusable workflows, start Pi with the bundled orchestration guidance and
-describe the outcome you want. The parent can turn that request into a saved
-workflow, run its agents in the background, and keep their intermediate results
-out of the parent context.
+To opt into reusable workflow orchestration, start Pi with the workflow-oriented
+`--orchestrator` mode or explicitly ask for a workflow (for example, with
+`/workflow`). General tasks are not routed to the workflow tool automatically
+when no workflow mode is selected and the user has not asked for one.
 
 ## Demo
 
@@ -478,7 +478,10 @@ Snapshots use schema version 1, temp-file + rename writes, deterministic per-ses
 
 ### `subagent_with_context`
 
-Starts a sub-agent with the current conversation history included in its prompt.
+Starts a sub-agent with the parent conversation included in its prompt. When the
+installed Pi SDK exposes the canonical session projection, that projection is
+used (including omission and replacement edits); older supported SDKs fall back
+to their message entries.
 
 Parameters:
 
@@ -614,7 +617,7 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — context mode selector: `true` serializes the full parent branch; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `includeContext` — context mode selector: `true` serializes the canonical parent session projection when available (including omission and replacement edits), with a message-entry fallback on older supported SDKs; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`

@@ -30,6 +30,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
 
+## [3.6.4] - 2026-10-03
+
+### Changed
+
+- Clarified provider and model selection guidance across sub-agent tools.
+
+### Fixed
+
+- Require explicit opt-in before workflows are selected by the orchestrator.
+- Distinguish Orchestratorv2 footer status from other interactive sub-agents.
+
+## [3.6.3] - 2026-09-24
+
+### Added
+
+- Added bounded diagnostics for interactive sub-agent processes that exit
+  before completing a turn.
+
+### Fixed
+
+- Corrected opt-in parent context inheritance to use Pi's canonical session
+  projection when available, preserve omission and replacement edits, and fall
+  back on older supported SDKs.
+
 ## [3.6.2] - 2026-09-06
 
 ### Added

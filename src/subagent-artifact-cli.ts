@@ -19,7 +19,15 @@
  * Exit codes: 0 on success, 2 on usage error (missing env var / unknown cmd).
  */
 
-import { MAX_EVENT_TEXT_LENGTH, MAX_OUTPUT_SNAPSHOT_BYTES } from "./artifact";
+import {
+  MAX_ACTIVE_TOOL_ID_LENGTH,
+  MAX_ACTIVE_TOOL_RECORDS,
+  MAX_ACTIVE_TURN_BYTES,
+  MAX_EVENT_TEXT_LENGTH,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
+  MAX_TOOL_NAME_LENGTH,
+  MAX_TURN_ID_LENGTH,
+} from "./artifact";
 
 /**
  * The body of the CLI as a string, written verbatim to
@@ -59,8 +67,21 @@ const statusFile = join(dir, "events.ndjson");
 const activeTurnFile = join(dir, "active-turn.json");
 const MAX_OUTPUT_SNAPSHOT_BYTES = ${MAX_OUTPUT_SNAPSHOT_BYTES};
 const MAX_EVENT_TEXT_LENGTH = ${MAX_EVENT_TEXT_LENGTH};
+const MAX_ACTIVE_TURN_BYTES = ${MAX_ACTIVE_TURN_BYTES};
+const MAX_ACTIVE_TOOL_RECORDS = ${MAX_ACTIVE_TOOL_RECORDS};
+const MAX_ACTIVE_TOOL_ID_LENGTH = ${MAX_ACTIVE_TOOL_ID_LENGTH};
+const MAX_TOOL_NAME_LENGTH = ${MAX_TOOL_NAME_LENGTH};
+const MAX_TURN_ID_LENGTH = ${MAX_TURN_ID_LENGTH};
 const boundedOptionalEventText = (value) =>
   typeof value === "string" ? value.slice(0, MAX_EVENT_TEXT_LENGTH) : undefined;
+const SAFE_METADATA_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const boundedMetadataIdentifier = (value, maxLength) =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= maxLength &&
+  SAFE_METADATA_PATTERN.test(value)
+    ? value
+    : undefined;
 
 const cmd = process.argv[2];
 const arg = process.argv[3];
@@ -77,15 +98,57 @@ const readEvents = () => {
     return [];
   }
 };
-const activeTurn = () => {
+const normalizeActiveTool = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const name = boundedMetadataIdentifier(value.name, MAX_TOOL_NAME_LENGTH);
+  const callId = boundedMetadataIdentifier(value.callId, MAX_ACTIVE_TOOL_ID_LENGTH);
+  if (!name || !Number.isSafeInteger(value.startedAt) || value.startedAt < 0) return null;
+  return { name, ...(callId ? { callId } : {}), startedAt: value.startedAt };
+};
+const activeTurnMetadata = () => {
+  let fd;
   try {
-    const value = JSON.parse(readFileSync(activeTurnFile, "utf8"));
-    return typeof value.turnId === "string" ? value.turnId : null;
+    fd = openSync(activeTurnFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > MAX_ACTIVE_TURN_BYTES) return null;
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < metadata.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        metadata.size - offset,
+        offset,
+      );
+      if (bytesRead <= 0) return null;
+      offset += bytesRead;
+    }
+    const value = JSON.parse(buffer.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const turnId = boundedMetadataIdentifier(value.turnId, MAX_TURN_ID_LENGTH);
+    if (!turnId) return null;
+    if (Array.isArray(value.activeTools) && value.activeTools.length > MAX_ACTIVE_TOOL_RECORDS) return null;
+    const activeTools = Array.isArray(value.activeTools)
+      ? value.activeTools.map(normalizeActiveTool).filter(Boolean)
+      : [];
+    const lastTool = boundedMetadataIdentifier(value.lastTool, MAX_TOOL_NAME_LENGTH);
+    return {
+      turnId,
+      started: value.started === true,
+      activeTools,
+      ...(lastTool ? { lastTool } : {}),
+    };
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* bounded metadata is no longer usable */ }
+    }
   }
 };
-const turnId = activeTurn() ?? "process";
+const activeState = activeTurnMetadata();
+const turnId = activeState?.turnId ?? "process";
 const lockKey = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
 const completionLock = join(dir, ".completion-" + lockKey + ".lock");
 const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
@@ -120,6 +183,69 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
+const signalNames = [
+  undefined,
+  "SIGHUP",
+  "SIGINT",
+  "SIGQUIT",
+  "SIGILL",
+  "SIGTRAP",
+  "SIGABRT",
+  "SIGBUS",
+  "SIGFPE",
+  "SIGKILL",
+  "SIGUSR1",
+  "SIGSEGV",
+  "SIGUSR2",
+  "SIGPIPE",
+  "SIGALRM",
+  "SIGTERM",
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGSTOP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGURG",
+  "SIGXCPU",
+  "SIGXFSZ",
+  "SIGVTALRM",
+  "SIGPROF",
+  "SIGWINCH",
+  "SIGIO",
+  "SIGPWR",
+  "SIGSYS",
+  ];
+const signalForExitCode = (exitCode) => {
+  const signalNumber = exitCode - 128;
+  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
+    ? signalNames[signalNumber]
+    : undefined;
+};
+const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {
+  const activeTool = activeState?.activeTools?.at(-1);
+  const signal = signalForExitCode(exitCode);
+  const terminationReason = alreadyCompleted
+    ? "normal_exit"
+    : cancelled
+      ? "cancelled"
+      : activeTool
+        ? "active_tool"
+        : activeState?.started
+          ? "active_turn"
+          : signal
+            ? "signal"
+            : exitCode === 0
+              ? "unknown"
+              : "nonzero_exit";
+  return {
+    terminationReason,
+    ...(signal ? { signal } : {}),
+    ...(!alreadyCompleted && (activeTool?.name ?? activeState?.lastTool)
+      ? { lastTool: activeTool?.name ?? activeState?.lastTool }
+      : {}),
+  };
+};
 const snapshot = (eventId) => {
   const source = join(dir, "output.md");
   let fd;
@@ -212,7 +338,13 @@ switch (cmd) {
   case "process-exit": {
     const exitCode = Number(arg ?? 0);
     const cancelled = existsSync(join(dir, ".cancelled"));
-    if (!completed()) {
+    const alreadyCompleted = completed();
+    const diagnostics = processExitDiagnostics(
+      exitCode,
+      cancelled,
+      alreadyCompleted,
+    );
+    if (!alreadyCompleted) {
       completion(cancelled ? "cancelled" : "error", "process_exit", {
         exitCode,
         ...(!cancelled ? { message: "sub-agent process exited before turn completion" } : {}),
@@ -226,6 +358,7 @@ switch (cmd) {
       type: "process_exited",
       status: cancelled ? "cancelled" : exitCode === 0 ? "done" : "error",
       exitCode,
+      ...diagnostics,
     });
     break;
   }

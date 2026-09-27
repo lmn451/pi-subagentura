@@ -174,6 +174,21 @@ describe("subagent_interactive tool lifecycle", () => {
     mockLaunchInteractiveSubagent.mockReturnValue(mockInteractiveState());
   });
 
+  it("describes provider-aware model selection", () => {
+    const tool = getInteractiveToolDef(api);
+    const modelDescription = tool.parameters.properties.model.description;
+    const rules = [
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+    ];
+
+    for (const rule of rules) {
+      expect(tool.description).toContain(rule);
+      expect(modelDescription).toContain(rule);
+    }
+  });
+
   afterEach(() => {
     interactiveSubagentRegistry.clear();
     clearSessionScopes();
@@ -406,6 +421,61 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(contextText).not.toContain(
       "EXPLICIT-CONTEXT-MUST-NOT-BE-CONCATENATED",
     );
+  });
+
+  it("uses the projected parent messages after a context replacement", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: "message",
+        message: { role: "user", content: "RAW-ORIGINAL" },
+      },
+    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({
+      messages: [{ role: "user", content: "EDITED-REPLACEMENT" }],
+    });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
+
+    await toolDef.execute(
+      "call-replaced-parent-context",
+      { task: "research X", includeContext: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
+      .contextText as string;
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(contextText).toContain("EDITED-REPLACEMENT");
+    expect(contextText).not.toContain("RAW-ORIGINAL");
+  });
+
+  it("does not inherit a parent message omitted by the session projection", async () => {
+    const toolDef = getInteractiveToolDef(api);
+    const ctx = mockCtx();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: "message",
+        message: { role: "user", content: "RAW-OMITTED" },
+      },
+    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({ messages: [] });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
+
+    await toolDef.execute(
+      "call-omitted-parent-context",
+      { task: "research X", includeContext: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
+      .contextText as string;
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(contextText).not.toContain("RAW-OMITTED");
   });
 
   it("persists initial routing metadata only after a successful spawn", async () => {
@@ -811,7 +881,7 @@ describe("subagent_interactive tool lifecycle", () => {
 
       expect(ctx.ui.setStatus).toHaveBeenCalledWith(
         "subagentura-running",
-        "⚡ 1 sub-agent alive · 1 working · orchestrator",
+        `⚡ 1 sub-agent alive · 1 working · ${flag}`,
       );
     },
   );
