@@ -28,6 +28,7 @@ import { encodeRunValue, WorkflowRunStore } from "../src/workflow-run-store";
 import { restoreDurableWorkflowRuns } from "../src/workflow-durable-tools";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+import { registerWorkflowTool } from "../src/workflow-tool";
 
 const durableProcessControl = vi.hoisted(() => ({
   stop: undefined as ((directory: string) => Promise<void>) | undefined,
@@ -53,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  durableProcessControl.stop = undefined;
   for (const owner of owners.splice(0)) cleanupWorkflowJobsForOwner(owner);
   for (const job of workflowJobRegistry.values()) job.abort.abort();
   await Promise.allSettled(
@@ -142,6 +144,167 @@ async function executeTool(
 }
 
 describe("v4 workflow public tools", () => {
+  it("keeps cancellation retryable after marker persistence fails", async () => {
+    const current = setup(1, "cancel-retry-owner");
+    let agentStarted!: () => void;
+    const started = new Promise<void>((resolve) => (agentStarted = resolve));
+    const runner: WorkflowAgentRunner = ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        agentStarted();
+        signal?.addEventListener(
+          "abort",
+          () => reject(signal.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    const api = register(current, runner);
+    const startedRun = await api.run(
+      {
+        script: definition(
+          "cancel-retry",
+          'await ctx.agent("wait", { prompt: "wait", id: "wait" }); return true;',
+        ),
+        async: true,
+      },
+      undefined,
+      undefined,
+      current.ctx,
+    );
+    const workflowId = startedRun.details.workflowId;
+    const job = workflowJobRegistry.get(workflowId)!;
+    await started;
+    const attemptsDirectory = join(job.durable!.store.directory, "attempts");
+    await mkdir(attemptsDirectory, { recursive: true });
+    const attemptManifest = join(attemptsDirectory, "1-1.json");
+    await writeFile(attemptManifest, "{}");
+
+    const resume = current.tools.get("resume_workflow");
+    registerWorkflowTool(current.pi, current.scope);
+    durableProcessControl.stop = async () => {
+      throw new Error("marker persistence unavailable");
+    };
+    const failed = await executeTool(
+      current.tools,
+      "cancel_workflow",
+      { workflowId },
+      current.ctx,
+    );
+    expect(failed.isError).toBe(true);
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(
+      job.durable?.store.events.some((event) => event.kind === "cancelled"),
+    ).toBe(false);
+
+    try {
+      durableProcessControl.stop = undefined;
+      const retried = await executeTool(
+        current.tools,
+        "cancel_workflow",
+        { workflowId },
+        current.ctx,
+      );
+      expect(retried.details).toMatchObject({
+        status: "cancelled",
+        cancelled: true,
+      });
+      await access(`${attemptManifest}.cancel`);
+      await expect(job.promise).rejects.toThrow();
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        workflowId,
+      );
+      expect(events?.some((event) => event.kind === "cancelled")).toBe(true);
+
+      const rejected = await resume.execute(
+        "resume",
+        { workflowId, async: true },
+        undefined,
+        undefined,
+        current.ctx,
+      );
+      expect(rejected.isError).toBe(true);
+      expect(rejected.details.error).toMatch(/already terminal/i);
+    } finally {
+      durableProcessControl.stop = undefined;
+    }
+  });
+
+  it("reports completion when a run finishes during marker persistence", async () => {
+    const current = setup(1, "cancel-race-owner");
+    let agentStarted!: () => void;
+    let finishAgent!: () => void;
+    const started = new Promise<void>((resolve) => (agentStarted = resolve));
+    const waitForFinish = new Promise<void>(
+      (resolve) => (finishAgent = resolve),
+    );
+    const runner: WorkflowAgentRunner = async () => {
+      agentStarted();
+      await waitForFinish;
+      return {
+        isError: false,
+        output: "finished",
+        usage: zeroUsage(),
+      };
+    };
+    const api = register(current, runner);
+    const startedRun = await api.run(
+      {
+        script: definition(
+          "cancel-race",
+          'await ctx.agent("wait", { prompt: "wait", id: "wait" }); return true;',
+        ),
+        async: true,
+      },
+      undefined,
+      undefined,
+      current.ctx,
+    );
+    const workflowId = startedRun.details.workflowId;
+    const job = workflowJobRegistry.get(workflowId)!;
+    await started;
+
+    registerWorkflowTool(current.pi, current.scope);
+    let resolveMarkerStarted!: () => void;
+    let releaseMarker!: () => void;
+    const markerStarted = new Promise<void>((resolve) => {
+      resolveMarkerStarted = resolve;
+    });
+    const markerRelease = new Promise<void>((resolve) => {
+      releaseMarker = resolve;
+    });
+    let markerCalls = 0;
+    durableProcessControl.stop = async () => {
+      markerCalls++;
+      if (markerCalls === 1) {
+        resolveMarkerStarted();
+        await markerRelease;
+      }
+    };
+    const cancelPromise = executeTool(
+      current.tools,
+      "cancel_workflow",
+      { workflowId },
+      current.ctx,
+    );
+    try {
+      await markerStarted;
+      finishAgent();
+      await expect(job.promise).resolves.toMatchObject({ result: true });
+      releaseMarker();
+      const response = await cancelPromise;
+      expect(response.details).toMatchObject({
+        status: "done",
+        cancelled: false,
+      });
+      expect(job.abort.signal.aborted).toBe(false);
+    } finally {
+      finishAgent();
+      releaseMarker();
+      durableProcessControl.stop = undefined;
+    }
+  });
+
   it("recovers only project terminal notices owned by this parent once", async () => {
     const current = setup(1, "recovery-owner");
     const notify = vi.fn();
