@@ -33,6 +33,34 @@ function deniedEvent(source: string) {
 }
 
 describe("terminal E2E network guard scope", () => {
+  it("captures opted-in PostHog fetches without opening the network", () => {
+    const root = mkdtempSync(join(tmpdir(), "telemetry-capture-contract-"));
+    const log = join(root, "telemetry.ndjson");
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          "--eval",
+          `fetch("https://us.i.posthog.com/i/v0/e/", { method: "POST", body: JSON.stringify({ event: "pi_subagentura_workflow_started" }) })`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NODE_OPTIONS: `--require=${preload}`,
+            SUBAGENTURA_E2E_TELEMETRY_LOG: log,
+          },
+          stdio: "ignore",
+          timeout: 5_000,
+        },
+      );
+      expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({
+        event: "pi_subagentura_workflow_started",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("labels positional loopback connect as local", () => {
     expect(
       deniedEvent('require("node:net").connect(443, "127.0.0.1")'),

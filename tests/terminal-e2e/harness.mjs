@@ -252,6 +252,8 @@ export class TerminalHarness {
     this.wrapperBin = join(this.root, "bin");
     this.providerLog = join(this.root, "provider.ndjson");
     this.networkLog = join(this.root, "network.ndjson");
+    this.telemetryLog = join(this.root, "telemetry.ndjson");
+    this.captureTelemetry = false;
     this.diagnosticsDir =
       process.env.SUBAGENTURA_E2E_DIAGNOSTICS ?? join(this.root, "diagnostics");
     this.socket = `subagentura-e2e-${process.pid}-${Math.random().toString(16).slice(2)}`;
@@ -288,6 +290,15 @@ export class TerminalHarness {
       }),
       { mode: 0o600 },
     );
+    if (this.captureTelemetry) {
+      const settingsDirectory = join(this.workspace, ".pi");
+      mkdirSync(settingsDirectory, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(settingsDirectory, "settings-extensions.json"),
+        JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+        { mode: 0o600 },
+      );
+    }
     const wrapper = join(this.wrapperBin, "pi");
     cpSync(join(HERE, "fixtures/pi-child-wrapper.sh"), wrapper);
     chmodSync(wrapper, 0o700);
@@ -312,13 +323,17 @@ export class TerminalHarness {
       HOME: this.home,
       PATH: safePath,
       TERM: "xterm-256color",
-      PI_OFFLINE: "1",
+      PI_OFFLINE: this.captureTelemetry ? "0" : "1",
+      ...(this.captureTelemetry ? { PI_SUBAGENTURA_TELEMETRY: "1" } : {}),
       PI_CODING_AGENT_DIR: this.agentDir,
       PI_CODING_AGENT_SESSION_DIR: this.sessionDir,
       PI_SUBAGENTURA_TMUX_SOCKET: this.socket,
       SUBAGENTURA_E2E_GATE_DIR: this.gates,
       SUBAGENTURA_E2E_LOG: this.providerLog,
       SUBAGENTURA_E2E_NETWORK_LOG: this.networkLog,
+      ...(this.captureTelemetry
+        ? { SUBAGENTURA_E2E_TELEMETRY_LOG: this.telemetryLog }
+        : {}),
       SUBAGENTURA_E2E_REPO: REPO,
       SUBAGENTURA_E2E_API_KEY: "subagentura-e2e-test-key",
       SUBAGENTURA_E2E_REAL_PI: resolvePi(),
@@ -383,7 +398,8 @@ export class TerminalHarness {
       pi,
       // Keep the startup resource list visible when CI enables quiet startup.
       "--verbose",
-      "--offline",
+      ...(!this.captureTelemetry ? ["--offline"] : []),
+      ...(this.captureTelemetry ? ["--subagentura-telemetry"] : []),
       "--approve",
       "--api-key",
       "subagentura-e2e-test-key",
@@ -577,6 +593,15 @@ export class TerminalHarness {
     return this.readJsonl(this.networkLog);
   }
 
+  telemetryEvents() {
+    if (!existsSync(this.telemetryLog)) return [];
+    return readFileSync(this.telemetryLog, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
   artifactEvents() {
     return findFiles(this.sessionDir, "events.ndjson").flatMap((path) =>
       this.readJsonl(path).map((event) => ({ path, ...event })),
@@ -697,6 +722,10 @@ export class TerminalHarness {
     writeDiagnostic(
       "network.ndjson",
       existsSync(this.networkLog) ? readFileSync(this.networkLog) : "",
+    );
+    writeDiagnostic(
+      "telemetry.ndjson",
+      existsSync(this.telemetryLog) ? readFileSync(this.telemetryLog) : "",
     );
     writeDiagnostic("panes.json", JSON.stringify(this.panes(), null, 2));
     writeDiagnostic(
