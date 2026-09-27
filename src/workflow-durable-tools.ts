@@ -338,7 +338,10 @@ export function registerDurableWorkflowTools(
           status: "resuming",
           resumedAt: Date.now(),
         });
-      await store.append("delivery", { completion });
+      await store.append("delivery", {
+        completion,
+        parentSessionId: runScope.sessionId,
+      });
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
       const workflowOptions = {
         args: decodeRunValue(definition.args),
@@ -493,13 +496,13 @@ export function registerDurableWorkflowTools(
     try {
       store = await WorkflowRunStore.resume(await lookupScope(id, ctx), id);
       if (terminal(store.events)) return await inspect(id, ctx);
+      // A persistent cancel request is consumed by each exact attempt supervisor;
+      // never kill a potentially recycled mux pane ID recovered from old disk state.
+      await stopDurableProcessAttempts(store.directory);
       await store.append("cancelled", {
         status: "cancelled",
         completedAt: Date.now(),
       });
-      // A persistent cancel request is consumed by each exact attempt supervisor;
-      // never kill a potentially recycled mux pane ID recovered from old disk state.
-      await stopDurableProcessAttempts(store.directory);
       return {
         content: [
           {
@@ -718,58 +721,76 @@ export async function restoreDurableWorkflowRuns(
     }
     const sessionId = ctx.sessionManager?.getSessionId?.();
     if (!sessionId || !ctx.cwd) return;
-    const runScope = { sessionId, cwd: ctx.cwd };
-    for (const id of await WorkflowRunStore.list(runScope)) {
-      if (!isSessionOwnerLive(currentOwner)) return;
-      const events = await WorkflowRunStore.inspect(runScope, id);
-      if (!events) continue;
-      const end = terminal(events);
-      const completion =
-        events.findLast((event) => event.kind === "delivery")?.data
-          .completion ?? events[0].data.completion;
-      if (!end || !completion?.policy) continue;
-      publishCompletion(
-        {
-          schemaVersion: 1,
-          completionId: `workflow:${id}`,
-          source: "workflow",
-          sourceId: id,
-          label: completionDisplayLabel(
-            parseWorkflow(events[0].data.script).meta.name,
-            "workflow",
-          ),
-          status:
-            end.kind === "rejected"
-              ? "error"
-              : end.data.status === "done"
-                ? end.data.result &&
-                  decodeRunValue<WorkflowRunResult>(end.data.result)
-                    .errorCount > 0
-                  ? "error"
-                  : "done"
-                : end.data.status === "cancelled"
-                  ? "cancelled"
-                  : "error",
-          policy: completion.policy,
-          ...(completion.groupId ? { groupId: completion.groupId } : {}),
-          references:
-            end.kind === "rejected"
-              ? [
-                  {
-                    label: "run",
-                    value: `Workflow ${id} was rejected before execution`,
-                  },
-                ]
-              : [
-                  {
-                    label: "result",
-                    value: `call get_workflow_result with workflowId ${JSON.stringify(id)}`,
-                  },
-                ],
-          completedAt: end.data.completedAt,
-        },
-        currentOwner,
-      );
+    const runScopes = [
+      { scope: { sessionId, cwd: ctx.cwd, root: storeRoot }, project: false },
+      {
+        scope: { sessionId: "workflow-v4", cwd: ctx.cwd, root: storeRoot },
+        project: true,
+      },
+    ];
+    const recovered = new Set<string>();
+    for (const { scope: runScope, project } of runScopes) {
+      for (const id of await WorkflowRunStore.list(runScope)) {
+        if (recovered.has(id)) continue;
+        recovered.add(id);
+        if (!isSessionOwnerLive(currentOwner)) return;
+        const events = await WorkflowRunStore.inspect(runScope, id);
+        if (!events) continue;
+        const end = terminal(events);
+        const delivery = events.findLast((event) => event.kind === "delivery");
+        const completion =
+          delivery?.data.completion ?? events[0].data.completion;
+        const deliveryOwner =
+          delivery?.data.parentSessionId ?? events[0].data.parentSessionId;
+        if (
+          !end ||
+          !completion?.policy ||
+          (project && deliveryOwner !== sessionId)
+        )
+          continue;
+        publishCompletion(
+          {
+            schemaVersion: 1,
+            completionId: `workflow:${id}`,
+            source: "workflow",
+            sourceId: id,
+            label: completionDisplayLabel(
+              parseWorkflow(events[0].data.script).meta.name,
+              "workflow",
+            ),
+            status:
+              end.kind === "rejected"
+                ? "error"
+                : end.data.status === "done"
+                  ? end.data.result &&
+                    decodeRunValue<WorkflowRunResult>(end.data.result)
+                      .errorCount > 0
+                    ? "error"
+                    : "done"
+                  : end.data.status === "cancelled"
+                    ? "cancelled"
+                    : "error",
+            policy: completion.policy,
+            ...(completion.groupId ? { groupId: completion.groupId } : {}),
+            references:
+              end.kind === "rejected"
+                ? [
+                    {
+                      label: "run",
+                      value: `Workflow ${id} was rejected before execution`,
+                    },
+                  ]
+                : [
+                    {
+                      label: "result",
+                      value: `call get_workflow_result with workflowId ${JSON.stringify(id)}`,
+                    },
+                  ],
+            completedAt: end.data.completedAt,
+          },
+          currentOwner,
+        );
+      }
     }
   } catch (error) {
     ctx.ui?.notify?.(
