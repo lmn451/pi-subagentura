@@ -691,7 +691,11 @@ export function startWorkflowJob(
         if (typeof p.agentId === "number") {
           if (p.liveUsage) {
             liveUsageByAgent.set(p.agentId, { ...p.liveUsage });
-            recordWorkflowAgentLiveUsage(state.snapshot, p.agentId, p.liveUsage);
+            recordWorkflowAgentLiveUsage(
+              state.snapshot,
+              p.agentId,
+              p.liveUsage,
+            );
           }
           if (p.kind === "agent_done") liveUsageByAgent.delete(p.agentId);
         }
@@ -705,7 +709,8 @@ export function startWorkflowJob(
   const execution = telemetryStartReceipt
     ? telemetryStartReceipt.then(executeWorkflow)
     : executeWorkflow();
-  state.promise = execution.then(async (r) => {
+  state.promise = execution
+    .then(async (r) => {
       if (state.durable) {
         if (state.durableInterrupted || abort.signal.aborted)
           throw new Error("Workflow interrupted before result commit.");

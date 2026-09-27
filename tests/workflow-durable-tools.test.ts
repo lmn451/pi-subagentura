@@ -42,9 +42,8 @@ const durableProcessControl = vi.hoisted(() => ({
   markerFailure: undefined as Error | undefined,
 }));
 vi.mock("../src/workflow-durable-process", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("../src/workflow-durable-process")
-  >();
+  const actual =
+    await importOriginal<typeof import("../src/workflow-durable-process")>();
   return {
     ...actual,
     stopDurableProcessAttempts: async (directory: string) => {
@@ -123,7 +122,11 @@ describe("durable public tools", () => {
     );
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    append.mockImplementation(async function (this: WorkflowRunStore, kind, data) {
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind,
+      data,
+    ) {
       if (kind === "delivery") throw new Error("injected delivery failure");
       return originalAppend.call(this, kind, data);
     });
@@ -188,7 +191,8 @@ describe("durable public tools", () => {
       const store = await WorkflowRunStore.create(
         { cwd: root, sessionId: "same-parent", root },
         {
-          script: 'export const meta={name:"cancel",description:"d"}; return 7;',
+          script:
+            'export const meta={name:"cancel",description:"d"}; return 7;',
           args: encodeRunValue(undefined),
           budgetTotal: 100,
           telemetry: {
@@ -207,9 +211,7 @@ describe("durable public tools", () => {
       await api.cancel(id, ctx);
     }
     expect(
-      payloads.some((payload) =>
-        payload.event.endsWith("workflow_completed"),
-      ),
+      payloads.some((payload) => payload.event.endsWith("workflow_completed")),
     ).toBe(false);
   });
 
@@ -799,9 +801,7 @@ describe("durable public tools", () => {
     );
     expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
     expect(
-      payloads.filter((event) =>
-        event.event.endsWith("workflow_completed"),
-      ),
+      payloads.filter((event) => event.event.endsWith("workflow_completed")),
     ).toEqual([]);
 
     expect((await api.cancel(id, ctx)).details.status).toBe("cancelled");
@@ -809,11 +809,11 @@ describe("durable public tools", () => {
       { cwd: root, sessionId: "same-parent", root },
       id,
     );
-    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(1);
+    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(
+      1,
+    );
     expect(
-      payloads.filter((event) =>
-        event.event.endsWith("workflow_completed"),
-      ),
+      payloads.filter((event) => event.event.endsWith("workflow_completed")),
     ).toHaveLength(1);
   });
 

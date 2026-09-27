@@ -367,8 +367,7 @@ export function registerDurableWorkflowTools(
         : telemetryOptions.sessionOverride
           ? {
               confirmed: false,
-              confirm: () =>
-                store!.append("telemetry_start_confirmed", {}),
+              confirm: () => store!.append("telemetry_start_confirmed", {}),
             }
           : { confirmed: false };
       reservation = params.workflowId
