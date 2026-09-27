@@ -18,6 +18,7 @@ import {
   parseWorkflow,
   type WorkflowAgentRunner,
   type WorkflowRunResult,
+  type RunWorkflowOptions,
 } from "./workflow-core";
 import {
   startWorkflowJob,
@@ -359,7 +360,7 @@ export function registerDurableWorkflowTools(
         throw error;
       }
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
-      const workflowOptions = {
+      const workflowOptions: RunWorkflowOptions = {
         args: decodeRunValue(definition.args),
         cwd: definition.cwd,
         durable,

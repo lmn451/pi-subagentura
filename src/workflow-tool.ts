@@ -4,6 +4,7 @@ import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
 import {
   prepareDurableProcess,
   cancelDurableProcess,
+  stopDurableProcessAttempts,
 } from "./workflow-durable-process";
 import { abortableWait } from "./abortable-wait";
 import {
@@ -265,6 +266,28 @@ function emitWorkflowResultReadTelemetry(
     },
     { allowInactive: true },
   );
+}
+
+async function persistDurableCancellation(
+  job: WorkflowJobState,
+  beforeTerminal?: () => void,
+): Promise<boolean> {
+  if (!job.durable) return false;
+  const isTerminal = () =>
+    job.durable!.store.events.some((event) =>
+      ["cancelled", "rejected", "terminal"].includes(event.kind),
+    );
+  if (isTerminal()) return false;
+  await stopDurableProcessAttempts(job.durable.store.directory);
+  beforeTerminal?.();
+  if (!isTerminal()) {
+    await job.durable.store.append("cancelled", {
+      status: "cancelled",
+      completedAt: Date.now(),
+    });
+    return true;
+  }
+  return false;
 }
 
 export function registerWorkflowTool(
@@ -1455,6 +1478,21 @@ export function registerWorkflowTool(
         };
       }
       if (st.status === "cancelled") {
+        try {
+          if (await persistDurableCancellation(st))
+            cancelWorkflowJob(st, "explicit_cancel");
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: error instanceof Error ? error.message : String(error),
+              },
+            ],
+            details: { status: "cancelled", workflowId: st.id },
+            isError: true,
+          };
+        }
         if (cancellationSnapshotsEnabled()) {
           await waitForCancellationReceipts(st);
           normalizeCancelledWorkflowState(st);
@@ -1486,11 +1524,29 @@ export function registerWorkflowTool(
           },
         };
       }
-      if (st.durable)
-        await st.durable.store.append("cancelled", {
-          status: "cancelled",
-          completedAt: Date.now(),
+      try {
+        await persistDurableCancellation(st, () =>
+          st.abort.abort({
+            source: "cancel_subagent",
+            reason: "explicit_cancel",
+          }),
+        );
+      } catch (error) {
+        st.abort.abort({
+          source: "cancel_subagent",
+          reason: "explicit_cancel",
         });
+        return {
+          content: [
+            {
+              type: "text",
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
+          details: { status: "running", workflowId: st.id },
+          isError: true,
+        };
+      }
       cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);

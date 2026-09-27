@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SubagentResult } from "../src/helpers";
 import {
   cancelWorkflowJob,
@@ -168,6 +171,55 @@ describe("cancelled workflow snapshot normalization", () => {
       workflowId: job.id,
     });
     expect(afterSettlementStatus.details.runningCount).toBe(0);
+  });
+
+  it("keeps durable cancellation retryable when marker persistence fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflow-cancel-marker-"));
+    try {
+      const job = await startInFlightWorkflow();
+      const attempts = join(directory, "attempts");
+      await writeFile(attempts, "not a directory");
+      const events: any[] = [{ kind: "accepted" }];
+      let markerAtTerminal = false;
+      job.durable = {
+        store: {
+          directory,
+          events,
+          append: async (kind: string, data: unknown) => {
+            if (kind === "cancelled") {
+              markerAtTerminal = await access(
+                join(attempts, "1-1.json.cancel"),
+              ).then(
+                () => true,
+                () => false,
+              );
+            }
+            events.push({ kind, data });
+          },
+          close: async () => {},
+        },
+        stop: () => {},
+        drain: async () => {},
+        usage: () => ({}),
+      } as any;
+
+      const cancel = workflowTools().cancel_workflow;
+      const first = await cancel.execute("cancel", { workflowId: job.id });
+      expect(first.isError).toBe(true);
+      expect(job.abort.signal.aborted).toBe(true);
+      expect(events.some((event) => event.kind === "cancelled")).toBe(false);
+
+      await expect(job.promise).rejects.toThrow();
+      await rm(attempts, { force: true });
+      await mkdir(attempts);
+      await writeFile(join(attempts, "1-1.json"), "{}");
+
+      const retried = await cancel.execute("cancel", { workflowId: job.id });
+      expect(retried.details.status).toBe("cancelled");
+      expect(markerAtTerminal).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("normalizes cancelAllFlows immediately and after settlement", async () => {
