@@ -15,15 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   durable runs; `durable: false` selects an in-memory run.
 - Explicit bounded `retry()` workflow primitive, independent of existing
   three-attempt schema repair, with typed attempt numbers and cancellation guards.
-- Opt-in durable code workflows: private request/response and agent-attempt
+- Opt-in durable legacy code workflows: private request/response and agent-attempt
   journals, stable operation ids, manual same-session recovery, persisted
   results/cancellation, source inspection, and run listing. Root definitions,
   arguments, effective settings, and nested definitions are recorded; parallel
   response ordering and worker-visible budget deltas replay without new agent calls.
 - One-use process attempt supervisors and persisted unfinished completion
-  barriers for durable workflows. Existing non-durable execution remains the
-  compatibility default; no daemon, remote execution, VM snapshots, or
-  exactly-once external-side-effect guarantee is introduced.
+  barriers for durable workflows. Legacy `.mjs` execution remains non-durable
+  by default; V4 definitions default to project-scoped durable runs. Neither
+  mode adds a daemon, remote execution, VM snapshots, or an exactly-once
+  external-side-effect guarantee. Interrupted runs require explicit resume from
+  a live Pi process.
 - Durable authoring preflight via `save_workflow({ requireDurable: true })`,
   saved-definition readiness and source digests, and durable execution by default
   for compatible `/workflows` selections. `/workflow <task>` generates stable
