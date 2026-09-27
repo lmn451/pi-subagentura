@@ -270,7 +270,6 @@ function emitWorkflowResultReadTelemetry(
 
 async function persistDurableCancellation(
   job: WorkflowJobState,
-  beforeTerminal?: () => void,
 ): Promise<boolean> {
   if (!job.durable) return false;
   const isTerminal = () =>
@@ -279,7 +278,7 @@ async function persistDurableCancellation(
     );
   if (isTerminal()) return false;
   await stopDurableProcessAttempts(job.durable.store.directory);
-  beforeTerminal?.();
+  await job.durable.store.flush();
   if (!isTerminal()) {
     await job.durable.store.append("cancelled", {
       status: "cancelled",
@@ -288,6 +287,34 @@ async function persistDurableCancellation(
     return true;
   }
   return false;
+}
+
+function durableTerminalStatus(job: WorkflowJobState): string | undefined {
+  const event = job.durable?.store.events.findLast((candidate) =>
+    ["cancelled", "rejected", "terminal"].includes(candidate.kind),
+  );
+  if (!event) return undefined;
+  return (
+    event.data.status ??
+    (event.kind === "cancelled"
+      ? "cancelled"
+      : event.kind === "rejected"
+        ? "rejected"
+        : undefined)
+  );
+}
+
+function cancellationRaceResponse(job: WorkflowJobState, status: string) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Workflow ${job.id} is already ${status}; nothing was cancelled.`,
+      },
+    ],
+    details: { status, workflowId: job.id, cancelled: false },
+    ...(status === "error" || status === "rejected" ? { isError: true } : {}),
+  };
 }
 
 export function registerWorkflowTool(
@@ -1493,6 +1520,9 @@ export function registerWorkflowTool(
             isError: true,
           };
         }
+        const durableStatus = durableTerminalStatus(st);
+        if (durableStatus && durableStatus !== "cancelled")
+          return cancellationRaceResponse(st, durableStatus);
         if (cancellationSnapshotsEnabled()) {
           await waitForCancellationReceipts(st);
           normalizeCancelledWorkflowState(st);
@@ -1525,17 +1555,8 @@ export function registerWorkflowTool(
         };
       }
       try {
-        await persistDurableCancellation(st, () =>
-          st.abort.abort({
-            source: "cancel_subagent",
-            reason: "explicit_cancel",
-          }),
-        );
+        await persistDurableCancellation(st);
       } catch (error) {
-        st.abort.abort({
-          source: "cancel_subagent",
-          reason: "explicit_cancel",
-        });
         return {
           content: [
             {
@@ -1547,7 +1568,14 @@ export function registerWorkflowTool(
           isError: true,
         };
       }
+      const durableStatus = durableTerminalStatus(st);
+      if (durableStatus && durableStatus !== "cancelled")
+        return cancellationRaceResponse(st, durableStatus);
       cancelWorkflowJob(st, "explicit_cancel");
+      const finalStatus = durableTerminalStatus(st) ?? String(st.status);
+      if (finalStatus !== "cancelled") {
+        return cancellationRaceResponse(st, finalStatus);
+      }
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);
         normalizeCancelledWorkflowState(st);
