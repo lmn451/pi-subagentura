@@ -280,6 +280,126 @@ describe("v4 workflow public tools", () => {
     });
   });
 
+  it("retains parent A's group intent after B and C interruptions", async () => {
+    const groupId = "repeated-parent-group";
+    const script = definition(
+      "repeated-parent-switch",
+      'await ctx.agent("wait", { prompt: "wait" }); return { done: true };',
+    );
+    const first = setup(1, "repeated-parent-a");
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "workflow-v4", root },
+      {
+        parentSessionId: "repeated-parent-a",
+        script,
+        args: encodeRunValue({}),
+        budgetTotal: 1000,
+        completion: { legacy: false, policy: "group", groupId },
+        concurrency: 4,
+        processConcurrency: 4,
+        workflowTimeoutMs: 60_000,
+      },
+    );
+    const workflowId = store.id;
+    await store.append("accepted", {});
+    await store.append("delivery", {
+      completion: { legacy: false, policy: "group", groupId },
+      parentSessionId: "repeated-parent-a",
+    });
+    registerCompletionMember(
+      "workflow",
+      workflowId,
+      "group",
+      groupId,
+      first.owner,
+    );
+    sealCompletionGroups(first.owner);
+    await store.append("interrupted", { status: "interrupted" });
+    await store.close();
+    clearCompletionCoordinator(first.owner);
+    clearSessionScopes();
+
+    for (const [index, sessionId] of [
+      "repeated-parent-b",
+      "repeated-parent-c",
+    ].entries()) {
+      const middle = setup(index + 2, sessionId);
+      let signalStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const interruptedRunner: WorkflowAgentRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signalStarted();
+          signal!.addEventListener(
+            "abort",
+            () => reject(new Error("parent replaced")),
+            { once: true },
+          );
+        });
+      register(middle, interruptedRunner);
+      const resumed = await executeTool(
+        middle.tools,
+        "resume_workflow",
+        { workflowId, async: true },
+        middle.ctx,
+      );
+      expect(resumed.details.status).toBe("started");
+      const job = workflowJobRegistry.get(workflowId)!;
+      await started;
+      expect(job.completionPolicy).toBe("each");
+      cleanupWorkflowJobsForOwner(middle.owner);
+      await expect(job.promise).rejects.toThrow("Workflow aborted.");
+      clearCompletionCoordinator(middle.owner);
+      clearSessionScopes();
+    }
+
+    const returning = setup(4, "repeated-parent-a");
+    await restoreDurableWorkflowRuns(
+      returning.pi,
+      returning.owner,
+      returning.ctx,
+      root,
+    );
+    const returningApi = register(
+      returning,
+      successfulRunner("completed after returning to A"),
+    );
+    const resumed = await returningApi.run(
+      { workflowId, async: true },
+      undefined,
+      undefined,
+      returning.ctx,
+    );
+    expect(resumed.details.status).toBe("started");
+    const returnedJob = workflowJobRegistry.get(workflowId)!;
+    expect(returnedJob.completionPolicy).toBe("group");
+    await expect(returnedJob.promise).resolves.toMatchObject({
+      result: { done: true },
+    });
+    const events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "workflow-v4", root },
+      workflowId,
+    );
+    expect(
+      events?.findLast((event) => event.kind === "delivery")?.data,
+    ).toMatchObject({
+      parentSessionId: "repeated-parent-a",
+      completion: { policy: "group", groupId },
+    });
+    await restoreDurableWorkflowRuns(
+      returning.pi,
+      returning.owner,
+      returning.ctx,
+      root,
+    );
+    expect(
+      returning.entries.find(
+        (entry) => entry.completionId === `workflow:${workflowId}`,
+      ),
+    ).toMatchObject({ policy: "group", groupId, groupComplete: true });
+  });
+
   it("writes cancellation markers before terminalizing a durable workflow", async () => {
     const current = setup(1, "cancel-owner");
     const store = await WorkflowRunStore.create(

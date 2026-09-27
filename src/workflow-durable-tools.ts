@@ -59,6 +59,22 @@ function terminal(events: RunEvent[]) {
   );
 }
 
+function completionIntentForOwner(
+  events: RunEvent[],
+  parentSessionId: string,
+): ResolvedCompletionPolicy | undefined {
+  const deliveries = events.filter((event) => event.kind === "delivery");
+  const owned = deliveries.findLast(
+    (event) => event.data.parentSessionId === parentSessionId,
+  );
+  if (owned) return owned.data.completion;
+  if (events[0].data.parentSessionId !== parentSessionId) return undefined;
+  return (
+    deliveries.findLast((event) => !event.data.parentSessionId)?.data
+      .completion ?? events[0].data.completion
+  );
+}
+
 export function durableRunSummary(id: string, events: RunEvent[]) {
   const end = terminal(events);
   const interrupted = events.findLast(
@@ -262,17 +278,8 @@ export function registerDurableWorkflowTools(
             "Workflow start was interrupted before acceptance. Start a new run.",
           );
         completion =
-          store.events.findLast((event) => event.kind === "delivery")?.data
-            .completion ?? store.events[0].data.completion;
-        if (runAsync && !completion.policy)
-          completion = { legacy: false, policy: "each" };
-        if (
-          store.events[0].data.parentSessionId &&
-          store.events[0].data.parentSessionId !== runScope.sessionId
-        )
-          completion = runAsync
-            ? { legacy: false, policy: "each" }
-            : { legacy: false };
+          completionIntentForOwner(store.events, runScope.sessionId) ??
+          (runAsync ? { legacy: false, policy: "each" } : { legacy: false });
       } else {
         if (
           !runAsync &&
@@ -746,19 +753,10 @@ export async function restoreDurableWorkflowRuns(
         const events = await WorkflowRunStore.inspect(runScope, id);
         if (!events) continue;
         const end = terminal(events);
-        const deliveries = events.filter((event) => event.kind === "delivery");
-        const delivery = project
-          ? deliveries.findLast(
-              (event) =>
-                event.data.parentSessionId === sessionId ||
-                (!event.data.parentSessionId &&
-                  events[0].data.parentSessionId === sessionId),
-            )
-          : deliveries.at(-1);
+        const intent = completionIntentForOwner(events, sessionId);
         const completion =
-          delivery?.data.completion ??
-          (!project ? events[0].data.completion : undefined);
-        if (!end || !completion?.policy || (project && !delivery)) continue;
+          intent ?? (!project ? events[0].data.completion : undefined);
+        if (!end || !completion?.policy || (project && !intent)) continue;
         publishCompletion(
           {
             schemaVersion: 1,
