@@ -72,6 +72,7 @@ import {
   type MuxName,
   type Multiplexer,
   type PaneActivity,
+  type PaneLivenessDiagnostic,
   type PaneLiveness,
   type PaneRef,
   safeSegment,
@@ -1316,6 +1317,19 @@ export function getInteractivePaneLivenessAsync(
     state.paneId,
     state.muxSession,
   );
+}
+
+/** Probe pane liveness with optional backend-specific failure detail. */
+export async function getInteractivePaneLivenessDiagnosticAsync(
+  state: InteractiveSubagentState,
+): Promise<PaneLivenessDiagnostic> {
+  const mux = getMuxForState(state);
+  if (mux.getPaneLivenessDiagnosticAsync) {
+    return mux.getPaneLivenessDiagnosticAsync(state.paneId, state.muxSession);
+  }
+  return {
+    liveness: await mux.getPaneLivenessAsync(state.paneId, state.muxSession),
+  };
 }
 
 /** Preserve active state unless the async backend explicitly confirms death. */

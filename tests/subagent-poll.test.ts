@@ -33,6 +33,7 @@ import {
   writeOutput,
 } from "../src/artifact";
 import type { Multiplexer } from "../src/multiplexer";
+import type { PaneLivenessDiagnostic } from "../src/multiplexer-contracts";
 import { importFresh } from "./test-utils";
 import {
   advanceSessionScopeGeneration,
@@ -1382,6 +1383,154 @@ describe("pollArtifactChanges", () => {
         (payload) => payload.event === "pi_subagentura_task_completed",
       ),
     ).toBe(false);
+  });
+
+  it.each([
+    ["cancelled", { ts: 1, type: "cancelled", status: "cancelled" }],
+    [
+      "process-exited",
+      {
+        version: 2,
+        eventId: "process-exited-event",
+        turnId: "process-exited-turn",
+        ts: 1,
+        type: "process_exited",
+        status: "error",
+        exitCode: 1,
+      },
+    ],
+  ] as const)(
+    "does not repeat mux probe failures for retained %s states",
+    async (_label, terminalEvent) => {
+      vi.resetModules();
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const multiplexer = await import("../src/multiplexer");
+      const debugLog = vi.spyOn(await import("../src/helpers"), "debugLog");
+      const item = makeState();
+      const art = artifactPath(join(item.artifactDir, ".."), item.id);
+      appendEvent(art, terminalEvent as any);
+      const telemetry = createTelemetrySession(true, "orchestrator_v2");
+      const owner = { id: 909, generation: 1 };
+      const scope = registerSessionScope({
+        ...owner,
+        lifecycle: "started",
+        pi: { sendMessage: vi.fn() } as any,
+        ui: {
+          notify: vi.fn(),
+          setStatus: vi.fn(),
+          setWidget: vi.fn(),
+        } as any,
+        sessionManager: { getSessionId: () => "pi" },
+        telemetry,
+      });
+      item.state.telemetryEligible = true;
+      item.state.telemetryCorrelationId = telemetry.correlationId;
+      item.state.telemetryInvocationSource = "interactive";
+      item.state.telemetryCompletionPolicy = "each";
+      item.state.telemetryAsync = true;
+      item.state.telemetryDepth = 1;
+      item.state.telemetryDepthBucket = "1";
+      item.state.telemetryModel = "default";
+      scope.interactiveStates.set(item.id, item.state);
+      mod.interactiveSubagentRegistry.set(item.id, item.state);
+      let diagnostic: PaneLivenessDiagnostic = {
+        liveness: "unknown",
+        failureReason: "timeout",
+      };
+      const getPaneLivenessDiagnosticAsync = vi.fn(async () => diagnostic);
+      multiplexer.__setTmuxMultiplexer({
+        getPaneLivenessDiagnosticAsync,
+      } as never);
+      const payloads: Array<{
+        event?: string;
+        properties?: Record<string, unknown>;
+      }> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      });
+      installDeliverySpies();
+
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+      const runtimeFailures = () =>
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_runtime_failure",
+        );
+      expect(runtimeFailures()).toHaveLength(1);
+      expect(item.state.status).toBe(
+        terminalEvent.type === "cancelled" ? "cancelled" : "exited",
+      );
+      expect(item.state.eventByteCursor).toBeGreaterThan(0);
+      const muxProbeLogs = () =>
+        debugLog.mock.calls.filter(
+          ([, event]) => event === "interactive_mux_probe_unknown",
+        );
+      expect(muxProbeLogs()).toHaveLength(1);
+      expect(muxProbeLogs()[0]).toEqual([
+        "warn",
+        "interactive_mux_probe_unknown",
+        { mux: "tmux", failureReason: "timeout" },
+      ]);
+      expect(runtimeFailures()[0]?.properties).not.toHaveProperty(
+        "failureReason",
+      );
+
+      diagnostic = { liveness: "alive" };
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+      diagnostic = { liveness: "unknown", failureReason: "timeout" };
+      await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+      expect(runtimeFailures()).toHaveLength(2);
+      expect(muxProbeLogs()).toHaveLength(2);
+      expect(getPaneLivenessDiagnosticAsync).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it("logs mux probe classifications once even when telemetry is disabled", async () => {
+    vi.resetModules();
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const debugLog = vi.spyOn(await import("../src/helpers"), "debugLog");
+    const item = makeState();
+    const owner = { id: 910, generation: 1 };
+    const scope = registerSessionScope({
+      ...owner,
+      lifecycle: "started",
+      pi: { sendMessage: vi.fn() } as any,
+      ui: {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+      } as any,
+      sessionManager: { getSessionId: () => "pi" },
+    });
+    scope.interactiveStates.set(item.id, item.state);
+    mod.interactiveSubagentRegistry.set(item.id, item.state);
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessDiagnosticAsync: async () => ({
+        liveness: "unknown",
+        failureReason: "command_error",
+      }),
+    } as never);
+
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
+
+    expect(
+      debugLog.mock.calls.filter(
+        ([, event]) => event === "interactive_mux_probe_unknown",
+      ),
+    ).toEqual([
+      [
+        "warn",
+        "interactive_mux_probe_unknown",
+        { mux: "tmux", failureReason: "command_error" },
+      ],
+    ]);
   });
 
   it("truncates overflowing activity and workflow widget rows", async () => {
