@@ -247,7 +247,7 @@ function emitWorkflowCompletedTelemetry(
   );
 }
 
-/** Emit the aggregate cancellation for an interrupted durable run exactly once. */
+/** Capture one cancellation aggregate for an accepted durable run. */
 export function emitDurableWorkflowCancelledTelemetry(
   telemetry: WorkflowJobTelemetry,
   startedAt: number,

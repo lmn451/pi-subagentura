@@ -480,6 +480,9 @@ export function registerDurableWorkflowTools(
       store = await WorkflowRunStore.resume(scope(ctx), id);
       if (terminal(store.events)) return await inspect(id, ctx);
       const definition = store.events[0].data;
+      const wasAccepted = store.events.some(
+        (event) => event.kind === "accepted",
+      );
       const currentTelemetry = resolveLiveSessionScope(owner())?.telemetry;
       const telemetryOptions = workflowTelemetryForDurableRun(
         definition.telemetry,
@@ -499,9 +502,10 @@ export function registerDurableWorkflowTools(
       await store.append("cancelled", {
         status: "cancelled",
         completedAt,
-        telemetryCompletionReceipt: telemetryOptions.sessionOverride !== null,
+        telemetryCompletionReceipt:
+          wasAccepted && telemetryOptions.sessionOverride !== null,
       });
-      if (telemetryOptions.sessionOverride) {
+      if (wasAccepted && telemetryOptions.sessionOverride) {
         emitDurableWorkflowCancelledTelemetry(
           {
             session: telemetryOptions.sessionOverride,

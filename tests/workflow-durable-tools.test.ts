@@ -81,6 +81,58 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("does not emit cancellation telemetry before acceptance or after opt-out", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const owner = sessionOwner(scope);
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    for (const scenario of [
+      { accepted: false, optedOut: false },
+      { accepted: true, optedOut: true },
+    ]) {
+      const telemetry = createTelemetrySession(!scenario.optedOut);
+      scope.telemetry = telemetry;
+      const store = await WorkflowRunStore.create(
+        { cwd: root, sessionId: "same-parent", root },
+        {
+          script: 'export const meta={name:"cancel",description:"d"}; return 7;',
+          args: encodeRunValue(undefined),
+          budgetTotal: 100,
+          telemetry: {
+            enabled: true,
+            correlationId: createTelemetrySession(true).correlationId,
+            mode: "straight",
+            invocation: "tool",
+            async: true,
+            completionPolicy: "each",
+          },
+        },
+      );
+      const id = store.id;
+      if (scenario.accepted) await store.append("accepted", {});
+      await store.close();
+      await api.cancel(id, ctx);
+    }
+    expect(
+      payloads.some((payload) =>
+        payload.event.endsWith("workflow_completed"),
+      ),
+    ).toBe(false);
+  });
+
   it("does not cancel or resume a durable run rejected by job admission", async () => {
     const { pi, scope, ctx } = setup();
     const payloads: Array<{ event: string }> = [];
