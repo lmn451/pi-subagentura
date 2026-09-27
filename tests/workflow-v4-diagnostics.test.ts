@@ -125,6 +125,40 @@ describe("workflow v4 cancellation diagnostics", () => {
   });
 });
 describe("workflow v4 aggregate classifications", () => {
+  it("classifies an ordinary failed agent turn in a partial aggregate", async () => {
+    const { owner, payloads } = telemetryScope(405);
+    const job = startWorkflowJob(
+      "partial-agent-error",
+      SCRIPT,
+      {
+        runAgent: async () =>
+          ({
+            ...successfulResult(),
+            isError: true,
+            errorMessage: "provider failure details stay private",
+          }) as SubagentResult,
+      },
+      undefined,
+      undefined,
+      owner,
+    );
+    jobs.push(job);
+
+    await job.promise;
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_workflow_completed",
+    );
+    expect(completed?.properties).toMatchObject({
+      status: "partial",
+      error_category: "unknown",
+      error_stage: "turn",
+    });
+    expect(JSON.stringify(completed)).not.toContain(
+      "provider failure details stay private",
+    );
+  });
+
   it("carries schema validation evidence to one workflow lifecycle pair", async () => {
     const { owner, payloads } = telemetryScope(401);
     const runAgent = vi.fn(async () => successfulResult());

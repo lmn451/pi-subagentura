@@ -46,7 +46,13 @@ export interface WorkflowJobTelemetry {
   completionPolicy: TelemetryCompletionPolicy;
 }
 
-export type WorkflowJobTelemetryOptions = Omit<WorkflowJobTelemetry, "session">;
+export type WorkflowJobTelemetryOptions = Omit<
+  WorkflowJobTelemetry,
+  "session"
+> & {
+  /** Durable recovery binds back to the accepted invocation's telemetry identity. */
+  sessionOverride?: TelemetrySession | null;
+};
 
 function normalizeWorkflowInvocation(
   value: WorkflowJobTelemetryOptions["invocation"] | undefined,
@@ -236,6 +242,32 @@ function emitWorkflowCompletedTelemetry(
             error_stage: failure.errorStage,
           }),
       ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+    },
+    { allowInactive: true },
+  );
+}
+
+/** Emit the aggregate cancellation for an interrupted durable run exactly once. */
+export function emitDurableWorkflowCancelledTelemetry(
+  telemetry: WorkflowJobTelemetry,
+  startedAt: number,
+  completedAt: number,
+  agentsSpawned: number,
+  errorCount: number,
+): void {
+  if (!telemetry.session) return;
+  captureTelemetry(
+    telemetry.session,
+    {
+      event: "workflow_completed",
+      invocation: telemetry.invocation,
+      async: telemetry.async,
+      completion_policy: telemetry.completionPolicy,
+      status: "cancelled",
+      terminal_reason: "explicit_cancel",
+      agents_spawned: boundedWorkflowTelemetryCount(agentsSpawned),
+      error_count: boundedWorkflowTelemetryCount(errorCount),
+      duration_ms: workflowTelemetryDuration(startedAt, completedAt),
     },
     { allowInactive: true },
   );
@@ -561,7 +593,10 @@ export function startWorkflowJob(
       ? telemetryOptions.async
       : defaultAsync;
   const telemetry: WorkflowJobTelemetry = {
-    session: telemetrySession,
+    session:
+      telemetryOptions && "sessionOverride" in telemetryOptions
+        ? (telemetryOptions.sessionOverride ?? undefined)
+        : telemetrySession,
     invocation: normalizeWorkflowInvocation(telemetryOptions?.invocation),
     async: telemetryAsync,
     completionPolicy: normalizeWorkflowCompletionPolicy(

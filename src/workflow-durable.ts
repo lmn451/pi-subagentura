@@ -81,7 +81,9 @@ export class DurableWorkflow {
     this.responses = store.events
       .filter((e) => e.kind === "response")
       .map((e) => e.data);
-    this.replaying = this.requests.length > 0;
+    this.replaying =
+      this.requests.length > 0 ||
+      store.events.some((event) => event.kind === "accepted");
     this.priorErrorCount = this.responses.reduce(
       (total, row) =>
         total +

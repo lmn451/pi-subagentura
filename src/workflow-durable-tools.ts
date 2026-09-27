@@ -21,9 +21,18 @@ import {
 } from "./workflow-core";
 import {
   startWorkflowJob,
+  emitDurableWorkflowCancelledTelemetry,
   type WorkflowJobState,
+  type WorkflowJobTelemetryOptions,
   getWorkflowJobForOwner,
 } from "./workflow-jobs";
+import {
+  createTelemetrySession,
+  type TelemetryCompletionPolicy,
+  type TelemetryMode,
+  type TelemetrySession,
+  type TelemetryWorkflowInvocation,
+} from "./telemetry";
 import {
   resolveLiveSessionScope,
   isSessionOwnerLive,
@@ -50,6 +59,90 @@ function terminal(events: RunEvent[]) {
     events.findLast((e) => e.kind === "cancelled") ??
     events.findLast((e) => e.kind === "terminal")
   );
+}
+
+interface DurableTelemetryMetadata {
+  enabled: boolean;
+  correlationId?: string;
+  mode?: TelemetryMode;
+  invocation: TelemetryWorkflowInvocation;
+  async: boolean;
+  completionPolicy: TelemetryCompletionPolicy;
+}
+
+function durableTelemetryMetadata(
+  session: TelemetrySession | undefined,
+  invocation: TelemetryWorkflowInvocation,
+  async: boolean,
+  completionPolicy: TelemetryCompletionPolicy,
+): DurableTelemetryMetadata {
+  const enabled = session?.enabled === true && session.active;
+  return {
+    enabled,
+    ...(enabled
+      ? { correlationId: session.correlationId, mode: session.mode }
+      : {}),
+    invocation,
+    async,
+    completionPolicy,
+  };
+}
+
+function workflowTelemetryForDurableRun(
+  value: unknown,
+  current: TelemetrySession | undefined,
+): WorkflowJobTelemetryOptions {
+  const fallback = {
+    invocation: "tool" as const,
+    async: true,
+    completionPolicy: "each" as const,
+  };
+  if (!value || typeof value !== "object")
+    return { ...fallback, sessionOverride: null };
+  const metadata = value as Partial<DurableTelemetryMetadata>;
+  if (
+    typeof metadata.enabled !== "boolean" ||
+    typeof metadata.invocation !== "string" ||
+    typeof metadata.async !== "boolean" ||
+    typeof metadata.completionPolicy !== "string"
+  ) {
+    return { ...fallback, sessionOverride: null };
+  }
+  const invocation =
+    metadata.invocation === "saved_command" ? "saved_command" : "tool";
+  const completionPolicy: TelemetryCompletionPolicy =
+    metadata.completionPolicy === "inline" ||
+    metadata.completionPolicy === "each" ||
+    metadata.completionPolicy === "group" ||
+    metadata.completionPolicy === "legacy"
+      ? metadata.completionPolicy
+      : "each";
+  const mode =
+    metadata.mode === "orchestrator" ||
+    metadata.mode === "orchestrator_v2" ||
+    metadata.mode === "straight"
+      ? metadata.mode
+      : undefined;
+  const correlationId = metadata.correlationId;
+  const validCorrelationId =
+    typeof correlationId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      correlationId,
+    );
+  const sessionOverride =
+    metadata.enabled &&
+    current?.enabled &&
+    current.active &&
+    mode &&
+    validCorrelationId
+      ? createTelemetrySession(true, mode, correlationId)
+      : null;
+  return {
+    invocation,
+    async: metadata.async,
+    completionPolicy,
+    sessionOverride,
+  };
 }
 
 export function durableRunSummary(id: string, events: RunEvent[]) {
@@ -178,6 +271,8 @@ export function registerDurableWorkflowTools(
         );
       const runScope = scope(ctx);
       const workflowOwner = owner();
+      const currentTelemetry =
+        resolveLiveSessionScope(workflowOwner)?.telemetry;
       if (signal?.aborted) throw new Error("Workflow start was cancelled.");
       const runAsync = params.async !== false;
       let completion: ResolvedCompletionPolicy;
@@ -235,12 +330,22 @@ export function registerDurableWorkflowTools(
           defaultModel: ctx.model
             ? `${ctx.model.provider}/${ctx.model.id}`
             : undefined,
+          telemetry: durableTelemetryMetadata(
+            currentTelemetry,
+            invocation,
+            runAsync,
+            runAsync ? (completion.policy ?? "each") : "inline",
+          ),
         });
       }
       if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
         throw new Error("Parent session changed before workflow acceptance.");
       const durable = new DurableWorkflow(store);
       const definition = durable.definition;
+      const telemetryOptions = workflowTelemetryForDurableRun(
+        definition.telemetry,
+        currentTelemetry,
+      );
       reservation = params.workflowId
         ? undefined
         : reserveCompletionGroup(
@@ -264,61 +369,70 @@ export function registerDurableWorkflowTools(
         });
       await store.append("delivery", { completion });
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
-      const job = startWorkflowJob(
-        parseWorkflow(definition.script).meta.name,
-        definition.script,
-        {
-          args: decodeRunValue(definition.args),
-          cwd: definition.cwd,
-          durable,
-          budgetTotal: definition.budgetTotal,
-          concurrency: definition.concurrency,
-          processConcurrency: definition.processConcurrency,
-          workflowTimeoutMs: Math.max(
-            1,
-            definition.workflowTimeoutMs - (Date.now() - definition.createdAt),
-          ),
-          runAgent: (request) =>
-            baseRunner({
-              ...request,
-              model: request.model ?? definition.defaultModel,
-            }),
-          loadWorkflow: loadWorkflowScript,
-          signal: runAsync ? undefined : signal,
-          onProgress: (progress) => {
-            if (progress.kind === "phase") {
-              void store!
-                .append("progress", { phase: progress.phase.slice(0, 1024) })
-                .catch((error) => job.abort.abort(error));
-            }
-            onUpdate?.({
-              content: [{ type: "text", text: renderProgress(progress) }],
-              details: { status: "running", workflowId: store!.id },
-            });
-          },
-        },
-        definition.createdAt,
-        runAsync
-          ? notify
-          : completion.policy
-            ? (job) => {
-                consumeCompletionSource(
-                  pi,
-                  { source: "workflow", sourceId: job.id },
-                  workflowOwner,
-                );
-                return notify(job);
+      let job: WorkflowJobState;
+      try {
+        job = startWorkflowJob(
+          parseWorkflow(definition.script).meta.name,
+          definition.script,
+          {
+            args: decodeRunValue(definition.args),
+            cwd: definition.cwd,
+            durable,
+            budgetTotal: definition.budgetTotal,
+            concurrency: definition.concurrency,
+            processConcurrency: definition.processConcurrency,
+            workflowTimeoutMs: Math.max(
+              1,
+              definition.workflowTimeoutMs -
+                (Date.now() - definition.createdAt),
+            ),
+            runAgent: (request) =>
+              baseRunner({
+                ...request,
+                model: request.model ?? definition.defaultModel,
+              }),
+            loadWorkflow: loadWorkflowScript,
+            signal: runAsync ? undefined : signal,
+            onProgress: (progress) => {
+              if (progress.kind === "phase") {
+                void store!
+                  .append("progress", { phase: progress.phase.slice(0, 1024) })
+                  .catch((error) => job.abort.abort(error));
               }
-            : undefined,
-        workflowOwner,
-        runAsync ? "async" : "sync",
-        {
-          invocation,
-          async: runAsync,
-          completionPolicy: runAsync ? (completion.policy ?? "each") : "inline",
-        },
-        store.id,
-      );
+              onUpdate?.({
+                content: [{ type: "text", text: renderProgress(progress) }],
+                details: { status: "running", workflowId: store!.id },
+              });
+            },
+          },
+          definition.createdAt,
+          runAsync
+            ? notify
+            : completion.policy
+              ? (job) => {
+                  consumeCompletionSource(
+                    pi,
+                    { source: "workflow", sourceId: job.id },
+                    workflowOwner,
+                  );
+                  return notify(job);
+                }
+              : undefined,
+          workflowOwner,
+          runAsync ? "async" : "sync",
+          telemetryOptions,
+          store.id,
+        );
+      } catch (error) {
+        if (!params.workflowId) {
+          await store.append("terminal", {
+            status: "error",
+            completedAt: Date.now(),
+            error: "Workflow could not be admitted to the job registry.",
+          });
+        }
+        throw error;
+      }
       job.completionPolicy =
         completion.policy ?? (runAsync ? "each" : undefined);
       job.completionGroupId = completion.groupId;
@@ -365,10 +479,42 @@ export function registerDurableWorkflowTools(
     try {
       store = await WorkflowRunStore.resume(scope(ctx), id);
       if (terminal(store.events)) return await inspect(id, ctx);
+      const definition = store.events[0].data;
+      const currentTelemetry = resolveLiveSessionScope(owner())?.telemetry;
+      const telemetryOptions = workflowTelemetryForDurableRun(
+        definition.telemetry,
+        currentTelemetry,
+      );
+      const completedAt = Date.now();
+      const responseStats = store.events
+        .filter((event) => event.kind === "response")
+        .reduce(
+          (total, event) =>
+            total +
+            (decodeRunValue<{
+              stats?: { errorCount?: number };
+            }>(event.data.value).stats?.errorCount ?? 0),
+          0,
+        );
       await store.append("cancelled", {
         status: "cancelled",
-        completedAt: Date.now(),
+        completedAt,
+        telemetryCompletionReceipt: telemetryOptions.sessionOverride !== null,
       });
+      if (telemetryOptions.sessionOverride) {
+        emitDurableWorkflowCancelledTelemetry(
+          {
+            session: telemetryOptions.sessionOverride,
+            invocation: telemetryOptions.invocation,
+            async: telemetryOptions.async,
+            completionPolicy: telemetryOptions.completionPolicy,
+          },
+          definition.createdAt,
+          completedAt,
+          store.events.filter((event) => event.kind === "attempt").length,
+          responseStats,
+        );
+      }
       // A persistent cancel request is consumed by each exact attempt supervisor;
       // never kill a potentially recycled mux pane ID recovered from old disk state.
       await stopDurableProcessAttempts(store.directory);

@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
+- Durable job admission failures are terminalized before later resume/cancel,
+  recovery after acceptance does not duplicate workflow start telemetry before
+  its first RPC, and retired sessions cannot revive saved telemetry opt-ins.
 
 ## [3.6.4] - 2026-10-03
 

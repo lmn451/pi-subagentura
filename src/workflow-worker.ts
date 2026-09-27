@@ -514,6 +514,10 @@ async function executeScript(
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
+            engine.failure ??= {
+              errorCategory: "unknown",
+              errorStage: "turn",
+            };
             return { value: null, tokensDelta, errorCount: 1 };
           }
           if (!hasSchema) return { value: res.output, tokensDelta };
