@@ -31,11 +31,24 @@ export function writeCompletionGroup(
   directory: string,
   group: PersistedCompletionGroup,
 ): void {
-  if (!group.members.some((member) => member.startsWith("workflow:wfd_")))
-    return;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const name = createHash("sha256").update(group.groupId).digest("hex");
   const target = join(directory, `${name}.json`);
+  if (!group.members.some((member) => member.startsWith("workflow:wfd_"))) {
+    try {
+      unlinkSync(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return;
+    }
+    const parent = openSync(directory, "r");
+    try {
+      fsyncSync(parent);
+    } finally {
+      closeSync(parent);
+    }
+    return;
+  }
   const temporary = join(directory, `${name}.${randomUUID()}.tmp`);
   const fd = openSync(temporary, "wx", 0o600);
   try {

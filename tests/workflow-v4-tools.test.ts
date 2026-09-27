@@ -10,16 +10,22 @@ import {
 } from "../src/session-scope";
 import {
   cleanupWorkflowJobsForOwner,
+  MAX_WORKFLOW_JOBS,
   workflowJobRegistry,
 } from "../src/workflow-jobs";
 import {
   clearCompletionCoordinator,
+  prepareCompletionManifest,
   registerCompletionCoordinator,
+  sealCompletionGroups,
 } from "../src/completion-coordinator";
 import { DurableWorkflow } from "../src/workflow-durable";
 import { runWorkflow } from "../src/workflow-worker";
 import { getLiveWorkflowV4Store } from "../src/workflow-v4-store";
 import { encodeRunValue, WorkflowRunStore } from "../src/workflow-run-store";
+import { readCompletionGroups } from "../src/completion-group-store";
+import { sessionLedgerPath } from "../src/completion-ledger";
+import { restoreDurableWorkflowRuns } from "../src/workflow-durable-tools";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
 
@@ -120,6 +126,90 @@ async function executeTool(
 }
 
 describe("v4 workflow public tools", () => {
+  it("removes a recovered group member whose journal proves acceptance failed", async () => {
+    const first = setup(1, "acceptance-crash");
+    const api = register(first, successfulRunner("unused"));
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    append.mockImplementation(async function (kind: string, data: any) {
+      if (kind === "accepted") throw new Error("simulated acceptance crash");
+      return originalAppend.call(this, kind, data);
+    });
+    try {
+      const failed = await api.run(
+        {
+          script: definition("crashed-acceptance", "return true;"),
+          completionPolicy: "group",
+          completionGroupId: "crashed-acceptance-group",
+        },
+        undefined,
+        undefined,
+        first.ctx,
+      );
+      expect(failed.isError).toBe(true);
+    } finally {
+      append.mockRestore();
+    }
+
+    clearCompletionCoordinator(first.owner);
+    clearSessionScopes();
+    const second = setup(2, "acceptance-crash");
+    await restoreDurableWorkflowRuns(second.pi, second.owner, second.ctx, root);
+    const directory = `${sessionLedgerPath(
+      root,
+      "acceptance-crash",
+      "subagentura-completion-groups",
+    )}.groups`;
+    expect(await readCompletionGroups(directory)).toEqual([]);
+  });
+
+  it("records rejected capacity admission and settles its completion member", async () => {
+    const current = setup(1, "capacity-rejection");
+    workflowJobRegistry.clear();
+    for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
+      workflowJobRegistry.set(`occupied-${index}`, {
+        id: `occupied-${index}`,
+        status: "running",
+        abort: new AbortController(),
+        parentSessionOwner: current.owner,
+      } as any);
+    }
+    const runner = successfulRunner("unused");
+    const api = register(current, runner);
+    const rejected = await api.run(
+      {
+        script: definition("capacity-rejected", "return true;"),
+        completionPolicy: "group",
+        completionGroupId: "capacity-group",
+      },
+      undefined,
+      undefined,
+      current.ctx,
+    );
+    expect(rejected.isError).toBe(true);
+    expect(runner).not.toHaveBeenCalled();
+    const ids = await WorkflowRunStore.list({
+      cwd: root,
+      sessionId: "workflow-v4",
+      root,
+    });
+    const events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "workflow-v4", root },
+      ids[0],
+    );
+    expect(events?.map((event) => event.kind)).toContain("accepted");
+    expect(events?.at(-1)).toMatchObject({
+      kind: "rejected",
+      data: { status: "rejected", reason: "capacity" },
+    });
+    expect(workflowJobRegistry.has(ids[0])).toBe(false);
+    sealCompletionGroups(current.owner);
+    expect(
+      prepareCompletionManifest(current.owner)?.details.completionIds,
+    ).toContain(`workflow:${ids[0]}`);
+    expect(workflowJobRegistry.size).toBe(MAX_WORKFLOW_JOBS);
+  });
+
   it("answers a background gate through Pi UI and completes without model-supplied input", async () => {
     const confirm = vi.fn(async () => true);
     const current = setup(1, "gate-parent", { confirm });

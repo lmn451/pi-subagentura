@@ -21,6 +21,7 @@ import {
 } from "./workflow-core";
 import {
   startWorkflowJob,
+  WorkflowJobCapacityError,
   type WorkflowJobState,
   getWorkflowJobForOwner,
 } from "./workflow-jobs";
@@ -52,6 +53,7 @@ import {
 
 function terminal(events: RunEvent[]) {
   return (
+    events.findLast((e) => e.kind === "rejected") ??
     events.findLast((e) => e.kind === "cancelled") ??
     events.findLast((e) => e.kind === "terminal")
   );
@@ -338,74 +340,113 @@ export function registerDurableWorkflowTools(
         });
       await store.append("delivery", { completion });
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
-      const job = startWorkflowJob(
-        parseWorkflow(definition.script).meta.name,
-        definition.script,
-        {
-          args: decodeRunValue(definition.args),
-          cwd: definition.cwd,
-          durable,
-          budgetTotal: definition.budgetTotal,
-          concurrency: definition.concurrency,
-          processConcurrency: definition.processConcurrency,
-          workflowTimeoutMs: durable.stepBased
-            ? definition.workflowTimeoutMs
-            : Math.max(
-                1,
-                definition.workflowTimeoutMs -
-                  (Date.now() - definition.createdAt),
-              ),
-          runAgent: (request) =>
-            baseRunner({
-              ...request,
-              model: request.model ?? definition.defaultModel,
-            }),
-          loadWorkflow: loadWorkflowScript,
-          signal: runAsync ? undefined : signal,
-          requestInput: runAsync
-            ? undefined
-            : async (request, stepSignal) => {
-                if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
-                  throw new Error("Workflow input was interrupted.");
-                const value = await queuedInput(ctx, request, stepSignal);
-                if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
-                  throw new Error("Workflow input was interrupted.");
-                return value;
-              },
-          onProgress: (progress) => {
-            if (progress.kind === "phase") {
-              void store!
-                .append("progress", { phase: progress.phase.slice(0, 1024) })
-                .catch((error) => job.abort.abort(error));
-            }
-            onUpdate?.({
-              content: [{ type: "text", text: renderProgress(progress) }],
-              details: { status: "running", workflowId: store!.id },
-            });
+      const workflowOptions = {
+        args: decodeRunValue(definition.args),
+        cwd: definition.cwd,
+        durable,
+        budgetTotal: definition.budgetTotal,
+        concurrency: definition.concurrency,
+        processConcurrency: definition.processConcurrency,
+        workflowTimeoutMs: durable.stepBased
+          ? definition.workflowTimeoutMs
+          : Math.max(
+              1,
+              definition.workflowTimeoutMs -
+                (Date.now() - definition.createdAt),
+            ),
+        runAgent: (request) =>
+          baseRunner({
+            ...request,
+            model: request.model ?? definition.defaultModel,
+          }),
+        loadWorkflow: loadWorkflowScript,
+        signal: runAsync ? undefined : signal,
+        requestInput: runAsync
+          ? undefined
+          : async (request, stepSignal) => {
+              if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
+                throw new Error("Workflow input was interrupted.");
+              const value = await queuedInput(ctx, request, stepSignal);
+              if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
+                throw new Error("Workflow input was interrupted.");
+              return value;
+            },
+        onProgress: (progress) => {
+          if (progress.kind === "phase") {
+            void store!
+              .append("progress", { phase: progress.phase.slice(0, 1024) })
+              .catch((error) => job.abort.abort(error));
+          }
+          onUpdate?.({
+            content: [{ type: "text", text: renderProgress(progress) }],
+            details: { status: "running", workflowId: store!.id },
+          });
+        },
+      };
+      let job: WorkflowJobState;
+      try {
+        job = startWorkflowJob(
+          parseWorkflow(definition.script).meta.name,
+          definition.script,
+          workflowOptions,
+          definition.createdAt,
+          runAsync
+            ? notify
+            : completion.policy
+              ? (job) => {
+                  consumeCompletionSource(
+                    pi,
+                    { source: "workflow", sourceId: job.id },
+                    workflowOwner,
+                  );
+                  return notify(job);
+                }
+              : undefined,
+          workflowOwner,
+          runAsync ? "async" : "sync",
+          {
+            invocation,
+            async: runAsync,
+            completionPolicy: runAsync
+              ? (completion.policy ?? "each")
+              : "inline",
           },
-        },
-        definition.createdAt,
-        runAsync
-          ? notify
-          : completion.policy
-            ? (job) => {
-                consumeCompletionSource(
-                  pi,
-                  { source: "workflow", sourceId: job.id },
-                  workflowOwner,
-                );
-                return notify(job);
-              }
-            : undefined,
-        workflowOwner,
-        runAsync ? "async" : "sync",
-        {
-          invocation,
-          async: runAsync,
-          completionPolicy: runAsync ? (completion.policy ?? "each") : "inline",
-        },
-        store.id,
-      );
+          store.id,
+        );
+      } catch (error) {
+        if (!(error instanceof WorkflowJobCapacityError)) throw error;
+        await store.append("rejected", {
+          status: "rejected",
+          reason: "capacity",
+          completedAt: Date.now(),
+        });
+        if (completion.policy) {
+          publishCompletion(
+            {
+              schemaVersion: 1,
+              completionId: `workflow:${store.id}`,
+              source: "workflow",
+              sourceId: store.id,
+              label: completionDisplayLabel(
+                parseWorkflow(definition.script).meta.name,
+                "workflow",
+              ),
+              status: "error",
+              policy: completion.policy,
+              ...(completion.groupId ? { groupId: completion.groupId } : {}),
+              references: [
+                {
+                  label: "run",
+                  value: `Workflow ${store.id} was rejected before execution`,
+                },
+              ],
+              completedAt: Date.now(),
+            },
+            workflowOwner,
+          );
+        }
+        throw error;
+      }
       job.completionPolicy =
         completion.policy ?? (runAsync ? "each" : undefined);
       job.completionGroupId = completion.groupId;
@@ -649,10 +690,26 @@ export async function restoreDurableWorkflowRuns(
   pi: ExtensionAPI,
   currentOwner: SessionOwnerToken,
   ctx: any,
+  storeRoot?: string,
 ): Promise<void> {
   try {
     try {
-      await restoreDurableCompletionGroups(currentOwner);
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (!sessionId || !ctx.cwd) {
+        await restoreDurableCompletionGroups(currentOwner);
+      } else {
+        await restoreDurableCompletionGroups(currentOwner, async (id) => {
+          for (const candidate of [sessionId, "workflow-v4"]) {
+            const events = await WorkflowRunStore.inspect(
+              { sessionId: candidate, cwd: ctx.cwd, root: storeRoot },
+              id,
+            );
+            if (events)
+              return events.some((event) => event.kind === "accepted");
+          }
+          throw new Error("Durable completion member journal is unavailable.");
+        });
+      }
     } catch (error) {
       ctx.ui?.notify?.(
         `Durable completion groups need attention: ${error instanceof Error ? error.message : String(error)}`,
@@ -682,23 +739,33 @@ export async function restoreDurableWorkflowRuns(
             "workflow",
           ),
           status:
-            end.data.status === "done"
-              ? end.data.result &&
-                decodeRunValue<WorkflowRunResult>(end.data.result).errorCount >
-                  0
-                ? "error"
-                : "done"
-              : end.data.status === "cancelled"
-                ? "cancelled"
-                : "error",
+            end.kind === "rejected"
+              ? "error"
+              : end.data.status === "done"
+                ? end.data.result &&
+                  decodeRunValue<WorkflowRunResult>(end.data.result)
+                    .errorCount > 0
+                  ? "error"
+                  : "done"
+                : end.data.status === "cancelled"
+                  ? "cancelled"
+                  : "error",
           policy: completion.policy,
           ...(completion.groupId ? { groupId: completion.groupId } : {}),
-          references: [
-            {
-              label: "result",
-              value: `call get_workflow_result with workflowId ${JSON.stringify(id)}`,
-            },
-          ],
+          references:
+            end.kind === "rejected"
+              ? [
+                  {
+                    label: "run",
+                    value: `Workflow ${id} was rejected before execution`,
+                  },
+                ]
+              : [
+                  {
+                    label: "result",
+                    value: `call get_workflow_result with workflowId ${JSON.stringify(id)}`,
+                  },
+                ],
           completedAt: end.data.completedAt,
         },
         currentOwner,

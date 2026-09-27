@@ -339,6 +339,13 @@ export const workflowJobRegistry = g.__piSubagenturaWorkflowJobs as Map<
 
 export const MAX_WORKFLOW_JOBS = 100;
 
+export class WorkflowJobCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowJobCapacityError";
+  }
+}
+
 /** Maximum notification delivery attempts before giving up. */
 export const MAX_WORKFLOW_NOTIFICATION_ATTEMPTS = 5;
 
@@ -544,7 +551,7 @@ export function startWorkflowJob(
         errorStage: "workflow",
         runtimeFailureKind: "workflow_capacity",
       });
-      throw new Error(
+      throw new WorkflowJobCapacityError(
         `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
     }

@@ -1985,6 +1985,7 @@ export function isCompletionGroupRecoveryBlocked(
 
 export async function restoreDurableCompletionGroups(
   owner: SessionOwnerToken,
+  wasAccepted?: (workflowId: string) => Promise<boolean>,
 ): Promise<void> {
   const state = getState(owner);
   if (!state) return;
@@ -1998,7 +1999,36 @@ export async function restoreDurableCompletionGroups(
     if (!resolveLiveSessionScope(owner)) return;
     for (const saved of groups) {
       const existing = state.groups.get(saved.groupId);
-      const members = new Set([...(existing?.members ?? []), ...saved.members]);
+      const recoveredMembers: string[] = [];
+      for (const member of saved.members) {
+        if (
+          wasAccepted &&
+          member.startsWith("workflow:wfd_") &&
+          !(await wasAccepted(member.slice("workflow:".length)))
+        )
+          continue;
+        recoveredMembers.push(member);
+      }
+      const existingMembers = [...(existing?.members ?? [])].filter(
+        (member) =>
+          !wasAccepted ||
+          !member.startsWith("workflow:wfd_") ||
+          recoveredMembers.includes(member),
+      );
+      const members = new Set([...existingMembers, ...recoveredMembers]);
+      if (existing) {
+        for (const member of existing.members) {
+          if (member.startsWith("workflow:wfd_") && !members.has(member)) {
+            existing.terminalMembers.delete(member);
+          }
+        }
+        existing.members = new Set(
+          [...existing.members].filter(
+            (member) =>
+              !member.startsWith("workflow:wfd_") || members.has(member),
+          ),
+        );
+      }
       if (members.size > MAX_GROUP_MEMBERS)
         throw new Error("Recovered completion group exceeds its member cap.");
       const terminalMembers = existing?.terminalMembers ?? new Set<string>();
@@ -2017,6 +2047,13 @@ export async function restoreDurableCompletionGroups(
         terminalMembers,
         sealed: true,
       });
+      if (recoveredMembers.length !== saved.members.length) {
+        writeCompletionGroup(directory, {
+          groupId: saved.groupId,
+          members: [...members],
+          sealed: true,
+        });
+      }
     }
     reconcileState(state);
     failedGroupRecoveryOwners.delete(key);
