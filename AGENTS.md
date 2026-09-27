@@ -210,34 +210,9 @@ exists only to drain persisted pre-coordinator state and support internal tests.
 
 ### Background workflows are parent-session scoped
 
-This section describes legacy workflows. Opt-in `durable:true` code
-workflows use `workflow-run-store.ts` and `workflow-durable.ts`: immutable root
-inputs/settings, fsynced request/response transcripts, stable operation ids,
-explicit same-session recovery, and one-use process attempt wrappers. See
-`WORKFLOW_RUNTIME.md`. Durable continuity interrupts the controller and releases
-it only after its runners drain; never retain a stale `runAgent` closure across
-generations. Replay divergence must terminate the host worker, not become a
-catchable script error. Persisted mux pane ids alone never authorize cancellation.
-Durable aggregate notices use the existing completion coordinator and unfinished
-mixed-source group barriers; do not add another notification scheduler. Saving
-a legacy script or running it asynchronously without `durable:true` changes none
-of the session-scoped behavior below.
-
-V4 `defineWorkflow` modules default to project-scoped durability, with explicit
-`durable:false` available. Their worker/controller is still retired on every
-parent shutdown, including `new`/`fork`, but their step journal and artifacts
-remain available for explicit resume from a new session in the same cwd. Never
-reuse a prior session's runner closure or completion group. V4 step identity
-includes the stable path, original definition, input, policy, and execution
-generation; completed reusable values must bypass agent dispatch. Disabled
-caching starts a fresh execution identity. Human input is private durable data
-collected through Pi UI only; local step abort must dismiss the dialog and clear
-its pending RPC without preventing the failure record from being persisted.
-The workflow watchdog excludes time waiting for human input. Ordinary custom
-callbacks can repeat side effects after interruption and must be idempotent.
-The public SDK remains Promise/TypeScript based; Effect stays internal.
-
-Background workflow jobs and in-process async sub-agent jobs do **not** survive
+Durable workflow storage, recovery, cancellation, and V4 execution invariants
+are documented in [`WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md). In-process
+jobs and non-durable background workflow jobs do **not** survive
 parent session replacement. On every `session_shutdown` reason (`reload`,
 `resume`, `quit`, `new`, and similar), `src/session-handlers.ts` suppresses late
 workflow completion hooks, aborts running workflow workers, and clears
