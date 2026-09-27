@@ -324,14 +324,6 @@ export function registerDurableWorkflowTools(
             completion.groupId,
             workflowOwner,
           );
-      registerCompletionMember(
-        "workflow",
-        store.id,
-        completion.policy ?? "each",
-        completion.groupId,
-        workflowOwner,
-        reservation,
-      );
       if (!params.workflowId) await store.append("accepted", {});
       else
         await store.append("interrupted", {
@@ -342,6 +334,23 @@ export function registerDurableWorkflowTools(
         completion,
         parentSessionId: runScope.sessionId,
       });
+      try {
+        registerCompletionMember(
+          "workflow",
+          store.id,
+          completion.policy ?? "each",
+          completion.groupId,
+          workflowOwner,
+          reservation,
+        );
+      } catch (error) {
+        await store.append("rejected", {
+          status: "rejected",
+          reason: "completion_registration",
+          completedAt: Date.now(),
+        });
+        throw error;
+      }
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
       const workflowOptions = {
         args: decodeRunValue(definition.args),
@@ -737,17 +746,19 @@ export async function restoreDurableWorkflowRuns(
         const events = await WorkflowRunStore.inspect(runScope, id);
         if (!events) continue;
         const end = terminal(events);
-        const delivery = events.findLast((event) => event.kind === "delivery");
+        const deliveries = events.filter((event) => event.kind === "delivery");
+        const delivery = project
+          ? deliveries.findLast(
+              (event) =>
+                event.data.parentSessionId === sessionId ||
+                (!event.data.parentSessionId &&
+                  events[0].data.parentSessionId === sessionId),
+            )
+          : deliveries.at(-1);
         const completion =
-          delivery?.data.completion ?? events[0].data.completion;
-        const deliveryOwner =
-          delivery?.data.parentSessionId ?? events[0].data.parentSessionId;
-        if (
-          !end ||
-          !completion?.policy ||
-          (project && deliveryOwner !== sessionId)
-        )
-          continue;
+          delivery?.data.completion ??
+          (!project ? events[0].data.completion : undefined);
+        if (!end || !completion?.policy || (project && !delivery)) continue;
         publishCompletion(
           {
             schemaVersion: 1,

@@ -16,6 +16,8 @@ import {
 import {
   clearCompletionCoordinator,
   prepareCompletionManifest,
+  publishCompletion,
+  registerCompletionMember,
   registerCompletionCoordinator,
   sealCompletionGroups,
 } from "../src/completion-coordinator";
@@ -23,8 +25,6 @@ import { DurableWorkflow } from "../src/workflow-durable";
 import { runWorkflow } from "../src/workflow-worker";
 import { getLiveWorkflowV4Store } from "../src/workflow-v4-store";
 import { encodeRunValue, WorkflowRunStore } from "../src/workflow-run-store";
-import { readCompletionGroups } from "../src/completion-group-store";
-import { sessionLedgerPath } from "../src/completion-ledger";
 import { restoreDurableWorkflowRuns } from "../src/workflow-durable-tools";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
@@ -200,6 +200,86 @@ describe("v4 workflow public tools", () => {
     ).toBe(false);
   });
 
+  it("releases the original group after a different parent resumes the run", async () => {
+    const first = setup(1, "group-parent-a");
+    const groupId = "parent-a-group";
+    const script = definition("cross-parent-group", "return { done: true }; ");
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "workflow-v4", root },
+      {
+        parentSessionId: "group-parent-a",
+        script,
+        args: encodeRunValue({}),
+        budgetTotal: 1000,
+        completion: { legacy: false, policy: "group", groupId },
+        concurrency: 4,
+        processConcurrency: 4,
+        workflowTimeoutMs: 60_000,
+      },
+    );
+    const workflowId = store.id;
+    await store.append("accepted", {});
+    await store.append("delivery", {
+      completion: { legacy: false, policy: "group", groupId },
+      parentSessionId: "group-parent-a",
+    });
+    registerCompletionMember(
+      "workflow",
+      workflowId,
+      "group",
+      groupId,
+      first.owner,
+    );
+    sealCompletionGroups(first.owner);
+    await store.append("interrupted", { status: "interrupted" });
+    await store.close();
+    clearCompletionCoordinator(first.owner);
+    clearSessionScopes();
+
+    const second = setup(2, "group-parent-b");
+    register(second, successfulRunner("completed in parent B"));
+    const resumed = await executeTool(
+      second.tools,
+      "resume_workflow",
+      { workflowId, async: true },
+      second.ctx,
+    );
+    expect(resumed.details.status).toBe("started");
+    await expect(
+      workflowJobRegistry.get(workflowId)!.promise,
+    ).resolves.toMatchObject({
+      result: { done: true },
+    });
+    clearCompletionCoordinator(second.owner);
+    clearSessionScopes();
+
+    const restored = setup(3, "group-parent-a");
+    const recoveryNotice = vi.fn();
+    restored.ctx.ui.notify = recoveryNotice;
+    await restoreDurableWorkflowRuns(
+      restored.pi,
+      restored.owner,
+      restored.ctx,
+      root,
+    );
+    expect(recoveryNotice).not.toHaveBeenCalled();
+    await restoreDurableWorkflowRuns(
+      restored.pi,
+      restored.owner,
+      restored.ctx,
+      root,
+    );
+    const recoveredNotices = restored.entries.filter(
+      (entry) => entry.completionId === `workflow:${workflowId}`,
+    );
+    expect(recoveredNotices).toHaveLength(1);
+    expect(recoveredNotices[0]).toMatchObject({
+      policy: "group",
+      groupId,
+      groupComplete: true,
+    });
+  });
+
   it("writes cancellation markers before terminalizing a durable workflow", async () => {
     const current = setup(1, "cancel-owner");
     const store = await WorkflowRunStore.create(
@@ -264,9 +344,32 @@ describe("v4 workflow public tools", () => {
     expect(markerExistedAtTerminal).toBe(true);
   });
 
-  it("removes a recovered group member whose journal proves acceptance failed", async () => {
+  it("keeps accepted peers completable when another acceptance append fails", async () => {
     const first = setup(1, "acceptance-crash");
     const api = register(first, successfulRunner("unused"));
+    const groupId = "crashed-acceptance-group";
+    registerCompletionMember(
+      "interactive",
+      "accepted-peer",
+      "group",
+      groupId,
+      first.owner,
+    );
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: "completion-accepted-peer",
+        source: "interactive",
+        sourceId: "accepted-peer",
+        label: "Accepted peer",
+        status: "done",
+        policy: "group",
+        groupId,
+        references: [{ label: "output", value: "peer-output" }],
+        completedAt: Date.now(),
+      },
+      first.owner,
+    );
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
     append.mockImplementation(async function (kind: string, data: any) {
@@ -278,7 +381,7 @@ describe("v4 workflow public tools", () => {
         {
           script: definition("crashed-acceptance", "return true;"),
           completionPolicy: "group",
-          completionGroupId: "crashed-acceptance-group",
+          completionGroupId: groupId,
         },
         undefined,
         undefined,
@@ -289,16 +392,10 @@ describe("v4 workflow public tools", () => {
       append.mockRestore();
     }
 
-    clearCompletionCoordinator(first.owner);
-    clearSessionScopes();
-    const second = setup(2, "acceptance-crash");
-    await restoreDurableWorkflowRuns(second.pi, second.owner, second.ctx, root);
-    const directory = `${sessionLedgerPath(
-      root,
-      "acceptance-crash",
-      "subagentura-completion-groups",
-    )}.groups`;
-    expect(await readCompletionGroups(directory)).toEqual([]);
+    sealCompletionGroups(first.owner);
+    expect(
+      prepareCompletionManifest(first.owner)?.details.completionIds,
+    ).toContain("completion-accepted-peer");
   });
 
   it("records rejected capacity admission and settles its completion member", async () => {
