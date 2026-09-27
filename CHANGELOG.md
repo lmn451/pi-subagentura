@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Executable TypeScript V4 workflows with `defineWorkflow()` and a typed
+  `ctx` API for persisted steps, agent calls, bounded fan-out/repeat, human
+  input, checkpoints, and artifacts. V4 definitions default to project-scoped
+  durable runs; `durable: false` selects an in-memory run.
 - Explicit bounded `retry()` workflow primitive, independent of existing
   three-attempt schema repair, with typed attempt numbers and cancellation guards.
 - Opt-in durable code workflows: private request/response and agent-attempt
@@ -24,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved-definition readiness and source digests, and durable execution by default
   for compatible `/workflows` selections. `/workflow <task>` generates stable
   IDs, validates before saving, and requests a durable background run.
+
+### Changed
+
+- Require Node.js 24.12 or newer for native erasable TypeScript workflow
+  syntax. The workflow worker pins Effect 4 internally; Effect remains outside
+  the public workflow API.
 
 ### Fixed
 

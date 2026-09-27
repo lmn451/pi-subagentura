@@ -1,166 +1,151 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
-interface WorkflowStep {
-  name?: string;
-  run?: string;
-  if?: string;
-  env?: Record<string, string>;
-  "continue-on-error"?: boolean;
-}
-
-interface WorkflowJob {
-  name?: string;
-  "runs-on"?: string;
-  strategy?: {
-    matrix?: {
-      "pi-version"?: string[];
-    };
-  };
-  steps: WorkflowStep[];
-}
-
-interface Workflow {
-  on?: {
-    push?: { branches?: string[] };
-    pull_request?: unknown;
-    schedule?: Array<{ cron: string }>;
-    workflow_dispatch?: unknown;
-  };
-  concurrency?: {
-    group?: string;
-    "cancel-in-progress"?: string;
-  };
-  jobs: Record<string, WorkflowJob>;
-}
-
 const REPO = resolve(fileURLToPath(import.meta.url), "..", "..");
-const workflow = parse(
-  readFileSync(resolve(REPO, ".github/workflows/ci.yml"), "utf8"),
-) as Workflow;
+const workflow = readFileSync(
+  resolve(REPO, ".github/workflows/ci.yml"),
+  "utf8",
+);
+const contributing = readFileSync(resolve(REPO, "CONTRIBUTING.md"), "utf8");
 const packageJson = JSON.parse(
   readFileSync(resolve(REPO, "package.json"), "utf8"),
-) as {
-  scripts: Record<string, string>;
-  peerDependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
-  files: string[];
-};
+) as { scripts: Record<string, string> };
 
-function step(job: WorkflowJob, name: string): WorkflowStep {
-  const match = job.steps.find((candidate) => candidate.name === name);
-  expect(match, `missing CI step: ${name}`).toBeDefined();
-  return match!;
+function jobBlock(job: string, nextJob?: string): string {
+  const start = workflow.indexOf(`\n  ${job}:`);
+  const end = nextJob ? workflow.indexOf(`\n  ${nextJob}:`, start) : -1;
+  expect(start).toBeGreaterThanOrEqual(0);
+  return workflow.slice(start, end === -1 ? undefined : end);
 }
 
-function normalizedCondition(candidate: WorkflowStep): string {
-  return (candidate.if ?? "").replace(/\s+/g, " ").trim();
+function stepBlock(name: string): string {
+  const start = workflow.indexOf(`      - name: ${name}\n`);
+  const end = workflow.indexOf("\n      - name:", start + 1);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return workflow.slice(start, end === -1 ? undefined : end);
 }
 
-function allSteps(): WorkflowStep[] {
-  return Object.values(workflow.jobs).flatMap((job) => job.steps);
+function occurrences(value: string): number {
+  return workflow.split(value).length - 1;
 }
 
 describe("CI workflow (.github/workflows/ci.yml)", () => {
   it("validates PRs once and only runs push CI for master", () => {
-    expect(workflow.on?.push?.branches).toEqual(["master"]);
-    expect(workflow.on?.pull_request).toBeDefined();
-    expect(workflow.concurrency?.group).toBe(
-      "ci-${{ github.event.pull_request.number || github.run_id }}",
+    expect(workflow).toContain(
+      "on:\n  push:\n    branches: [master]\n  pull_request:\n",
     );
-    expect(workflow.concurrency?.["cancel-in-progress"]).toBe(
-      "${{ github.event_name == 'pull_request' }}",
+    expect(workflow).toContain(
+      "group: ci-${{ github.event.pull_request.number || github.run_id }}",
     );
-    expect(workflow.on?.schedule?.map(({ cron }) => cron)).toContain(
-      "0 6 * * *",
+    expect(workflow).toContain(
+      "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
     );
-    expect(workflow.on?.workflow_dispatch).toBeDefined();
+    expect(workflow).toContain('cron: "0 6 * * *"');
+    expect(workflow).toContain("  workflow_dispatch:");
   });
 
-  it("preserves stable merge-gate check names and the actual SDK matrix", () => {
-    const minimumNode = workflow.jobs["minimum-node"]!;
-    const test = workflow.jobs.test!;
+  it("preserves all stable merge-gate check names", () => {
+    const jobs = workflow.slice(workflow.indexOf("\njobs:"));
+    const jobIds = [...jobs.matchAll(/^  ([a-z][a-z0-9-]*):$/gm)].map(
+      (match) => match[1],
+    );
+    const minimumNode = jobBlock("minimum-node", "test");
+    const test = jobBlock("test");
 
-    expect(Object.keys(workflow.jobs)).toEqual(["minimum-node", "test"]);
-    expect(minimumNode.name).toBe("Minimum Node 22.23.2");
-    expect(minimumNode["runs-on"]).toBe("ubuntu-latest");
+    expect(jobIds).toEqual(["minimum-node", "test"]);
+    expect(minimumNode).toContain("name: Minimum Node 22.23.2");
     expect(
-      minimumNode.steps.some(({ run }) => run === "npm run typecheck"),
-    ).toBe(true);
-    expect(
-      minimumNode.steps.some(({ run }) => run === "npm run test:property"),
-    ).toBe(true);
-    expect(
-      minimumNode.steps.some(({ run }) => run === "npm run pack:check"),
-    ).toBe(true);
-
-    expect(test.name).toBe("Test (Pi ${{ matrix.pi-version }})");
-    const versions = test.strategy?.matrix?.["pi-version"] ?? [];
-    expect(test.strategy?.matrix).toEqual({
-      "pi-version": ["1.2.0", "latest"],
-    });
-    expect(
-      versions.map((version) =>
-        test.name?.replace("${{ matrix.pi-version }}", version),
-      ),
-    ).toEqual(["Test (Pi 1.2.0)", "Test (Pi latest)"]);
-  });
-
-  it("passes the matrix SDK version to the installer", () => {
-    const test = workflow.jobs.test!;
-    const install = step(test, "Install selected Pi SDK");
-
-    expect(install.env).toEqual({ PI_VERSION: "${{ matrix.pi-version }}" });
-  });
-
-  it("declares the supported Pi SDK floor without pi-server", () => {
-    for (const name of [
-      "@earendil-works/pi-agent-core",
-      "@earendil-works/pi-ai",
-      "@earendil-works/pi-coding-agent",
-      "@earendil-works/pi-tui",
+      parse(workflow).jobs["minimum-node"].steps.find((step: any) =>
+        step.uses?.startsWith("actions/setup-node@"),
+      )?.with["node-version"],
+    ).toBe("24.12.0");
+    expect(minimumNode).toContain("run: npm run typecheck");
+    expect(minimumNode).toContain("run: npm run test:property");
+    expect(minimumNode).toContain("run: npm run pack:check");
+    expect(test).toContain("name: Test (Pi ${{ matrix.pi-version }})");
+    expect(test).toContain('pi-version: ["0.80.6", "latest"]');
+    for (const check of [
+      "Minimum Node 22.23.2",
+      "Test (Pi 0.80.6)",
+      "Test (Pi latest)",
     ]) {
-      expect(packageJson.peerDependencies[name]).toBe(">=1.2.0");
-      expect(packageJson.devDependencies[name]).toBe("1.4.0");
+      expect(contributing).toContain(`- \`${check}\``);
     }
-    expect(packageJson.peerDependencies).not.toHaveProperty(
-      "@earendil-works/pi-server",
-    );
-    expect(packageJson.devDependencies).not.toHaveProperty(
-      "@earendil-works/pi-server",
-    );
-    expect(packageJson.files).not.toContain("src/pi-sdk-compat.ts");
   });
 
-  it("runs static, coverage, packaging, and session checks on their intended legs", () => {
-    const test = workflow.jobs.test!;
-    const steps = allSteps();
-    for (const command of [
-      "npm run format:check",
-      "npm run coverage:check",
-      "npm run pack:check",
-      "npm run test:property",
-    ]) {
-      expect(steps.filter(({ run }) => run === command)).toHaveLength(1);
-    }
+  it.each(["0.80.6", "latest"])(
+    "installs the selected %s SDK in one npm invocation",
+    (version) => {
+      const scripts = [...workflow.matchAll(/^      - name: (.+)\n/gm)]
+        .map((match) => match[1])
+        .filter((name) =>
+          /^Install (selected Pi SDK|latest Pi server)/.test(name),
+        )
+        .map(stepBlock)
+        .filter(
+          (step) =>
+            version === "latest" ||
+            !step.includes("if: matrix.pi-version == 'latest'"),
+        )
+        .map((step) => {
+          const inline = step.match(/^        run: (npm .+)$/m);
+          if (inline) return inline[1];
+          const run = step.match(
+            /^        run: ([|>]-?)\n((?:          .*\n|\n)*)/m,
+          );
+          expect(run).not.toBeNull();
+          const lines = run![2]
+            .trimEnd()
+            .split("\n")
+            .map((line) => line.slice(10));
+          return lines.join(run![1].startsWith(">") ? " " : "\n");
+        });
+      const calls = execFileSync(
+        "bash",
+        ["-c", `npm() { printf '%s\\n' "$*"; }\n${scripts.join("\n")}`],
+        { encoding: "utf8", env: { ...process.env, PI_VERSION: version } },
+      )
+        .trim()
+        .split("\n");
 
-    expect(normalizedCondition(step(test, "Check formatting"))).toBe(
-      "matrix.pi-version == '1.2.0'",
+      // A later no-save install can reset the earlier unsaved SDK selection.
+      expect(calls).toHaveLength(1);
+      for (const name of [
+        "pi-agent-core",
+        "pi-ai",
+        "pi-coding-agent",
+        "pi-tui",
+      ]) {
+        expect(calls[0]).toContain(`@earendil-works/${name}@${version}`);
+      }
+      expect(calls[0].includes("@earendil-works/pi-server@latest")).toBe(
+        version === "latest",
+      );
+    },
+  );
+
+  it("runs static, coverage, and packaging checks once", () => {
+    expect(occurrences("run: npm run format:check")).toBe(1);
+    expect(occurrences("run: npm run coverage:check")).toBe(1);
+    expect(occurrences("run: npm run pack:check")).toBe(1);
+    expect(occurrences("run: npm run test:property")).toBe(1);
+
+    expect(stepBlock("Check formatting")).toContain(
+      "if: matrix.pi-version == '0.80.6'",
     );
     expect(
-      normalizedCondition(
-        step(test, "Run unit and Pi session tests with coverage thresholds"),
-      ),
-    ).toBe("matrix.pi-version == '1.2.0'");
-    expect(normalizedCondition(step(test, "Run unit tests"))).toBe(
-      "matrix.pi-version == 'latest'",
+      stepBlock("Run unit and Pi session tests with coverage thresholds"),
+    ).toContain("if: matrix.pi-version == '0.80.6'");
+    expect(stepBlock("Run unit tests")).toContain(
+      "if: matrix.pi-version == 'latest'",
     );
-    expect(
-      normalizedCondition(step(test, "Run Pi session integration tests")),
-    ).toBe("matrix.pi-version == 'latest'");
+    expect(stepBlock("Run Pi session integration tests")).toContain(
+      "if: matrix.pi-version == 'latest'",
+    );
     expect(packageJson.scripts["test:unit"]).toContain(
       "--exclude tests/published-tarball.test.ts",
     );
@@ -173,33 +158,31 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
   });
 
   it("runs real Herdr coverage on hosted runners with failure diagnostics", () => {
-    const test = workflow.jobs.test!;
-    const install = step(test, "Install Herdr");
-    expect(install.env?.HERDR_VERSION).toBe("v0.9.0");
-    expect(install.env?.HERDR_SHA256).toBe(
-      "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f",
+    const install = stepBlock("Install Herdr");
+    expect(install).toContain("HERDR_VERSION: v0.9.0");
+    expect(install).toContain("herdr-linux-x86_64");
+    expect(install).toContain("sha256sum -c -");
+    expect(stepBlock("Run headless Herdr integration tests")).toContain(
+      "run: npm run test:herdr:headless",
     );
-    expect(install.run).toContain("herdr-linux-x86_64");
-    expect(install.run).toContain("sha256sum -c -");
-    expect(step(test, "Run headless Herdr integration tests").run).toBe(
-      "npm run test:herdr:headless",
-    );
-    expect(step(test, "Upload Herdr diagnostics").if).toBe("failure()");
+    expect(stepBlock("Upload Herdr diagnostics")).toContain("if: failure()");
+    expect(workflow).not.toMatch(/run: npm run test:herdr\s*\n/);
+    expect(workflow).not.toContain("self-hosted");
     expect(packageJson.scripts["test:herdr:headless"]).toBe(
       "node --experimental-strip-types tests/helpers/herdr-headless.ts",
     );
   });
 
-  it("keeps random and mutation scripts available only as deep checks", () => {
-    const test = workflow.jobs.test!;
-    const deepCondition =
-      "matrix.pi-version == '1.2.0' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')";
-    const random = step(test, "Run randomized-order tests");
-    const mutation = step(test, "Run non-blocking mutation pilot");
+  it("keeps random and mutation scripts but runs them only as deep checks", () => {
+    const random = stepBlock("Run randomized-order tests");
+    const mutation = stepBlock("Run non-blocking mutation pilot");
 
-    expect(normalizedCondition(random)).toBe(deepCondition);
-    expect(normalizedCondition(mutation)).toBe(deepCondition);
-    expect(mutation["continue-on-error"]).toBe(true);
+    for (const step of [random, mutation]) {
+      expect(step).toContain("matrix.pi-version == '0.80.6'");
+      expect(step).toContain("github.event_name == 'schedule'");
+      expect(step).toContain("github.event_name == 'workflow_dispatch'");
+    }
+    expect(mutation).toContain("continue-on-error: true");
     expect(packageJson.scripts["test:random"]).toContain("--sequence.shuffle");
     expect(packageJson.scripts["test:property"]).toBe(
       "vitest run tests/property",

@@ -220,6 +220,7 @@ export const TELEMETRY_OPERATION_NAMES = {
     "workflow",
     "get_workflow_status",
     "resume_workflow",
+    "respond_workflow_input",
     "list_workflow_runs",
     "inspect_workflow",
     "get_workflow_result",

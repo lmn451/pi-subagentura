@@ -32,6 +32,10 @@ const EVENT_KINDS = new Set([
   "accepted",
   "dispatch",
   "delivery",
+  "v4.step",
+  "v4.progress",
+  "v4.artifact",
+  "v4.definition",
 ]);
 
 export interface RunScope {

@@ -45,7 +45,10 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
-import { restoreDurableWorkflowRuns } from "./workflow-durable-tools";
+import {
+  restoreDurableWorkflowRuns,
+  restoreWorkflowV4View,
+} from "./workflow-durable-tools";
 import {
   deleteOrchestratorRoutingFile,
   loadOrchestratorRoutingMetadata,
@@ -730,6 +733,7 @@ export function registerSessionHandlers(
     ensureInteractivePoller(globalState);
     await durableRecovery;
     scope.workflowAdmissionClosed = false;
+    await restoreWorkflowV4View(ctx);
   });
 
   pi.on("session_shutdown", (event, ctx) => {

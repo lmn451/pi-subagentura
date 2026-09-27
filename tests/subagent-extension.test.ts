@@ -52,6 +52,7 @@ const WORKFLOW_TOOL_NAMES = [
   "get_workflow_result",
   "get_workflow_status",
   "resume_workflow",
+  "respond_workflow_input",
   "list_workflow_runs",
   "inspect_workflow",
   "list_workflows",

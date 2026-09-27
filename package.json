@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/subagent.ts",
     "./workflow": {
-      "types": "./types/workflow.d.ts"
+      "types": "./types/workflow.d.ts",
+      "default": "./src/workflow-v4-sdk.mjs"
     }
   },
   "type": "module",
@@ -50,6 +51,13 @@
     "examples/workflows/*.mjs",
     "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
+    "examples/workflows/*.ts",
+    "types/workflow-v4.d.ts",
+    "src/workflow-v4-sdk.mjs",
+    "src/workflow-v4-sdk.d.mts",
+    "src/workflow-v4-runtime.mjs",
+    "src/workflow-v4-runtime.d.mts",
+    "src/workflow-v4-store.ts",
     "src/notifications.ts",
     "src/rendering.ts",
     "src/schemas.ts",
@@ -116,7 +124,7 @@
     "src/cancellation-snapshots.ts"
   ],
   "engines": {
-    "node": ">=22.23.2"
+    "node": ">=24.12.0"
   },
   "publishConfig": {
     "access": "public"
@@ -183,6 +191,7 @@
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
+    "effect": "4.0.0-rc.117",
     "is-path-inside": "^4.0.0"
   }
 }

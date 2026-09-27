@@ -26,7 +26,14 @@ export function inspectDurableWorkflow(
   const referencedWorkflows = new Set<string>();
 
   try {
-    parseWorkflow(script);
+    const parsed = parseWorkflow(script);
+    if (parsed.format === "definition")
+      return {
+        durableReady: true,
+        definitionDigest,
+        errors: [],
+        referencedWorkflows: [],
+      };
   } catch (error) {
     errors.push(`Workflow definition is invalid: ${errorMessage(error)}`);
     return {

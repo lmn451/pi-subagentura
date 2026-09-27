@@ -60,7 +60,8 @@ import {
   workflowUsageFromUsage,
   zeroWorkflowUsage,
 } from "./workflow-core";
-import { workflowStringify } from "./workflow-script";
+import { workflowStringify, parseWorkflow } from "./workflow-script";
+import { WorkflowV4Store } from "./workflow-v4-store";
 import {
   cancelInteractiveSubagent,
   getInteractivePaneLivenessAsync,
@@ -84,6 +85,8 @@ interface ActiveAgentRun {
 }
 
 interface Engine {
+  v4?: WorkflowV4Store;
+  rpcAborts: Map<number, AbortController>;
   durable?: RunWorkflowOptions["durable"];
   runAgent: WorkflowAgentRunner;
   abort: AbortController;
@@ -213,6 +216,16 @@ export async function runWorkflow(
     opts.signal?.addEventListener("abort", forwardAbort, { once: true });
   }
   const engine: Engine = {
+    v4:
+      parseWorkflow(script).format === "definition"
+        ? new WorkflowV4Store(
+            script,
+            opts.durable?.store,
+            opts.onStep,
+            opts.requestInput,
+          )
+        : undefined,
+    rpcAborts: new Map(),
     durable: opts.durable,
     runAgent: opts.runAgent,
     abort,
@@ -269,6 +282,7 @@ export async function runWorkflow(
       cause,
     );
   } finally {
+    engine.v4?.close();
     opts.signal?.removeEventListener("abort", forwardAbort);
   }
 }
@@ -279,6 +293,8 @@ type WorkerRpcResponse = {
   ok: boolean;
   value?: unknown;
   error?: string;
+  cancelled?: boolean;
+  failure?: WorkflowFailureClassification;
   tokensDelta: number;
   stats?: {
     errorCount?: number;
@@ -292,6 +308,7 @@ type AgentCallResponse = {
   tokensDelta: number;
   errorCount?: number;
   cancelledCount?: number;
+  failure?: WorkflowFailureClassification;
 };
 
 class WorkerRpcFailure extends Error {
@@ -363,6 +380,10 @@ async function executeScript(
 
     const prompt = payload.prompt;
     const agentOpts = payload.opts ?? {};
+    const localAbort = engine.rpcAborts.get(requestId);
+    const agentSignal = localAbort
+      ? AbortSignal.any([engine.signal, localAbort.signal])
+      : engine.signal;
     const hasSchema = agentOpts.schema != null;
     if (hasSchema) {
       const schemaValidation = validateSchemaDefinition(agentOpts.schema);
@@ -386,9 +407,10 @@ async function executeScript(
     let runnerFailure: { cause: unknown } | undefined;
     try {
       let lastErr = "";
+      let callFailure: WorkflowFailureClassification | undefined;
       const attempts = hasSchema ? SCHEMA_RETRIES : 1;
       for (let attempt = 0; attempt < attempts; attempt++) {
-        if (engine.signal?.aborted) throw new Error("Workflow aborted.");
+        if (agentSignal.aborted) throw new Error("Workflow aborted.");
         if (engine.counters.agentsSpawned >= MAX_TOTAL_AGENTS) {
           throw new WorkflowFailureError(
             `Workflow exceeded the ${MAX_TOTAL_AGENTS}-agent lifetime cap.`,
@@ -431,7 +453,7 @@ async function executeScript(
           const invokeAgent: WorkflowAgentRunner = (request) =>
             engine.durable
               ? engine.durable.runAttempt(
-                  requestId,
+                  engine.v4 ? (agentOpts.id ?? String(requestId)) : requestId,
                   attempt,
                   request,
                   engine.runAgent,
@@ -442,7 +464,7 @@ async function executeScript(
               prompt: finalPrompt,
               persona: agentOpts.persona,
               model: agentOpts.model,
-              signal: engine.signal,
+              signal: agentSignal,
               isolation,
               label: agentOpts.label,
               ...(hasSchema && !isProcess ? { schema: agentOpts.schema } : {}),
@@ -475,6 +497,7 @@ async function executeScript(
               res = await agentRun;
               finalModel = res.model ?? agentOpts.model;
               const resultFailure = workflowFailureClassification(res);
+              if (resultFailure) callFailure = resultFailure;
               if (resultFailure && engine.failure === undefined) {
                 engine.failure = resultFailure;
               }
@@ -514,12 +537,26 @@ async function executeScript(
           if (res.cancelled) {
             status = "cancelled";
             engine.counters.cancelledCount++;
-            return { value: null, tokensDelta, cancelledCount: 1 };
+            return {
+              value: null,
+              tokensDelta,
+              cancelledCount: 1,
+            };
           }
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
-            return { value: null, tokensDelta, errorCount: 1 };
+            callFailure ??= {
+              errorCategory: "unknown",
+              errorStage: "completion",
+            };
+            engine.failure ??= callFailure;
+            return {
+              value: null,
+              tokensDelta,
+              errorCount: 1,
+              failure: callFailure,
+            };
           }
           if (!hasSchema) return { value: res.output, tokensDelta };
           if (!isProcess && res.workflowStructuredOutput != null) {
@@ -527,6 +564,10 @@ async function executeScript(
             if (!schemaCapture?.called) {
               status = "error";
               engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
+              callFailure = {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
               };
@@ -538,6 +579,10 @@ async function executeScript(
               return { value: schemaCapture.value, tokensDelta };
             status = "error";
             engine.failure ??= {
+              errorCategory: "schema",
+              errorStage: "schema_validation",
+            };
+            callFailure = {
               errorCategory: "schema",
               errorStage: "schema_validation",
             };
@@ -555,10 +600,18 @@ async function executeScript(
                 errorCategory: "schema",
                 errorStage: "schema_validation",
               };
+              callFailure = {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
               status = "error";
               engine.failure ??= {
+                errorCategory: "schema",
+                errorStage: "schema_validation",
+              };
+              callFailure = {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
               };
@@ -592,7 +645,12 @@ async function executeScript(
         kind: "log",
         message: `agent(schema) failed after ${attempts} attempts: ${lastErr}`,
       });
-      return { value: null, tokensDelta, errorCount: 1 };
+      callFailure ??= {
+        errorCategory: "schema",
+        errorStage: "schema_validation",
+      };
+      engine.failure ??= callFailure;
+      return { value: null, tokensDelta, errorCount: 1, failure: callFailure };
     } catch (error) {
       throw new WorkerRpcFailure(error, tokensDelta, runnerFailure);
     } finally {
@@ -663,15 +721,37 @@ function runWorkflowWorker(
       resolve(value);
     };
     const onAbort = () => fail(new Error("Workflow aborted."));
-    const timeout = setTimeout(() => {
-      const err = new WorkflowWallTimeoutError(engine.workflowTimeoutMs);
-      fail(err);
-      engine.abort.abort(err);
-    }, engine.workflowTimeoutMs);
+    let waitingForInput = 0;
+    let remainingMs = engine.workflowTimeoutMs;
+    let armedAt = Date.now();
+    let timeout: ReturnType<typeof setTimeout>;
+    const armTimeout = () => {
+      armedAt = Date.now();
+      timeout = setTimeout(
+        () => {
+          const err = new WorkflowWallTimeoutError(engine.workflowTimeoutMs);
+          fail(err);
+          engine.abort.abort(err);
+        },
+        Math.max(1, remainingMs),
+      );
+    };
+    const pauseForInput = () => {
+      if (waitingForInput++ === 0) {
+        clearTimeout(timeout);
+        remainingMs -= Date.now() - armedAt;
+      }
+    };
+    const finishInput = () => {
+      if (--waitingForInput === 0 && !settled) armTimeout();
+    };
+    armTimeout();
     const cleanup = () => {
       clearTimeout(timeout);
       engine.signal.removeEventListener("abort", onAbort);
       runnerFailures.clear();
+      for (const abort of engine.rpcAborts.values()) abort.abort();
+      engine.rpcAborts.clear();
       worker.removeAllListeners();
     };
 
@@ -707,7 +787,23 @@ function runWorkflowWorker(
         engine.durable?.acceptResponse(msg.id, msg.frontier);
         return;
       }
+      if (msg.type === "cancel_request") {
+        engine.rpcAborts.get(msg.id)?.abort();
+        return;
+      }
       if (typeof msg.id !== "number" || typeof msg.method !== "string") return;
+      if (
+        msg.method === "agent" ||
+        (engine.v4 &&
+          msg.method === "v4" &&
+          msg.payload?.action === "gate.wait")
+      )
+        engine.rpcAborts.set(msg.id, new AbortController());
+      const humanInput =
+        !!engine.v4 &&
+        msg.method === "v4" &&
+        msg.payload?.action === "gate.wait";
+      if (humanInput) pauseForInput();
       const execute = async (): Promise<WorkerRpcResponse> => {
         try {
           return await handleWorkerRpc(msg, engine, runAgentCall);
@@ -730,6 +826,19 @@ function runWorkflowWorker(
             id: msg.id,
             ok: false,
             error,
+            ...(engine.v4
+              ? {
+                  failure:
+                    workflowFailureClassification(err) ??
+                    (engine.signal.aborted
+                      ? undefined
+                      : {
+                          errorCategory: "unknown" as const,
+                          errorStage: "completion" as const,
+                        }),
+                  ...(engine.signal.aborted ? { cancelled: true } : {}),
+                }
+              : {}),
             tokensDelta,
             stats: {
               errorCount:
@@ -737,14 +846,16 @@ function runWorkflowWorker(
               failure: engine.failure,
             },
           };
+        } finally {
+          if (humanInput) finishInput();
         }
       };
-      if (engine.durable) engine.durable.dispatch(msg, execute);
+      if (engine.durable && !engine.v4) engine.durable.dispatch(msg, execute);
       else
-        void execute().then(
-          (response) => postWorkerResponse(worker, response),
-          fail,
-        );
+        void execute().then((response) => {
+          engine.rpcAborts.delete(msg.id);
+          postWorkerResponse(worker, response);
+        }, fail);
     });
     worker.on("error", fail);
     worker.on("exit", (code) => {
@@ -759,7 +870,9 @@ function runWorkflowWorker(
       budgetTotal: engine.budgetTotal,
       syncTimeoutMs: WORKFLOW_SYNC_TIMEOUT_MS,
       maxItemsPerCall: MAX_ITEMS_PER_CALL,
-      maxWorkflowDepth: MAX_WORKFLOW_DEPTH,
+      maxWorkflowDepth: engine.v4 ? 8 : MAX_WORKFLOW_DEPTH,
+      stepBased: !!engine.v4,
+      initialTokensSpent: engine.v4 ? (engine.durable?.usage().output ?? 0) : 0,
       durable: !!engine.durable,
     });
   });
@@ -776,26 +889,61 @@ async function handleWorkerRpc(
     requestId: number,
   ) => Promise<AgentCallResponse>,
 ): Promise<WorkerRpcResponse> {
+  if (msg.method === "v4") {
+    if (!engine.v4)
+      throw new Error("Step operations require a v4 workflow definition.");
+    const value = await engine.v4.request(
+      msg.payload.action,
+      msg.payload.payload,
+      engine.rpcAborts.get(msg.id)?.signal,
+    );
+    return { id: msg.id, ok: true, value, tokensDelta: 0 };
+  }
   if (msg.method === "agent") {
     const response = await runAgentCall(msg.payload, msg.id);
+    const v4Definition =
+      engine.v4 !== undefined && msg.payload.v4Definition === true;
+    const cancelled = v4Definition && (response.cancelledCount ?? 0) > 0;
+    const failed = v4Definition && !cancelled && (response.errorCount ?? 0) > 0;
     return {
       id: msg.id,
-      ok: true,
-      value: response.value,
+      ok: !cancelled && !failed,
+      ...(cancelled
+        ? { error: "Workflow agent was cancelled.", cancelled: true }
+        : failed
+          ? {
+              error: "Workflow agent failed.",
+              failure:
+                response.failure ??
+                (engine.v4
+                  ? {
+                      errorCategory: "unknown" as const,
+                      errorStage: "completion" as const,
+                    }
+                  : undefined),
+            }
+          : { value: response.value }),
       tokensDelta: response.tokensDelta,
       stats: {
         errorCount: response.errorCount,
         cancelledCount: response.cancelledCount,
-        failure: engine.failure,
+        failure: response.failure ?? engine.failure,
       },
     };
   }
   if (msg.method === "loadWorkflow") {
     const name = engine.durable ? msg.payload.name : msg.payload;
-    const script = loadWorkflowRef(name, engine);
+    const prior =
+      engine.v4 &&
+      engine.durable?.store.events.find(
+        (event) => event.kind === "v4.definition" && event.data.name === name,
+      );
+    const script = prior?.data.script ?? loadWorkflowRef(name, engine);
     if (script == null && typeof name === "string") {
       throw new Error(`workflow(): no saved workflow named "${name}".`);
     }
+    if (engine.v4 && engine.durable && !prior)
+      await engine.durable.store.append("v4.definition", { name, script });
     return {
       id: msg.id,
       ok: true,

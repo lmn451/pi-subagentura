@@ -4,7 +4,7 @@ Thanks for contributing to `pi-subagentura`.
 
 ## Local development
 
-Node.js 22.23.2 or newer is required for local development.
+Node.js 24.12.0 or newer is required for local development.
 
 ```bash
 npm install
@@ -24,14 +24,13 @@ random-order and mutation checks.
 The `Protect master` repository ruleset must require these stable CI check names:
 
 - `Minimum Node 22.23.2`
-- `Test (Pi 1.2.0)`
+- `Test (Pi 0.80.6)`
 - `Test (Pi latest)`
 
 The separate minimum-Node check makes runtime support visible rather than hiding
-it inside the Pi SDK matrix. `Test (Pi 1.2.0)` tests the minimum supported Pi
-SDK, 1.2.0; development dependencies pin Pi SDK 1.4.0, and `Test (Pi latest)`
-tests the latest published SDK. Keep all three check names synchronized with
-the repository ruleset.
+it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
+coordinated ruleset update by a repository administrator.
+The historical `Minimum Node 22.23.2` check name now runs Node.js 24.12.0.
 
 ### Real Herdr integration coverage
 
@@ -115,7 +114,9 @@ and manual workflows, with `continue-on-error` on the pinned SDK leg, so mutatio
 results never gate a pull request. Local configuration or test-runner failures
 still return a non-zero exit code.
 
-For model resolution behavior, see [architecture §5.2](architecture.md#52-context-and-model-selection).
+## Provider list
+
+`resolveModel()` in `helpers.ts` dynamically queries all providers via `getProviders()` from the Pi SDK — no hardcoded list. When Pi adds new providers, bare model IDs resolve automatically without code changes.
 
 ## Guidelines
 
