@@ -50,6 +50,7 @@ import {
   getWorkflowJobForOwner,
   normalizeCancelledWorkflowState,
   startWorkflowJob,
+  withWorkflowTerminalTransition,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -1506,8 +1507,10 @@ export function registerWorkflowTool(
       }
       if (st.status === "cancelled") {
         try {
-          if (await persistDurableCancellation(st))
-            cancelWorkflowJob(st, "explicit_cancel");
+          await withWorkflowTerminalTransition(st, async () => {
+            if (await persistDurableCancellation(st))
+              cancelWorkflowJob(st, "explicit_cancel");
+          });
         } catch (error) {
           return {
             content: [
@@ -1555,7 +1558,14 @@ export function registerWorkflowTool(
         };
       }
       try {
-        await persistDurableCancellation(st);
+        await withWorkflowTerminalTransition(st, async () => {
+          const terminal = durableTerminalStatus(st);
+          if (terminal) return;
+          await persistDurableCancellation(st);
+          const status = durableTerminalStatus(st);
+          if (status && status !== "cancelled") return;
+          cancelWorkflowJob(st, "explicit_cancel");
+        });
       } catch (error) {
         return {
           content: [
@@ -1571,7 +1581,6 @@ export function registerWorkflowTool(
       const durableStatus = durableTerminalStatus(st);
       if (durableStatus && durableStatus !== "cancelled")
         return cancellationRaceResponse(st, durableStatus);
-      cancelWorkflowJob(st, "explicit_cancel");
       const finalStatus = durableTerminalStatus(st) ?? String(st.status);
       if (finalStatus !== "cancelled") {
         return cancellationRaceResponse(st, finalStatus);

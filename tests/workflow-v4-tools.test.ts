@@ -281,6 +281,96 @@ describe("v4 workflow public tools", () => {
         await markerRelease;
       }
     };
+    finishAgent();
+    try {
+      await markerStarted;
+      const completion = job.completionNotification;
+      const completionSpy = vi.fn((finishedJob) => completion?.(finishedJob));
+      job.completionNotification = completionSpy;
+      const cancelPromise = executeTool(
+        current.tools,
+        "cancel_workflow",
+        { workflowId },
+        current.ctx,
+      );
+      await Promise.resolve();
+      expect(markerCalls).toBe(1);
+      releaseMarker();
+      await expect(job.promise).resolves.toMatchObject({ result: true });
+      const response = await cancelPromise;
+      expect(response.details).toMatchObject({
+        status: "done",
+        cancelled: false,
+      });
+      expect(job.abort.signal.aborted).toBe(false);
+      expect(completionSpy).toHaveBeenCalledTimes(1);
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        workflowId,
+      );
+      expect(events?.filter((event) => event.kind === "terminal")).toHaveLength(
+        1,
+      );
+      expect(events?.at(-1)?.data.status).toBe("done");
+    } finally {
+      finishAgent();
+      releaseMarker();
+      durableProcessControl.stop = undefined;
+    }
+  });
+
+  it("commits cancellation before a queued success terminal", async () => {
+    const current = setup(1, "cancel-wins-owner");
+    let agentStarted!: () => void;
+    let finishAgent!: () => void;
+    const started = new Promise<void>((resolve) => (agentStarted = resolve));
+    const waitForFinish = new Promise<void>(
+      (resolve) => (finishAgent = resolve),
+    );
+    const runner: WorkflowAgentRunner = async () => {
+      agentStarted();
+      await waitForFinish;
+      return {
+        isError: false,
+        output: "finished",
+        usage: zeroUsage(),
+      };
+    };
+    const api = register(current, runner);
+    const startedRun = await api.run(
+      {
+        script: definition(
+          "cancel-wins",
+          'await ctx.agent("wait", { prompt: "wait", id: "wait" }); return true;',
+        ),
+        async: true,
+      },
+      undefined,
+      undefined,
+      current.ctx,
+    );
+    const workflowId = startedRun.details.workflowId;
+    const job = workflowJobRegistry.get(workflowId)!;
+    await started;
+    registerWorkflowTool(current.pi, current.scope);
+    let markerStarted!: () => void;
+    let releaseMarker!: () => void;
+    const markerEntered = new Promise<void>((resolve) => {
+      markerStarted = resolve;
+    });
+    const markerWait = new Promise<void>((resolve) => {
+      releaseMarker = resolve;
+    });
+    let markerCalls = 0;
+    let settled = false;
+    const completion = job.completionNotification;
+    const completionSpy = vi.fn((finishedJob) => completion?.(finishedJob));
+    job.completionNotification = completionSpy;
+    durableProcessControl.stop = async () => {
+      markerCalls++;
+      markerStarted();
+      await markerWait;
+    };
     const cancelPromise = executeTool(
       current.tools,
       "cancel_workflow",
@@ -288,16 +378,42 @@ describe("v4 workflow public tools", () => {
       current.ctx,
     );
     try {
-      await markerStarted;
+      await markerEntered;
+      void job.promise.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
       finishAgent();
-      await expect(job.promise).resolves.toMatchObject({ result: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(markerCalls).toBe(1);
       releaseMarker();
       const response = await cancelPromise;
       expect(response.details).toMatchObject({
-        status: "done",
-        cancelled: false,
+        status: "cancelled",
+        cancelled: true,
       });
-      expect(job.abort.signal.aborted).toBe(false);
+      await expect(job.promise).rejects.toThrow();
+      expect(job.status).toBe("cancelled");
+      expect(job.abort.signal.aborted).toBe(true);
+      expect(completionSpy).toHaveBeenCalledTimes(1);
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        workflowId,
+      );
+      expect(
+        events?.filter((event) =>
+          ["cancelled", "terminal"].includes(event.kind),
+        ),
+      ).toHaveLength(1);
+      expect(
+        events?.findLast((event) =>
+          ["cancelled", "terminal"].includes(event.kind),
+        ),
+      ).toMatchObject({
+        kind: "cancelled",
+        data: { status: "cancelled" },
+      });
     } finally {
       finishAgent();
       releaseMarker();

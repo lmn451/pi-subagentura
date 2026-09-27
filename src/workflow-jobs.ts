@@ -315,6 +315,28 @@ export interface WorkflowJobState {
   telemetryFailure?: WorkflowFailureClassification;
   /** Runtime failures are emitted once per workflow operation. */
   telemetryRuntimeFailureReported?: boolean;
+  terminalTransition?: {
+    promise: Promise<void>;
+    release: () => void;
+  };
+}
+
+export async function withWorkflowTerminalTransition<T>(
+  job: WorkflowJobState,
+  transition: () => Promise<T>,
+): Promise<T> {
+  const previous = job.terminalTransition?.promise ?? Promise.resolve();
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => (release = resolve));
+  const slot = { promise, release };
+  job.terminalTransition = slot;
+  await previous;
+  try {
+    return await transition();
+  } finally {
+    release();
+    if (job.terminalTransition === slot) job.terminalTransition = undefined;
+  }
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -660,13 +682,23 @@ export function startWorkflowJob(
   })
     .then(async (r) => {
       if (state.durable) {
-        if (state.durableInterrupted || abort.signal.aborted)
-          throw new Error("Workflow interrupted before result commit.");
-        await stopDurableProcessAttempts(state.durable.store.directory);
-        await state.durable.store.append("terminal", {
-          status: "done",
-          result: encodeRunValue(r),
-          completedAt: Date.now(),
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            if (terminal.data.status === "done") return;
+            throw new Error("Workflow interrupted before result commit.");
+          }
+          if (state.durableInterrupted || abort.signal.aborted)
+            throw new Error("Workflow interrupted before result commit.");
+          await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.flush();
+          await state.durable!.store.append("terminal", {
+            status: "done",
+            result: encodeRunValue(r),
+            completedAt: Date.now(),
+          });
         });
       }
       if (state.status === "running") state.status = "done";
@@ -694,17 +726,31 @@ export function startWorkflowJob(
       if (state.durable) {
         state.durable.stop();
         await state.durable.drain();
-        if (!state.durableInterrupted)
-          await stopDurableProcessAttempts(state.durable.store.directory);
-        await state.durable.store.append(
-          state.durableInterrupted ? "interrupted" : "terminal",
-          {
-            status: state.durableInterrupted ? "interrupted" : state.status,
-            error: msg,
-            usage: state.durable.usage(),
-            completedAt: Date.now(),
-          },
-        );
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            state.status =
+              terminal.data.status === "done"
+                ? "done"
+                : terminal.data.status === "error"
+                  ? "error"
+                  : "cancelled";
+            return;
+          }
+          if (!state.durableInterrupted)
+            await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.append(
+            state.durableInterrupted ? "interrupted" : "terminal",
+            {
+              status: state.durableInterrupted ? "interrupted" : state.status,
+              error: msg,
+              usage: state.durable!.usage(),
+              completedAt: Date.now(),
+            },
+          );
+        });
       }
       if (state.status !== "cancelled") {
         state.telemetryFailure =
