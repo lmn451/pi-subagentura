@@ -353,6 +353,12 @@ export function registerDurableWorkflowTools(
             completion.groupId,
             workflowOwner,
           );
+      if (params.workflowId)
+        await store.append("interrupted", {
+          status: "resuming",
+          resumedAt: Date.now(),
+        });
+      await store.append("delivery", { completion });
       registerCompletionMember(
         "workflow",
         store.id,
@@ -362,12 +368,6 @@ export function registerDurableWorkflowTools(
         reservation,
       );
       if (!params.workflowId) await store.append("accepted", {});
-      else
-        await store.append("interrupted", {
-          status: "resuming",
-          resumedAt: Date.now(),
-        });
-      await store.append("delivery", { completion });
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
       let job: WorkflowJobState;
       try {

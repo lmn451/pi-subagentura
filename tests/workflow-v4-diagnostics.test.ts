@@ -13,6 +13,7 @@ import {
 import { awaitInteractiveResult } from "../src/workflow-worker";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import {
+  attachWorkflowFailure,
   workflowFailureClassification,
   type WorkflowAgentRunner,
   type WorkflowProgress,
@@ -125,6 +126,54 @@ describe("workflow v4 cancellation diagnostics", () => {
   });
 });
 describe("workflow v4 aggregate classifications", () => {
+  it("preserves mux probe classification from an error result", async () => {
+    const { owner, payloads } = telemetryScope(406);
+    const runAgent: WorkflowAgentRunner = async () =>
+      attachWorkflowFailure(
+        {
+          ...successfulResult(),
+          isError: true,
+          errorMessage: "mux probe details stay private",
+        },
+        {
+          errorCategory: "mux",
+          errorStage: "polling",
+          runtimeFailureKind: "mux_probe",
+        },
+      );
+    const job = startWorkflowJob(
+      "classified-agent-error",
+      SCRIPT,
+      { runAgent },
+      undefined,
+      undefined,
+      owner,
+    );
+    jobs.push(job);
+
+    await job.promise;
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_workflow_completed",
+    );
+    const runtimeFailure = payloads.find(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(completed?.properties).toMatchObject({
+      status: "partial",
+      error_category: "mux",
+      error_stage: "polling",
+    });
+    expect(runtimeFailure?.properties).toMatchObject({
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+    });
+    expect(JSON.stringify([completed, runtimeFailure])).not.toContain(
+      "mux probe details stay private",
+    );
+  });
+
   it("classifies an ordinary failed agent turn in a partial aggregate", async () => {
     const { owner, payloads } = telemetryScope(405);
     const job = startWorkflowJob(

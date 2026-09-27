@@ -81,6 +81,65 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("keeps a delivery-write failure pre-acceptance through cancel and resume", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scope);
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    const originalAppend = append.getMockImplementation()!;
+    append.mockImplementation(async function (kind, data) {
+      if (kind === "delivery") throw new Error("injected delivery failure");
+      return originalAppend.call(this, kind, data);
+    });
+    const result = await api.run(
+      {
+        script:
+          'export const meta={name:"delivery-failure",description:"d"}; return 7;',
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    append.mockRestore();
+    expect(result.isError).toBe(true);
+    const scopeForStore = { cwd: root, sessionId: "same-parent", root };
+    const [id] = await WorkflowRunStore.list(scopeForStore);
+    expect(id).toBeDefined();
+    const initial = await WorkflowRunStore.inspect(scopeForStore, id!);
+    expect(initial?.some((event) => event.kind === "delivery")).toBe(false);
+    expect(initial?.some((event) => event.kind === "accepted")).toBe(false);
+
+    const resumed = await api.run(
+      { workflowId: id!, async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(resumed.isError).toBe(true);
+    expect(resumed.content[0]?.text).toContain("before acceptance");
+    await api.cancel(id!, ctx);
+    expect(
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
+  });
+
   it("does not emit cancellation telemetry before acceptance or after opt-out", async () => {
     const { pi, scope, ctx } = setup();
     const payloads: Array<{ event: string }> = [];
