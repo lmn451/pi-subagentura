@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerDurableWorkflowTools } from "../src/workflow-durable-tools";
@@ -28,6 +28,22 @@ import { sessionLedgerPath } from "../src/completion-ledger";
 import { restoreDurableWorkflowRuns } from "../src/workflow-durable-tools";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+
+const durableProcessControl = vi.hoisted(() => ({
+  stop: undefined as ((directory: string) => Promise<void>) | undefined,
+}));
+
+vi.mock("../src/workflow-durable-process", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../src/workflow-durable-process")>();
+  return {
+    ...actual,
+    stopDurableProcessAttempts: (directory: string) =>
+      durableProcessControl.stop
+        ? durableProcessControl.stop(directory)
+        : actual.stopDurableProcessAttempts(directory),
+  };
+});
 
 let root: string;
 const owners: ReturnType<typeof sessionOwner>[] = [];
@@ -126,6 +142,128 @@ async function executeTool(
 }
 
 describe("v4 workflow public tools", () => {
+  it("recovers only project terminal notices owned by this parent once", async () => {
+    const current = setup(1, "recovery-owner");
+    const notify = vi.fn();
+    current.ctx.ui.notify = notify;
+    const runScope = { cwd: root, sessionId: "workflow-v4", root };
+    const createTerminalRun = async (parentSessionId: string) => {
+      const store = await WorkflowRunStore.create(runScope, {
+        parentSessionId,
+        script: definition(`terminal-${parentSessionId}`, "return true;"),
+        args: encodeRunValue({}),
+        budgetTotal: 1000,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 4,
+        processConcurrency: 4,
+        workflowTimeoutMs: 60_000,
+      });
+      await store.append("accepted", {});
+      await store.append("delivery", {
+        completion: { legacy: false, policy: "each" },
+        parentSessionId,
+      });
+      await store.append("terminal", {
+        status: "done",
+        result: encodeRunValue({ errorCount: 0 }),
+        completedAt: Date.now(),
+      });
+      await store.close();
+      return store.id;
+    };
+    const eligibleId = await createTerminalRun("recovery-owner");
+    const unrelatedId = await createTerminalRun("unrelated-parent");
+
+    await restoreDurableWorkflowRuns(
+      current.pi,
+      current.owner,
+      current.ctx,
+      root,
+    );
+    await restoreDurableWorkflowRuns(
+      current.pi,
+      current.owner,
+      current.ctx,
+      root,
+    );
+    const notices = current.entries.filter((entry) =>
+      entry.completionId?.startsWith("workflow:"),
+    );
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      notices.filter(
+        (entry) => entry.completionId === `workflow:${eligibleId}`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      notices.some((entry) => entry.completionId === `workflow:${unrelatedId}`),
+    ).toBe(false);
+  });
+
+  it("writes cancellation markers before terminalizing a durable workflow", async () => {
+    const current = setup(1, "cancel-owner");
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "workflow-v4", root },
+      {
+        parentSessionId: "cancel-owner",
+        script: definition("cancel-order", "return true;"),
+        args: encodeRunValue({}),
+        budgetTotal: 1000,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 4,
+        processConcurrency: 4,
+        workflowTimeoutMs: 60_000,
+      },
+    );
+    await store.append("accepted", {});
+    await store.append("delivery", {
+      completion: { legacy: false, policy: "each" },
+      parentSessionId: "cancel-owner",
+    });
+    const attempts = join(store.directory, "attempts");
+    await mkdir(attempts, { recursive: true });
+    await writeFile(join(attempts, "1-1.json"), "{}");
+    const workflowId = store.id;
+    await store.close();
+
+    const api = register(current, successfulRunner("unused"));
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    let markerExistedAtTerminal = false;
+    append.mockImplementation(async function (kind: string, data: any) {
+      if (kind === "cancelled") {
+        try {
+          await access(join(attempts, "1-1.json.cancel"));
+          markerExistedAtTerminal = true;
+        } catch {
+          markerExistedAtTerminal = false;
+        }
+      }
+      return originalAppend.call(this, kind, data);
+    });
+    try {
+      durableProcessControl.stop = async () => {
+        throw new Error("simulated marker write failure");
+      };
+      const failedCancel = await api.cancel(workflowId, current.ctx);
+      expect(failedCancel.isError).toBe(true);
+      const afterFailure = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        workflowId,
+      );
+      expect(afterFailure?.some((event) => event.kind === "cancelled")).toBe(
+        false,
+      );
+      durableProcessControl.stop = undefined;
+      const cancelled = await api.cancel(workflowId, current.ctx);
+      expect(cancelled.details.status).toBe("cancelled");
+    } finally {
+      durableProcessControl.stop = undefined;
+      append.mockRestore();
+    }
+    expect(markerExistedAtTerminal).toBe(true);
+  });
+
   it("removes a recovered group member whose journal proves acceptance failed", async () => {
     const first = setup(1, "acceptance-crash");
     const api = register(first, successfulRunner("unused"));
