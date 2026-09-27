@@ -201,6 +201,7 @@ function emitWorkflowCompletedTelemetry(
   job: WorkflowJobState,
   result: WorkflowRunResult | undefined,
 ): void {
+  if (job.durable && !job.telemetryStartConfirmed) return;
   if (job.telemetryCompleted) return;
   job.telemetryCompleted = true;
   if (job.completedAt === undefined) job.completedAt = safeTelemetryNow();
@@ -346,6 +347,7 @@ export interface WorkflowJobState {
   telemetryFailure?: WorkflowFailureClassification;
   /** Runtime failures are emitted once per workflow operation. */
   telemetryRuntimeFailureReported?: boolean;
+  telemetryStartConfirmed?: boolean;
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -542,6 +544,10 @@ export function startWorkflowJob(
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
   durableId?: string,
+  durableTelemetryStart?: {
+    confirmed: boolean;
+    confirm?: () => Promise<void>;
+  },
 ): WorkflowJobState {
   const parentSessionOwner = owner;
   const telemetrySession =
@@ -638,50 +644,68 @@ export function startWorkflowJob(
     activeAgentRuns: new Set(),
     parentSessionOwner,
     telemetry,
+    telemetryStartConfirmed: opts.durable
+      ? durableTelemetryStart?.confirmed === true
+      : true,
   };
-  if (!opts.durable?.replaying) emitWorkflowStartedTelemetry(state);
+  if (
+    !opts.durable ||
+    (!opts.durable.replaying && durableTelemetryStart?.confirm)
+  )
+    emitWorkflowStartedTelemetry(state);
+  const telemetryStartReceipt =
+    opts.durable && !opts.durable.replaying && durableTelemetryStart?.confirm
+      ? durableTelemetryStart.confirm().then(() => {
+          state.telemetryStartConfirmed = true;
+        })
+      : undefined;
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
-  state.promise = runWorkflow(script, {
-    ...opts,
-    runAgent: (request) =>
-      runTrackedWorkflowAgent(state, opts.runAgent, request),
-    signal: abort.signal,
-    onProgress: (p) => {
-      state.snapshot.agentsSpawned = p.agentsSpawned;
-      state.snapshot.errorCount = p.errorCount;
-      state.snapshot.tokensSpent = p.tokensSpent;
-      state.snapshot.budgetTotal = p.budgetTotal ?? state.snapshot.budgetTotal;
-      state.snapshot.usage = p.usage ? { ...p.usage } : state.snapshot.usage;
-      state.snapshot.runningCount = p.runningCount;
-      if (p.kind === "phase" && p.phase) {
-        state.snapshot.currentPhase = p.phase;
-        state.snapshot.phases.push(p.phase);
-        state.snapshot.lastMessage = `◆ phase: ${p.phase}`;
-      } else if (p.kind === "log" && p.message) {
-        state.snapshot.lastMessage = p.message;
-      } else if (p.kind === "agent_start") {
-        state.snapshot.lastMessage = `→ started${formatWorkflowAgentTag(p)}`;
-      } else if (p.kind === "agent_done") {
-        state.snapshot.lastMessage = `→ done${formatWorkflowAgentTag(p)}`;
-      }
-      if (p.kind === "agent_start" || p.kind === "agent_done") {
-        recordWorkflowAgentProgress(state.snapshot, p);
-      }
-      if (typeof p.agentId === "number") {
-        if (p.liveUsage) {
-          liveUsageByAgent.set(p.agentId, { ...p.liveUsage });
-          recordWorkflowAgentLiveUsage(state.snapshot, p.agentId, p.liveUsage);
+  const executeWorkflow = () =>
+    runWorkflow(script, {
+      ...opts,
+      runAgent: (request) =>
+        runTrackedWorkflowAgent(state, opts.runAgent, request),
+      signal: abort.signal,
+      onProgress: (p) => {
+        state.snapshot.agentsSpawned = p.agentsSpawned;
+        state.snapshot.errorCount = p.errorCount;
+        state.snapshot.tokensSpent = p.tokensSpent;
+        state.snapshot.budgetTotal =
+          p.budgetTotal ?? state.snapshot.budgetTotal;
+        state.snapshot.usage = p.usage ? { ...p.usage } : state.snapshot.usage;
+        state.snapshot.runningCount = p.runningCount;
+        if (p.kind === "phase" && p.phase) {
+          state.snapshot.currentPhase = p.phase;
+          state.snapshot.phases.push(p.phase);
+          state.snapshot.lastMessage = `◆ phase: ${p.phase}`;
+        } else if (p.kind === "log" && p.message) {
+          state.snapshot.lastMessage = p.message;
+        } else if (p.kind === "agent_start") {
+          state.snapshot.lastMessage = `→ started${formatWorkflowAgentTag(p)}`;
+        } else if (p.kind === "agent_done") {
+          state.snapshot.lastMessage = `→ done${formatWorkflowAgentTag(p)}`;
         }
-        if (p.kind === "agent_done") liveUsageByAgent.delete(p.agentId);
-      }
-      state.snapshot.liveUsage = aggregateWorkflowLiveUsage(liveUsageByAgent);
-      opts.onProgress?.(p);
-    },
-    onCancellationSnapshot: (receipt) => {
-      (state.cancellationSnapshots ??= []).push(receipt);
-    },
-  })
-    .then(async (r) => {
+        if (p.kind === "agent_start" || p.kind === "agent_done") {
+          recordWorkflowAgentProgress(state.snapshot, p);
+        }
+        if (typeof p.agentId === "number") {
+          if (p.liveUsage) {
+            liveUsageByAgent.set(p.agentId, { ...p.liveUsage });
+            recordWorkflowAgentLiveUsage(state.snapshot, p.agentId, p.liveUsage);
+          }
+          if (p.kind === "agent_done") liveUsageByAgent.delete(p.agentId);
+        }
+        state.snapshot.liveUsage = aggregateWorkflowLiveUsage(liveUsageByAgent);
+        opts.onProgress?.(p);
+      },
+      onCancellationSnapshot: (receipt) => {
+        (state.cancellationSnapshots ??= []).push(receipt);
+      },
+    });
+  const execution = telemetryStartReceipt
+    ? telemetryStartReceipt.then(executeWorkflow)
+    : executeWorkflow();
+  state.promise = execution.then(async (r) => {
       if (state.durable) {
         if (state.durableInterrupted || abort.signal.aborted)
           throw new Error("Workflow interrupted before result commit.");

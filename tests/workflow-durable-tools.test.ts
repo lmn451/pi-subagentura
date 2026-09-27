@@ -230,12 +230,16 @@ describe("durable public tools", () => {
       {
         script:
           'export const meta={name:"admission",description:"d"}; return await agent("work", {id:"work"});',
+        completionPolicy: "group",
+        completionGroupId: "capacity-rejected",
       },
       undefined,
       undefined,
       ctx,
     );
     expect(failed.isError).toBe(true);
+    sealCompletionGroups(owner);
+    expect(prepareCompletionManifest(owner)).toBeDefined();
     const id = (
       await WorkflowRunStore.list({
         cwd: root,
@@ -269,11 +273,13 @@ describe("durable public tools", () => {
     expect(runner).not.toHaveBeenCalled();
     await api.cancel(id, ctx);
     expect(
-      payloads.some((payload) => payload.event.endsWith("workflow_completed")),
-    ).toBe(false);
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
   });
 
-  it("does not emit another start when resuming accepted work before its first RPC", async () => {
+  it("suppresses lifecycle telemetry when accepted work lacks a confirmed start", async () => {
     const { pi, scope, ctx } = setup();
     const payloads: Array<{ event: string; distinct_id: string }> = [];
     vi.stubGlobal(
@@ -325,14 +331,42 @@ describe("durable public tools", () => {
     );
     expect(resumed.details.status, resumed.content[0]?.text).toBe("done");
     expect(
-      payloads.filter((payload) => payload.event.endsWith("workflow_started")),
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
     ).toEqual([]);
+
+    const cancelledStore = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script:
+          'export const meta={name:"unconfirmed-cancel",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: original.correlationId,
+          mode: original.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const cancelledId = cancelledStore.id;
+    await cancelledStore.append("accepted", {});
+    await cancelledStore.append("telemetry_start_claim", {});
+    await cancelledStore.close();
+    await api.cancel(cancelledId, ctx);
     expect(
       payloads.filter((payload) =>
-        payload.event.endsWith("workflow_completed"),
+        /workflow_(started|completed)$/.test(payload.event),
       ),
-    ).toHaveLength(1);
-    expect(payloads[0]?.distinct_id).toBe(original.correlationId);
+    ).toEqual([]);
   });
 
   it("does not revive durable telemetry for a retired current session", async () => {
@@ -557,6 +591,18 @@ describe("durable public tools", () => {
     const id = response.details.workflowId;
     const job = workflowJobRegistry.get(id)!;
     await agentStarted;
+    const startedEvents = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(
+      startedEvents?.some((event) => event.kind === "telemetry_start_claim"),
+    ).toBe(true);
+    expect(
+      startedEvents?.some(
+        (event) => event.kind === "telemetry_start_confirmed",
+      ),
+    ).toBe(true);
     cleanupWorkflowJobsForOwner(sessionOwner(scope));
     await expect(job.promise).rejects.toThrow();
     expect(notify).not.toHaveBeenCalled();

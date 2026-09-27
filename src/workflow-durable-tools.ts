@@ -61,6 +61,16 @@ function terminal(events: RunEvent[]) {
   );
 }
 
+function hasConfirmedDurableWorkflowStart(events: RunEvent[]): boolean {
+  const claimIndex = events.findIndex(
+    (event) => event.kind === "telemetry_start_claim",
+  );
+  const confirmationIndex = events.findIndex(
+    (event) => event.kind === "telemetry_start_confirmed",
+  );
+  return claimIndex >= 0 && confirmationIndex > claimIndex;
+}
+
 interface DurableTelemetryMetadata {
   enabled: boolean;
   correlationId?: string;
@@ -264,6 +274,7 @@ export function registerDurableWorkflowTools(
     let store: WorkflowRunStore | undefined;
     let accepted = false;
     let reservation: ReturnType<typeof reserveCompletionGroup>;
+    let completionMemberRegistered = false;
     try {
       if (getOrchestrationContext())
         throw new Error(
@@ -346,6 +357,20 @@ export function registerDurableWorkflowTools(
         definition.telemetry,
         currentTelemetry,
       );
+      const startCaptureConfirmed = hasConfirmedDurableWorkflowStart(
+        store.events,
+      );
+      if (params.workflowId && !startCaptureConfirmed)
+        telemetryOptions.sessionOverride = null;
+      const durableTelemetryStart = params.workflowId
+        ? { confirmed: startCaptureConfirmed }
+        : telemetryOptions.sessionOverride
+          ? {
+              confirmed: false,
+              confirm: () =>
+                store!.append("telemetry_start_confirmed", {}),
+            }
+          : { confirmed: false };
       reservation = params.workflowId
         ? undefined
         : reserveCompletionGroup(
@@ -367,7 +392,12 @@ export function registerDurableWorkflowTools(
         workflowOwner,
         reservation,
       );
-      if (!params.workflowId) await store.append("accepted", {});
+      completionMemberRegistered = true;
+      if (!params.workflowId) {
+        await store.append("accepted", {});
+        if (durableTelemetryStart.confirm)
+          await store.append("telemetry_start_claim", {});
+      }
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
       let job: WorkflowJobState;
       try {
@@ -422,14 +452,42 @@ export function registerDurableWorkflowTools(
           runAsync ? "async" : "sync",
           telemetryOptions,
           store.id,
+          durableTelemetryStart,
         );
       } catch (error) {
         if (!params.workflowId) {
+          const completedAt = Date.now();
           await store.append("terminal", {
             status: "error",
-            completedAt: Date.now(),
+            completedAt,
             error: "Workflow could not be admitted to the job registry.",
           });
+          if (
+            completionMemberRegistered &&
+            completion.policy === "group" &&
+            completion.groupId
+          ) {
+            publishCompletion(
+              {
+                schemaVersion: 1,
+                completionId: `workflow:${store.id}`,
+                source: "workflow",
+                sourceId: store.id,
+                label: completionDisplayLabel(
+                  parseWorkflow(definition.script).meta.name,
+                  "workflow",
+                ),
+                status: "error",
+                policy: "group",
+                groupId: completion.groupId,
+                references: [
+                  { label: "status", value: "Workflow was not admitted." },
+                ],
+                completedAt,
+              },
+              workflowOwner,
+            );
+          }
         }
         throw error;
       }
@@ -483,6 +541,9 @@ export function registerDurableWorkflowTools(
       const wasAccepted = store.events.some(
         (event) => event.kind === "accepted",
       );
+      const startCaptureConfirmed = hasConfirmedDurableWorkflowStart(
+        store.events,
+      );
       const currentTelemetry = resolveLiveSessionScope(owner())?.telemetry;
       const telemetryOptions = workflowTelemetryForDurableRun(
         definition.telemetry,
@@ -503,9 +564,15 @@ export function registerDurableWorkflowTools(
         status: "cancelled",
         completedAt,
         telemetryCompletionReceipt:
-          wasAccepted && telemetryOptions.sessionOverride !== null,
+          wasAccepted &&
+          startCaptureConfirmed &&
+          telemetryOptions.sessionOverride !== null,
       });
-      if (wasAccepted && telemetryOptions.sessionOverride) {
+      if (
+        wasAccepted &&
+        startCaptureConfirmed &&
+        telemetryOptions.sessionOverride
+      ) {
         emitDurableWorkflowCancelledTelemetry(
           {
             session: telemetryOptions.sessionOverride,

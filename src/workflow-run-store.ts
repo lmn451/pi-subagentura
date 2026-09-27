@@ -32,6 +32,8 @@ const EVENT_KINDS = new Set([
   "accepted",
   "dispatch",
   "delivery",
+  "telemetry_start_claim",
+  "telemetry_start_confirmed",
 ]);
 
 export interface RunScope {
