@@ -95,6 +95,17 @@ function serializeError(error, path) {
   };
 }
 
+function serializeStepFailure(error, path, persist) {
+  const serialized = serializeError(error, path);
+  return persist === false
+    ? {
+        ...serialized,
+        name: "WorkflowStepError",
+        message: "Workflow step failed.",
+      }
+    : serialized;
+}
+
 function isCancelled(error, signal) {
   return (
     signal?.aborted === true ||
@@ -379,6 +390,25 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
       const attempt = Number.isInteger(entered?.attempt)
         ? entered.attempt
         : localAttempt;
+      if (
+        entered?.persistedFailure &&
+        policy.persist !== false &&
+        policy.cache !== false &&
+        policy.resume !== false &&
+        (policy.failure === "collect" || policy.failure === "continue")
+      ) {
+        const saved = entered.persistedFailure;
+        const error = Object.assign(
+          new Error(String(saved.message ?? "Workflow step failed.")),
+          {
+            name: String(saved.name ?? "WorkflowStepError"),
+            category: saved.category,
+            stage: saved.stage,
+            path: Array.isArray(saved.path) ? saved.path : path,
+          },
+        );
+        return taskResult(error, path);
+      }
       if (attempt > maxAttempts) {
         const exhausted = new WorkflowStepError(
           `Step retry limit ${maxAttempts} was exhausted before resume.`,
@@ -460,7 +490,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
             : undefined;
         await bridgeRequest(bridge, "step.fail", {
           path,
-          error: serializeError(error, path),
+          error: serializeStepFailure(error, path, policy.persist),
           attempt,
           ...(status ? { status } : {}),
         });
@@ -469,6 +499,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
           await sleep(backoffMilliseconds(policy, attempt), parentSignal);
           continue;
         }
+        break;
       } finally {
         if (timer !== undefined) clearTimeout(timer);
         if (!controller.signal.aborted) controller.abort();
@@ -510,11 +541,13 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
       },
       async (stepSignal, entered) => {
         const counters = currentScope().budgetCounters ?? [];
+        const persist = stepPolicy(options).persist;
         const agentId = `${entered?.idempotencyKey ?? pathKey(childPath(id))}:${entered?.attempt ?? 1}`;
         const value = await bridge.agent(
           options.prompt,
           {
             ...options,
+            ...(persist !== undefined ? { persist } : {}),
             id: agentId,
             output: options.output,
           },

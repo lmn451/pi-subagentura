@@ -28,10 +28,16 @@ let workerConfig = {
 let tokensSpent = 0;
 const rpcErrorIds = new WeakMap();
 
+function cancellationError(message = "Workflow aborted.") {
+  const error = new Error(message);
+  error.cancelled = true;
+  return error;
+}
+
 function rpc(method, payload, signal, onUsage) {
-  if (aborted) return Promise.reject(new Error("Workflow aborted."));
+  if (aborted) return Promise.reject(cancellationError());
   if (signal?.aborted)
-    return Promise.reject(signal.reason ?? new Error("Workflow aborted."));
+    return Promise.reject(signal.reason ?? cancellationError());
   return new Promise((resolve, reject) => {
     const id = nextRpcId++;
     const cancel = () => parentPort.postMessage({ type: "cancel_request", id });
@@ -42,7 +48,7 @@ function rpc(method, payload, signal, onUsage) {
       resolve: (value) => {
         clean();
         signal?.aborted
-          ? reject(signal.reason ?? new Error("Workflow aborted."))
+          ? reject(signal.reason ?? cancellationError())
           : resolve(value);
       },
       reject: (error) => {
@@ -64,9 +70,9 @@ parentPort.on("message", (msg) => {
 
   if (msg.type === "abort") {
     aborted = true;
-    workflowAbort.abort(new Error("Workflow aborted."));
+    workflowAbort.abort(cancellationError());
     for (const { reject } of pending.values()) {
-      reject(new Error("Workflow aborted."));
+      reject(cancellationError());
     }
     pending.clear();
     return;
@@ -99,6 +105,9 @@ parentPort.on("message", (msg) => {
         parentPort.postMessage({
           type: "error",
           error: err instanceof Error ? err.message : String(err),
+          ...(err?.cancelled === true || err?.name === "WorkflowCancelledError"
+            ? { cancelled: true }
+            : {}),
           ...(rpcId === undefined ? {} : { rpcId }),
         });
       });
@@ -180,7 +189,18 @@ async function executeBody(
   let legacyAgentIndex = 0;
 
   function checkAbort() {
-    if (aborted || signal.aborted) throw new Error("Workflow aborted.");
+    if (aborted) throw cancellationError();
+    if (signal.aborted) {
+      const reason = signal.reason;
+      if (
+        reason?.category === "timeout" ||
+        reason?.name === "WorkflowTimeoutError"
+      ) {
+        throw reason;
+      }
+      if (reason?.cancelled === true) throw reason;
+      throw cancellationError();
+    }
   }
 
   function agent(prompt, opts = {}, agentSignal = signal, onUsage) {
@@ -480,6 +500,10 @@ async function executeBody(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const wrapped = new Error(`Workflow "${meta.name}" failed: ${msg}`);
+    if (err?.cancelled === true || err?.name === "WorkflowCancelledError") {
+      wrapped.name = "WorkflowCancelledError";
+      wrapped.cancelled = true;
+    }
     const rpcId = rpcIdFromError(err);
     if (rpcId !== undefined) rpcErrorIds.set(wrapped, rpcId);
     throw wrapped;

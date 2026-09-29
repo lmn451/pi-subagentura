@@ -218,6 +218,7 @@ export async function runWorkflow(
             opts.durable?.store,
             opts.onStep,
             opts.requestInput,
+            opts.workflowId,
           )
         : undefined,
     rpcAborts: new Map(),
@@ -271,11 +272,18 @@ export async function runWorkflow(
     await drainActiveAgentRuns(engine);
     if (error instanceof WorkflowExecutionError && error.usage) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    throw new WorkflowExecutionError(
+    const executionError = new WorkflowExecutionError(
       message,
       usageIfPresent(engine.usage),
       cause,
     );
+    if ((error as { cancelled?: unknown } | null)?.cancelled === true) {
+      Object.assign(executionError, {
+        cancelled: true,
+        cancelledCount: engine.counters.cancelledCount,
+      });
+    }
+    throw executionError;
   } finally {
     engine.v4?.close();
     opts.signal?.removeEventListener("abort", forwardAbort);
@@ -452,6 +460,7 @@ async function executeScript(
                   attempt,
                   request,
                   engine.runAgent,
+                  { persist: !engine.v4 || agentOpts.persist !== false },
                 )
               : engine.runAgent(request);
           const agentRun = Promise.resolve().then(() =>
@@ -766,11 +775,16 @@ function runWorkflowWorker(
       if (msg.type === "error") {
         const message = String(msg.error ?? "Workflow worker failed.");
         if (typeof msg.rpcId === "number" && runnerFailures.has(msg.rpcId)) {
-          fail(
-            new WorkerTerminalFailure(message, runnerFailures.get(msg.rpcId)),
+          const error = new WorkerTerminalFailure(
+            message,
+            runnerFailures.get(msg.rpcId),
           );
+          if (msg.cancelled === true) Object.assign(error, { cancelled: true });
+          fail(error);
         } else {
-          fail(new Error(message));
+          const error = new Error(message);
+          if (msg.cancelled === true) Object.assign(error, { cancelled: true });
+          fail(error);
         }
         return;
       }

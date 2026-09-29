@@ -998,9 +998,31 @@ export function registerWorkflowTool(
       // values correct if that restriction is ever lifted.
       const spawn = resolveWorkflowSpawn(ctx);
       const baseOpts = (workflowId: string) => ({
+        workflowId,
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
+        ...(params.durable === false && params.async === false
+          ? {
+              requestInput: async (
+                request: unknown,
+                stepSignal?: AbortSignal,
+              ) => {
+                if (!isSessionOwnerLive(workflowOwner))
+                  throw new Error("Workflow input was interrupted.");
+                stepSignal?.throwIfAborted();
+                const value = await durableTools.requestInput(
+                  ctx,
+                  request,
+                  stepSignal,
+                );
+                if (!isSessionOwnerLive(workflowOwner))
+                  throw new Error("Workflow input was interrupted.");
+                stepSignal?.throwIfAborted();
+                return value;
+              },
+            }
+          : {}),
         runAgent: makeRunAgent(
           ctx,
           workflowId,

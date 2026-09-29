@@ -220,22 +220,13 @@ function compileDefinition(source, ast) {
       throw new Error(`Duplicate SDK import binding ${JSON.stringify(local)}.`);
     aliases.set(local, imported);
   }
-  const injected = new Set([
-    "__runWorkflowDefinition",
-    "defineWorkflow",
-    "schema",
-  ]);
+  const runBinding = freshIdentifier(ast, "__piRunWorkflowDefinition");
+  const defineParam = freshIdentifier(ast, "__piDefineWorkflow");
+  const schemaParam = freshIdentifier(ast, "__piWorkflowSchema");
   const bindings = [];
   for (const [local, imported] of aliases) {
-    if (injected.has(local)) {
-      if (local !== imported) {
-        throw new Error(
-          `Workflow SDK alias ${JSON.stringify(local)} conflicts with an injected binding.`,
-        );
-      }
-      continue;
-    }
-    bindings.push(`const ${local} = ${imported};`);
+    const injected = imported === "defineWorkflow" ? defineParam : schemaParam;
+    bindings.push(`const ${local} = ${injected};`);
   }
   const definitionName = freshIdentifier(ast, "__piWorkflowDefinition");
   removals.push({
@@ -245,7 +236,7 @@ function compileDefinition(source, ast) {
   });
 
   let body = applySourceReplacements(source, removals);
-  body = `(async function (__runWorkflowDefinition, defineWorkflow, schema) {\n${bindings.join("\n")}\n${body}\nreturn await __runWorkflowDefinition(${definitionName});\n})`;
+  body = `(async function (${runBinding}, ${defineParam}, ${schemaParam}) {\n${bindings.join("\n")}\n${body}\nreturn await ${runBinding}(${definitionName});\n})`;
   return {
     format: "definition",
     meta: { name, version, description },

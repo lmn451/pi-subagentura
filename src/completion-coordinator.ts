@@ -1477,17 +1477,16 @@ function pruneCoordinatorState(state: CompletionCoordinatorState): void {
 }
 
 function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
-  if (recoveringGroupOwners.has(ownerKey(state.owner))) return [];
   reconcileState(state);
   pruneCoordinatorState(state);
   const records = [...state.records.values()];
+  const groupRecoveryBlocked = isCompletionGroupRecoveryBlocked(state.owner);
   return records.filter(
     (record) =>
       !state.consumed.has(record.completionId) &&
       !state.dispatchAttempted.has(record.completionId) &&
       (record.policy === "each" ||
-        !failedGroupRecoveryOwners.has(ownerKey(state.owner))) &&
-      groupIsReady(state, record),
+        (!groupRecoveryBlocked && groupIsReady(state, record))),
   );
 }
 
@@ -1905,10 +1904,54 @@ export function registerCompletionMember(
   owner?: SessionOwnerToken,
   reservation?: CompletionGroupReservation,
 ): void {
+  registerCompletionMemberInner(
+    source,
+    sourceId,
+    policy,
+    groupId,
+    owner,
+    reservation,
+    false,
+  );
+}
+
+/** Journal acceptance is authoritative when recovering a missed spawn write. */
+export function registerRecoveredCompletionMember(
+  source: CompletionSource,
+  sourceId: string,
+  policy: CompletionPolicy,
+  groupId: string | undefined,
+  owner?: SessionOwnerToken,
+): void {
+  registerCompletionMemberInner(
+    source,
+    sourceId,
+    policy,
+    groupId,
+    owner,
+    undefined,
+    true,
+  );
+}
+
+function registerCompletionMemberInner(
+  source: CompletionSource,
+  sourceId: string,
+  policy: CompletionPolicy,
+  groupId: string | undefined,
+  owner: SessionOwnerToken | undefined,
+  reservation: CompletionGroupReservation | undefined,
+  recovered: boolean,
+): void {
   if (policy !== "group") return;
   const state = getState(owner);
   if (!state) return;
-  if (isCompletionGroupRecoveryBlocked(state.owner)) {
+  const stateKey = ownerKey(state.owner);
+  if (
+    failedGroupRecoveryOwners.has(stateKey) ||
+    (recoveringGroupOwners.has(stateKey) && !recovered) ||
+    (recovered && !recoveringGroupOwners.has(stateKey))
+  ) {
     throw new Error("Completion group recovery is unavailable");
   }
   const normalizedGroupId = normalizeGroupId(groupId);
@@ -1933,7 +1976,12 @@ export function registerCompletionMember(
     sealed: state.groupsSealed,
   };
   const memberKey = completionMemberKey(source, sourceId);
-  if (group.sealed && !group.members.has(memberKey) && !hasReservation) {
+  if (
+    group.sealed &&
+    !group.members.has(memberKey) &&
+    !hasReservation &&
+    !recovered
+  ) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
   if (
@@ -1986,15 +2034,22 @@ export function isCompletionGroupRecoveryBlocked(
 export async function restoreDurableCompletionGroups(
   owner: SessionOwnerToken,
   wasAccepted?: (workflowId: string) => Promise<boolean>,
+  discoverAccepted?: () => Promise<void>,
 ): Promise<void> {
   const state = getState(owner);
   if (!state) return;
   const directory =
     sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
-  if (!hasCompletionGroups(directory)) return;
   const key = ownerKey(owner);
   recoveringGroupOwners.add(key);
   try {
+    failedGroupRecoveryOwners.delete(key);
+    restoreDurableCompletionGroupsSync(owner);
+    await discoverAccepted?.();
+    if (!hasCompletionGroups(directory)) {
+      failedGroupRecoveryOwners.delete(key);
+      return;
+    }
     const groups = await readCompletionGroups(directory);
     if (!resolveLiveSessionScope(owner)) return;
     for (const saved of groups) {

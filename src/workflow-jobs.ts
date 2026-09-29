@@ -720,8 +720,24 @@ export function startWorkflowJob(
       }
       const msg = err instanceof Error ? err.message : String(err);
       const timedOut = isWorkflowWallTimeout(err);
+      const workerCancelled =
+        (err as { cancelled?: unknown } | null)?.cancelled === true;
       if (timedOut) state.telemetryTerminalReason = "timeout";
-      state.status = abort.signal.aborted ? "cancelled" : "error";
+      state.status =
+        abort.signal.aborted || workerCancelled ? "cancelled" : "error";
+      const workerCancelledCount = (err as { cancelledCount?: unknown } | null)
+        ?.cancelledCount;
+      if (
+        workerCancelled &&
+        typeof workerCancelledCount === "number" &&
+        Number.isInteger(workerCancelledCount) &&
+        workerCancelledCount >= 0
+      ) {
+        state.snapshot.cancelledCount = Math.max(
+          state.snapshot.cancelledCount ?? 0,
+          workerCancelledCount,
+        );
+      }
       state.error = msg;
       if (state.durable) {
         state.durable.stop();

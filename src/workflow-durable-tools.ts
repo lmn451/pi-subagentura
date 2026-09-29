@@ -34,6 +34,7 @@ import {
 import {
   resolveCompletionPolicy,
   registerCompletionMember,
+  registerRecoveredCompletionMember,
   reserveCompletionGroup,
   releaseCompletionGroup,
   consumeCompletionSource,
@@ -60,20 +61,52 @@ function terminal(events: RunEvent[]) {
   );
 }
 
-function completionIntentForOwner(
+export function completionIntentForOwner(
   events: RunEvent[],
   parentSessionId: string,
 ): ResolvedCompletionPolicy | undefined {
   const deliveries = events.filter((event) => event.kind === "delivery");
+  const createdOwner =
+    events[0].data.parentSessionId ?? events[0].data.sessionId;
   const owned = deliveries.findLast(
     (event) => event.data.parentSessionId === parentSessionId,
   );
   if (owned) return owned.data.completion;
-  if (events[0].data.parentSessionId !== parentSessionId) return undefined;
+  if (createdOwner !== parentSessionId) return undefined;
   return (
     deliveries.findLast((event) => !event.data.parentSessionId)?.data
       .completion ?? events[0].data.completion
   );
+}
+
+async function restoreAcceptedWorkflowMembers(
+  currentOwner: SessionOwnerToken,
+  cwd: string,
+  sessionId: string,
+  root?: string,
+): Promise<void> {
+  const seen = new Set<string>();
+  for (const candidate of [sessionId, "workflow-v4"]) {
+    const runScope = { cwd, sessionId: candidate, root };
+    for (const id of await WorkflowRunStore.list(runScope, {
+      requireComplete: true,
+    })) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const events = await WorkflowRunStore.inspect(runScope, id);
+      if (!events?.some((event) => event.kind === "accepted")) continue;
+      const completion = completionIntentForOwner(events, sessionId);
+      if (completion?.policy === "group") {
+        registerRecoveredCompletionMember(
+          "workflow",
+          id,
+          completion.policy,
+          completion.groupId,
+          currentOwner,
+        );
+      }
+    }
+  }
 }
 
 export function durableRunSummary(id: string, events: RunEvent[]) {
@@ -352,15 +385,18 @@ export function registerDurableWorkflowTools(
           reservation,
         );
       } catch (error) {
-        await store.append("rejected", {
-          status: "rejected",
-          reason: "completion_registration",
-          completedAt: Date.now(),
-        });
+        if (!params.workflowId) {
+          await store.append("rejected", {
+            status: "rejected",
+            reason: "completion_registration",
+            completedAt: Date.now(),
+          });
+        }
         throw error;
       }
       const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
       const workflowOptions: RunWorkflowOptions = {
+        workflowId: store.id,
         args: decodeRunValue(definition.args),
         cwd: definition.cwd,
         durable,
@@ -435,35 +471,37 @@ export function registerDurableWorkflowTools(
         );
       } catch (error) {
         if (!(error instanceof WorkflowJobCapacityError)) throw error;
-        await store.append("rejected", {
-          status: "rejected",
-          reason: "capacity",
-          completedAt: Date.now(),
-        });
-        if (completion.policy) {
-          publishCompletion(
-            {
-              schemaVersion: 1,
-              completionId: `workflow:${store.id}`,
-              source: "workflow",
-              sourceId: store.id,
-              label: completionDisplayLabel(
-                parseWorkflow(definition.script).meta.name,
-                "workflow",
-              ),
-              status: "error",
-              policy: completion.policy,
-              ...(completion.groupId ? { groupId: completion.groupId } : {}),
-              references: [
-                {
-                  label: "run",
-                  value: `Workflow ${store.id} was rejected before execution`,
-                },
-              ],
-              completedAt: Date.now(),
-            },
-            workflowOwner,
-          );
+        if (!params.workflowId) {
+          await store.append("rejected", {
+            status: "rejected",
+            reason: "capacity",
+            completedAt: Date.now(),
+          });
+          if (completion.policy) {
+            publishCompletion(
+              {
+                schemaVersion: 1,
+                completionId: `workflow:${store.id}`,
+                source: "workflow",
+                sourceId: store.id,
+                label: completionDisplayLabel(
+                  parseWorkflow(definition.script).meta.name,
+                  "workflow",
+                ),
+                status: "error",
+                policy: completion.policy,
+                ...(completion.groupId ? { groupId: completion.groupId } : {}),
+                references: [
+                  {
+                    label: "run",
+                    value: `Workflow ${store.id} was rejected before execution`,
+                  },
+                ],
+                completedAt: Date.now(),
+              },
+              workflowOwner,
+            );
+          }
         }
         throw error;
       }
@@ -703,7 +741,13 @@ export function registerDurableWorkflowTools(
       }
     },
   });
-  return { run, inspect, cancel };
+  return {
+    run,
+    inspect,
+    cancel,
+    requestInput: (ctx: any, request: unknown, signal?: AbortSignal) =>
+      queuedInput(ctx, request, signal),
+  };
 }
 
 export async function restoreDurableWorkflowRuns(
@@ -718,17 +762,30 @@ export async function restoreDurableWorkflowRuns(
       if (!sessionId || !ctx.cwd) {
         await restoreDurableCompletionGroups(currentOwner);
       } else {
-        await restoreDurableCompletionGroups(currentOwner, async (id) => {
-          for (const candidate of [sessionId, "workflow-v4"]) {
-            const events = await WorkflowRunStore.inspect(
-              { sessionId: candidate, cwd: ctx.cwd, root: storeRoot },
-              id,
+        await restoreDurableCompletionGroups(
+          currentOwner,
+          async (id) => {
+            for (const candidate of [sessionId, "workflow-v4"]) {
+              const events = await WorkflowRunStore.inspect(
+                { sessionId: candidate, cwd: ctx.cwd, root: storeRoot },
+                id,
+              );
+              if (events)
+                return events.some((event) => event.kind === "accepted");
+            }
+            throw new Error(
+              "Durable completion member journal is unavailable.",
             );
-            if (events)
-              return events.some((event) => event.kind === "accepted");
-          }
-          throw new Error("Durable completion member journal is unavailable.");
-        });
+          },
+          async () => {
+            await restoreAcceptedWorkflowMembers(
+              currentOwner,
+              ctx.cwd,
+              sessionId,
+              storeRoot,
+            );
+          },
+        );
       }
     } catch (error) {
       ctx.ui?.notify?.(

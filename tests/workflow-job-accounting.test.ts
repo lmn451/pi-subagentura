@@ -84,4 +84,28 @@ describe("async workflow rejection accounting", () => {
     expect(job.snapshot.usage).toEqual(usage);
     expect(job.snapshot.tokensSpent).toBe(usage.output);
   });
+
+  it("classifies nested worker cancellation as cancelled without error telemetry", async () => {
+    const failure = Object.assign(
+      new WorkflowExecutionError("nested workflow was cancelled"),
+      { cancelled: true, cancelledCount: 2 },
+    );
+    mockRunWorkflow.mockRejectedValueOnce(failure);
+    const job = startWorkflowJob(
+      "nested-cancel",
+      `export const meta = { name: "nested-cancel", description: "d" };\nreturn "unused";`,
+      {
+        runAgent: async () => {
+          throw new Error("mocked runWorkflow should own execution");
+        },
+      },
+    );
+    await expect(job.promise).rejects.toBe(failure);
+    expect(job.status).toBe("cancelled");
+    expect(job.snapshot).toMatchObject({
+      errorCount: 0,
+      cancelledCount: 2,
+    });
+    expect(job.telemetryFailure).toBeUndefined();
+  });
 });

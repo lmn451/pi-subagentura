@@ -11,7 +11,7 @@ import { sessionLedgerPath } from "../src/completion-ledger";
 import { prepareDurableProcess } from "../src/workflow-durable-process";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { registerDurableWorkflowTools } from "../src/workflow-durable-tools";
 import {
   registerSessionScope,
@@ -25,6 +25,7 @@ import {
 import {
   registerCompletionCoordinator,
   registerCompletionMember,
+  registerRecoveredCompletionMember,
   sealCompletionGroups,
   clearCompletionCoordinator,
   restoreDurableCompletionGroups,
@@ -34,6 +35,7 @@ import {
 } from "../src/completion-coordinator";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+import { WorkflowRunStore } from "../src/workflow-run-store";
 
 let root: string;
 beforeEach(async () => {
@@ -130,6 +132,110 @@ describe("durable public tools", () => {
       "workflow:wfd_group",
     ]);
     clearCompletionCoordinator(owner);
+  });
+
+  it("keeps groups blocked when accepted-member discovery fails", async () => {
+    const { pi, scope } = setup();
+    const owner = sessionOwner(scope);
+    registerCompletionMember("workflow", "peer", "group", "discovery", owner);
+    const record = (id: string, policy: "each" | "group") => ({
+      schemaVersion: 1 as const,
+      completionId: `workflow:${id}`,
+      source: "workflow" as const,
+      sourceId: id,
+      label: id,
+      status: "done" as const,
+      policy,
+      ...(policy === "group" ? { groupId: "discovery" } : {}),
+      references: [{ label: "result", value: "result" }],
+      completedAt: 1,
+    });
+    publishCompletion(record("peer", "group"), owner);
+    sealCompletionGroups(owner);
+    await expect(
+      restoreDurableCompletionGroups(owner, undefined, async () => {
+        throw new Error("simulated journal read failure");
+      }),
+    ).rejects.toThrow("simulated journal read failure");
+    publishCompletion(record("independent", "each"), owner);
+    const manifest = prepareCompletionManifest(owner);
+    expect(manifest!.details.completionIds).toEqual(["workflow:independent"]);
+    clearCompletionCoordinator(owner);
+    void pi;
+  });
+
+  it("allows durable group discovery to retry after a transient failure", async () => {
+    const { scope } = setup();
+    const owner = sessionOwner(scope);
+    registerCompletionMember("interactive", "peer", "group", "retry", owner);
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: "interactive:peer",
+        source: "interactive",
+        sourceId: "peer",
+        label: "peer",
+        status: "done",
+        policy: "group",
+        groupId: "retry",
+        references: [{ label: "result", value: "result" }],
+        completedAt: 1,
+      },
+      owner,
+    );
+    sealCompletionGroups(owner);
+    await expect(
+      restoreDurableCompletionGroups(owner, undefined, async () => {
+        throw new Error("temporary journal failure");
+      }),
+    ).rejects.toThrow("temporary journal failure");
+    await restoreDurableCompletionGroups(owner, undefined, async () => {
+      registerRecoveredCompletionMember(
+        "workflow",
+        "recovered-run",
+        "group",
+        "retry",
+        owner,
+      );
+    });
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: "workflow:recovered-run",
+        source: "workflow",
+        sourceId: "recovered-run",
+        label: "recovered",
+        status: "done",
+        policy: "group",
+        groupId: "retry",
+        references: [{ label: "result", value: "result" }],
+        completedAt: 1,
+      },
+      owner,
+    );
+    expect(prepareCompletionManifest(owner)!.details.completionIds).toEqual(
+      expect.arrayContaining(["interactive:peer", "workflow:recovered-run"]),
+    );
+    clearCompletionCoordinator(owner);
+  });
+
+  it("rejects a truncated durable recovery scan above the list limit", async () => {
+    const scope = { cwd: root, sessionId: "workflow-v4", root };
+    const seed = await WorkflowRunStore.create(scope, {
+      script: "unused",
+      args: "",
+    });
+    await seed.close();
+    const directory = dirname(seed.directory);
+    for (let index = 1; index <= 1000; index++) {
+      await mkdir(
+        join(directory, `wfd_${index.toString(16).padStart(32, "0")}`),
+      );
+    }
+    expect(await WorkflowRunStore.list(scope)).toHaveLength(1000);
+    await expect(
+      WorkflowRunStore.list(scope, { requireComplete: true }),
+    ).rejects.toThrow("exceeds 1,000 runs");
   });
 
   it("stops completed durable attempt wrappers instead of retaining idle children", async () => {

@@ -42,6 +42,7 @@ const MAX_VALUE_BYTES = 512 * 1024;
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const MAX_ARTIFACT_TOTAL = 64 * 1024 * 1024;
 const liveStores = new Map<string, WorkflowV4Store>();
+const liveStoreIds = new WeakMap<WorkflowV4Store, string>();
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const key = (path: string[]) => JSON.stringify(path);
@@ -131,6 +132,7 @@ export class WorkflowV4Store {
       request: unknown,
       signal?: AbortSignal,
     ) => Promise<unknown>,
+    workflowId?: string,
   ) {
     this.definitionHash = hash(source);
     for (const event of store?.events ?? []) {
@@ -139,7 +141,11 @@ export class WorkflowV4Store {
       if (event.kind === "v4.artifact")
         this.artifacts.set(event.data.ref.id, event.data);
     }
-    if (store) liveStores.set(store.id, this);
+    const liveId = workflowId ?? store?.id;
+    if (liveId) {
+      liveStores.set(liveId, this);
+      liveStoreIds.set(this, liveId);
+    }
     this.publish();
   }
 
@@ -302,8 +308,38 @@ export class WorkflowV4Store {
         ),
       };
     }
+    if (
+      compatible &&
+      previous.status === "failed" &&
+      payload.policy?.persist !== false &&
+      payload.policy?.cache !== false &&
+      payload.policy?.resume !== false &&
+      (previous.attempt >= (payload.policy?.retry?.attempts ?? 1) ||
+        previous.error?.category === "budget") &&
+      ["collect", "continue"].includes(payload.policy?.failure)
+    ) {
+      return {
+        reuse: false,
+        attempt: previous.attempt,
+        persistedFailure: previous.error,
+        idempotencyKey: hash(
+          JSON.stringify([
+            path,
+            definitionHash,
+            previous.input,
+            previous.policy,
+            previous.generation ?? 0,
+          ]),
+        ),
+      };
+    }
     const freshExecution =
-      compatible && ["completed", "restored"].includes(previous.status);
+      compatible &&
+      (["completed", "restored"].includes(previous.status) ||
+        (previous.status === "failed" &&
+          (payload.policy?.cache === false ||
+            payload.policy?.resume === false ||
+            payload.policy?.persist === false)));
     const generation = compatible
       ? (previous.generation ?? 0) + (freshExecution ? 1 : 0)
       : 0;
@@ -327,6 +363,7 @@ export class WorkflowV4Store {
       definitionHash,
       startedAt: compatible ? previous.startedAt : Date.now(),
       completedAt: undefined,
+      error: undefined,
     };
     await this.save(node);
     return {
@@ -386,8 +423,31 @@ export class WorkflowV4Store {
         error instanceof Error ? error : new Error(String(error)),
       );
     };
-    const onAbort = () =>
+    const waitAttempt = this.node(payload.path).attempt;
+    const onAbort = () => {
       rejectWait(new Error("Workflow input was interrupted."));
+      void this.serialize(async () => {
+        const current = this.nodes.get(pathKey);
+        if (
+          !current ||
+          current.status !== "waiting_for_input" ||
+          current.attempt !== waitAttempt
+        )
+          return;
+        await this.save({
+          ...current,
+          status: "cancelled",
+          completedAt: Date.now(),
+          error: {
+            name: "AbortError",
+            message: "Workflow input was interrupted.",
+            path: current.path,
+          },
+        });
+      }).catch(() => {
+        /* Abort may race store shutdown; the invoking job still receives it. */
+      });
+    };
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
     if (
@@ -512,8 +572,8 @@ export class WorkflowV4Store {
     for (const waiter of this.waiters.values())
       waiter.reject(new Error("Workflow interrupted."));
     this.waiters.clear();
-    if (this.store && liveStores.get(this.store.id) === this)
-      liveStores.delete(this.store.id);
+    const liveId = liveStoreIds.get(this);
+    if (liveId && liveStores.get(liveId) === this) liveStores.delete(liveId);
   }
 }
 
