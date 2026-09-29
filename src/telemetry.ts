@@ -7,7 +7,7 @@ import {
 } from "./identifier-types";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 4;
+export const TELEMETRY_SCHEMA_VERSION = 5;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -65,6 +65,27 @@ export type TelemetrySpawnFailureStage =
   | "registration"
   | "parent_shutdown"
   | "unknown";
+export type TelemetrySpawnFailureOperation =
+  | "lineage_bootstrap_check"
+  | "routing_metadata_validation"
+  | "explicit_context_limit"
+  | "completion_policy_validation"
+  | "parent_context_serialization"
+  | "cwd_validation"
+  | "persona_limit"
+  | "interactive_path_creation"
+  | "lineage_store_resolution"
+  | "artifact_write"
+  | "system_prompt_write"
+  | "mux_resolution"
+  | "model_resolution"
+  | "pane_launch"
+  | "interactive_state_write"
+  | "lineage_manifest_write"
+  | "child_command_build"
+  | "lineage_bootstrap_write"
+  | "launch_script_write"
+  | "completion_registration";
 export type TelemetryTerminalReason =
   | "completed"
   | "agent_error"
@@ -238,6 +259,7 @@ export type TelemetryEvent =
   | ({
       event: "agent_spawn_failed";
       failure_stage: TelemetrySpawnFailureStage;
+      failure_operation?: TelemetrySpawnFailureOperation;
       spawn_duration_ms?: number;
     } & TelemetrySpawnFailureDimensions)
   | ({ event: "task_started"; unit: "job" | "turn" } & TelemetryAgentDimensions)
@@ -499,6 +521,30 @@ const TELEMETRY_COMPLETION_FAILURE_STAGES: readonly TelemetryCompletionFailureSt
     "completion_publication",
   ];
 
+const TELEMETRY_SPAWN_FAILURE_OPERATIONS: readonly TelemetrySpawnFailureOperation[] =
+  [
+    "lineage_bootstrap_check",
+    "routing_metadata_validation",
+    "explicit_context_limit",
+    "completion_policy_validation",
+    "parent_context_serialization",
+    "cwd_validation",
+    "persona_limit",
+    "interactive_path_creation",
+    "lineage_store_resolution",
+    "artifact_write",
+    "system_prompt_write",
+    "mux_resolution",
+    "model_resolution",
+    "pane_launch",
+    "interactive_state_write",
+    "lineage_manifest_write",
+    "child_command_build",
+    "lineage_bootstrap_write",
+    "launch_script_write",
+    "completion_registration",
+  ];
+
 /** Never forward arbitrary error categories into telemetry. */
 export function sanitizeTelemetryErrorCategory(
   value: unknown,
@@ -560,6 +606,18 @@ export function sanitizeTelemetryCompletionFailureStage(
       value as TelemetryCompletionFailureStage,
     )
     ? (value as TelemetryCompletionFailureStage)
+    : undefined;
+}
+
+/** Never forward arbitrary spawn-operation labels into telemetry. */
+export function sanitizeTelemetrySpawnFailureOperation(
+  value: unknown,
+): TelemetrySpawnFailureOperation | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_SPAWN_FAILURE_OPERATIONS.includes(
+      value as TelemetrySpawnFailureOperation,
+    )
+    ? (value as TelemetrySpawnFailureOperation)
     : undefined;
 }
 
@@ -714,7 +772,10 @@ export function buildTelemetryPayload(
         ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
-    case "agent_spawn_failed":
+    case "agent_spawn_failed": {
+      const failureOperation = sanitizeTelemetrySpawnFailureOperation(
+        event.failure_operation,
+      );
       properties = {
         ...common,
         execution: event.execution,
@@ -726,9 +787,13 @@ export function buildTelemetryPayload(
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
         failure_stage: event.failure_stage,
+        ...(failureOperation === undefined
+          ? {}
+          : { failure_operation: failureOperation }),
         ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
+    }
     case "task_started":
       properties = {
         ...common,
