@@ -140,6 +140,7 @@ export function buildChildSubagentProtocol(
 ): string {
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
+  const completionErrorPath = `${artifactDir}/completion-error.txt`;
   const userAttentionGuidance = requireActivePaneForUserAttention
     ? "USER ATTENTION AND PANE ACTIVITY. Before calling any tool or extension that may wait for user input, call get_current_pane_activity immediately first. If it reports active, continue with the user-attention call in this pane. If it reports inactive or unknown, do not open a prompt here; include the exact decision needed in your result so the orchestrator can ask the user."
     : "";
@@ -168,7 +169,9 @@ Follow this checklist for every turn, including follow-ups:
 
 ### If completion fails
 
-If writing the result or running the CLI fails, inspect the error and make at most two corrective retries of the failed step, only when a safe correction is available within the assigned scope. Do not retry an unchanged, persistent failure or expand permissions. If still blocked, preserve the result and error in output.md if writable, then report the blocker in your final response. Do not claim completion was recorded. This is the exception to step 4's success requirement; the lifecycle hook remains a recovery path, not a reason to skip an available CLI.
+If writing the result or running the CLI fails, inspect the error and make at most two corrective retries of the failed step, only when a safe correction is available within the assigned scope. Do not retry an unchanged, persistent failure or expand permissions.
+If still blocked, preserve the result and error in output.md if writable, then use the \`write\` tool to write a concise CLI failure reason to ${completionErrorPath}. The lifecycle fallback consumes this per-turn marker and records an error even when the final assistant response stops normally; it is cleared at the start of every initial and follow-up turn. Make no more tool calls after writing the marker.
+Use the marker only if the CLI remains unavailable; if a task fails but the \`error\` command works, use that command instead. Then report the blocker in your final response. Do not claim completion was recorded. This is the exception to step 4's success requirement; the lifecycle hook remains a recovery path, not a reason to skip an available CLI.
 
 The REPL stays open for follow-ups. Do not call \`/exit\`, press Ctrl-D, or close the pane unless explicitly asked. Do not call 'cancelled' yourself; only parent lifecycle or cancellation actions record that event. Do not edit events.ndjson.`;
 }

@@ -746,10 +746,14 @@ call, and the REPL stays open for follow-ups.
 If writing the result or invoking the CLI fails, the instructions allow at most
 two corrective retries of that step, only when a safe correction exists within
 scope. The child must not retry an unchanged persistent failure or expand
-permissions. If still blocked, it preserves the result/error if writable and
-reports the blocker without claiming completion was recorded. This failure path
-permits a final response; the `agent_settled` hook remains a recovery path, not
-a substitute for an available CLI. This is prompt guidance, not a runtime retry
+permissions. If still blocked, it preserves the result/error in `output.md` when
+writable and writes a concise reason to `completion-error.txt` with the `write`
+tool when the artifact directory is writable. The `agent_settled` hook consumes
+that per-turn marker and records an error even if the assistant response stops
+normally; the marker is cleared when the next initial or follow-up turn starts.
+The child reports the blocker without claiming the CLI recorded completion. This
+failure path permits a final response; the hook remains a recovery path, not a
+substitute for an available CLI. This is prompt guidance, not a runtime retry
 counter or delivery guarantee. Existing child system prompts are not rewritten.
 See [prompt guidance and evaluation scenarios](./docs/prompt-guidance.md).
 

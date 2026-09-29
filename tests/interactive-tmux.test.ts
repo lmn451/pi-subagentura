@@ -1090,6 +1090,8 @@ describe("interactive-tmux", () => {
       );
       const doneCommand = '"$ARTIFACT_DIR/cli.mjs" done 0';
       const errorCommand = '"$ARTIFACT_DIR/cli.mjs" error "short reason"';
+      const completionErrorSignal = `${FIXTURE_DIR}/completion-error.txt`;
+      const fallbackMarker = protocol.indexOf(completionErrorSignal);
       const finalResponse = protocol.indexOf("After the command succeeds");
 
       expect(protocol.match(/^## Completion protocol$/gm)).toHaveLength(1);
@@ -1106,6 +1108,20 @@ describe("interactive-tmux", () => {
       );
       expect(protocol).toContain(
         "Do not retry an unchanged, persistent failure or expand permissions",
+      );
+      expect(protocol).toContain(completionErrorSignal);
+      expect(protocol.split(completionErrorSignal)).toHaveLength(2);
+      expect(fallbackMarker).toBeGreaterThan(
+        protocol.indexOf("### If completion fails"),
+      );
+      expect(protocol).toContain(
+        "records an error even when the final assistant response stops normally",
+      );
+      expect(protocol).toContain(
+        "cleared at the start of every initial and follow-up turn",
+      );
+      expect(protocol).toContain(
+        "Use the marker only if the CLI remains unavailable",
       );
       expect(protocol).toContain("report the blocker in your final response");
       expect(protocol).toContain("Do not claim completion was recorded");
