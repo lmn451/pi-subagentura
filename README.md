@@ -601,6 +601,10 @@ Parameters:
 Deprecated compatibility fields cannot be combined with `completionPolicy` or
 `completionGroupId`. The spawn result describes the selected coordinated behavior.
 
+`send_interactive_subagent_message` sends only the follow-up text explicitly requested by its caller. tmux and Zellij retain their existing literal text + Enter path. Herdr tries its semantic [`agent.prompt` API](https://herdr.dev/docs/socket-api/) first (requires 0.9.0+), then falls back to raw pane input when the API definitively reports no submission, including unsupported versions/APIs and blocked or unrecognized agents. Herdr's own agent detector supplies the blocked state; that signal may be imperfect, and the raw fallback can type into the currently displayed approval/question UI. The Herdr 0.9.0 acceptance guarantee and 0.8.2 blocked response are documented in the [Herdr changelog](https://github.com/herdrdev/herdr/blob/v0.9.0/CHANGELOG.md); CI pins 0.9.0.
+
+After a prompt request times out or returns malformed/transport errors with uncertain delivery, no raw fallback or automatic retry is attempted to avoid duplicate prompts. Prompt acceptance is not completion: child artifact events remain authoritative. See Herdr's [agent automation guide](https://herdr.dev/docs/agent-automation/).
+
 The sub-agent's artifact contains `events.ndjson` lifecycle records, mutable
 `output.md` staging, and immutable protocol-v2 `outputs/<eventId>.md` terminal
 snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
