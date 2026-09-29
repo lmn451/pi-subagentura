@@ -209,6 +209,74 @@ describe("workflow v4 aggregate classifications", () => {
     );
   });
 
+  it("lets a later structured workflow failure supersede an ordinary turn failure", async () => {
+    const { owner, payloads } = telemetryScope(407);
+    let calls = 0;
+    const job = startWorkflowJob(
+      "ordinary-then-structured-agent-error",
+      'export const meta = { name: "ordinary-then-structured", description: "d" };\n' +
+        'await agent("ordinary");\n' +
+        'await agent("mux");\n' +
+        'return "done";',
+      {
+        runAgent: async () => {
+          calls++;
+          if (calls === 1) {
+            return {
+              isError: true,
+              output: "",
+              usage: successfulResult().usage,
+              errorMessage: "provider details stay private",
+            };
+          }
+          return attachWorkflowFailure(
+            {
+              isError: true,
+              output: "",
+              usage: successfulResult().usage,
+              errorMessage: "mux probe details stay private",
+            },
+            {
+              errorCategory: "mux",
+              errorStage: "polling",
+              runtimeFailureKind: "mux_probe",
+            },
+          );
+        },
+      },
+      undefined,
+      undefined,
+      owner,
+    );
+    jobs.push(job);
+
+    await job.promise;
+
+    const completed = payloads.find(
+      (payload) => payload.event === "pi_subagentura_workflow_completed",
+    );
+    const runtimeFailure = payloads.find(
+      (payload) => payload.event === "pi_subagentura_runtime_failure",
+    );
+    expect(calls).toBe(2);
+    expect(completed?.properties).toMatchObject({
+      status: "partial",
+      error_category: "mux",
+      error_stage: "polling",
+    });
+    expect(runtimeFailure?.properties).toMatchObject({
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+    });
+    expect(JSON.stringify([completed, runtimeFailure])).not.toContain(
+      "provider details stay private",
+    );
+    expect(JSON.stringify([completed, runtimeFailure])).not.toContain(
+      "mux probe details stay private",
+    );
+  });
+
   it("carries schema validation evidence to one workflow lifecycle pair", async () => {
     const { owner, payloads } = telemetryScope(401);
     const runAgent = vi.fn(async () => successfulResult());

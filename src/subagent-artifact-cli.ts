@@ -54,6 +54,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { constants as osConstants } from "node:os";
 import { join } from "node:path";
 
 const dir = process.env.ARTIFACT_DIR;
@@ -183,44 +184,49 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
-const signalNames = [
-  undefined,
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGILL",
-  "SIGTRAP",
-  "SIGABRT",
-  "SIGBUS",
-  "SIGFPE",
-  "SIGKILL",
-  "SIGUSR1",
-  "SIGSEGV",
-  "SIGUSR2",
-  "SIGPIPE",
-  "SIGALRM",
-  "SIGTERM",
-  "SIGCHLD",
-  "SIGCONT",
-  "SIGSTOP",
-  "SIGTSTP",
-  "SIGTTIN",
-  "SIGTTOU",
-  "SIGURG",
-  "SIGXCPU",
-  "SIGXFSZ",
-  "SIGVTALRM",
-  "SIGPROF",
-  "SIGWINCH",
-  "SIGIO",
-  "SIGPWR",
-  "SIGSYS",
-  ];
+const allowedSignalNames = {
+  SIGHUP: true,
+  SIGINT: true,
+  SIGQUIT: true,
+  SIGILL: true,
+  SIGTRAP: true,
+  SIGABRT: true,
+  SIGBUS: true,
+  SIGFPE: true,
+  SIGKILL: true,
+  SIGUSR1: true,
+  SIGSEGV: true,
+  SIGUSR2: true,
+  SIGPIPE: true,
+  SIGALRM: true,
+  SIGTERM: true,
+  SIGCHLD: true,
+  SIGCONT: true,
+  SIGSTOP: true,
+  SIGTSTP: true,
+  SIGTTIN: true,
+  SIGTTOU: true,
+  SIGURG: true,
+  SIGXCPU: true,
+  SIGXFSZ: true,
+  SIGVTALRM: true,
+  SIGPROF: true,
+  SIGWINCH: true,
+  SIGIO: true,
+  SIGPWR: true,
+  SIGSYS: true,
+};
+const signalNames = Object.create(null);
+for (const [name, number] of Object.entries(osConstants.signals)) {
+  if (allowedSignalNames[name] === true && Number.isSafeInteger(number)) {
+    signalNames[number] = name;
+  }
+}
 const signalForExitCode = (exitCode) => {
   const signalNumber = exitCode - 128;
-  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
-    ? signalNames[signalNumber]
-    : undefined;
+  if (!Number.isSafeInteger(exitCode) || signalNumber <= 0) return undefined;
+  const signal = signalNames[signalNumber];
+  return typeof signal === "string" ? signal : undefined;
 };
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {
   const activeTool = activeState?.activeTools?.at(-1);

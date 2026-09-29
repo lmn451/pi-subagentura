@@ -559,6 +559,12 @@ export function registerDurableWorkflowTools(
             }>(event.data.value).stats?.errorCount ?? 0),
           0,
         );
+      let attemptCount = 0;
+      let dispatchCount = 0;
+      for (const event of store.events) {
+        if (event.kind === "attempt") attemptCount++;
+        else if (event.kind === "dispatch") dispatchCount++;
+      }
       // Persist cancellation requests before making cancellation terminal.
       // A failed marker write must leave the run retryable and its child active.
       await stopDurableProcessAttempts(store.directory);
@@ -584,7 +590,7 @@ export function registerDurableWorkflowTools(
           },
           definition.createdAt,
           completedAt,
-          store.events.filter((event) => event.kind === "attempt").length,
+          Math.max(attemptCount, dispatchCount),
           responseStats,
         );
       }

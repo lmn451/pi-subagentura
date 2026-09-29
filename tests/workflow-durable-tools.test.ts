@@ -747,6 +747,71 @@ describe("durable public tools", () => {
     expect(JSON.stringify(lifecycle[1])).not.toContain(id);
   });
 
+  it("counts replay dispatches in cancellation telemetry", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const telemetry = createTelemetrySession(true);
+    scope.telemetry = telemetry;
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script:
+          'export const meta={name:"replayed",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: telemetry.correlationId,
+          mode: telemetry.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.append("telemetry_start_claim", {});
+    await store.append("telemetry_start_confirmed", {});
+    await store.append("attempt", {});
+    await store.append("dispatch", {});
+    await store.append("dispatch", {});
+    await store.append("dispatch", {});
+    await store.close();
+
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const cancelled = await api.cancel(id, ctx);
+
+    expect(cancelled.details.status).toBe("cancelled");
+    const completed = payloads.find((payload) =>
+      payload.event.endsWith("workflow_completed"),
+    );
+    expect(completed?.properties).toMatchObject({
+      status: "cancelled",
+      agents_spawned: 3,
+    });
+  });
+
   it("keeps persisted cancellation retryable when an attempt marker fails", async () => {
     const { pi, scope, ctx } = setup();
     const payloads: Array<{ event: string }> = [];

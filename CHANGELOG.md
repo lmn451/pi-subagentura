@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Durable job admission failures are terminalized before later resume/cancel,
   recovery after acceptance does not duplicate workflow start telemetry before
   its first RPC, and retired sessions cannot revive saved telemetry opt-ins.
+- Preserve later structured workflow failure diagnostics and count replayed
+  dispatches in durable cancellation telemetry.
+- Map child process exit signals using host numbering without expanding the
+  supported signal set.
 
 ## [3.6.4] - 2026-10-03
 

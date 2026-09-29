@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
@@ -198,6 +198,42 @@ describe("subagent-artifact CLI", () => {
         terminationReason: "signal",
         signal: "SIGTERM",
       });
+    });
+
+    it("maps signal numbers using the host operating system constants", () => {
+      const exitCode = 128 + osConstants.signals.SIGBUS;
+      expect(runCli(tmp, ["process-exit", String(exitCode)]).status).toBe(0);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8")
+          .trim()
+          .split("\n")
+          .at(-1)!,
+      );
+      expect(event).toMatchObject({
+        type: "process_exited",
+        status: "error",
+        exitCode,
+        terminationReason: "signal",
+        signal: "SIGBUS",
+      });
+    });
+
+    it("omits signals outside the supported host signal set", () => {
+      const exitCode = 128 + 1_000;
+      expect(runCli(tmp, ["process-exit", String(exitCode)]).status).toBe(0);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8")
+          .trim()
+          .split("\n")
+          .at(-1)!,
+      );
+      expect(event).toMatchObject({
+        type: "process_exited",
+        status: "error",
+        exitCode,
+        terminationReason: "nonzero_exit",
+      });
+      expect(event).not.toHaveProperty("signal");
     });
 
     it("records nonzero exits without inventing a signal", () => {
