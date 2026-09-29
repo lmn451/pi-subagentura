@@ -9,9 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added opt-in local diagnostics for unknown mux liveness, logged once per
+  tracked pane per outage. Herdr reports only closed timeout, command-error,
+  or malformed-response reasons; anonymous telemetry is unchanged.
 - Added telemetry schema v5's optional closed `failure_operation` dimension to
   distinguish interactive spawn preparation, persistence, and registration
   failures without collecting exception text or user data.
+
+### Fixed
+
+- Keep terminal interactive rows from reopening a persistent mux-probe
+  runtime-failure episode on every poll. A known-liveness poll ends the
+  episode; a later unknown result may report a new one.
+- Render coordinated workflow completion notices with resolved agent errors
+  as “completed with errors” while retaining the internal error status.
 
 ## [3.6.4] - 2026-10-03
 

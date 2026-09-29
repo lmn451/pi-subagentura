@@ -1249,6 +1249,8 @@ Set `SUBAGENT_DEBUG_LOG_DIR=/some/path` to write a JSONL trace of sub-agent life
 
 The `tool_start` event records the `toolName` and full `args` of every tool the sub-agent invokes — useful for replaying or auditing what a sub-agent did. Other events cover session creation, turns, message updates, prompts, and job completion.
 
+Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is independent of anonymous telemetry, whose runtime-failure event keeps its existing closed schema. Probe timeout and polling behavior are unchanged.
+
 The feature is a no-op when the env var is unset.
 
 ```bash

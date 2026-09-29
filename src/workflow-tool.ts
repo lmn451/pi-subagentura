@@ -583,6 +583,10 @@ export function registerWorkflowTool(
                   presentation.label === "completed with errors"
                 ? "error"
                 : "done",
+          ...(job.status === "done" &&
+          presentation.label === "completed with errors"
+            ? { presentation: "completed-with-errors" as const }
+            : {}),
           policy: job.completionPolicy,
           ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
           references:

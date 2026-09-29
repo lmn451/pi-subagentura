@@ -33,9 +33,10 @@ import {
   deriveInteractiveSubagentStatusFromLifecycle,
   foldInteractiveLifecycle,
   interactiveSubagentRegistry,
-  getInteractivePaneLivenessAsync,
+  getInteractivePaneLivenessDiagnosticAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
+import type { PaneLivenessFailureReason } from "./multiplexer-contracts";
 import { isOrchestratorMode, isOrchestratorV2Enabled } from "./completion-turn";
 import { shouldNotify } from "./notifications";
 import {
@@ -620,6 +621,7 @@ interface RuntimeFailureEpisodeState {
 }
 
 const runtimeFailureEpisodes = new Map<string, RuntimeFailureEpisodeState>();
+const debuggedMuxProbeStates = new WeakSet<InteractiveSubagentState>();
 
 function runtimeFailureKindForIssue(
   issue: EventReadIssue,
@@ -655,7 +657,15 @@ function reportRuntimeFailure(
   kind: ArtifactRuntimeFailureKind,
   category: TelemetryErrorCategory,
   stage: TelemetryErrorStage,
+  failureReason?: PaneLivenessFailureReason,
 ): void {
+  if (kind === "mux_probe" && !debuggedMuxProbeStates.has(state)) {
+    debuggedMuxProbeStates.add(state);
+    debugLog("warn", "interactive_mux_probe_unknown", {
+      mux: state.mux,
+      ...(failureReason === undefined ? {} : { failureReason }),
+    });
+  }
   if (
     !telemetry ||
     !state.telemetryEligible ||
@@ -688,12 +698,7 @@ function clearRuntimeFailureEpisode(
 ): void {
   const episode = runtimeFailureEpisodes.get(state.artifactDir);
   episode?.active.delete(kind);
-}
-
-function clearRuntimeFailureEpisodes(state: InteractiveSubagentState): void {
-  const episode = runtimeFailureEpisodes.get(state.artifactDir);
-  if (!episode) return;
-  episode.active.clear();
+  if (kind === "mux_probe") debuggedMuxProbeStates.delete(state);
 }
 
 function reportArtifactReadIssues(
@@ -856,13 +861,16 @@ async function runPollArtifactChanges(
     const liveness = await Promise.all(
       states.map(async (state) => {
         try {
-          return [state, await getInteractivePaneLivenessAsync(state)] as const;
+          return [
+            state,
+            await getInteractivePaneLivenessDiagnosticAsync(state),
+          ] as const;
         } catch (err) {
           debugLog("error", "poller_liveness_error", {
             stateId: state.id,
             error: err instanceof Error ? err.message : String(err),
           });
-          return [state, "unknown"] as const;
+          return [state, { liveness: "unknown" as const }] as const;
         }
       }),
     );
@@ -887,8 +895,9 @@ async function runPollArtifactChanges(
       ownerContext?.ui ??
       (g2.__piSubagenturaUi as ExtensionUIContext | undefined);
     const persistedStates: InteractiveSubagentState[] = [];
-    for (const [state, paneLiveness] of liveness) {
+    for (const [state, livenessDiagnostic] of liveness) {
       if (stateMap.get(state.id) !== state) continue;
+      const paneLiveness = livenessDiagnostic.liveness;
       if (paneLiveness === "unknown") {
         reportRuntimeFailure(
           state,
@@ -896,6 +905,7 @@ async function runPollArtifactChanges(
           "mux_probe",
           "mux",
           "polling",
+          livenessDiagnostic.failureReason,
         );
       } else {
         clearRuntimeFailureEpisode(state, "mux_probe");
@@ -1191,7 +1201,6 @@ async function runPollArtifactChanges(
         state.status === "cancelled" || state.status === "exited";
       if (terminal) {
         destroySessionParser(state);
-        clearRuntimeFailureEpisodes(state);
       }
       if (
         terminal &&
