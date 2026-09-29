@@ -99,7 +99,35 @@ export async function createPiSessionHarness(
       },
     ],
     streamSimple: (_model: unknown, context: Context) => {
-      contexts.push(context);
+      // Pi 0.86 passes providers a normalized transcript: the leading system
+      // prompt is represented as a system message instead of Context.systemPrompt.
+      // Keep the harness' observable context shape stable across SDK versions.
+      const leadingSystem = (
+        context.messages as Array<{
+          role?: string;
+          content?: unknown;
+          toolsAdded?: Context["tools"];
+        }>
+      ).find((message) => message.role === "system");
+      const systemPrompt =
+        context.systemPrompt ??
+        (typeof leadingSystem?.content === "string"
+          ? leadingSystem.content
+          : undefined);
+      const tools =
+        context.tools ??
+        (Array.isArray(leadingSystem?.toolsAdded)
+          ? leadingSystem.toolsAdded
+          : undefined);
+      contexts.push(
+        systemPrompt === undefined && tools === undefined
+          ? context
+          : {
+              ...context,
+              ...(systemPrompt ? { systemPrompt } : {}),
+              ...(tools ? { tools } : {}),
+            },
+      );
       const stream = createAssistantMessageEventStream();
       pending.push(stream);
       return stream;
@@ -113,7 +141,10 @@ export async function createPiSessionHarness(
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
-    settingsManager.getRetrySettings = () => options.retrySettings!;
+    settingsManager.getRetrySettings = () => ({
+      ...options.retrySettings!,
+      maxAgentDelayMs: 0,
+    });
   }
   const resourceLoader = new DefaultResourceLoader({
     cwd,
