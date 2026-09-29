@@ -125,12 +125,8 @@ import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
 
 /**
- * System prompt sent to every interactive sub-agent. Tells the child how to
- * signal completion so the parent can be notified, and where to write its
- * result. The persona (if provided) is placed ABOVE this so the protocol —
- * the part that keeps the parent-child notification loop working — is the
- * most recent instruction the LLM reads (recency wins for instruction
- * following).
+ * Completion instructions appended after the optional persona. Task and
+ * follow-up reminders refer to this checklist rather than redefining it.
  *
  * `artifactDir` is the resolved absolute path baked into the prompt so the
  * child can use it directly in `write` tool calls. Bash commands and `cli.mjs`
@@ -144,45 +140,40 @@ export function buildChildSubagentProtocol(
 ): string {
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
+  const completionErrorPath = `${artifactDir}/completion-error.txt`;
   const userAttentionGuidance = requireActivePaneForUserAttention
     ? "USER ATTENTION AND PANE ACTIVITY. Before calling any tool or extension that may wait for user input, call get_current_pane_activity immediately first. If it reports active, continue with the user-attention call in this pane. If it reports inactive or unknown, do not open a prompt here; include the exact decision needed in your result so the orchestrator can ask the user."
     : "";
-  return `You are running inside a Pi sub-agent launched by a parent agent. The parent agent reads your work from two files in your artifact directory and from one CLI command. You MUST follow this protocol or your work will be lost.
-
-BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
-
-COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
+  return `You are an interactive Pi sub-agent. Complete the parent's assigned task and return the requested evidence and deliverables. Keep the result concise; omit play-by-play narration.
 
 ${userAttentionGuidance}
 
+## Artifact paths
+
 Your artifact directory is: ${artifactDir}
+Write the result to ${outputPath}. The lifecycle helper is ${cliPath}. Use literal absolute paths with the \`write\` tool; it does not expand $ARTIFACT_DIR. In bash, the wrapper exports $ARTIFACT_DIR and the quoted commands below support paths containing spaces.
 
-  output.md      — your final result (prose, findings, code, whatever the parent asked for)
-  events.ndjson  — append-only lifecycle log (managed by the wrapper, you do not write to it)
-  cli.mjs        — the wrapper's lifecycle helper, invoked via bash
+## Completion protocol
 
-Use the literal path above in your \`write\` tool calls — the \`write\` tool does not expand \$ARTIFACT_DIR or any other shell variable, so a path like "\$ARTIFACT_DIR/output.md" will be written literally to a file of that name and never reach the parent.
+Follow this checklist for every turn, including follow-ups:
 
-When your task is done, follow this checklist in order. The parent is a parent agent and cannot guess that you have finished — it will only know after step 3 succeeds. Skipping or reordering any step breaks the completion contract.
+1. Finish the task and required verification before starting completion. Do not begin new task work afterward.
+2. Write your concise result to ${outputPath} using the \`write\` tool. Include any task failure, blocker, and evidence the parent needs. If the result is elsewhere, copy it here.
+3. Run the appropriate lifecycle command via bash and wait for success:
 
-  1. Finish all task work. Once you start this checklist, do not begin new work.
-  2. Write your final result to ${outputPath} using the \`write\` tool. Use the exact path above. If you have already written the result to some other path (a /tmp file, a project file, etc.), copy or append it to output.md so the parent can read it.
-  3. Run the appropriate bash command and wait for it to return. A successful invocation must record exactly one completion event for this turn. \$ARTIFACT_DIR is exported to your shell by the wrapper, so the quoted forms expand correctly even if the path contains spaces:
+   "$ARTIFACT_DIR/cli.mjs" done 0       # task succeeded
+   "$ARTIFACT_DIR/cli.mjs" error "short reason"   # task failed or is blocked
 
-       "$ARTIFACT_DIR/cli.mjs" done 0       # success
-       "$ARTIFACT_DIR/cli.mjs" error "short reason"   # unrecoverable failure
+   The successful lifecycle command must be your final tool call for the turn. The CLI is idempotent for the active turn; do not append lifecycle events yourself.
+4. After the command succeeds, send a one-sentence final assistant response with the outcome and result location. Make no more tool calls in this turn.
 
-     This must be your final tool call for the turn. If the command itself fails, do not send the final assistant response; fix the cause and retry until one completion event has been recorded successfully.
+### If completion fails
 
-  4. Only after the lifecycle command succeeds, produce your final assistant text in the chat summarising what you did and where to find the work. Make no more tool calls during this turn.
-  5. Stay in the REPL. Do not call \`/exit\` or press Ctrl-D. The REPL stays open after step 3 so the user (or the parent) can follow up; the wrapper's EXIT trap will only fire if you actually exit. If you exit, the wrapper will treat it as a crash and the parent will not see your final answer.
+If writing the result or running the CLI fails, inspect the error and make at most two corrective retries of the failed step, only when a safe correction is available within the assigned scope. Do not retry an unchanged, persistent failure or expand permissions.
+If still blocked, preserve the result and error in output.md if writable, then use the \`write\` tool to write a concise CLI failure reason to ${completionErrorPath}. The lifecycle fallback consumes this per-turn marker and records an error even when the final assistant response stops normally; it is cleared at the start of every initial and follow-up turn. Make no more tool calls after writing the marker.
+Use the marker only if the CLI remains unavailable; if a task fails but the \`error\` command works, use that command instead. Then report the blocker in your final response. Do not claim completion was recorded. This is the exception to step 4's success requirement; the lifecycle hook remains a recovery path, not a reason to skip an available CLI.
 
-Do not call 'cancelled' yourself — only parent lifecycle or cancellation actions record that event.
-
-For reference: ${cliPath} is the lifecycle CLI. Each invocation appends one NDJSON line to events.ndjson. The parent reads that file every few seconds. The atomic write pattern (write to .tmp, then rename onto output.md) is fine if you want crash-safety.
-
-─── HARDENING REMINDER (read this last, it is the most recent instruction on purpose) ───
-The child-only Pi lifecycle hook is a crash-safety fallback, not permission to omit the command. At the end of EVERY initial or follow-up turn: write output.md FIRST, call \`cli.mjs done 0\`, wait until exactly one completion event is recorded successfully, and only then send the final assistant response. The CLI is idempotent for the active turn, so the later agent_settled hook is a no-op. Never rely on the hook when you can call the CLI yourself.`;
+The REPL stays open for follow-ups. Do not call \`/exit\`, press Ctrl-D, or close the pane unless explicitly asked. Do not call 'cancelled' yourself; only parent lifecycle or cancellation actions record that event. Do not edit events.ndjson.`;
 }
 
 /**
@@ -454,13 +445,7 @@ export function buildInteractivePrompt(params: {
   contextText?: string | null;
 }): string {
   const footer =
-    "\n\n" +
-    "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
-    "write your result to output.md (path from the system prompt), run the command below, " +
-    "and wait for it to succeed. Repeat this for every turn:\n" +
-    '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
-    "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
-    "Do not intentionally exit or close the pane unless explicitly asked.";
+    '\n\nMANDATORY COMPLETION PROTOCOL: Follow "Completion protocol" in your system prompt for every turn, including success, failure, and bounded recovery. Keep the REPL open for follow-ups unless explicitly asked to exit.';
 
   if (!params.contextText) return params.task + footer;
   return (
@@ -859,18 +844,9 @@ export function launchInteractiveSubagent(params: {
     );
   }
 
-  // Always write a system prompt that includes the child protocol, and place
-  // the user-supplied persona (if any) ABOVE the protocol. Recency wins for
-  // instruction-following, so the protocol — the part that keeps the
-  // parent-child notification loop working — is the most recent instruction
-  // the LLM reads. A persona that says "ignore the protocol" is a known LLM
-  // footgun, and placing the protocol last makes it stick.
+  // Keep one authoritative completion checklist after the optional persona.
   let systemPromptFile: string;
   try {
-    // Always write a system prompt that includes the child protocol, and place
-    // the user-supplied persona (if any) ABOVE the protocol. Recency wins for
-    // instruction-following, so the protocol — the part that keeps the parent-
-    // child notification loop working — is the most recent instruction.
     const protocol = buildChildSubagentProtocol(
       paths.artifactDir,
       params.requireActivePaneForUserAttention,

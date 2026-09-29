@@ -2,10 +2,11 @@
  * Sub-agent artifact storage.
  *
  * Each interactive sub-agent owns a directory under the parent's artifacts root.
- * The directory holds three kinds of files:
+ * The directory holds these files:
  *
  *   events.ndjson    — append-only log of lifecycle and tool_activity events
  *   output.md        — mutable staging file for the active child turn; reset at turn start
+ *   completion-error.txt — optional per-turn signal for an unavailable CLI, consumed by the child lifecycle fallback
  *   outputs/<id>.md  — immutable protocol-v2 snapshots, atomically captured
  *                      before their completion event is appended
  *   output-N.md      — legacy numeric snapshots retained for compatibility

@@ -6,6 +6,7 @@ import {
   openSync,
   readSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -21,8 +22,14 @@ import {
   artifactPath,
   newEventId,
   writeOutput,
+  type SubagentArtifact,
   type SubagentEventV2,
 } from "./artifact";
+
+const COMPLETION_ERROR_FILE = "completion-error.txt";
+const COMPLETION_ERROR_FALLBACK_MESSAGE =
+  "Completion CLI could not be invoked; see output.md for the reported blocker";
+const MAX_COMPLETION_ERROR_BYTES = 2_000;
 
 interface ActiveTool {
   name: string;
@@ -41,7 +48,7 @@ interface ActiveTurn {
 
 let latestAgentMessages: unknown[] = [];
 
-function getArtifact() {
+function getArtifact(): SubagentArtifact {
   const dir = process.env.ARTIFACT_DIR;
   if (!dir) throw new Error("PI_SUBAGENTURA_CHILD requires ARTIFACT_DIR");
   return artifactPath(dirname(dir), basename(dir));
@@ -49,6 +56,57 @@ function getArtifact() {
 
 function activeTurnPath(art = getArtifact()): string {
   return join(art.dir, "active-turn.json");
+}
+
+function clearCompletionErrorSignal(art: SubagentArtifact): void {
+  try {
+    unlinkSync(join(art.dir, COMPLETION_ERROR_FILE));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function readCompletionErrorSignal(art: SubagentArtifact): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      join(art.dir, COMPLETION_ERROR_FILE),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > MAX_COMPLETION_ERROR_BYTES) {
+      return COMPLETION_ERROR_FALLBACK_MESSAGE;
+    }
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < metadata.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        metadata.size - offset,
+        offset,
+      );
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+    }
+    return (
+      buffer.subarray(0, offset).toString("utf8").trim() ||
+      COMPLETION_ERROR_FALLBACK_MESSAGE
+    );
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? undefined
+      : COMPLETION_ERROR_FALLBACK_MESSAGE;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* the completion failure signal has already been read */
+      }
+    }
+  }
 }
 
 const SAFE_METADATA_PATTERN = /^[A-Za-z0-9._:-]+$/;
@@ -297,6 +355,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       started: true,
       previousUserEntryId,
     };
+    clearCompletionErrorSignal(art);
     latestAgentMessages = [];
     writeOutput(art, "");
     writeActiveTurn(turn, art);
@@ -340,6 +399,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       started: false,
       previousUserEntryId: latestUserEntryId(ctx),
     };
+    clearCompletionErrorSignal(art);
     latestAgentMessages = [];
     writeOutput(art, "");
     writeActiveTurn(turn, art);
@@ -374,6 +434,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
   pi.on("agent_settled", (_event, ctx) => {
     const active = bindPersistedTurn(ctx, Date.now());
     if (!active) return;
+    const completionFailureMessage = readCompletionErrorSignal(art);
     const assistant = [...latestAgentMessages]
       .reverse()
       .find((message: any) => message?.role === "assistant") as any;
@@ -382,8 +443,9 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       typeof assistant?.errorMessage === "string"
         ? assistant.errorMessage
         : undefined;
+    const reportedErrorMessage = errorMessage || completionFailureMessage;
     const failed =
-      Boolean(errorMessage) ||
+      Boolean(reportedErrorMessage) ||
       assistant?.stopReason === "error" ||
       assistant?.stopReason === "aborted";
     appendCompletionEvent(art, {
@@ -391,8 +453,8 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       outcome: failed ? "error" : "done",
       source: "agent_settled",
       exitCode: failed ? 1 : 0,
-      errorMessage,
-      message: errorMessage,
+      errorMessage: reportedErrorMessage,
+      message: reportedErrorMessage,
       agentStopReason:
         stopReason === "error" || stopReason === "aborted"
           ? stopReason

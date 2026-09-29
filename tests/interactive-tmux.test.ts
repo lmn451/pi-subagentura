@@ -998,8 +998,8 @@ describe("interactive-tmux", () => {
   // ------------------------------------------------------------------
 
   describe("buildChildSubagentProtocol", () => {
-    // Fixture artifact dir used by the protocol tests. The function bakes the
-    // path into the rendered prompt, so each test asserts against the same value.
+    // These assertions cover the generated prompt interface, not model compliance.
+    // Model interpretation is evaluated separately; see docs/prompt-guidance.md.
     const FIXTURE_DIR = "/tmp/pi-subagentura-fixture";
 
     it("names all three completion signals (done / error / cancelled)", async () => {
@@ -1054,10 +1054,7 @@ describe("interactive-tmux", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const protocol = buildChildSubagentProtocol(FIXTURE_DIR);
-      // The BE BRIEF directive lives at the top of the protocol so it gets
-      // high attention. We match the literal "BE BRIEF" token so the exact
-      // wording can be tuned without breaking the test.
-      expect(protocol).toMatch(/BE BRIEF/);
+      expect(protocol).toContain("concise result");
     });
 
     it("gates Orchestratorv2 child attention by pane activity", async () => {
@@ -1083,28 +1080,52 @@ describe("interactive-tmux", () => {
       expect(protocol).not.toContain("get_current_pane_activity");
     });
 
-    it("requires done before the final assistant response on every turn", async () => {
+    it("emits one completion checklist with both outcomes and bounded recovery", async () => {
       const { buildChildSubagentProtocol } = await importFresh<
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const protocol = buildChildSubagentProtocol(FIXTURE_DIR);
+      const writeResult = protocol.indexOf(
+        `Write your concise result to ${FIXTURE_DIR}/output.md`,
+      );
+      const doneCommand = '"$ARTIFACT_DIR/cli.mjs" done 0';
+      const errorCommand = '"$ARTIFACT_DIR/cli.mjs" error "short reason"';
+      const completionErrorSignal = `${FIXTURE_DIR}/completion-error.txt`;
+      const fallbackMarker = protocol.indexOf(completionErrorSignal);
+      const finalResponse = protocol.indexOf("After the command succeeds");
 
-      expect(protocol).toMatch(/A turn is not complete.*cli\.mjs.*returns/i);
-      expect(protocol).toMatch(/every turn.*follow-up/i);
-      expect(protocol).toMatch(
-        /do not (?:produce|send|emit).*final assistant.*before.*cli\.mjs/i,
+      expect(protocol.match(/^## Completion protocol$/gm)).toHaveLength(1);
+      expect(protocol.split(doneCommand)).toHaveLength(2);
+      expect(protocol.split(errorCommand)).toHaveLength(2);
+      expect(writeResult).toBeGreaterThanOrEqual(0);
+      expect(protocol.indexOf(doneCommand)).toBeGreaterThan(writeResult);
+      expect(finalResponse).toBeGreaterThan(protocol.indexOf(errorCommand));
+      expect(protocol).toContain("every turn, including follow-ups");
+      expect(protocol).toContain("final tool call");
+      expect(protocol).toContain("at most two corrective retries");
+      expect(protocol).toContain(
+        "only when a safe correction is available within the assigned scope",
       );
-      expect(protocol).toMatch(/final tool call/i);
-      expect(protocol).toMatch(
-        /if the command.*fails.*do not.*final assistant.*retry/i,
+      expect(protocol).toContain(
+        "Do not retry an unchanged, persistent failure or expand permissions",
       );
-
-      const doneCommand = protocol.indexOf('"$ARTIFACT_DIR/cli.mjs" done 0');
-      const finalResponse = protocol.indexOf(
-        "Only after the lifecycle command succeeds",
+      expect(protocol).toContain(completionErrorSignal);
+      expect(protocol.split(completionErrorSignal)).toHaveLength(2);
+      expect(fallbackMarker).toBeGreaterThan(
+        protocol.indexOf("### If completion fails"),
       );
-      expect(doneCommand).toBeGreaterThanOrEqual(0);
-      expect(finalResponse).toBeGreaterThan(doneCommand);
+      expect(protocol).toContain(
+        "records an error even when the final assistant response stops normally",
+      );
+      expect(protocol).toContain(
+        "cleared at the start of every initial and follow-up turn",
+      );
+      expect(protocol).toContain(
+        "Use the marker only if the CLI remains unavailable",
+      );
+      expect(protocol).toContain("report the blocker in your final response");
+      expect(protocol).toContain("Do not claim completion was recorded");
+      expect(protocol).toContain("Do not call 'cancelled' yourself");
     });
 
     it("embeds the literal artifact dir in the rendered prompt", async () => {
@@ -1118,20 +1139,26 @@ describe("interactive-tmux", () => {
     });
   });
 
-  it("repeats the mandatory completion contract in the initial task prompt", async () => {
-    const { buildInteractivePrompt } = await importFresh<
-      typeof import("../src/interactive-tmux")
-    >("../src/interactive-tmux");
-    const prompt = buildInteractivePrompt({ task: "inspect the project" });
+  it.each([undefined, "REFERENCE_CONTEXT"])(
+    "links the initial task to the system checklist (context: %s)",
+    async (contextText) => {
+      const { buildInteractivePrompt } = await importFresh<
+        typeof import("../src/interactive-tmux")
+      >("../src/interactive-tmux");
+      const prompt = buildInteractivePrompt({
+        task: "inspect the project",
+        contextText,
+      });
 
-    expect(prompt).toMatch(/^inspect the project/);
-    expect(prompt).toMatch(/mandatory completion protocol/i);
-    expect(prompt).toMatch(/before sending your final assistant response/i);
-    expect(prompt).toContain('"$ARTIFACT_DIR/cli.mjs" done 0');
-    expect(prompt).toMatch(/every turn/i);
-    expect(prompt).toMatch(/remain in the Pi REPL and wait for follow-up/i);
-    expect(prompt).toMatch(/do not intentionally exit or close the pane/i);
-  });
+      expect(prompt).toContain("inspect the project");
+      if (contextText) expect(prompt).toContain(contextText);
+      expect(prompt).toContain("MANDATORY COMPLETION PROTOCOL");
+      expect(prompt).toContain('"Completion protocol" in your system prompt');
+      expect(prompt).toContain("every turn");
+      expect(prompt).toContain("bounded recovery");
+      expect(prompt).not.toContain("cli.mjs");
+    },
+  );
 
   describe("system prompt is always written", () => {
     // The "kills the orphan pane" test earlier in the file mocks node:fs to
@@ -1212,7 +1239,7 @@ describe("interactive-tmux", () => {
       );
     });
 
-    it("places the persona ABOVE the protocol (recency favors the protocol)", async () => {
+    it("appends the completion protocol after the persona in the emitted system prompt", async () => {
       const tmp = makeTmp();
       process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
       process.env.TMUX = makeArgs().TMUX;

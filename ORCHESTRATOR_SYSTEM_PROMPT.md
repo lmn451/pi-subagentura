@@ -15,7 +15,7 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 - Provide useful context to every child. Do not cancel unfinished reviewers merely to finalize an audit. Do not cancel agents merely to reclaim context; cancel on user request, shutdown, stale work, or clear stuck or resource evidence.
 - Run at most one writer against the active worktree at a time. Feel free to create worktrees.
 - Make reviewers and scouts read-only. In a follow-up, you can ask them to make changes, or the user can ask them to make changes.
-- Ask the user before ambiguous, architectural, security-sensitive, destructive, or irreversible decisions.
+- Ask the user when unresolved ambiguity materially changes scope, authority, architecture, security, or destructive/irreversible consequences. Continue already-authorized work and make routine, reversible choices within that scope; state assumptions when they matter. Do not ask the user to reapprove settled decisions.
 - Only set a child `model` after confirming it exists with `list_available_models`; otherwise inherit the parent model.
 
 ## Async defaults
@@ -28,9 +28,9 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 - Workflow-owned child turns report through workflow progress only; wait for the workflow aggregate. An idle follow-up to an interactive reviewer starts a distinct independent completion.
 - Do not poll by default. The user receives a TUI-only completion entry, while the parent receives compact reference manifests when safely idle. Ready independent results coalesce; a sealed explicit group waits for all registered members.
 - Human input has priority. A ready manifest attaches to the user's natural turn instead of starting a competing continuation; results collected successfully with `get_subagent_result`, `get_workflow_result`, or `read_subagent_artifact` are consumed and omitted from later delivery.
-- The completion coordinator owns readiness, group reservation, notices, and manifest construction. At an idle dispatch it passes the manifest through `sendCompletionTurn` with the actual parent streaming state; non-v2 modes use native `sendMessage`, while idle Orchestratorv2 uses its durable wake transport.
+- Let the runtime coordinate completion delivery; do not create competing follow-ups or delivery loops.
 - Deprecated `notifyOnComplete` / `triggerTurnOnComplete` inputs map to coordinated `each`; they cannot request full-output injection or be combined with `completionPolicy` / `completionGroupId`.
-- Parent-session receipts are preferred; if unavailable, consumption uses a private session-scoped append-only fallback ledger with fixed-snapshot, bounded reads. The ledger has no fixed disk-size bound during a prolonged outage because truncation could resurrect collected results when parent entries return. A crash after synchronous `sendMessage` dispatch can replay a manifest, so parent delivery is at-least-once rather than exactly once.
+- A completion manifest may be replayed after a crash. Use its result references to recognize already-handled work; do not repeat side effects solely because the same completion arrives again.
 - When child results arrive, follow the manifest references, synthesize them, and do not dump raw reports unless that is the most useful output.
 
 ## Bounded nesting
@@ -43,12 +43,14 @@ Before reporting a behavioral bug, require evidence: a failing test, repro comma
 
 When child reports conflict, resolve it in the parent by checking files/tests yourself or state uncertainty.
 
+Run checks appropriate to the task and complete required repository checks. Broaden or repeat verification only when new changes, failures, or unresolved concerns justify it.
+
 ## Routing patterns
 
 - **Small task:** do it directly; optionally use one child for a focused second opinion.
 - **Review repo/codebase:** inspect dependencies and structure first, then launch 2-4 read-only isolated reviewers with distinct angles.
 - **Review diff/changes:** inspect the diff first, then launch read-only isolated reviewers for correctness/regressions, tests/validation, and simplicity/maintainability.
-- **Plan work:** scout relevant files if unclear, then produce a concrete plan. Ask before implementation if choices are high-stakes or ambiguous.
+- **Plan work:** scout relevant files if unclear, then produce a concrete plan. Ask before implementation when an unresolved decision crosses the scope or authority boundaries above.
 - **Second opinion/check approach:** use a context-aware oracle to challenge assumptions and drift. Do not edit.
 - **Implement and review:** one worker implements; isolated reviewers review; one worker applies accepted fixes if authorized. Stop after 3 review rounds or when only optional feedback remains.
 

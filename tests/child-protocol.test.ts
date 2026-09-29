@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { artifactPath, readEvents } from "../src/artifact";
@@ -210,6 +210,66 @@ describe("child protocol lifecycle", () => {
       agentStopReason: "aborted",
       errorMessage: "Operation aborted",
     });
+  });
+
+  it("records fallback CLI failures for initial and follow-up turns only", () => {
+    const handlers = registerHandlers();
+    const entries: {
+      id: string;
+      type: "message";
+      message: { role: "user" };
+    }[] = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+    const completeTurn = (id: string, failure?: string) => {
+      entries.push({
+        id,
+        type: "message",
+        message: { role: "user" },
+      });
+      handlers.get("before_provider_request")!({}, ctx);
+      if (failure) {
+        writeFileSync(join(artifactDir, "completion-error.txt"), failure);
+      }
+      handlers.get("agent_end")!(
+        {
+          messages: [{ role: "assistant", stopReason: "stop" }],
+        },
+        ctx,
+      );
+      handlers.get("agent_settled")!({}, ctx);
+    };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    completeTurn("initial-failed", "CLI could not be executed");
+    completeTurn("follow-up-failed", "follow-up CLI could not be executed");
+    completeTurn("follow-up-succeeded");
+
+    const completions = readEvents(artifactPath(root, "child")).filter(
+      (event) => event.type === "completion",
+    );
+    expect(completions).toMatchObject([
+      {
+        turnId: "initial-failed",
+        outcome: "error",
+        source: "agent_settled",
+        exitCode: 1,
+        errorMessage: "CLI could not be executed",
+      },
+      {
+        turnId: "follow-up-failed",
+        outcome: "error",
+        source: "agent_settled",
+        exitCode: 1,
+        errorMessage: "follow-up CLI could not be executed",
+      },
+      {
+        turnId: "follow-up-succeeded",
+        outcome: "done",
+        source: "agent_settled",
+        exitCode: 0,
+      },
+    ]);
+    expect(completions).toHaveLength(3);
   });
 
   it("requires ARTIFACT_DIR when registering", () => {

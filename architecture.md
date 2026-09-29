@@ -500,8 +500,9 @@ pi --session <child-session.jsonl> --name <name> [model/thinking flags]
    --append-system-prompt <system.md> @<prompt.md>
 ```
 
-The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
-`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.
+The generated child system prompt contains one completion checklist: write `output.md`, invoke `cli.mjs done 0` for success or `cli.mjs error "short reason"` for a failed/blocked task as the final successful tool call, wait for success, then respond and keep the REPL open. Initial and follow-up reminders refer to that checklist.
+If output writing or the CLI fails, the prompt allows at most two corrective retries per failed step, only for safe corrections within scope; unchanged persistent failures and permission expansion are prohibited. If still blocked, the child preserves the result/error if writable and reports the recording blocker without claiming success. This explicitly permits a final response on the failure path and does not add a runtime retry counter or delivery guarantee.
+`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback. See [prompt guidance](./docs/prompt-guidance.md) for the model-evaluation boundary.
 
 ### 6.3 Mux boundary
 
