@@ -112,6 +112,7 @@ import {
   type TelemetryDepthBucket,
   type TelemetryInvocationSource,
   type TelemetrySpawnFailureMux,
+  type TelemetrySpawnFailureOperation,
   type TelemetrySession,
   type TelemetrySpawnFailureStage,
 } from "./telemetry";
@@ -569,6 +570,7 @@ export function writeLaunchScript(
 export function captureInteractiveSpawnFailure(params: {
   telemetry?: TelemetrySession;
   stage: TelemetrySpawnFailureStage;
+  operation?: TelemetrySpawnFailureOperation;
   startedAt?: number;
   mux?: TelemetrySpawnFailureMux;
   invocationSource?: TelemetryInvocationSource;
@@ -597,6 +599,7 @@ export function captureInteractiveSpawnFailure(params: {
     depth_bucket: telemetryDepthBucket(params.depth),
     completion_policy: params.completionPolicy ?? "legacy",
     failure_stage: params.stage,
+    failure_operation: params.operation,
     spawn_duration_ms: duration,
   });
 }
@@ -688,6 +691,7 @@ export function launchInteractiveSubagent(params: {
   const reportSpawnFailure = (
     stage: TelemetrySpawnFailureStage,
     mux?: TelemetrySpawnFailureMux,
+    operation?: TelemetrySpawnFailureOperation,
   ): void => {
     if (spawnFailureReported) return;
     spawnFailureReported = true;
@@ -696,6 +700,7 @@ export function launchInteractiveSubagent(params: {
         params.sessionScope?.telemetry ??
         resolveLiveSessionScope(params.supervisorOwner)?.telemetry,
       stage,
+      operation,
       startedAt: spawnStartedAt,
       mux,
       invocationSource: params.telemetryInvocationSource,
@@ -722,14 +727,14 @@ export function launchInteractiveSubagent(params: {
   try {
     cwd = resolve(params.cwd);
   } catch (error) {
-    reportSpawnFailure("context");
+    reportSpawnFailure("context", undefined, "cwd_validation");
     throw error;
   }
   if (
     cwd.includes("\0") ||
     Buffer.byteLength(cwd, "utf8") > MAX_PERSISTED_WORKING_CWD_BYTES
   ) {
-    reportSpawnFailure("context");
+    reportSpawnFailure("context", undefined, "cwd_validation");
     throw new Error(
       `working cwd exceeds ${MAX_PERSISTED_WORKING_CWD_BYTES} bytes or contains NUL`,
     );
@@ -738,7 +743,7 @@ export function launchInteractiveSubagent(params: {
   try {
     stateCwd = params.parentCwd ? resolve(params.parentCwd) : cwd;
   } catch (error) {
-    reportSpawnFailure("context");
+    reportSpawnFailure("context", undefined, "cwd_validation");
     throw error;
   }
   let artifactOwnerSessionId: string | undefined;
@@ -769,7 +774,11 @@ export function launchInteractiveSubagent(params: {
   try {
     paths = createInteractiveSubagentPaths({ id, name: params.name, cwd });
   } catch (error) {
-    reportSpawnFailure("state_persistence");
+    reportSpawnFailure(
+      "state_persistence",
+      undefined,
+      "interactive_path_creation",
+    );
     throw error;
   }
   const liveScope =
@@ -790,7 +799,11 @@ export function launchInteractiveSubagent(params: {
       ? resolveLineageStorePathsSync(sessionRoot, rootId)
       : undefined;
   } catch (error) {
-    reportSpawnFailure("state_persistence");
+    reportSpawnFailure(
+      "state_persistence",
+      undefined,
+      "lineage_store_resolution",
+    );
     throw error;
   }
   if (lineageStore) {
@@ -828,7 +841,7 @@ export function launchInteractiveSubagent(params: {
     }
     writeFileSync(paths.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
   } catch (error) {
-    reportSpawnFailure("state_persistence");
+    reportSpawnFailure("state_persistence", undefined, "artifact_write");
     throw error;
   }
 
@@ -841,7 +854,7 @@ export function launchInteractiveSubagent(params: {
     params.persona !== undefined &&
     Buffer.byteLength(params.persona, "utf8") > MAX_PERSONA_BYTES
   ) {
-    reportSpawnFailure("context");
+    reportSpawnFailure("context", undefined, "persona_limit");
     throw new Error(
       `persona too large: ${Buffer.byteLength(params.persona, "utf8")} bytes (max ${MAX_PERSONA_BYTES})`,
     );
@@ -872,7 +885,7 @@ export function launchInteractiveSubagent(params: {
     });
     systemPromptFile = paths.systemPromptFile;
   } catch (error) {
-    reportSpawnFailure("state_persistence");
+    reportSpawnFailure("state_persistence", undefined, "system_prompt_write");
     throw error;
   }
 
@@ -883,7 +896,7 @@ export function launchInteractiveSubagent(params: {
   try {
     mux = getMux({ preference: params.muxPreference });
   } catch (err) {
-    reportSpawnFailure("mux_resolution");
+    reportSpawnFailure("mux_resolution", undefined, "mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {
       throw new Error(`${err.message}\n${tmuxSetupHint()}`);
     }
@@ -919,7 +932,7 @@ export function launchInteractiveSubagent(params: {
         model: sanitizeTelemetryModel(params.model),
       };
     } catch (error) {
-      reportSpawnFailure("model_resolution", mux.name);
+      reportSpawnFailure("model_resolution", mux.name, "model_resolution");
       throw error;
     }
   }
@@ -947,11 +960,11 @@ export function launchInteractiveSubagent(params: {
     windowName = created.windowName;
     muxSession = created.session;
   } catch (error) {
-    reportSpawnFailure("pane_launch", mux.name);
+    reportSpawnFailure("pane_launch", mux.name, "pane_launch");
     throw error;
   }
   if (typeof paneId !== "string" || paneId.length === 0) {
-    reportSpawnFailure("pane_launch", mux.name);
+    reportSpawnFailure("pane_launch", mux.name, "pane_launch");
     throw new Error("multiplexer returned an invalid pane id");
   }
   let persistedState = false;
@@ -987,7 +1000,11 @@ export function launchInteractiveSubagent(params: {
       });
       persistedState = true;
     } catch (err) {
-      reportSpawnFailure("state_persistence", mux.name);
+      reportSpawnFailure(
+        "state_persistence",
+        mux.name,
+        "interactive_state_write",
+      );
       try {
         mux.killPane(paneId, muxSession);
       } catch {
@@ -1023,7 +1040,11 @@ export function launchInteractiveSubagent(params: {
         },
       );
     } catch (err) {
-      reportSpawnFailure("state_persistence", mux.name);
+      reportSpawnFailure(
+        "state_persistence",
+        mux.name,
+        "lineage_manifest_write",
+      );
       if (persistedState) {
         try {
           removeInteractiveState(stateCwd, id);
@@ -1075,7 +1096,13 @@ export function launchInteractiveSubagent(params: {
       cwd,
       thinkingLevel: params.thinkingLevel,
     });
-    if (spawnTreeContext) {
+  } catch (err) {
+    reportSpawnFailure("state_persistence", mux.name, "child_command_build");
+    cleanupFailedSpawn();
+    throw err;
+  }
+  if (spawnTreeContext) {
+    try {
       lineageBootstrapPath = writeLineageBootstrap(
         paths.artifactDir,
         createDescendantSpawnTreeContext(
@@ -1084,7 +1111,17 @@ export function launchInteractiveSubagent(params: {
           paths.artifactDir,
         ),
       );
+    } catch (err) {
+      reportSpawnFailure(
+        "state_persistence",
+        mux.name,
+        "lineage_bootstrap_write",
+      );
+      cleanupFailedSpawn();
+      throw err;
     }
+  }
+  try {
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
       PI_SUBAGENTURA_MUX: mux.name,
       ...(lineageBootstrapPath
@@ -1093,7 +1130,7 @@ export function launchInteractiveSubagent(params: {
       ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
     });
   } catch (err) {
-    reportSpawnFailure("state_persistence", mux.name);
+    reportSpawnFailure("state_persistence", mux.name, "launch_script_write");
     cleanupFailedSpawn();
     throw err;
   }
@@ -1112,7 +1149,7 @@ export function launchInteractiveSubagent(params: {
       session: muxSession,
     });
   } catch (err) {
-    reportSpawnFailure("pane_launch", mux.name);
+    reportSpawnFailure("pane_launch", mux.name, "pane_launch");
     cleanupFailedSpawn();
     throw err;
   }
@@ -1170,7 +1207,7 @@ export function launchInteractiveSubagent(params: {
     registerInteractiveSubagentState(state, liveScope);
   } catch (err) {
     interactiveCreatedTelemetry.delete(state);
-    reportSpawnFailure("registration", mux.name);
+    reportSpawnFailure("registration", mux.name, "completion_registration");
     removeInteractiveSubagentState(state);
     if (persistedState && params.parentSessionId) {
       try {
