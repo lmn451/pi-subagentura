@@ -16,6 +16,11 @@ export interface TmuxVersion {
   major: number;
   minor: number;
 }
+export interface TelemetryEvent {
+  event: string;
+  distinct_id: string;
+  properties: Record<string, unknown>;
+}
 export class TerminalHarness {
   constructor(options?: TerminalHarnessOptions);
   scenario: string;
@@ -31,6 +36,8 @@ export class TerminalHarness {
   readonly env: Record<string, string>;
   readonly keep: boolean;
   readonly started: boolean;
+  captureTelemetry: boolean;
+  telemetryOptOut: boolean;
   setupFiles(): void;
   assertChildCanExecNode(safePath: string): void;
   tmux(
@@ -51,6 +58,7 @@ export class TerminalHarness {
   providerEvents(): Array<Record<string, unknown>>;
   networkEvents(): Array<Record<string, unknown>>;
   artifactEvents(): Array<Record<string, unknown>>;
+  telemetryEvents(): TelemetryEvent[];
   release(name: string): void;
   waitFor(
     predicate: () => boolean | Promise<boolean>,

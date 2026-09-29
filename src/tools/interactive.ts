@@ -55,6 +55,7 @@ import {
   type CurrentPaneActivity,
   type InteractiveSubagentState,
 } from "../interactive-tmux";
+import { getParentContextMessages } from "../pi-sdk-compat";
 import { debugLog } from "../helpers";
 import {
   completionTriggersTurn,
@@ -534,6 +535,10 @@ export function registerInteractiveSubagentTools(
       "Use this when the user wants to attach to the sub-agent session and continue follow-ups there.",
       "Works inside tmux, Zellij, or Herdr. The tool returns attach/focus commands and the child session file.",
       "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+      "For example, 'anthropic/claude-sonnet-4-5'.",
       "Completion coordination defaults to each: every terminal turn creates one TUI-only notice, while safely-idle results are coalesced into a compact immutable-reference manifest that resumes the parent.",
       "Use completionPolicy=group with a shared completionGroupId for related agents; the parent resumes once the spawning turn settles and every registered member is terminal.",
     ].join("\n"),
@@ -723,13 +728,15 @@ export function registerInteractiveSubagentTools(
       let authorityEntries: readonly unknown[] | undefined;
       try {
         if (contextParams.includeContext === true) {
-          const branch = ctx.sessionManager.getBranch();
-          authorityEntries = branch;
-          const messages = branch
-            .filter(
-              (e): e is typeof e & { type: "message" } => e.type === "message",
-            )
-            .map((e) => e.message);
+          const legacyBranch =
+            params.routingDescription !== undefined
+              ? ctx.sessionManager.getBranch()
+              : undefined;
+          authorityEntries = legacyBranch;
+          const messages = getParentContextMessages(
+            ctx.sessionManager,
+            legacyBranch,
+          );
           contextText = serializeConversation(convertToLlm(messages));
         } else if (topLevelOrchestratorV2) {
           authorityEntries = parentBranchEntries(ctx);

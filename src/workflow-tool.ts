@@ -4,6 +4,7 @@ import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
 import {
   prepareDurableProcess,
   cancelDurableProcess,
+  stopDurableProcessAttempts,
 } from "./workflow-durable-process";
 import { abortableWait } from "./abortable-wait";
 import {
@@ -703,6 +704,8 @@ export function registerWorkflowTool(
     name: "workflow",
     label: "Workflow",
     description: [
+      "Only use this tool when the user explicitly requests a workflow or the active CLI mode explicitly selects it.",
+      "Without either, do not choose it automatically based on task suitability.",
       "Run an agent-authored JavaScript workflow that deterministically orchestrates ISOLATED",
       "sub-agents. Intermediate results live in script variables, not your context window — fan out",
       "dozens of sub-agents (review pipelines, research sweeps, migrations) without context pressure.",
@@ -727,6 +730,10 @@ export function registerWorkflowTool(
       "                            (filter with Boolean).",
       "                            Defaults to attachable multiplexer process isolation;",
       "                            falls back to in-process if no multiplexer is available.",
+      "Model selection: By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+      "For example, 'anthropic/claude-sonnet-4-5'.",
       "  parallel(thunks)       -> run `() => Promise` thunks concurrently (barrier); failures -> null.",
       "  pipeline(items, ...st) -> stream each item through stages, no barrier between stages.",
       "  workflow(name, args?)  -> run a saved workflow inline (one level deep).",
@@ -753,6 +760,9 @@ export function registerWorkflowTool(
       "Call phase(title) at real work-group transitions. Agent phase defaults to the current phase; an explicit agent phase overrides it.",
       "parallel() takes thunks such as `() => agent(...)`; pipeline() streams each item through every stage independently, with no barrier between stages.",
       "Give agent calls unique short labels, include enough task context and relevant paths, and treat failed agents or stages as null.",
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
       "Use only the documented plain JSON Schema subset for schema outputs; in-process agents use native structured output while process agents use validated textual JSON fallback.",
       "Filter or handle null results, then use a final synthesis agent when the workflow needs one coherent answer.",
     ],
@@ -1437,11 +1447,15 @@ export function registerWorkflowTool(
           },
         };
       }
-      if (st.durable)
+      // A failed durable marker write must leave both the journal and the live
+      // cancellation signal untouched so the caller can retry safely.
+      if (st.durable) {
+        await stopDurableProcessAttempts(st.durable.store.directory);
         await st.durable.store.append("cancelled", {
           status: "cancelled",
           completedAt: Date.now(),
         });
+      }
       cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);

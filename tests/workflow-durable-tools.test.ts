@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { prepareDurableProcess } from "../src/workflow-durable-process";
+import { encodeRunValue, WorkflowRunStore } from "../src/workflow-run-store";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import {
 } from "../src/session-scope";
 import {
   cleanupWorkflowJobsForOwner,
+  MAX_WORKFLOW_JOBS,
   workflowJobRegistry,
 } from "../src/workflow-jobs";
 import {
@@ -34,9 +36,30 @@ import {
 } from "../src/completion-coordinator";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+import { createTelemetrySession } from "../src/telemetry";
+
+const durableProcessControl = vi.hoisted(() => ({
+  markerFailure: undefined as Error | undefined,
+}));
+vi.mock("../src/workflow-durable-process", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../src/workflow-durable-process")>();
+  return {
+    ...actual,
+    stopDurableProcessAttempts: async (directory: string) => {
+      if (durableProcessControl.markerFailure) {
+        const error = durableProcessControl.markerFailure;
+        durableProcessControl.markerFailure = undefined;
+        throw error;
+      }
+      return actual.stopDurableProcessAttempts(directory);
+    },
+  };
+});
 
 let root: string;
 beforeEach(async () => {
+  durableProcessControl.markerFailure = undefined;
   root = await mkdtemp(join(tmpdir(), "durable-tools-"));
 });
 afterEach(async () => {
@@ -78,6 +101,348 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("keeps a delivery-write failure pre-acceptance through cancel and resume", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scope);
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind,
+      data,
+    ) {
+      if (kind === "delivery") throw new Error("injected delivery failure");
+      return originalAppend.call(this, kind, data);
+    });
+    const result = await api.run(
+      {
+        script:
+          'export const meta={name:"delivery-failure",description:"d"}; return 7;',
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    append.mockRestore();
+    expect(result.isError).toBe(true);
+    const scopeForStore = { cwd: root, sessionId: "same-parent", root };
+    const [id] = await WorkflowRunStore.list(scopeForStore);
+    expect(id).toBeDefined();
+    const initial = await WorkflowRunStore.inspect(scopeForStore, id!);
+    expect(initial?.some((event) => event.kind === "delivery")).toBe(false);
+    expect(initial?.some((event) => event.kind === "accepted")).toBe(false);
+
+    const resumed = await api.run(
+      { workflowId: id!, async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(resumed.isError).toBe(true);
+    expect(resumed.content[0]?.text).toContain("before acceptance");
+    await api.cancel(id!, ctx);
+    expect(
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not emit cancellation telemetry before acceptance or after opt-out", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const owner = sessionOwner(scope);
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    for (const scenario of [
+      { accepted: false, optedOut: false },
+      { accepted: true, optedOut: true },
+    ]) {
+      const telemetry = createTelemetrySession(!scenario.optedOut);
+      scope.telemetry = telemetry;
+      const store = await WorkflowRunStore.create(
+        { cwd: root, sessionId: "same-parent", root },
+        {
+          script:
+            'export const meta={name:"cancel",description:"d"}; return 7;',
+          args: encodeRunValue(undefined),
+          budgetTotal: 100,
+          telemetry: {
+            enabled: true,
+            correlationId: createTelemetrySession(true).correlationId,
+            mode: "straight",
+            invocation: "tool",
+            async: true,
+            completionPolicy: "each",
+          },
+        },
+      );
+      const id = store.id;
+      if (scenario.accepted) await store.append("accepted", {});
+      await store.close();
+      await api.cancel(id, ctx);
+    }
+    expect(
+      payloads.some((payload) => payload.event.endsWith("workflow_completed")),
+    ).toBe(false);
+  });
+
+  it("does not cancel or resume a durable run rejected by job admission", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
+    const owner = sessionOwner(scope);
+    for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
+      const id = `held-${index}`;
+      workflowJobRegistry.set(id, {
+        id,
+        status: "done",
+        completionPolicy: "each",
+        resultRetrieved: false,
+        parentSessionOwner: owner,
+      } as any);
+    }
+    const runner: WorkflowAgentRunner = vi.fn(async () => ({
+      isError: false as const,
+      output: "ran",
+      usage: zeroUsage(),
+    }));
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => runner,
+      () => true,
+      root,
+    );
+    const failed = await api.run(
+      {
+        script:
+          'export const meta={name:"admission",description:"d"}; return await agent("work", {id:"work"});',
+        completionPolicy: "group",
+        completionGroupId: "capacity-rejected",
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(failed.isError).toBe(true);
+    sealCompletionGroups(owner);
+    expect(prepareCompletionManifest(owner)).toBeDefined();
+    const id = (
+      await WorkflowRunStore.list({
+        cwd: root,
+        sessionId: "same-parent",
+        root,
+      })
+    )[0]!;
+    expect(
+      (
+        await WorkflowRunStore.inspect(
+          {
+            cwd: root,
+            sessionId: "same-parent",
+            root,
+          },
+          id,
+        )
+      )?.some((event) => event.kind === "accepted"),
+    ).toBe(true);
+
+    for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
+      workflowJobRegistry.delete(`held-${index}`);
+    }
+    const resumed = await api.run(
+      { workflowId: id, async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(resumed.details.status).toBe("error");
+    expect(runner).not.toHaveBeenCalled();
+    await api.cancel(id, ctx);
+    expect(
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
+  });
+
+  it("suppresses lifecycle telemetry when accepted work lacks a confirmed start", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string; distinct_id: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const original = createTelemetrySession(true);
+    scope.telemetry = original;
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script:
+          'export const meta={name:"early-resume",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: original.correlationId,
+          mode: original.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.append("interrupted", { status: "interrupted" });
+    await store.close();
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const resumed = await api.run(
+      { workflowId: id, async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(resumed.details.status, resumed.content[0]?.text).toBe("done");
+    expect(
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
+
+    const cancelledStore = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script:
+          'export const meta={name:"unconfirmed-cancel",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: original.correlationId,
+          mode: original.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const cancelledId = cancelledStore.id;
+    await cancelledStore.append("accepted", {});
+    await cancelledStore.append("telemetry_start_claim", {});
+    await cancelledStore.close();
+    await api.cancel(cancelledId, ctx);
+    expect(
+      payloads.filter((payload) =>
+        /workflow_(started|completed)$/.test(payload.event),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not revive durable telemetry for a retired current session", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const original = createTelemetrySession(true);
+    scope.telemetry = createTelemetrySession(true);
+    scope.telemetry.active = false;
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script: 'export const meta={name:"retired",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: original.correlationId,
+          mode: original.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.close();
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    await api.cancel(id, ctx);
+    expect(
+      payloads.filter((payload) =>
+        payload.event.endsWith("workflow_completed"),
+      ),
+    ).toEqual([]);
+  });
+
   it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
     const { scope } = setup();
     const owner = sessionOwner(scope);
@@ -205,6 +570,16 @@ describe("durable public tools", () => {
 
   it("interrupts on lifecycle cleanup, then resumes with the new live runner context", async () => {
     const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string; distinct_id: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const originalTelemetry = createTelemetrySession(true);
+    scope.telemetry = originalTelemetry;
     let started!: () => void;
     const agentStarted = new Promise<void>((resolve) => {
       started = resolve;
@@ -239,6 +614,18 @@ describe("durable public tools", () => {
     const id = response.details.workflowId;
     const job = workflowJobRegistry.get(id)!;
     await agentStarted;
+    const startedEvents = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(
+      startedEvents?.some((event) => event.kind === "telemetry_start_claim"),
+    ).toBe(true);
+    expect(
+      startedEvents?.some(
+        (event) => event.kind === "telemetry_start_confirmed",
+      ),
+    ).toBe(true);
     cleanupWorkflowJobsForOwner(sessionOwner(scope));
     await expect(job.promise).rejects.toThrow();
     expect(notify).not.toHaveBeenCalled();
@@ -247,6 +634,7 @@ describe("durable public tools", () => {
     expect((await api.inspect(id, ctx)).details.usage).toBeDefined();
     clearCompletionCoordinator(sessionOwner(scope));
     scope.generation++;
+    scope.telemetry = createTelemetrySession(true);
     runner = vi.fn(async () => ({
       isError: false as const,
       output: "resumed",
@@ -261,6 +649,237 @@ describe("durable public tools", () => {
     expect(resumed.details.status).toBe("done");
     expect(resumed.content[0].text).toBe("resumed");
     expect(runner).toHaveBeenCalledTimes(1);
+    const lifecycle = payloads.filter((payload) =>
+      /workflow_(started|completed)$/.test(payload.event),
+    );
+    expect(lifecycle.map((payload) => payload.event)).toEqual([
+      "pi_subagentura_workflow_started",
+      "pi_subagentura_workflow_completed",
+    ]);
+    expect(lifecycle[0]?.distinct_id).toBe(originalTelemetry.correlationId);
+    expect(lifecycle[1]?.distinct_id).toBe(originalTelemetry.correlationId);
+  });
+
+  it("closes interrupted cancellation telemetry once with its original correlation and clock", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{
+      event: string;
+      distinct_id: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const originalTelemetry = createTelemetrySession(true);
+    scope.telemetry = originalTelemetry;
+    let started!: () => void;
+    const agentStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () =>
+        ({ signal }) =>
+          new Promise((_, reject) => {
+            started();
+            signal!.addEventListener(
+              "abort",
+              () => reject(new Error("interrupted")),
+              { once: true },
+            );
+          }),
+      () => true,
+      root,
+    );
+    const response = await api.run(
+      {
+        script:
+          'export const meta={name:"cancel-interrupted",description:"d"}; return await agent("work", {id:"work",isolation:"in-process"});',
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const id = response.details.workflowId;
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted;
+    cleanupWorkflowJobsForOwner(sessionOwner(scope));
+    await expect(job.promise).rejects.toThrow();
+
+    scope.telemetry = createTelemetrySession(true);
+    await api.cancel(id, ctx);
+    await api.cancel(id, ctx);
+
+    const lifecycle = payloads.filter((payload) =>
+      /workflow_(started|completed)$/.test(payload.event),
+    );
+    expect(lifecycle.map((payload) => payload.event)).toEqual([
+      "pi_subagentura_workflow_started",
+      "pi_subagentura_workflow_completed",
+    ]);
+    expect(lifecycle[0]?.distinct_id).toBe(originalTelemetry.correlationId);
+    expect(lifecycle[1]?.distinct_id).toBe(originalTelemetry.correlationId);
+    expect(lifecycle[1]?.properties).toMatchObject({
+      status: "cancelled",
+      terminal_reason: "explicit_cancel",
+    });
+    const events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    const cancellation = events?.findLast(
+      (event) => event.kind === "cancelled",
+    );
+    expect(cancellation?.data).toMatchObject({
+      status: "cancelled",
+      telemetryCompletionReceipt: true,
+    });
+    expect(lifecycle[1]?.properties.duration_ms).toBe(
+      Math.round(
+        (cancellation!.data.completedAt - events![0]!.data.createdAt) / 100,
+      ) * 100,
+    );
+    expect(JSON.stringify(lifecycle[1])).not.toContain(id);
+  });
+
+  it("counts replay dispatches in cancellation telemetry", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{
+      event: string;
+      properties: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const telemetry = createTelemetrySession(true);
+    scope.telemetry = telemetry;
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: "same-parent", root },
+      {
+        script:
+          'export const meta={name:"replayed",description:"d"}; return 7;',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+        completion: { legacy: false, policy: "each" },
+        concurrency: 1,
+        processConcurrency: 1,
+        workflowTimeoutMs: 10_000,
+        telemetry: {
+          enabled: true,
+          correlationId: telemetry.correlationId,
+          mode: telemetry.mode,
+          invocation: "tool",
+          async: true,
+          completionPolicy: "each",
+        },
+      },
+    );
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.append("telemetry_start_claim", {});
+    await store.append("telemetry_start_confirmed", {});
+    await store.append("attempt", {});
+    await store.append("dispatch", {});
+    await store.append("dispatch", {});
+    await store.append("dispatch", {});
+    await store.close();
+
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const cancelled = await api.cancel(id, ctx);
+
+    expect(cancelled.details.status).toBe("cancelled");
+    const completed = payloads.find((payload) =>
+      payload.event.endsWith("workflow_completed"),
+    );
+    expect(completed?.properties).toMatchObject({
+      status: "cancelled",
+      agents_spawned: 3,
+    });
+  });
+
+  it("keeps persisted cancellation retryable when an attempt marker fails", async () => {
+    const { pi, scope, ctx } = setup();
+    const payloads: Array<{ event: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: { body?: unknown }) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
+    let started!: () => void;
+    const agentStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () =>
+        ({ signal }) =>
+          new Promise((_, reject) => {
+            started();
+            signal!.addEventListener(
+              "abort",
+              () => reject(new Error("interrupted")),
+              { once: true },
+            );
+          }),
+      () => true,
+      root,
+    );
+    const response = await api.run(
+      {
+        script:
+          'export const meta={name:"marker-failure",description:"d"}; return await agent("work", {id:"work",isolation:"in-process"});',
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const id = response.details.workflowId;
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted;
+    cleanupWorkflowJobsForOwner(sessionOwner(scope));
+    await expect(job.promise).rejects.toThrow();
+
+    durableProcessControl.markerFailure = new Error("marker write failed");
+    expect((await api.cancel(id, ctx)).isError).toBe(true);
+    let events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
+    expect(
+      payloads.filter((event) => event.event.endsWith("workflow_completed")),
+    ).toEqual([]);
+
+    expect((await api.cancel(id, ctx)).details.status).toBe("cancelled");
+    events = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "same-parent", root },
+      id,
+    );
+    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(
+      1,
+    );
+    expect(
+      payloads.filter((event) => event.event.endsWith("workflow_completed")),
+    ).toHaveLength(1);
   });
 
   it("restores unfinished mixed completion barriers before a durable aggregate", async () => {

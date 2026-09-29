@@ -73,6 +73,13 @@ export const scenarios = {
     child: "[E2E:CHILD_WORKFLOW_OK]",
     expected: 'Workflow "e2e-partial" completed with errors',
   },
+  "durable-workflow-error": {
+    name: "durable-workflow-error",
+    marker: "[E2E:DURABLE_WORKFLOW_ERROR]",
+    gate: null,
+    prompt: "[E2E:DURABLE_WORKFLOW_ERROR] Run the durable failure fixture.",
+    expected: "null",
+  },
   interactive: {
     name: "interactive",
     marker: "[E2E:INTERACTIVE]",

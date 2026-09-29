@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+offline_args=()
+if [[ "${PI_OFFLINE:-1}" != "0" ]]; then
+  offline_args+=(--offline)
+fi
+
 exec "$SUBAGENTURA_E2E_REAL_PI" \
-  --offline \
+  "${offline_args[@]}" \
   --api-key subagentura-e2e-test-key \
   --no-extensions \
   --no-skills \

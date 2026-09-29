@@ -150,6 +150,7 @@ const KNOWN_MARKERS = new Set([
   "[E2E:WORKFLOW_ASYNC]",
   "[E2E:WORKFLOW_PROCESS]",
   "[E2E:WORKFLOW_PARTIAL]",
+  "[E2E:DURABLE_WORKFLOW_ERROR]",
   "[E2E:ASYNC_STATUS]",
   "[E2E:ASYNC_RESULT]",
   "[E2E:WORKFLOW_STATUS]",
@@ -707,6 +708,13 @@ function parentTool(marker: string, context: Context): ToolCall {
   if (marker.includes("WORKFLOW_PARTIAL")) {
     return toolCall("e2e-workflow-partial-1", "workflow", {
       script: `export const meta = { name: "e2e-partial", description: "partial failure fixture", phases: [{ title: "phase" }] }; phase("phase"); return await parallel([() => agent("[E2E:CHILD_WORKFLOW_OK] Return success.", { label: "ok", model: "subagentura-e2e/mock", isolation: "in-process" }), () => agent("[E2E:CHILD_WORKFLOW_ERROR] Fail deterministically.", { label: "error", model: "subagentura-e2e/mock", isolation: "in-process" })]);`,
+      async: false,
+    });
+  }
+  if (marker.includes("DURABLE_WORKFLOW_ERROR")) {
+    return toolCall("e2e-durable-workflow-1", "workflow", {
+      durable: true,
+      script: `export const meta = { name: "e2e-durable-failure", description: "durable failure fixture" }; return await agent("[E2E:CHILD_WORKFLOW_ERROR] Fail with private diagnostic text.", { id: "worker", label: "worker", model: "subagentura-e2e/mock", isolation: "in-process" });`,
       async: false,
     });
   }

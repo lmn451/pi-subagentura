@@ -29,6 +29,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
+- Durable job admission failures are terminalized before later resume/cancel,
+  recovery after acceptance does not duplicate workflow start telemetry before
+  its first RPC, and retired sessions cannot revive saved telemetry opt-ins.
+- Preserve later structured workflow failure diagnostics and count replayed
+  dispatches in durable cancellation telemetry.
+- Map child process exit signals using host numbering without expanding the
+  supported signal set.
+
+## [3.6.4] - 2026-10-03
+
+### Changed
+
+- Clarified provider and model selection guidance across sub-agent tools.
+
+### Fixed
+
+- Require explicit opt-in before workflows are selected by the orchestrator.
+- Distinguish Orchestratorv2 footer status from other interactive sub-agents.
+
+## [3.6.3] - 2026-09-24
+
+### Added
+
+- Added bounded diagnostics for interactive sub-agent processes that exit
+  before completing a turn.
+
+### Fixed
+
+- Corrected opt-in parent context inheritance to use Pi's canonical session
+  projection when available, preserve omission and replacement edits, and fall
+  back on older supported SDKs.
 
 ## [3.6.2] - 2026-09-06
 

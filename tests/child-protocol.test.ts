@@ -93,6 +93,51 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
+  it("retains the newest active tool across concurrent starts", () => {
+    const handlers = registerHandlers();
+    const entries = [
+      { id: "turn-tools", type: "message", message: { role: "user" } },
+    ];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "bash", toolCallId: "tool-1" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "npm_test", toolCallId: "tool-2" },
+      ctx,
+    );
+
+    expect(readActiveTurn()).toMatchObject({
+      activeTools: [
+        { name: "bash", callId: "tool-1" },
+        { name: "npm_test", callId: "tool-2" },
+      ],
+      lastTool: "npm_test",
+    });
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "bash", toolCallId: "tool-1" },
+      ctx,
+    );
+    expect(readActiveTurn()).toMatchObject({
+      activeTools: [{ name: "npm_test", callId: "tool-2" }],
+      lastTool: "npm_test",
+    });
+
+    handlers.get("tool_execution_end")!(
+      { toolName: "npm_test", toolCallId: "tool-2" },
+      ctx,
+    );
+    expect(readActiveTurn()).toMatchObject({
+      activeTools: [],
+      lastTool: "npm_test",
+    });
+  });
+
   it("records an error completion and supports getBranch fallback", () => {
     const handlers = registerHandlers();
     let branch: any[] = [];

@@ -42,13 +42,16 @@ APIs, `Date.now()`, `Math.random()`, or argless `new Date()`. For editor support
 reference the published ambient declarations at `pi-subagentura/workflow`.
 
 Use workflows only when work decomposes into independent agents or streaming
-stages. The VM globals are `agent`, `parallel`, `pipeline`, `workflow`, `phase`,
-`log`, `args`, immutable `cwd` (the parent execution directory), `budget`,
-`console`, and guarded `Date`/`Math`. `parallel()` takes thunks; `pipeline()`
-moves each item through all stages independently without a between-stage
-barrier. Use unique short labels, include enough context and relevant paths in
-every agent prompt, handle `null` failures, and add a final synthesis agent when
-one coherent result is required.
+stages.
+The VM globals are `agent`, `parallel`, `pipeline`, `retry`, `workflow`,
+`phase`, `log`, `args`, immutable `cwd` (the parent execution directory),
+`budget`, `console`, and guarded `Date`/`Math`. `parallel()` takes thunks;
+`pipeline()` moves each item through all stages independently without a
+between-stage barrier. Use unique short labels, include enough context and
+relevant paths in every agent prompt, handle `null` failures, and add a final
+synthesis agent when one coherent result is required. Durable runs also require
+unique stable operation IDs; see the [runtime contract](../WORKFLOW_RUNTIME.md)
+for the retry and recovery rules.
 
 Call `phase()` at real work-group transitions. Calls to `agent()` inherit the
 current phase unless `phase` is set explicitly. With `schema`, use the plain

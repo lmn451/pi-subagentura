@@ -102,10 +102,23 @@ interface Engine {
   };
   nextAgentAttemptId: number;
   failure?: WorkflowFailureClassification;
+  failureIsFallback?: boolean;
 
   usage: WorkflowUsage;
   activeAgentRuns: Set<ActiveAgentRun>;
   phases: string[];
+}
+
+function recordWorkflowFailure(
+  engine: Engine,
+  failure: WorkflowFailureClassification,
+  fallback = false,
+): void {
+  if (engine.failure !== undefined && (!engine.failureIsFallback || fallback)) {
+    return;
+  }
+  engine.failure = failure;
+  engine.failureIsFallback = fallback;
 }
 
 function withProgressCounters(
@@ -470,9 +483,7 @@ async function executeScript(
               res = await agentRun;
               finalModel = res.model ?? agentOpts.model;
               const resultFailure = workflowFailureClassification(res);
-              if (resultFailure && engine.failure === undefined) {
-                engine.failure = resultFailure;
-              }
+              if (resultFailure) recordWorkflowFailure(engine, resultFailure);
             } catch (error) {
               const errorUsage = (error as { usage?: Usage } | null)?.usage;
               const terminalAgentUsage = workflowUsageFromUsage(errorUsage);
@@ -487,8 +498,7 @@ async function executeScript(
               tokensDelta += agentUsage?.output ?? 0;
               accountAgentUsage(engine, activeRun, partialUsage);
               const failure = workflowFailureClassification(error);
-              if (failure && engine.failure === undefined)
-                engine.failure = failure;
+              if (failure) recordWorkflowFailure(engine, failure);
               if (engine.signal.aborted) {
                 status = "cancelled";
                 engine.counters.cancelledCount++;
@@ -514,6 +524,14 @@ async function executeScript(
           if (res.isError) {
             status = "error";
             engine.counters.errorCount++;
+            recordWorkflowFailure(
+              engine,
+              {
+                errorCategory: "unknown",
+                errorStage: "turn",
+              },
+              true,
+            );
             return { value: null, tokensDelta, errorCount: 1 };
           }
           if (!hasSchema) return { value: res.output, tokensDelta };
@@ -521,10 +539,10 @@ async function executeScript(
             const schemaCapture = res.workflowStructuredOutput;
             if (!schemaCapture?.called) {
               status = "error";
-              engine.failure ??= {
+              recordWorkflowFailure(engine, {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
-              };
+              });
               lastErr = "No structured_output call found.";
               continue;
             }
@@ -532,10 +550,10 @@ async function executeScript(
             if (verrs.length === 0)
               return { value: schemaCapture.value, tokensDelta };
             status = "error";
-            engine.failure ??= {
+            recordWorkflowFailure(engine, {
               errorCategory: "schema",
               errorStage: "schema_validation",
-            };
+            });
             lastErr = verrs.slice(0, 5).join("; ");
             continue;
           }
@@ -546,27 +564,27 @@ async function executeScript(
               const verrs = validateSchema(parsed, agentOpts.schema);
               if (verrs.length === 0) return { value: parsed, tokensDelta };
               status = "error";
-              engine.failure ??= {
+              recordWorkflowFailure(engine, {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
-              };
+              });
               lastErr = verrs.slice(0, 5).join("; ");
             } catch (e) {
               status = "error";
-              engine.failure ??= {
+              recordWorkflowFailure(engine, {
                 errorCategory: "schema",
                 errorStage: "schema_validation",
-              };
+              });
               lastErr = `JSON parse error: ${
                 e instanceof Error ? e.message : String(e)
               }`;
             }
           } else {
             status = "error";
-            engine.failure ??= {
+            recordWorkflowFailure(engine, {
               errorCategory: "schema",
               errorStage: "schema_validation",
-            };
+            });
             lastErr = "no JSON object/array found in output";
           }
         } finally {

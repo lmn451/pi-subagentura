@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gateForMarker } from "./fixtures/mock-provider";
@@ -369,6 +375,89 @@ describe("real Pi terminal E2E", () => {
           screen.includes("Child result for [E2E:CHILD_WORKFLOW_OK]."),
         "partial workflow retained successful output",
       );
+      await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
+    "runs a durable workflow failure in real Pi and captures bounded telemetry",
+    async () => {
+      harness.captureTelemetry = true;
+      const scenario = getScenario("durable-workflow-error");
+      await startScenario("durable-workflow-error");
+      await waitForParentSettled(scenario.marker);
+      await harness.waitForScreen(
+        (screen) => screen.includes(scenario.expected),
+        "durable workflow failure result rendered",
+      );
+      await harness.waitFor(
+        () => harness.telemetryEvents().length >= 2,
+        "durable workflow lifecycle payloads captured",
+      );
+
+      const payloads = harness.telemetryEvents();
+      const events = payloads;
+      const started = events.filter(
+        (event) => event.event === "pi_subagentura_workflow_started",
+      );
+      const completed = events.filter(
+        (event) => event.event === "pi_subagentura_workflow_completed",
+      );
+      expect(started).toHaveLength(1);
+      expect(completed).toHaveLength(1);
+      expect(completed[0].properties).toMatchObject({
+        status: "partial",
+        error_category: "unknown",
+        error_stage: "turn",
+      });
+      expect(started[0].distinct_id).toBe(completed[0].distinct_id);
+      expect(started[0].properties.telemetry_session_id).toBe(
+        completed[0].properties.telemetry_session_id,
+      );
+      expect(JSON.stringify(events)).not.toContain("scripted provider error");
+      expect(JSON.stringify(events)).not.toContain("DURABLE_WORKFLOW_ERROR");
+      await harness.assertNoNetwork();
+
+      const evidenceDirectory = process.env.NO_MISTAKES_EVIDENCE_DIR;
+      if (evidenceDirectory) {
+        mkdirSync(evidenceDirectory, { recursive: true });
+        writeFileSync(
+          resolve(evidenceDirectory, "durable-workflow-telemetry.json"),
+          `${JSON.stringify(
+            {
+              userVisibleResult: scenario.expected,
+              events: events.map(({ event, properties }) => ({
+                event,
+                properties: {
+                  ...properties,
+                  telemetry_session_id: "[redacted]",
+                },
+              })),
+            },
+            null,
+            2,
+          )}\n`,
+          { mode: 0o600 },
+        );
+      }
+    },
+    timeout,
+  );
+
+  it(
+    "keeps an explicit telemetry opt-out effective in the live Pi workflow",
+    async () => {
+      harness.captureTelemetry = true;
+      harness.telemetryOptOut = true;
+      const scenario = getScenario("durable-workflow-error");
+      await startScenario("durable-workflow-error");
+      await waitForParentSettled(scenario.marker);
+      await harness.waitForScreen(
+        (screen) => screen.includes(scenario.expected),
+        "opted-out durable workflow result rendered",
+      );
+      expect(harness.telemetryEvents()).toEqual([]);
       await harness.assertNoNetwork();
     },
     timeout,
