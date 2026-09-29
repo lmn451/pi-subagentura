@@ -2,12 +2,19 @@ import {
   defineWorkflow,
   schema,
   type RepeatResult,
+  type PipelineOptions,
   type TaskResult,
   type WorkflowContext,
   type WorkflowFailureResult,
   type WorkflowJsonValue,
   type WorkflowStepNode,
 } from "pi-subagentura/workflow";
+
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+type Assert<T extends true> = T;
 
 const Input = schema.object({
   path: schema.string(),
@@ -79,6 +86,91 @@ const definition = defineWorkflow({
       { failure: "collect" },
       () => 1,
     );
+    const nestedRecoverable = ctx.step(
+      "nested-recoverable",
+      { policy: { failure: "collect" } },
+      () => 1,
+    );
+    type NestedStepUsesCollectPolicy = Assert<
+      Equal<typeof nestedRecoverable, Promise<number | WorkflowFailureResult>>
+    >;
+    const simpleStep = ctx.step("simple", () => 1);
+    const ordinaryStep = ctx.step(
+      "ordinary",
+      { policy: { failure: "fail" } },
+      () => 1,
+    );
+    type FailFastStepInference = Assert<
+      Equal<typeof simpleStep, Promise<number>>
+    >;
+    type FailFastConfiguredStepInference = Assert<
+      Equal<typeof ordinaryStep, Promise<number>>
+    >;
+    const ordinaryPipeline = ctx.pipeline([path], (file) => file);
+    const explicitFailPipeline = ctx.pipeline([path], (file) => file, {
+      failure: "fail",
+    });
+    type FailFastPipelineInference = Assert<
+      Equal<typeof ordinaryPipeline, Promise<string[]>>
+    >;
+    type ExplicitFailPipelineInference = Assert<
+      Equal<typeof explicitFailPipeline, Promise<string[]>>
+    >;
+    const collectedPipeline = ctx.pipeline([path], (file) => file, {
+      failure: "collect",
+    });
+    const collectedPipeline2 = ctx.pipeline(
+      [path],
+      (file) => file.length,
+      (length) => length + 1,
+      { failure: "collect" },
+    );
+    const collectedPipeline3 = ctx.pipeline(
+      [path],
+      (file) => file.length,
+      (length) => length + 1,
+      (length) => String(length),
+      { failure: "collect" },
+    );
+    type CollectedPipelineInference = Assert<
+      Equal<typeof collectedPipeline, Promise<TaskResult<string>[]>>
+    >;
+    type CollectedPipeline2Inference = Assert<
+      Equal<typeof collectedPipeline2, Promise<TaskResult<number>[]>>
+    >;
+    type CollectedPipeline3Inference = Assert<
+      Equal<typeof collectedPipeline3, Promise<TaskResult<string>[]>>
+    >;
+    const broadPipelineOptions: PipelineOptions<string> = {
+      failure: "collect",
+    };
+    const broadPipeline = ctx.pipeline(
+      [path],
+      (file) => file,
+      broadPipelineOptions,
+    );
+    const broadPipeline2 = ctx.pipeline(
+      [path],
+      (file) => file.length,
+      (length) => length + 1,
+      broadPipelineOptions,
+    );
+    const broadPipeline3 = ctx.pipeline(
+      [path],
+      (file) => file.length,
+      (length) => length + 1,
+      (length) => String(length),
+      broadPipelineOptions,
+    );
+    type BroadPipelineInference = Assert<
+      Equal<typeof broadPipeline, Promise<string[] | TaskResult<string>[]>>
+    >;
+    type BroadPipeline2Inference = Assert<
+      Equal<typeof broadPipeline2, Promise<number[] | TaskResult<number>[]>>
+    >;
+    type BroadPipeline3Inference = Assert<
+      Equal<typeof broadPipeline3, Promise<string[] | TaskResult<string>[]>>
+    >;
     const keyed = await ctx.map([{ key: "one" }], (item) => item.key, {
       key: (item) => item.key,
     });
@@ -103,6 +195,28 @@ const definition = defineWorkflow({
     void gate;
     void logged;
     void recoverable;
+    void nestedRecoverable;
+    void (0 as unknown as NestedStepUsesCollectPolicy);
+    void simpleStep;
+    void ordinaryStep;
+    void (0 as unknown as FailFastStepInference);
+    void (0 as unknown as FailFastConfiguredStepInference);
+    void ordinaryPipeline;
+    void (0 as unknown as FailFastPipelineInference);
+    void explicitFailPipeline;
+    void (0 as unknown as ExplicitFailPipelineInference);
+    void collectedPipeline;
+    void (0 as unknown as CollectedPipelineInference);
+    void collectedPipeline2;
+    void (0 as unknown as CollectedPipeline2Inference);
+    void collectedPipeline3;
+    void (0 as unknown as CollectedPipeline3Inference);
+    void broadPipeline;
+    void (0 as unknown as BroadPipelineInference);
+    void broadPipeline2;
+    void (0 as unknown as BroadPipeline2Inference);
+    void broadPipeline3;
+    void (0 as unknown as BroadPipeline3Inference);
     return result;
   },
 });

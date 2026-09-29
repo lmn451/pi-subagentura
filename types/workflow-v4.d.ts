@@ -231,6 +231,14 @@ export interface PipelineOptions<T = unknown> extends ParallelOptions {
   readonly key?: (item: T, index: number) => string;
 }
 
+type PipelineOutput<R, O extends PipelineOptions<any>> = [
+  Extract<O["failure"], "collect" | "continue">,
+] extends [never]
+  ? Awaited<R>[]
+  : [Extract<O["failure"], "fail" | undefined>] extends [never]
+    ? TaskResult<Awaited<R>>[]
+    : Awaited<R>[] | TaskResult<Awaited<R>>[];
+
 export interface WorkflowPipelineInfo<T = unknown> {
   readonly item: T;
   readonly stage: number;
@@ -291,6 +299,15 @@ export interface WorkflowContext {
   step<T>(id: string, work: () => Awaitable<T>): Promise<T>;
   step<T>(
     id: string,
+    options: WorkflowStepOptions & {
+      readonly policy: WorkflowStepPolicy & {
+        readonly failure: "continue" | "collect";
+      };
+    },
+    work: () => Awaitable<T>,
+  ): Promise<WorkflowStepOutcome<T>>;
+  step<T>(
+    id: string,
     options: WorkflowStepOptions & { readonly failure: "continue" | "collect" },
     work: () => Awaitable<T>,
   ): Promise<WorkflowStepOutcome<T>>;
@@ -341,14 +358,50 @@ export interface WorkflowContext {
   pipeline<T, A>(
     items: readonly T[],
     first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    options: PipelineOptions<T> & { readonly failure: "collect" },
+  ): Promise<TaskResult<Awaited<A>>[]>;
+  pipeline<T, A, O extends PipelineOptions<T>>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    options: O,
+  ): Promise<PipelineOutput<A, O>>;
+  pipeline<T, A>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
     options?: PipelineOptions<T>,
   ): Promise<Awaited<A>[]>;
   pipeline<T, A, B>(
     items: readonly T[],
     first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
     second: (value: Awaited<A>, info: WorkflowPipelineInfo<T>) => Awaitable<B>,
+    options: PipelineOptions<T> & { readonly failure: "collect" },
+  ): Promise<TaskResult<Awaited<B>>[]>;
+  pipeline<T, A, B, O extends PipelineOptions<T>>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    second: (value: Awaited<A>, info: WorkflowPipelineInfo<T>) => Awaitable<B>,
+    options: O,
+  ): Promise<PipelineOutput<B, O>>;
+  pipeline<T, A, B>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    second: (value: Awaited<A>, info: WorkflowPipelineInfo<T>) => Awaitable<B>,
     options?: PipelineOptions<T>,
   ): Promise<Awaited<B>[]>;
+  pipeline<T, A, B, C>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    second: (value: Awaited<A>, info: WorkflowPipelineInfo<T>) => Awaitable<B>,
+    third: (value: Awaited<B>, info: WorkflowPipelineInfo<T>) => Awaitable<C>,
+    options: PipelineOptions<T> & { readonly failure: "collect" },
+  ): Promise<TaskResult<Awaited<C>>[]>;
+  pipeline<T, A, B, C, O extends PipelineOptions<T>>(
+    items: readonly T[],
+    first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,
+    second: (value: Awaited<A>, info: WorkflowPipelineInfo<T>) => Awaitable<B>,
+    third: (value: Awaited<B>, info: WorkflowPipelineInfo<T>) => Awaitable<C>,
+    options: O,
+  ): Promise<PipelineOutput<C, O>>;
   pipeline<T, A, B, C>(
     items: readonly T[],
     first: (item: T, info: WorkflowPipelineInfo<T>) => Awaitable<A>,

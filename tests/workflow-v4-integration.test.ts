@@ -15,6 +15,9 @@ import type { WorkflowAgentRunner } from "../src/workflow-core";
 
 const roots: string[] = [];
 const stores: WorkflowRunStore[] = [];
+function waitForWorkflowWorker(assertion: () => void) {
+  return vi.waitFor(assertion, { timeout: 10_000 });
+}
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
   for (const root of roots.splice(0))
@@ -322,7 +325,7 @@ describe("v4 workflow integration through worker and durable store", () => {
       runAgent: async () => ok(""),
     });
     try {
-      await vi.waitFor(() =>
+      await waitForWorkflowWorker(() =>
         expect(
           store.events.some(
             (event) =>
@@ -361,7 +364,7 @@ describe("v4 workflow integration through worker and durable store", () => {
       runAgent: async () => ok(""),
     });
     try {
-      await vi.waitFor(() =>
+      await waitForWorkflowWorker(() =>
         expect(
           store.events.some(
             (event) =>
@@ -417,7 +420,7 @@ describe("v4 workflow integration through worker and durable store", () => {
       budgetTotal: 1000,
     });
     try {
-      await vi.waitFor(() => expect(attempts).toHaveLength(2));
+      await waitForWorkflowWorker(() => expect(attempts).toHaveLength(2));
       firstAbort.abort(new Error("simulate interruption"));
       await expect(interrupted).rejects.toThrow();
     } finally {
@@ -465,6 +468,61 @@ describe("v4 workflow integration through worker and durable store", () => {
         loadWorkflow: (name: string) => (name === "cycle" ? cycle : null),
       }),
     ).rejects.toThrow(/cycle|recursive|depth/i);
+  });
+
+  it("propagates cancellation across a nested workflow despite collect policy", async () => {
+    const parent = source(
+      `return ctx.workflow("nested-wait", {}, {
+        id: "child",
+        failure: "collect",
+        retry: { attempts: 3 },
+      }).then(async (value) => {
+        await ctx.step("after-child", () => "must not run");
+        return value;
+      });`,
+    );
+    const child = source(
+      `return ctx.agent("cancelled", { prompt: "cancel", failure: "collect" });`,
+    );
+    const { store } = await fixture(parent);
+    const durable = new DurableWorkflow(store);
+    const runner = vi.fn<WorkflowAgentRunner>(async () => ({
+      isError: false,
+      cancelled: true,
+      output: "",
+      usage: { ...zeroUsage() },
+    }));
+    const running = runWorkflow(parent, {
+      durable,
+      runAgent: runner,
+      loadWorkflow: (name: string) => (name === "nested-wait" ? child : null),
+    });
+    try {
+      await expect(running).rejects.toMatchObject({
+        message: expect.stringMatching(/cancel/i),
+        cancelled: true,
+        cancelledCount: 1,
+      });
+      expect(runner).toHaveBeenCalledTimes(1);
+      expect(
+        store.events.some(
+          (event) =>
+            event.kind === "v4.step" &&
+            event.data.path.at(-1) === "child" &&
+            event.data.status === "cancelled",
+        ),
+      ).toBe(true);
+      expect(
+        store.events.some(
+          (event) =>
+            event.kind === "v4.step" &&
+            event.data.path.at(-1) === "after-child",
+        ),
+      ).toBe(false);
+    } finally {
+      durable.stop();
+      await durable.drain();
+    }
   });
 
   it("enforces the nested definition depth limit through the worker", async () => {

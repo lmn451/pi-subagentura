@@ -384,17 +384,24 @@ export class WorkflowRunStore {
     }
   }
 
-  static async list(scope: RunScope): Promise<string[]> {
+  static async list(
+    scope: RunScope,
+    options: { requireComplete?: boolean } = {},
+  ): Promise<string[]> {
     const { readdir } = await import("node:fs/promises");
     try {
       const entries = await readdir(await scopeDirectory(scope), {
         withFileTypes: true,
       });
-      return entries
+      const runs = entries
         .filter((e) => e.isDirectory() && RUN_ID.test(e.name))
         .map((e) => e.name)
-        .sort()
-        .slice(0, 1000);
+        .sort();
+      if (options.requireComplete && runs.length > 1000)
+        throw new WorkflowPersistenceError(
+          "Durable workflow recovery scan exceeds 1,000 runs.",
+        );
+      return runs.slice(0, 1000);
     } catch (error) {
       if (isMissing(error)) return [];
       throw error;

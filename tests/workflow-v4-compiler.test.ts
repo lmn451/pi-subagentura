@@ -118,6 +118,35 @@ describe("v4 workflow compiler", () => {
     ).resolves.toBe("initialized after export");
   });
 
+  it("keeps generated SDK parameters clear of valid top-level bindings", async () => {
+    const compiled = compileWorkflowScript(`
+      import { defineWorkflow as define, schema as sdkSchema } from "pi-subagentura/workflow";
+      const schema = "local schema binding";
+      const Input = sdkSchema.object({ value: sdkSchema.string() });
+      export default define({
+        name: "schema-collision",
+        version: 1,
+        input: Input,
+        run(_ctx, args) { return { value: args.value, local: schema }; },
+      });
+    `);
+    const invoke = runInNewContext(compiled.body) as (
+      run: (definition: unknown) => Promise<any>,
+      define: typeof defineWorkflow,
+      schemas: typeof schema,
+    ) => Promise<any>;
+    const definition = await invoke(
+      (value) => Promise.resolve(value),
+      defineWorkflow,
+      schema,
+    );
+
+    expect(definition.run({}, { value: "ok" })).toEqual({
+      value: "ok",
+      local: "local schema binding",
+    });
+  });
+
   it("rejects top-level return while preserving returns inside functions", async () => {
     expect(() =>
       compileWorkflowScript(`

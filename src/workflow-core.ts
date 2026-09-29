@@ -258,6 +258,8 @@ export function formatWorkflowUsageLegend(ascii = false): string {
 export interface WorkflowAgentOpts {
   /** Stable operation identity; required only for durable execution. */
   id?: string;
+  /** V4 only: omit this agent result from the workflow journal. */
+  persist?: boolean;
   schema?: unknown;
   label?: string;
   phase?: string;
@@ -527,6 +529,8 @@ export class WorkflowWallTimeoutError extends Error {
 }
 
 export interface RunWorkflowOptions {
+  /** Host job id used to route live v4 input without a durable journal. */
+  workflowId?: string;
   requestInput?: (request: unknown, signal?: AbortSignal) => Promise<unknown>;
   onStep?: (
     steps: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>,

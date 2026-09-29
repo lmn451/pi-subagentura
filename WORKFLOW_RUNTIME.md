@@ -80,7 +80,13 @@ Recovery re-executes the same source from the beginning and reuses a completed
 step only when its stable path, input, policy, and definition hash still match.
 Changing the source invalidates that compatibility and may run the step again.
 
-`persist: false` omits a step's output from durable storage. `cache: false` or
+`persist: false` omits a step's output from the durable workflow journal,
+including agent attempt results and failure messages. Usage and terminal status
+remain available for accounting. Recovery reruns an agent whose private result
+was discarded, including a crash between the attempt receipt and step completion.
+This does not erase separately retained Pi child session files or process-agent
+artifacts, or values the workflow explicitly returns or writes elsewhere.
+`cache: false` or
 `resume: false` prevents a compatible completed output from being reused.
 Checkpoints persist their value. Artifacts persist content separately from the
 journal and return a reference; each artifact is limited to 2 MiB and the run's
@@ -94,7 +100,9 @@ shared as telemetry.
 background runs, inspect the waiting step with workflow status/list tools, then
 use `respond_workflow_input({workflowId, path})`. Pi presents the question or
 approval in its UI and writes the answer to the project-scoped run before
-execution continues. The answer is private run data; it is not included in the
+execution continues. With `durable: false`, the same sync and background input
+flows work while the run is live, and answers remain in memory.
+The answer is private run data; it is not included in the
 step summary. Legacy `.mjs` workflows still cannot pause for interactive input.
 
 ## Definitions and runs are different

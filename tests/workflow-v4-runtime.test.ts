@@ -5,6 +5,7 @@ import {
   WorkflowCancelledError,
   WorkflowTimeoutError,
 } from "../src/workflow-v4-runtime.mjs";
+import { WorkflowV4Store } from "../src/workflow-v4-store";
 
 type StepEvent = { action: string; payload: any };
 
@@ -372,6 +373,166 @@ describe("v4 workflow runtime", () => {
     expect(childRuns).toBe(1);
   });
 
+  it("replays a collected persisted step failure after its attempt limit", async () => {
+    const bridge = makeBridge({
+      async request(action: string, payload: any) {
+        if (action === "step.enter") {
+          return {
+            reuse: false,
+            attempt: 2,
+            idempotencyKey: digest(payload.path.join("/")),
+            persistedFailure: {
+              name: "WorkflowStepError",
+              message: "previously handled failure",
+              category: "provider",
+              path: payload.path,
+            },
+          };
+        }
+        if (action === "step.fail") return;
+        throw new Error(`Unexpected bridge request ${action}`);
+      },
+    });
+    let calls = 0;
+    const result = await runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.step("collected", { failure: "collect" }, () => {
+          calls++;
+          return "unexpected";
+        }),
+      ),
+      {},
+      bridge,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        message: "previously handled failure",
+        category: "provider",
+      }),
+    });
+    expect(calls).toBe(0);
+  });
+
+  it("replays a real persisted collected failure without exhausting attempts", async () => {
+    const store = new WorkflowV4Store("replay-collected-step");
+    await store.request("step.enter", {
+      path: ["collected"],
+      kind: "step",
+      title: "collected",
+      policy: { failure: "collect" },
+    });
+    await store.request("step.fail", {
+      path: ["collected"],
+      attempt: 1,
+      error: {
+        name: "WorkflowStepError",
+        message: "previously handled failure",
+        category: "provider",
+      },
+    });
+    let calls = 0;
+    const result = await runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.step("collected", { failure: "collect" }, () => {
+          calls++;
+          return "unexpected";
+        }),
+      ),
+      {},
+      makeBridge({
+        async request(action: string, payload: any) {
+          return store.request(action, payload);
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { message: "previously handled failure", category: "provider" },
+    });
+    expect(calls).toBe(0);
+    await store.close();
+  });
+
+  it("retries a persisted collected failure when retry attempts remain", async () => {
+    const store = new WorkflowV4Store("retry-collected-step");
+    const policy = { failure: "collect", retry: { attempts: 3 } };
+    await store.request("step.enter", {
+      path: ["collected"],
+      kind: "step",
+      title: "collected",
+      policy,
+    });
+    await store.request("step.fail", {
+      path: ["collected"],
+      attempt: 1,
+      error: {
+        name: "WorkflowStepError",
+        message: "first transient failure",
+        category: "provider",
+      },
+    });
+    let calls = 0;
+    const result = await runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.step("collected", policy, () => {
+          calls++;
+          return "retried";
+        }),
+      ),
+      {},
+      makeBridge({
+        async request(action: string, payload: any) {
+          return store.request(action, payload);
+        },
+      }),
+    );
+    expect(result).toBe("retried");
+    expect(calls).toBe(1);
+    await store.close();
+  });
+
+  it.each(["cache", "resume"] as const)(
+    "reruns a persisted collected failure when %s is false",
+    async (optOut) => {
+      const store = new WorkflowV4Store(`rerun-${optOut}-step`);
+      const policy = { failure: "collect", [optOut]: false };
+      await store.request("step.enter", {
+        path: ["collected"],
+        kind: "step",
+        title: "collected",
+        policy,
+      });
+      await store.request("step.fail", {
+        path: ["collected"],
+        attempt: 1,
+        error: {
+          name: "WorkflowStepError",
+          message: "previous failure",
+          category: "provider",
+        },
+      });
+      let calls = 0;
+      const result = await runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.step("collected", policy, () => {
+            calls++;
+            return "rerun";
+          }),
+        ),
+        {},
+        makeBridge({
+          async request(action: string, payload: any) {
+            return store.request(action, payload);
+          },
+        }),
+      );
+      expect(result).toBe("rerun");
+      expect(calls).toBe(1);
+      await store.close();
+    },
+  );
+
   it("rejects duplicate step IDs within one execution", async () => {
     const bridge = makeBridge();
     await expect(
@@ -405,6 +566,54 @@ describe("v4 workflow runtime", () => {
         bridge,
       ),
     ).rejects.toBeInstanceOf(WorkflowCancelledError);
+  });
+
+  it("propagates nested workflow cancellation through collect and retry", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const bridge = makeBridge({
+      signal: controller.signal,
+      async workflow(_name: string, _args: unknown, options: any) {
+        started.resolve();
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("nested worker stopped")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const running = runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.workflow(
+          "child",
+          {},
+          {
+            id: "child",
+            failure: "collect",
+            retry: { attempts: 3 },
+          },
+        ),
+      ),
+      {},
+      bridge,
+    );
+    await started.promise;
+    controller.abort(new Error("cancel nested worker"));
+    await expect(running).rejects.toBeInstanceOf(WorkflowCancelledError);
+    expect(
+      bridge.events.filter(
+        ({ action, payload }: StepEvent) =>
+          action === "step.enter" && payload.path[0] === "child",
+      ),
+    ).toHaveLength(1);
+    expect(
+      bridge.events.find(
+        ({ action, payload }: StepEvent) =>
+          action === "step.fail" && payload.path[0] === "child",
+      )?.payload.status,
+    ).toBe("cancelled");
   });
 
   it("persists a waiting human gate and exposes checkpoint/artifact APIs", async () => {
@@ -579,6 +788,42 @@ describe("v4 workflow runtime", () => {
     ).toBe("budget");
   });
 
+  it("stops step retries after a budget failure", async () => {
+    const bridge = makeBridge();
+    let calls = 0;
+    bridge.agent = async (
+      _prompt: string,
+      _options: unknown,
+      _signal: AbortSignal,
+      onUsage?: (tokens: number) => void,
+    ) => {
+      calls++;
+      onUsage?.(1);
+      return "over budget";
+    };
+    bridge.budget = { total: 10, spent: () => 0, remaining: () => 10 };
+    await expect(
+      runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.step("budgeted", { retry: { attempts: 4 }, budget: 0 }, () =>
+            ctx.agent("work", { prompt: "work", budget: 1 }),
+          ),
+        ),
+        {},
+        bridge,
+      ),
+    ).rejects.toThrow(/exceeded its budget/);
+    expect(calls).toBe(1);
+    expect(
+      bridge.events.filter(
+        ({ action, payload }: StepEvent) =>
+          action === "step.enter" &&
+          payload.path.length === 1 &&
+          payload.path[0] === "budgeted",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("charges concurrent step budgets only for that step's agent usage", async () => {
     const bridge = makeBridge({
       async agent(
@@ -660,6 +905,50 @@ describe("v4 workflow runtime", () => {
     expect(siblings).toMatchObject({
       expensive: { ok: false, error: { category: "budget" } },
       affordable: { ok: true, value: "affordable" },
+    });
+  });
+
+  it("passes the effective step persistence policy to agent execution", async () => {
+    const bridge = makeBridge();
+    let agentOptions: any;
+    bridge.agent = async (_prompt: string, options: any) => {
+      agentOptions = options;
+      return "output";
+    };
+    await runWorkflowDefinition(
+      definition((ctx) =>
+        ctx.agent("private", {
+          prompt: "private",
+          policy: { persist: false },
+        }),
+      ),
+      {},
+      bridge,
+    );
+    expect(agentOptions.persist).toBe(false);
+  });
+
+  it("omits private step failure text from persisted state", async () => {
+    const bridge = makeBridge();
+    await expect(
+      runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.step("private", { persist: false }, () => {
+            throw new Error("private provider output");
+          }),
+        ),
+        {},
+        bridge,
+      ),
+    ).rejects.toThrow("private provider output");
+    expect(
+      bridge.events.find(
+        ({ action, payload }: StepEvent) =>
+          action === "step.fail" && payload.path[0] === "private",
+      )?.payload.error,
+    ).toMatchObject({
+      name: "WorkflowStepError",
+      message: "Workflow step failed.",
     });
   });
 });
