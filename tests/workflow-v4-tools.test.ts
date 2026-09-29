@@ -1299,6 +1299,66 @@ describe("v4 workflow public tools", () => {
     expect(saved?.some((event) => event.kind === "terminal")).toBe(true);
   });
 
+  it.each(["resume_workflow", "respond_workflow_input"])(
+    "preserves a gate across session shutdown before %s",
+    async (toolName) => {
+      const first = setup(1, "gate-before-shutdown");
+      const firstApi = register(first, successfulRunner("unused"));
+      const started = await firstApi.run(
+        {
+          script: definition(
+            "interrupted-gate",
+            'const approved = await ctx.gate("approval", { title: "Proceed?" }); return { approved };',
+          ),
+        },
+        undefined,
+        undefined,
+        first.ctx,
+      );
+      const workflowId = started.details.workflowId;
+      const interruptedJob = workflowJobRegistry.get(workflowId)!;
+      await waitForWorkflowWorker(() =>
+        expect(
+          getLiveWorkflowV4Store(workflowId)?.getStep(["approval"])?.status,
+        ).toBe("waiting_for_input"),
+      );
+      cleanupWorkflowJobsForOwner(first.owner);
+      await expect(interruptedJob.promise).rejects.toThrow();
+      clearCompletionCoordinator(first.owner);
+      clearSessionScopes();
+
+      const second = setup(2, "gate-after-shutdown", {
+        confirm: vi.fn(async () => true),
+      });
+      register(second, successfulRunner("unused"));
+      const resumed = await executeTool(
+        second.tools,
+        toolName,
+        toolName === "resume_workflow"
+          ? { workflowId, async: false }
+          : { workflowId, path: ["approval"] },
+        second.ctx,
+      );
+      expect(resumed.isError, resumed.content[0]?.text).not.toBe(true);
+      if (toolName === "resume_workflow") {
+        expect(resumed.details.status).toBe("done");
+        expect(JSON.parse(resumed.content[0].text)).toEqual({ approved: true });
+      } else {
+        const job = workflowJobRegistry.get(workflowId)!;
+        await expect(job.promise).resolves.toMatchObject({
+          result: { approved: true },
+        });
+      }
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        workflowId,
+      );
+      expect(
+        events?.filter((event) => event.kind === "v4.step").at(-1)?.data,
+      ).toMatchObject({ path: ["approval"], attempt: 1, status: "completed" });
+    },
+  );
+
   it("answers a persisted gate after reopening the project run and resumes it", async () => {
     const first = setup(1, "gate-before-reopen");
     const script = definition(

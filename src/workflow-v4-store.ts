@@ -426,6 +426,8 @@ export class WorkflowV4Store {
     const waitAttempt = this.node(payload.path).attempt;
     const onAbort = () => {
       rejectWait(new Error("Workflow input was interrupted."));
+      // Session interruption preserves the pending question and its attempt.
+      if (this.store && signal?.reason?.source === "durable_interrupt") return;
       void this.serialize(async () => {
         const current = this.nodes.get(pathKey);
         if (

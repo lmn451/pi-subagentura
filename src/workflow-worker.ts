@@ -754,7 +754,8 @@ function runWorkflowWorker(
       clearTimeout(timeout);
       engine.signal.removeEventListener("abort", onAbort);
       runnerFailures.clear();
-      for (const abort of engine.rpcAborts.values()) abort.abort();
+      for (const abort of engine.rpcAborts.values())
+        abort.abort(engine.signal.reason);
       engine.rpcAborts.clear();
       worker.removeAllListeners();
     };
