@@ -1,6 +1,6 @@
 {
   "name": "pi-subagentura",
-  "version": "3.6.2",
+  "version": "3.6.4",
   "description": "Reusable agent workflows and observable, attachable sub-agents for the Pi coding agent",
   "author": "lmn451",
   "license": "MIT",
@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/subagent.ts",
     "./workflow": {
-      "types": "./types/workflow.d.ts"
+      "types": "./types/workflow.d.ts",
+      "default": "./src/workflow-v4-sdk.mjs"
     }
   },
   "type": "module",
@@ -45,8 +46,15 @@
     "docs/workflows.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
+    "examples/workflows/*.ts",
     "skills/ralplan",
     "types/workflow.d.ts",
+    "types/workflow-v4.d.ts",
+    "src/workflow-v4-sdk.mjs",
+    "src/workflow-v4-sdk.d.mts",
+    "src/workflow-v4-runtime.mjs",
+    "src/workflow-v4-runtime.d.mts",
+    "src/workflow-v4-store.ts",
     "src/ndjson.d.ts",
     "src/notifications.ts",
     "src/rendering.ts",
@@ -113,7 +121,7 @@
     "src/cancellation-snapshots.ts"
   ],
   "engines": {
-    "node": ">=22.23.2"
+    "node": ">=24.12.0"
   },
   "publishConfig": {
     "access": "public"
@@ -173,11 +181,13 @@
     "oxfmt": "^0.68.0",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "yaml": "2.9.0"
   },
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
+    "effect": "4.0.0-rc.117",
     "is-path-inside": "^4.0.0",
     "ndjson": "^2.0.0"
   }

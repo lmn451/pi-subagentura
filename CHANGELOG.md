@@ -9,26 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Executable TypeScript V4 workflows with `defineWorkflow()` and a typed
+  `ctx` API for persisted steps, agent calls, bounded fan-out/repeat, human
+  input, checkpoints, and artifacts. V4 definitions default to project-scoped
+  durable runs; `durable: false` selects an in-memory run.
 - Explicit bounded `retry()` workflow primitive, independent of existing
   three-attempt schema repair, with typed attempt numbers and cancellation guards.
-- Opt-in durable code workflows: private request/response and agent-attempt
+- Opt-in durable legacy code workflows: private request/response and agent-attempt
   journals, stable operation ids, manual same-session recovery, persisted
   results/cancellation, source inspection, and run listing. Root definitions,
   arguments, effective settings, and nested definitions are recorded; parallel
   response ordering and worker-visible budget deltas replay without new agent calls.
 - One-use process attempt supervisors and persisted unfinished completion
-  barriers for durable workflows. Existing non-durable execution remains the
-  compatibility default; no daemon, remote execution, VM snapshots, or
-  exactly-once external-side-effect guarantee is introduced.
+  barriers for durable workflows. Legacy `.mjs` execution remains non-durable
+  by default; V4 definitions default to project-scoped durable runs. Neither
+  mode adds a daemon, remote execution, VM snapshots, or an exactly-once
+  external-side-effect guarantee. Interrupted runs require explicit resume from
+  a live Pi process.
 - Durable authoring preflight via `save_workflow({ requireDurable: true })`,
   saved-definition readiness and source digests, and durable execution by default
   for compatible `/workflows` selections. `/workflow <task>` generates stable
   IDs, validates before saving, and requests a durable background run.
 
+### Changed
+
+- Require Node.js 24.12 or newer for native erasable TypeScript workflow
+  syntax. The workflow worker pins Effect 4 internally; Effect remains outside
+  the public workflow API.
+
 ### Fixed
 
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
+
+## [3.6.4] - 2026-10-03
+
+### Changed
+
+- Clarified provider and model selection guidance across sub-agent tools.
+
+### Fixed
+
+- Require explicit opt-in before workflows are selected by the orchestrator.
+- Distinguish Orchestratorv2 footer status from other interactive sub-agents.
+
+## [3.6.3] - 2026-09-24
+
+### Added
+
+- Added bounded diagnostics for interactive sub-agent processes that exit
+  before completing a turn.
+
+### Fixed
+
+- Corrected opt-in parent context inheritance to use Pi's canonical session
+  projection when available, preserve omission and replacement edits, and fall
+  back on older supported SDKs.
 
 ## [3.6.2] - 2026-09-06
 

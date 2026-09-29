@@ -1,8 +1,8 @@
 # Bundled workflow examples
 
-These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They demonstrate reusable workflow structure and provide practical planning and
-conversion flows.
+The trusted `.mjs` scripts are included in the `pi-subagentura` npm package and
+demonstrate the legacy injected-global API. The repository also includes a
+TypeScript V4 definition example; it uses the `pi-subagentura/workflow` SDK.
 
 ## Running an example
 
@@ -29,6 +29,29 @@ workflow({
 
 To reuse a script by name, pass the same source to `save_workflow` once, then
 run it with `workflow({ name, args })` or select it with `/workflows`.
+
+## Typed V4 definition
+
+[`review-source.ts`](./review-source.ts) is a TypeScript module that default
+exports `defineWorkflow()`. It validates input and output with SDK schemas,
+reviews each file through a stable map step, checkpoints the synthesis, pauses
+for human confirmation, and writes the result as an artifact.
+
+Pass the full source to the `workflow` tool with a JSON input such as
+`{ files: ["src/auth.ts", "src/session.ts"] }`. V4 definitions are durable by
+default and use project-scoped run storage; set `durable: false` for an
+in-memory invocation. They support Node's erasable TypeScript syntax, but the
+workflow runner does not type-check it. Runtime imports must be named
+`defineWorkflow` / `schema` imports from `pi-subagentura/workflow`; other runtime
+imports are rejected. Node.js 24.12 or newer is required. The exact
+`effect@4.0.0-rc.117` runtime dependency remains internal.
+
+To inspect a paused run, use `list_workflow_runs` or `get_workflow_status`, then
+call `respond_workflow_input({workflowId, path})`; Pi asks the person at the UI
+and persists the answer before resuming. With `async: false`, input is collected
+directly by the workflow tool. After interruption, use
+`resume_workflow({workflowId})` while Pi is running. V4 status summaries omit
+step outputs and answers. See the [runtime contract](../../WORKFLOW_RUNTIME.md#v4-definitions).
 
 All bundled examples accept either an args object or its JSON-string form. JSON
 strings are useful when another tool boundary serializes the payload:
@@ -71,7 +94,7 @@ so delivery is at-least-once.
 
 ## Authoring guidance
 
-Write raw JavaScript without fences. Include a top-level pure-literal
+For the legacy `.mjs` examples, write raw JavaScript without fences. Include a top-level pure-literal
 `export const meta = { name, description, phases? }` statement; helper
 declarations may appear before or after it. Do not use TypeScript, imports,
 `require`, filesystem APIs, `Date.now()`, `Math.random()`, or argless `new Date()`.
@@ -179,8 +202,9 @@ source is parsed in the test suite before it is accepted.
 - Process-isolated agents require tmux or Zellij; non-durable runs otherwise
   fall back to in-process execution. Durable runs fail closed when the
   process backend is unavailable.
-- Interactive user-question pauses are represented by pending-approval output;
-  a workflow cannot suspend and later resume at an `AskUserQuestion` checkpoint.
+- Legacy `.mjs` workflows cannot suspend for interactive user input. V4
+  definitions can pause through `ctx.ask()` / `ctx.gate()` and
+  `respond_workflow_input`.
 - File-writing examples depend on the delegated agents having appropriate read
   and write tools and permissions.
 - Model overrides must name models configured in the active Pi installation.
@@ -191,8 +215,9 @@ source is parsed in the test suite before it is accepted.
 bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, then
 run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
 durable: true})`. Use `async: false` for an immediate result. After an
-interruption, use `resume_workflow({workflowId})` in the same Pi session/cwd.
-Other examples are not automatically durable merely because they are saved.
+interruption, use `resume_workflow({workflowId})` in the same project. This
+legacy `.mjs` example opts into durability; V4 definitions are durable by
+default unless `durable: false` is supplied.
 
 `retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
 and `null`, but never cancellation. Every attempt may repeat agent side effects;

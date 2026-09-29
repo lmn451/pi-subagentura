@@ -1,5 +1,7 @@
 import { parentPort } from "node:worker_threads";
 import { runInNewContext } from "node:vm";
+import { createHash } from "node:crypto";
+import { defineWorkflow, schema } from "./workflow-v4-sdk.mjs";
 import {
   makeGuardedDate,
   makeGuardedMath,
@@ -15,6 +17,7 @@ let nextRpcId = 1;
 const pending = new Map();
 const outstandingAgentCalls = new Set();
 let aborted = false;
+const workflowAbort = new AbortController();
 let workerConfig = {
   syncTimeoutMs: 30_000,
   maxItemsPerCall: 4096,
@@ -25,11 +28,34 @@ let workerConfig = {
 let tokensSpent = 0;
 const rpcErrorIds = new WeakMap();
 
-function rpc(method, payload) {
-  if (aborted) return Promise.reject(new Error("Workflow aborted."));
+function cancellationError(message = "Workflow aborted.") {
+  const error = new Error(message);
+  error.cancelled = true;
+  return error;
+}
+
+function rpc(method, payload, signal, onUsage) {
+  if (aborted) return Promise.reject(cancellationError());
+  if (signal?.aborted)
+    return Promise.reject(signal.reason ?? cancellationError());
   return new Promise((resolve, reject) => {
     const id = nextRpcId++;
-    pending.set(id, { resolve, reject });
+    const cancel = () => parentPort.postMessage({ type: "cancel_request", id });
+    signal?.addEventListener("abort", cancel, { once: true });
+    const clean = () => signal?.removeEventListener("abort", cancel);
+    pending.set(id, {
+      onUsage,
+      resolve: (value) => {
+        clean();
+        signal?.aborted
+          ? reject(signal.reason ?? cancellationError())
+          : resolve(value);
+      },
+      reject: (error) => {
+        clean();
+        reject(error);
+      },
+    });
     parentPort.postMessage({ id, method, payload });
   });
 }
@@ -44,8 +70,9 @@ parentPort.on("message", (msg) => {
 
   if (msg.type === "abort") {
     aborted = true;
+    workflowAbort.abort(cancellationError());
     for (const { reject } of pending.values()) {
-      reject(new Error("Workflow aborted."));
+      reject(cancellationError());
     }
     pending.clear();
     return;
@@ -68,7 +95,9 @@ parentPort.on("message", (msg) => {
       budgetTotal: msg.budgetTotal,
       cwd: msg.cwd,
       durable: msg.durable === true,
+      stepBased: msg.stepBased === true,
     };
+    tokensSpent = msg.initialTokensSpent ?? 0;
     executeScript(msg.script, msg.args, 0)
       .then((value) => parentPort.postMessage({ type: "result", value }))
       .catch((err) => {
@@ -76,6 +105,9 @@ parentPort.on("message", (msg) => {
         parentPort.postMessage({
           type: "error",
           error: err instanceof Error ? err.message : String(err),
+          ...(err?.cancelled === true || err?.name === "WorkflowCancelledError"
+            ? { cancelled: true }
+            : {}),
           ...(rpcId === undefined ? {} : { rpcId }),
         });
       });
@@ -86,24 +118,49 @@ parentPort.on("message", (msg) => {
     const waiter = pending.get(msg.id);
     pending.delete(msg.id);
     tokensSpent += typeof msg.tokensDelta === "number" ? msg.tokensDelta : 0;
+    if (typeof msg.tokensDelta === "number") waiter.onUsage?.(msg.tokensDelta);
     if (msg.ok) {
       waiter.resolve(msg.value);
     } else {
       const error = new Error(String(msg.error || "Workflow RPC failed."));
+      const failure = msg.failure ?? msg.stats?.failure;
+      if (failure && typeof failure === "object") {
+        error.category = failure.errorCategory;
+        error.stage = failure.errorStage;
+      }
+      if (msg.cancelled === true) error.cancelled = true;
       rpcErrorIds.set(error, msg.id);
       waiter.reject(error);
     }
   }
 });
 
-async function executeScript(script, args, depth, operationPath = []) {
+async function executeScript(
+  script,
+  args,
+  depth,
+  operationPath = [],
+  ancestors = [],
+  signal = workflowAbort.signal,
+  invocationKey,
+  inheritedUsage,
+) {
   const parsed = parseWorkflow(script);
+  const identity = createHash("sha256").update(script).digest("hex");
+  if (workerConfig.stepBased && ancestors.includes(identity))
+    throw new Error("Nested workflow cycle detected.");
   const result = await executeBody(
     parsed.meta,
     parsed.body,
     args,
     depth,
     operationPath,
+    [...ancestors, identity],
+    signal,
+    script,
+    parsed.format,
+    invocationKey,
+    inheritedUsage,
   );
   while (depth === 0 && outstandingAgentCalls.size > 0) {
     await Promise.all([...outstandingAgentCalls]);
@@ -111,14 +168,42 @@ async function executeScript(script, args, depth, operationPath = []) {
   return { meta: parsed.meta, result };
 }
 
-async function executeBody(meta, body, args, depth, operationPath) {
+async function executeBody(
+  meta,
+  body,
+  args,
+  depth,
+  operationPath,
+  ancestors,
+  signal,
+  source,
+  format,
+  invocationKey,
+  inheritedUsage,
+) {
+  const runWorkflowDefinition =
+    format === "definition"
+      ? (await import("./workflow-v4-runtime.mjs")).runWorkflowDefinition
+      : undefined;
   let currentPhase;
+  let legacyAgentIndex = 0;
 
   function checkAbort() {
-    if (aborted) throw new Error("Workflow aborted.");
+    if (aborted) throw cancellationError();
+    if (signal.aborted) {
+      const reason = signal.reason;
+      if (
+        reason?.category === "timeout" ||
+        reason?.name === "WorkflowTimeoutError"
+      ) {
+        throw reason;
+      }
+      if (reason?.cancelled === true) throw reason;
+      throw cancellationError();
+    }
   }
 
-  function agent(prompt, opts = {}) {
+  function agent(prompt, opts = {}, agentSignal = signal, onUsage) {
     const call = (async () => {
       checkAbort();
       if (typeof prompt !== "string" || prompt.trim() === "") {
@@ -136,13 +221,37 @@ async function executeBody(meta, body, args, depth, operationPath) {
           ? String(opts.phase)
           : currentPhase;
       const callOpts = { ...opts, phase: resolvedPhase };
-      return await rpc("agent", {
-        prompt,
-        opts: callOpts,
-        ...(workerConfig.durable
-          ? { operationPath: [...operationPath, opts.id] }
-          : {}),
-      });
+      if (workerConfig.stepBased) {
+        callOpts.schema = opts.schema ?? opts.output;
+        callOpts.label = opts.label ?? opts.title;
+      }
+      delete callOpts.signal;
+      if (workerConfig.stepBased) {
+        callOpts.id = createHash("sha256")
+          .update(
+            JSON.stringify([
+              ...operationPath,
+              opts.id ?? `legacy-${++legacyAgentIndex}`,
+            ]),
+          )
+          .digest("hex");
+      }
+      return await rpc(
+        "agent",
+        {
+          prompt,
+          opts: callOpts,
+          v4Definition: format === "definition",
+          ...(workerConfig.durable
+            ? { operationPath: [...operationPath, opts.id] }
+            : {}),
+        },
+        agentSignal,
+        (amount) => {
+          onUsage?.(amount);
+          inheritedUsage?.(amount);
+        },
+      );
     })();
     outstandingAgentCalls.add(call);
     void call.then(
@@ -254,13 +363,26 @@ async function executeBody(meta, body, args, depth, operationPath) {
     });
   }
 
-  function workflow(nameOrRef, childArgs, options = {}) {
+  function workflow(nameOrRef, childArgs, options = {}, onUsage) {
     const call = (async () => {
       checkAbort();
       if (depth >= workerConfig.maxWorkflowDepth) {
-        throw new Error("workflow() composition is one level deep only.");
+        throw new Error(
+          workerConfig.stepBased
+            ? "Workflow nesting depth exceeds 8."
+            : "workflow() composition is one level deep only.",
+        );
       }
-      const childPath = [...operationPath, options.id];
+      const childPath = [
+        ...(workerConfig.stepBased && Array.isArray(options.stepPath)
+          ? [...operationPath, ...options.stepPath]
+          : [
+              ...operationPath,
+              options.id ??
+                options.idempotencyKey ??
+                (workerConfig.stepBased ? nameOrRef : undefined),
+            ]),
+      ];
       const childScript = await rpc(
         "loadWorkflow",
         workerConfig.durable
@@ -272,6 +394,13 @@ async function executeBody(meta, body, args, depth, operationPath) {
         childArgs,
         depth + 1,
         childPath,
+        ancestors,
+        options.signal ?? signal,
+        workerConfig.stepBased ? options.id : undefined,
+        (amount) => {
+          onUsage?.(amount);
+          inheritedUsage?.(amount);
+        },
       );
       return child.result;
     })();
@@ -290,6 +419,48 @@ async function executeBody(meta, body, args, depth, operationPath) {
   };
 
   const sandbox = Object.assign(Object.create(null), {
+    defineWorkflow,
+    schema,
+    __runWorkflowDefinition: (definition) =>
+      runWorkflowDefinition(definition, args, {
+        agent,
+        workflow,
+        signal,
+        budget,
+        maxItems: workerConfig.maxItemsPerCall,
+        request: (action, payload, requestSignal) =>
+          rpc(
+            "v4",
+            {
+              action,
+              payload: {
+                ...payload,
+                ...(payload.path
+                  ? { path: [...operationPath, ...payload.path] }
+                  : {}),
+                definitionHash: createHash("sha256")
+                  .update(JSON.stringify([source, invocationKey ?? null]))
+                  .digest("hex"),
+              },
+            },
+            requestSignal ?? signal,
+          ),
+        validate: (value, schema) =>
+          rpc("v4", { action: "validate", payload: { value, schema } }, signal),
+        log: (message, path) => {
+          const text =
+            typeof message === "string" ? message : workflowStringify(message);
+          log(text);
+          return rpc(
+            "v4",
+            {
+              action: "step.progress",
+              payload: { path: [...operationPath, ...path], message: text },
+            },
+            signal,
+          );
+        },
+      }),
     agent,
     parallel,
     pipeline,
@@ -316,7 +487,9 @@ async function executeBody(meta, body, args, depth, operationPath) {
 
   try {
     return await runInNewContext(
-      "(async () => {\n" + body + "\n})()",
+      format === "definition"
+        ? `(${body})(__runWorkflowDefinition, defineWorkflow, schema)`
+        : "(async () => {\n" + body + "\n})()",
       sandbox,
       {
         filename: "workflow:" + meta.name + ".js",
@@ -327,6 +500,10 @@ async function executeBody(meta, body, args, depth, operationPath) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const wrapped = new Error(`Workflow "${meta.name}" failed: ${msg}`);
+    if (err?.cancelled === true || err?.name === "WorkflowCancelledError") {
+      wrapped.name = "WorkflowCancelledError";
+      wrapped.cancelled = true;
+    }
     const rpcId = rpcIdFromError(err);
     if (rpcId !== undefined) rpcErrorIds.set(wrapped, rpcId);
     throw wrapped;

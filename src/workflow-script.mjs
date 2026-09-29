@@ -1,11 +1,44 @@
 import { parse } from "acorn";
+import { stripTypeScriptTypes } from "node:module";
 
 const META_EXPORT_NAME = "meta";
 const RESERVE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
-/** Split a workflow script into its static `meta` literal and executable body. */
+/** Compile a legacy workflow module or a typed v4 definition module. */
+export function compileWorkflowScript(script) {
+  if (typeof script !== "string") {
+    throw new Error("Workflow source must be a string.");
+  }
+  let source = script;
+  let ast;
+  try {
+    ast = parseWorkflowAst(source);
+  } catch (err) {
+    try {
+      source = stripTypeScriptTypes(script, { mode: "strip" });
+      ast = parseWorkflowAst(source);
+    } catch (stripError) {
+      const message =
+        stripError instanceof Error ? `: ${stripError.message}` : "";
+      throw new Error(`Workflow TypeScript must use erasable syntax${message}`);
+    }
+  }
+  if (
+    findMetaExport(ast.body) === null &&
+    ast.body.some((node) => node.type === "ExportDefaultDeclaration")
+  ) {
+    return compileDefinition(source, ast);
+  }
+  const legacy = parseLegacyWorkflow(source, ast);
+  return { format: "legacy", ...legacy };
+}
+
+/** Backwards-compatible parser used by saved-script and runtime callers. */
 export function parseWorkflow(script) {
-  const ast = parseWorkflowAst(script);
+  return compileWorkflowScript(script);
+}
+
+function parseLegacyWorkflow(script, ast = parseWorkflowAst(script)) {
   const metaExport = findMetaExport(ast.body);
   if (metaExport === null) {
     throw new Error(
@@ -34,6 +67,259 @@ export function parseWorkflow(script) {
 
   const body = stripWorkflowExports(script, ast.body, metaExport.node);
   return { meta, body };
+}
+
+function compileDefinition(source, ast) {
+  const runtimeImports = [];
+  const removals = [];
+  let defaultExport;
+  let defineBinding;
+
+  walk(ast, (node) => {
+    if (node.type === "ImportExpression") {
+      throw new Error("Dynamic imports are unavailable in v4 workflows.");
+    }
+    if (node.type === "MetaProperty" && node.meta?.name === "import") {
+      throw new Error("`import.meta` is unavailable in v4 workflows.");
+    }
+  });
+
+  for (const node of ast.body) {
+    if (node.type === "ImportDeclaration") {
+      if (
+        node.source.value !== "pi-subagentura/workflow" ||
+        (node.attributes?.length ?? 0) > 0
+      ) {
+        throw new Error(
+          "V4 workflow runtime imports must come from `pi-subagentura/workflow`.",
+        );
+      }
+      for (const specifier of node.specifiers) {
+        if (specifier.type !== "ImportSpecifier") {
+          throw new Error(
+            "V4 workflows may import only named `defineWorkflow` and `schema` runtime bindings.",
+          );
+        }
+        const imported = specifier.imported.name;
+        if (imported !== "defineWorkflow" && imported !== "schema") {
+          throw new Error(
+            `Unsupported workflow SDK import ${JSON.stringify(imported)}.`,
+          );
+        }
+        runtimeImports.push({ imported, local: specifier.local.name });
+        if (imported === "defineWorkflow") {
+          if (defineBinding !== undefined) {
+            throw new Error("Import `defineWorkflow` only once.");
+          }
+          defineBinding = specifier.local.name;
+        }
+      }
+      removals.push({ start: node.start, end: node.end, replacement: "" });
+      continue;
+    }
+
+    if (node.type === "ExportDefaultDeclaration") {
+      if (defaultExport !== undefined) {
+        throw new Error("V4 workflow source must have one default definition.");
+      }
+      defaultExport = node;
+      continue;
+    }
+
+    if (
+      node.type === "ExportNamedDeclaration" ||
+      node.type === "ExportAllDeclaration"
+    ) {
+      throw new Error(
+        "V4 workflow modules may export only a default `defineWorkflow(...)` definition.",
+      );
+    }
+  }
+
+  if (!defaultExport) {
+    throw new Error(
+      "V4 workflow source must default-export `defineWorkflow(...)`.",
+    );
+  }
+  rejectTopLevelReturns(ast);
+  if (!defineBinding) {
+    throw new Error("Import `defineWorkflow` from `pi-subagentura/workflow`.");
+  }
+  const declaration = defaultExport.declaration;
+  if (
+    declaration.type !== "CallExpression" ||
+    declaration.callee.type !== "Identifier" ||
+    declaration.callee.name !== defineBinding ||
+    declaration.arguments.length !== 1 ||
+    declaration.arguments[0]?.type !== "ObjectExpression"
+  ) {
+    throw new Error(
+      "Default export must call `defineWorkflow` with one object literal.",
+    );
+  }
+
+  const definition = declaration.arguments[0];
+  const properties = new Map();
+  for (const property of definition.properties) {
+    if (
+      property.type !== "Property" ||
+      property.computed ||
+      property.shorthand ||
+      property.kind !== "init"
+    ) {
+      throw new Error(
+        "Workflow definition fields must use explicit object properties.",
+      );
+    }
+    const key =
+      property.key.type === "Identifier"
+        ? property.key.name
+        : typeof property.key.value === "string"
+          ? property.key.value
+          : undefined;
+    if (!key) throw new Error("Workflow definition has an invalid field name.");
+    if (RESERVE_KEYS.has(key)) {
+      throw new Error(
+        `Workflow definition field ${JSON.stringify(key)} is reserved.`,
+      );
+    }
+    if (properties.has(key))
+      throw new Error(`Duplicate workflow field ${JSON.stringify(key)}.`);
+    properties.set(key, property);
+  }
+  const name = staticString(properties.get("name"), "name");
+  const versionProperty = properties.get("version");
+  const version = versionProperty?.value?.value;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new Error(
+      "Workflow definition `version` must be a positive integer literal.",
+    );
+  }
+  const descriptionProperty = properties.get("description");
+  const description = descriptionProperty
+    ? staticString(descriptionProperty, "description", true)
+    : "";
+  const runProperty = properties.get("run");
+  if (
+    !runProperty ||
+    (!runProperty.method &&
+      runProperty.value?.type !== "FunctionExpression" &&
+      runProperty.value?.type !== "ArrowFunctionExpression")
+  ) {
+    throw new Error("Workflow definition `run` must be a function.");
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+    throw new Error(
+      "Workflow definition `name` must use lowercase letters, digits, and hyphens (max 64).",
+    );
+  }
+
+  const aliases = new Map();
+  for (const { imported, local } of runtimeImports) {
+    if (aliases.has(local))
+      throw new Error(`Duplicate SDK import binding ${JSON.stringify(local)}.`);
+    aliases.set(local, imported);
+  }
+  const runBinding = freshIdentifier(ast, "__piRunWorkflowDefinition");
+  const defineParam = freshIdentifier(ast, "__piDefineWorkflow");
+  const schemaParam = freshIdentifier(ast, "__piWorkflowSchema");
+  const bindings = [];
+  for (const [local, imported] of aliases) {
+    const injected = imported === "defineWorkflow" ? defineParam : schemaParam;
+    bindings.push(`const ${local} = ${injected};`);
+  }
+  const definitionName = freshIdentifier(ast, "__piWorkflowDefinition");
+  removals.push({
+    start: defaultExport.start,
+    end: defaultExport.end,
+    replacement: `const ${definitionName} = ${source.slice(declaration.start, declaration.end)};`,
+  });
+
+  let body = applySourceReplacements(source, removals);
+  body = `(async function (${runBinding}, ${defineParam}, ${schemaParam}) {\n${bindings.join("\n")}\n${body}\nreturn await ${runBinding}(${definitionName});\n})`;
+  return {
+    format: "definition",
+    meta: { name, version, description },
+    body,
+  };
+}
+
+function staticString(property, field, allowEmpty = false) {
+  const value = property?.value;
+  if (
+    value?.type !== "Literal" ||
+    typeof value.value !== "string" ||
+    (!allowEmpty && !value.value)
+  ) {
+    throw new Error(
+      `Workflow definition \`${field}\` must be a ${allowEmpty ? "string" : "non-empty string"} literal.`,
+    );
+  }
+  return value.value;
+}
+
+function rejectTopLevelReturns(ast) {
+  function visit(node, inFunction = false) {
+    if (!node || typeof node !== "object") return;
+    const isFunction =
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression";
+    const nestedFunction = inFunction || isFunction;
+    if (node.type === "ReturnStatement" && !nestedFunction) {
+      throw new Error(
+        "V4 workflow modules may not contain a top-level return.",
+      );
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child, nestedFunction);
+      } else if (
+        value &&
+        typeof value === "object" &&
+        typeof value.type === "string"
+      ) {
+        visit(value, nestedFunction);
+      }
+    }
+  }
+  visit(ast);
+}
+
+function freshIdentifier(ast, base) {
+  const used = new Set();
+  walk(ast, (node) => {
+    if (node.type === "Identifier") used.add(node.name);
+  });
+  let candidate = base;
+  let index = 0;
+  while (used.has(candidate)) candidate = `${base}${++index}`;
+  return candidate;
+}
+
+function walk(node, visit) {
+  if (!node || typeof node !== "object") return;
+  if (typeof node.type === "string") visit(node);
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) {
+      for (const child of value) walk(child, visit);
+    } else if (
+      value &&
+      typeof value === "object" &&
+      typeof value.type === "string"
+    ) {
+      walk(value, visit);
+    }
+  }
+}
+
+function applySourceReplacements(source, replacements) {
+  replacements.sort((a, b) => b.start - a.start);
+  let result = source;
+  for (const replacement of replacements) {
+    result = `${result.slice(0, replacement.start)}${replacement.replacement}${result.slice(replacement.end)}`;
+  }
+  return result;
 }
 
 function parseWorkflowAst(script) {

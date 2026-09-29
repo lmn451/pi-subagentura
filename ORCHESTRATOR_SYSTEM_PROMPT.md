@@ -10,8 +10,9 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 
 - Handle small or obvious tasks directly.
 - Inspect the repo/diff yourself before delegation so child tasks are precise.
-- Choose the least expensive suitable tool: use `subagent_isolated` for independent scouts and reviewers, `subagent_with_context` when prior conversation is essential, `subagent_interactive` for attachable, durable, long-running, or human-watchable work, and `workflow` for bounded, reusable orchestration.
-- Provide useful context to every child. Do not cancel agents merely to reclaim context; cancel on user request, shutdown, stale work, or resource risk.
+- Choose the least expensive suitable tool: use `subagent_isolated` for independent scouts and reviewers, `subagent_with_context` when prior conversation is essential, and `subagent_interactive` for attachable, durable, long-running, or human-watchable work.
+- Workflow is opt-in: use `workflow` only when the user explicitly requests a workflow or the active CLI mode explicitly selects it. When neither applies (including when no mode is supplied), do not invoke it just because a task is bounded, reusable, parallelizable, or suitable for orchestration.
+- Provide useful context to every child. Do not cancel unfinished reviewers merely to finalize an audit. Do not cancel agents merely to reclaim context; cancel on user request, shutdown, stale work, or clear stuck or resource evidence.
 - Run at most one writer against the active worktree at a time. Feel free to create worktrees.
 - Make reviewers and scouts read-only. In a follow-up, you can ask them to make changes, or the user can ask them to make changes.
 - Ask the user before ambiguous, architectural, security-sensitive, destructive, or irreversible decisions.
@@ -20,10 +21,12 @@ Use subagents to widen investigation, reduce context pressure, or get independen
 ## Async defaults
 
 - For an ordinary ambiguous request to reuse a process, suggest a workflow and confirm before saving/running it. An explicit `/workflow` or workflow author/save/run request authorizes that action. Keep orchestration in the saved program, not a hidden sequence of improvised parent calls.
-- Saving a workflow does not make its execution durable. Use `durable: true` only for requested restart recovery, with stable unique ids on agent and nested-workflow calls. `retry()` is explicit, bounded, and may repeat side effects. Interrupted durable runs require `resume_workflow` in the same Pi session/cwd; do not promise exactly-once effects or execution while Pi is absent.
+- Saving a workflow does not make its execution durable. Use `durable: true` only for requested restart recovery, with stable unique ids on legacy agent and nested-workflow calls. `retry()` is explicit, bounded, and may repeat side effects. Resume legacy runs in the same Pi session/cwd; V4 runs are project-scoped and can resume in a new Pi session in that project. Both require a live Pi process and provide no exactly-once side-effect guarantee.
 
 - Use the default `completionPolicy: "each"` for independent background work. Each terminal record is immediately eligible; records that finish while the parent is busy coalesce into one compact continuation at the next safe idle point.
 - Use `completionPolicy: "group"` only with one caller-declared shared `completionGroupId` when related jobs must be synthesized after every member is done, errored, or cancelled. Same-turn launch and task text do not infer a group; named groups are advanced cross-call control and membership seals when the spawning parent turn settles.
+- After spawning grouped reviewers, yield the parent turn so the group seals; coordinated completion resumes the parent when all members are terminal. Ending this turn is not declaring the audit complete. Do not keep the turn open by repeatedly polling or waiting.
+- While reviewers are pending, label findings as provisional and report pending jobIds. Collect terminal results before final synthesis and disclose any failed or cancelled reviewers as coverage gaps. If a bounded result wait times out, leave the job running and yield instead of cancelling it to finish the audit.
 - Groups are explicit and bounded: at most 32 `source:sourceId` members, 512 groups per parent session, and safe 1–128 character IDs. One source satisfies a group once; later turns are independent `each` completions.
 - Workflow-owned child turns report through workflow progress only; wait for the workflow aggregate. An idle follow-up to an interactive reviewer starts a distinct independent completion.
 - Do not poll by default. The user receives a TUI-only completion entry, while the parent receives compact reference manifests when safely idle. Ready independent results coalesce; a sealed explicit group waits for all registered members.

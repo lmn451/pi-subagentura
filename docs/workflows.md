@@ -5,35 +5,92 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
-`/workflow <task>` creates a reusable script with stable operation IDs, validates
-it with `save_workflow({requireDurable:true})`, and starts a durable background
-run. `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts;
-compatible scripts run durably, while legacy scripts keep session-scoped behavior.
-The `list_workflows` tool also returns readiness and a SHA-256 source digest.
-Computed operation IDs are checked again during execution; static readiness
-does not guarantee that every runtime input will produce unique IDs.
+Workflows support two source formats. New typed workflows can use the V4
+TypeScript SDK described below; existing `.mjs` scripts continue to use the
+legacy injected-global API. See [the runtime contract](../WORKFLOW_RUNTIME.md)
+for execution and recovery details, and the [typed example](../examples/workflows/review-source.ts).
 
-After interruption, use `resume_workflow({workflowId})` in the same Pi session
-and working directory. Recovery is manual and requires Pi to run. Direct calls
-to `workflow` opt into persistence with `durable:true`; saving or using `async`
-alone does not enable it. See [the runtime contract](../WORKFLOW_RUNTIME.md) for
-replay, process adoption, cancellation, and side-effect limits.
+## V4 typed workflows
 
-This project ships several `.mjs` workflow scripts under
+A V4 workflow is a TypeScript module that imports `defineWorkflow` and `schema`
+from `pi-subagentura/workflow`, then default-exports a definition. The module
+name must be a lowercase slug of at most 64 characters and its version a
+positive integer. The compiler strips erasable TypeScript syntax with Node's
+native support, but does not run a type checker. Use erasable syntax only; enum
+declarations and other syntax that needs code generation are rejected. Runtime
+imports are restricted to named `defineWorkflow` and `schema` bindings from
+that one package subpath. Type-only imports disappear during stripping; runtime
+imports, dynamic imports, `import.meta`, and named exports are unavailable.
+
+The SDK's `schema` builder defines the input, agent-output, and final-result
+shapes. The `run(ctx, args)` function receives a typed `WorkflowContext` with
+`step`, `agent`, `group`, `parallel`, `map`, `pipeline`, `repeat`, `workflow`,
+`ask`, `gate`, `checkpoint`, `artifact`, `log`, `budget`, and `signal`. Stable
+step IDs and native TypeScript control flow keep orchestration code explicit.
+The runner uses Effect 4 internally (`effect@4.0.0-rc.117`); Effect is not part
+of the authoring API.
+
+Steps and agents accept `timeout`, `retry`, `failure`, `persist`, `resume`,
+`cache`, and per-step `budget` options. A timeout can be positive milliseconds
+or a duration string such as `"10 minutes"`; retry accepts 1–10 attempts and
+fixed or exponential backoff. `failure: "continue"` and `"collect"` return
+structured task results for failed branches. The per-step output-token budget
+is checked when that step settles.
+
+V4 definitions use project-scoped durable storage by default. Pass
+`durable: false` for a non-durable run. Completed durable steps are reused only
+when source definition, stable path, inputs, and policy remain compatible. A
+changed source hash causes the step to run again. `persist: false` avoids
+storing a step output; `cache: false` and `resume: false` disable reuse.
+`checkpoint` values and artifact references persist; artifact content is kept
+in a separate bounded private file. V4 status snapshots omit step inputs,
+policies, outputs, and human answers.
+
+If execution is interrupted before a step callback's completed output is
+committed, that callback may run again after resume. A step is a persistence
+boundary, not a transaction; make callbacks idempotent around external effects.
+Paused input waits and downtime before a manual resume do not count against the
+active V4 worker's execution-time limit.
+
+`ctx.ask()` and `ctx.gate()` wait for a human answer in the Pi UI. Use
+`list_workflow_runs` or `get_workflow_status` to find a waiting step, then call
+`respond_workflow_input({workflowId, path})`; the answer is persisted before
+the background run continues. With `async: false`, the tool collects input
+directly in Pi's UI. `ctx.budget.assertAvailable(amount)` checks whether a
+non-negative finite output-token amount fits in the current remaining soft
+budget; it does not reserve capacity or limit already-running work. Restart recovery is manual with
+`resume_workflow({workflowId})` in a live Pi process. See
+[review-source.ts](../examples/workflows/review-source.ts) for a runnable
+definition.
+
+## Creating and resuming workflows
+
+`/workflow <task>` creates a reusable TypeScript V4 workflow, saves it with
+`requireDurable: true`, and starts a durable background run. `/workflows` shows
+`durable-ready` or `session-scoped` beside saved scripts and starts compatible
+scripts durably by default. The `list_workflows` tool returns readiness and a
+SHA-256 source digest. Use `resume_workflow({workflowId})` from a live Pi
+process in the same project after interruption; recovery is manual. A direct
+V4 `workflow` call is durable by default, while legacy `.mjs` calls require
+`durable: true` to opt in.
+
+## Legacy `.mjs` workflow scripts
+
+This project ships several legacy `.mjs` workflow scripts under
 `examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`
 tool. Two are **generic converters**; the rest are **concrete instantiations**
 of consensus planning pipelines.
 
-Workflow scripts are trusted agent-authored JavaScript. The worker VM hides
-accidental Node globals and disables string code generation, but it is not a
-security boundary; do not feed arbitrary user-supplied JavaScript to the
-workflow tool.
+Workflow scripts are trusted agent-authored JavaScript or TypeScript. The
+worker VM hides accidental Node globals and disables string code generation,
+but it is not a security boundary; do not feed arbitrary user-supplied source
+to the workflow tool.
 
 An in-process sub-agent orchestration context cannot invoke the `workflow` tool.
 This topology is unsupported until cross-registry cancellation is implemented; see
 GitHub issue [#62](https://github.com/lmn451/pi-subagentura/issues/62).
 
-## Authoring contract
+## Legacy authoring contract
 
 Submit raw JavaScript without markdown fences. Include a top-level pure-literal
 `export const meta = { name, description, phases? }`; helper declarations may

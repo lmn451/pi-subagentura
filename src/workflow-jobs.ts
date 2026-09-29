@@ -260,6 +260,7 @@ export interface WorkflowJobState {
   promise: Promise<WorkflowRunResultWithUsage>;
   abort: AbortController;
   snapshot: {
+    steps?: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>;
     agentsSpawned: number;
     errorCount: number;
     cancelledCount?: number;
@@ -314,6 +315,28 @@ export interface WorkflowJobState {
   telemetryFailure?: WorkflowFailureClassification;
   /** Runtime failures are emitted once per workflow operation. */
   telemetryRuntimeFailureReported?: boolean;
+  terminalTransition?: {
+    promise: Promise<void>;
+    release: () => void;
+  };
+}
+
+export async function withWorkflowTerminalTransition<T>(
+  job: WorkflowJobState,
+  transition: () => Promise<T>,
+): Promise<T> {
+  const previous = job.terminalTransition?.promise ?? Promise.resolve();
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => (release = resolve));
+  const slot = { promise, release };
+  job.terminalTransition = slot;
+  await previous;
+  try {
+    return await transition();
+  } finally {
+    release();
+    if (job.terminalTransition === slot) job.terminalTransition = undefined;
+  }
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -337,6 +360,13 @@ export const workflowJobRegistry = g.__piSubagenturaWorkflowJobs as Map<
 >;
 
 export const MAX_WORKFLOW_JOBS = 100;
+
+export class WorkflowJobCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowJobCapacityError";
+  }
+}
 
 /** Maximum notification delivery attempts before giving up. */
 export const MAX_WORKFLOW_NOTIFICATION_ATTEMPTS = 5;
@@ -395,7 +425,7 @@ export function cleanupWorkflowJobsForOwner(
     if (
       job.durable &&
       job.status === "running" &&
-      terminalReason !== "fresh_session"
+      (terminalReason !== "fresh_session" || job.durable.stepBased)
     ) {
       job.durableInterrupted = true;
       job.abort.abort({ source: "durable_interrupt" });
@@ -543,7 +573,7 @@ export function startWorkflowJob(
         errorStage: "workflow",
         runtimeFailureKind: "workflow_capacity",
       });
-      throw new Error(
+      throw new WorkflowJobCapacityError(
         `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
     }
@@ -608,6 +638,10 @@ export function startWorkflowJob(
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
   state.promise = runWorkflow(script, {
     ...opts,
+    onStep: (steps) => {
+      state.snapshot.steps = steps;
+      opts.onStep?.(steps);
+    },
     runAgent: (request) =>
       runTrackedWorkflowAgent(state, opts.runAgent, request),
     signal: abort.signal,
@@ -648,13 +682,23 @@ export function startWorkflowJob(
   })
     .then(async (r) => {
       if (state.durable) {
-        if (state.durableInterrupted || abort.signal.aborted)
-          throw new Error("Workflow interrupted before result commit.");
-        await stopDurableProcessAttempts(state.durable.store.directory);
-        await state.durable.store.append("terminal", {
-          status: "done",
-          result: encodeRunValue(r),
-          completedAt: Date.now(),
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            if (terminal.data.status === "done") return;
+            throw new Error("Workflow interrupted before result commit.");
+          }
+          if (state.durableInterrupted || abort.signal.aborted)
+            throw new Error("Workflow interrupted before result commit.");
+          await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.flush();
+          await state.durable!.store.append("terminal", {
+            status: "done",
+            result: encodeRunValue(r),
+            completedAt: Date.now(),
+          });
         });
       }
       if (state.status === "running") state.status = "done";
@@ -664,6 +708,7 @@ export function startWorkflowJob(
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      else normalizeTerminalWorkflowSteps(state, "done");
       emitWorkflowCompletedTelemetry(state, r);
       invokeWorkflowCompletionHook(state);
       return r;
@@ -675,23 +720,53 @@ export function startWorkflowJob(
       }
       const msg = err instanceof Error ? err.message : String(err);
       const timedOut = isWorkflowWallTimeout(err);
+      const workerCancelled =
+        (err as { cancelled?: unknown } | null)?.cancelled === true;
       if (timedOut) state.telemetryTerminalReason = "timeout";
-      state.status = abort.signal.aborted ? "cancelled" : "error";
+      state.status =
+        abort.signal.aborted || workerCancelled ? "cancelled" : "error";
+      const workerCancelledCount = (err as { cancelledCount?: unknown } | null)
+        ?.cancelledCount;
+      if (
+        workerCancelled &&
+        typeof workerCancelledCount === "number" &&
+        Number.isInteger(workerCancelledCount) &&
+        workerCancelledCount >= 0
+      ) {
+        state.snapshot.cancelledCount = Math.max(
+          state.snapshot.cancelledCount ?? 0,
+          workerCancelledCount,
+        );
+      }
       state.error = msg;
       if (state.durable) {
         state.durable.stop();
         await state.durable.drain();
-        if (!state.durableInterrupted)
-          await stopDurableProcessAttempts(state.durable.store.directory);
-        await state.durable.store.append(
-          state.durableInterrupted ? "interrupted" : "terminal",
-          {
-            status: state.durableInterrupted ? "interrupted" : state.status,
-            error: msg,
-            usage: state.durable.usage(),
-            completedAt: Date.now(),
-          },
-        );
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            state.status =
+              terminal.data.status === "done"
+                ? "done"
+                : terminal.data.status === "error"
+                  ? "error"
+                  : "cancelled";
+            return;
+          }
+          if (!state.durableInterrupted)
+            await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.append(
+            state.durableInterrupted ? "interrupted" : "terminal",
+            {
+              status: state.durableInterrupted ? "interrupted" : state.status,
+              error: msg,
+              usage: state.durable!.usage(),
+              completedAt: Date.now(),
+            },
+          );
+        });
       }
       if (state.status !== "cancelled") {
         state.telemetryFailure =
@@ -706,7 +781,11 @@ export function startWorkflowJob(
       }
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
-      if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      if (!state.durableInterrupted) {
+        if (state.status === "cancelled")
+          normalizeCancelledWorkflowState(state);
+        else normalizeTerminalWorkflowSteps(state, "error");
+      }
       if (!state.durableInterrupted)
         emitWorkflowCompletedTelemetry(state, undefined);
       invokeWorkflowCompletionHook(state);
@@ -808,6 +887,24 @@ export function normalizeCancelledWorkflowState(state: WorkflowJobState): void {
   for (const record of state.snapshot.agentRecords ?? []) {
     if (record.status === "running") record.status = "cancelled";
   }
+  normalizeTerminalWorkflowSteps(state, "cancelled");
+}
+
+function normalizeTerminalWorkflowSteps(
+  state: WorkflowJobState,
+  status: "cancelled" | "error" | "done",
+): void {
+  const retiredStatus =
+    status === "cancelled"
+      ? "cancelled"
+      : status === "error"
+        ? "failed"
+        : "skipped";
+  state.snapshot.steps = state.snapshot.steps?.map((step) =>
+    ["waiting_for_input", "running", "pending"].includes(step.status)
+      ? { ...step, status: retiredStatus }
+      : step,
+  ) as WorkflowJobState["snapshot"]["steps"];
 }
 
 /** Count running workflow jobs (status === "running"). */

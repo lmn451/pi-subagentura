@@ -32,6 +32,6 @@ npm run <script-name>
 
 ## Version
 
-This project requires Node.js >= 22.23.2, matching the `engines.node` field in
+This project requires Node.js >= 24.12.0, matching the `engines.node` field in
 `package.json` and the minimum-runtime CI check. The lockfile
 (`package-lock.json`) ensures reproducible installs.

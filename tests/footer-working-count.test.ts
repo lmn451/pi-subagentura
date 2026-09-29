@@ -61,15 +61,13 @@ function makeInteractive(
   };
 }
 
-function makeScope(orchestratorv2 = false): SessionScope {
+function makeScope(mode?: "orchestrator" | "orchestratorv2"): SessionScope {
   return registerSessionScope({
     id: 1,
     generation: 1,
     lifecycle: "started",
     pi: {
-      getFlag: vi.fn((name: string) =>
-        name === "orchestratorv2" ? orchestratorv2 : false,
-      ),
+      getFlag: vi.fn((name: string) => name === mode),
     } as never,
   });
 }
@@ -186,27 +184,20 @@ describe("footer working count", () => {
     );
   });
 
-  it("preserves Orchestratorv2 and legacy identity behavior", () => {
-    const scope = makeScope(true);
-    scope.inProcessJobs.set("owned", makeJob("owned", "running"));
-    const orchestratorUi = { setStatus: vi.fn() };
+  it.each(["orchestrator", "orchestratorv2"] as const)(
+    "shows the active %s mode in the footer",
+    (mode) => {
+      const scope = makeScope(mode);
+      scope.inProcessJobs.set("owned", makeJob("owned", "running"));
+      const ui = { setStatus: vi.fn() };
 
-    updateRunningSubagentFooter(orchestratorUi, sessionOwner(scope));
-    expect(orchestratorUi.setStatus).toHaveBeenCalledWith(
-      "subagentura-running",
-      "⚡ 1 sub-agent alive · 1 working · orchestrator",
-    );
-
-    clearSessionScopes();
-    const legacyJob = makeJob("legacy", "running");
-    jobRegistry.set(legacyJob.id, legacyJob);
-    const legacyUi = { setStatus: vi.fn() };
-    updateRunningSubagentFooter(legacyUi);
-    expect(legacyUi.setStatus).toHaveBeenCalledWith(
-      "subagentura-running",
-      "⚡ 1 sub-agent alive · 1 working",
-    );
-  });
+      updateRunningSubagentFooter(ui, sessionOwner(scope));
+      expect(ui.setStatus).toHaveBeenCalledWith(
+        "subagentura-running",
+        `⚡ 1 sub-agent alive · 1 working · ${mode}`,
+      );
+    },
+  );
 
   it("fails closed for a stale owner generation", () => {
     const scope = makeScope();

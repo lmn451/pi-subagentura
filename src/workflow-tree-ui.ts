@@ -228,6 +228,15 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
 
 function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
   const rows: WorkflowRow[] = [];
+  const steps = job.snapshot.steps ?? [];
+  for (const step of steps.slice(-100)) {
+    rows.push({
+      job,
+      depth: Math.min(8, step.path.length),
+      selectable: false,
+      text: `${step.status === "waiting_for_input" ? "?" : step.status === "completed" || step.status === "restored" ? "✓" : step.status === "failed" ? "✗" : "·"} ${step.title} [${step.status}]`,
+    });
+  }
   const usage = presentWorkflowUsage(job.snapshot.usage);
   if (usage) {
     for (const field of formatWorkflowUsageFields(usage, {

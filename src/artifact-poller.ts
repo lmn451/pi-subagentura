@@ -36,7 +36,7 @@ import {
   getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
-import { isOrchestratorMode } from "./completion-turn";
+import { isOrchestratorMode, isOrchestratorV2Enabled } from "./completion-turn";
 import { shouldNotify } from "./notifications";
 import {
   deliveryIdFor,
@@ -298,7 +298,8 @@ function orchestratorLabelForOwner(
     const ownerId = context.parentAgentId ?? context.rootId;
     return `subagent of orchestrator ${ownerId}`;
   }
-  return scope && isOrchestratorMode(scope.pi) ? "orchestrator" : undefined;
+  if (!scope || !isOrchestratorMode(scope.pi)) return undefined;
+  return isOrchestratorV2Enabled(scope.pi) ? "orchestratorv2" : "orchestrator";
 }
 function workflowTagForId(workflowId: string): string {
   const name = workflowJobRegistry.get(workflowId)?.name;

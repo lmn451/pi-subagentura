@@ -17,10 +17,10 @@ for clarification when a request is ambiguous or a narrow request has no matchin
 child, and leave specialist repository work to those children. Compatibility
 workflow and in-process tools remain registered.
 
-For reusable workflows, start Pi with the bundled orchestration guidance and
-describe the outcome you want. The parent can turn that request into a saved
-workflow, run its agents in the background, and keep their intermediate results
-out of the parent context.
+To opt into reusable workflow orchestration, start Pi with the workflow-oriented
+`--orchestrator` mode or explicitly ask for a workflow (for example, with
+`/workflow`). General tasks are not routed to the workflow tool automatically
+when no workflow mode is selected and the user has not asked for one.
 
 ## Demo
 
@@ -37,7 +37,7 @@ plays in 8:06, with quiet stretches accelerated and English translations include
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.
 
-Node.js 22.23.2 or newer is required.
+Node.js 24.12.0 or newer is required. CI covers Node 24 and 26.
 
 Install globally:
 
@@ -119,23 +119,29 @@ output tokens. This is a high safety ceiling with significant cost/runtime risk,
 not a spending recommendation; use a lower explicit budget when practical.
 Existing agent/item caps, concurrency, timeouts, cancellation, and errors still apply.
 
-Workflow scripts are trusted agent-authored JavaScript. The VM improves
-determinism but is not a security boundary, so never run untrusted JavaScript.
-Without `durable: true`, background workflow jobs are scoped to the current parent session and are
-cancelled by reload, resume, quit, or a new session. Standalone attachable
+Workflow source is trusted agent-authored JavaScript or V4 TypeScript. The VM
+improves determinism but is not a security boundary, so never run untrusted
+workflow code. Legacy `.mjs` jobs without `durable: true` are scoped to the
+current parent session and are cancelled by reload, resume, quit, or a new
+session. Standalone attachable
 interactive sub-agents use durable artifacts and survive parent `reload`,
 `resume`, and `quit` continuity transitions. A fresh `new` or `fork` transition
 cleans up their owned panes and state entries; workflow-owned interactive panes
 are also cleaned up with their owning workflow.
 
-For explicitly restart-resumable execution, use `workflow({ name, args,
-durable: true })`. Give every `agent()` and nested `workflow()` call a unique
-stable `id`; include item keys and retry attempt numbers. Use
+Legacy `.mjs` scripts opt into restart-resumable execution with
+`workflow({ name, args, durable: true })`. V4 TypeScript definitions are
+durable by default unless `durable: false` is set. Legacy durable scripts give
+every `agent()` and nested `workflow()` call a unique stable `id` option; V4
+definitions use stable IDs as the first argument to `ctx.step()`, `ctx.agent()`,
+and related operations. Include item keys in mapped work. Use
 `list_workflow_runs`, `get_workflow_status`, `get_workflow_result`,
 `cancel_workflow`, and `resume_workflow` to inspect and control saved runs.
 Recovery re-executes the recorded script and replays committed outcomes in their
-recorded response order. It requires the same host, canonical cwd, Pi session,
-and Node major version. It is manual, not an always-on coordinator, and agent
+recorded response order. Legacy runs require the same host, canonical cwd, Pi
+session, and Node major version. V4 project-scoped runs require the same host,
+canonical cwd, and Node major version and can be resumed manually from a live
+Pi process in that project. Recovery is not an always-on coordinator, and agent
 side effects are **not exactly-once**. Process children can finish while Pi is
 absent; new workflow steps cannot start until Pi resumes the run. Durable
 process attempts fail closed instead of falling back after a failed launch.
@@ -147,11 +153,37 @@ ambiguous operation IDs before replacing a saved definition. `list_workflows`
 returns `durableReady` and a source `definitionDigest`; readiness also checks
 the current saved child definitions. Computed IDs remain validated at runtime.
 The `/workflows` command reports durable startup errors without falling back
-to a session-scoped run. Direct `workflow` tool calls still require explicit
-`durable: true`.
+to a session-scoped run. Direct legacy `workflow` calls require explicit
+`durable: true`; V4 definitions are durable by default unless set to false.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
+
+### Typed V4 workflows
+
+New workflows can be written as TypeScript modules using
+`defineWorkflow()` and `schema` from `pi-subagentura/workflow`. A definition
+provides typed input/output schemas and a `run(ctx, args)` function with
+observable steps, agents, groups, bounded parallel/map/pipeline operations,
+repeat cycles, nested workflows, human questions/gates, checkpoints, and
+artifacts. Node.js 24.12 or newer strips erasable TypeScript syntax; imports
+are limited to the named SDK bindings, and the workflow runner does not
+type-check source code. Effect 4 (`effect@4.0.0-rc.117`) is an internal runtime
+dependency and is not part of the workflow API.
+
+V4 definitions use project-scoped durable runs by default. Set `durable: false`
+for an in-memory run. To resume an interrupted run, use `resume_workflow`; to
+answer a paused question or approval, use `respond_workflow_input` with the
+workflow id and waiting step path. The Pi process must be running to resume or
+answer; no background daemon is provided. Durable step outputs are reused only
+when their source definition, stable path, inputs, and policy are compatible.
+Step summaries omit outputs and answers. A step callback interrupted before its
+completed value is committed can run again; make callbacks idempotent around
+external effects. Paused human waits and downtime before manual resume do not
+consume the active V4 worker's execution-time limit. See the
+[V4 workflow guide](./docs/workflows.md#v4-typed-workflows),
+[runtime contract](./WORKFLOW_RUNTIME.md#v4-definitions), and
+[runnable TypeScript example](./examples/workflows/review-source.ts).
 
 ## Why use it?
 
@@ -196,8 +228,9 @@ The extension registers these public tools for parent agents.
 | `save_workflow`                         | Validate and save a reusable workflow                             |
 | `list_workflows`                        | List saved workflows                                              |
 | `inspect_workflow`                      | Read and validate a saved definition without running it           |
-| `list_workflow_runs`                    | List durable runs in this Pi session and cwd                      |
+| `list_workflow_runs`                    | List project v4 runs and current-session legacy durable runs      |
 | `resume_workflow`                       | Explicitly resume an interrupted durable run                      |
+| `respond_workflow_input`                | Ask the user to answer a waiting v4 question or approval          |
 | `delete_workflow`                       | Delete a saved workflow                                           |
 | `get_workflow_status`                   | Inspect a background workflow                                     |
 | `get_workflow_result`                   | Wait for and return a workflow result                             |
@@ -478,7 +511,10 @@ Snapshots use schema version 1, temp-file + rename writes, deterministic per-ses
 
 ### `subagent_with_context`
 
-Starts a sub-agent with the current conversation history included in its prompt.
+Starts a sub-agent with the parent conversation included in its prompt. When the
+installed Pi SDK exposes the canonical session projection, that projection is
+used (including omission and replacement edits); older supported SDKs fall back
+to their message entries.
 
 Parameters:
 
@@ -614,7 +650,7 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — context mode selector: `true` serializes the full parent branch; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `includeContext` — context mode selector: `true` serializes the canonical parent session projection when available (including omission and replacement edits), with a message-entry fallback on older supported SDKs; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`

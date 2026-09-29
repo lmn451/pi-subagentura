@@ -139,3 +139,39 @@ declare global {
   const cwd: string;
   const budget: WorkflowBudget;
 }
+
+export type {
+  ArtifactRef,
+  AskRequest,
+  Awaitable,
+  InferWorkflowSchema,
+  MapOptions,
+  ParallelOptions,
+  PipelineOptions,
+  RepeatOptions,
+  RepeatResult,
+  RepeatTermination,
+  SerializedWorkflowError,
+  TaskResult,
+  WorkflowAgentOptions as WorkflowV4AgentOptions,
+  WorkflowContext,
+  WorkflowBudget as WorkflowV4Budget,
+  WorkflowDefinition,
+  WorkflowEvent,
+  WorkflowExecutionOptions,
+  WorkflowFailureResult,
+  WorkflowJsonPrimitive,
+  WorkflowJsonValue,
+  WorkflowRetryPolicy,
+  WorkflowSchema,
+  WorkflowSchemaBuilder,
+  WorkflowSchemaDefinition,
+  WorkflowStepNode,
+  WorkflowStepPolicy,
+  WorkflowStepOptions,
+  WorkflowStepOutcome,
+  WorkflowStepStatus,
+  WorkflowPipelineInfo,
+} from "./workflow-v4.d.ts";
+
+export { defineWorkflow, schema } from "../src/workflow-v4-sdk.mjs";
