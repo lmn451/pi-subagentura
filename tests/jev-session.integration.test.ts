@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
   createPiSessionHarness,
   type PiSessionHarness,
@@ -22,6 +23,31 @@ afterEach(() => {
 });
 
 describe("Jev advisor in a real Pi session", () => {
+  it.skipIf(!("classify" in ModelRegistry.prototype))(
+    "registers exactly once after late flag binding and reload with native auth",
+    async () => {
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+      vi.stubEnv("OPENROUTER_API_KEY", "synthetic-test-key");
+      const fetch = vi.fn().mockRejectedValue(new Error("unexpected network"));
+      vi.stubGlobal("fetch", fetch);
+      cwd = mkdtempSync(join(tmpdir(), "pi-jev-enabled-"));
+      harness = await createPiSessionHarness(cwd, {
+        extensionRoot,
+        extensionFlags: { orchestratorv2: true },
+        bindExtensionLifecycle: true,
+        includeTools: true,
+      });
+      const advisorNames = () =>
+        harness!.session
+          .getActiveToolNames()
+          .filter((name) => name === "resolve_orchestrator_route");
+      expect(advisorNames()).toHaveLength(1);
+      await harness.reload();
+      expect(advisorNames()).toHaveLength(1);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it("stays absent after late flag binding and reload without a native authenticated classifier", async () => {
     vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
     vi.stubEnv("TYPESAFE_API_KEY", "synthetic-test-key");
