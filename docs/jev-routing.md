@@ -142,10 +142,23 @@ classifier errors, malformed answers, oversized payloads, incomplete registry
 projections, low confidence, close scores, and `none` prevent automatic selection.
 Cancellation aborts the host request and invalidates late answers.
 
-Normal tests mock Pi's classifier registry and require no provider keys. They
-verify activation, native calls, failure handling, bounds, and authority checks;
-they do not establish live service behavior or routing accuracy. Evaluate labeled
-requests before tuning thresholds, including overlapping responsibilities,
-read-only versus implementation tasks, no suitable child, explicit-new/attach
-requests, and unclear scope. Keep sensitive evaluation tasks local unless
-external processing is separately approved.
+Configured authentication is an availability gate, not a successful service
+health check. A provider can still reject a request for permissions, billing, or
+other reasons. For example, HTTP 402 from OpenRouter for insufficient credits
+becomes `kind: "error", reason: "unavailable"`; raw provider diagnostics are not
+included in advice. Check the provider account rather than lowering confidence
+thresholds. Switching to TypeSafe requires both `typesafe` and `jev-latest` IDs
+plus its own authentication; it does not guarantee free service.
+
+Unit tests mock Pi's classifier registry. Native-SDK integration tests exercise
+the real catalog, authentication resolution, System One transport, answer parsing,
+usage, and HTTP 402 handling with synthetic credentials and a stubbed HTTP
+response. A real-session test checks advisor registration after startup and
+reload. Classifier-specific integration cases skip on pre-classifier SDKs and run
+on CI's latest SDK leg. None requires live provider credentials or paid requests.
+
+These tests do not establish live service availability or routing accuracy.
+Evaluate labeled requests before tuning thresholds, including overlapping
+responsibilities, read-only versus implementation tasks, no suitable child,
+explicit-new/attach requests, and unclear scope. Keep sensitive evaluation tasks
+local unless external processing is separately approved.
