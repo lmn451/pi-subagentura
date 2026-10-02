@@ -388,6 +388,15 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
+An optional native Pi classifier advisor adds `resolve_orchestrator_route` when
+`PI_ORCHESTRATOR_ROUTER=jev` and `--orchestratorv2` are enabled, and the host
+provides a classifier with configured authentication (Pi ≥ 0.99.0). The default
+is `openrouter/~typesafe/jev-latest`, using Pi-managed authentication. There are
+no direct HTTP adapters or fallbacks: unavailable native classification leaves
+the advisor disabled. The parent obtains a recommendation, then sends the
+original task through its existing messaging tool. See
+[Jev routing](docs/jev-routing.md) for setup, data disclosure, and failure behavior.
+
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
 to the exact payload, current session generation, and a later user message; a
@@ -426,6 +435,67 @@ nested children without top-level approval. Nested children belong to the
 immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
+
+#### Enable the optional classifier advisor
+
+With pi-subagentura installed, use **Pi ≥ 0.99.0** (`pi --version`). The
+classifier recommends an existing child; it does not replace your chat model
+or automatically send work. Codemode is not required.
+
+1. In Pi, run `/login`, select `openrouter`, and configure its API key (or supply
+   `OPENROUTER_API_KEY` through your environment). Ensure the account has enough
+   credit for classifier requests. Never commit credentials.
+2. Start a new Pi process from a shell with these settings:
+
+   ```bash
+   export PI_ORCHESTRATOR_ROUTER="jev"
+   export PI_ORCHESTRATOR_ROUTER_PROVIDER="openrouter"
+   export PI_ORCHESTRATOR_ROUTER_MODEL="~typesafe/jev-latest"
+   pi --orchestratorv2
+   ```
+
+   The provider/model lines explicitly select the defaults. **The opt-in value
+   is `jev`, not `openrouter`**; `openrouter` belongs in the provider setting.
+   When testing this branch, use a Pi executable with classifier support: the
+   repository's development SDK pin is older than 0.99.0.
+
+3. Create interactive specialists with `routingDescription` responsibilities
+   (or confirm responsibility updates through
+   `update_orchestrator_agent_description`). Ask the parent to list agents and
+   use `resolve_orchestrator_route` for a clear task whose child owner is
+   ambiguous. Only eligible live children with confirmed responsibilities are
+   considered. A `match` recommends a `childId`; the parent still sends the
+   original task through `send_interactive_subagent_message`.
+
+To use TypeSafe directly, first configure `TYPESAFE_API_KEY` through your
+environment or Pi-managed authentication, then set **both** provider and model:
+
+```bash
+PI_ORCHESTRATOR_ROUTER=jev \
+PI_ORCHESTRATOR_ROUTER_PROVIDER=typesafe \
+PI_ORCHESTRATOR_ROUTER_MODEL=jev-latest \
+pi --orchestratorv2
+```
+
+Changing the provider alone retains the OpenRouter-specific model ID. TypeSafe
+has its own credentials and service terms; switching does not guarantee free
+usage. Classifiers are not chat models: do not select Jev with `--model`.
+
+**Troubleshooting:**
+
+- Missing `resolve_orchestrator_route`: check Pi's version, both opt-ins, exact
+  provider/model IDs, configured credentials, and valid routing settings. Restart
+  Pi after changing environment variables.
+- `error` / `unavailable`: configured credentials do not prove that a request
+  will succeed. Check provider access and billing; insufficient OpenRouter credit
+  can return HTTP 402. Advice exposes a closed reason, not the raw provider error.
+- `no_match`: there may be no eligible child, no suitable responsibility, or
+  insufficient confidence. This is not a successful selection.
+- To disable, unset `PI_ORCHESTRATOR_ROUTER` and restart Pi.
+
+Enabling the advisor sends the bounded task and candidate responsibility text
+to the selected provider. Review [Jev routing](docs/jev-routing.md) for payload
+disclosure, thresholds, deadlines, and fail-closed behavior.
 
 ## Cancellation context snapshots (opt-in)
 

@@ -19,6 +19,7 @@ published injector.
 | [publish.md](./publish.md)                                                         | OIDC publishing and the authoritative release procedure                |
 | [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools           |
 | [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                            |
+| [jev-routing.md](./jev-routing.md)                                                 | Optional Jev candidate selection, configuration, and external payload  |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters |
 
 ## Known limitations

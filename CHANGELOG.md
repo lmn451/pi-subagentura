@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added telemetry schema v5's optional closed `failure_operation` dimension to
   distinguish interactive spawn preparation, persistence, and registration
   failures without collecting exception text or user data.
+- Added optional Orchestratorv2 child selection through Pi's native classifier
+  API (Pi ≥ 0.99.0), with Pi-managed authentication, explicit opt-in, bounded
+  payloads, fail-closed selection, and usage accounting. Unavailable native
+  classification disables the advisor; no direct HTTP adapters or fallbacks.
 
 ### Fixed
 
