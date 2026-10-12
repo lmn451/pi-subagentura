@@ -1,3 +1,4 @@
+import { Container, Text } from "@earendil-works/pi-tui";
 import type {
   ExtensionAPI,
   ToolDefinition,
@@ -17,5 +18,24 @@ export function registerToolWithDefaultGuidance<
     ...tool,
     description: `${tool.description}\n${TOOL_DEFAULT_GUIDANCE}`,
     execute: withOperationTelemetry(pi, "tool", tool.name, tool.execute, 2),
+    renderCall(args, theme, context) {
+      const summary =
+        tool.renderCall?.(args, theme, context) ??
+        new Text(theme.fg("toolTitle", theme.bold(tool.label)), 0, 0);
+      if (!context?.expanded) return summary;
+
+      let parameters: string;
+      try {
+        parameters = JSON.stringify(args, null, 2) ?? "{}";
+      } catch {
+        parameters = "[parameters unavailable]";
+      }
+
+      const component = new Container();
+      component.addChild(summary);
+      component.addChild(new Text(theme.fg("muted", "Parameters:"), 0, 0));
+      component.addChild(new Text(theme.fg("toolOutput", parameters), 0, 0));
+      return component;
+    },
   });
 }
