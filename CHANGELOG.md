@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
 
+### Deprecated
+
+- Documented the planned v4 removal of interactive protocol-v1 event/state
+  compatibility. Existing v1 artifacts and state remain readable in v3; no data
+  is migrated or deleted by this documentation change. See
+  [the compatibility inventory](docs/protocol-v1-compatibility.md).
+
 ### Fixed
 
 - Keep terminal interactive rows from reopening a persistent mux-probe

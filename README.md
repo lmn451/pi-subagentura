@@ -755,6 +755,12 @@ in physical NDJSON byte order; timestamps are display-only. Mixed v1/v2 logs and
 legacy `output-N.md` snapshots remain readable. New legacy completions are
 pointer-only because mutable `output.md` cannot be safely attributed to a turn.
 
+The v3 runtime continues to read mixed v1/v2 event logs and older output/state
+formats for upgrade compatibility. The planned v4 removal is documented in the
+[protocol-v1 compatibility inventory](docs/protocol-v1-compatibility.md). This
+plan does not delete or rewrite existing artifacts; consult the inventory before
+a future major-version migration.
+
 Immutable snapshots are limited to 1 MiB. The parent and generated child CLI
 check the staging file size before reading it. If `output.md` exceeds the limit,
 the completion is still recorded with `outputError.code = "output_too_large"`
