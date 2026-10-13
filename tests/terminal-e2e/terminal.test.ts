@@ -161,7 +161,8 @@ describe("real Pi terminal E2E", () => {
       expect(expanded).toContain('"authOnly": false');
 
       await harness.waitForScreen(
-        (screen) => screen.includes("Parent settled for [E2E:TOOL_PARAMETERS]."),
+        (screen) =>
+          screen.includes("Parent settled for [E2E:TOOL_PARAMETERS]."),
         "parent settled after model-list tool call",
       );
       await harness.assertNoNetwork();
