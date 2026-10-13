@@ -141,6 +141,36 @@ function assertCompletionSnapshot(
 
 describe("real Pi terminal E2E", () => {
   it(
+    "shows extension tool parameters only after Ctrl+O expansion",
+    async () => {
+      await startScenario("tool-parameters");
+      await harness.waitForScreen(
+        (screen) => screen.includes("List Available Models"),
+        "model-list tool call",
+      );
+      const collapsed = harness.renderedScreen();
+      expect(collapsed).not.toContain('"filter"');
+      expect(collapsed).not.toContain('"authOnly"');
+
+      harness.sendKey("C-o");
+      await harness.waitForScreen(
+        (screen) => screen.includes('"filter": "subagentura-e2e"'),
+        "expanded model-list parameters",
+      );
+      const expanded = harness.renderedScreen();
+      expect(expanded).toContain('"authOnly": false');
+
+      await harness.waitForScreen(
+        (screen) =>
+          screen.includes("Parent settled for [E2E:TOOL_PARAMETERS]."),
+        "parent settled after model-list tool call",
+      );
+      await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
     "starts a real Pi editor in the isolated PTY",
     async () => {
       await harness.start();

@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added telemetry schema v5's optional closed `failure_operation` dimension to
   distinguish interactive spawn preparation, persistence, and registration
   failures without collecting exception text or user data.
+- Show supplied pi-subagentura tool arguments as JSON when tool output is
+  expanded with Pi's default Ctrl+O shortcut, retaining compact call summaries
+  when collapsed.
+- Record pi-subagentura tool names and full arguments in `extension_tool_call`
+  events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
+- Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
+  artifact diagnostics.
 
 ### Fixed
 
@@ -23,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   episode; a later unknown result may report a new one.
 - Render coordinated workflow completion notices with resolved agent errors
   as “completed with errors” while retaining the internal error status.
+- Reject missing or non-directory interactive child working directories before
+  creating a multiplexer pane.
 
 ## [3.6.4] - 2026-10-03
 

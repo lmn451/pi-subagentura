@@ -143,6 +143,7 @@ function toolCall(
 
 const KNOWN_MARKERS = new Set([
   "[E2E:SMOKE]",
+  "[E2E:TOOL_PARAMETERS]",
   "[E2E:SYNC_CONTEXT]",
   "[E2E:SYNC_ISOLATED]",
   "[E2E:ASYNC_ISOLATED]",
@@ -664,6 +665,12 @@ async function runRequest(
 }
 
 function parentTool(marker: string, context: Context): ToolCall {
+  if (marker === "[E2E:TOOL_PARAMETERS]") {
+    return toolCall("e2e-tool-parameters-1", "list_available_models", {
+      filter: "subagentura-e2e",
+      authOnly: false,
+    });
+  }
   if (marker.includes("ASYNC_STATUS")) {
     return toolCall("e2e-async-status-1", "get_subagent_status", {
       jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),

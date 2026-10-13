@@ -45,6 +45,7 @@
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
     "skills/ralplan",
+    "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
     "src/ndjson.d.ts",
     "src/notifications.ts",

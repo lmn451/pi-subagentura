@@ -43,6 +43,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -738,6 +739,23 @@ export function launchInteractiveSubagent(params: {
     throw new Error(
       `working cwd exceeds ${MAX_PERSISTED_WORKING_CWD_BYTES} bytes or contains NUL`,
     );
+  }
+  let workingDirectoryStat: ReturnType<typeof statSync>;
+  try {
+    workingDirectoryStat = statSync(cwd);
+  } catch (error) {
+    reportSpawnFailure("context", undefined, "cwd_validation");
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    throw new Error(
+      missing
+        ? `working directory does not exist: ${cwd}`
+        : `working directory cannot be accessed: ${cwd}`,
+      { cause: error },
+    );
+  }
+  if (!workingDirectoryStat.isDirectory()) {
+    reportSpawnFailure("context", undefined, "cwd_validation");
+    throw new Error(`working directory is not a directory: ${cwd}`);
   }
   let stateCwd: string;
   try {

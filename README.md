@@ -1230,6 +1230,24 @@ npm test
 npm run pack:check
 ```
 
+### Testing the checkout in Pi
+
+Editing this repository does not update a separately installed
+`npm:pi-subagentura`. Check `pi list` and the enabled extension path in
+`pi config` before debugging a missing feature. To try the checkout for one
+invocation from the repository root, without loading the installed extensions:
+
+```bash
+pi --no-extensions -e ./src/subagent.ts --skill ./skills/pi-subagentura-debug
+```
+
+This disables other discovered/configured extensions for that invocation too.
+It does not change package settings or select the checkout for interactive
+children, which launch their own `pi` process in the requested `cwd`. For an
+existing session, enable the local checkout and disable the npm extension in
+that project's configuration before `/reload`. Collect any running in-process
+or background workflow results first; `/reload` cancels those jobs.
+
 ### Branch preview releases
 
 Maintainers can create a non-npm preview release from any branch through the **Branch Preview Release** GitHub Action. It verifies the branch, moves a `branch-<sanitized-branch>` tag to that commit, creates/updates a prerelease, and uploads the `npm pack` tarball plus checksums for inspection.
@@ -1245,17 +1263,55 @@ The attached release tarball is for manual download/auditing; Pi installs the pa
 
 ### Debug logging
 
-Set `SUBAGENT_DEBUG_LOG_DIR=/some/path` to write a JSONL trace of sub-agent lifecycle events to `debug-YYYY-MM-DD.jsonl` in that directory. Each line is a self-describing JSON object with `timestamp`, `level`, `event`, and event-specific fields.
+Set `SUBAGENT_DEBUG_LOG_DIR` to a private directory before starting Pi to enable
+local JSONL diagnostics. The logger appends to `debug-YYYY-MM-DD.jsonl` with
+`timestamp`, `level`, `event`, and event-specific fields; it is inactive when
+the variable is unset.
 
-The `tool_start` event records the `toolName` and full `args` of every tool the sub-agent invokes — useful for replaying or auditing what a sub-agent did. Other events cover session creation, turns, message updates, prompts, and job completion.
+- `tool_start` records `toolName` and full `args` for tools invoked by
+  **in-process** sub-agents.
+- `extension_tool_call` records `toolName` and full `args` for pi-subagentura
+  tool executions in the Pi process where the extension is loaded.
+
+Logs can include task/persona text, paths, identifiers, and tool contents.
+Keep them private and redact entries before sharing. These local diagnostics
+are separate from anonymous telemetry.
 
 Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is independent of anonymous telemetry, whose runtime-failure event keeps its existing closed schema. Probe timeout and polling behavior are unchanged.
 
-The feature is a no-op when the env var is unset.
-
 ```bash
-SUBAGENT_DEBUG_LOG_DIR=./.pi-debug pi   # writes ./pi-debug/debug-2026-06-10.jsonl
+mkdir -p .pi-debug
+SUBAGENT_DEBUG_LOG_DIR="$PWD/.pi-debug" pi
 ```
+
+For **interactive children**, configure `SUBAGENT_DEBUG_LOG_DIR` in the
+multiplexer session/server or the child's shell environment before launching
+the child. The generated launch script does not explicitly export this variable;
+do not assume an inline setting on the parent Pi command reaches a new mux pane.
+Use an absolute path to avoid resolving the directory relative to a different
+child `cwd`. This enables the child's local extension diagnostics, not a trace
+of every built-in tool it invokes.
+
+### Inspecting tool arguments
+
+On this branch (unreleased), press **Ctrl+O** (Pi's default tool-output expansion
+shortcut) in the TUI. Pi-subagentura calls retain their compact summary when
+collapsed; expanded calls add a **Parameters:** block containing the supplied
+arguments as JSON.
+This displays the call arguments, not a list of every schema parameter or
+omitted default. It does not require debug logging.
+
+The bundled [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md)
+covers launch, working-directory, mux, and artifact diagnostics. It is included
+under `skills/pi-subagentura-debug/` in the package tarball for this branch.
+The current `pi` manifest declares only the extension, so a plain package source
+does not automatically expose the skill. Load it explicitly (for example,
+`pi --skill ./skills/pi-subagentura-debug` from this checkout), then invoke
+`/skill:pi-subagentura-debug`. These additions are unreleased, not features shipped
+in npm version 3.6.4.
+
+Interactive spawning also validates that the resolved `cwd` exists and is a
+directory before creating a pane; create a requested worktree before spawning.
 
 ## Contributing
 
