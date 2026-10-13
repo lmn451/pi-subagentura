@@ -1685,8 +1685,9 @@ function normalizeV2StatePayload(
 ): InteractiveSubagentStateFile | null {
   const rawStates = obj.states;
   if (
-    rawStates &&
-    typeof rawStates === "object" &&
+    !rawStates ||
+    typeof rawStates !== "object" ||
+    Array.isArray(rawStates) ||
     Object.keys(rawStates).length > MAX_PERSISTED_STATE_COUNT
   ) {
     return null;
@@ -1718,13 +1719,15 @@ function normalizeV2StatePayload(
   // Validate only the current protocol-v2 state representation.
   const asStates = (
     v: unknown,
-  ): { [id: string]: InteractiveSubagentPersistedStateV2 } => {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  ): { [id: string]: InteractiveSubagentPersistedStateV2 } | null => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
     const normalizedStates: {
       [id: string]: InteractiveSubagentPersistedStateV2;
     } = {};
     for (const [id, value] of Object.entries(v)) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return null;
+      }
       const raw = value as Record<string, unknown>;
       if (
         typeof raw.id !== "string" ||
@@ -1740,7 +1743,7 @@ function normalizeV2StatePayload(
         typeof raw.sessionFile !== "string" ||
         (raw.mux !== "tmux" && raw.mux !== "zellij" && raw.mux !== "herdr")
       ) {
-        continue;
+        return null;
       }
       const terminalIdCandidate = raw.muxTerminalId;
       const muxTerminalId =
@@ -1773,6 +1776,13 @@ function normalizeV2StatePayload(
         candidate >= 0
           ? candidate
           : fallback;
+      if (
+        entry.pendingDeliveries !== undefined &&
+        (!Array.isArray(entry.pendingDeliveries) ||
+          entry.pendingDeliveries.length > MAX_PERSISTED_DELIVERY_INTENTS)
+      ) {
+        return null;
+      }
       const pendingDeliveries = Array.isArray(entry.pendingDeliveries)
         ? entry.pendingDeliveries
             .flatMap((intent): PersistedDeliveryIntent[] => {
@@ -1859,8 +1869,13 @@ function normalizeV2StatePayload(
                 },
               ];
             })
-            .slice(-MAX_PERSISTED_DELIVERY_INTENTS)
         : [];
+      if (
+        Array.isArray(entry.pendingDeliveries) &&
+        pendingDeliveries.length !== entry.pendingDeliveries.length
+      ) {
+        return null;
+      }
       const deliveryReceipts = Array.isArray(entry.deliveryReceipts)
         ? [
             ...new Set(
@@ -2053,11 +2068,13 @@ function normalizeV2StatePayload(
     }
     return normalizedStates;
   };
+  const states = asStates(rawStates);
+  if (!states) return null;
   return {
     schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
     parent,
     ...(telemetry ? { telemetry } : {}),
-    states: asStates(rawStates),
+    states,
   };
 }
 function stateLoadError(

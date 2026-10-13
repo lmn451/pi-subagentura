@@ -1635,7 +1635,7 @@ describe("persisted interactive state helpers", () => {
     });
   });
 
-  it("rejects removed delivery fields without rewriting persisted state", () => {
+  it("rejects dispatch-attempted deliveries without rewriting persisted state", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     const groupedIntent = {
@@ -1648,8 +1648,8 @@ describe("persisted interactive state helpers", () => {
       status: "done",
       artifactDir: SAMPLE.artifactDir,
       completionPolicy: "group",
-      completionGroupId: "bad\\ngroup",
-      state: "queued",
+      completionGroupId: "valid-group",
+      state: "dispatchAttempted",
     };
     const contents = JSON.stringify({
       schemaVersion: 2,
@@ -1658,7 +1658,7 @@ describe("persisted interactive state helpers", () => {
         [SAMPLE.id]: {
           ...SAMPLE,
           completionPolicy: "group",
-          completionGroupId: "bad\\ngroup",
+          completionGroupId: "valid-group",
           pendingDeliveries: [groupedIntent],
         },
       },
@@ -1706,29 +1706,67 @@ describe("persisted interactive state helpers", () => {
     expect(states?.valid123?.muxTerminalId).toBe("terminal-42");
   });
 
-  it("skips malformed v2 state and intent shapes without throwing", () => {
-    const file = stateFilePath(root);
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 2,
-        parent: "pi",
+  it.each([
+    ["invalid states map", { states: "corrupt" }],
+    [
+      "invalid state entry",
+      { states: { ...{ [SAMPLE.id]: SAMPLE }, broken: "bad" } },
+    ],
+    [
+      "invalid pending delivery",
+      {
         states: {
           [SAMPLE.id]: {
             ...SAMPLE,
-            artifactDir: "relative/artifact",
-            pendingDeliveries: "not-an-array",
+            pendingDeliveries: [
+              { deliveryId: "invalid", completionPolicy: "each", state: "queued" },
+            ],
           },
-          arrayEntry: [],
-          primitiveEntry: "bad",
         },
-      }),
-      { mode: 0o600 },
-    );
+      },
+    ],
+    [
+      "invalid pending delivery queue shape",
+      { states: { [SAMPLE.id]: { ...SAMPLE, pendingDeliveries: "corrupt" } } },
+    ],
+    [
+      "over-limit pending queue",
+      {
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            pendingDeliveries: Array.from({ length: 33 }, (_, index) => ({
+              deliveryId: `delivery-${index}`,
+              subagentId: SAMPLE.id,
+              turnId: `turn-${index}`,
+              eventId: `event-${index}`,
+              status: "done",
+              artifactDir: SAMPLE.artifactDir,
+              completionPolicy: "each",
+              state: "queued",
+            })),
+          },
+        },
+      },
+    ],
+  ])("preserves v2 state with %s across writers", (_label, fields) => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const raw = JSON.stringify({ schemaVersion: 2, parent: "pi", ...fields });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
 
-    expect(() => loadInteractiveStates(root)).not.toThrow();
-    expect(loadInteractiveStates(root)?.states).toEqual({});
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+    expect(() => updateInteractiveState(root, SAMPLE.id, () => undefined)).toThrow(
+      /state file/i,
+    );
+    expect(readFileSync(file)).toEqual(before);
+    expect(() => updatePersistedTelemetrySession(root, "session-new", undefined)).toThrow(
+      /state file/i,
+    );
+    expect(readFileSync(file)).toEqual(before);
   });
 
   it("saveInteractiveStates creates the .pi/ directory if missing (mode 0o700)", () => {
