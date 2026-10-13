@@ -44,8 +44,8 @@ classification; it no longer implements a delivery broker.
   files, or state files.
 - V1 rows and numeric snapshots are not automatically migrated, archived, or
   attributed to v2 turns. Unsupported state is not silently rewritten: a
-  mutation encountering a removed state field or old delivery intent fails
-  closed and preserves the file bytes.
+  mutation encountering a removed state field or unsupported delivery intent
+  fails closed and preserves the file bytes.
 - Users who need to inspect legacy data should retain a copy and run the last
   release that supported it. The current runtime does not provide an importer or
   migration tool.
@@ -55,12 +55,17 @@ classification; it no longer implements a delivery broker.
 
 ## Delivery remains a separate concern
 
-Protocol-v1 artifact parsing and old completion delivery had separate runtime
-paths and are both removed in this breaking change. New delivery is coordinated:
-completion entries, each/group barriers, bounded hidden manifests, and manual
-consumption receipts remain authoritative. Persisted intents using the removed
-`mode`, `triggerTurn`, or `dispatchAttempted` format are not upgraded to the new
-schema. Queue overflow fails explicitly so the source artifact can be replayed.
+Protocol-v1 artifact parsing and pre-coordinator completion delivery had
+separate runtime paths and are both removed in this breaking change. New
+delivery is coordinated: completion entries, each/group barriers, bounded
+hidden manifests, and manual consumption receipts remain authoritative. A
+queued intent is replayable only when it already has a valid `each` or `group`
+completion policy. Older `mode` and `triggerTurn` routing metadata on such a
+coordinated intent is ignored and removed from the in-memory normalized form;
+it does not restore the old broker or trigger behavior. Uncoordinated intents
+without a completion policy and intents with `dispatchAttempted` are rejected,
+and state mutations preserve their file bytes. Queue overflow fails explicitly
+so the source artifact can be replayed.
 
 See [issue #42](https://github.com/lmn451/pi-subagentura/issues/42) for the
 original staged proposal and rationale.

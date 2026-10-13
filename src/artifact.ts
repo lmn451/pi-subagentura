@@ -1784,8 +1784,8 @@ function normalizeV2StatePayload(
         return null;
       }
       const pendingDeliveries = Array.isArray(entry.pendingDeliveries)
-        ? entry.pendingDeliveries
-            .flatMap((intent): PersistedDeliveryIntent[] => {
+        ? entry.pendingDeliveries.flatMap(
+            (intent): PersistedDeliveryIntent[] => {
               if (!intent || typeof intent !== "object") return [];
               const rawIntent = intent as unknown as Record<string, unknown>;
               const intentGroupId =
@@ -1868,7 +1868,8 @@ function normalizeV2StatePayload(
                   state: "queued",
                 },
               ];
-            })
+            },
+          )
         : [];
       if (
         Array.isArray(entry.pendingDeliveries) &&
