@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.5] - 2026-10-14
+
 ### Added
 
 - Added opt-in local diagnostics for unknown mux liveness, logged once per
@@ -331,7 +333,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.2...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...HEAD
+[3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
 [3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
 [3.6.1]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...v3.6.0
