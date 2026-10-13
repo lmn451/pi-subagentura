@@ -49,6 +49,7 @@ import {
   writeOutput,
   withInteractiveStateLock,
   updateInteractiveStates,
+  updateInteractiveState,
   updatePersistedTelemetrySession,
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
@@ -1524,6 +1525,50 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)).toBeNull();
     expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
     expect(readFileSync(file)).toEqual(before);
+  });
+
+  it("retains coordinated queued deliveries with obsolete routing fields", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            pendingDeliveries: [
+              {
+                deliveryId: "delivery-a",
+                subagentId: SAMPLE.id,
+                turnId: "turn-a",
+                eventId: "event-a",
+                mode: "notify",
+                triggerTurn: false,
+                status: "done",
+                artifactDir: SAMPLE.artifactDir,
+                completionPolicy: "each",
+                state: "queued",
+              },
+            ],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(loadInteractiveStates(root)?.states[SAMPLE.id]?.pendingDeliveries)
+      .toMatchObject([{ deliveryId: "delivery-a", completionPolicy: "each" }]);
+    updateInteractiveState(root, SAMPLE.id, (state) => {
+      state.eventByteCursor = 17;
+    });
+    expect(loadInteractiveStates(root)?.states[SAMPLE.id]).toMatchObject({
+      eventByteCursor: 17,
+      pendingDeliveries: [
+        { deliveryId: "delivery-a", completionPolicy: "each", state: "queued" },
+      ],
+    });
   });
 
   describe("hasPersistedTelemetryField", () => {

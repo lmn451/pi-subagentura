@@ -1602,8 +1602,6 @@ function hasRemovedInteractiveStateFields(
       }
       const delivery = intent as Record<string, unknown>;
       if (
-        "mode" in delivery ||
-        "triggerTurn" in delivery ||
         delivery.state === "dispatchAttempted" ||
         (delivery.completionPolicy !== "each" &&
           delivery.completionPolicy !== "group")
@@ -1789,8 +1787,6 @@ function normalizeV2StatePayload(
                   : undefined;
               const intentPolicy = rawIntent.completionPolicy;
               if (
-                "mode" in rawIntent ||
-                "triggerTurn" in rawIntent ||
                 "dispatchAttempted" in rawIntent ||
                 typeof rawIntent.deliveryId !== "string" ||
                 rawIntent.deliveryId.length === 0 ||
