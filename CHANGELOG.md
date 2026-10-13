@@ -23,12 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
 
-### Deprecated
+### Changed
 
-- Documented the planned v4 removal of interactive protocol-v1 event/state
-  compatibility. Existing v1 artifacts and state remain readable in v3; no data
-  is migrated or deleted by this documentation change. See
-  [the compatibility inventory](docs/protocol-v1-compatibility.md).
+- Breaking: make the interactive runtime protocol-v2-only. Remove v1 event/state
+  migration, synthetic identities, numeric snapshot readers, and child session-log
+  tailing. Existing legacy files are not deleted or rewritten, but this runtime no
+  longer reads them and does not provide migration tooling.
+- Breaking: remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
+  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
+  now uses the coordinated each/group protocol only.
+- Remove the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 

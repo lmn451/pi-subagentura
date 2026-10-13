@@ -56,10 +56,7 @@ function normalizeWorkflowCompletionPolicy(
   value: WorkflowJobTelemetryOptions["completionPolicy"] | undefined,
   fallback: TelemetryCompletionPolicy,
 ): TelemetryCompletionPolicy {
-  return value === "inline" ||
-    value === "each" ||
-    value === "group" ||
-    value === "legacy"
+  return value === "inline" || value === "each" || value === "group"
     ? value
     : fallback;
 }
@@ -280,22 +277,16 @@ export interface WorkflowJobState {
    * get_workflow_result collection releases this protection.
    */
   resultRetrieved?: boolean;
-  /** Completion notification callback bound to the current parent session. */
-  completionNotification?: (job: WorkflowJobState) => boolean | void;
-  /** Set only after the completion callback reports a successful delivery. */
-  completionNotificationDelivered?: boolean;
+  /** Terminal callback bound to the parent session. */
+  completionNotification?: (job: WorkflowJobState) => void;
   /** Set during parent shutdown so late settlement cannot notify a replacement session. */
   suppressCompletionNotification?: boolean;
   /** Receipts captured by nested agents during workflow cancellation. */
   cancellationSnapshots?: CancellationSnapshotReceipt[];
   /** Active runner lifecycles that must drain before cancellation receipts are final. */
   activeAgentRuns?: Set<Promise<void>>;
-  /** Set when notification attempts are exhausted. Prevents re-logging. */
-  _notificationExhausted?: boolean;
-  /** Synchronous reentrant guard — set while the delivery callback is in flight. */
-  _notificationInFlight?: boolean;
-  /** Number of successful delivery attempts. Only increments on success. */
-  notificationAttempt?: number;
+  /** Guards terminal callback invocation against duplicate settlement paths. */
+  terminalCallbackDelivered?: boolean;
   /** Parent session lifecycle that owns this workflow job. */
   parentSessionOwner?: SessionOwnerToken;
   /** Guards the aggregate terminal event against reentrant settlement paths. */
@@ -333,9 +324,6 @@ export const workflowJobRegistry = g.__piSubagenturaWorkflowJobs as Map<
 >;
 
 export const MAX_WORKFLOW_JOBS = 100;
-
-/** Maximum notification delivery attempts before giving up. */
-export const MAX_WORKFLOW_NOTIFICATION_ATTEMPTS = 5;
 
 export function workflowJobBelongsToOwner(
   job: WorkflowJobState,
@@ -432,7 +420,6 @@ export function cancelWorkflowJob(
   } else {
     normalizeCancelledWorkflowState(job);
   }
-  invokeWorkflowCompletionHook(job);
 }
 
 /** Roll back a just-created workflow whose completion registration failed. */
@@ -491,7 +478,7 @@ export function startWorkflowJob(
     | StartWorkflowJobOptions
     | ((workflowId: string) => StartWorkflowJobOptions),
   startedAt?: number,
-  onComplete?: (job: WorkflowJobState) => boolean | void,
+  onTerminal?: (job: WorkflowJobState) => void,
   owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
@@ -539,7 +526,7 @@ export function startWorkflowJob(
   );
   const defaultAsync = executionMode === "async";
   const defaultCompletionPolicy: TelemetryCompletionPolicy = defaultAsync
-    ? "legacy"
+    ? "each"
     : "inline";
   const telemetryAsync =
     typeof telemetryOptions?.async === "boolean"
@@ -581,8 +568,8 @@ export function startWorkflowJob(
       agentRecordsOmitted: 0,
       runningCount: 0,
     },
-    completionNotification: onComplete,
-    completionNotificationDelivered: false,
+    completionNotification: onTerminal,
+    terminalCallbackDelivered: false,
     cancellationSnapshots: [],
     activeAgentRuns: new Set(),
     parentSessionOwner,
@@ -685,7 +672,7 @@ export function invokeWorkflowCompletionHook(job: WorkflowJobState): void {
   const callback = job.completionNotification;
   if (
     !callback ||
-    job.completionNotificationDelivered ||
+    job.terminalCallbackDelivered ||
     job.suppressCompletionNotification
   ) {
     return;
@@ -693,57 +680,14 @@ export function invokeWorkflowCompletionHook(job: WorkflowJobState): void {
   if (job.parentSessionOwner && !isSessionOwnerLive(job.parentSessionOwner)) {
     return;
   }
-  // Already exhausted — no-op, no increment, no log.
-  if (job._notificationExhausted) return;
-  // Synchronous reentrant guard: prevents recursive retry from
-  // calling the same callback while it is still on the call stack.
-  if (job._notificationInFlight) return;
-  job._notificationInFlight = true;
+  job.terminalCallbackDelivered = true;
   try {
-    // Increment on every invocation (including throws) for truthful total count.
-    job.notificationAttempt = (job.notificationAttempt ?? 0) + 1;
-    const result = callback(job);
-    // Only mark delivered on success; throw goes to catch.
-    if (result !== false) {
-      job.completionNotificationDelivered = true;
-    }
-    // Mark exhausted only if the callback explicitly returned false.
-    if (
-      result === false &&
-      job.notificationAttempt >= MAX_WORKFLOW_NOTIFICATION_ATTEMPTS
-    ) {
-      job._notificationExhausted = true;
-      debugLog("warn", "workflow_notification_exhausted", {
-        workflowId: job.id,
-        attempts: job.notificationAttempt,
-      });
-    }
+    callback(job);
   } catch (err) {
-    debugLog("warn", "workflow_completion_hook_failed", {
+    debugLog("warn", "workflow_completion_callback_failed", {
       workflowId: job.id,
-      attempt: job.notificationAttempt,
       error: err instanceof Error ? err.message : String(err),
     });
-    // Mark exhausted after the MAXth failed invocation.
-    if ((job.notificationAttempt ?? 0) >= MAX_WORKFLOW_NOTIFICATION_ATTEMPTS) {
-      job._notificationExhausted = true;
-      debugLog("warn", "workflow_notification_exhausted", {
-        workflowId: job.id,
-        attempts: job.notificationAttempt,
-      });
-    }
-  } finally {
-    job._notificationInFlight = false;
-  }
-}
-
-/** Retry terminal workflow notifications that failed in this parent session. */
-export function retryPendingWorkflowNotifications(
-  owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
-): void {
-  for (const job of workflowJobsForOwner(owner)) {
-    if (job.status === "running") continue;
-    invokeWorkflowCompletionHook(job);
   }
 }
 

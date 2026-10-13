@@ -155,7 +155,6 @@ describe("Orchestratorv2 compact agent projection", () => {
     const state = runtimeState(CHILD_A, {
       name: "API owner",
       task: `  Review\n the API   ${"x".repeat(600)} ${secret}`,
-      lastStopText: secret,
       lastToolSummary: secret,
     });
 

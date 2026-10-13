@@ -92,41 +92,25 @@ export interface CompletionRecord {
 export interface CompletionPolicyParams {
   completionPolicy?: CompletionPolicy;
   completionGroupId?: string;
-  notifyOnComplete?: unknown;
-  triggerTurnOnComplete?: unknown;
 }
 
 export interface ResolvedCompletionPolicy {
-  policy?: CompletionPolicy;
+  policy: CompletionPolicy;
   groupId?: string;
-  legacy: boolean;
 }
 
 export function resolveCompletionPolicy(
   params: CompletionPolicyParams,
 ): ResolvedCompletionPolicy {
-  const hasLegacyFields =
-    params.notifyOnComplete !== undefined ||
-    params.triggerTurnOnComplete !== undefined;
-  if (
-    hasLegacyFields &&
-    (params.completionPolicy !== undefined ||
-      params.completionGroupId !== undefined)
-  ) {
-    throw new Error(
-      "Deprecated notifyOnComplete or triggerTurnOnComplete cannot be combined with completionPolicy or completionGroupId",
-    );
-  }
-  if (hasLegacyFields) return { policy: "each", legacy: false };
   const policy = params.completionPolicy ?? "each";
   if (policy === "each") {
     if (params.completionGroupId !== undefined) {
       throw new Error('completionGroupId requires completionPolicy="group"');
     }
-    return { policy, legacy: false };
+    return { policy };
   }
   const groupId = normalizeGroupId(params.completionGroupId);
-  return { policy, groupId, legacy: false };
+  return { policy, groupId };
 }
 
 interface CompletionConsumptionBase {

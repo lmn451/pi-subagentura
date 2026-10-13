@@ -8,7 +8,6 @@ import {
   getWorkflowJobForActiveSession,
   getWorkflowJobForOwner,
   getRunningWorkflowCount,
-  retryPendingWorkflowNotifications,
   startWorkflowJob,
   workflowJobBelongsToOwner,
   workflowJobRegistry,
@@ -37,7 +36,6 @@ function context(id: number, generation: number): SessionScope {
     pi: {} as never,
     parentStreaming: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
   };
 }
@@ -94,7 +92,6 @@ describe("workflow parent session ownership", () => {
       pi: {} as never,
       parentStreaming: false,
       inProcessJobs: new Map(),
-      pendingInProcessDeliveries: [],
       interactiveStates: new Map(),
     });
 
@@ -110,11 +107,9 @@ describe("workflow parent session ownership", () => {
     expect(workflow.suppressCompletionNotification).toBe(true);
     expect(workflowJobRegistry.has(workflow.id)).toBe(false);
   });
-  it("records cancellation evidence and invokes the completion hook once", () => {
+  it("records cancellation evidence and aborts exactly once", () => {
     const workflow = makeJob("cancel", "running", owner(6, 1));
     workflow.parentSessionOwner = undefined;
-    const onComplete = vi.fn();
-    workflow.completionNotification = onComplete;
     const abort = vi.spyOn(workflow.abort, "abort");
 
     cancelWorkflowJob(workflow, "explicit_cancel");
@@ -125,7 +120,6 @@ describe("workflow parent session ownership", () => {
     expect(workflow.completedAt).toEqual(expect.any(Number));
     expect(workflow.snapshot.runningCount).toBe(0);
     expect(abort).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
   it("uses the requested terminal reason when cleaning up workflow jobs", () => {
@@ -210,10 +204,10 @@ describe("workflow parent session ownership", () => {
     expect(started.parentSessionOwner).toEqual(activeOwner);
   });
 
-  it("suppresses late completion notifications after the parent generation changes", async () => {
+  it("suppresses terminal callbacks after the parent generation changes", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const onComplete = vi.fn();
+    const onTerminal = vi.fn();
     setLegacyActiveSessionRefs(context(3, 1));
     const job = startWorkflowJob(
       "late-owner",
@@ -225,16 +219,13 @@ describe("workflow parent session ownership", () => {
         },
       },
       undefined,
-      onComplete,
+      onTerminal,
     );
-
     setLegacyActiveSessionRefs(context(3, 2));
     release();
     await job.promise;
-    retryPendingWorkflowNotifications();
-
-    expect(onComplete).not.toHaveBeenCalled();
-    expect(job.completionNotificationDelivered).toBe(false);
+    expect(onTerminal).not.toHaveBeenCalled();
+    expect(job.terminalCallbackDelivered).toBe(false);
   });
 
   it("lets captured A helpers access A while B is active, and blocks B from A", () => {

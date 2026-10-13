@@ -48,7 +48,6 @@
     "skills/ralplan",
     "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
-    "src/ndjson.d.ts",
     "src/notifications.ts",
     "src/rendering.ts",
     "src/schemas.ts",
@@ -172,7 +171,6 @@
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
-    "is-path-inside": "^4.0.0",
-    "ndjson": "^2.0.0"
+    "is-path-inside": "^4.0.0"
   }
 }

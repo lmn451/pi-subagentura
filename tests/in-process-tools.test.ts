@@ -18,7 +18,6 @@ const {
   mockFormatUsage,
   mockBuildLiveUpdate,
   mockScheduleJobCleanup,
-  mockDeliverNotification,
   mockPublishCompletion,
   mockRegisterCompletionMember,
 } = vi.hoisted(() => ({
@@ -27,7 +26,6 @@ const {
   mockFormatUsage: vi.fn(),
   mockBuildLiveUpdate: vi.fn(),
   mockScheduleJobCleanup: vi.fn(),
-  mockDeliverNotification: vi.fn(),
   mockPublishCompletion: vi.fn(),
   mockRegisterCompletionMember: vi.fn(),
 }));
@@ -50,14 +48,6 @@ vi.mock("../src/helpers", async (importOriginal) => {
     formatUsage: mockFormatUsage,
     buildLiveUpdate: mockBuildLiveUpdate,
     scheduleJobCleanup: mockScheduleJobCleanup,
-  };
-});
-
-vi.mock("../src/notifications", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/notifications")>();
-  return {
-    ...actual,
-    deliverNotification: mockDeliverNotification,
   };
 });
 
@@ -297,7 +287,7 @@ afterEach(() => {
   clearSessionScopes();
 });
 describe("peer session scope isolation", () => {
-  it("keeps an A spawn owned by A after B becomes the legacy active session", async () => {
+  it("keeps an A spawn owned by A after B becomes active", async () => {
     const a = setupScopedExtension(801);
     const b = setupScopedExtension(802);
     setLegacyActiveSessionRefs(b.scope);
@@ -329,10 +319,6 @@ describe("peer session scope isolation", () => {
     expect(result.details).toMatchObject({ status: "started", jobId: "job-a" });
     expect(a.scope.inProcessJobs.has("job-a")).toBe(true);
     expect(b.scope.inProcessJobs.has("job-a")).toBe(false);
-    expect(jobRegistry.get("job-a")?.deliveryOwner).toMatchObject({
-      sessionScopeId: ownerA.id,
-      sessionScopeGeneration: ownerA.generation,
-    });
     expect(mockStartSubagentJob).toHaveBeenCalledWith(
       expect.objectContaining({ owner: ownerA }),
     );
@@ -553,7 +539,7 @@ describe("subagent_with_context tool", () => {
     const ctx = mockCtx();
     const result = await toolDef.execute(
       "call-1",
-      { task: "do something" },
+      { task: "do something", async: false },
       undefined,
       undefined,
       ctx,
@@ -666,7 +652,6 @@ describe("subagent_with_context tool", () => {
     expect(props.model).toBeDefined();
     expect(props.cwd).toBeDefined();
     expect(props.async).toBeDefined();
-    expect(props.notifyOnComplete).toBeDefined();
     expect(props.maxAge).toBeDefined();
   });
 });
@@ -735,8 +720,10 @@ describe("subagent_isolated tool", () => {
   });
 
   it("defaults to async (background) when the flag is omitted", async () => {
+    const scoped = setupScopedExtension(715);
+    const scopedTool = getToolDef(scoped.api, "subagent_isolated");
     const ctx = mockCtx();
-    const result = await toolDef.execute(
+    const result = await scopedTool.execute(
       "call-async-default",
       { task: "analyze code" },
       undefined,
@@ -754,17 +741,18 @@ describe("subagent_isolated tool", () => {
   });
 
   it("reports retained-job capacity instead of session shutdown", async () => {
+    const scoped = setupScopedExtension(718);
+    const scopedTool = getToolDef(scoped.api, "subagent_isolated");
     for (let index = 0; index < MAX_REGISTRY_SIZE; index++) {
-      jobRegistry.set(
-        `running-capacity-${index}`,
-        createJobState({
-          id: `running-capacity-${index}`,
-          status: "running",
-        }),
-      );
+      const job = createJobState({
+        id: `running-capacity-${index}`,
+        status: "running",
+      });
+      scoped.scope.inProcessJobs.set(job.id, job);
+      jobRegistry.set(job.id, job);
     }
 
-    const result = await toolDef.execute(
+    const result = await scopedTool.execute(
       "call-at-capacity",
       { task: "analyze code" },
       undefined,
@@ -779,11 +767,13 @@ describe("subagent_isolated tool", () => {
   });
 
   it("refuses to spawn once the orchestration depth cap is reached", async () => {
+    const scoped = setupScopedExtension(720);
+    const scopedTool = getToolDef(scoped.api, "subagent_isolated");
     const ctx = mockCtx();
     const result = await withOrchestrationContext(
       { ownerJobId: "deep-parent", depth: DEFAULT_MAX_ORCHESTRATION_DEPTH },
       () =>
-        toolDef.execute(
+        scopedTool.execute(
           "call-too-deep",
           { task: "spawn yet another reviewer" },
           undefined,
@@ -913,7 +903,6 @@ describe("subagent_isolated tool", () => {
     expect(props.model).toBeDefined();
     expect(props.cwd).toBeDefined();
     expect(props.async).toBeDefined();
-    expect(props.notifyOnComplete).toBeDefined();
     expect(props.maxAge).toBeDefined();
   });
 });
@@ -2540,7 +2529,8 @@ describe("subagent_with_context async path", () => {
   let toolDef: ReturnType<typeof getToolDef>;
 
   beforeEach(() => {
-    api = setupExtension();
+    const scoped = setupScopedExtension(803);
+    api = scoped.api;
     toolDef = getToolDef(api, "subagent_with_context");
   });
 
@@ -2554,7 +2544,7 @@ describe("subagent_with_context async path", () => {
       ctx,
     );
     expect(result.content[0].text).toBe("No conversation history to inherit.");
-    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
   });
 
   it("starts async job with serialized context when branch has messages", async () => {
@@ -2608,38 +2598,26 @@ describe("subagent_with_context async path", () => {
 
     expect(jobRegistry.has("default-job")).toBe(true);
     expect(jobRegistry.get("default-job")).toMatchObject({
-      completionPolicy: undefined,
-      notifyOnComplete: "inject",
+      completionPolicy: "each",
     });
   });
 
-  it("keeps legacy notifyOnComplete on the direct fallback without a session scope", async () => {
-    mockConvertToLlm.mockReturnValue([{ role: "user", content: "Hi" }]);
-    mockSerializeConversation.mockReturnValue("Hi");
-
-    const ctx = mockCtx({
-      sessionManager: {
-        getBranch: vi
-          .fn()
-          .mockReturnValue([
-            { type: "message", message: { role: "user", content: "Hi" } },
-          ]),
-        getSessionId: vi.fn().mockReturnValue("test-session"),
-      },
-    });
-
-    await toolDef.execute(
+  it("rejects async spawn without a live session owner", async () => {
+    const unscopedTool = getToolDef(setupExtension(), "subagent_with_context");
+    clearSessionScopes();
+    const result = await unscopedTool.execute(
       "call-1",
-      { task: "test", async: true, notifyOnComplete: "notify" },
+      { task: "test", async: true },
       undefined,
       undefined,
-      ctx,
+      mockCtx(),
     );
 
-    expect(jobRegistry.get("default-job")!.notifyOnComplete).toBe("notify");
-    expect(jobRegistry.get("default-job")!.completionPolicy).toBeUndefined();
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(mockDeliverNotification).toHaveBeenCalledOnce();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain(
+      "require an active parent session for coordinated completion",
+    );
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
   });
 
   it("includes modelWarning in async response when present", async () => {
@@ -2724,7 +2702,6 @@ describe("subagent_with_context async path", () => {
       }),
       sessionOwner(scoped.scope),
     );
-    expect(mockDeliverNotification).not.toHaveBeenCalled();
   });
 
   it("rolls back a prepared isolated job when completion registration fails", async () => {
@@ -2795,8 +2772,10 @@ describe("subagent_with_context async path", () => {
     resolveJob(defaultSuccessResult);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    expect(mockDeliverNotification).not.toHaveBeenCalled();
-    expect(mockPublishCompletion).not.toHaveBeenCalled();
+    expect(mockPublishCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "cancelled", policy: "each" }),
+      expect.anything(),
+    );
   });
 
   it("publishes a coordinated completion on job promise rejection", async () => {
@@ -2849,7 +2828,6 @@ describe("subagent_with_context async path", () => {
       }),
       sessionOwner(scoped.scope),
     );
-    expect(mockDeliverNotification).not.toHaveBeenCalled();
   });
 });
 
@@ -2871,7 +2849,8 @@ describe("async rejection settlement", () => {
       jobPromise: deferred,
     });
 
-    const api = setupExtension();
+    const scoped = setupScopedExtension(827);
+    const api = scoped.api;
     const ctx = mockCtx({
       sessionManager: {
         getBranch: vi
@@ -2885,7 +2864,7 @@ describe("async rejection settlement", () => {
     const startTool = getToolDef(api, "subagent_with_context");
     await startTool.execute(
       "call-1",
-      { task: "test", async: true, notifyOnComplete: "inject" },
+      { task: "test", async: true },
       undefined,
       undefined,
       ctx,
@@ -2907,13 +2886,17 @@ describe("async rejection settlement", () => {
       "default-job",
       false,
       undefined,
-      undefined,
+      sessionOwner(scoped.scope),
     );
-    expect(mockDeliverNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "default-job", status: "error" }),
-      expect.objectContaining({ isError: true, errorMessage: "context crash" }),
+    expect(mockPublishCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "in-process",
+        sourceId: "default-job",
+        status: "error",
+        policy: "each",
+      }),
+      expect.anything(),
     );
-    expect(mockPublishCompletion).not.toHaveBeenCalled();
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(
       "subagentura-running",
       undefined,
@@ -2952,11 +2935,12 @@ describe("async rejection settlement", () => {
       jobPromise: deferred,
     });
 
-    const api = setupExtension();
+    const scoped = setupScopedExtension(828);
+    const api = scoped.api;
     const ctx = mockCtx();
     await getToolDef(api, "subagent_isolated").execute(
       "call-1",
-      { task: "test", async: true, notifyOnComplete: "notify" },
+      { task: "test", async: true },
       undefined,
       undefined,
       ctx,
@@ -2978,16 +2962,17 @@ describe("async rejection settlement", () => {
       "default-job",
       false,
       undefined,
-      undefined,
+      sessionOwner(scoped.scope),
     );
-    expect(mockDeliverNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "default-job", status: "error" }),
+    expect(mockPublishCompletion).toHaveBeenCalledWith(
       expect.objectContaining({
-        isError: true,
-        errorMessage: "isolated crash",
+        source: "in-process",
+        sourceId: "default-job",
+        status: "error",
+        policy: "each",
       }),
+      expect.anything(),
     );
-    expect(mockPublishCompletion).not.toHaveBeenCalled();
 
     const result = await getToolDef(api, "get_subagent_result").execute(
       "result-call",
@@ -3012,11 +2997,12 @@ describe("async rejection settlement", () => {
       jobPromise: deferred,
     });
 
-    const api = setupExtension();
+    const scoped = setupScopedExtension(829);
+    const api = scoped.api;
     const ctx = mockCtx();
     await getToolDef(api, "subagent_isolated").execute(
       "call-1",
-      { task: "test", async: true, notifyOnComplete: "inject" },
+      { task: "test", async: true },
       undefined,
       undefined,
       ctx,
@@ -3025,10 +3011,8 @@ describe("async rejection settlement", () => {
 
     rejectJob(new Error("cancelled crash"));
     await flushPromiseHandlers();
-
     const job = jobRegistry.get("default-job")!;
     expect(job.status).toBe("cancelled");
     expect(job.result).toBeUndefined();
-    expect(mockDeliverNotification).not.toHaveBeenCalled();
   });
 });
