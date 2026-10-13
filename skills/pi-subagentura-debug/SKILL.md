@@ -1,5 +1,5 @@
 ---
-name: subagent-debug
+name: pi-subagentura-debug
 description: Diagnose pi-subagentura sub-agent launches, tool calls, missing working directories, multiplexer panes, and artifact delivery. Use when behavior is unexpected or a sub-agent starts then exits.
 level: beginner
 ---
@@ -7,6 +7,25 @@ level: beginner
 # Debugging pi-subagentura
 
 Use this skill when a pi-subagentura tool behaves unexpectedly, an interactive child exits immediately, or completion/artifact delivery is unclear. Gather the exact tool name, arguments, visible error, Pi version, and whether the call was in-process or interactive before changing settings.
+
+## Inspect arguments and the loaded extension
+
+Press **Ctrl+O** (Pi's default tool-output expansion shortcut) to show the
+**Parameters:** JSON block for pi-subagentura calls. It shows the supplied
+arguments, not omitted schema defaults, and does not require debug logging.
+
+If an expanded call still shows only its summary, check the enabled extension
+source with `pi list` and `pi config`. Editing a checkout does not update a
+separately installed npm package. Load the checkout and disable the npm
+extension before reloading; collect running in-process/workflow results first
+because `/reload` cancels those jobs.
+
+This skill and the expanded parameter/logging additions are unreleased branch
+features, not features shipped in npm version 3.6.4. The branch packages this
+skill under `skills/pi-subagentura-debug/`, but its current `pi` manifest declares
+only the extension. A plain package source does not automatically expose the
+skill; load it explicitly with `pi --skill ./skills/pi-subagentura-debug` from the
+checkout, then use `/skill:pi-subagentura-debug`.
 
 ## Enable local debug logs
 
@@ -23,9 +42,16 @@ Logs are appended to `debug-YYYY-MM-DD.jsonl`. Find the relevant records with:
 jq -c 'select(.event == "extension_tool_call" or .event == "tool_start")' .pi-debug/debug-*.jsonl
 ```
 
-- `extension_tool_call` records the name and parameters for a pi-subagentura tool called by the parent Pi agent.
-- `tool_start` records the name and parameters for tools called inside a sub-agent.
+- `extension_tool_call` records `toolName` and full `args` for pi-subagentura tool executions in the Pi process where the extension is loaded.
+- `tool_start` records `toolName` and full `args` for tools invoked by **in-process** sub-agents.
 - Other events record lifecycle and polling diagnostics; use their `event` and `timestamp` fields to follow a sequence.
+
+For **interactive children**, set `SUBAGENT_DEBUG_LOG_DIR` in the multiplexer
+session/server or the child's shell environment before spawning. The generated
+launch script does not explicitly export it; do not assume an inline parent
+setting reaches a new pane. Use an absolute path because the child's working
+directory may differ. This enables local extension diagnostics in that child,
+not logging of every built-in tool it invokes.
 
 These logs can contain task/persona text, paths, and identifiers. Keep them local and private; redact them before sharing. They are local diagnostics, not anonymous telemetry.
 
