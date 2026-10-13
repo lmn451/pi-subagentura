@@ -1558,8 +1558,9 @@ describe("persisted interactive state helpers", () => {
       { mode: 0o600 },
     );
 
-    expect(loadInteractiveStates(root)?.states[SAMPLE.id]?.pendingDeliveries)
-      .toMatchObject([{ deliveryId: "delivery-a", completionPolicy: "each" }]);
+    expect(
+      loadInteractiveStates(root)?.states[SAMPLE.id]?.pendingDeliveries,
+    ).toMatchObject([{ deliveryId: "delivery-a", completionPolicy: "each" }]);
     updateInteractiveState(root, SAMPLE.id, (state) => {
       state.eventByteCursor = 17;
     });
@@ -1719,7 +1720,11 @@ describe("persisted interactive state helpers", () => {
           [SAMPLE.id]: {
             ...SAMPLE,
             pendingDeliveries: [
-              { deliveryId: "invalid", completionPolicy: "each", state: "queued" },
+              {
+                deliveryId: "invalid",
+                completionPolicy: "each",
+                state: "queued",
+              },
             ],
           },
         },
@@ -1759,13 +1764,13 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)).toBeNull();
     expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
     expect(readFileSync(file)).toEqual(before);
-    expect(() => updateInteractiveState(root, SAMPLE.id, () => undefined)).toThrow(
-      /state file/i,
-    );
+    expect(() =>
+      updateInteractiveState(root, SAMPLE.id, () => undefined),
+    ).toThrow(/state file/i);
     expect(readFileSync(file)).toEqual(before);
-    expect(() => updatePersistedTelemetrySession(root, "session-new", undefined)).toThrow(
-      /state file/i,
-    );
+    expect(() =>
+      updatePersistedTelemetrySession(root, "session-new", undefined),
+    ).toThrow(/state file/i);
     expect(readFileSync(file)).toEqual(before);
   });
 
