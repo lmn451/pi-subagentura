@@ -4,6 +4,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
+import { debugLog } from "./helpers";
 import { withOperationTelemetry } from "./telemetry-operations";
 
 export const TOOL_DEFAULT_GUIDANCE =
@@ -14,10 +15,20 @@ export function registerToolWithDefaultGuidance<
   TDetails = unknown,
   TState = any,
 >(pi: ExtensionAPI, tool: ToolDefinition<TParams, TDetails, TState>): void {
+  const executeWithTelemetry = withOperationTelemetry(
+    pi,
+    "tool",
+    tool.name,
+    tool.execute,
+    2,
+  );
   pi.registerTool({
     ...tool,
     description: `${tool.description}\n${TOOL_DEFAULT_GUIDANCE}`,
-    execute: withOperationTelemetry(pi, "tool", tool.name, tool.execute, 2),
+    execute(toolCallId, args, signal, onUpdate, ctx) {
+      debugLog("info", "extension_tool_call", { toolName: tool.name, args });
+      return executeWithTelemetry(toolCallId, args, signal, onUpdate, ctx);
+    },
     renderCall(args, theme, context) {
       const summary =
         tool.renderCall?.(args, theme, context) ??

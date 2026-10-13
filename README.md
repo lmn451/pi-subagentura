@@ -1245,9 +1245,12 @@ The attached release tarball is for manual download/auditing; Pi installs the pa
 
 ### Debug logging
 
-Set `SUBAGENT_DEBUG_LOG_DIR=/some/path` to write a JSONL trace of sub-agent lifecycle events to `debug-YYYY-MM-DD.jsonl` in that directory. Each line is a self-describing JSON object with `timestamp`, `level`, `event`, and event-specific fields.
+Set `SUBAGENT_DEBUG_LOG_DIR=/some/path` to write a JSONL trace to `debug-YYYY-MM-DD.jsonl` in that directory. Each line is a self-describing JSON object with `timestamp`, `level`, `event`, and event-specific fields.
 
-The `tool_start` event records the `toolName` and full `args` of every tool the sub-agent invokes — useful for replaying or auditing what a sub-agent did. Other events cover session creation, turns, message updates, prompts, and job completion.
+The `tool_start` event records the `toolName` and full `args` of every tool a sub-agent invokes.
+The `extension_tool_call` event records the name and full arguments for each pi-subagentura tool call.
+Interactive spawning validates that the requested `cwd` exists and is a directory before creating a pane.
+These logs can contain task or persona text. Keep the directory private and redact entries before sharing.
 
 Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is independent of anonymous telemetry, whose runtime-failure event keeps its existing closed schema. Probe timeout and polling behavior are unchanged.
 

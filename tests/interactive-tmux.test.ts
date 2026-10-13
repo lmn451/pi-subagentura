@@ -238,6 +238,39 @@ describe("interactive-tmux", () => {
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
+  it("rejects a missing child working directory before creating a pane", async () => {
+    const tmp = makeTmp();
+    const missingCwd = join(tmp, "missing-worktree");
+    process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+    process.env.TMUX = makeArgs().TMUX;
+    process.env.TMUX_PANE = "%9";
+    const calls: string[][] = [];
+    installMockExec((_file, args) => {
+      calls.push(args);
+      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+      if (args[0] === "display-message") return MOCK_LOCATION;
+      if (args[0] === "show-options") return "0\n";
+      return "";
+    });
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+
+    let thrown: unknown;
+    try {
+      mod.launchInteractiveSubagent({
+        name: "Missing cwd",
+        task: "should fail before pane creation",
+        cwd: missingCwd,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(String(thrown)).toMatch(/working directory does not exist/iu);
+    expect(calls.some((args) => args[0] === "new-window")).toBe(false);
+    expect(calls.some((args) => args[0] === "split-window")).toBe(false);
+  });
   it("keeps the parent state cwd separate from the child working cwd", async () => {
     const parentCwd = makeTmp();
     const childCwd = join(parentCwd, "child");
