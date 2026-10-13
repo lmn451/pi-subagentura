@@ -302,9 +302,6 @@ export function spawnFailureStage(
 
 export type JobStatus = "running" | "done" | "error" | "cancelled";
 
-/** Notification delivery mode for async subagent completion */
-export type NotifyOnComplete = "notify" | "inject";
-
 export interface JobDeliveryOwner {
   /** Pi API identity captured when the async job was spawned. */
   pi: ExtensionAPI;
@@ -329,18 +326,12 @@ export interface JobState {
   thinkingLevel?: ThinkingLevel;
   /** Anonymous telemetry context retained for post-shutdown result reads. */
   telemetry?: AgentTelemetryContext;
-  /** Deprecated legacy pointer/output delivery mode. */
-  notifyOnComplete?: NotifyOnComplete;
   /** Delivery owner captured at async spawn time. */
   deliveryOwner?: JobDeliveryOwner;
-  /** Deprecated legacy parent-turn trigger override. */
-  triggerTurnOnComplete?: boolean;
   /** Coordinated default: independent readiness or an explicit group barrier. */
   completionPolicy?: CompletionPolicy;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
-  /** At-most-once delivery guard */
-  notificationDelivered?: boolean;
   /** At-most-once durable publication into the completion coordinator. */
   completionPublished?: boolean;
   /** Set true by get_subagent_result to suppress redundant notification */

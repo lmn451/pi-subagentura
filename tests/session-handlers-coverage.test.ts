@@ -937,7 +937,6 @@ describe("session handler lifecycle callbacks", () => {
           sessionFile: state.sessionFile,
           parentSessionId: "session-a",
           eventByteCursor: eventLogEndOffset(art),
-          sessionByteCursor: 0,
           pendingDeliveries: [],
           deliveryReceipts: [],
           telemetry: {
@@ -1380,7 +1379,14 @@ describe("session handler lifecycle callbacks", () => {
       parentSessionId: string,
     ) => {
       const artifact = artifactPath(root, id);
-      appendEvent(artifact, { ts: 1, type: "started", status: "running" });
+      appendEvent(artifact, {
+        version: 2,
+        eventId: `start-${id}`,
+        turnId: `turn-${id}`,
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
       const state = {
         id,
         paneId: `%${id}`,

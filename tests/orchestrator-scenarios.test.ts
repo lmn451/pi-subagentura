@@ -155,8 +155,6 @@ function makeRuntimeState(
     selectPaneCommand: `tmux select-pane -t %${id.slice(0, 4)}`,
     launchScriptFile: join(params.parentCwd, "launch", `${id}.sh`),
     artifactDir: join(params.parentCwd, ".artifacts", id),
-    notifyOnComplete: params.notifyOnComplete,
-    triggerTurnOnComplete: params.triggerTurnOnComplete,
     completionPolicy: params.completionPolicy,
     completionGroupId: params.completionGroupId,
   };

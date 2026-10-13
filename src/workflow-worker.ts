@@ -7,7 +7,6 @@ import {
   eventLogEndOffset,
   isTurnTerminal,
   readEventBatch,
-  readOutput,
   readOutputForTurnId,
   type SubagentArtifact,
   type SubagentEvent,
@@ -989,8 +988,8 @@ function abortedInteractiveResult(usage: Usage): SubagentResult {
 
 /**
  * Await a process-backed sub-agent's owned terminal artifact event, then read the
- * matching immutable `outputs/<eventId>.md` snapshot by turnId. Mutable output.md
- * remains legacy/staging fallback only. Honors abort and dead-pane detection.
+ * matching immutable `outputs/<eventId>.md` snapshot by turnId. Honors abort and
+ * dead-pane detection.
  */
 export async function awaitInteractiveResult(
   state: InteractiveSubagentState,
@@ -1032,36 +1031,12 @@ export async function awaitInteractiveResult(
           requestCancellationOnce();
           return abortedInteractiveResult(usage);
         }
-        switch (terminal.type) {
-          case "completion":
-            switch (terminal.outcome) {
-              case "done":
-                return {
-                  isError: false,
-                  output:
-                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                  usage,
-                  ...(state.model !== undefined ? { model: state.model } : {}),
-                };
-              case "error":
-              case "cancelled":
-                return {
-                  isError: true,
-                  output:
-                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                  usage,
-                  errorMessage:
-                    terminal.errorMessage ??
-                    terminal.message ??
-                    `interactive sub-agent ${terminal.outcome}`,
-                };
-              default:
-                return assertNever(terminal.outcome);
-            }
+        switch (terminal.outcome) {
           case "done":
             return {
               isError: false,
-              output: readOutput(art) ?? "(no output)",
+              output:
+                readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
               usage,
               ...(state.model !== undefined ? { model: state.model } : {}),
             };
@@ -1069,13 +1044,16 @@ export async function awaitInteractiveResult(
           case "cancelled":
             return {
               isError: true,
-              output: readOutput(art) ?? "(no output)",
+              output:
+                readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
               usage,
               errorMessage:
-                terminal.message ?? `interactive sub-agent ${terminal.type}`,
+                terminal.errorMessage ??
+                terminal.message ??
+                `interactive sub-agent ${terminal.outcome}`,
             };
           default:
-            return assertNever(terminal);
+            return assertNever(terminal.outcome);
         }
       }
       // A dead pane is only confirmed by a successful probe. Probe failures are
@@ -1094,7 +1072,7 @@ export async function awaitInteractiveResult(
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
         });
         if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-          const output = readOutput(art) ?? "(no output)";
+          const output = "(no output)";
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
@@ -1115,7 +1093,7 @@ export async function awaitInteractiveResult(
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
         });
         if (muxProbeFailureTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-          const output = readOutput(art) ?? "(no output)";
+          const output = "(no output)";
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();

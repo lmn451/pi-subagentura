@@ -15,7 +15,6 @@ In particular, completion and result bytes reach humans and the parent model thr
 - a deterministic TUI-only completion entry excluded from LLM context;
 - one compact coordinated manifest containing result references;
 - explicit result or artifact retrieval;
-- an upgrade-recovered legacy custom message from persisted pre-coordinator state.
 
 The distinction is architectural, not cosmetic.
 A tmux, Zellij, or Herdr screen is not an interactive result store.
@@ -38,7 +37,6 @@ flowchart TB
   Session[session-handlers.ts]
   Coordinator[completion-coordinator.ts]
   Turn[completion-turn.ts]
-  Legacy[notifications.ts legacy broker]
   RouteTools[tools/orchestrator.ts]
   Routing[orchestrator-routing.ts]
 
@@ -73,8 +71,6 @@ flowchart TB
   InTools --> InKernel
   InTools --> InJobs
   InTools -->|coordinated terminal record| Coordinator
-  InTools -->|upgrade-recovered intent| Legacy
-  Legacy -->|legacy custom message| Parent
   InTools -->|sync result| Parent
 
   IntTools --> IntKernel
@@ -87,7 +83,6 @@ flowchart TB
   Poller --> IntJobs
   Poller --> Delivery
   Delivery -->|coordinated terminal record| Coordinator
-  Delivery -->|upgrade-recovered legacy intent| Parent
 
   WfTools --> WfJobs
   WfJobs --> Host
@@ -157,7 +152,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - `src/orchestrator-routing.ts` owns parent-branch authority records, untrusted project-cache projection, and confirmation-bound routing metadata.
 - `src/completion-coordinator.ts` owns per-session completion records, consumption receipts, `each`/named-group readiness, and compact manifest claims.
 - `src/completion-turn.ts` owns lower-level idle Orchestratorv2 wake transport, process-global run-bound wake state, bounded retries, and recovery.
-- `src/notifications.ts` owns only upgrade-recovery legacy in-process delivery queues and the aggregate queue.
+- `src/notifications.ts` owns shared output sanitization and v2 completion classification; it is not a delivery broker.
 - `src/session-handlers.ts` owns the one global poller handle and parent input/settlement integration.
 
 **How does every mode reach parent context?**
@@ -169,7 +164,6 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId` and waits for a sealed all-terminal group.
 - The coordinator attaches one ready manifest to pending human input or prepares one follow-up only after safe idleness. It passes that idle manifest to `sendCompletionTurn` with the actual parent streaming state; non-v2 falls through to native `sendMessage`, while idle Orchestratorv2 uses the synthetic user-wake transport.
 - Full output is not automatic by default, and successful manual retrieval consumes the matching record. Related group membership is explicit: same-turn launch and task text do not infer relatedness.
-- Deprecated `notifyOnComplete` / `triggerTurnOnComplete` inputs map to coordinated `each`; persisted pre-coordinator intents alone use the legacy broker.
 - Parent session ownership and generation fencing prevent delivery across session replacement.
 
 ---
@@ -181,7 +175,7 @@ Registration is mode-gated so a child process does not recursively expose the fu
 
 | Condition                           | Registration / behavior                                                                                                                                                             | Owner                                                                        |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Every activation                    | Register legacy `subagent-notify` rendering; coordinated entry renderers register with session handlers                                                                             | `src/subagent.ts`, `registerCompletionCoordinator`                           |
+| Every activation                    | Register coordinated completion entry renderers                                                                                                                                     | `src/subagent.ts`, `registerCompletionCoordinator`                           |
 | Every parent activation             | Register Pi session lifecycle callbacks                                                                                                                                             | `registerSessionHandlers`                                                    |
 | Normal parent with `--orchestrator` | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                      | `src/subagent.ts:default`                                                    |
 | Normal parent                       | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                  | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
@@ -194,7 +188,7 @@ Registration is mode-gated so a child process does not recursively expose the fu
 | human `input`                       | Mark the coordinator's human-priority fence before the next turn                                                                                                                    | `src/session-handlers.ts`, `completion-coordinator.ts`                       |
 | `before_agent_start`                | Mark the exact wake prompt, set the coordinator turn-start fence, and attach a ready manifest to the natural turn                                                                   | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
 | `agent_start`                       | Mark this parent as streaming                                                                                                                                                       | `src/session-handlers.ts`                                                    |
-| `agent_settled`                     | Settle the exact wake first; clear streaming; flush legacy paths; then settle coordinator readiness and dispatch remaining work                                                     | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| `agent_settled`                     | Settle the exact wake first; clear streaming; then settle coordinator readiness and dispatch remaining work                                                                         | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
 | `session_shutdown`                  | Clean owner state and retire scoped completions; clear coordinator and wake state; then fence generation, preserve or kill panes by reason, stop interval only after the last scope | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
 
 The child launch wrapper exports both `PI_SUBAGENTURA_CHILD=1` and `ARTIFACT_DIR`.
@@ -336,7 +330,7 @@ A live sample combines completed turns with the current partial assistant messag
 compact manifest claims.
 `src/completion-turn.ts` is the lower-level idle Orchestratorv2 transport and
 recovery layer; it preserves native non-v2 delivery.
-`src/notifications.ts` retains the upgrade-only legacy inject/pointer broker.
+`src/notifications.ts` provides shared output sanitization and v2 completion classification; it does not broker delivery.
 
 ### 5.2 Context and model selection
 
@@ -547,10 +541,9 @@ Cancellation first preserves authority on disk, then tears down the process:
 1. optionally create a bounded cancellation snapshot;
 2. write `.cancelled` best-effort;
 3. append a parent-source cancelled completion;
-4. in legacy mode, acknowledge the synthetic delivery identity so it cannot be re-injected;
-5. mark live state cancelled;
-6. kill the recorded mux pane best-effort;
-7. let the wrapper's `EXIT` trap append `process_exited`.
+4. mark live state cancelled;
+5. kill the recorded mux pane best-effort;
+6. let the wrapper's `EXIT` trap append `process_exited`.
 
 The filesystem action precedes pane kill so a crash between those operations still leaves cancellation truth.
 
@@ -564,7 +557,7 @@ For an interactive child `<id>`:
 
 ```text
 <session-root>/subagentura/<cwd-label-random>/
-├── <timestamp>-<id>.jsonl              child Pi session log
+├── <timestamp>-<id>.jsonl              child Pi session log (usage/accounting)
 └── artifacts/<id>/                     directory mode 0700
     ├── <label>-prompt.md                initial task, mode 0600
     ├── <label>-system.md                persona + mandatory protocol, 0600
@@ -575,7 +568,6 @@ For an interactive child `<id>`:
     ├── events.ndjson                    append-only lifecycle/activity, 0600
     ├── outputs/
     │   └── <eventId>.md                 immutable v2 snapshot, 0600
-    ├── output-N.md                      legacy numeric snapshot
     ├── .cancelled                       parent cancellation marker
     └── .completion-<turn-hash>.lock/    transient exactly-once lock
 ```
@@ -591,11 +583,9 @@ Project recovery state is separate:
 Lineage manifests live under the Pi session directory and are authority only for descendant discovery/cancellation topology.
 They are not lifecycle or delivery authority.
 
-### 7.2 v1 and v2 records
+### 7.2 Protocol-v2 records only
 
-Legacy records have no `version` and use `started`, `tool_activity`, `done`, `error`, or `cancelled` with numeric `ts`.
-The wrapper still emits legacy `started`, so a valid log can contain both protocol generations.
-On read, legacy events receive stable synthetic identities derived from physical byte offset and raw bytes.
+The runtime accepts version-2 artifact events only. Unversioned protocol-v1 and older records are not normalized or assigned synthetic identities. Existing unsupported records and files are left untouched; no conversion is performed.
 
 Every v2 record contains:
 
@@ -629,7 +619,7 @@ Both the in-package writer and generated `cli.mjs`:
 
 When snapshot capture succeeds, it writes `outputs/<eventId>.md` and the completion records path, byte length, and SHA-256.
 A completion may instead carry `outputError`, or no output descriptor when staging output is absent.
-A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes or using explicit legacy injection.
+A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes.
 
 `output.md` is mutable staging and is never historical proof.
 For a completion with captured output, `eventId` names the physical snapshot; `turnId` selects the logical turn.
@@ -673,9 +663,9 @@ sequenceDiagram
   participant S as session-handlers timer
   participant P as artifact-poller
   participant M as mux backend
-  participant A as artifact and session files
+  participant A as artifact files
   participant D as durable delivery queue
-  participant B as delivery broker
+  participant C as completion coordinator
   participant Parent as parent Pi session
 
   S->>P: tick(owner id + generation)
@@ -683,16 +673,15 @@ sequenceDiagram
   P->>P: resolve live owner and owned states
   P->>M: probe all pane liveness in parallel
   M-->>P: complete liveness batch
-  P->>A: tail child session JSONL per state
-  P->>A: read events by byte cursor
+  P->>A: read v2 events by byte cursor
   loop physical records
     P->>P: fold lifecycle in file order
     P->>D: enqueue completion intent durably
   end
   P->>A: persist cursors, fold, queue, receipts
-  P->>B: flush owner deliveries
-  B->>Parent: publish coordinated record or legacy message
-  B->>A: persist/reconcile interactive identity
+  P->>C: publish coordinated completion
+  C->>Parent: TUI notice and bounded manifest
+  C->>A: persist/reconcile interactive identity
   P->>P: project UI, then clean terminal state
 ```
 
@@ -703,28 +692,12 @@ These guards prevent a tick captured before shutdown or rehydrate from touching 
 
 Pane liveness is probed in parallel and is only a lifecycle input.
 Dead without a terminal artifact becomes `unknown`.
-A v2 done/error completion with a live pane becomes `idle`; a legacy `done` does likewise, but a legacy `error` is always `exited`. With a dead pane, these terminal outcomes are `exited`.
+A v2 done/error completion with a live pane becomes `idle`; with a dead pane, terminal outcomes are `exited`.
 Parent cancellation dominates the fold.
-
-### 8.3 Session JSONL observation
-
-The poller tails the child session file in bounded chunks with a streaming NDJSON parser.
-It synthesizes silent tool activity for selected child operations and observes new user turns.
-This projection is TUI-only and never goes directly into parent LLM context.
-It does not establish completion.
-
-Two cursor concepts are retained:
-
-- observed byte end, including an incomplete line;
-- safe partial-line replay start.
-
-On rehydrate, parsing restarts at the replay boundary while the observed end remains available for truncation detection.
-Legacy persisted records without this metadata conservatively restart at byte zero.
-File truncation resets parsing and cursors.
 
 ### 8.4 Coordinated readiness, consumption, and dispatch
 
-An interactive completion first becomes a deterministic persisted delivery intent before the artifact cursor advances. `delivery.ts` drains coordinated intents into `completion-coordinator.ts` in bounded chunks; only upgrade-recovered pre-coordinator intents continue through the legacy FIFO.
+Interactive completions become deterministic persisted delivery intents before the artifact cursor advances. `delivery.ts` drains these intents into `completion-coordinator.ts` in bounded chunks; unsupported pre-coordinator intents are not recovered.
 
 For every parent-visible standalone terminal record and every background workflow aggregate, the coordinator appends one deterministic `subagentura-completion` custom entry. Workflow-owned child turns are suppressed before publication. The renderer is TUI-only: Pi excludes it from provider context. Reconciliation against parent entries makes repeated artifact folds, polling, and ordinary reload idempotent.
 
@@ -732,7 +705,7 @@ For every parent-visible standalone terminal record and every background workflo
 
 For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group, late members are rejected, and parent delivery waits for every registered member to be `done`, `error`, or `cancelled`. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
 
-The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references prefer immutable `outputs/<eventId>.md` plus `events.ndjson`; legacy artifacts may fall back to mutable `output.md`; in-process and workflow references name their result tools.
+The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
 
 Successful terminal retrieval through `read_subagent_artifact`, `get_subagent_result`, or `get_workflow_result` appends a consumption receipt before returning. The coordinator first losslessly appends the receipt and calls `fsyncSync` in a private, session-scoped append-only NDJSON ledger beneath the parent Pi session directory, outside the project working tree, keyed by the parent session identity. It then best-effort mirrors the receipt into a parent session entry. A ledger write failure blocks manual collection; lifecycle retirement has a separate best-effort path. A manager without a session directory uses a random process-private temporary root and does not claim restart durability. The coordinator omits consumed records, and an entirely consumed explicit group creates no empty turn. Workflow-owned children are suppressed before this path, so only the background workflow aggregate publishes.
 
@@ -751,8 +724,6 @@ run start is retried at most three times with a 30-second watchdog; durable
 acknowledgement is retried at most three times with a one-second delay.
 Exhaustion is bounded and stops further retries.
 
-Deprecated public legacy fields map to coordinated `each` and cannot select this channel. Upgrade-recovered pre-coordinator intents may still send `subagent-notify` with prior inject/pointer semantics; those messages remain part of later LLM context.
-
 Interactive delivery queues and in-memory receipt indexes remain bounded and persisted. Consumption-ledger readers take a fixed snapshot of the current file size and process it in bounded chunks and line buffers; reconciliation advances through later snapshots so late-published receipts are not lost without repeatedly loading or scanning the whole file. The append-only ledger has no fixed disk-size bound during a prolonged parent-session-entry outage. This is intentional: truncating it could resurrect results already collected when parent entries become available again. Parent delivery is fail-closed behind durable notice storage: failed notice appends remain pending, block manifest preparation, and retry on later coordinator activity without a tight loop. Reconciliation handles append-then-throw without routine duplication. A successful `sendMessage` proves synchronous dispatch, not durable parent-session commit; a crash in that separate window can still duplicate a manifest or legacy message. Parent-model delivery is therefore at-least-once across that crash window, not exactly once.
 
 ### 8.5 Rehydration
@@ -764,10 +735,10 @@ It:
 2. filters by current `parentSessionId`;
 3. skips IDs already in the live registry;
 4. restores pane, artifact, session, cursor, fold, queue, receipt, completion-policy, and group identity;
-5. restores the safe session partial-line replay boundary;
+5. restores artifact cursors and delivery receipts;
 6. rebuilds attach/focus commands;
 7. probes mux liveness and folds status;
-8. reconciles parent completion, manifest, consumption, and legacy receipt entries;
+8. reconciles parent completion, manifest, and consumption entries;
 9. registers restored interactive group members and publishes reconstructed state;
 10. seals recovered groups before polling begins.
 
@@ -777,7 +748,7 @@ Recovery is complete before the global interval is ensured. The first later tick
 
 Shutdown ordering prevents late cross-session delivery:
 
-1. close the supervisor overlay and clear session parsers for the owner;
+1. close the supervisor overlay for the owner;
 2. snapshot running in-process jobs and suppress/abort owner-scoped workflow jobs;
 3. clear owner-scoped in-process deliveries;
 4. remove owner-scoped interactive states before killing panes, preserving standalone panes on `reload`, `resume`, or `quit`; workflow-owned panes are cleaned up with their workflow generation;
@@ -877,8 +848,8 @@ Only structured-cloneable messages cross this boundary.
 
 Default isolation is `process`.
 The workflow host calls `launchInteractiveSubagent` in the parent process; the Worker itself does not launch tmux.
-`awaitInteractiveResult` then waits on artifact events for that one delegated turn, reads the selected immutable output or fallback output, and aggregates usage from the child session JSONL.
-Its poll wait wakes immediately on abort, so cancellation can kill the pane and parse already-persisted session usage without waiting for the normal one-second interval.
+`awaitInteractiveResult` then waits on v2 artifact events for that delegated turn, reads its immutable output snapshot, and aggregates usage from the child session JSONL.
+Its artifact wait wakes immediately on abort, so cancellation can kill the pane and parse already-persisted session usage without waiting for the normal polling interval.
 It probes pane liveness with a bounded dead-pane grace and returns parsed partial usage on cancellation or premature pane exit.
 If process launch fails, the adapter warns and falls back to in-process execution.
 
@@ -963,15 +934,14 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 | Mux screen capture           | Backend                                 | Supervisor UI                   | Visible terminal tail                              | No                                                             | No                                 | Presentation only                                                       |
 | Child Pi callbacks           | Child protocol                          | Artifact writer                 | Turn/activity/completion fallback                  | Through written artifact                                       | No                                 | Event producer                                                          |
 | `events.ndjson`              | Child CLI/protocol/parent cancellation  | Poller/read tools/workflow wait | Ordered lifecycle and completion                   | Yes                                                            | No                                 | Interactive lifecycle authority in physical byte order                  |
-| Mutable `output.md`          | Interactive child                       | Snapshot writer/read fallback   | Current-turn staging                               | Yes but mutable                                                | No                                 | Not historical proof                                                    |
+| Mutable `output.md`          | Interactive child                       | Snapshot writer                 | Current-turn staging                               | Yes but mutable                                                | No                                 | Not historical proof                                                    |
 | Immutable output snapshot    | Completion writer                       | Manifest/read/workflow wait     | Verified result bytes                              | Yes                                                            | No; manifests carry only its path  | V2 output authority                                                     |
 | Child session JSONL          | Child Pi                                | Poller/workflow usage reader    | Messages, activity, usage                          | Yes                                                            | No                                 | Observation/usage, not completion                                       |
 | Durable interactive state    | Poller/orchestrator                     | Rehydrate/poller/delivery       | Pane identity, cursors, fold, queue, policy/groups | Yes                                                            | No                                 | Crash-recovery authority                                                |
 | Coordinated completion entry | Completion coordinator                  | Human TUI / reconciliation      | Bounded terminal identity and references           | Parent session                                                 | No                                 | Deterministic TUI notice identity/reconciliation                        |
 | Consumption receipt ledger   | Completion coordinator                  | Coordinator reconciliation      | Session-scoped consumption receipts                | Private append-only ledger beneath parent Pi session directory | No                                 | Receipt recovery and manual-consumption gate                            |
 | `subagent-manifest`          | Completion coordinator                  | Parent Pi session/agent         | Compact coalesced references and completion IDs    | After Pi session commit                                        | Yes                                | Coordinated parent-delivery claim; not exactly-once across crash window |
-| Upgrade legacy follow-up     | Legacy brokers                          | Parent Pi session/agent         | Persisted pre-coordinator output/pointer           | After Pi session commit                                        | Yes                                | Upgrade-recovery channel                                                |
-| Pi UI status/widget/notify   | Poller/brokers                          | Human UI                        | Activity and notices                               | No                                                             | No                                 | Presentation only                                                       |
+| Pi UI status/widget/notify   | Poller/coordinator                      | Human UI                        | Activity and notices                               | No                                                             | No                                 | Presentation only                                                       |
 | Cancellation snapshot        | Cancellation subsystem                  | Human/tooling                   | Bounded diagnostic context                         | Yes when enabled                                               | No                                 | Diagnostic only                                                         |
 | Interactive lineage manifest | Spawn/supervisor                        | Descendant cancellation         | Parent/root/mux topology                           | Yes                                                            | No                                 | Lineage authority only                                                  |
 
@@ -990,7 +960,7 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 | Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                     |                    Yes |                      Yes | `rehydrateInteractiveSubagents`        |
 | Parent completion entries               | Parent Pi session custom entries                                       |                    Yes |         Yes with session | Coordinator reconciliation             |
 | Consumption receipt ledger              | Private ledger beneath parent Pi session directory, keyed by session   |                    Yes |         Yes with session | Bounded snapshot reconciliation        |
-| Child conversation                      | Child Pi session JSONL                                                 |                    Yes |                      Yes | Reopened by Pi; tailed for observation |
+| Child conversation                      | Child Pi session JSONL                                                 |                    Yes |                      Yes | Reopened by Pi; usage accounting only  |
 | Workflow jobs/results                   | `workflow-jobs.ts` global registry                                     |                    Yes |                       No | None                                   |
 | Workflow scripts                        | `~/.pi-subagentura/workflows/*.js`                                     |                    Yes |                      Yes | Load by validated name                 |
 | Session ownership                       | `session-scope.ts` live scope registry                                 |                    Yes |                       No | New `session_start` generation         |
@@ -1008,7 +978,7 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 | Is an interactive process alive?                | Recorded mux backend's liveness probe                                                              | Last event timestamp                                        |
 | Was coordinated parent delivery committed?      | Matching `subagent-manifest` entry containing the completion ID                                    | TUI completion entry, successful `sendMessage` return       |
 | Was a completion consumed?                      | Matching parent-session consumption entry or private ledger receipt                                | In-memory flags alone                                       |
-| Where does artifact polling resume?             | Persisted physical byte cursor and partial-line replay boundary                                    | Event timestamp                                             |
+| Where does artifact polling resume?             | Persisted physical byte cursor                                                                     | Event timestamp                                             |
 | Who owns a state?                               | Exact parent session ID plus live scope generation                                                 | Current top UI alone                                        |
 | What is interactive descendant topology?        | Validated lineage manifests                                                                        | Artifact event parent guesses                               |
 | What is a workflow job result?                  | Settled `WorkflowJobState` promise/result                                                          | Worker progress log, notification summary                   |
@@ -1020,15 +990,15 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 
 ## 12. Cancellation semantics
 
-| Scope               | Trigger                                        | Ordering and propagation                                                                                                                                | Terminal evidence                                                   |
-| ------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Sync in-process     | Parent tool signal                             | Abort listener calls session abort; nested recorded descendants cascade                                                                                 | Returned cancelled `SubagentResult`                                 |
-| Async in-process    | `cancel_subagent`, cross-mode cancel, shutdown | Snapshot, abort target controller, recursively abort `parentJobId` descendants, prevent late settlement overwrite                                       | Cancelled registry state until scheduled removal                    |
-| Interactive single  | Interactive cancel tool                        | Snapshot, `.cancelled`, parent completion, coordinated completion (synthetic receipt only for upgrade-recovered legacy state), registry mark, pane kill | Artifact completion plus later `process_exited`                     |
-| Interactive subtree | Supervisor/lineage action                      | Validate bounded manifests; sort deepest first; skip stale/non-actionable/terminal; continue after failures                                             | Per-node categorized result and artifact/process state              |
-| Workflow            | `cancel_workflow`, cross-mode cancel, shutdown | Abort job and engine, normalize immediately, cancel active runner, post worker abort, terminate thread                                                  | Cancelled workflow state and runner receipts                        |
-| Result wait only    | Abort status/result waiting tool               | Stop waiting; do not cancel underlying in-process/workflow job                                                                                          | `wait_cancelled`/timeout response                                   |
-| Session shutdown    | Pi lifecycle                                   | Fence generation first; clear identity before asynchronous teardown; preserve interactive panes for reload/resume/quit                                  | No late owner delivery; durable state retained or deleted by reason |
+| Scope               | Trigger                                        | Ordering and propagation                                                                                               | Terminal evidence                                                   |
+| ------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Sync in-process     | Parent tool signal                             | Abort listener calls session abort; nested recorded descendants cascade                                                | Returned cancelled `SubagentResult`                                 |
+| Async in-process    | `cancel_subagent`, cross-mode cancel, shutdown | Snapshot, abort target controller, recursively abort `parentJobId` descendants, prevent late settlement overwrite      | Cancelled registry state until scheduled removal                    |
+| Interactive single  | Interactive cancel tool                        | Snapshot, `.cancelled`, parent completion, coordinated completion, registry mark, pane kill                            | Artifact completion plus later `process_exited`                     |
+| Interactive subtree | Supervisor/lineage action                      | Validate bounded manifests; sort deepest first; skip stale/non-actionable/terminal; continue after failures            | Per-node categorized result and artifact/process state              |
+| Workflow            | `cancel_workflow`, cross-mode cancel, shutdown | Abort job and engine, normalize immediately, cancel active runner, post worker abort, terminate thread                 | Cancelled workflow state and runner receipts                        |
+| Result wait only    | Abort status/result waiting tool               | Stop waiting; do not cancel underlying in-process/workflow job                                                         | `wait_cancelled`/timeout response                                   |
+| Session shutdown    | Pi lifecycle                                   | Fence generation first; clear identity before asynchronous teardown; preserve interactive panes for reload/resume/quit | No late owner delivery; durable state retained or deleted by reason |
 
 Cancellation snapshots are optional under `SUBAGENT_CANCEL_SNAPSHOT=full`.
 They are bounded, atomic, keyed for deduplication, and failure-tolerant.
@@ -1047,13 +1017,13 @@ The following table inventories the tracked runtime source modules and companion
 |   # | Module                                       | Responsibility                                                                                                                  | Direct internal dependencies                                                                                                                                                                                                                                                                         |
 | --: | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 |   1 | `src/abortable-wait.ts`                      | Abort-aware promise race and result type                                                                                        | None                                                                                                                                                                                                                                                                                                 |
-|   2 | `src/artifact-poller.ts`                     | Owner-scoped artifact/session polling, lifecycle folding, durable enqueue/drain, footer/widget projection                       | `artifact`, `interactive-tmux`, `notifications`, `delivery`, `helpers`, `rendering`, `workflow-core`, `workflow-jobs`, `session-scope`                                                                                                                                                               |
-|   3 | `src/artifact.ts`                            | Canonical artifact event/state schemas, bounded NDJSON I/O, immutable snapshots, state locks and persistence                    | `helpers`, `identifier-types`; type-only `multiplexer`                                                                                                                                                                                                                                               |
+|   2 | `src/artifact-poller.ts`                     | Owner-scoped v2 artifact polling, lifecycle folding, coordinated enqueue/drain, footer/widget projection                        | `artifact`, `interactive-tmux`, `delivery`, `helpers`, `rendering`, `workflow-core`, `workflow-jobs`, `session-scope`                                                                                                                                                                                |
+|   3 | `src/artifact.ts`                            | Protocol-v2 event/state schemas, bounded NDJSON I/O, immutable snapshots, state locks and persistence                           | `helpers`, `identifier-types`; type-only `multiplexer`                                                                                                                                                                                                                                               |
 |   4 | `src/cancel-all-flows-registration.ts`       | Registers cross-mode keyboard shortcut and slash command                                                                        | `cancel-all-flows`; type-only `session-scope`                                                                                                                                                                                                                                                        |
 |   5 | `src/cancel-all-flows.ts`                    | Owner-scoped cancellation across all three registries and snapshot receipt collection                                           | `helpers`, `interactive-tmux`, `workflow-jobs`, `session-scope`, `cancellation-snapshots`                                                                                                                                                                                                            |
 |   6 | `src/cancellation-snapshots.ts`              | Optional bounded atomic deduplicated cancellation diagnostics                                                                   | None                                                                                                                                                                                                                                                                                                 |
 |   7 | `src/child-protocol.ts`                      | Converts child Pi lifecycle callbacks to active-turn and artifact events                                                        | `artifact`                                                                                                                                                                                                                                                                                           |
-|   8 | `src/delivery.ts`                            | Durable interactive intent queue, coordinated publication, validated legacy injection, and receipt reconciliation               | `artifact`, `completion-coordinator`, `completion-turn`, `notifications`, `session-scope`, `helpers`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                               |
+|   8 | `src/delivery.ts`                            | Durable interactive intent queue, coordinated publication, and receipt reconciliation                                           | `artifact`, `completion-coordinator`, `completion-turn`, `session-scope`, `helpers`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                                                |
 |   9 | `src/helpers.ts`                             | In-process execution kernel, model/session compatibility use, job registry, live status, cancellation trees                     | `pi-sdk-compat`, `workflow-structured-output`, `cancellation-snapshots`, `orchestration-context`, `usage`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                          |
 |  10 | `src/interactive-lineage.ts`                 | Bounded durable lineage manifests, projection, and leaf-first subtree cancellation                                              | None                                                                                                                                                                                                                                                                                                 |
 |  11 | `src/interactive-supervisor-registration.ts` | Registers supervisor shortcut/command and routes focus, capture, and cancel actions                                             | `interactive-supervisor-ui`, `interactive-tmux`, `interactive-lineage`, `multiplexer`, `helpers`, `cancellation-snapshots`, `artifact-poller`, `workflow-jobs`, `session-scope`                                                                                                                      |
@@ -1062,8 +1032,7 @@ The following table inventories the tracked runtime source modules and companion
 |  14 | `src/multiplexer-tmux.ts`                    | tmux implementation of pane/session creation, input, liveness, capture, focus and kill                                          | `multiplexer-contracts`                                                                                                                                                                                                                                                                              |
 |  15 | `src/multiplexer-zellij.ts`                  | Zellij implementation of pane/tab creation, normalized identity, input, liveness, capture, focus and kill                       | `multiplexer-contracts`                                                                                                                                                                                                                                                                              |
 |  16 | `src/multiplexer.ts`                         | Multiplexer backend resolver/cache and registry API                                                                             | `multiplexer-contracts`, `multiplexer-tmux`, `multiplexer-zellij`, `multiplexer-herdr`                                                                                                                                                                                                               |
-|  17 | `src/ndjson.d.ts`                            | Local declaration shim for external `ndjson` package                                                                            | None project-internal                                                                                                                                                                                                                                                                                |
-|  18 | `src/notifications.ts`                       | Upgrade-only legacy in-process completion queue, formatting, custom-message dispatch and retry                                  | `helpers`, `artifact`, `session-scope`; type-only `interactive-tmux`                                                                                                                                                                                                                                 |
+|  17 | `src/notifications.ts`                       | Shared output sanitization and v2 completion classification                                                                     | `artifact`; type-only `interactive-tmux`                                                                                                                                                                                                                                                             |
 |  19 | `src/orchestration-context.ts`               | Reload-stable `AsyncLocalStorage` lineage/depth propagation and spawn limit                                                     | None                                                                                                                                                                                                                                                                                                 |
 |  20 | `src/pi-sdk-compat.ts`                       | Pi SDK boundary for modern runtime versus legacy auth/model-registry APIs                                                       | None project-internal                                                                                                                                                                                                                                                                                |
 |  21 | `src/rehydrate.ts`                           | Reconstructs interactive state, coordinated group membership, physical cursors, queues, and receipts                            | `artifact`, `completion-coordinator`, `delivery`, `interactive-tmux`                                                                                                                                                                                                                                 |
@@ -1127,8 +1096,7 @@ Runtime companions have distinct loading/materialization rules:
 | generated artifact `cli.mjs`       | Source string comes from the installed package but is written into each artifact directory and invoked there |
 | `ORCHESTRATOR_SYSTEM_PROMPT.md`    | Loaded as a package asset by file URL, not a code module                                                     |
 | `ORCHESTRATOR_V2_SYSTEM_PROMPT.md` | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
-| child Pi session JSONL             | Runtime data observed for activity/usage, not an import dependency                                           |
-| external `ndjson`                  | Runtime transform consumed through the local declaration shim                                                |
+| child Pi session JSONL             | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
 
 The restrictive exports map matters: shipping all source files in `package.json#files` does not make every source path a supported public subpath.
 
@@ -1227,7 +1195,6 @@ The restrictive exports map matters: shipping all source files in `package.json#
 - [ ] Rehydrate runs only for `startup`, `reload`, or `resume`.
 - [ ] Rehydrate restores coordinated interactive policy/group membership and completes before polling begins.
 - [ ] Recovered groups seal before polling; in-process/workflow jobs do not rehydrate.
-- [ ] Session partial-line replay and observed-end cursors remain distinct.
 - [ ] Shutdown advances generation before asynchronous teardown.
 - [ ] Final shutdown clears the poll interval.
 - [ ] Final shutdown clears interactive registry identity before killing panes.

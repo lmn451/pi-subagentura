@@ -110,8 +110,6 @@ function setup() {
     },
     parentStreaming: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
-    interactiveStates: new Map(),
   });
   registerCompletionCoordinator(pi as never, registeredScope);
   return {
@@ -214,22 +212,6 @@ describe("completion coordinator", () => {
       .join("\n")
       .trimEnd();
     expect(recovered).toBe("from: demo workflow, ⚠ completed with errors");
-
-    const legacyWorkflowError = record("legacy-workflow", {
-      source: "workflow",
-      status: "error",
-      label: "legacy workflow",
-    });
-    expect(
-      recoveredRenderer(
-        { data: legacyWorkflowError },
-        { expanded: false },
-        theme,
-      )
-        .render(200)
-        .join("\n")
-        .trimEnd(),
-    ).toBe("from: legacy workflow, ✕ error");
 
     const manifest = prepareCompletionManifest(sessionOwner(scope));
     expect(manifest?.content).toContain('"status":"error"');
@@ -655,10 +637,7 @@ describe("completion coordinator", () => {
   });
 
   it("requires safe explicit group identifiers", () => {
-    expect(resolveCompletionPolicy({})).toEqual({
-      policy: "each",
-      legacy: false,
-    });
+    expect(resolveCompletionPolicy({})).toEqual({ policy: "each" });
     expect(() =>
       resolveCompletionPolicy({
         completionPolicy: "group",
@@ -883,19 +862,6 @@ describe("completion coordinator", () => {
 
     const completionEntries = userCompletions(setupResult.entries);
     expect(completionEntries.at(-1)?.data.policy).toBe("each");
-  });
-
-  it("maps legacy completion controls and rejects mixed group options", () => {
-    expect(resolveCompletionPolicy({ notifyOnComplete: "inject" })).toEqual({
-      policy: "each",
-      legacy: false,
-    });
-    expect(() =>
-      resolveCompletionPolicy({
-        notifyOnComplete: "notify",
-        completionGroupId: "mixed",
-      }),
-    ).toThrow(/cannot be combined/i);
   });
 
   it("rejects unregistered grouped publication after sealing", () => {

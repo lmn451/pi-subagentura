@@ -58,9 +58,6 @@ Human input takes priority, successful terminal retrieval consumes pending
 automatic delivery, and an entirely consumed group creates no turn. Jobs and
 results remain scoped to the current parent session.
 
-Deprecated `notifyOnComplete` and `triggerTurnOnComplete` fields map to
-coordinated `each`.
-
 Parent-session consumption receipts are preferred; when unavailable, a private
 session-scoped append-only fallback ledger is read from fixed snapshots in
 bounded chunks and line buffers. It has no fixed disk-size bound during a

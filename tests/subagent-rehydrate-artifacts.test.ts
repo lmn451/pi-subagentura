@@ -62,55 +62,6 @@ describe("rehydrateInteractiveSubagents", () => {
     vi.doUnmock("node:child_process");
   });
 
-  it("inject-mode orphans DO re-inject their existing terminal event on the first poll after rehydrate", async () => {
-    // Behavior change: we no longer suppress re-injection here. The inject-mode path
-    // fires on every NEW `done` event. On rehydrate, lastInjectedEventTs starts as
-    // undefined, so the first poll will re-inject the latest terminal event. This means
-    // exactly one extra inject per sub-agent on parent reload, which is acceptable —
-    // it's better than silently dropping a result that completed during the reload downtime.
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const id = "inject-orphan";
-    const artDir = join(cwd, id);
-    appendInteractiveState(cwd, {
-      id,
-      paneId: "%77",
-      mux: "tmux",
-      artifactDir: artDir,
-      sessionFile: "/tmp/sess.jsonl",
-      notifyOnComplete: "inject",
-    });
-    // Add a done event to the artifact (what an orphan-with-completed-work looks like).
-    const art = artifactPath(cwd, id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    mod.rehydrateInteractiveSubagents(cwd);
-
-    const rehydrated = interactiveSubagentRegistry.get(id);
-    expect(rehydrated).toBeDefined();
-    // lastInjectedEventTs should remain undefined — we no longer suppress re-injection.
-    expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
-  });
-
-  it("notify-mode orphans leave lastInjectedEventTs undefined (inject path is irrelevant)", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const id = "notify-orphan";
-    const artDir = join(cwd, id);
-    appendInteractiveState(cwd, {
-      id,
-      paneId: "%88",
-      mux: "tmux",
-      artifactDir: artDir,
-      sessionFile: "/tmp/sess.jsonl",
-      notifyOnComplete: "notify",
-    });
-    mod.rehydrateInteractiveSubagents(cwd);
-    const rehydrated = interactiveSubagentRegistry.get(id);
-    expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
-  });
-
   it("recovers name from prompt file and startedAt from first event", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
@@ -131,7 +82,6 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: artDir,
       sessionFile: "/tmp/sess.jsonl",
       eventByteCursor: 0,
-      sessionByteCursor: 0,
       pendingDeliveries: [],
       deliveryReceipts: [],
       lifecycle: { startedAt: 1000 },
@@ -139,8 +89,25 @@ describe("rehydrateInteractiveSubagents", () => {
 
     // Event history remains available without being reparsed during rehydrate.
     const art = artifactPath(cwd, id);
-    appendEvent(art, { ts: 1000, type: "started", status: "running" });
-    appendEvent(art, { ts: 2000, type: "done", status: "done", exitCode: 0 });
+    appendEvent(art, {
+      version: 2,
+      eventId: "recover-start",
+      turnId: "recover-turn",
+      ts: 1000,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "recover-done",
+      turnId: "recover-turn",
+      ts: 2000,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+      exitCode: 0,
+    });
 
     mod.rehydrateInteractiveSubagents(cwd);
 
@@ -296,8 +263,6 @@ describe("rehydrateInteractiveSubagents", () => {
           subagentId: id,
           turnId: "turn-grouped",
           eventId: "event-grouped",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
           completionPolicy: "group",
@@ -382,8 +347,6 @@ describe("rehydrateInteractiveSubagents", () => {
           subagentId: id,
           turnId: "receipt-turn",
           eventId: "receipt-event",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
           completionPolicy: "each",
@@ -471,8 +434,6 @@ describe("rehydrateInteractiveSubagents", () => {
                   subagentId: id,
                   turnId: "over-capacity-turn",
                   eventId: "over-capacity-event",
-                  mode: "notify" as const,
-                  triggerTurn: false,
                   status: "done" as const,
                   artifactDir: artDir,
                   completionPolicy: "group" as const,
@@ -532,11 +493,11 @@ describe("rehydrateInteractiveSubagents", () => {
       persisted?.states["group-member-32"]?.pendingDeliveries,
     ).toMatchObject([{ completionPolicy: "each" }]);
     expect(
-      persisted?.states["group-member-32"]?.pendingDeliveries[0]
+      persisted?.states["group-member-32"]?.pendingDeliveries?.[0]
         ?.completionGroupId,
     ).toBeUndefined();
   });
-  it("requeues a rehydrated delivery using its own streaming state", async () => {
+  it("rehydrates a pending delivery despite another scope streaming", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const id = "rehydrated-delivery";
@@ -549,19 +510,18 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: artDir,
       sessionFile: join(cwd, "child-delivery.jsonl"),
       parentSessionId: "reload-parent",
+      completionPolicy: "each",
       eventByteCursor: 0,
-      sessionByteCursor: 0,
       pendingDeliveries: [
         {
           deliveryId: "delivery-a",
           subagentId: id,
           turnId: "turn-a",
           eventId: "event-a",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
-          state: "dispatchAttempted",
+          completionPolicy: "each",
+          state: "queued",
         },
       ],
       deliveryReceipts: [],

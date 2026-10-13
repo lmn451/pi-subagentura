@@ -1,23 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendCompletionEvent,
   appendEvent,
   artifactPath,
-  snapshotOutput,
   writeOutput,
 } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { JobState, SubagentResult } from "../src/helpers";
-import {
-  deliverNotification,
-  flushInProcessDeliveries,
-  MAX_IN_PROCESS_DELIVERY_BYTES,
-  MAX_IN_PROCESS_DELIVERY_RECORDS,
-} from "../src/notifications";
+import type { SubagentResult } from "../src/helpers";
 import {
   clearSessionScopes,
   getSessionScopes,
@@ -40,7 +33,7 @@ vi.mock("../src/helpers", async (importOriginal) => {
 
 // ── Imports (resolved after hoisted mock) ─────────────────────────────────
 import registerExtension from "../src/subagent";
-import { jobRegistry, registerInProcessJob } from "../src/helpers";
+import { jobRegistry } from "../src/helpers";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -215,26 +208,11 @@ function sentMessageOptsAt(api: any, callIndex: number) {
   return api.sendMessage.mock.calls[callIndex][1];
 }
 
-function registerOwnedNotificationJob(
-  state: JobState,
-  scope: SessionScope,
-): void {
-  state.deliveryOwner = {
-    ...state.deliveryOwner,
-    pi: scope.pi,
-    sessionScopeId: scope.id,
-    sessionScopeGeneration: scope.generation,
-  };
-  if (!registerInProcessJob(state, sessionOwner(scope))) {
-    throw new Error(`Failed to register owned notification job ${state.id}`);
-  }
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
 
-describe("notifyOnComplete", () => {
+describe("coordinated completion", () => {
   let api: ReturnType<typeof setupExtension>["api"];
   let scope: SessionScope;
   let isolatedToolDef: any;
@@ -731,62 +709,6 @@ describe("notifyOnComplete", () => {
       }
     });
 
-    it("degrades in-process overflow to a bounded identity ledger", () => {
-      scope.parentStreaming = true;
-      const states: any[] = [];
-      for (let index = 0; index < 40; index++) {
-        const state: any = {
-          id: `overflow-${index}`,
-          status: "completed",
-          liveStatus: {},
-          session: { abort: vi.fn() },
-          startedAt: 0,
-          promise: Promise.resolve(SUCCESS_RESULT),
-          notifyOnComplete: "notify",
-        };
-        states.push(state);
-        registerOwnedNotificationJob(state, scope);
-        deliverNotification(state, {
-          ...SUCCESS_RESULT,
-          output: `${index}:${"x".repeat(20_000)}`,
-        });
-      }
-
-      const queue = scope.pendingInProcessDeliveries;
-      expect(queue.length).toBeLessThanOrEqual(MAX_IN_PROCESS_DELIVERY_RECORDS);
-      const completionBytes = queue
-        .filter((pending) => pending.kind === "completion")
-        .reduce(
-          (total, pending) =>
-            total + Buffer.byteLength(pending.result.output, "utf8") + 512,
-          0,
-        );
-      expect(completionBytes).toBeLessThanOrEqual(
-        MAX_IN_PROCESS_DELIVERY_BYTES,
-      );
-      const overflow = queue.find((pending) => pending.kind === "overflow");
-      expect(overflow).toBeDefined();
-      if (!overflow || overflow.kind !== "overflow") {
-        throw new Error("expected an overflow identity ledger");
-      }
-      const overflowRows = readFileSync(overflow.overflowPath, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      const identities = [
-        ...overflowRows.map((row) => row.deliveryId),
-        ...queue
-          .filter((pending) => pending.kind === "completion")
-          .map((pending) => pending.deliveryId),
-      ];
-      expect(new Set(identities).size).toBe(40);
-
-      scope.parentStreaming = false;
-      flushInProcessDeliveries(sessionOwner(scope));
-      expect(states.every((state) => state.notificationDelivered)).toBe(true);
-      expect(queue).toEqual([]);
-    });
-
     it("delivers to the parent while a nested child context is active", async () => {
       const jobId = "nested-context-parent-owner";
       const control = createJobControl();
@@ -866,253 +788,6 @@ describe("notifyOnComplete", () => {
       });
       expect(api.notify).not.toHaveBeenCalled();
       expect(child.api.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("fails closed when an async spawn owner's generation rolls over", async () => {
-      const jobId = "spawn-owner-generation";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-      await isolatedToolDef.execute(
-        "spawn-owner-call",
-        { async: true, task: "test", notifyOnComplete: "inject" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      scope.generation++;
-      control.resolve(SUCCESS_RESULT);
-      await vi.waitFor(() => {
-        expect(jobRegistry.get(jobId)?.status).toBe("done");
-      });
-      expect(api.sendMessage).not.toHaveBeenCalled();
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("drops a queued completion when the same scope rolls generation", () => {
-      const state: any = {
-        id: "generation-rollover",
-        status: "completed",
-        liveStatus: {},
-        session: { abort: vi.fn() },
-        startedAt: 0,
-        promise: Promise.resolve(SUCCESS_RESULT),
-        notifyOnComplete: "inject",
-      };
-      registerOwnedNotificationJob(state, scope);
-      scope.parentStreaming = true;
-      deliverNotification(state, SUCCESS_RESULT);
-      expect(scope.pendingInProcessDeliveries).toHaveLength(1);
-
-      scope.generation++;
-      scope.parentStreaming = false;
-      flushInProcessDeliveries(sessionOwner(scope));
-      expect(api.sendMessage).not.toHaveBeenCalled();
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("does not deliver one scope's completion through a peer Pi", () => {
-      const peer = setupExtension();
-      const state: any = {
-        id: "peer-isolation",
-        status: "completed",
-        liveStatus: {},
-        session: { abort: vi.fn() },
-        startedAt: 0,
-        promise: Promise.resolve(SUCCESS_RESULT),
-        notifyOnComplete: "inject",
-      };
-      registerOwnedNotificationJob(state, scope);
-      scope.parentStreaming = true;
-      deliverNotification(state, SUCCESS_RESULT);
-
-      flushInProcessDeliveries(sessionOwner(peer.scope));
-      expect(peer.api.sendMessage).not.toHaveBeenCalled();
-      expect(peer.scope.pendingInProcessDeliveries).toEqual([]);
-      expect(scope.pendingInProcessDeliveries).toHaveLength(1);
-
-      scope.parentStreaming = false;
-      flushInProcessDeliveries(sessionOwner(scope));
-      expect(api.sendMessage).toHaveBeenCalledOnce();
-      expect(peer.api.sendMessage).not.toHaveBeenCalled();
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("fails closed for a tokenless completion when one scope is live", () => {
-      const state: any = {
-        id: "sole-scope-tokenless-delivery",
-        status: "completed",
-        liveStatus: {},
-        session: { abort: vi.fn() },
-        startedAt: 0,
-        promise: Promise.resolve(SUCCESS_RESULT),
-        notifyOnComplete: "inject",
-      };
-
-      deliverNotification(state, SUCCESS_RESULT);
-
-      expect(api.sendMessage).not.toHaveBeenCalled();
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("fails closed for a tokenless completion when peer scopes are live", () => {
-      const peer = setupExtension();
-      const state: any = {
-        id: "ambiguous-tokenless-delivery",
-        status: "completed",
-        liveStatus: {},
-        session: { abort: vi.fn() },
-        startedAt: 0,
-        promise: Promise.resolve(SUCCESS_RESULT),
-        notifyOnComplete: "inject",
-      };
-
-      deliverNotification(state, SUCCESS_RESULT);
-
-      expect(api.sendMessage).not.toHaveBeenCalled();
-      expect(peer.api.sendMessage).not.toHaveBeenCalled();
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-      expect(peer.scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("does not merge overflow ledgers across scope generations", () => {
-      scope.parentStreaming = true;
-      for (let index = 0; index < 40; index++) {
-        if (index === 20) scope.generation++;
-        const state: any = {
-          id: `generation-overflow-${index}`,
-          status: "completed",
-          liveStatus: {},
-          session: { abort: vi.fn() },
-          startedAt: 0,
-          promise: Promise.resolve(SUCCESS_RESULT),
-          notifyOnComplete: "notify",
-        };
-        registerOwnedNotificationJob(state, scope);
-        deliverNotification(state, {
-          ...SUCCESS_RESULT,
-          output: `${index}:${"x".repeat(20_000)}`,
-        });
-      }
-      const queue = scope.pendingInProcessDeliveries;
-      const overflows = queue.filter((pending) => pending.kind === "overflow");
-      expect(overflows).toHaveLength(2);
-      for (const overflow of overflows) {
-        const rows = readFileSync(overflow.overflowPath, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
-        const generations = rows.map((row) =>
-          Number(row.jobId.split("-").pop()) < 20 ? 0 : 1,
-        );
-        expect(new Set(generations)).toHaveLength(1);
-        rmSync(overflow.overflowPath, { force: true });
-      }
-      scope.parentStreaming = false;
-      queue.length = 0;
-    });
-
-    it("keeps each peer scope's overflow queue bounded and isolated", () => {
-      const peer = setupExtension();
-      scope.parentStreaming = true;
-      peer.scope.parentStreaming = true;
-      for (const [label, ownerScope] of [
-        ["first", scope],
-        ["peer", peer.scope],
-      ] as const) {
-        for (let index = 0; index < 40; index++) {
-          const state: any = {
-            id: `${label}-owner-overflow-${index}`,
-            status: "completed",
-            liveStatus: {},
-            session: { abort: vi.fn() },
-            startedAt: 0,
-            promise: Promise.resolve(SUCCESS_RESULT),
-            notifyOnComplete: "notify",
-          };
-          registerOwnedNotificationJob(state, ownerScope);
-          deliverNotification(state, {
-            ...SUCCESS_RESULT,
-            output: `${index}:${"x".repeat(20_000)}`,
-          });
-        }
-      }
-
-      for (const ownerScope of [scope, peer.scope]) {
-        const queue = ownerScope.pendingInProcessDeliveries;
-        expect(queue.length).toBeLessThanOrEqual(
-          MAX_IN_PROCESS_DELIVERY_RECORDS,
-        );
-        expect(queue.some((pending) => pending.kind === "overflow")).toBe(true);
-        expect(
-          queue.every(
-            (pending) =>
-              pending.ownerSessionScopeId === ownerScope.id &&
-              pending.ownerSessionScopeGeneration === ownerScope.generation,
-          ),
-        ).toBe(true);
-      }
-
-      scope.parentStreaming = false;
-      peer.scope.parentStreaming = false;
-      flushInProcessDeliveries(sessionOwner(scope));
-      flushInProcessDeliveries(sessionOwner(peer.scope));
-      expect(scope.pendingInProcessDeliveries).toEqual([]);
-      expect(peer.scope.pendingInProcessDeliveries).toEqual([]);
-    });
-
-    it("keeps collapsed inject and trigger semantics in one overflow envelope", () => {
-      scope.parentStreaming = true;
-      for (let index = 0; index < 40; index++) {
-        const state: any = {
-          id: `semantic-overflow-${index}`,
-          status: "completed",
-          liveStatus: {},
-          session: { abort: vi.fn() },
-          startedAt: 0,
-          promise: Promise.resolve(SUCCESS_RESULT),
-          notifyOnComplete: index === 0 ? "inject" : "notify",
-          triggerTurnOnComplete: index === 1,
-        };
-        registerOwnedNotificationJob(state, scope);
-        deliverNotification(state, {
-          ...SUCCESS_RESULT,
-          output: `${index}:${"x".repeat(20_000)}`,
-        });
-      }
-
-      const queue = scope.pendingInProcessDeliveries;
-      const overflow = queue.find((pending) => pending.kind === "overflow");
-      expect(overflow).toMatchObject({
-        mode: "inject",
-        triggerTurn: true,
-      });
-      if (!overflow || overflow.kind !== "overflow") {
-        throw new Error("expected an overflow identity ledger");
-      }
-      const rows = readFileSync(overflow.overflowPath, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(rows[0]).toMatchObject({
-        mode: "inject",
-        triggerTurn: false,
-        status: "done",
-      });
-      expect(rows[1]).toMatchObject({
-        mode: "notify",
-        triggerTurn: true,
-        status: "done",
-      });
-
-      scope.parentStreaming = false;
-      flushInProcessDeliveries(sessionOwner(scope));
-      expect(api.sendMessage).toHaveBeenCalledOnce();
-      expect(sentMessageAt(api, 0).content).toContain(overflow.overflowPath);
-      expect(sentMessageAt(api, 0).details.mode).toBe("inject");
-      expect(sentMessageOptsAt(api, 0)).toMatchObject({ triggerTurn: true });
     });
 
     it("uses fallback text when output is empty in inject mode", async () => {
@@ -1323,36 +998,6 @@ describe("notifyOnComplete", () => {
       expect(content).toContain('"status":"error"');
       expect(content).not.toContain("Connection timeout");
     });
-
-    it("does NOT deliver via rejection handler if notification already delivered", async () => {
-      const jobId = "double-deliver-guard";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-
-      await isolatedToolDef.execute(
-        "call-11",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      // Set notificationDelivered BEFORE settling
-      const jobState = jobRegistry.get(jobId)!;
-      jobState.notificationDelivered = true;
-
-      control.reject(new Error("Timeout"));
-
-      await vi.waitFor(
-        () => {
-          expect(api.sendMessage).toHaveBeenCalledTimes(0);
-          expect(api.notify).toHaveBeenCalledTimes(0);
-        },
-        { timeout: 50 },
-      );
-    });
   });
 
   // ── Default delivery ──────────────────────────────────────────────
@@ -1536,8 +1181,8 @@ describe("notifyOnComplete", () => {
       );
 
       // Use a ctx where ui.setStatus throws synchronously
-      // The .then() handler wraps ctx.ui.setStatus in try/catch, so the
-      // execution continues and deliverNotification (which uses pi, not ctx) still fires.
+      // The .then() handler wraps ctx.ui.setStatus in try/catch, so completion
+      // continues through the coordinated delivery path.
       await isolatedToolDef.execute(
         "call-stale-ctx",
         { async: true, task: "test", notifyOnComplete: "notify" },
@@ -1654,7 +1299,7 @@ describe("read_subagent_artifact (output reporting)", () => {
   function makeArtifactWithDone(
     id: string,
     parentDir: string,
-    appendLegacyDone = true,
+    appendCompletion = true,
   ) {
     const dir = join(parentDir, id);
     const state: import("../src/interactive-tmux").InteractiveSubagentState = {
@@ -1673,9 +1318,22 @@ describe("read_subagent_artifact (output reporting)", () => {
       artifactDir: dir,
     };
     const art = artifactPath(parentDir, id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    if (appendLegacyDone) {
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+    appendEvent(art, {
+      version: 2,
+      eventId: "turn-started",
+      turnId: "turn-1",
+      ts: 1,
+      type: "turn_started",
+      status: "running",
+    });
+    if (appendCompletion) {
+      appendCompletionEvent(art, {
+        turnId: "turn-1",
+        eventId: "completion-1",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
     }
     return { state, art, dir };
   }
@@ -1713,35 +1371,6 @@ describe("read_subagent_artifact (output reporting)", () => {
 
   afterEach(() => {
     cleanGlobals();
-  });
-
-  it("reports '(sub-agent exited without writing output.md — last event: done @ <ts>)' when output.md is missing and the agent finished", async () => {
-    const id = "ab12cd3400000001";
-    const parent = tmp();
-    try {
-      const { state } = makeArtifactWithDone(id, parent);
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const readTool = makeReadTool(mod, state);
-      expect(readTool).toBeDefined();
-
-      const result = await readTool.execute(
-        "call-1",
-        { id },
-        undefined,
-        undefined,
-        {} as any,
-      );
-      const text = result.content[0].text;
-      expect(text).toContain(
-        "Output: (sub-agent exited without writing output.md",
-      );
-      expect(text).toContain("last event: done @ 2");
-      expect(text).not.toContain("not written yet");
-      expect(result.details.output).toBeNull();
-    } finally {
-      rmSync(parent, { recursive: true, force: true });
-    }
   });
 
   it("treats a protocol-v2 empty immutable snapshot as a consumed result", async () => {
@@ -1983,9 +1612,13 @@ describe("read_subagent_artifact (output reporting)", () => {
       const { state, art } = makeArtifactWithDone(id, parent, false);
       for (let index = 0; index < 3_000; index++) {
         appendEvent(art, {
+          version: 2,
+          eventId: `tool-${index}`,
+          turnId: "turn-1",
           ts: index + 2,
           type: "tool_activity",
           status: "running",
+          phase: "start",
           tool: "test",
           summary: "x".repeat(100),
         });
@@ -2013,51 +1646,6 @@ describe("read_subagent_artifact (output reporting)", () => {
       expect(readArtifactApi.appendEntry).toHaveBeenCalledWith(
         "subagentura-completion-consumed",
         expect.objectContaining({ turnId: "late-completed-turn" }),
-      );
-    } finally {
-      rmSync(parent, { recursive: true, force: true });
-    }
-  });
-
-  it("maps numeric selectors only to legacy done snapshots in mixed logs", async () => {
-    const id = "ab12cd3800000013";
-    const parent = tmp();
-    try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
-      writeOutput(art, "legacy one");
-      snapshotOutput(art, 1);
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "v2 result");
-      appendCompletionEvent(art, {
-        turnId: "v2-turn",
-        eventId: "v2-event",
-        outcome: "done",
-        source: "agent_settled",
-        ts: 3,
-      });
-      writeOutput(art, "legacy two");
-      snapshotOutput(art, 2);
-      appendEvent(art, { ts: 4, type: "done", status: "done", exitCode: 0 });
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const readTool = makeReadTool(mod, state);
-
-      const result = await readTool.execute(
-        "legacy-two",
-        { id, turn: 2 },
-        undefined,
-        undefined,
-        {} as any,
-      );
-
-      expect(result.details.output).toBe("legacy two");
-      expect(readArtifactApi.appendEntry).toHaveBeenCalledWith(
-        "subagentura-completion-consumed",
-        expect.objectContaining({ turnId: expect.stringMatching(/^legacy-/) }),
-      );
-      expect(readArtifactApi.appendEntry).not.toHaveBeenCalledWith(
-        "subagentura-completion-consumed",
-        expect.objectContaining({ turnId: "v2-turn" }),
       );
     } finally {
       rmSync(parent, { recursive: true, force: true });
@@ -2123,11 +1711,22 @@ describe("read_subagent_artifact (output reporting)", () => {
           artifactDir: dir,
         };
       const art = artifactPath(parent, id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, {
+        version: 2,
+        eventId: "turn-started",
+        turnId: "turn-1",
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "tool-activity",
+        turnId: "turn-1",
         ts: 2,
         type: "tool_activity",
         status: "running",
+        phase: "start",
         tool: "bash",
         summary: "ls",
       });
@@ -2151,12 +1750,19 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
-  it("reports '(empty — 0 chars)' when output.md exists but is empty", async () => {
+  it("reports an empty protocol-v2 output snapshot", async () => {
     const id = "ab12cd3600000005";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent);
+      const { state, art } = makeArtifactWithDone(id, parent, false);
       writeOutput(art, "");
+      appendCompletionEvent(art, {
+        turnId: "empty-output-turn",
+        eventId: "empty-output-event",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
 
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
@@ -2168,21 +1774,26 @@ describe("read_subagent_artifact (output reporting)", () => {
         undefined,
         {} as any,
       );
-      const text = result.content[0].text;
-      expect(text).toContain("Output: (empty — 0 chars)");
+      expect(result.content[0].text).toContain("Output: (empty — 0 chars)");
       expect(result.details.output).toBe("");
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
   });
 
-  it("reports '<N> chars' when output.md has content", async () => {
+  it("reports content from an immutable protocol-v2 snapshot", async () => {
     const id = "ab12cd3700000006";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent);
+      const { state, art } = makeArtifactWithDone(id, parent, false);
       writeOutput(art, "Hello, world!");
-
+      appendCompletionEvent(art, {
+        turnId: "output-turn",
+        eventId: "output-event",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const readTool = makeReadTool(mod, state);
@@ -2193,10 +1804,11 @@ describe("read_subagent_artifact (output reporting)", () => {
         undefined,
         {} as any,
       );
-      const text = result.content[0].text;
-      expect(text).toContain("Output: 13 chars");
-      expect(text).toContain(
-        "<untrusted-subagent-output>\nHello, world!\n</untrusted-subagent-output>",
+      expect(result.content[0].text).toContain("Output: 13 chars");
+      expect(result.content[0].text).toContain(
+        `<untrusted-subagent-output>
+Hello, world!
+</untrusted-subagent-output>`,
       );
       expect(result.details.output).toBe("Hello, world!");
     } finally {
@@ -2204,17 +1816,23 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
-  it("bounds artifact output included in provider-facing content", async () => {
+  it("bounds output read from an immutable protocol-v2 snapshot", async () => {
     const id = "ab12cd3700000007";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent);
+      const { state, art } = makeArtifactWithDone(id, parent, false);
       const oversized = "x".repeat(80 * 1024);
       writeOutput(art, oversized);
+      appendCompletionEvent(art, {
+        turnId: "oversized-output-turn",
+        eventId: "oversized-output-event",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const readTool = makeReadTool(mod, state);
-
       const result = await readTool.execute(
         "call-bounded-output",
         { id },
@@ -2222,7 +1840,6 @@ describe("read_subagent_artifact (output reporting)", () => {
         undefined,
         {} as any,
       );
-
       expect(result.content[0].text).toContain(
         "[Output truncated from 81920 bytes.]",
       );
@@ -2239,7 +1856,7 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3800000007";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent);
+      const { state, art } = makeArtifactWithDone(id, parent, false);
       writeOutput(art, "first immutable output");
       appendCompletionEvent(art, {
         turnId: "pi-user-entry-first",
@@ -2254,7 +1871,6 @@ describe("read_subagent_artifact (output reporting)", () => {
         outcome: "done",
         source: "agent_settled",
       });
-
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const readTool = makeReadTool(mod, state);
@@ -2267,51 +1883,25 @@ describe("read_subagent_artifact (output reporting)", () => {
       );
 
       expect(result.details.output).toBe("first immutable output");
-      expect(result.details.outputHistory).toEqual([
-        expect.objectContaining({
-          turnId: "pi-user-entry-first",
-          eventId: "completion-first",
-        }),
-        expect.objectContaining({
-          turnId: "pi-user-entry-second",
-          eventId: "completion-second",
-        }),
-      ]);
+      expect(result.details.outputHistory).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            turnId: "pi-user-entry-first",
+            eventId: "completion-first",
+          }),
+          expect.objectContaining({
+            turnId: "pi-user-entry-second",
+            eventId: "completion-second",
+          }),
+        ]),
+      );
       expect(result.content[0].text).toContain(
         "Reading turnId: pi-user-entry-first",
       );
       expect(result.content[0].text).toContain(
-        "<untrusted-subagent-output>\nfirst immutable output\n</untrusted-subagent-output>",
-      );
-    } finally {
-      rmSync(parent, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects ambiguous legacy turn and protocol-v2 turnId selectors", async () => {
-    const id = "ab12cd3900000008";
-    const parent = tmp();
-    try {
-      const { state } = makeArtifactWithDone(id, parent);
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const readTool = makeReadTool(mod, state);
-
-      const result = await readTool.execute(
-        "call-ambiguous-history",
-        { id, turn: 1, turnId: "pi-user-entry-first" },
-        undefined,
-        undefined,
-        {} as any,
-      );
-
-      expect(result.isError).toBe(true);
-      expect(result.details).toMatchObject({
-        id,
-        status: "invalid_selector",
-      });
-      expect(result.content[0].text).toContain(
-        "Pass either turn or turnId, not both",
+        `<untrusted-subagent-output>
+first immutable output
+</untrusted-subagent-output>`,
       );
     } finally {
       rmSync(parent, { recursive: true, force: true });

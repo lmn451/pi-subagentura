@@ -566,8 +566,6 @@ describe("session_shutdown handler", () => {
       sessionFile: join(tmpRoot, "child.jsonl"),
       parentSessionId: sessionId,
       eventByteCursor: 0,
-      sessionByteCursor: 0,
-      pendingDeliveries: [],
       deliveryReceipts: [],
       lifecycle: {
         currentTurnId: "completed-turn",
@@ -724,11 +722,10 @@ describe("session_shutdown handler", () => {
         parentSessionId: "session-a",
       },
     );
-    appendEvent(artifactPath(tmpRoot, state.id), {
-      ts: 1,
-      type: "done",
-      status: "done",
-      exitCode: 0,
+    appendCompletionEvent(artifactPath(tmpRoot, state.id), {
+      turnId: "race-turn",
+      outcome: "done",
+      source: "agent_end",
     });
 
     let releaseLiveness!: (value: "alive") => void;
@@ -765,11 +762,10 @@ describe("session_shutdown handler", () => {
         parentSessionId: "session-a",
       },
     );
-    appendEvent(artifactPath(tmpRoot, state.id), {
-      ts: 1,
-      type: "done",
-      status: "done",
-      exitCode: 0,
+    appendCompletionEvent(artifactPath(tmpRoot, state.id), {
+      turnId: "done-turn",
+      outcome: "done",
+      source: "agent_end",
     });
     const owner = sessionOwner(registration.scope);
     const tick = setIntervalSpy.mock.calls[0][0] as () => void;
@@ -778,14 +774,12 @@ describe("session_shutdown handler", () => {
       registration.api as unknown as ExtensionAPI,
       owner,
     );
-    expect(registration.api.sendMessage).toHaveBeenCalledOnce();
-    expect(ui.notify).toHaveBeenCalledOnce();
+    expect(state.eventByteCursor).toBeGreaterThan(0);
 
     registration.shutdown({ reason: "quit" }, shutdownContext("session-a"));
     tick();
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(registration.api.sendMessage).toHaveBeenCalledOnce();
-    expect(ui.notify).toHaveBeenCalledOnce();
+    expect(state.eventByteCursor).toBeGreaterThan(0);
   });
 });

@@ -240,4 +240,31 @@ describe("result collection during receipt storage failure", () => {
     expect((await read()).details.output).toBe("retained snapshot");
     expectDurableConsumption();
   });
+
+  it("does not return mutable output without a protocol-v2 completion", async () => {
+    const id = "abcd123400000002";
+    const art = artifactPath(root, id);
+    writeOutput(art, "stale legacy output");
+    scope.interactiveStates.set(id, {
+      id,
+      name: "Legacy",
+      task: "task",
+      cwd: root,
+      artifactDir: art.dir,
+      status: "exited",
+      mux: "tmux",
+      paneId: "%100",
+      startedAt: Date.now(),
+      sessionFile: join(root, "session.jsonl"),
+      launchScriptFile: join(root, "launch.sh"),
+      attachCommand: "",
+      selectPaneCommand: "",
+    } satisfies InteractiveSubagentState);
+
+    const result = await tools
+      .get("read_subagent_artifact")!
+      .execute("read-legacy", { id }, undefined, undefined, { cwd: root });
+
+    expect(result.details.output).toBeNull();
+  });
 });
