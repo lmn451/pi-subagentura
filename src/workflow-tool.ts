@@ -47,11 +47,7 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
-import { sanitizeOutput } from "./notifications";
-import {
-  completionDisplayLabel,
-  formatCompletionMessage,
-} from "./completion-presentation";
+import { completionDisplayLabel } from "./completion-presentation";
 import { showWorkflowTree } from "./workflow-tree-ui";
 import {
   WorkflowPickerComponent,
@@ -71,13 +67,11 @@ import {
 import {
   getActiveSessionOwner,
   isSessionOwnerLive,
-  resolveActualStreamingFlag,
   resolveLiveSessionScope,
   sessionOwner,
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
-import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 import { attachAsyncJobSettlement } from "./tools/in-process";
 import { registerToolWithDefaultGuidance } from "./tool-guidance";
 import { registerCommandWithTelemetry } from "./telemetry-operations";
@@ -113,9 +107,7 @@ function workflowTelemetryCompletionPolicy(
   runAsync: boolean,
   completion: ResolvedCompletionPolicy,
 ): TelemetryCompletionPolicy {
-  if (!runAsync) return "inline";
-  if (completion.legacy) return "legacy";
-  return completion.policy ?? "each";
+  return runAsync ? completion.policy : "inline";
 }
 
 /**
@@ -197,28 +189,6 @@ function workflowErrorUsage(error: unknown): WorkflowUsage | undefined {
     : undefined;
 }
 
-export function formatWorkflowNotificationSummary(
-  job: WorkflowJobState,
-): string {
-  const run = job.result;
-  if (run) {
-    const usage = presentWorkflowUsage(run.usage);
-    const usageSummary = usage
-      ? `, ${formatWorkflowUsage(usage, {
-          outputBudget: job.snapshot.budgetTotal,
-        })}`
-      : "";
-    return `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${usageSummary}.`;
-  }
-  const usage = presentWorkflowUsage(job.snapshot.usage);
-  return `${job.error ?? "Workflow did not produce a result."}${
-    usage
-      ? ` (${formatWorkflowUsage(usage, {
-          outputBudget: job.snapshot.budgetTotal,
-        })})`
-      : ""
-  }`;
-}
 function workflowReadLatencyMs(job: WorkflowJobState): number | undefined {
   if (job.completedAt === undefined) return undefined;
   try {
@@ -527,16 +497,6 @@ export function registerWorkflowTool(
     };
   }
 
-  const MAX_WORKFLOW_NOTIFICATION_CHARS = 20_000;
-  const WORKFLOW_TRUNCATION_MARKER = "\n\n[Content truncated.]";
-
-  function truncateWorkflowNotification(text: string): string {
-    if (text.length <= MAX_WORKFLOW_NOTIFICATION_CHARS) return text;
-    const end =
-      MAX_WORKFLOW_NOTIFICATION_CHARS - WORKFLOW_TRUNCATION_MARKER.length;
-    return text.slice(0, Math.max(0, end)) + WORKFLOW_TRUNCATION_MARKER;
-  }
-
   function configureWorkflowCompletion(
     job: WorkflowJobState,
     completion: ResolvedCompletionPolicy,
@@ -561,94 +521,51 @@ export function registerWorkflowTool(
     return completionDisplayLabel(job.name, "workflow");
   }
 
-  function notifyWorkflowCompletion(job: WorkflowJobState): boolean {
-    const run = job.result;
-    const errorCount = run?.errorCount ?? job.snapshot.errorCount;
+  function notifyWorkflowCompletion(job: WorkflowJobState): void {
+    const errorCount = job.result?.errorCount ?? job.snapshot.errorCount;
     const presentation = getWorkflowCompletionPresentation(
       job.status,
       errorCount,
     );
-    if (job.completionPolicy) {
-      publishCompletion(
-        {
-          schemaVersion: 1,
-          completionId: `workflow:${job.id}`,
-          source: "workflow",
-          sourceId: job.id,
-          label: workflowCompletionLabel(job),
-          status:
-            job.status === "cancelled"
-              ? "cancelled"
-              : job.status === "error" ||
-                  presentation.label === "completed with errors"
-                ? "error"
-                : "done",
-          ...(job.status === "done" &&
-          presentation.label === "completed with errors"
-            ? { presentation: "completed-with-errors" as const }
-            : {}),
-          policy: job.completionPolicy,
-          ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
-          references:
-            job.status === "cancelled"
-              ? [{ label: "status", value: "cancelled; no result retained" }]
-              : [
-                  {
-                    label: "result",
-                    value: `call get_workflow_result with workflowId ${JSON.stringify(job.id)}`,
-                  },
-                ],
-          completedAt: Date.now(),
-        },
-        job.parentSessionOwner,
-      );
-      return true;
-    }
-    const icon = presentation.icon || (job.status === "done" ? "✅" : "❌");
-    const rawSummary = formatWorkflowNotificationSummary(job);
-    const summary = truncateWorkflowNotification(sanitizeOutput(rawSummary));
-    let content = formatCompletionMessage(
-      completionDisplayLabel(job.name, "workflow"),
-      `${icon} ${presentation.label} — ${summary}`,
-      "workflow",
-    );
-    if (run) {
-      content += isOrchestratorV2Enabled(pi)
-        ? "\n\nThis completion came from the separate workflow compatibility mode. Surface its status without calling workflow tools in Orchestratorv2 mode."
-        : `\n\nCall get_workflow_result with workflowId "${job.id}" to retrieve the result.`;
-    }
-    try {
-      const owner =
-        job.parentSessionOwner ??
-        (sessionScope ? sessionOwner(sessionScope) : undefined);
-      sendCompletionTurn(
-        pi,
-        {
-          customType: "workflow-notify",
-          content,
-          display: true,
-          details: {
-            workflowId: job.id,
-            status: job.status,
-            presentationStatus: presentation.label,
-            usage: run?.usage ?? job.snapshot.usage,
-            budgetTotal: job.snapshot.budgetTotal,
-          },
-        },
-        {
-          deliverAs: "followUp",
-          triggerTurn: true,
-          parentStreaming: resolveActualStreamingFlag(owner),
-        },
-      );
-      return true;
-    } catch (err) {
-      debugLog("warn", "workflow_completion_notification_failed", {
+    if (!job.completionPolicy) {
+      debugLog("warn", "workflow_completion_policy_missing", {
         workflowId: job.id,
-        error: err instanceof Error ? err.message : String(err),
       });
-      return false;
+      return;
     }
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: `workflow:${job.id}`,
+        source: "workflow",
+        sourceId: job.id,
+        label: workflowCompletionLabel(job),
+        status:
+          job.status === "cancelled"
+            ? "cancelled"
+            : job.status === "error" ||
+                presentation.label === "completed with errors"
+              ? "error"
+              : "done",
+        ...(job.status === "done" &&
+        presentation.label === "completed with errors"
+          ? { presentation: "completed-with-errors" as const }
+          : {}),
+        policy: job.completionPolicy,
+        ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
+        references:
+          job.status === "cancelled"
+            ? [{ label: "status", value: "cancelled; no result retained" }]
+            : [
+                {
+                  label: "result",
+                  value: `call get_workflow_result with workflowId ${JSON.stringify(job.id)}`,
+                },
+              ],
+        completedAt: Date.now(),
+      },
+      job.parentSessionOwner,
+    );
   }
 
   registerToolWithDefaultGuidance(pi, {
@@ -796,20 +713,8 @@ export function registerWorkflowTool(
       try {
         completion =
           params.async === false
-            ? { legacy: false }
-            : sessionScope
-              ? resolveCompletionPolicy(params)
-              : (() => {
-                  if (
-                    params.completionPolicy !== undefined ||
-                    params.completionGroupId !== undefined
-                  ) {
-                    throw new Error(
-                      "completionPolicy or completionGroupId requires an active parent session",
-                    );
-                  }
-                  return { legacy: true };
-                })();
+            ? { policy: "each" }
+            : resolveCompletionPolicy(params);
         if (
           params.async === false &&
           (params.completionPolicy !== undefined ||
@@ -1525,9 +1430,7 @@ export function registerWorkflowTool(
       }
       // One completion decision drives both the coordination that is installed
       // and the dimension that is reported, so the two cannot drift apart.
-      const commandCompletion: ResolvedCompletionPolicy = sessionScope
-        ? { policy: "each", legacy: false }
-        : { legacy: true };
+      const commandCompletion: ResolvedCompletionPolicy = { policy: "each" };
       // A slash command runs at the prompt, so this is the root's own depth,
       // and the root's own session id is the only attribution available.
       const spawn = resolveWorkflowSpawn(ctx);

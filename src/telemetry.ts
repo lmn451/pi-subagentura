@@ -25,7 +25,7 @@ export type TelemetryInvocationSource =
   | "isolated"
   | "interactive"
   | "workflow";
-export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
+export type TelemetryCompletionPolicy = "inline" | "each" | "group";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";

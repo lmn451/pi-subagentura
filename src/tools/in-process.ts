@@ -63,12 +63,6 @@ import {
   type ResolvedCompletionPolicy,
   type CompletionGroupReservation,
 } from "../completion-coordinator";
-import {
-  completionTriggersTurn,
-  deliverNotification,
-  formatCompletionDeliveryBehavior,
-  notifyInProcessCompletionWithoutDelivery,
-} from "../notifications";
 import { interactiveSubagentRegistry } from "../interactive-tmux";
 import { renderSubagentCall, renderSubagentResult } from "../rendering";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
@@ -165,9 +159,7 @@ function telemetryForAgent(
   const session = owner ? resolveLiveSessionScope(owner)?.telemetry : undefined;
   if (!session) return undefined;
   const completionPolicy: TelemetryCompletionPolicy = async
-    ? completion.legacy
-      ? "legacy"
-      : (completion.policy ?? "each")
+    ? completion.policy
     : "inline";
   return {
     session,
@@ -198,11 +190,7 @@ function telemetryForSpawnFailure(
     invocationSource,
     async,
     depth,
-    completionPolicy: async
-      ? completion?.legacy
-        ? "legacy"
-        : (completion?.policy ?? "each")
-      : "inline",
+    completionPolicy: async ? (completion?.policy ?? "each") : "inline",
   };
 }
 
@@ -441,39 +429,19 @@ function resolveAsyncCompletionPolicy(
         "completionPolicy or completionGroupId is available only for background sub-agents",
       );
     }
-    return { legacy: false };
+    return { policy: "each" };
   }
-  // A registration without a live session scope is the pre-coordinator
-  // compatibility path. Keep its historical direct notification behavior
-  // instead of creating completion records that have nowhere to be owned.
   if (!owner) {
-    if (
-      params.completionPolicy !== undefined ||
-      params.completionGroupId !== undefined
-    ) {
-      throw new Error(
-        "completionPolicy or completionGroupId requires an active parent session",
-      );
-    }
-    return { legacy: true };
+    throw new Error(
+      "Background sub-agents require an active parent session for coordinated completion",
+    );
   }
   return resolveCompletionPolicy(params);
 }
 
 function formatResolvedCompletionBehavior(
   completion: ResolvedCompletionPolicy,
-  jobState: JobState,
 ): string {
-  if (completion.legacy) {
-    return formatCompletionDeliveryBehavior(
-      jobState.notifyOnComplete ?? "inject",
-      completionTriggersTurn(
-        jobState.notifyOnComplete ?? "inject",
-        jobState.triggerTurnOnComplete,
-      ),
-      "planned",
-    );
-  }
   return completion.policy === "group"
     ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
     : "Completion will notify the user immediately and resume the parent with a compact result reference when safely idle.";
@@ -555,25 +523,7 @@ function settleAsyncJob(
   scheduleJobCleanup(jobId, false, jobState.maxAge, owner);
 
   publishInProcessCompletion(jobState, result, owner);
-  // A workflow aggregate consumes its children's results itself; the child must
-  // never independently notify or inject into the parent session.
-  const shouldDeliver =
-    !jobState.completionPolicy &&
-    jobState.completionOwner !== "workflow" &&
-    jobState.notifyOnComplete &&
-    !jobState.notificationDelivered &&
-    !jobState.resultRetrieved &&
-    (jobState.activeResultWaits ?? 0) === 0;
-  if (shouldDeliver) {
-    deliverNotification(jobState, result);
-  } else if (
-    !jobState.completionPolicy &&
-    jobState.completionOwner !== "workflow" &&
-    jobState.notifyOnComplete &&
-    !jobState.notificationDelivered
-  ) {
-    notifyInProcessCompletionWithoutDelivery(jobState, result);
-  }
+  // Workflow aggregates own completion publication for their child jobs.
 
   if (ctx) updateRunningFooter(ctx, owner);
 }
@@ -706,7 +656,6 @@ function registerSubagentWithContextTool(
       "Do not cancel a running job merely because it is unfinished or to reclaim context.",
       "Do not cancel unfinished reviewers merely to finalize an audit.",
       "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
-      "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
       "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
@@ -762,14 +711,7 @@ function registerSubagentWithContextTool(
         persona: params.persona ?? null,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        notifyOnComplete: completion.legacy
-          ? (params.notifyOnComplete ?? "inject")
-          : null,
-        triggerTurnOnComplete: completion.legacy
-          ? (params.triggerTurnOnComplete ?? null)
-          : null,
-        completionPolicy:
-          completion.policy ?? (completion.legacy ? "legacy" : null),
+        completionPolicy: completion.policy,
         completionGroupId: completion.groupId ?? null,
         maxAge: params.maxAge ?? null,
       });
@@ -803,7 +745,6 @@ function registerSubagentWithContextTool(
       }
       const messages = contextResult.value;
 
-      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       if (runAsync) {
         if (messages.length === 0) {
           captureSpawnFailure(telemetry, "context", spawnRequestedAt);
@@ -824,6 +765,7 @@ function registerSubagentWithContextTool(
           return completionPolicyErrorResult(error);
         }
         const targetCwd = params.cwd ?? ctx.cwd;
+        const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
 
         let completionReservation: CompletionGroupReservation | undefined;
         try {
@@ -894,16 +836,9 @@ function registerSubagentWithContextTool(
           abort,
           parentJobId: spawn.parentJobId,
           depth: spawn.childDepth,
-          notifyOnComplete: completion.legacy
-            ? params.notifyOnComplete === "notify"
-              ? "notify"
-              : "inject"
-            : undefined,
-          triggerTurnOnComplete: params.triggerTurnOnComplete,
           completionPolicy: completion.policy,
           completionGroupId: completion.groupId,
           deliveryOwner,
-          notificationDelivered: false,
           maxAge: params.maxAge,
         };
 
@@ -960,7 +895,7 @@ function registerSubagentWithContextTool(
               type: "text",
               text:
                 `Job ${jobId} started. The main agent continues — use get_subagent_status to check progress and get_subagent_result to collect output when ready.\n\n` +
-                formatResolvedCompletionBehavior(completion, jobState) +
+                formatResolvedCompletionBehavior(completion) +
                 (modelWarning ? `\n\n${modelWarning}` : ""),
             },
           ],
@@ -1085,7 +1020,6 @@ function registerSubagentIsolatedTool(
       "Do not cancel a running job merely because it is unfinished or to reclaim context.",
       "Do not cancel unfinished reviewers merely to finalize an audit.",
       "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
-      "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
       "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
@@ -1141,14 +1075,7 @@ function registerSubagentIsolatedTool(
         persona: params.persona ?? null,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        notifyOnComplete: completion.legacy
-          ? (params.notifyOnComplete ?? "inject")
-          : null,
-        triggerTurnOnComplete: completion.legacy
-          ? (params.triggerTurnOnComplete ?? null)
-          : null,
-        completionPolicy:
-          completion.policy ?? (completion.legacy ? "legacy" : null),
+        completionPolicy: completion.policy,
         completionGroupId: completion.groupId ?? null,
         maxAge: params.maxAge ?? null,
       });
@@ -1166,8 +1093,8 @@ function registerSubagentIsolatedTool(
         return depthLimitResult(spawn.limit);
       }
 
-      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       const targetCwd = params.cwd ?? ctx.cwd;
+      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       if (runAsync) {
         let completionReservation: CompletionGroupReservation | undefined;
         try {
@@ -1239,16 +1166,9 @@ function registerSubagentIsolatedTool(
           abort,
           parentJobId: spawn.parentJobId,
           depth: spawn.childDepth,
-          notifyOnComplete: completion.legacy
-            ? params.notifyOnComplete === "notify"
-              ? "notify"
-              : "inject"
-            : undefined,
-          triggerTurnOnComplete: params.triggerTurnOnComplete,
           completionPolicy: completion.policy,
           completionGroupId: completion.groupId,
           deliveryOwner,
-          notificationDelivered: false,
           maxAge: params.maxAge,
         };
 
@@ -1305,7 +1225,7 @@ function registerSubagentIsolatedTool(
               type: "text",
               text:
                 `Job ${jobId} started. The main agent continues — use get_subagent_status to check progress and get_subagent_result to collect output when ready.\n\n` +
-                formatResolvedCompletionBehavior(completion, jobState) +
+                formatResolvedCompletionBehavior(completion) +
                 (modelWarning ? `\n\n${modelWarning}` : ""),
             },
           ],

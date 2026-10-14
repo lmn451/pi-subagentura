@@ -52,7 +52,6 @@ import {
   interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
-import { enqueueDelivery, flushDeliveries } from "../src/delivery";
 import { registerCompletionMember } from "../src/completion-coordinator";
 import {
   clearSessionScopes,
@@ -255,63 +254,6 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
-  it.each(["notify", "inject"] as const)(
-    "keeps legacy %s delivery for a scope-less registration",
-    async (mode) => {
-      clearSessionScopes();
-      const scopeLessApi = setupScopeLessExtension();
-      const toolDef = getInteractiveToolDef(scopeLessApi);
-      const state =
-        mockInteractiveState() as unknown as InteractiveSubagentState;
-      mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
-      const ctx = mockCtx();
-
-      const result = await toolDef.execute(
-        `call-scope-less-${mode}`,
-        { task: "legacy delivery", notifyOnComplete: mode },
-        undefined,
-        undefined,
-        ctx,
-      );
-
-      expect(result.details.status).toBe("started");
-      expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
-      const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-      expect(launch.notifyOnComplete).toBe(mode);
-      expect(launch.triggerTurnOnComplete).toBe(true);
-      expect(launch.completionPolicy).toBeUndefined();
-      expect(launch.completionGroupId).toBeUndefined();
-
-      interactiveSubagentRegistry.set(state.id, state);
-      enqueueDelivery(
-        state,
-        {
-          deliveryId: `scope-less-${mode}`,
-          subagentId: state.id,
-          turnId: "legacy-turn",
-          eventId: "legacy-event",
-          mode,
-          triggerTurn: true,
-          status: "done",
-          artifactDir: state.artifactDir,
-          state: "queued",
-        },
-        { persist: false },
-      );
-      flushDeliveries(
-        scopeLessApi as unknown as Parameters<typeof flushDeliveries>[0],
-        ctx.ui as unknown as Parameters<typeof flushDeliveries>[1],
-      );
-
-      expect(scopeLessApi.sendMessage).toHaveBeenCalledOnce();
-      expect(scopeLessApi.sendMessage.mock.calls[0][1]).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(scopeLessApi.sendUserMessage).not.toHaveBeenCalled();
-    },
-  );
-
   it.each([
     ["each", { completionPolicy: "each" }],
     ["group", { completionPolicy: "group", completionGroupId: "legacy-group" }],
@@ -353,8 +295,6 @@ describe("subagent_interactive tool lifecycle", () => {
 
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
     const callArgs = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(callArgs.notifyOnComplete).toBeUndefined();
-    expect(callArgs.triggerTurnOnComplete).toBeUndefined();
     expect(callArgs.completionPolicy).toBe("each");
     expect(callArgs.deferAgentCreatedTelemetry).toBe(true);
     expect(callArgs.spawnTreeContext).toMatchObject({
@@ -736,87 +676,6 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
-  it("rejects conflicting coordinated and legacy delivery options", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-conflict",
-      {
-        task: "review shard",
-        completionPolicy: "each",
-        notifyOnComplete: "notify",
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("cannot be combined");
-    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
-  });
-
-  it("maps explicit legacy notify mode to coordinated each delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-2",
-      { task: "research X", notifyOnComplete: "notify" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.notifyOnComplete).toBeUndefined();
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("notify the user immediately");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
-
-  it("maps explicit legacy inject controls to coordinated each delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-3",
-      {
-        task: "research X",
-        notifyOnComplete: "inject",
-        triggerTurnOnComplete: false,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.notifyOnComplete).toBeUndefined();
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-    expect(result.content[0].text).not.toContain(
-      "Completion output will be injected",
-    );
-  });
-
-  it("accepts legacy triggerTurnOnComplete through coordinated delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-trigger-turn",
-      {
-        task: "research X",
-        notifyOnComplete: "notify",
-        triggerTurnOnComplete: true,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
-
   it("updates the running footer immediately after launch", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();
@@ -993,25 +852,6 @@ describe("subagent_interactive tool lifecycle", () => {
       undefined,
     );
   });
-  it("maps legacy false triggering to coordinated timing", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-notify-no-trigger",
-      {
-        task: "research X",
-        notifyOnComplete: "notify",
-        triggerTurnOnComplete: false,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
 
   it("notifies the user without scheduling another LLM completion when cancelled", async () => {
     const toolDef = getCancelToolDef(api);
@@ -1058,16 +898,13 @@ describe("subagent_interactive tool lifecycle", () => {
     const [commonFields, contextModes] = (params as any).allOf;
     const properties = commonFields.properties;
     expect(properties).toBeDefined();
-    expect(properties.notifyOnComplete).toBeDefined();
-    expect(properties.triggerTurnOnComplete).toBeDefined();
+    expect(properties.notifyOnComplete).toBeUndefined();
+    expect(properties.triggerTurnOnComplete).toBeUndefined();
     expect(properties.routingDescription).toBeDefined();
     expect(properties.routingAliases).toBeDefined();
     expect(properties.completionPolicy).toBeDefined();
     expect(properties.completionGroupId).toBeDefined();
     expect(contextModes.anyOf).toHaveLength(3);
-    const desc = properties.notifyOnComplete.description ?? "";
-    expect(desc).toMatch(/deprecated compatibility/i);
-    expect(desc).toContain("coordinated each");
     expect(properties.completionPolicy.description).toMatch(
       /defaults to "each"/i,
     );

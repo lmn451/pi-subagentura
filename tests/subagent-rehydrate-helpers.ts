@@ -24,7 +24,9 @@ export function makeState(cwd: string, id: string): InteractiveSubagentState {
     selectPaneCommand: "",
     launchScriptFile: "",
     artifactDir,
-    notifyOnComplete: "inject",
+    eventByteCursor: 0,
+    pendingDeliveries: [],
+    deliveryReceipts: [],
     parentSessionId: "pi",
   };
 }

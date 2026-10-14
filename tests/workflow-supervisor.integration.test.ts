@@ -125,7 +125,6 @@ function liveSessionContext(options: {
     },
     parentStreaming: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
     telemetry: createTelemetrySession(true),
   };
@@ -329,25 +328,6 @@ describe("workflow supervisor integration", () => {
       releaseAgent(subagentResult("done"));
     },
   );
-
-  it("threads legacy policy to an ownerless background process child", async () => {
-    const { pi, findTool } = makePi();
-    registerWorkflowTool(pi as never);
-
-    await findTool().execute(
-      "call-legacy",
-      { script: SINGLE_AGENT_SCRIPT("policy-legacy"), async: true },
-      undefined,
-      vi.fn(),
-      { cwd: "/tmp", modelRegistry: {} },
-    );
-    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
-
-    expect(mockLaunch).toHaveBeenCalledWith(
-      expect.objectContaining({ telemetryCompletionPolicy: "legacy" }),
-    );
-    releaseAgent(subagentResult("done"));
-  });
 
   it("shows a live process child under its tracked sync workflow", async () => {
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });

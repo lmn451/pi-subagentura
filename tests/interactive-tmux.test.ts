@@ -873,28 +873,33 @@ describe("interactive-tmux", () => {
   });
 
   describe("deriveInteractiveSubagentStatus (pure status-decision matrix)", () => {
-    // Event factories — keep them tiny, the matrix is what matters.
     const startedEv = {
+      version: 2 as const,
+      eventId: "event-started",
+      turnId: "turn-started",
       ts: 1,
-      type: "started" as const,
+      type: "turn_started" as const,
       status: "running" as const,
     };
     const doneEv = {
+      version: 2 as const,
+      eventId: "event-done",
+      turnId: "turn-done",
       ts: 2,
-      type: "done" as const,
+      type: "completion" as const,
       status: "done" as const,
-      exitCode: 0,
-    };
-    const errorEv = {
-      ts: 3,
-      type: "error" as const,
-      status: "error" as const,
-      message: "boom",
+      outcome: "done" as const,
+      source: "agent_settled" as const,
     };
     const cancelledEv = {
+      version: 2 as const,
+      eventId: "event-cancelled",
+      turnId: "turn-cancelled",
       ts: 4,
-      type: "cancelled" as const,
+      type: "completion" as const,
       status: "cancelled" as const,
+      outcome: "cancelled" as const,
+      source: "parent" as const,
     };
     const v2ErrorCompletion = {
       version: 2 as const,
@@ -927,12 +932,6 @@ describe("interactive-tmux", () => {
     });
     it("done event + pane dead → 'exited' (terminal)", () => {
       expect(deriveInteractiveSubagentStatus(doneEv, false)).toBe("exited");
-    });
-    it("error event + pane alive → 'exited' (child declared it unrecoverable)", () => {
-      expect(deriveInteractiveSubagentStatus(errorEv, true)).toBe("exited");
-    });
-    it("error event + pane dead → 'exited'", () => {
-      expect(deriveInteractiveSubagentStatus(errorEv, false)).toBe("exited");
     });
     it("v2 error completion + pane alive → 'idle' for follow-up", () => {
       expect(deriveInteractiveSubagentStatus(v2ErrorCompletion, true)).toBe(
@@ -1338,126 +1337,6 @@ describe("interactive-tmux", () => {
       expect(launchScript).toContain("--append-system-prompt");
       // Filename should appear (shell-escaped) in the launch script.
       expect(launchScript).toMatch(/wire-system\.md/);
-    });
-  });
-
-  describe("InteractiveSubagentState.notifyOnComplete", () => {
-    // The public tool passes an effective mode before calling this low-level helper.
-    // Direct callers without parent-session context retain the legacy inject fallback,
-    // while the tool-level default is covered by subagent-interactive-default.test.ts.
-
-    beforeEach(() => {
-      vi.doUnmock("node:fs");
-    });
-
-    it("keeps the low-level inject fallback when mode is omitted", async () => {
-      const tmp = makeTmp();
-      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-      process.env.TMUX = makeArgs().TMUX;
-      process.env.TMUX_PANE = "%9";
-
-      installMockExec((_f, args) => {
-        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
-        if (args[0] === "display-message") return MOCK_LOCATION;
-        if (args[0] === "show-options") return "0\n";
-        return "";
-      });
-
-      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
-        "../src/interactive-tmux",
-      );
-      const state = mod.launchInteractiveSubagent({
-        name: "NoNotify",
-        task: "x",
-        cwd: tmp,
-      });
-
-      expect(state.notifyOnComplete).toBe("inject");
-      expect(state.lastInjectedEventTs).toBeUndefined();
-    });
-
-    it("propagates notifyOnComplete: 'inject' from launchInteractiveSubagent to the state", async () => {
-      const tmp = makeTmp();
-      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-      process.env.TMUX = makeArgs().TMUX;
-      process.env.TMUX_PANE = "%9";
-
-      installMockExec((_f, args) => {
-        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
-        if (args[0] === "display-message") return MOCK_LOCATION;
-        if (args[0] === "show-options") return "0\n";
-        return "";
-      });
-
-      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
-        "../src/interactive-tmux",
-      );
-      const state = mod.launchInteractiveSubagent({
-        name: "InjectMode",
-        task: "x",
-        cwd: tmp,
-        notifyOnComplete: "inject",
-      });
-
-      expect(state.notifyOnComplete).toBe("inject");
-    });
-
-    it("propagates notifyOnComplete: 'notify' from launchInteractiveSubagent to the state", async () => {
-      const tmp = makeTmp();
-      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-      process.env.TMUX = makeArgs().TMUX;
-      process.env.TMUX_PANE = "%9";
-
-      installMockExec((_f, args) => {
-        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
-        if (args[0] === "display-message") return MOCK_LOCATION;
-        if (args[0] === "show-options") return "0\n";
-        return "";
-      });
-
-      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
-        "../src/interactive-tmux",
-      );
-      const state = mod.launchInteractiveSubagent({
-        name: "NotifyMode",
-        task: "x",
-        cwd: tmp,
-        notifyOnComplete: "notify",
-      });
-
-      expect(state.notifyOnComplete).toBe("notify");
-    });
-
-    it("propagates triggerTurnOnComplete from launchInteractiveSubagent to the state", async () => {
-      const tmp = makeTmp();
-      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-      process.env.TMUX = makeArgs().TMUX;
-      process.env.TMUX_PANE = "%9";
-
-      installMockExec((_f, args) => {
-        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
-        if (args[0] === "display-message") return MOCK_LOCATION;
-        if (args[0] === "show-options") return "0\n";
-        return "";
-      });
-
-      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
-        "../src/interactive-tmux",
-      );
-      const state = mod.launchInteractiveSubagent({
-        name: "TriggerTurn",
-        task: "x",
-        cwd: tmp,
-        notifyOnComplete: "notify",
-        triggerTurnOnComplete: true,
-        parentSessionId: "parent-session",
-        parentCwd: tmp,
-      });
-
-      expect(state.triggerTurnOnComplete).toBe(true);
-      expect(
-        loadInteractiveStates(tmp)?.states[state.id]?.triggerTurnOnComplete,
-      ).toBe(true);
     });
   });
 

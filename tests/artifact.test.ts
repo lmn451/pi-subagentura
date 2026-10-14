@@ -32,7 +32,6 @@ import {
   listArtifacts,
   MAX_EVENT_ISSUES,
   MAX_EVENT_RECORD_BYTES,
-  listOutputTurns,
   loadInteractiveStates,
   MAX_EVENT_TEXT_LENGTH,
   MAX_EVENT_BATCH_BYTES,
@@ -40,19 +39,17 @@ import {
   MAX_MUX_TERMINAL_ID_BYTES,
   MAX_TOOL_NAME_LENGTH,
   MAX_TURN_ID_LENGTH,
-  outputPathForTurn,
   readEvents,
   readEventBatch,
   readEventRecords,
   readOutput,
-  readOutputForTurn,
   removeInteractiveState,
   saveInteractiveStates,
-  snapshotOutput,
   stateFilePath,
   writeOutput,
   withInteractiveStateLock,
   updateInteractiveStates,
+  updateInteractiveState,
   updatePersistedTelemetrySession,
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
@@ -102,8 +99,11 @@ describe("artifact", () => {
     it("creates dir and writes one NDJSON line", () => {
       const art = artifactPath(root, "a");
       const ev: SubagentEvent = {
+        version: 2,
+        eventId: "event-a",
+        turnId: "turn-a",
         ts: 1000,
-        type: "started",
+        type: "turn_started",
         status: "running",
       };
       appendEvent(art, ev);
@@ -114,18 +114,41 @@ describe("artifact", () => {
 
     it("appends multiple events in order", () => {
       const art = artifactPath(root, "a");
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e1",
+        turnId: "t1",
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e2",
+        turnId: "t1",
+        ts: 3,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "explicit",
+      });
       const content = readFileSync(art.statusFile, "utf8");
       const lines = content.trim().split("\n");
       expect(lines).toHaveLength(2);
-      expect(JSON.parse(lines[0]).type).toBe("started");
-      expect(JSON.parse(lines[1]).exitCode).toBe(0);
+      expect(JSON.parse(lines[0]).type).toBe("turn_started");
+      expect(JSON.parse(lines[1]).outcome).toBe("done");
     });
 
     it("creates the status file with 0o600 perms", () => {
       const art = artifactPath(root, "a");
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e1",
+        turnId: "t1",
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
       expect(statSync(art.statusFile).mode & 0o777).toBe(0o600);
     });
   });
@@ -161,11 +184,23 @@ describe("artifact", () => {
 
     it("parses all events in order", () => {
       const art = artifactPath(root, "a");
-      appendEvent(art, { ts: 100, type: "started", status: "running" });
       appendEvent(art, {
+        version: 2,
+        eventId: "e1",
+        turnId: "t1",
+        ts: 100,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e2",
+        turnId: "t1",
         ts: 200,
-        type: "error",
+        type: "completion",
         status: "error",
+        outcome: "error",
+        source: "explicit",
         message: "m",
       });
       const events = readEvents(art);
@@ -176,8 +211,24 @@ describe("artifact", () => {
 
     it("filters by `since` (inclusive)", () => {
       const art = artifactPath(root, "a");
-      appendEvent(art, { ts: 100, type: "started", status: "running" });
-      appendEvent(art, { ts: 300, type: "done", status: "done", exitCode: 0 });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e1",
+        turnId: "t1",
+        ts: 100,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e2",
+        turnId: "t1",
+        ts: 300,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "explicit",
+      });
       const events = readEvents(art, 200);
       expect(events.map((e) => e.ts)).toEqual([300]);
     });
@@ -187,12 +238,12 @@ describe("artifact", () => {
       ensureArtifactDir(art);
       appendFileSync(
         art.statusFile,
-        '{"ts":1,"type":"started","status":"running"}\n',
+        '{"version":2,"eventId":"e1","turnId":"t1","ts":1,"type":"turn_started","status":"running"}\n',
       );
       appendFileSync(art.statusFile, "this is not json\n");
       appendFileSync(
         art.statusFile,
-        '{"ts":2,"type":"done","status":"done","exitCode":0}\n',
+        '{"version":2,"eventId":"e2","turnId":"t1","ts":2,"type":"completion","status":"done","outcome":"done","source":"explicit"}\n',
       );
       const events = readEvents(art);
       expect(events).toHaveLength(2);
@@ -203,13 +254,25 @@ describe("artifact", () => {
       const secret = "malformed secret bearer token";
       const valid =
         JSON.stringify({
+          version: 2,
+          eventId: "e1",
+          turnId: "t1",
           ts: 1,
-          type: "started",
+          type: "turn_started",
           status: "running",
         }) + "\n";
       const malformed = `${secret}\n`;
       const done =
-        JSON.stringify({ ts: 2, type: "done", status: "done" }) + "\n";
+        JSON.stringify({
+          version: 2,
+          eventId: "e2",
+          turnId: "t1",
+          ts: 2,
+          type: "completion",
+          status: "done",
+          outcome: "done",
+          source: "explicit",
+        }) + "\n";
       writeFileSync(art.statusFile, valid + malformed + done);
 
       const batch = readEventBatch(art, 0);
@@ -270,8 +333,8 @@ describe("artifact", () => {
         [
           JSON.stringify({
             version: 2,
-            eventId: "e".repeat(10_000),
-            turnId: { bad: true },
+            eventId: "valid-event",
+            turnId: "valid-turn",
             ts: 1,
             type: "completion",
             status: { bad: true },
@@ -306,8 +369,8 @@ describe("artifact", () => {
       const records = readEventRecords(art);
       expect(records).toHaveLength(2);
       const completion = records[0].event as any;
-      expect(completion.eventId).toMatch(/^invalid-event-/);
-      expect(completion.turnId).toMatch(/^invalid-turn-/);
+      expect(completion.eventId).toBe("valid-event");
+      expect(completion.turnId).toBe("valid-turn");
       expect(completion.message).toBeUndefined();
       expect(completion.errorMessage).toBeUndefined();
       expect(completion.summary).toHaveLength(MAX_EVENT_TEXT_LENGTH);
@@ -317,7 +380,7 @@ describe("artifact", () => {
     });
   });
 
-  it("normalizes process-exit diagnostics while preserving legacy events", () => {
+  it("skips pre-v2 events while preserving valid protocol-v2 events", () => {
     const art = artifactPath(root, "process-exit-diagnostics");
     ensureArtifactDir(art);
     appendFileSync(
@@ -326,8 +389,8 @@ describe("artifact", () => {
         JSON.stringify({ ts: 1, type: "done", status: "done", exitCode: 0 }),
         JSON.stringify({
           version: 2,
-          eventId: "legacy-process-exit",
-          turnId: "legacy-turn",
+          eventId: "valid-process-exit",
+          turnId: "valid-turn",
           ts: 2,
           type: "process_exited",
           status: "done",
@@ -349,27 +412,34 @@ describe("artifact", () => {
     );
 
     const events = readEvents(art);
-    expect(events[0]).toMatchObject({ type: "done", exitCode: 0 });
-    expect(events[1]).toMatchObject({
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
       type: "process_exited",
+      eventId: "valid-process-exit",
       exitCode: 0,
     });
-    expect(events[1]).not.toHaveProperty("terminationReason");
-    expect(events[2]).toMatchObject({
+    expect(events[1]).toMatchObject({
       type: "process_exited",
       exitCode: 17,
     });
-    expect(events[2]).not.toHaveProperty("terminationReason");
-    expect(events[2]).not.toHaveProperty("signal");
-    expect(events[2]).not.toHaveProperty("lastTool");
+    expect(events[1]).not.toHaveProperty("terminationReason");
+    expect(events[1]).not.toHaveProperty("signal");
+    expect(events[1]).not.toHaveProperty("lastTool");
   });
 
   it("reads long logs in bounded physical batches", () => {
     const art = artifactPath(root, "long-log");
     ensureArtifactDir(art);
     const line =
-      JSON.stringify({ ts: 1, type: "tool_activity", status: "running" }) +
-      "\n";
+      JSON.stringify({
+        version: 2,
+        eventId: "tool-event",
+        turnId: "tool-turn",
+        ts: 1,
+        type: "tool_activity",
+        status: "running",
+        phase: "start",
+      }) + "\n";
     const count = Math.ceil((MAX_EVENT_BATCH_BYTES * 3) / line.length);
     appendFileSync(art.statusFile, line.repeat(count));
     const eof = eventLogEndOffset(art);
@@ -608,10 +678,17 @@ describe("artifact", () => {
     ]);
     expect(committed.endOffset).toBe(committedEnd);
 
-    appendEvent(art, { ts: 2, type: "started", status: "running" });
+    appendEvent(art, {
+      version: 2,
+      eventId: "e-recovery",
+      turnId: "t-recovery",
+      ts: 2,
+      type: "turn_started",
+      status: "running",
+    });
     const recovered = readEventBatch(art, committed.endOffset);
     expect(recovered.records.map(({ event }) => event.type)).toEqual([
-      "started",
+      "turn_started",
     ]);
   });
 
@@ -660,91 +737,27 @@ describe("artifact", () => {
 
     it("returns the most recent event", () => {
       const art = artifactPath(root, "a");
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 9, type: "done", status: "done", exitCode: 0 });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e-start",
+        turnId: "t",
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "e-done",
+        turnId: "t",
+        ts: 9,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "explicit",
+      });
       expect(lastEvent(art)?.ts).toBe(9);
-      expect(lastEvent(art)?.type).toBe("done");
+      expect(lastEvent(art)?.type).toBe("completion");
     });
-  });
-
-  describe("per-turn snapshots (output-N.md)", () => {
-    it("snapshotOutput copies the current output.md into output-N.md", () => {
-      const art = artifactPath(root, "snap1");
-      writeOutput(art, "first turn's answer");
-      snapshotOutput(art, 1);
-      expect(existsSync(outputPathForTurn(art, 1))).toBe(true);
-      expect(readOutputForTurn(art, 1)).toBe("first turn's answer");
-      // output.md is untouched (it's the source).
-      expect(readOutput(art)).toBe("first turn's answer");
-    });
-
-    it("preserves history across multiple snapshots — earlier turns aren't overwritten", () => {
-      const art = artifactPath(root, "snap2");
-      // Turn 1
-      writeOutput(art, "answer v1");
-      snapshotOutput(art, 1);
-      // Turn 2: child overwrites output.md, poller snapshots again
-      writeOutput(art, "answer v2");
-      snapshotOutput(art, 2);
-      // Turn 3
-      writeOutput(art, "answer v3");
-      snapshotOutput(art, 3);
-
-      expect(readOutputForTurn(art, 1)).toBe("answer v1");
-      expect(readOutputForTurn(art, 2)).toBe("answer v2");
-      expect(readOutputForTurn(art, 3)).toBe("answer v3");
-      // Latest output.md is v3.
-      expect(readOutput(art)).toBe("answer v3");
-    });
-
-    it("readOutputForTurn returns null when the snapshot doesn't exist", () => {
-      const art = artifactPath(root, "snap3");
-      writeOutput(art, "v1");
-      snapshotOutput(art, 1);
-      expect(readOutputForTurn(art, 2)).toBe(null);
-      expect(readOutputForTurn(art, 99)).toBe(null);
-    });
-
-    it("snapshotOutput is a no-op when output.md is missing", () => {
-      const art = artifactPath(root, "snap4");
-      // No writeOutput call — output.md doesn't exist.
-      snapshotOutput(art, 1);
-      expect(existsSync(outputPathForTurn(art, 1))).toBe(false);
-    });
-
-    it("snapshotOutput does not read or copy oversized output.md", () => {
-      const art = artifactPath(root, "snap-oversized");
-      ensureArtifactDir(art);
-      writeFileSync(
-        art.outputFile,
-        Buffer.alloc(MAX_OUTPUT_SNAPSHOT_BYTES + 1, 120),
-      );
-
-      snapshotOutput(art, 1);
-
-      expect(existsSync(outputPathForTurn(art, 1))).toBe(false);
-    });
-
-    it("listOutputTurns returns the turn numbers for which a snapshot exists, sorted", () => {
-      const art = artifactPath(root, "snap5");
-      writeOutput(art, "a");
-      snapshotOutput(art, 2); // out of order to verify sort
-      writeOutput(art, "b");
-      snapshotOutput(art, 1);
-      writeOutput(art, "c");
-      snapshotOutput(art, 3);
-      expect(listOutputTurns(art)).toEqual([1, 2, 3]);
-    });
-
-    it("listOutputTurns returns [] when the artifact dir doesn't exist", () => {
-      const art = artifactPath(root, "snap6-nonexistent");
-      expect(listOutputTurns(art)).toEqual([]);
-    });
-  });
-
-  it("listOutputTurns returns [] when the artifact dir doesn't exist", () => {
-    const art = artifactPath(root, "snap6-nonexistent");
-    expect(listOutputTurns(art)).toEqual([]);
   });
 
   describe("cleanupOldArtifacts", () => {
@@ -858,7 +871,14 @@ describe("artifact", () => {
       const old = makeArtifact("old-but-recent-event", 200_000);
       const art = artifactPath(root, "old-but-recent-event");
       // Append a recent event (within TTL)
-      appendEvent(art, { ts: Date.now(), type: "started", status: "running" });
+      appendEvent(art, {
+        version: 2,
+        eventId: "recent",
+        turnId: "recent",
+        ts: Date.now(),
+        type: "turn_started",
+        status: "running",
+      });
 
       const result = cleanupOldArtifacts(root, 100_000, {
         now: Date.now() + 50_000, // make mtime and dir old
@@ -934,8 +954,11 @@ describe("artifact", () => {
       for (const art of [activeArt, staleArt]) {
         ensureArtifactDir(art);
         appendEvent(art, {
+          version: 2,
+          eventId: `e-${art.id}`,
+          turnId: art.id,
           ts: Date.now(),
-          type: "started",
+          type: "turn_started",
           status: "running",
         });
         writeOutput(art, "result");
@@ -978,8 +1001,11 @@ describe("artifact", () => {
       for (const art of [nestedActive, nestedOld, flatOld]) {
         ensureArtifactDir(art);
         appendEvent(art, {
+          version: 2,
+          eventId: `e-${art.id}`,
+          turnId: art.id,
           ts: oldTs,
-          type: "started",
+          type: "turn_started",
           status: "running",
         });
         writeOutput(art, "result");
@@ -1041,12 +1067,9 @@ describe("persisted interactive state helpers", () => {
 
     sessionFile: "/tmp/session.jsonl",
 
-    notifyOnComplete: "inject",
     eventByteCursor: 0,
-    sessionByteCursor: 0,
     pendingDeliveries: [],
     deliveryReceipts: [],
-    legacyCutoverOffset: 0,
   };
 
   it("does not steal a stale-looking lock owned by a live process", () => {
@@ -1461,39 +1484,91 @@ describe("persisted interactive state helpers", () => {
     );
   });
 
-  it("loadInteractiveStates migrates a file with no schemaVersion field", () => {
+  it.each([
+    ["missing schemaVersion", JSON.stringify({ parent: "pi", states: {} })],
+    [
+      "schemaVersion 1",
+      JSON.stringify({ schemaVersion: 1, parent: "pi", states: {} }),
+    ],
+    [
+      "schemaVersion 0",
+      JSON.stringify({ schemaVersion: 0, parent: "pi", states: {} }),
+    ],
+  ])("rejects and preserves old state files (%s)", (_label, raw) => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({ parent: "pi", states: { abc12345: SAMPLE } }),
-      { mode: 0o600 },
-    );
-    const loaded = loadInteractiveStates(root);
-    expect(loaded).toEqual({
-      schemaVersion: 2,
-      parent: "pi",
-      states: { abc12345: SAMPLE },
-    });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+    expect(existsSync(file)).toBe(true);
   });
 
-  it("loadInteractiveStates migrates a file with schemaVersion 0", () => {
+  it("preserves schema-v2 state containing removed delivery fields", () => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const raw = JSON.stringify({
+      schemaVersion: 2,
+      parent: "pi",
+      states: {
+        [SAMPLE.id]: {
+          ...SAMPLE,
+          notifyOnComplete: "inject",
+        },
+      },
+    });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+  });
+
+  it("retains coordinated queued deliveries with obsolete routing fields", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     writeFileSync(
       file,
       JSON.stringify({
-        schemaVersion: 0,
+        schemaVersion: 2,
         parent: "pi",
-        states: { abc12345: SAMPLE },
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            pendingDeliveries: [
+              {
+                deliveryId: "delivery-a",
+                subagentId: SAMPLE.id,
+                turnId: "turn-a",
+                eventId: "event-a",
+                mode: "notify",
+                triggerTurn: false,
+                status: "done",
+                artifactDir: SAMPLE.artifactDir,
+                completionPolicy: "each",
+                state: "queued",
+              },
+            ],
+          },
+        },
       }),
       { mode: 0o600 },
     );
-    const loaded = loadInteractiveStates(root);
-    expect(loaded).toEqual({
-      schemaVersion: 2,
-      parent: "pi",
-      states: { abc12345: SAMPLE },
+
+    expect(
+      loadInteractiveStates(root)?.states[SAMPLE.id]?.pendingDeliveries,
+    ).toMatchObject([{ deliveryId: "delivery-a", completionPolicy: "each" }]);
+    updateInteractiveState(root, SAMPLE.id, (state) => {
+      state.eventByteCursor = 17;
+    });
+    expect(loadInteractiveStates(root)?.states[SAMPLE.id]).toMatchObject({
+      eventByteCursor: 17,
+      pendingDeliveries: [
+        { deliveryId: "delivery-a", completionPolicy: "each", state: "queued" },
+      ],
     });
   });
 
@@ -1561,135 +1636,7 @@ describe("persisted interactive state helpers", () => {
     });
   });
 
-  it("normalizes the pre-v2 telemetry mode name during recovery", () => {
-    const file = stateFilePath(root);
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 2,
-        parent: "pi",
-        telemetry: {
-          correlationId: "11111111-1111-4111-8111-111111111111",
-          mode: "manual",
-        },
-        states: {},
-      }),
-      { mode: 0o600 },
-    );
-
-    expect(loadInteractiveStates(root)?.telemetry).toEqual({
-      correlationId: "11111111-1111-4111-8111-111111111111",
-      mode: "straight",
-    });
-  });
-
-  it("loadInteractiveStates migrates a file with schemaVersion -1", () => {
-    const file = stateFilePath(root);
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: -1,
-        parent: "pi",
-        states: { abc12345: SAMPLE },
-      }),
-      { mode: 0o600 },
-    );
-    const loaded = loadInteractiveStates(root);
-    expect(loaded).toEqual({
-      schemaVersion: 2,
-      parent: "pi",
-      states: { abc12345: SAMPLE },
-    });
-  });
-
-  it("loadInteractiveStates returns empty states when the file exists but has no states key", () => {
-    const file = stateFilePath(root);
-
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-
-    writeFileSync(file, JSON.stringify({ schemaVersion: 1, parent: "pi" }), {
-      mode: 0o600,
-    });
-
-    const loaded = loadInteractiveStates(root);
-
-    expect(loaded).toEqual({ schemaVersion: 2, parent: "pi", states: {} });
-  });
-
-  it("skips malformed v1 entries, retains valid intents, and normalizes untrusted fields", () => {
-    const file = stateFilePath(root);
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    const validIntent = {
-      deliveryId: "delivery",
-      subagentId: SAMPLE.id,
-      turnId: "turn",
-      eventId: "event",
-      mode: "notify",
-      triggerTurn: false,
-      status: "done",
-      artifactDir: SAMPLE.artifactDir,
-      state: "queued",
-      completedAt: 1234,
-    };
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 1,
-        parent: "pi",
-        states: {
-          wrongId: { ...SAMPLE, id: "different" },
-          badArtifact: { ...SAMPLE, id: "badArtifact", artifactDir: 42 },
-          [SAMPLE.id]: {
-            ...SAMPLE,
-            eventByteCursor: "not-a-number",
-            sessionByteCursor: -10,
-            pendingDeliveries: [
-              null,
-              { nope: true },
-              { ...validIntent, deliveryId: "x".repeat(129) },
-              { ...validIntent, turnId: "" },
-              { ...validIntent, eventId: "../escape" },
-              {
-                ...validIntent,
-                eventId: "bad-time",
-                completedAt: "not-a-number",
-              },
-              validIntent,
-            ],
-            deliveryReceipts: ["one", "one", 42, "two"],
-          },
-        },
-      }),
-      { mode: 0o600 },
-    );
-
-    expect(() => loadInteractiveStates(root)).not.toThrow();
-    const loaded = loadInteractiveStates(root)!;
-    expect(Object.keys(loaded.states)).toEqual([SAMPLE.id]);
-    expect(loaded.states[SAMPLE.id].eventByteCursor).toBe(0);
-    expect(loaded.states[SAMPLE.id].sessionByteCursor).toBe(0);
-    expect(loaded.states[SAMPLE.id].pendingDeliveries).toHaveLength(2);
-    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).toMatchObject({
-      deliveryId: "delivery",
-      subagentId: SAMPLE.id,
-      turnId: "turn",
-      eventId: "bad-time",
-      mode: "notify",
-      triggerTurn: false,
-      status: "done",
-      artifactDir: SAMPLE.artifactDir,
-      state: "queued",
-    });
-    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).not.toHaveProperty(
-      "completedAt",
-    );
-    expect(loaded.states[SAMPLE.id].pendingDeliveries[1]).toEqual(validIntent);
-    expect(loaded.states[SAMPLE.id].deliveryReceipts).toEqual(["one", "two"]);
-  });
-
-  it("normalizes malformed persisted group authority to coordinated each", () => {
+  it("rejects dispatch-attempted deliveries without rewriting persisted state", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     const groupedIntent = {
@@ -1702,35 +1649,25 @@ describe("persisted interactive state helpers", () => {
       status: "done",
       artifactDir: SAMPLE.artifactDir,
       completionPolicy: "group",
-      completionGroupId: "bad\ngroup",
-      state: "queued",
+      completionGroupId: "valid-group",
+      state: "dispatchAttempted",
     };
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 2,
-        parent: "pi",
-        states: {
-          [SAMPLE.id]: {
-            ...SAMPLE,
-            completionPolicy: "group",
-            completionGroupId: "bad\ngroup",
-            pendingDeliveries: [groupedIntent],
-          },
+    const contents = JSON.stringify({
+      schemaVersion: 2,
+      parent: "pi",
+      states: {
+        [SAMPLE.id]: {
+          ...SAMPLE,
+          completionPolicy: "group",
+          completionGroupId: "valid-group",
+          pendingDeliveries: [groupedIntent],
         },
-      }),
-      { mode: 0o600 },
-    );
-
-    const loaded = loadInteractiveStates(root)!;
-    expect(loaded.states[SAMPLE.id].completionPolicy).toBe("each");
-    expect(loaded.states[SAMPLE.id].completionGroupId).toBeUndefined();
-    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).toMatchObject({
-      completionPolicy: "each",
+      },
     });
-    expect(loaded.states[SAMPLE.id].pendingDeliveries[0]).not.toHaveProperty(
-      "completionGroupId",
-    );
+    writeFileSync(file, contents, { mode: 0o600 });
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(readFileSync(file, "utf8")).toBe(contents);
   });
 
   it("bounds and drops malformed persisted mux terminal identities", () => {
@@ -1770,84 +1707,78 @@ describe("persisted interactive state helpers", () => {
     expect(states?.valid123?.muxTerminalId).toBe("terminal-42");
   });
 
-  it("skips malformed v2 state and intent shapes without throwing", () => {
+  it.each([
+    ["invalid states map", { states: "corrupt" }],
+    [
+      "invalid state entry",
+      { states: { ...{ [SAMPLE.id]: SAMPLE }, broken: "bad" } },
+    ],
+    [
+      "invalid pending delivery",
+      {
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            pendingDeliveries: [
+              {
+                deliveryId: "invalid",
+                completionPolicy: "each",
+                state: "queued",
+              },
+            ],
+          },
+        },
+      },
+    ],
+    [
+      "invalid pending delivery queue shape",
+      { states: { [SAMPLE.id]: { ...SAMPLE, pendingDeliveries: "corrupt" } } },
+    ],
+    [
+      "over-limit pending queue",
+      {
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            pendingDeliveries: Array.from({ length: 33 }, (_, index) => ({
+              deliveryId: `delivery-${index}`,
+              subagentId: SAMPLE.id,
+              turnId: `turn-${index}`,
+              eventId: `event-${index}`,
+              status: "done",
+              artifactDir: SAMPLE.artifactDir,
+              completionPolicy: "each",
+              state: "queued",
+            })),
+          },
+        },
+      },
+    ],
+  ])("preserves v2 state with %s across writers", (_label, fields) => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 2,
-        parent: "pi",
-        states: {
-          [SAMPLE.id]: {
-            ...SAMPLE,
-            artifactDir: "relative/artifact",
-            pendingDeliveries: "not-an-array",
-          },
-          arrayEntry: [],
-          primitiveEntry: "bad",
-        },
-      }),
-      { mode: 0o600 },
-    );
+    const raw = JSON.stringify({ schemaVersion: 2, parent: "pi", ...fields });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
 
-    expect(() => loadInteractiveStates(root)).not.toThrow();
-    expect(loadInteractiveStates(root)?.states).toEqual({});
-  });
-
-  it("uses EOF cutover for v1 but zero for missing or invalid v2 cursor", () => {
-    const art = artifactPath(join(root, "artifacts"), SAMPLE.id);
-    ensureArtifactDir(art);
-    appendEvent(art, { ts: 1, type: "done", status: "done" });
-    const eof = statSync(art.statusFile).size;
-    const file = stateFilePath(root);
-    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 1,
-        parent: "pi",
-        states: {
-          [SAMPLE.id]: {
-            ...SAMPLE,
-            artifactDir: art.dir,
-            eventByteCursor: "invalid",
-            legacyCutoverOffset: "invalid",
-          },
-        },
-      }),
-    );
-    expect(loadInteractiveStates(root)?.states[SAMPLE.id]).toMatchObject({
-      eventByteCursor: eof,
-      legacyCutoverOffset: eof,
-    });
-
-    writeFileSync(
-      file,
-      JSON.stringify({
-        schemaVersion: 2,
-        parent: "pi",
-        states: {
-          [SAMPLE.id]: {
-            ...SAMPLE,
-            artifactDir: art.dir,
-            eventByteCursor: "invalid",
-            legacyCutoverOffset: "invalid",
-          },
-        },
-      }),
-    );
-    expect(loadInteractiveStates(root)?.states[SAMPLE.id]).toMatchObject({
-      eventByteCursor: 0,
-      legacyCutoverOffset: 0,
-    });
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() => appendInteractiveState(root, SAMPLE)).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+    expect(() =>
+      updateInteractiveState(root, SAMPLE.id, () => undefined),
+    ).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+    expect(() =>
+      updatePersistedTelemetrySession(root, "session-new", undefined),
+    ).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
   });
 
   it("saveInteractiveStates creates the .pi/ directory if missing (mode 0o700)", () => {
     expect(existsSync(join(root, ".pi"))).toBe(false);
 
     saveInteractiveStates(root, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       parent: "pi",
       states: {},
     });
@@ -1861,7 +1792,7 @@ describe("persisted interactive state helpers", () => {
 
   it("saveInteractiveStates writes atomically (no torn writes)", () => {
     saveInteractiveStates(root, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       parent: "pi",
       states: { abc12345: SAMPLE },
     });
@@ -1883,7 +1814,7 @@ describe("persisted interactive state helpers", () => {
 
   it("appendInteractiveState adds a new entry to an existing file", () => {
     saveInteractiveStates(root, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       parent: "pi",
       states: {},
     });
@@ -2028,18 +1959,22 @@ describe("persisted interactive state helpers", () => {
 describe("SubagentEvent classification matrix", () => {
   const baseTs = 1000;
   const events = {
-    started: { ts: baseTs, type: "started", status: "running" },
-    tool_activity: { ts: baseTs, type: "tool_activity", status: "running" },
-    done: { ts: baseTs, type: "done", status: "done" },
-    error: { ts: baseTs, type: "error", status: "error" },
-    cancelled: { ts: baseTs, type: "cancelled", status: "cancelled" },
     turn_started: {
       version: 2,
-      eventId: "e-turn",
-      turnId: "t-turn",
+      eventId: "e-start",
+      turnId: "t-start",
       ts: baseTs,
       type: "turn_started",
       status: "running",
+    },
+    tool_activity: {
+      version: 2,
+      eventId: "e-tool",
+      turnId: "t-tool",
+      ts: baseTs,
+      type: "tool_activity",
+      status: "running",
+      phase: "start",
     },
     completion: {
       version: 2,
@@ -2063,12 +1998,8 @@ describe("SubagentEvent classification matrix", () => {
   } satisfies Record<SubagentEvent["type"], SubagentEvent>;
 
   const expected = {
-    started: { terminal: false, completion: false, settled: false },
-    tool_activity: { terminal: false, completion: false, settled: false },
-    done: { terminal: true, completion: true, settled: true },
-    error: { terminal: true, completion: true, settled: true },
-    cancelled: { terminal: true, completion: true, settled: true },
     turn_started: { terminal: false, completion: false, settled: false },
+    tool_activity: { terminal: false, completion: false, settled: false },
     completion: { terminal: true, completion: true, settled: true },
     process_exited: { terminal: false, completion: false, settled: true },
   } satisfies Record<

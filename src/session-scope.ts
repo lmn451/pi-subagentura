@@ -5,7 +5,6 @@ import type {
 import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
-import type { PendingJobDelivery } from "./notifications";
 import type { TelemetrySession } from "./telemetry";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
@@ -39,7 +38,6 @@ export interface SessionScope {
   uiPromptActive?: boolean;
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
-  pendingInProcessDeliveries: PendingJobDelivery[];
   interactiveStates: Map<string, InteractiveSubagentState>;
   /** Anonymous correlation state for this exact lifecycle generation. */
   telemetry?: TelemetrySession;
@@ -61,7 +59,6 @@ export interface SessionScopeRegistration {
   uiPromptActive?: boolean;
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
-  pendingInProcessDeliveries?: PendingJobDelivery[];
   interactiveStates?: Map<string, InteractiveSubagentState>;
   telemetry?: TelemetrySession;
 }
@@ -131,7 +128,6 @@ export function createSessionScope(
     parentStreaming: false,
     uiPromptActive: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
     telemetry: undefined,
   };
@@ -146,7 +142,6 @@ function isCompleteSessionScope(
       registration.lifecycle === "shutdown") &&
     typeof registration.parentStreaming === "boolean" &&
     registration.inProcessJobs instanceof Map &&
-    Array.isArray(registration.pendingInProcessDeliveries) &&
     registration.interactiveStates instanceof Map
   );
 }
@@ -187,10 +182,6 @@ export function registerSessionScope(
     if (registration.inProcessJobs !== undefined) {
       existing.inProcessJobs = registration.inProcessJobs;
     }
-    if (registration.pendingInProcessDeliveries !== undefined) {
-      existing.pendingInProcessDeliveries =
-        registration.pendingInProcessDeliveries;
-    }
     if (registration.interactiveStates !== undefined) {
       existing.interactiveStates = registration.interactiveStates;
     }
@@ -216,8 +207,6 @@ export function registerSessionScope(
         uiPromptActive: registration.uiPromptActive ?? false,
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),
-        pendingInProcessDeliveries:
-          registration.pendingInProcessDeliveries ?? [],
         interactiveStates: registration.interactiveStates ?? new Map(),
         telemetry: registration.telemetry,
       };

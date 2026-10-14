@@ -226,7 +226,7 @@ export function rehydrateInteractiveSubagents(
         );
         if (artifactOwner !== currentSessionId) continue;
       } catch (error) {
-        // Missing markers are valid legacy state; other read failures fail closed.
+        // Missing markers are valid for states without an owner marker; other read failures fail closed.
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
       }
     }
@@ -250,13 +250,6 @@ export function rehydrateInteractiveSubagents(
     }
 
     const startedAt = entry.lifecycle?.startedAt ?? 0;
-    const partialLineStart = entry.sessionPartialLineStart;
-    const sessionResumeCursor =
-      partialLineStart === undefined
-        ? 0
-        : partialLineStart === null
-          ? entry.sessionByteCursor
-          : partialLineStart;
 
     const attach = (() => {
       try {
@@ -301,19 +294,13 @@ export function rehydrateInteractiveSubagents(
       selectPaneCommand: attach.focusCommand,
       launchScriptFile: "",
       artifactDir: entry.artifactDir,
-      notifyOnComplete: entry.notifyOnComplete,
-      triggerTurnOnComplete: entry.triggerTurnOnComplete,
       completionPolicy: entry.completionPolicy,
       completionGroupId: entry.completionGroupId,
       parentSessionId: entry.parentSessionId ?? "pi",
-      eventByteCursor: entry.eventByteCursor,
-      lastDeliveredSessionByte: sessionResumeCursor,
-      sessionPartialLineStart:
-        typeof partialLineStart === "number" ? partialLineStart : undefined,
-      sessionObservedByteCursor: entry.sessionByteCursor,
+      eventByteCursor: entry.eventByteCursor ?? 0,
       activeTurnId: entry.activeTurnId,
-      pendingDeliveries: [...entry.pendingDeliveries],
-      deliveryReceipts: [...entry.deliveryReceipts],
+      pendingDeliveries: [...(entry.pendingDeliveries ?? [])],
+      deliveryReceipts: [...(entry.deliveryReceipts ?? [])],
       lifecycle: entry.lifecycle ? { ...entry.lifecycle } : {},
       telemetryCorrelationId: entry.telemetry?.correlationId,
       telemetryEligible,
@@ -331,15 +318,6 @@ export function rehydrateInteractiveSubagents(
       telemetryDepth: entry.telemetry?.depth,
       telemetryDepthBucket: entry.telemetry?.depthBucket,
       telemetryModel: entry.telemetry?.model,
-      // Legacy timestamp fields remain for API compatibility only.
-      lastDeliveredEventTs: undefined,
-      lastInjectedEventTs: undefined,
-      lastSnapshotEventTs: undefined,
-      injected: undefined,
-      autoDoneForTurnAt: undefined,
-      lastStopReason: undefined,
-      lastStopReasonAt: undefined,
-      lastStopText: undefined,
     };
 
     const paneAlive = isPaneAlive(rehydrated);
