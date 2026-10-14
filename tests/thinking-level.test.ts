@@ -121,7 +121,6 @@ vi.mock("../src/interactive-tmux", async (importOriginal) => {
     await importOriginal<typeof import("../src/interactive-tmux")>();
   return {
     ...actual,
-    interactiveSubagentRegistry: new Map(),
     isTmuxAvailable: () => false,
   };
 });
@@ -139,9 +138,12 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
+import { clearSessionScopes } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 describe("in-process subagent thinkingLevel propagation", () => {
   beforeEach(() => {
+    clearSessionScopes();
     vi.clearAllMocks();
     mockStartSubagentJob.mockImplementation(async (params) => ({
       jobId: "test-job",
@@ -173,6 +175,7 @@ describe("in-process subagent thinkingLevel propagation", () => {
       thinkingLevel: params.thinkingLevel,
     }));
   });
+  afterEach(() => clearSessionScopes());
 
   function mockCtx(overrides: Record<string, any> = {}) {
     return {
@@ -401,7 +404,10 @@ describe("in-process subagent thinkingLevel propagation", () => {
 describe("interactive subagent thinkingLevel rendering", () => {
   it("renders the requested thinking level in the spawn result", () => {
     const api = { registerTool: vi.fn() };
-    registerInteractiveSubagentTools(api as any);
+    registerInteractiveSubagentTools(
+      api as any,
+      createTestSessionScope({ pi: api as any }),
+    );
     const toolDef = api.registerTool.mock.calls.find(
       ([tool]: any[]) => tool.name === "subagent_interactive",
     )?.[0];

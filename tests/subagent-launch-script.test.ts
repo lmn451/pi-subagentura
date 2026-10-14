@@ -28,7 +28,12 @@ import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { createTelemetrySession } from "../src/telemetry";
-import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -310,6 +315,7 @@ type SpawnEnvName = (typeof SPAWN_ENV_NAMES)[number];
 
 describe("spawn-time state persistence", () => {
   let cwd: string;
+  let scope: SessionScope;
   let tmuxCalls: string[][];
   let savedEnv: Record<SpawnEnvName, string | undefined>;
   const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
@@ -317,6 +323,11 @@ describe("spawn-time state persistence", () => {
   beforeEach(() => {
     tmuxCalls = installTmuxMock();
     cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-spawn-persist-"));
+    clearSessionScopes();
+    scope = createTestSessionScope({
+      cwd,
+      sessionManager: { getSessionId: () => "pi" },
+    });
     savedEnv = Object.fromEntries(
       SPAWN_ENV_NAMES.map((name) => [name, process.env[name]]),
     ) as Record<SpawnEnvName, string | undefined>;
@@ -360,6 +371,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     expect(existsSync(stateFilePath(cwd))).toBe(true);
     const loaded = loadInteractiveStates(cwd);
@@ -609,7 +621,12 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
-    launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+    launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      sessionScope: scope,
+    });
     expect(existsSync(stateFilePath(cwd))).toBe(false);
   });
 
@@ -617,7 +634,12 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
-    launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+    launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      sessionScope: scope,
+    });
 
     const sendKeys = tmuxCalls.find((args) => args[0] === "send-keys");
     expect(sendKeys).toBeDefined();
@@ -634,6 +656,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
       spawnTreeContext: createRootSpawnTreeContext(
         "pi",
         cwd,
@@ -678,6 +701,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     const loaded = loadInteractiveStates(cwd);
     const entry = loaded?.states[state.id];
@@ -691,18 +715,14 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
+    scope.telemetry = createTelemetrySession(true);
     const state = launchInteractiveSubagent({
       name: "Demo",
       task: "t",
       cwd,
       parentSessionId: "pi",
       model: "private-provider/customer-deployment-secret",
-      sessionScope: {
-        id: 1,
-        generation: 1,
-        interactiveStates: new Map(),
-        telemetry: createTelemetrySession(true),
-      } as any,
+      sessionScope: scope,
     });
 
     expect(loadInteractiveStates(cwd)?.states[state.id]?.telemetry?.model).toBe(
@@ -722,6 +742,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     expect(state.parentSessionId).toBe("pi");
     expect(state.cwd).toBe(cwd);

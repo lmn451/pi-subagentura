@@ -13,7 +13,12 @@ import {
   updateInteractiveState,
 } from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import {
+  clearSessionScopes,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import { flushDeliveries } from "../src/delivery";
 import { importFresh } from "./test-utils";
 import { makeTmp, makeState } from "./subagent-rehydrate-helpers";
@@ -26,6 +31,7 @@ let buildAttachCommands: AttachCommandBuilder;
 
 describe("rehydrateInteractiveSubagents", () => {
   let cwd: string;
+  let scope: SessionScope;
 
   beforeEach(() => {
     buildAttachCommands = (state) => ({
@@ -42,12 +48,8 @@ describe("rehydrateInteractiveSubagents", () => {
       }),
       NoMultiplexerAvailableError: class extends Error {},
     }));
-    const g = globalThis as typeof globalThis & {
-      __piSubagenturaInteractiveRegistry?: { clear?: () => void };
-      __piSubagenturaPiRef?: unknown;
-    };
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
+    clearSessionScopes();
+    scope = createTestSessionScope({ cwd });
   });
 
   afterEach(() => {
@@ -58,7 +60,7 @@ describe("rehydrateInteractiveSubagents", () => {
   it("returns zero recovery counts when the state file is missing", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
     expect(result).toEqual({
       total: 0,
       recovered: 0,
@@ -83,10 +85,10 @@ describe("rehydrateInteractiveSubagents", () => {
       completionGroupId: "review",
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
     expect(result.total).toBe(1);
-    const rehydrated = interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.paneId).toBe("%42");
     expect(rehydrated?.mux).toBe("tmux");
@@ -108,9 +110,9 @@ describe("rehydrateInteractiveSubagents", () => {
       workingCwd: childCwd,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(state.id);
+    const rehydrated = scope.interactiveStates.get(state.id);
     expect(rehydrated?.cwd).toBe(cwd);
     expect(rehydrated?.workingCwd).toBe(childCwd);
   });
@@ -128,9 +130,9 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = mod.interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated?.attachCommand).toContain("tmux attach");
     expect(rehydrated?.selectPaneCommand).toContain("tmux select-window");
   });
@@ -157,9 +159,11 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    expect(mod.rehydrateInteractiveSubagents(cwd).total).toBe(1);
+    expect(
+      mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope).total,
+    ).toBe(1);
 
-    const rehydrated = mod.interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated?.attachCommand).toBe(ATTACH_UNAVAILABLE);
     expect(rehydrated?.selectPaneCommand).toBe(ATTACH_UNAVAILABLE);
     // A shell would run the old value as a command name; this one cannot be
@@ -183,11 +187,11 @@ describe("rehydrateInteractiveSubagents", () => {
 
     // Pre-populate the registry with a different (older) state.
     const older: InteractiveSubagentState = { ...state, paneId: "%OLD" };
-    interactiveSubagentRegistry.set("abc12345", older);
+    scope.interactiveStates.set("abc12345", older);
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const after = interactiveSubagentRegistry.get("abc12345");
+    const after = scope.interactiveStates.get("abc12345");
     expect(after?.paneId).toBe("%OLD");
   });
 
@@ -204,9 +208,9 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get("abc12345")!;
+    const rehydrated = scope.interactiveStates.get("abc12345")!;
     expect(rehydrated.eventByteCursor).toBe(0);
   });
 
@@ -231,9 +235,9 @@ describe("rehydrateInteractiveSubagents", () => {
       },
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("cancelled");
+    expect(scope.interactiveStates.get(state.id)?.status).toBe("cancelled");
     expect(result.terminal).toBe(1);
   });
 
@@ -258,10 +262,10 @@ describe("rehydrateInteractiveSubagents", () => {
       },
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("exited");
-    expect(interactiveSubagentRegistry.get(state.id)?.eventByteCursor).toBe(
+    expect(scope.interactiveStates.get(state.id)?.status).toBe("exited");
+    expect(scope.interactiveStates.get(state.id)?.eventByteCursor).toBe(
       1_000_000,
     );
   });
@@ -309,15 +313,20 @@ describe("rehydrateInteractiveSubagents", () => {
       };
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwdA);
+    const result = mod.rehydrateInteractiveSubagents(
+      cwdA,
+      undefined,
+      [],
+      scope,
+    );
 
     expect(result.total).toBe(2);
     expect(result.recovered).toBe(2);
     expect(result.alive).toBe(0);
     expect(result.terminal).toBe(1);
     expect(result.unknown).toBe(1);
-    expect(interactiveSubagentRegistry.get("alive1")?.status).toBe("unknown");
-    expect(interactiveSubagentRegistry.get("done1")?.status).toBe("exited");
+    expect(scope.interactiveStates.get("alive1")?.status).toBe("unknown");
+    expect(scope.interactiveStates.get("done1")?.status).toBe("exited");
   });
 
   it("does not throw when ctx.cwd is unreachable (best-effort recovery)", async () => {
@@ -326,11 +335,17 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(() =>
       mod.rehydrateInteractiveSubagents(
         "/nonexistent/path/that/does/not/exist",
+        undefined,
+        [],
+        scope,
       ),
     ).not.toThrow();
     expect(() =>
       mod.rehydrateInteractiveSubagents(
         "/nonexistent/path/that/does/not/exist",
+        undefined,
+        [],
+        scope,
       ),
     ).not.toThrow();
   });

@@ -15,7 +15,6 @@
  *   - `SubagentResult`
  *   - `SubagentLiveStatus`
  *   - `ACTIVE_TOOL_DEBOUNCE_MS`
- *   - `jobRegistry`
  *   - `MAX_REGISTRY_SIZE`
  *   - `pruneOldestJob`
  *   - `pruneCompletedJobs`

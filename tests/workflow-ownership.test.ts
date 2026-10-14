@@ -5,7 +5,6 @@ import {
   cancelWorkflowJob,
   cleanupWorkflowJobsForOwner,
   discardWorkflowJob,
-  getWorkflowJobForActiveSession,
   getWorkflowJobForOwner,
   getRunningWorkflowCount,
   startWorkflowJob,
@@ -19,10 +18,10 @@ import {
   registerSessionScope,
   getStartedSessionScopes,
   removeSessionScope,
-  setLegacyActiveSessionRefs,
   type SessionOwnerToken,
   type SessionScope,
 } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 function owner(id: number, generation: number): SessionOwnerToken {
   return { id, generation };
@@ -81,7 +80,6 @@ function makeJob(
 describe("workflow parent session ownership", () => {
   beforeEach(() => {
     workflowJobRegistry.clear();
-    setLegacyActiveSessionRefs(undefined);
     clearSessionScopes();
   });
 
@@ -149,11 +147,15 @@ describe("workflow parent session ownership", () => {
     workflowJobRegistry.set(wrongGeneration.id, wrongGeneration);
     workflowJobRegistry.set(wrongId.id, wrongId);
 
-    setLegacyActiveSessionRefs(context(7, 1));
+    context(7, 1);
 
-    expect(getWorkflowJobForActiveSession("owned")).toBe(owned);
-    expect(getWorkflowJobForActiveSession("wrong-generation")).toBeUndefined();
-    expect(getWorkflowJobForActiveSession("wrong-id")).toBeUndefined();
+    expect(getWorkflowJobForOwner("owned", sameIdGeneration1)).toBe(owned);
+    expect(
+      getWorkflowJobForOwner("wrong-generation", sameIdGeneration1),
+    ).toBeUndefined();
+    expect(
+      getWorkflowJobForOwner("wrong-id", sameIdGeneration1),
+    ).toBeUndefined();
     expect(workflowJobBelongsToOwner(owned, sameIdGeneration1)).toBe(true);
     expect(workflowJobBelongsToOwner(wrongGeneration, sameIdGeneration1)).toBe(
       false,
@@ -178,13 +180,16 @@ describe("workflow parent session ownership", () => {
     }
     const otherTerminal = makeJob("other-terminal", "done", otherOwner);
     workflowJobRegistry.set(otherTerminal.id, otherTerminal);
-    setLegacyActiveSessionRefs(context(1, 1));
+    context(1, 1);
 
     expect(() =>
       startWorkflowJob(
         "active",
         `export const meta = { name: "active", description: "d" };\nreturn "ok";`,
         { runAgent: async () => ({ isError: false, output: "ok" }) as any },
+        undefined,
+        undefined,
+        activeOwner,
       ),
     ).toThrow(/100 workflow jobs are retained or running/);
     expect(workflowJobRegistry.get("other-terminal")).toBe(otherTerminal);
@@ -197,6 +202,9 @@ describe("workflow parent session ownership", () => {
       "active",
       `export const meta = { name: "active", description: "d" };\nreturn "ok";`,
       { runAgent: async () => ({ isError: false, output: "ok" }) as any },
+      undefined,
+      undefined,
+      activeOwner,
     );
 
     expect(workflowJobRegistry.has("active-terminal")).toBe(false);
@@ -236,9 +244,10 @@ describe("workflow parent session ownership", () => {
     workflowJobRegistry.set(jobA.id, jobA);
     workflowJobRegistry.set(jobB.id, jobB);
 
-    setLegacyActiveSessionRefs(context(20, 1));
+    context(10, 1);
+    context(20, 1);
 
-    expect(getWorkflowJobForActiveSession("job-a")).toBeUndefined();
+    expect(getWorkflowJobForOwner("job-a", undefined)).toBeUndefined();
     expect(getWorkflowJobForOwner("job-a", ownerA)).toBe(jobA);
     expect(getWorkflowJobForOwner("job-a", ownerB)).toBeUndefined();
     expect(workflowJobsForOwner(ownerA)).toEqual([jobA]);
@@ -255,7 +264,8 @@ describe("workflow parent session ownership", () => {
   it("captures explicit start owner instead of the mutable active owner", () => {
     const ownerA = owner(30, 1);
     const ownerB = owner(40, 1);
-    setLegacyActiveSessionRefs(context(40, 1));
+    context(30, 1);
+    context(40, 1);
 
     const started = startWorkflowJob(
       "owned-by-a",
@@ -267,7 +277,7 @@ describe("workflow parent session ownership", () => {
     );
 
     expect(started.parentSessionOwner).toEqual(ownerA);
-    expect(getWorkflowJobForActiveSession(started.id)).toBeUndefined();
+    expect(getWorkflowJobForOwner(started.id, undefined)).toBeUndefined();
     expect(getWorkflowJobForOwner(started.id, ownerA)).toBe(started);
     expect(getWorkflowJobForOwner(started.id, ownerB)).toBeUndefined();
   });
@@ -299,7 +309,6 @@ describe("workflow parent session ownership", () => {
     const contextB = { ...context(60, 1), pi: piB };
     registerSessionScope(contextA);
     registerSessionScope(contextB);
-    setLegacyActiveSessionRefs(contextB);
     registerWorkflowTool(piA, contextA);
     const workflow = tools.find((tool) => tool.name === "workflow");
 

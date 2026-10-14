@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed obsolete aggregate indexes and active-session compatibility helpers for
+  in-process jobs and interactive sub-agent state. Runtime state now requires an
+  exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
+
 ## [3.6.5] - 2026-10-14
 
 ### Added

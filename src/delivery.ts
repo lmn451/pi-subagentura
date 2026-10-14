@@ -33,10 +33,6 @@ interface DeliveryGlobalState {
 }
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
 
-function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
-  return globalThis as typeof globalThis & DeliveryGlobalState;
-}
-
 function interactiveStatesForOwner(
   owner?: SessionOwnerToken,
 ): Iterable<InteractiveSubagentState> {
@@ -46,11 +42,7 @@ function interactiveStatesForOwner(
       EMPTY_INTERACTIVE_STATES
     );
   }
-  if (!ownerlessEntitiesVisible()) return EMPTY_INTERACTIVE_STATES;
-  return (
-    deliveryGlobals().__piSubagenturaInteractiveRegistry?.values() ??
-    EMPTY_INTERACTIVE_STATES
-  );
+  return EMPTY_INTERACTIVE_STATES;
 }
 
 function runningInProcessJobCount(owner?: SessionOwnerToken): number {
@@ -384,9 +376,9 @@ export function reconcileDeliveryReceipts(
 }
 
 export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
-  const entries = owner
-    ? resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.()
-    : deliveryGlobals().__piSubagenturaSessionManager?.getEntries?.();
+  if (!owner) return;
+  const entries =
+    resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
   const changedStates: InteractiveSubagentState[] = [];
   for (const state of interactiveStatesForOwner(owner)) {

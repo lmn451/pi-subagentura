@@ -45,7 +45,6 @@ import {
   getCurrentPaneActivity,
   removeInteractiveSubagentState,
   formatInteractiveState,
-  interactiveSubagentRegistry,
   launchInteractiveSubagent,
   pruneDeadInteractiveSubagents,
   sendCommandToPane,
@@ -410,15 +409,12 @@ function resultReadOutcome(params: {
 
 function resolveInteractiveToolStates(token: SessionToolToken | undefined):
   | {
-      scope?: SessionScope;
+      scope: SessionScope;
       states: Map<string, InteractiveSubagentState>;
     }
   | undefined {
   const scope = resolveToolSessionScope(token);
   if (scope) return { scope, states: scope.interactiveStates };
-  if (!token && getStartedSessionScopes().length === 0) {
-    return { states: interactiveSubagentRegistry };
-  }
   return undefined;
 }
 
@@ -1319,8 +1315,15 @@ export function registerInteractiveSubagentTools(
         };
       }
       const state = registration?.states.get(params.id);
+      // A persisted parent id can be shared by different live extension scopes.
       const foreignInMemoryState =
-        !state && interactiveSubagentRegistry.has(params.id);
+        registration !== undefined &&
+        !state &&
+        getStartedSessionScopes().some(
+          (scope) =>
+            scope !== registration.scope &&
+            scope.interactiveStates.has(params.id),
+        );
       const art = state
         ? getArtifactForState(state)
         : registration && !foreignInMemoryState

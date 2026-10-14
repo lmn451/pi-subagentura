@@ -17,10 +17,15 @@ import {
 } from "../src/interactive-lineage";
 import {
   cancelInteractiveDescendantByState,
-  interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
+
+import {
+  clearSessionScopes,
+  createSessionScope,
+  registerSessionScope,
+} from "../src/session-scope";
 
 const tempDirs: string[] = [];
 
@@ -58,7 +63,7 @@ function manifest(
 }
 
 afterEach(() => {
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __resetMuxInstances();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -124,9 +129,10 @@ describe("recursive interactive children", () => {
       artifactDir,
     };
 
+    const scope = registerSessionScope(createSessionScope({} as never));
     cancelInteractiveDescendantByState(state);
 
-    expect(interactiveSubagentRegistry.has(state.id)).toBe(false);
+    expect(scope.interactiveStates.has(state.id)).toBe(false);
     expect(state.deliveryReceipts).toBeUndefined();
     expect(state.status).toBe("cancelled");
     expect(existsSync(join(artifactDir, ".cancelled"))).toBe(true);

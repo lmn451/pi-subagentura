@@ -175,7 +175,6 @@ export {
   SubagentLiveStatus,
   ACTIVE_TOOL_DEBOUNCE_MS,
   // ── Async job machinery ──
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneOldestJob,
   pruneCompletedJobs,

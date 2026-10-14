@@ -11,7 +11,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { formatCompletionMessage } from "./completion-presentation";
 import { MAX_TURN_ID_LENGTH } from "./artifact";
 import {
-  getActiveSessionOwner,
   resolveLiveSessionScope,
   resolveStreamingFlag,
   resolveActualStreamingFlag,
@@ -249,7 +248,7 @@ function ownerKey(owner: SessionOwnerToken): string {
 function effectiveOwner(
   owner?: SessionOwnerToken,
 ): SessionOwnerToken | undefined {
-  return owner ?? getActiveSessionOwner();
+  return owner;
 }
 
 function sessionId(scope: SessionScope | undefined): string | undefined {

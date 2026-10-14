@@ -18,6 +18,15 @@ function makeTmp(): string {
 
 describe("protocol-v2 interactive completion", () => {
   let root: string;
+  let scope: SessionScope;
+
+  function pollFixture(
+    mod: typeof import("../src/subagent"),
+    pi: Parameters<typeof mod.pollArtifactChanges>[0],
+  ) {
+    scope.pi = pi;
+    return mod.pollArtifactChanges(pi, sessionOwner(scope));
+  }
 
   beforeEach(() => {
     vi.resetModules();

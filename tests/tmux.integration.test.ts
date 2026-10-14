@@ -15,7 +15,6 @@ import {
   cancelInteractiveSubagent,
   captureInteractiveSubagent,
   focusInteractiveSubagent,
-  interactiveSubagentRegistry,
   launchInteractiveSubagent,
   sendCommandToPane,
 } from "../src/interactive-tmux";
@@ -33,6 +32,8 @@ import {
   safeSegment,
 } from "../src/multiplexer";
 import { TmuxMultiplexer } from "../src/multiplexer-tmux";
+import { clearSessionScopes } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 const socket =
   process.env.PI_SUBAGENTURA_TMUX_SOCKET ??
@@ -125,7 +126,7 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
   delete process.env.ZELLIJ_SESSION_NAME;
 
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __resetMuxInstances();
 });
 
@@ -138,7 +139,7 @@ afterEach(() => {
     // The server may already be gone if a test failed before creating it.
   }
 
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __resetMuxInstances();
 
   restoreEnv("PATH");
@@ -163,6 +164,7 @@ afterEach(() => {
 test("launches an interactive subagent in an isolated tmux session", async () => {
   const cwd = mkdtempSync(join(tempRoot, "workspace-"));
 
+  const scope = createTestSessionScope();
   const state = launchInteractiveSubagent({
     name: "CI tmux child",
     task: "do fake work",
@@ -211,12 +213,14 @@ test("reports inactive for a pane in a detached session", async () => {
 test("sends a follow-up message into the same tmux pane", async () => {
   const cwd = mkdtempSync(join(tempRoot, "workspace-"));
 
+  const scope = createTestSessionScope();
   const state = launchInteractiveSubagent({
     name: "Followup child",
     task: "initial",
     cwd,
     muxPreference: "tmux",
     background: true,
+    sessionScope: scope,
   });
 
   await waitFor(
@@ -237,12 +241,14 @@ test("sends a follow-up message into the same tmux pane", async () => {
 });
 
 test("focuses a background child window through structured pane metadata", async () => {
+  const scope = createTestSessionScope();
   const first = launchInteractiveSubagent({
     name: "Focus first",
     task: "wait",
     cwd: mkdtempSync(join(tempRoot, "focus-first-")),
     muxPreference: "tmux",
     background: true,
+    sessionScope: scope,
   });
   const second = launchInteractiveSubagent({
     name: "Focus second",
@@ -250,6 +256,7 @@ test("focuses a background child window through structured pane metadata", async
     cwd: mkdtempSync(join(tempRoot, "focus-second-")),
     muxPreference: "tmux",
     background: true,
+    sessionScope: scope,
   });
 
   expect(
@@ -272,17 +279,19 @@ test("focuses a background child window through structured pane metadata", async
     ]).trim(),
   ).toBe("1");
 
-  cancelInteractiveSubagent(second.id);
-  cancelInteractiveSubagent(first.id);
+  cancelInteractiveSubagent(second.id, "cancel_interactive_subagent", second);
+  cancelInteractiveSubagent(first.id, "cancel_interactive_subagent", first);
 });
 
 test("captures live pane output with byte and line bounds", async () => {
+  const scope = createTestSessionScope();
   const state = launchInteractiveSubagent({
     name: "Capture child",
     task: "emit terminal output",
     cwd: mkdtempSync(join(tempRoot, "capture-workspace-")),
     muxPreference: "tmux",
     background: true,
+    sessionScope: scope,
   });
   await waitFor(
     () => existsSync(join(state.artifactDir, "output.md")),
@@ -303,21 +312,27 @@ test("captures live pane output with byte and line bounds", async () => {
   expect(bounded.output.split("\n")).toHaveLength(1);
   expect(bounded.truncated).toBe(true);
 
-  cancelInteractiveSubagent(state.id);
+  cancelInteractiveSubagent(state.id, "cancel_interactive_subagent", state);
 });
 
 test("cancel writes the cancellation marker and kills the tmux pane", async () => {
   const cwd = mkdtempSync(join(tempRoot, "workspace-"));
 
+  const scope = createTestSessionScope();
   const state = launchInteractiveSubagent({
     name: "Cancel child",
     task: "long work",
     cwd,
     muxPreference: "tmux",
     background: true,
+    sessionScope: scope,
   });
 
-  const cancelled = cancelInteractiveSubagent(state.id);
+  const cancelled = cancelInteractiveSubagent(
+    state.id,
+    "cancel_interactive_subagent",
+    state,
+  );
 
   expect(cancelled?.status).toBe("cancelled");
   expect(existsSync(join(state.artifactDir, ".cancelled"))).toBe(true);
@@ -522,6 +537,7 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     process.env.PI_CODING_AGENT_SESSION_DIR!,
   );
 
+  const scope = createTestSessionScope();
   const child = launchInteractiveSubagent({
     name: "Recursive child",
     task: "spawn a nested child",
@@ -530,6 +546,7 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     muxPreference: "tmux",
     background: true,
     spawnTreeContext: rootContext,
+    sessionScope: scope,
   });
   const childContext = createDescendantSpawnTreeContext(
     rootContext,
@@ -544,6 +561,7 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     muxPreference: "tmux",
     background: true,
     spawnTreeContext: childContext,
+    sessionScope: scope,
   });
 
   const paths = await resolveLineageStorePaths(
@@ -565,6 +583,10 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
   ).toEqual([grandchild.id]);
   expect(projection.roots[0]?.children[0]?.manifest.cwd).toBe(grandchildCwd);
 
-  cancelInteractiveSubagent(grandchild.id);
-  cancelInteractiveSubagent(child.id);
+  cancelInteractiveSubagent(
+    grandchild.id,
+    "cancel_interactive_subagent",
+    grandchild,
+  );
+  cancelInteractiveSubagent(child.id, "cancel_interactive_subagent", child);
 });

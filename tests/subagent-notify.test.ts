@@ -15,7 +15,6 @@ import {
   clearSessionScopes,
   getSessionScopes,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import { settleCompletionParentTurn } from "../src/completion-coordinator";
@@ -190,8 +189,6 @@ function mockJobResult(
 /** Shared state that must be cleaned between tests. */
 function cleanGlobals() {
   clearSessionScopes();
-  setLegacyActiveSessionRefs(undefined);
-  jobRegistry.clear();
 }
 
 /**
@@ -673,7 +670,7 @@ describe("coordinated completion", () => {
       );
       control.resolve(SUCCESS_RESULT);
       await vi.waitFor(() => {
-        expect(jobRegistry.get(jobId)?.status).toBe("done");
+        expect(scope.inProcessJobs.get(jobId)?.status).toBe("done");
       });
       expect(api.sendMessage).not.toHaveBeenCalled();
 
@@ -714,7 +711,7 @@ describe("coordinated completion", () => {
       const control = createJobControl();
       const parentSessionManager = {
         getSessionId: () => "parent-session",
-        getEntries: () => [],
+        // This lightweight host has no observable session-entry ledger.
       };
       const parentSessionStart = api.on.mock.calls.find(
         ([eventName]: any[]) => eventName === "session_start",
@@ -755,7 +752,6 @@ describe("coordinated completion", () => {
           ui: { notify: child.api.notify },
           sessionManager: {
             getSessionId: () => "child-session",
-            getEntries: () => [],
           },
         },
       );
@@ -766,7 +762,7 @@ describe("coordinated completion", () => {
 
       control.resolve(SUCCESS_RESULT);
       await vi.waitFor(() => {
-        expect(jobRegistry.get(jobId)?.status).toBe("done");
+        expect(scope.inProcessJobs.get(jobId)?.status).toBe("done");
       });
       const status = await statusToolDef.execute(
         "nested-context-status",
@@ -869,7 +865,7 @@ describe("coordinated completion", () => {
 
       // Mark the job as cancelled BEFORE resolving the promise.
       // The .then() handler checks jobState.status === "cancelled" and returns early.
-      const jobState = jobRegistry.get(jobId)!;
+      const jobState = scope.inProcessJobs.get(jobId)!;
       expect(jobState).toBeDefined();
       jobState.status = "cancelled";
 
@@ -899,7 +895,7 @@ describe("coordinated completion", () => {
         undefined,
         mockCtx(),
       );
-      const jobState = jobRegistry.get(jobId)!;
+      const jobState = scope.inProcessJobs.get(jobId)!;
       jobState.resultRetrieved = true;
       control.resolve(SUCCESS_RESULT);
 
@@ -927,7 +923,7 @@ describe("coordinated completion", () => {
         undefined,
         mockCtx(),
       );
-      const jobState = jobRegistry.get(jobId)!;
+      const jobState = scope.inProcessJobs.get(jobId)!;
       jobState.resultRetrieved = true;
       control.resolve(SUCCESS_RESULT);
 
@@ -1228,7 +1224,7 @@ describe("coordinated completion", () => {
       // By now, the notification was already delivered because .then()
       // fires before get_subagent_result can set resultRetrieved.
       // Simulate get_subagent_result being called now (after settlement).
-      const jobState = jobRegistry.get(jobId)!;
+      const jobState = scope.inProcessJobs.get(jobId)!;
       jobState.resultRetrieved = true;
 
       // No double delivery — notificationDelivered guard prevents it

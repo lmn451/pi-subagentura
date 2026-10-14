@@ -23,12 +23,11 @@ import {
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { flushDeliveries } from "../src/delivery";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import { createTestSessionScope } from "./session-scope-fixture";
 import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import { importFresh } from "./test-utils";
@@ -36,6 +35,7 @@ import { makeTmp } from "./subagent-rehydrate-helpers";
 
 describe("rehydrateInteractiveSubagents", () => {
   let cwd: string;
+  let scope: SessionScope;
   let completionScope: SessionScope | undefined;
   beforeEach(() => {
     cwd = makeTmp();
@@ -46,10 +46,8 @@ describe("rehydrateInteractiveSubagents", () => {
         throw new Error("mock: child_process unavailable");
       },
     }));
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
     clearSessionScopes();
-    g.__piSubagenturaPiRef = undefined;
+    scope = createTestSessionScope({ cwd });
   });
 
   afterEach(() => {
@@ -109,9 +107,9 @@ describe("rehydrateInteractiveSubagents", () => {
       exitCode: 0,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(id);
+    const rehydrated = scope.interactiveStates.get(id);
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.name).toBe("my-agent"); // from prompt file label
     expect(rehydrated?.startedAt).toBe(1000);
@@ -131,9 +129,9 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: "/tmp/sess.jsonl",
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(id);
+    const rehydrated = scope.interactiveStates.get(id);
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.name).toBe(id); // falls back to entry.id
     expect(rehydrated?.startedAt).toBe(0); // falls back to 0
@@ -152,8 +150,8 @@ describe("rehydrateInteractiveSubagents", () => {
       parentSessionId: "reload-parent",
       completionTombstone: "failed",
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(true);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(true);
   });
 
   it("does not rehydrate a failed completion-registration tombstone", async () => {
@@ -172,8 +170,8 @@ describe("rehydrateInteractiveSubagents", () => {
       completionTombstone: "failed",
       completionTombstoneAt: Date.now(),
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(false);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(false);
   });
 
   it("allows an expired failed tombstone to be recovered", async () => {
@@ -190,8 +188,8 @@ describe("rehydrateInteractiveSubagents", () => {
       completionTombstone: "failed",
       completionTombstoneAt: Date.now() - 6 * 60 * 1000,
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(true);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(true);
   });
 
   it("rehydrates same-session artifacts into the current scope generation", async () => {
@@ -219,7 +217,7 @@ describe("rehydrateInteractiveSubagents", () => {
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
     const rehydrated = scope.interactiveStates.get(id);
-    expect(rehydrated).toBe(interactiveSubagentRegistry.get(id));
+    expect(rehydrated).toBeDefined();
     expect(rehydrated?.sessionOwner).toEqual({ id: 710, generation: 9 });
     expect(rehydrated?.artifactDir).toBe(artDir);
   });
@@ -541,7 +539,7 @@ describe("rehydrateInteractiveSubagents", () => {
       pi: {} as never,
       parentStreaming: true,
     });
-    setLegacyActiveSessionRefs(peer);
+    expect(peer.parentStreaming).toBe(true);
 
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
@@ -550,7 +548,7 @@ describe("rehydrateInteractiveSubagents", () => {
     );
   });
 
-  it("rehydrates into the exact scope despite a stale aggregate id", async () => {
+  it("rehydrates into the exact scope despite a colliding peer id", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const id = "colliding-state";
@@ -575,12 +573,14 @@ describe("rehydrateInteractiveSubagents", () => {
       id,
       artifactDir: join(cwd, "stale", id),
     } as never;
-    interactiveSubagentRegistry.set(id, stale);
+    const peer = createTestSessionScope();
+    peer.interactiveStates.set(id, stale);
 
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
     expect(scope.interactiveStates.get(id)).toBeDefined();
     expect(scope.interactiveStates.get(id)).not.toBe(stale);
+    expect(peer.interactiveStates.get(id)).toBe(stale);
   });
   it("rejects a persisted entry with a foreign artifact marker", async () => {
     const mod =

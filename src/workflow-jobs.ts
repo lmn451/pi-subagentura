@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { debugLog } from "./helpers";
 import {
-  getActiveSessionOwner,
   isSessionOwnerLive,
   resolveLiveSessionScope,
   type SessionOwnerToken,
@@ -329,23 +328,11 @@ export function workflowJobBelongsToOwner(
   job: WorkflowJobState,
   owner: SessionOwnerToken | undefined,
 ): boolean {
-  if (!owner) return !job.parentSessionOwner;
+  if (!owner) return false;
   return (
     job.parentSessionOwner?.id === owner.id &&
     job.parentSessionOwner?.generation === owner.generation
   );
-}
-
-export function workflowJobBelongsToActiveSession(
-  job: WorkflowJobState,
-): boolean {
-  return workflowJobBelongsToOwner(job, getActiveSessionOwner());
-}
-
-export function getWorkflowJobForActiveSession(
-  workflowId: string,
-): WorkflowJobState | undefined {
-  return getWorkflowJobForOwner(workflowId, getActiveSessionOwner());
 }
 
 export function getWorkflowJobForOwner(
@@ -355,10 +342,6 @@ export function getWorkflowJobForOwner(
   const job = workflowJobRegistry.get(workflowId);
   if (!job || !workflowJobBelongsToOwner(job, owner)) return undefined;
   return job;
-}
-
-export function workflowJobsForActiveSession(): WorkflowJobState[] {
-  return workflowJobsForOwner(getActiveSessionOwner());
 }
 
 export function workflowJobsForOwner(
@@ -483,6 +466,9 @@ export function startWorkflowJob(
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
 ): WorkflowJobState {
+  if (!owner || !isSessionOwnerLive(owner)) {
+    throw new Error("Workflow jobs require an owner from a live session.");
+  }
   const parentSessionOwner = owner;
   const telemetrySession =
     resolveLiveSessionScope(parentSessionOwner)?.telemetry;
@@ -701,9 +687,7 @@ export function normalizeCancelledWorkflowState(state: WorkflowJobState): void {
 }
 
 /** Count running workflow jobs (status === "running"). */
-export function getRunningWorkflowCount(
-  owner: SessionOwnerToken | undefined = getActiveSessionOwner(),
-): number {
+export function getRunningWorkflowCount(owner?: SessionOwnerToken): number {
   let count = 0;
   for (const st of workflowJobRegistry.values()) {
     if (st.status === "running" && workflowJobBelongsToOwner(st, owner))

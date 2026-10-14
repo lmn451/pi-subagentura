@@ -7,6 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompletionEvent, artifactPath } from "../src/artifact";
 import { importFresh } from "./test-utils";
+import {
+  clearSessionScopes,
+  createSessionScope,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
+import { registerInteractiveSubagentState } from "../src/interactive-tmux";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-stale-ctx-"));

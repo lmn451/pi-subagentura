@@ -15,7 +15,6 @@ vi.mock("../src/helpers", async (importOriginal) => {
 });
 
 vi.mock("../src/interactive-tmux", () => ({
-  interactiveSubagentRegistry: new Map(),
   isTmuxAvailable: () => false,
   cancelInteractiveSubagent: vi.fn(),
   cancelInteractiveSubagentByState: vi.fn(),
@@ -23,12 +22,11 @@ vi.mock("../src/interactive-tmux", () => ({
   removeInteractiveSubagentState: vi.fn(),
 }));
 
-import { jobRegistry } from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { registerSessionHandlers } from "../src/session-handlers";
 import {
   clearSessionScopes,
-  getActiveSessionOwner,
+  sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
 
@@ -64,20 +62,11 @@ function setupTools(pi: any, owner?: SessionScope) {
 
 describe("async spawn shutdown handoff", () => {
   beforeEach(() => {
-    jobRegistry.clear();
     mockStartSubagentJob.mockReset();
     clearSessionScopes();
-    const g = globalThis as any;
-    g.__piSubagenturaInteractivePollerHandle = undefined;
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaUi = undefined;
-    g.__piSubagenturaSessionManager = undefined;
   });
 
   afterEach(() => {
-    jobRegistry.clear();
-    const handle = (globalThis as any).__piSubagenturaInteractivePollerHandle;
-    clearInterval(handle);
     clearSessionScopes();
   });
 
@@ -110,10 +99,10 @@ describe("async spawn shutdown handoff", () => {
       );
       await Promise.resolve();
       expect(mockStartSubagentJob).toHaveBeenCalledOnce();
-      expect(jobRegistry.size).toBe(0);
+      expect(parentScope.inProcessJobs.size).toBe(0);
 
       await shutdown({ reason: "quit" }, ctx);
-      expect(jobRegistry.size).toBe(0);
+      expect(parentScope.inProcessJobs.size).toBe(0);
 
       const sessionAbort = vi.fn();
       const start = vi.fn();
@@ -142,7 +131,7 @@ describe("async spawn shutdown handoff", () => {
       const result = await spawn;
       expect(result.details.status).toBe("cancelled");
       expect(result.isError).toBe(true);
-      expect(jobRegistry.size).toBe(0);
+      expect(parentScope.inProcessJobs.size).toBe(0);
       expect(start).not.toHaveBeenCalled();
       expect(disposeBeforeStart).toHaveBeenCalledOnce();
       expect(sessionAbort).toHaveBeenCalledOnce();
@@ -164,10 +153,7 @@ describe("async spawn shutdown handoff", () => {
     const otherScope = registerSessionHandlers(otherPi);
     expect(otherScope.lifecycle).toBe("registered");
 
-    expect(getActiveSessionOwner()).toEqual({
-      id: otherScope.id,
-      generation: otherScope.generation,
-    });
+    expect(sessionOwner(otherScope)).not.toEqual(sessionOwner(parentScope));
     const spawn = tools.subagent_isolated.execute(
       "call",
       { task: "parent-owned spawn", async: true },
@@ -205,8 +191,10 @@ describe("async spawn shutdown handoff", () => {
 
     const result = await spawn;
     expect(result.details.status).toBe("started");
-    expect(jobRegistry.has("parent-owned-job")).toBe(true);
-    expect(jobRegistry.get("parent-owned-job")?.deliveryOwner).toMatchObject({
+    expect(parentScope.inProcessJobs.has("parent-owned-job")).toBe(true);
+    expect(
+      parentScope.inProcessJobs.get("parent-owned-job")?.deliveryOwner,
+    ).toMatchObject({
       sessionScopeId: parentScope.id,
       sessionScopeGeneration: parentScope.generation,
     });
@@ -271,7 +259,10 @@ describe("async spawn shutdown handoff", () => {
 
       const result = await spawn;
       expect(result.details.status).toBe("started");
-      expect(jobRegistry.has(`${toolName}-nested-job`)).toBe(true);
+      expect(parentScope.inProcessJobs.has(`${toolName}-nested-job`)).toBe(
+        true,
+      );
+      expect(childScope.inProcessJobs.size).toBe(0);
       expect(disposeBeforeStart).not.toHaveBeenCalled();
       expect(start).toHaveBeenCalledOnce();
     },

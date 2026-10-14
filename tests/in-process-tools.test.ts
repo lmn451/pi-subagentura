@@ -5,7 +5,7 @@
  * filtering for every exported tool.
  *
  * Uses vi.hoisted + vi.mock to swap module-level dependencies while
- * keeping the real jobRegistry Map so tests can seed and verify state.
+ * keeping real session-owned Maps so tests can seed and verify state.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,17 +61,9 @@ vi.mock("../src/completion-coordinator", async (importOriginal) => {
   };
 });
 
-// interactive-tmux.ts has a TypeScript syntax that esbuild (vitest's transformer)
-// cannot parse (line 613). We mock it so vitest never loads the source.
-vi.mock("../src/interactive-tmux", () => {
-  const fakeRegistry = new Map<string, any>();
-  return {
-    interactiveSubagentRegistry: fakeRegistry,
-    isTmuxAvailable: () => false,
-    default: {},
-    // The specific shape doesn't matter — only the import needs to resolve.
-  };
-});
+vi.mock("../src/interactive-tmux", () => ({
+  isTmuxAvailable: () => false,
+}));
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   const actual =
@@ -94,7 +86,6 @@ import {
   type SubagentResult,
   annotateSpawnFailure,
   inProcessJobsForOwner,
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneCompletedJobs,
   registerInProcessJob,
@@ -111,10 +102,12 @@ import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import { createTelemetrySession } from "../src/telemetry";
+import { createTestSessionScope } from "./session-scope-fixture";
+
+let testScope: SessionScope;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -200,9 +193,10 @@ function createExtensionApi() {
 }
 
 /** Build a mock ExtensionAPI, register the tools, and return the API handle. */
-function setupExtension(scope?: SessionScope) {
+function setupExtension(scope: SessionScope = testScope) {
   const api = createExtensionApi();
   const extensionApi = api as unknown as ExtensionAPI;
+  scope.pi = extensionApi;
   registerInProcessSubagentTools(extensionApi, scope);
   registerInProcessMaintenanceTools(extensionApi, scope);
   return api;
@@ -270,7 +264,7 @@ const defaultStartSubagentJobResult = {
 beforeEach(() => {
   vi.clearAllMocks();
   clearSessionScopes();
-  jobRegistry.clear();
+  testScope = createTestSessionScope();
   mockStartSubagentJob.mockReset();
   mockStartSubagentJob.mockResolvedValue(defaultStartSubagentJobResult);
   mockFormatUsage.mockReturnValue("mock usage 1 turn");
@@ -283,14 +277,12 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  jobRegistry.clear();
   clearSessionScopes();
 });
 describe("peer session scope isolation", () => {
   it("keeps an A spawn owned by A after B becomes active", async () => {
     const a = setupScopedExtension(801);
     const b = setupScopedExtension(802);
-    setLegacyActiveSessionRefs(b.scope);
     const ownerA = sessionOwner(a.scope);
     const start = vi.fn();
     const pending = new Promise<SubagentResult>(() => {});
@@ -343,7 +335,36 @@ describe("peer session scope isolation", () => {
     expect([...inProcessJobsForOwner().keys()]).toEqual([]);
     expect(pruneCompletedJobs()).toBe(0);
     expect(a.scope.inProcessJobs.get(doneA.id)).toBe(doneA);
-    expect(jobRegistry.get(doneA.id)).toBe(doneA);
+  });
+
+  it("rejects ownerless tool registration without spawning or accessing live jobs", async () => {
+    const api = createExtensionApi();
+    const job = createJobState({ id: "owned-target" });
+    testScope.inProcessJobs.set(job.id, job);
+    registerInProcessSubagentTools(api as unknown as ExtensionAPI);
+
+    const spawn = await getToolDef(api, "subagent_isolated").execute(
+      "ownerless-spawn",
+      { task: "must not spawn" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(spawn.isError).toBe(true);
+    expect(spawn.content[0].text).toMatch(/session.*no longer active/i);
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+
+    const cancel = await getToolDef(api, "cancel_subagent").execute(
+      "ownerless-cancel",
+      { jobId: job.id },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(cancel.isError).toBe(true);
+    expect(job.status).toBe("running");
+    expect(job.session.abort).not.toHaveBeenCalled();
+    expect(testScope.inProcessJobs.get(job.id)).toBe(job);
   });
 
   it("isolates status, result, cancel, and prune management paths", async () => {
@@ -417,8 +438,6 @@ describe("peer session scope isolation", () => {
     expect(pruned.details).toMatchObject({ removed: 1, before: 1, after: 0 });
     expect(a.scope.inProcessJobs.has("done-a")).toBe(false);
     expect(b.scope.inProcessJobs.has("done-b")).toBe(true);
-    expect(jobRegistry.has("done-a")).toBe(false);
-    expect(jobRegistry.has("done-b")).toBe(true);
   });
   it("fails a dead supplied tool token closed instead of falling back", async () => {
     const a = setupScopedExtension(821);
@@ -763,7 +782,7 @@ describe("subagent_isolated tool", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("retained or running");
     expect(result.content[0].text).not.toContain("session shutdown");
-    expect(jobRegistry.size).toBe(MAX_REGISTRY_SIZE);
+    expect(testScope.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
   });
 
   it("refuses to spawn once the orchestration depth cap is reached", async () => {
@@ -867,7 +886,6 @@ describe("subagent_isolated tool", () => {
       const id = `capacity-${index}`;
       const job = createJobState({ id });
       scoped.scope.inProcessJobs.set(id, job);
-      jobRegistry.set(id, job);
     }
 
     const scopedTool = getToolDef(scoped.api, "subagent_isolated");
@@ -1066,7 +1084,10 @@ describe("get_subagent_status tool", () => {
 
   it("returns cancelled response when job status is cancelled", async () => {
     const jobId = "cancelled-job";
-    jobRegistry.set(jobId, createJobState({ id: jobId, status: "cancelled" }));
+    testScope.inProcessJobs.set(
+      jobId,
+      createJobState({ id: jobId, status: "cancelled" }),
+    );
 
     const result = await toolDef.execute(
       "call-1",
@@ -1096,7 +1117,7 @@ describe("get_subagent_status tool", () => {
       model: "anthropic/claude-3-5-sonnet",
       isError: false,
     };
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -1140,7 +1161,7 @@ describe("get_subagent_status tool", () => {
       isError: true,
       errorMessage: "LLM returned an error",
     };
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -1170,7 +1191,10 @@ describe("get_subagent_status tool", () => {
 
   it("returns running update for running job", async () => {
     const jobId = "running-job";
-    jobRegistry.set(jobId, createJobState({ id: jobId, status: "running" }));
+    testScope.inProcessJobs.set(
+      jobId,
+      createJobState({ id: jobId, status: "running" }),
+    );
 
     mockBuildLiveUpdate.mockReturnValue({
       content: [{ type: "text", text: "still working..." }],
@@ -1238,7 +1262,7 @@ describe("get_subagent_result tool", () => {
       resolveJob = resolve;
     });
     const job = createJobState({ id: jobId, promise: jobPromise });
-    jobRegistry.set(jobId, job);
+    testScope.inProcessJobs.set(jobId, job);
 
     const executePromise = toolDef.execute(
       "call-1",
@@ -1275,7 +1299,7 @@ describe("get_subagent_result tool", () => {
       resolveJob = resolve;
     });
     const job = createJobState({ id: jobId, promise: jobPromise });
-    jobRegistry.set(jobId, job);
+    testScope.inProcessJobs.set(jobId, job);
 
     const executePromise = toolDef.execute(
       "call-1",
@@ -1373,7 +1397,10 @@ describe("get_subagent_result tool", () => {
 
   it("returns cancelled when job status is already cancelled", async () => {
     const jobId = "cancelled-result";
-    jobRegistry.set(jobId, createJobState({ id: jobId, status: "cancelled" }));
+    testScope.inProcessJobs.set(
+      jobId,
+      createJobState({ id: jobId, status: "cancelled" }),
+    );
 
     const result = await toolDef.execute(
       "call-1",
@@ -1411,7 +1438,7 @@ describe("get_subagent_result tool", () => {
       result: doneResult,
       promise: Promise.resolve(doneResult),
     });
-    jobRegistry.set(jobId, job);
+    testScope.inProcessJobs.set(jobId, job);
 
     mockFormatUsage.mockReturnValue("3 turns ↑300 ↓200 $0.0030");
 
@@ -1632,18 +1659,31 @@ describe("get_subagent_result tool", () => {
         completionPolicy: "group",
         completionGroupId: "grouped-retention",
       });
-      expect(registerInProcessJob(groupedA)).toBe(true);
-      expect(registerInProcessJob(groupedB)).toBe(true);
+      expect(registerInProcessJob(groupedA, sessionOwner(testScope))).toBe(
+        true,
+      );
+      expect(registerInProcessJob(groupedB, sessionOwner(testScope))).toBe(
+        true,
+      );
 
       const actualHelpers =
         await vi.importActual<typeof HelpersModule>("../src/helpers");
-      actualHelpers.scheduleJobCleanup(groupedA.id, false, groupedA.maxAge);
+      actualHelpers.scheduleJobCleanup(
+        groupedA.id,
+        false,
+        groupedA.maxAge,
+        sessionOwner(testScope),
+      );
       vi.advanceTimersByTime(20);
-      expect(jobRegistry.get(groupedA.id)).toBe(groupedA);
-      expect(pruneCompletedJobs()).toBe(0);
+      expect(testScope.inProcessJobs.get(groupedA.id)).toBe(groupedA);
+      expect(pruneCompletedJobs(sessionOwner(testScope))).toBe(0);
 
-      for (let index = 0; jobRegistry.size < MAX_REGISTRY_SIZE; index++) {
-        jobRegistry.set(
+      for (
+        let index = 0;
+        testScope.inProcessJobs.size < MAX_REGISTRY_SIZE;
+        index++
+      ) {
+        testScope.inProcessJobs.set(
           `running-filler-${index}`,
           createJobState({
             id: `running-filler-${index}`,
@@ -1651,15 +1691,16 @@ describe("get_subagent_result tool", () => {
           }),
         );
       }
-      expect(jobRegistry.size).toBe(MAX_REGISTRY_SIZE);
+      expect(testScope.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
       expect(
         registerInProcessJob(
           createJobState({ id: "over-cap", status: "running" }),
+          sessionOwner(testScope),
         ),
       ).toBe(false);
-      expect(jobRegistry.size).toBe(MAX_REGISTRY_SIZE);
-      expect(jobRegistry.get(groupedA.id)).toBe(groupedA);
-      expect(jobRegistry.get(groupedB.id)).toBe(groupedB);
+      expect(testScope.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
+      expect(testScope.inProcessJobs.get(groupedA.id)).toBe(groupedA);
+      expect(testScope.inProcessJobs.get(groupedB.id)).toBe(groupedB);
 
       const collected = await toolDef.execute(
         "collect-grouped-a",
@@ -1674,10 +1715,10 @@ describe("get_subagent_result tool", () => {
         groupedA.id,
         true,
         undefined,
-        undefined,
+        sessionOwner(testScope),
       );
-      expect(pruneCompletedJobs()).toBe(1);
-      expect(jobRegistry.has(groupedA.id)).toBe(false);
+      expect(pruneCompletedJobs(sessionOwner(testScope))).toBe(1);
+      expect(testScope.inProcessJobs.has(groupedA.id)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -1695,7 +1736,7 @@ describe("get_subagent_result tool", () => {
       status: "running",
       promise: deferredPromise,
     });
-    jobRegistry.set(jobId, job);
+    testScope.inProcessJobs.set(jobId, job);
 
     // Start execute and wait for completion so cancellation race can be observed.
     const executePromise = toolDef.execute(
@@ -1762,7 +1803,10 @@ describe("cancel_subagent tool", () => {
 
   it("returns already cancelled when job status is already cancelled", async () => {
     const jobId = "already-cancelled";
-    jobRegistry.set(jobId, createJobState({ id: jobId, status: "cancelled" }));
+    testScope.inProcessJobs.set(
+      jobId,
+      createJobState({ id: jobId, status: "cancelled" }),
+    );
 
     const result = await toolDef.execute(
       "call-1",
@@ -1780,7 +1824,7 @@ describe("cancel_subagent tool", () => {
 
   it("returns already completed when job is done", async () => {
     const jobId = "done-cancel";
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -1806,7 +1850,7 @@ describe("cancel_subagent tool", () => {
 
   it("returns already completed when job is in error state", async () => {
     const jobId = "error-cancel";
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -1838,7 +1882,7 @@ describe("cancel_subagent tool", () => {
   it("cancels a running job and calls session.abort", async () => {
     const jobId = "running-cancel";
     const abortFn = vi.fn().mockResolvedValue(undefined);
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -1866,7 +1910,7 @@ describe("cancel_subagent tool", () => {
       jobId,
       true,
       undefined,
-      undefined,
+      sessionOwner(testScope),
     );
     // Footer was updated
     expect(ctx.ui.setStatus).toHaveBeenCalled();
@@ -1880,14 +1924,14 @@ describe("cancel_subagent tool", () => {
           },
         ],
       }),
-      undefined,
+      sessionOwner(testScope),
     );
   });
 
   it("handles abort rejection gracefully", async () => {
     const jobId = "abort-throws";
     const abortFn = vi.fn().mockRejectedValue(new Error("session gone"));
-    jobRegistry.set(
+    testScope.inProcessJobs.set(
       jobId,
       createJobState({
         id: jobId,
@@ -2453,9 +2497,18 @@ describe("prune_subagent_jobs tool", () => {
   });
 
   it("returns correct count when done/error jobs exist", async () => {
-    jobRegistry.set("j1", createJobState({ id: "j1", status: "done" }));
-    jobRegistry.set("j2", createJobState({ id: "j2", status: "error" }));
-    jobRegistry.set("j3", createJobState({ id: "j3", status: "running" }));
+    testScope.inProcessJobs.set(
+      "j1",
+      createJobState({ id: "j1", status: "done" }),
+    );
+    testScope.inProcessJobs.set(
+      "j2",
+      createJobState({ id: "j2", status: "error" }),
+    );
+    testScope.inProcessJobs.set(
+      "j3",
+      createJobState({ id: "j3", status: "running" }),
+    );
 
     const result = await toolDef.execute();
     expect(result.content[0].text).toContain("Removed 2");
@@ -2465,14 +2518,23 @@ describe("prune_subagent_jobs tool", () => {
   });
 
   it("preserves running and cancelled jobs, removes done", async () => {
-    jobRegistry.set("r1", createJobState({ id: "r1", status: "running" }));
-    jobRegistry.set("c1", createJobState({ id: "c1", status: "cancelled" }));
-    jobRegistry.set("d1", createJobState({ id: "d1", status: "done" }));
+    testScope.inProcessJobs.set(
+      "r1",
+      createJobState({ id: "r1", status: "running" }),
+    );
+    testScope.inProcessJobs.set(
+      "c1",
+      createJobState({ id: "c1", status: "cancelled" }),
+    );
+    testScope.inProcessJobs.set(
+      "d1",
+      createJobState({ id: "d1", status: "done" }),
+    );
 
     await toolDef.execute();
-    expect(jobRegistry.has("r1")).toBe(true);
-    expect(jobRegistry.has("c1")).toBe(true);
-    expect(jobRegistry.has("d1")).toBe(false);
+    expect(testScope.inProcessJobs.has("r1")).toBe(true);
+    expect(testScope.inProcessJobs.has("c1")).toBe(true);
+    expect(testScope.inProcessJobs.has("d1")).toBe(false);
   });
 });
 
@@ -2691,7 +2753,7 @@ describe("subagent_with_context async path", () => {
     // Flush microtask queue so the .then handler runs
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    const job = jobRegistry.get("default-job")!;
+    const job = scoped.scope.inProcessJobs.get("default-job")!;
     expect(job.status).toBe("done");
     expect(mockPublishCompletion).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2729,7 +2791,7 @@ describe("subagent_with_context async path", () => {
     );
     expect(result.isError).toBe(true);
     expect(abort).toHaveBeenCalledOnce();
-    expect(jobRegistry.has("rollback-job")).toBe(false);
+    expect(setup.scope.inProcessJobs.has("rollback-job")).toBe(false);
   });
 
   it("does not deliver notification when job is cancelled before completion", async () => {
@@ -2766,7 +2828,7 @@ describe("subagent_with_context async path", () => {
     );
 
     // Cancel the job before the promise resolves
-    const job = jobRegistry.get("default-job")!;
+    const job = testScope.inProcessJobs.get("default-job")!;
     job.status = "cancelled";
 
     resolveJob(defaultSuccessResult);
@@ -2873,7 +2935,7 @@ describe("async rejection settlement", () => {
     rejectJob(new Error("context crash"));
     await flushPromiseHandlers();
 
-    const job = jobRegistry.get("default-job")!;
+    const job = testScope.inProcessJobs.get("default-job")!;
     expect(job.status).toBe("error");
     expect(job.result).toEqual(
       expect.objectContaining({
@@ -2949,7 +3011,7 @@ describe("async rejection settlement", () => {
     rejectJob(new Error("isolated crash"));
     await flushPromiseHandlers();
 
-    const job = jobRegistry.get("default-job")!;
+    const job = testScope.inProcessJobs.get("default-job")!;
     expect(job.status).toBe("error");
     expect(job.result).toEqual(
       expect.objectContaining({
@@ -3007,7 +3069,7 @@ describe("async rejection settlement", () => {
       undefined,
       ctx,
     );
-    jobRegistry.get("default-job")!.status = "cancelled";
+    testScope.inProcessJobs.get("default-job")!.status = "cancelled";
 
     rejectJob(new Error("cancelled crash"));
     await flushPromiseHandlers();

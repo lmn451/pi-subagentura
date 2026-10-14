@@ -64,7 +64,7 @@ afterEach(() => {
   for (const root of artifactRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
 

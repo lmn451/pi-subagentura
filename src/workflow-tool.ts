@@ -11,10 +11,7 @@ import {
   type JobState,
   type StartSubagentJobResult,
 } from "./helpers";
-import {
-  launchInteractiveSubagent,
-  registerInteractiveSubagentState,
-} from "./interactive-tmux";
+import { launchInteractiveSubagent } from "./interactive-tmux";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -65,7 +62,6 @@ import {
   type SpawnDepthDecision,
 } from "./orchestration-context";
 import {
-  getActiveSessionOwner,
   isSessionOwnerLive,
   resolveLiveSessionScope,
   sessionOwner,
@@ -236,9 +232,7 @@ export function registerWorkflowTool(
 ): void {
   debugLog("info", "workflow_registered", {});
   const owner = (): SessionOwnerToken | undefined =>
-    sessionScope
-      ? { id: sessionScope.id, generation: sessionScope.generation }
-      : getActiveSessionOwner();
+    sessionScope ? sessionOwner(sessionScope) : undefined;
   // Build the real spawn function from the tool ctx. Switches backend on `isolation`.
   function makeRunAgent(
     ctx: any,
@@ -316,11 +310,6 @@ export function registerWorkflowTool(
           });
         }
         if (state) {
-          // launchInteractiveSubagent performs this registration itself. Repeating
-          // the idempotent synchronization here keeps alternate launch adapters and
-          // test doubles on the same production contract: the owner scope is the
-          // authoritative index, while the process-global registry is compatibility.
-          registerInteractiveSubagentState(state, childScope);
           const result = await awaitInteractiveResult(
             state,
             signal,
@@ -332,15 +321,13 @@ export function registerWorkflowTool(
         }
       }
 
-      // A child whose deliveryOwner carries no session-scope identity matches
-      // no owner-scoped sweep: it is invisible in the supervisor and the footer,
-      // and session shutdown skips it outright. Prefer the live owner, and leave
-      // the child unregistered rather than create an unreachable registry row.
-      const childOwner = supervisorOwner ?? getActiveSessionOwner();
+      const childOwner = supervisorOwner;
       // Telemetry has to name the scope the job actually registers under. Reading
       // it from `supervisorOwner` instead drops every child event whenever the
       // workflow tool was registered without a session scope.
-      const childTelemetry = resolveLiveSessionScope(childOwner)?.telemetry;
+      const childTelemetry = childOwner
+        ? resolveLiveSessionScope(childOwner)?.telemetry
+        : undefined;
       const captureSpawnFailure = (
         failureStage: InProcessSpawnFailureStage,
         attemptStartedAt: number,
@@ -431,7 +418,7 @@ export function registerWorkflowTool(
         throw error;
       }
       // The parent session can shut down while startSubagentJob is awaited above.
-      // session_shutdown drains jobRegistry, so registering now would re-insert
+      // session_shutdown drains the SessionScope registry, so registering now would re-insert
       // into an already-drained registry and start a model turn that no abort path
       // can reach (the PR #59 shutdown-escape hole).
       if (childOwner && !isSessionOwnerLive(childOwner)) {
@@ -696,10 +683,7 @@ export function registerWorkflowTool(
         };
       }
       const workflowOwner = owner();
-      if (
-        sessionScope &&
-        (!workflowOwner || !isSessionOwnerLive(workflowOwner))
-      ) {
+      if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         const error =
           "Workflow tool registration is no longer attached to a live session.";
         return {
@@ -1420,10 +1404,7 @@ export function registerWorkflowTool(
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
       const workflowOwner = owner();
-      if (
-        sessionScope &&
-        (!workflowOwner || !isSessionOwnerLive(workflowOwner))
-      ) {
+      if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         throw new Error(
           "Workflow command registration is no longer attached to a live session.",
         );
