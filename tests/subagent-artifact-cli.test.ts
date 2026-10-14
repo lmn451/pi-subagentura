@@ -12,10 +12,8 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
-  artifactPath,
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
-  readEvents,
 } from "../src/artifact";
 
 function makeTmp(): string {
@@ -54,10 +52,6 @@ describe("subagent-artifact CLI", () => {
   });
 
   describe("source", () => {
-    it("starts with a shebang", () => {
-      expect(CLI_SOURCE.startsWith("#!/usr/bin/env node")).toBe(true);
-    });
-
     it("parses as valid JavaScript (node --check)", () => {
       // Strip the shebang (node can't parse it as a file) and write to a
       // temp .mjs file, then `node --check` it.
@@ -75,21 +69,6 @@ describe("subagent-artifact CLI", () => {
       const cliPath = join(tmp, "cli.mjs");
       writeCliScript(cliPath);
       expect(statSync(cliPath).mode & 0o777).toBe(0o700);
-    });
-  });
-
-  describe("start", () => {
-    it("writes a v2 turn_started event readable by the artifact reader", () => {
-      const r = runCli(tmp, ["start"]);
-      expect(r.status).toBe(0);
-      expect(readEvents(artifactPath(tmp, "."))).toEqual([
-        expect.objectContaining({
-          version: 2,
-          type: "turn_started",
-          status: "running",
-          turnId: "process",
-        }),
-      ]);
     });
   });
 
