@@ -108,6 +108,37 @@ function installDeliverySpies() {
   return sendMessage;
 }
 
+function appendTestTurnStarted(
+  art: ReturnType<typeof artifactPath>,
+  ts: number,
+  turnId = `turn-${ts}`,
+): void {
+  appendEvent(art, {
+    version: 2,
+    eventId: `event-${turnId}-started`,
+    turnId,
+    ts,
+    type: "turn_started",
+    status: "running",
+  });
+}
+
+function appendTestCompletion(
+  art: ReturnType<typeof artifactPath>,
+  ts: number,
+  outcome: "done" | "error" | "cancelled" = "done",
+  turnId = `turn-${ts}`,
+): void {
+  appendCompletionEvent(art, {
+    turnId,
+    outcome,
+    source: "agent_settled",
+    ...(outcome === "cancelled"
+      ? { cancellationOrigin: "cancel_all" as const }
+      : {}),
+  });
+}
+
 function renderWidgetContent(content: unknown, width: number): string[] {
   if (typeof content !== "function") return (content as string[]) ?? [];
   const component = content(
@@ -187,6 +218,9 @@ describe("pollArtifactChanges", () => {
       mux: item.state.mux,
       artifactDir: item.state.artifactDir,
       sessionFile: item.state.sessionFile,
+      eventByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
     });
     const persistedBefore = loadInteractiveStates(item.state.cwd)?.states[
       item.id
@@ -655,10 +689,8 @@ describe("pollArtifactChanges", () => {
       turnId: "clarification-turn",
       status: "done",
     });
-    expect(sendMessage).toHaveBeenCalledOnce();
-    expect(sendMessage.mock.calls[0][0].content).not.toContain("aborted-turn");
-    expect(ui.notify).toHaveBeenCalledOnce();
-    expect(ui.notify.mock.calls[0][0]).not.toContain("aborted");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(ui.notify).not.toHaveBeenCalled();
   });
 
   it("polls and dispatches only interactive states owned by the supplied context", async () => {
@@ -711,9 +743,8 @@ describe("pollArtifactChanges", () => {
     expect(a.state.eventByteCursor ?? 0).toBe(0);
     expect(a.state.pendingDeliveries ?? []).toEqual([]);
     expect(b.state.eventByteCursor).toBeGreaterThan(0);
-    expect(sendMessage).toHaveBeenCalledOnce();
-    expect(sendMessage.mock.calls[0][0].content).toContain(b.id);
-    expect(sendMessage.mock.calls[0][0].content).not.toContain(a.id);
+    expect(b.state.pendingDeliveries).toHaveLength(1);
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(wrongSendMessage).not.toHaveBeenCalled();
   });
 
@@ -730,7 +761,7 @@ describe("pollArtifactChanges", () => {
     for (const item of [a, b]) {
       item.state.cwd = join(item.artifactDir, "..");
       const art = artifactPath(item.state.cwd, item.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
+      appendTestTurnStarted(art, 1, `turn-${item.id}`);
       mod.interactiveSubagentRegistry.set(item.id, item.state);
     }
     const ownerA = { id: 501, generation: 1 };
@@ -1278,7 +1309,7 @@ describe("pollArtifactChanges", () => {
     await Promise.all([first, second]);
 
     expect(getPaneLivenessAsync).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(item.state.pendingDeliveries ?? []).toHaveLength(1);
 
     // Once the in-flight poll settles the key is released, so a later tick runs.
@@ -1296,7 +1327,7 @@ describe("pollArtifactChanges", () => {
     const item = makeState();
     item.state.cwd = join(item.artifactDir, "..");
     const art = artifactPath(item.state.cwd, item.id);
-    appendEvent(art, { ts: 1, type: "done", status: "done" });
+    appendTestTurnStarted(art, 1, `turn-${item.id}`);
     mod.interactiveSubagentRegistry.set(item.id, item.state);
     installDeliverySpies();
     multiplexer.__setTmuxMultiplexer({
@@ -1386,7 +1417,6 @@ describe("pollArtifactChanges", () => {
   });
 
   it.each([
-    ["cancelled", { ts: 1, type: "cancelled", status: "cancelled" }],
     [
       "process-exited",
       {
@@ -1460,9 +1490,7 @@ describe("pollArtifactChanges", () => {
           (payload) => payload.event === "pi_subagentura_runtime_failure",
         );
       expect(runtimeFailures()).toHaveLength(1);
-      expect(item.state.status).toBe(
-        terminalEvent.type === "cancelled" ? "cancelled" : "exited",
-      );
+      expect(item.state.status).toBe("exited");
       expect(item.state.eventByteCursor).toBeGreaterThan(0);
       const muxProbeLogs = () =>
         debugLog.mock.calls.filter(
@@ -1681,12 +1709,11 @@ describe("pollArtifactChanges", () => {
     const multiplexer = await import("../src/multiplexer");
     const { state, artifactDir } = makeState();
     mkdirSync(artifactDir, { recursive: true });
-    appendEvent(artifactPath(join(artifactDir, ".."), state.id), {
-      ts: 1,
-      type: "done",
-      status: "done",
-      exitCode: 0,
-    });
+    appendTestTurnStarted(
+      artifactPath(join(artifactDir, ".."), state.id),
+      1,
+      `turn-${state.id}`,
+    );
     let resolveProbe!: (liveness: "alive") => void;
     const probe = new Promise<"alive">((resolve) => {
       resolveProbe = resolve;
@@ -1822,14 +1849,12 @@ describe("pollArtifactChanges", () => {
     rmSync(logDir, { recursive: true, force: true });
   });
 
-  it("acknowledges cancellation before killing a pane with unknown liveness", async () => {
+  it("records cancellation before killing a pane with unknown liveness", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const interactive = await import("../src/interactive-tmux");
     const multiplexer = await import("../src/multiplexer");
     const { state, artifactDir } = makeState();
-    state.notifyOnComplete = "inject";
-    state.triggerTurnOnComplete = true;
     state.cwd = join(artifactDir, "..");
     state.parentSessionId = "pi";
     mkdirSync(artifactDir, { recursive: true });
@@ -1839,16 +1864,16 @@ describe("pollArtifactChanges", () => {
     );
     let completionsAtKill = 0;
     let persistedIntentsAtKill = 0;
-    let persistedReceiptsAtKill = 0;
     appendInteractiveState(state.cwd, {
       id: state.id,
       paneId: state.paneId,
       mux: state.mux,
       artifactDir: state.artifactDir,
       sessionFile: state.sessionFile,
-      notifyOnComplete: "inject",
-      triggerTurnOnComplete: true,
       parentSessionId: "pi",
+      eventByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
     });
     multiplexer.__setTmuxMultiplexer({
       getPaneLiveness: () => "unknown",
@@ -1867,8 +1892,7 @@ describe("pollArtifactChanges", () => {
               event.turnId === "cancel-turn",
           ).length;
         const persisted = loadInteractiveStates(state.cwd)?.states[state.id];
-        persistedIntentsAtKill = persisted?.pendingDeliveries.length ?? 0;
-        persistedReceiptsAtKill = persisted?.deliveryReceipts.length ?? 0;
+        persistedIntentsAtKill = persisted?.pendingDeliveries?.length ?? 0;
       },
     } as any);
     interactive.interactiveSubagentRegistry.set(state.id, state);
@@ -1877,15 +1901,12 @@ describe("pollArtifactChanges", () => {
     interactive.cancelInteractiveSubagent(state.id);
     expect(completionsAtKill).toBe(1);
     expect(persistedIntentsAtKill).toBe(0);
-    expect(persistedReceiptsAtKill).toBe(1);
 
     (globalThis as any).__piSubagenturaParentStreaming = false;
     const sendMessage = vi.fn();
     await mod.pollArtifactChanges({ sendMessage } as any);
     await mod.pollArtifactChanges({ sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(state.pendingDeliveries).toEqual([]);
-    expect(state.deliveryReceipts).toHaveLength(1);
     multiplexer.__setTmuxMultiplexer(undefined);
   });
 
@@ -1924,702 +1945,13 @@ describe("pollArtifactChanges", () => {
       cancellationOrigin: "cancel_interactive_subagent",
     });
     expect(completions[1].turnId).toMatch(/^process-cancel-/);
-    expect(state.pendingDeliveries).toEqual([]);
-    expect(state.deliveryReceipts).toHaveLength(1);
     multiplexer.__setTmuxMultiplexer(undefined);
-  });
-
-  it("fires a pointer notification on done. Started is silent.", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    mod.jobRegistry.set("still-running", { status: "running" } as any);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    // Only done fires. started is silent (widget shows it).
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    const call = sendMessage.mock.calls[0][0];
-    expect(call.customType).toBe("subagent-notify");
-    expect(call.content).toContain("done");
-    // Pointer format: paths, not a tool-call hint.
-    expect(call.content).toContain("Output:");
-    expect(call.content).toContain("Activity log:");
-    expect(call.content).not.toContain("read_subagent_artifact");
-    expect(call.content).toContain(
-      "1 in-process sub-agent job is still running",
-    );
-    expect(call.details.remainingRunningJobs).toBe(1);
-    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
-  });
-
-  it("does NOT fire on tool_activity/started", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, {
-      ts: 2,
-      type: "tool_activity",
-      status: "running",
-      tool: "bash",
-      summary: "rg TODO src/",
-    });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    // Both are silent (started → TUI widget row; tool_activity → TUI widget only).
-    expect(sendMessage).not.toHaveBeenCalled();
-    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
-  });
-
-  it("delivers unacknowledged error and cancellation events normally", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, {
-      ts: 2,
-      type: "error",
-      status: "error",
-      message: "boom",
-    });
-    appendEvent(art, { ts: 3, type: "cancelled", status: "cancelled" });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    expect(sendMessage).toHaveBeenCalledOnce();
-    expect(sendMessage.mock.calls[0][0].content).toContain("error");
-    expect(sendMessage.mock.calls[0][0].content).toContain("cancelled");
-  });
-
-  it("is at-most-once per event (cursor advances)", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-    // Only done fires (started is silent).
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-
-    // Second poll: no new events, no new notifications.
-    sendMessage.mockClear();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-    expect(sendMessage).not.toHaveBeenCalled();
-  });
-
-  it("delivers only events after eventByteCursor (backlog catch-up)", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    // Simulate a sub-agent that finished while the parent was down — events
-    // were already on disk before this poller started.
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-    appendEvent(art, { ts: 3, type: "cancelled", status: "cancelled" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
-
-    state.eventByteCursor = readEventRecords(art)[0].endOffset;
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    // Should deliver done + cancelled, not started.
-    expect(sendMessage).toHaveBeenCalledOnce();
-    expect(sendMessage.mock.calls[0][0].content).toContain("done");
-    expect(sendMessage.mock.calls[0][0].content).toContain("cancelled");
-    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
-  });
-
-  it("marks the sub-agent as idle when a done event is seen and the pane is still alive (follow-up support)", async () => {
-    // The child is between turns, REPL is open, ready for the next prompt.
-    // Return a successful pane listing containing the tracked pane.
-    vi.resetModules();
-    vi.doMock("node:child_process", () => ({
-      execFileSync: () => Buffer.from("%99\n"),
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, "%99\n"),
-    }));
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    await mod.pollArtifactChanges({} as any);
-    expect(state.status).toBe("idle");
-    // exitCode is NOT set on idle — child is still around.
-    expect(state.exitCode).toBeUndefined();
-  });
-
-  it("marks the sub-agent as exited when a done event is seen but the pane is gone", async () => {
-    // A successful listing without the pane is confirmed dead.
-    vi.resetModules();
-    vi.doMock("node:child_process", () => ({
-      execFileSync: () => "",
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, ""),
-    }));
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    await mod.pollArtifactChanges({} as any);
-    expect(state.status).toBe("exited");
-    expect(state.exitCode).toBe(0);
-  });
-
-  it("marks the sub-agent as cancelled when a cancelled event is seen", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "cancelled", status: "cancelled" });
-
-    await mod.pollArtifactChanges({} as any);
-    expect(state.status).toBe("cancelled");
-  });
-
-  it("delivers durable completion backlog even when state is already cancelled", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    state.status = "cancelled";
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-    expect(sendMessage).toHaveBeenCalledOnce();
-  });
-
-  it("retries an unknown pane and notifies when done arrives later", async () => {
-    vi.resetModules();
-    let paneProbeCount = 0;
-    vi.doMock("node:child_process", () => ({
-      execFileSync: () => {
-        paneProbeCount++;
-        if (paneProbeCount === 1) {
-          throw new Error("pane not ready yet");
-        }
-        return Buffer.from("%99\n");
-      },
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => {
-        paneProbeCount++;
-        callback(
-          paneProbeCount === 1 ? new Error("pane not ready yet") : null,
-          "%99\n",
-        );
-      },
-    }));
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-    expect(state.status).toBe("unknown");
-
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0][0].content).toContain("done");
-  });
-
-  it("keeps processing 'idle' sub-agents — the follow-up case", async () => {
-    // After the child finishes a turn, status becomes 'idle'. The poll loop must keep running for
-    // it so a second `done` event (from a follow-up turn) re-fires the pointer notification.
-    vi.resetModules();
-    vi.doMock("node:child_process", () => ({
-      execFileSync: () => Buffer.from("%99\n"),
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, "%99\n"),
-    }));
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { state, artifactDir } = makeState();
-    state.status = "idle"; // simulate "already between turns"
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const art = artifactPath(join(artifactDir, ".."), state.id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-    state.eventByteCursor = eventLogEndOffset(art);
-    appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 }); // follow-up turn
-
-    const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-
-    // The new done event (ts=3) is delivered as a pointer notification.
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0][0].content).toContain("done");
-    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
-  });
-
-  // Inject-mode tests: when a sub-agent is spawned with notifyOnComplete:
-  // "inject" and finishes with a completion, the broker sends one attributed
-  // custom message. Legacy events remain pointer-only.
-  describe("inject mode for interactive sub-agents", () => {
-    beforeEach(() => {
-      (globalThis as any).__piSubagenturaInjectCount = 0;
-    });
-
-    it("sends one pointer-only custom message for a legacy inject completion", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "the sub-agent's final answer");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][0].content).not.toContain(
-        "the sub-agent's final answer",
-      );
-      expect(sendMessage.mock.calls[0][0].content).toContain("Output:");
-      expect(sendMessage.mock.calls[0][1]).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(sendUserMessage).not.toHaveBeenCalled();
-      expect(state.pendingDeliveries?.[0]?.state).toBe("dispatchAttempted");
-    });
-
-    it("persists oversized completion delivery metadata before advancing the event cursor", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const multiplexer = await import("../src/multiplexer");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      state.triggerTurnOnComplete = false;
-      state.cwd = join(artifactDir, "..");
-      state.parentSessionId = "pi";
-      appendInteractiveState(state.cwd, {
-        id: state.id,
-        paneId: state.paneId,
-        mux: state.mux,
-        artifactDir: state.artifactDir,
-        sessionFile: state.sessionFile,
-        notifyOnComplete: "inject",
-        triggerTurnOnComplete: false,
-        parentSessionId: "pi",
-      });
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      multiplexer.__setTmuxMultiplexer({
-        getPaneLiveness: () => "alive",
-        getPaneLivenessAsync: async () => "alive",
-      } as any);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      const raw =
-        JSON.stringify({
-          version: 2,
-          eventId: "adversarial-oversized-event",
-          turnId: "adversarial-oversized-turn",
-          ts: 1,
-          type: "completion",
-          outcome: "error",
-          source: "explicit",
-          errorMessage: "x".repeat(MAX_EVENT_RECORD_BYTES + 1),
-        }) + "\n";
-      mkdirSync(art.dir, { recursive: true });
-      writeFileSync(art.statusFile, raw);
-      const sendMessage = installDeliverySpies();
-
-      await mod.pollArtifactChanges({ sendMessage } as any);
-
-      const persisted = loadInteractiveStates(state.cwd)?.states[state.id];
-      expect(persisted?.eventByteCursor).toBe(eventLogEndOffset(art));
-      expect(persisted?.pendingDeliveries).toContainEqual(
-        expect.objectContaining({
-          eventId: "record-overflow-0",
-          turnId: "record-overflow-0",
-          status: "error",
-          message: `Artifact record at byte 0 exceeded the ${MAX_EVENT_RECORD_BYTES}-byte limit and was skipped.`,
-        }),
-      );
-      multiplexer.__setTmuxMultiplexer(undefined);
-    });
-
-    it("uses attributed sendMessage when state.notifyOnComplete is unset (default: inject)", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "should not be injected");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      // Legacy completions are pointer-only even when the delivery mode is inject.
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendUserMessage).not.toHaveBeenCalled();
-      expect(state.lastInjectedEventTs).toBeUndefined();
-    });
-
-    it("does NOT call sendUserMessage when state.notifyOnComplete === 'notify' (explicit)", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "notify";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "should not be injected");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("adds triggerTurn to notify-mode pointer notifications when requested", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "notify";
-      state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][1]).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("triggers the single inject envelope when triggerTurnOnComplete is set", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "final answer");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][1]).toEqual({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("does trigger the pointer notification for inject-mode errors when requested", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, {
-        ts: 2,
-        type: "error",
-        status: "error",
-        message: "boom",
-      });
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][1]).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("is at-most-once: a second poll does not redispatch the delivery intent", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "the answer");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendUserMessage).not.toHaveBeenCalled();
-
-      // Second poll: no new events (cursor advanced), inject is gated by state.injected.
-      sendMessage.mockClear();
-      sendUserMessage.mockClear();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-      expect(sendMessage).not.toHaveBeenCalled();
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("dispatches pointer-only envelopes for legacy follow-up completions", async () => {
-      vi.resetModules();
-      vi.doMock("node:child_process", () => ({
-        execFileSync: () => Buffer.from("%99\n"),
-        execFile: (
-          _file: string,
-          _args: string[],
-          _options: object,
-          callback: (error: Error | null, stdout?: string) => void,
-        ) => callback(null, "%99\n"),
-      }));
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      // Turn 1: child finishes, writes output v1, calls done.
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v1");
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][0].content).not.toContain("answer v1");
-      expect(sendMessage.mock.calls[0][0].content).toContain("Output:");
-      expect(sendUserMessage).not.toHaveBeenCalled();
-
-      // Turn 2: parent sent a follow-up, child processed it, wrote output v2, called done again.
-      appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v2");
-
-      sendMessage.mockClear();
-      sendUserMessage.mockClear();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendMessage).toHaveBeenCalledTimes(1);
-      expect(sendMessage.mock.calls[0][0].content).not.toContain("answer v2");
-      expect(sendUserMessage).not.toHaveBeenCalled();
-    });
-
-    it("does not call sendUserMessage when output.md is missing", async () => {
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      // Intentionally NOT writing output.md
-
-      const sendMessage = installDeliverySpies();
-      const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
-
-      expect(sendUserMessage).not.toHaveBeenCalled();
-      expect(sendMessage).toHaveBeenCalledOnce();
-      expect(sendMessage.mock.calls[0][0].content).toContain(
-        "(no immutable output available)",
-      );
-    });
-
-    it("does not snapshot mutable output.md for legacy completions", async () => {
-      vi.resetModules();
-      vi.doMock("node:child_process", () => ({
-        execFileSync: () => Buffer.from("%99\n"),
-        execFile: (
-          _file: string,
-          _args: string[],
-          _options: object,
-          callback: (error: Error | null, stdout?: string) => void,
-        ) => callback(null, "%99\n"),
-      }));
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-
-      // Turn 1.
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-
-      // Turn 2.
-      appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v2");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-
-      const v1Path = join(art.dir, "output-1.md");
-      const v2Path = join(art.dir, "output-2.md");
-      expect(existsSync(v1Path)).toBe(false);
-      expect(existsSync(v2Path)).toBe(false);
-    });
-
-    it("does not snapshot legacy output when notifyOnComplete is unset", async () => {
-      vi.resetModules();
-      vi.doMock("node:child_process", () => ({
-        execFileSync: () => Buffer.from("%99\n"),
-        execFile: (
-          _file: string,
-          _args: string[],
-          _options: object,
-          callback: (error: Error | null, stdout?: string) => void,
-        ) => callback(null, "%99\n"),
-      }));
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      // notifyOnComplete left undefined.
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-
-      expect(existsSync(join(art.dir, "output-1.md"))).toBe(false);
-    });
-
-    it("never creates legacy snapshots while mutable output changes", async () => {
-      vi.resetModules();
-      vi.doMock("node:child_process", () => ({
-        execFileSync: () => Buffer.from("%99\n"),
-        execFile: (
-          _file: string,
-          _args: string[],
-          _options: object,
-          callback: (error: Error | null, stdout?: string) => void,
-        ) => callback(null, "%99\n"),
-      }));
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const { state, artifactDir } = makeState();
-      // notifyOnComplete left undefined (default inject).
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      const art = artifactPath(join(artifactDir, ".."), state.id);
-
-      // Turn 1 completes with mutable legacy output.
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-      expect(existsSync(join(art.dir, "output-1.md"))).toBe(false);
-
-      // Follow-up turn: the child overwrites output.md but its done event has NOT landed yet
-      // (last event is still the turn-1 done@ts2). A poll lands in this window.
-      writeOutput(art, "answer v2 in progress");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-
-      expect(existsSync(join(art.dir, "output-1.md"))).toBe(false);
-
-      // A second legacy completion remains pointer-only.
-      appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
-      writeOutput(art, "answer v2 final");
-      await mod.pollArtifactChanges({
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-      } as any);
-      expect(existsSync(join(art.dir, "output-1.md"))).toBe(false);
-      expect(existsSync(join(art.dir, "output-2.md"))).toBe(false);
-    });
   });
 
   // ── Bug B regression tests (stale footer/widget for closed sub-agents) ──
   // When a sub-agent is "exited" (terminal, pane dead) the for-loop at line
-  // ~518 of subagent.ts must still tail-read the session log (for user-role
-  // revival, but it must NOT contribute to the active footer count or
+  // ~518 of subagent.ts must still process artifact lifecycle events, but
+  // terminal panes must NOT contribute to the active footer count or
   // the `widgetRows` list. `idle` sub-agents (between turns, REPL open) are
   // still live and DO contribute to the active count.
   describe("footer/widget (Bug B)", () => {
@@ -2650,33 +1982,21 @@ describe("pollArtifactChanges", () => {
       const idle = makeState().state;
       idle.id = "idle-1";
       idle.paneId = "%91";
-      idle.lastDeliveredEventTs = 2;
       idle.artifactDir = join(idle.artifactDir, "..", idle.id);
       mod.interactiveSubagentRegistry.set(idle.id, idle);
       const idleArt = artifactPath(join(idle.artifactDir, ".."), idle.id);
-      appendEvent(idleArt, { ts: 1, type: "started", status: "running" });
-      appendEvent(idleArt, {
-        ts: 2,
-        type: "done",
-        status: "done",
-        exitCode: 0,
-      });
+      appendTestTurnStarted(idleArt, 1, "turn-idle-1");
+      appendTestCompletion(idleArt, 2, "done", "turn-idle-1");
 
       // Exited sub-agent: done event, pane dead.
       const exited = makeState().state;
       exited.id = "exited-1";
       exited.paneId = "%92";
-      exited.lastDeliveredEventTs = 2;
       exited.artifactDir = join(exited.artifactDir, "..", exited.id);
       mod.interactiveSubagentRegistry.set(exited.id, exited);
       const exitedArt = artifactPath(join(exited.artifactDir, ".."), exited.id);
-      appendEvent(exitedArt, { ts: 1, type: "started", status: "running" });
-      appendEvent(exitedArt, {
-        ts: 2,
-        type: "done",
-        status: "done",
-        exitCode: 0,
-      });
+      appendTestTurnStarted(exitedArt, 1, "turn-exited-1");
+      appendTestCompletion(exitedArt, 2, "done", "turn-exited-1");
 
       const setStatus = vi.fn();
       const setWidget = vi.fn();
@@ -2730,13 +2050,8 @@ describe("pollArtifactChanges", () => {
       const artifactDir = join(cwd, id);
       mkdirSync(artifactDir, { recursive: true });
       const art = artifactPath(cwd, id);
-      appendEvent(art, { ts: 1, type: "started", status: "running" });
-      appendEvent(art, {
-        ts: 2,
-        type: "done",
-        status: "done",
-        exitCode: 0,
-      });
+      appendTestTurnStarted(art, 1, "turn-1");
+      appendTestCompletion(art, 2, "done", "turn-1");
       appendInteractiveState(cwd, {
         id,
         paneId: "%idle-pane",
@@ -2746,6 +2061,8 @@ describe("pollArtifactChanges", () => {
         sessionFile: "/tmp/sess.jsonl",
         parentSessionId: "pi",
         eventByteCursor: eventLogEndOffset(art),
+        pendingDeliveries: [],
+        deliveryReceipts: [],
         lifecycle: {
           completionTurnId: "turn-1",
           completionOutcome: "done",
@@ -2799,20 +2116,14 @@ describe("pollArtifactChanges", () => {
 
       const exited1 = makeState().state;
       exited1.id = "exited-1";
-      exited1.lastDeliveredEventTs = 2;
       exited1.artifactDir = join(exited1.artifactDir, "..", exited1.id);
       mod.interactiveSubagentRegistry.set(exited1.id, exited1);
       const exited1Art = artifactPath(
         join(exited1.artifactDir, ".."),
         exited1.id,
       );
-      appendEvent(exited1Art, { ts: 1, type: "started", status: "running" });
-      appendEvent(exited1Art, {
-        ts: 2,
-        type: "done",
-        status: "done",
-        exitCode: 0,
-      });
+      appendTestTurnStarted(exited1Art, 1, "turn-exited-1");
+      appendTestCompletion(exited1Art, 2, "done", "turn-exited-1");
 
       const setStatus = vi.fn();
       const setWidget = vi.fn();
@@ -2920,6 +2231,9 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       mux: state.mux,
       artifactDir: state.artifactDir,
       sessionFile: state.sessionFile,
+      eventByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
     });
     return { id, cwd, state };
   }
@@ -2950,7 +2264,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
   });
 
-  it("keeps terminal state until the custom-message receipt is visible", async () => {
+  it("queues coordinated completion before terminal cleanup", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFileSync: () => "",
@@ -2966,8 +2280,8 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const { cwd, id, state } = makePersistedState();
     mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+    appendTestTurnStarted(art, 1, `turn-${id}`);
+    appendTestCompletion(art, 2, "done", `turn-${id}`);
 
     installDeliverySpies();
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
@@ -2975,46 +2289,13 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
     expect(loaded?.states[id].pendingDeliveries).toEqual([
-      expect.objectContaining({ state: "dispatchAttempted" }),
+      expect.objectContaining({
+        state: "queued",
+        completionPolicy: "each",
+        turnId: `turn-${id}`,
+      }),
     ]);
   });
-
-  it("reconciles same-session inject receipt before terminal cleanup", async () => {
-    vi.resetModules();
-    vi.doMock("node:child_process", () => ({
-      execFileSync: () => "",
-      execFile: (
-        _file: string,
-        _args: string[],
-        _options: object,
-        callback: (error: Error | null, stdout?: string) => void,
-      ) => callback(null, ""),
-    }));
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { cwd, id, state } = makePersistedState();
-    state.notifyOnComplete = "inject";
-    mod.interactiveSubagentRegistry.set(id, state);
-    const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
-    const entries: unknown[] = [];
-    (globalThis as any).__piSubagenturaSessionManager = {
-      getEntries: () => entries,
-    };
-    await mod.pollArtifactChanges({
-      sendMessage: vi.fn((message) => {
-        entries.push({
-          type: "custom_message",
-          customType: message.customType,
-          details: message.details,
-        });
-      }),
-    } as any);
-
-    expect(state.pendingDeliveries).toEqual([]);
-    expect(loadInteractiveStates(cwd)?.states[id]).toBeUndefined();
-  });
-
   it("keeps the state.json entry after delivering a done event when the pane is alive", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
@@ -3031,8 +2312,8 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const { cwd, id, state } = makePersistedState();
     mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+    appendTestTurnStarted(art, 1, `turn-${id}`);
+    appendTestCompletion(art, 2, "done", `turn-${id}`);
 
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
@@ -3327,7 +2608,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     ).toBe(false);
     expect(JSON.stringify(payloads)).not.toContain(secret);
 
-    appendEvent(art, { ts: 2, type: "started", status: "running" });
+    appendTestTurnStarted(art, 2, `turn-${id}`);
     appendFileSync(art.statusFile, `${secret}-again\n`);
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
 
@@ -3459,79 +2740,6 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     expect(state.status).toBe("exited");
     expect(loadInteractiveStates(cwd)?.states[id]).toBeUndefined();
   });
-
-  it("keeps error state until the custom-message receipt is visible", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
-    const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, {
-      ts: 1,
-      type: "error",
-      status: "error",
-      message: "boom",
-    });
-
-    installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
-
-    const loaded = loadInteractiveStates(cwd);
-    expect(loaded?.states[id]).toBeDefined();
-    expect(loaded?.states[id].pendingDeliveries).toEqual([
-      expect.objectContaining({ state: "dispatchAttempted", status: "error" }),
-    ]);
-  });
-
-  it("keeps cancelled state until the custom-message receipt is visible", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
-    const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, { ts: 1, type: "cancelled", status: "cancelled" });
-
-    installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
-
-    const loaded = loadInteractiveStates(cwd);
-    expect(loaded?.states[id]).toBeDefined();
-    expect(loaded?.states[id].pendingDeliveries).toEqual([
-      expect.objectContaining({
-        state: "dispatchAttempted",
-        status: "cancelled",
-      }),
-    ]);
-  });
-
-  it("keeps the state.json entry and cursor when notification delivery fails", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
-    const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, {
-      ts: 1,
-      type: "error",
-      status: "error",
-      message: "boom",
-    });
-
-    (globalThis as any).__piSubagenturaUi = {
-      notify: vi.fn(() => {
-        throw new Error("stale pi");
-      }),
-      setStatus: vi.fn(),
-      setWidget: vi.fn(),
-    };
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
-
-    const loaded = loadInteractiveStates(cwd);
-    expect(loaded?.states[id]).toBeDefined();
-    expect(state.eventByteCursor).toBeGreaterThan(0);
-    expect(state.pendingDeliveries).toHaveLength(1);
-  });
-
   it("does NOT remove the state.json entry on tool_activity events (only terminals)", async () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
@@ -3549,13 +2757,16 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
+      version: 2,
+      eventId: "tool-activity-event",
+      turnId: "turn-tool-activity",
       ts: 1,
       type: "tool_activity",
+      phase: "end",
       status: "running",
       tool: "bash",
       summary: "ls",
     });
-
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
@@ -3583,7 +2794,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     };
     mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath("/tmp", id);
-    appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
+    appendTestCompletion(art, 1, "done", `turn-${id}`);
 
     await expect(
       mod.pollArtifactChanges({ sendMessage: vi.fn() } as any),
@@ -3596,8 +2807,8 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const { id, state } = makePersistedState();
     mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+    appendTestTurnStarted(art, 1, `turn-${id}`);
+    appendTestCompletion(art, 2, "done", `turn-${id}`);
 
     await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
 

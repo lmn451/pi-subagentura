@@ -6,7 +6,7 @@
  * 2. Interactive subagent CLI command includes --thinking flag
  * 3. Workflow agent() calls pass thinkingLevel to the runner
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 
@@ -137,6 +137,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 });
 
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
+import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
 
 describe("in-process subagent thinkingLevel propagation", () => {
@@ -196,9 +197,20 @@ describe("in-process subagent thinkingLevel propagation", () => {
       registerTool: vi.fn(),
       registerMessageRenderer: vi.fn(),
     };
-    registerInProcessSubagentTools(api as any);
+    const scope = registerSessionScope({
+      id: 1,
+      generation: 0,
+      lifecycle: "started",
+      pi: api as any,
+      sessionManager: { getSessionId: () => "test-session" },
+    });
+    registerInProcessSubagentTools(api as any, scope);
     return api;
   }
+
+  afterEach(() => {
+    clearSessionScopes();
+  });
 
   function getToolDef(
     api: { registerTool: ReturnType<typeof vi.fn> },

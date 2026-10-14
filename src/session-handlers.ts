@@ -15,15 +15,10 @@ import {
 } from "./artifact";
 import {
   updateRunningSubagentFooter,
-  clearSessionParsers,
   clearSessionScopeUiContributions,
   pollArtifactChanges,
 } from "./artifact-poller";
 import { flushDeliveries } from "./delivery";
-import {
-  clearInProcessDeliveries,
-  flushInProcessDeliveries,
-} from "./notifications";
 import { debugLog, removeInProcessJob } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import {
@@ -311,7 +306,7 @@ function captureInteractiveLifecycleCancellation(
       async: state.telemetryAsync ?? true,
       depth: state.telemetryDepth,
       depth_bucket: state.telemetryDepthBucket ?? "unknown",
-      completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+      completion_policy: state.telemetryCompletionPolicy ?? "each",
       status: "cancelled",
       terminal_reason: terminalReason,
       // `turnStartedAt` is an event-log `ts`, which the child writes from the
@@ -359,7 +354,6 @@ function cleanupScopeGeneration(
       ? "fresh_session"
       : "session_shutdown",
   );
-  clearInProcessDeliveries(owner);
 
   const destroysStandalonePanes =
     event?.reason === "new" || event?.reason === "fork";
@@ -447,7 +441,6 @@ export function registerSessionHandlers(
       if (scope.lifecycle !== "started" || scope.uiPromptActive) return;
       const owner = sessionOwner(scope);
       flushDeliveries(pi, scope.ui, owner);
-      flushInProcessDeliveries(owner);
       flushCompletionManifests(owner);
     });
   };
@@ -491,7 +484,6 @@ export function registerSessionHandlers(
     const owner = sessionOwner(scope);
     setLegacyActiveSessionRefs(scope);
     flushDeliveries(pi, scope.ui, owner);
-    flushInProcessDeliveries(owner);
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
   });
 
@@ -509,7 +501,6 @@ export function registerSessionHandlers(
       const previousOwner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(previousOwner);
-      clearSessionParsers(previousOwner);
       cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
       retireSessionScopedCompletions(
         previousOwner,
@@ -707,7 +698,6 @@ export function registerSessionHandlers(
       const owner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(owner);
-      clearSessionParsers(owner);
       cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
       clearFreshChildLineage(scope, event?.reason);
       retireSessionScopedCompletions(

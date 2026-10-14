@@ -462,12 +462,7 @@ Parameters:
 - `async` — run in background; returns a jobId immediately instead of blocking
 - `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
-
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.
 
 Best for:
 
@@ -489,12 +484,8 @@ Parameters:
 - `async` — run in background; returns a jobId immediately instead of blocking
 - `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.
 Async spawn results describe the selected coordinated behavior.
 
 Best for:
@@ -595,17 +586,13 @@ Parameters:
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `completionPolicy` — `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for a caller-declared named barrier
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`. The spawn result describes the selected coordinated behavior.
+The spawn result describes the selected coordinated behavior.
 
-The sub-agent's artifact contains `events.ndjson` lifecycle records, mutable
-`output.md` staging, and immutable protocol-v2 `outputs/<eventId>.md` terminal
-snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
-output is legacy/staging fallback only. The pane is for live monitoring, and the
-artifact survives parent restarts.
+The sub-agent's artifact contains protocol-v2 `events.ndjson`, mutable
+`output.md` staging for an active turn, and immutable
+`outputs/<eventId>.md` terminal snapshots selected by `turnId`. Unsupported
+protocol-v1 artifacts are left untouched but are not readable by this runtime.
 
 - Interactive children also have `get_current_pane_activity`, which reports
   whether their tmux or Zellij pane is active for the user's current client.
@@ -751,17 +738,20 @@ At each child turn start, mutable `output.md` is atomically reset without
 touching earlier snapshots. Before each completion event, the current staging
 file (including an empty file when the turn wrote nothing) is copied atomically to
 `outputs/<eventId>.md` with byte count and SHA-256 metadata. Events are consumed
-in physical NDJSON byte order; timestamps are display-only. Mixed v1/v2 logs and
-legacy `output-N.md` snapshots remain readable. New legacy completions are
-pointer-only because mutable `output.md` cannot be safely attributed to a turn.
+in physical NDJSON byte order; timestamps are display-only. The runtime accepts
+protocol-v2 events and immutable `turnId` snapshots only. Existing protocol-v1
+logs and numeric `output-N.md` files are left untouched but are not readable here.
+
+See the [protocol-v1 compatibility inventory](docs/protocol-v1-compatibility.md)
+for the current breaking-removal status and user-data behavior.
 
 Immutable snapshots are limited to 1 MiB. The parent and generated child CLI
 check the staging file size before reading it. If `output.md` exceeds the limit,
 the completion is still recorded with `outputError.code = "output_too_large"`
 and its observed byte count, but no immutable snapshot is created. The
-coordinated manifest therefore has no snapshot reference, and legacy injection
-cannot load the oversized output. The staging file remains available for manual
-inspection in the artifact directory.
+coordinated manifest therefore has no snapshot reference. No completion path
+injects mutable output into the parent context. The staging file remains available
+for manual inspection in the artifact directory.
 
 #### Coordinated completion delivery
 
@@ -778,9 +768,8 @@ from the parent-model channel:
 2. The parent model receives one bounded, hidden `subagent-manifest` containing
    statuses and references—not child output. Interactive records point to the
    immutable `outputs/<eventId>.md` snapshot when available plus
-   `events.ndjson`; legacy artifacts may fall back to mutable `output.md`.
-   In-process and workflow records point to `get_subagent_result` and
-   `get_workflow_result`.
+   `events.ndjson`; legacy artifact fallback is not supported. In-process and
+   workflow records point to `get_subagent_result` and `get_workflow_result`.
 3. A ready manifest attaches to a pending human-initiated turn when possible.
    Otherwise Pi receives one triggered follow-up after the parent is safely
    idle. Human prompts and steering always take priority.
@@ -804,15 +793,6 @@ dispatch. This is not an exactly-once delivery guarantee: a crash around parent
 dispatch can still replay a manifest as described below.
 Workflow-owned process or in-process children never publish directly; only the
 background workflow aggregate completion participates in coordinated delivery.
-
-The deprecated `notifyOnComplete` and `triggerTurnOnComplete` fields remain
-accepted for compatibility. Either legacy value maps deterministically to
-coordinated `"each"`: the notice is TUI-only, the parent receives only compact
-references, and policy plus human-priority rules control timing. Combining
-either field with `completionPolicy` or `completionGroupId` is rejected.
-Persisted pre-coordinator intents may still drain through the bounded legacy
-broker during upgrade recovery, but new API calls cannot select full-output
-injection.
 
 Interactive coordinated policy, group membership, and intents survive
 same-session startup/reload/resume through `.pi/subagentura-state.json` and
@@ -874,8 +854,7 @@ event and immutable output snapshot before killing the pane, so artifacts remain
 self-describing. The tool result acknowledges the cancellation to the parent.
 Under coordinated delivery, cancellation also creates one TUI-only terminal
 entry and satisfies an `all-terminal` group barrier; any later manifest contains
-only the bounded cancellation reference. Upgrade-recovered legacy intents retain
-their existing delivery receipt suppression.
+only the bounded cancellation reference.
 
 Parameters:
 
@@ -915,26 +894,22 @@ parent was away.
 
 #### `read_subagent_artifact`
 
-Reads a sub-agent's artifact by id. Returns the lifecycle event log (pass
+Reads a sub-agent's artifact by id. Returns protocol-v2 lifecycle events (pass
 `since` to fetch only new events) and, by default, the latest terminal immutable
-protocol-v2 snapshot. Mutable `output.md` is used only when no protocol-v2 terminal
-snapshot applies, including legacy or still-running artifacts. This avoids
-misattributing active follow-up staging bytes to an earlier terminal turn. A
-successful read that returns a terminal snapshot consumes that turn's pending
-coordinated delivery; an events-only read does not.
+snapshot associated with a completed `turnId`. Mutable `output.md` is staging data,
+not a completed-result fallback. A successful read that returns a terminal snapshot
+consumes that turn's pending coordinated delivery; an events-only read does not.
 
 Protocol-v2 completions map each Pi-derived `turnId` to an immutable
 `outputs/<eventId>.md` snapshot. Pass `turnId` to read that output; the response's
-`details.outputHistory` lists the available `turnId`/`eventId` mappings. Legacy
-`output-N.md` history remains available through numeric `turn` and
-`details.availableTurns`.
+`details.outputHistory` lists the available `turnId`/`eventId` mappings. Unsupported
+protocol-v1 artifacts and numeric `output-N.md` snapshots are not read or migrated.
 
 Parameters:
 
 - `id` — required sub-agent id
 - `since` — optional unix-ms timestamp; only return events with `ts >= since`
-- `includeOutput` — include the output (default `true`); historical selectors imply output
-- `turn` — optional turn number; read `output-N.md` for that specific turn instead of the latest `output.md`
+- `includeOutput` — include the output (default `true`)
 - `turnId` — optional protocol-v2 Pi turn id, up to 256 characters; read its immutable `outputs/<eventId>.md` snapshot
 
 ### `list_available_models`

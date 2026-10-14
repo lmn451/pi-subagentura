@@ -12,8 +12,10 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
+  artifactPath,
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
+  readEvents,
 } from "../src/artifact";
 
 function makeTmp(): string {
@@ -77,30 +79,37 @@ describe("subagent-artifact CLI", () => {
   });
 
   describe("start", () => {
-    it("writes a started event", () => {
+    it("writes a v2 turn_started event readable by the artifact reader", () => {
       const r = runCli(tmp, ["start"]);
       expect(r.status).toBe(0);
-      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
-        .trim()
-        .split("\n");
-      expect(events).toHaveLength(1);
-      const ev = JSON.parse(events[0]);
-      expect(ev.type).toBe("started");
-      expect(ev.status).toBe("running");
-      expect(typeof ev.ts).toBe("number");
+      expect(readEvents(artifactPath(tmp, "."))).toEqual([
+        expect.objectContaining({
+          version: 2,
+          type: "turn_started",
+          status: "running",
+          turnId: "process",
+        }),
+      ]);
     });
   });
 
   describe("done", () => {
-    it("writes a done event with exit code 0 → status done", () => {
+    it("writes one explicit v2 completion for repeated done commands", () => {
       runCli(tmp, ["done", "0"]);
-      const ev = JSON.parse(
-        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
-      );
-      expect(ev.type).toBe("completion");
-      expect(ev.outcome).toBe("done");
-      expect(ev.status).toBe("done");
-      expect(ev.exitCode).toBe(0);
+      runCli(tmp, ["done", "0"]);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        version: 2,
+        type: "completion",
+        source: "explicit",
+        outcome: "done",
+        status: "done",
+        exitCode: 0,
+      });
     });
 
     it("writes a done event with non-zero exit code → status error", () => {

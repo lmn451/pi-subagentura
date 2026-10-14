@@ -169,7 +169,6 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
     cwd,
     muxPreference: "tmux",
     background: true,
-    notifyOnComplete: "notify",
   });
 
   expect(state.mux).toBe("tmux");
@@ -190,7 +189,7 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
   );
 
   const events = readFileSync(join(state.artifactDir, "events.ndjson"), "utf8");
-  expect(events).toContain('"type":"started"');
+  expect(events).toContain('"version":2');
   expect(events).toContain('"type":"completion"');
   expect(events).toContain('"outcome":"done"');
 });

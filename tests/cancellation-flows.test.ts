@@ -81,7 +81,6 @@ import {
 } from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { abortableWait } from "../src/abortable-wait";
-import { deliverNotification } from "../src/notifications";
 import {
   interactiveSubagentRegistry,
   cancelInteractiveSubagent,
@@ -342,46 +341,6 @@ describe("get_subagent_result abort-aware wait", () => {
     // After normal completion, the abort listener should be removed
     expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
     expect(job.resultRetrieved).toBe(true);
-  });
-
-  it("marks an active result wait before settlement notification", async () => {
-    const jobId = "active-result-wait";
-    let resolveJob!: (value: SubagentResult) => void;
-    const jobPromise = new Promise<SubagentResult>((resolve) => {
-      resolveJob = resolve;
-    });
-    mockStartSubagentJob.mockResolvedValue({
-      jobId,
-      jobPromise,
-      session: { abort: vi.fn() },
-      liveStatus: createJobState({ id: jobId }).liveStatus,
-      modelLabel: "test/model",
-    });
-    const spawnTool = getToolDef(api, "subagent_isolated");
-    await spawnTool.execute(
-      "spawn-call",
-      { task: "test", async: true, notifyOnComplete: "inject" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-    const wait = toolDef.execute(
-      "result-call",
-      { jobId, wait: true },
-      new AbortController().signal,
-      undefined,
-      mockCtx(),
-    );
-
-    resolveJob({
-      output: "done",
-      usage: createJobState({ id: jobId }).liveStatus.usage,
-      isError: false,
-    });
-    await wait;
-
-    expect(deliverNotification).not.toHaveBeenCalled();
-    expect(jobRegistry.get(jobId)?.resultRetrieved).toBe(true);
   });
 });
 
