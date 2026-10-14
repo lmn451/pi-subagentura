@@ -43,7 +43,10 @@ import {
 import { withOrchestrationContext } from "./orchestration-context";
 import { asStringIdentifier, type InProcessJobId } from "./identifier-types";
 import type { CompletionPolicy } from "./completion-coordinator";
-import { findSessionScope, type SessionOwnerToken } from "./session-scope";
+import {
+  resolveLiveSessionScope,
+  type SessionOwnerToken,
+} from "./session-scope";
 import {
   captureTelemetry,
   telemetryDepth,
@@ -494,10 +497,7 @@ const EMPTY_IN_PROCESS_JOBS: ReadonlyMap<string, JobState> = new Map();
 function exactSessionJobRegistry(
   owner: SessionOwnerToken,
 ): Map<string, JobState> | undefined {
-  const scope = findSessionScope(owner.id);
-  return scope?.generation === owner.generation
-    ? scope.inProcessJobs
-    : undefined;
+  return resolveLiveSessionScope(owner)?.inProcessJobs;
 }
 
 /** Authoritative registry for one owner. Missing ownership is empty. */
@@ -896,6 +896,10 @@ export async function startSubagentJob(
     spawnRequestedAt,
   } = params;
 
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error("A live session owner is required to start a sub-agent.");
+  }
+
   // Enforce the cap within this exact scope; peer sessions never evict each other.
   while (inProcessJobsForOwner(owner).size >= MAX_REGISTRY_SIZE) {
     if (!pruneOldestJob(owner)) break; // registration rejects when no slot is available
@@ -907,6 +911,11 @@ export async function startSubagentJob(
     sessionRuntime = await createCompatibleSessionRuntime();
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
+  }
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error(
+      "Sub-agent owner session shut down before session creation.",
+    );
   }
 
   // Resolve model: exact match only, fallback to default
@@ -1203,8 +1212,17 @@ export async function startSubagentJob(
   const startGate = new Promise<void>((resolve) => {
     startGateResolve = resolve;
   });
+  const disposePreparedSession = (): void => {
+    if (started || disposedBeforeStart) return;
+    disposedBeforeStart = true;
+    startGateResolve();
+  };
   const start = (): void => {
     if (started || disposedBeforeStart) return;
+    if (!resolveLiveSessionScope(owner)) {
+      disposePreparedSession();
+      return;
+    }
     started = true;
     const startedAt = Date.now();
     telemetryStartedAt = startedAt;
@@ -1231,11 +1249,6 @@ export async function startSubagentJob(
       ...telemetryAgentDimensions,
       unit: "job",
     });
-    startGateResolve();
-  };
-  const disposePreparedSession = (): void => {
-    if (started || disposedBeforeStart) return;
-    disposedBeforeStart = true;
     startGateResolve();
   };
   let result: SubagentResult = {

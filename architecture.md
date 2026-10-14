@@ -330,6 +330,7 @@ It registers `subagent_with_context`, `subagent_isolated`, `get_subagent_status`
 
 `src/helpers.ts:startSubagentJob` is the execution kernel.
 It resolves Pi runtime compatibility, creates an in-memory `SessionManager` and `AgentSession`, subscribes to Pi events, builds the prompt, maintains cumulative live usage across assistant turns, aggregates final usage, and disposes the session.
+Managed tools and the exported `startSubagentJob` helper both require the exact live `SessionScope` owner. The helper rejects missing, stale, or shut-down owners before preparing a session, and its deferred `start()` rechecks ownership before running the prompt.
 A live sample combines completed turns with the current partial assistant message exactly once; the latest turn alone is never presented as the agent total.
 
 `src/orchestration-context.ts` carries nested `jobId`, depth, and root-session identity through `AsyncLocalStorage`.

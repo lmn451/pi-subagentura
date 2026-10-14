@@ -29,7 +29,19 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   };
 });
 
-import { startSubagentJob } from "../src/helpers";
+import {
+  MAX_REGISTRY_SIZE,
+  startSubagentJob,
+  type JobState,
+} from "../src/helpers";
+import {
+  advanceSessionScopeGeneration,
+  clearSessionScopes,
+  removeSessionScope,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import {
   createTelemetrySession,
   retireTelemetrySession,
@@ -65,18 +77,77 @@ function params(
     signal: undefined,
     onUpdate: undefined,
     defaultModel: undefined,
+    owner: sessionOwner(testScope),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
   };
 }
 
+let testScope: SessionScope;
+
 describe("startSubagentJob effective thinking level", () => {
   beforeEach(() => {
+    clearSessionScopes();
+    testScope = createTestSessionScope();
     vi.clearAllMocks();
     mockCreateCompatibleSessionRuntime.mockResolvedValue({
       kind: "modern",
       modelRuntime: {},
     });
     mockBuildSessionOptions.mockReturnValue({});
+  });
+
+  it("rejects absent and stale owners before runtime preparation", async () => {
+    for (let i = 0; i < MAX_REGISTRY_SIZE; i++) {
+      testScope.inProcessJobs.set(`job-${i}`, {
+        id: `job-${i}`,
+        status: "done",
+      } as JobState);
+    }
+    const firstJobId = testScope.inProcessJobs.keys().next().value;
+    const ownerless = { ...params(), owner: undefined };
+    await expect(startSubagentJob(ownerless)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    const unknownOwner = {
+      ...params(),
+      owner: { id: testScope.id + 100, generation: 1 },
+    };
+    await expect(startSubagentJob(unknownOwner)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    const staleOwner = {
+      ...params(),
+      owner: { id: testScope.id, generation: 0 },
+    };
+    await expect(startSubagentJob(staleOwner)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    testScope.lifecycle = "shutdown";
+    await expect(startSubagentJob(params())).rejects.toThrow(
+      /live session owner/,
+    );
+    expect(testScope.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
+    expect(testScope.inProcessJobs.keys().next().value).toBe(firstJobId);
+    expect(mockCreateCompatibleSessionRuntime).not.toHaveBeenCalled();
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("does not start a prepared prompt after its owner generation retires", async () => {
+    const session = createSession("low");
+    mockCreateAgentSession.mockResolvedValue({ session });
+    const prepared = await startSubagentJob(params());
+
+    advanceSessionScopeGeneration(testScope.id);
+    removeSessionScope(testScope.id);
+    prepared.start();
+    const result = await prepared.jobPromise;
+
+    expect(result).toMatchObject({ cancelled: true, isError: false });
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledOnce();
   });
 
   it("threads explicit requested options to the SDK and exposes effective level", async () => {
