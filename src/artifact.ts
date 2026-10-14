@@ -1862,7 +1862,7 @@ function normalizeV2StatePayload(
                     ? { completedAt: rawIntent.completedAt }
                     : {}),
                   completionPolicy: intentPolicy,
-                  ...(intentGroupId
+                  ...(intentPolicy === "group" && intentGroupId
                     ? { completionGroupId: intentGroupId }
                     : {}),
                   state: "queued",

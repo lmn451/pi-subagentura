@@ -1538,6 +1538,8 @@ describe("persisted interactive state helpers", () => {
         states: {
           [SAMPLE.id]: {
             ...SAMPLE,
+            eventByteCursor: 8,
+            deliveryReceipts: ["receipt-before-migration"],
             pendingDeliveries: [
               {
                 deliveryId: "delivery-a",
@@ -1549,6 +1551,7 @@ describe("persisted interactive state helpers", () => {
                 status: "done",
                 artifactDir: SAMPLE.artifactDir,
                 completionPolicy: "each",
+                completionGroupId: "stale-each-group",
                 state: "queued",
               },
             ],
@@ -1558,18 +1561,31 @@ describe("persisted interactive state helpers", () => {
       { mode: 0o600 },
     );
 
-    expect(
-      loadInteractiveStates(root)?.states[SAMPLE.id]?.pendingDeliveries,
-    ).toMatchObject([{ deliveryId: "delivery-a", completionPolicy: "each" }]);
+    const loaded = loadInteractiveStates(root)?.states[SAMPLE.id];
+    expect(loaded?.pendingDeliveries).toMatchObject([
+      { deliveryId: "delivery-a", completionPolicy: "each" },
+    ]);
+    expect(loaded?.pendingDeliveries?.[0]).not.toHaveProperty(
+      "completionGroupId",
+    );
+    expect(loaded).toMatchObject({
+      eventByteCursor: 8,
+      deliveryReceipts: ["receipt-before-migration"],
+    });
     updateInteractiveState(root, SAMPLE.id, (state) => {
       state.eventByteCursor = 17;
     });
-    expect(loadInteractiveStates(root)?.states[SAMPLE.id]).toMatchObject({
+    const updated = loadInteractiveStates(root)?.states[SAMPLE.id];
+    expect(updated).toMatchObject({
       eventByteCursor: 17,
+      deliveryReceipts: ["receipt-before-migration"],
       pendingDeliveries: [
         { deliveryId: "delivery-a", completionPolicy: "each", state: "queued" },
       ],
     });
+    expect(updated?.pendingDeliveries?.[0]).not.toHaveProperty(
+      "completionGroupId",
+    );
   });
 
   describe("hasPersistedTelemetryField", () => {
