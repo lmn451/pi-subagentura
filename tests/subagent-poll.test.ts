@@ -42,7 +42,10 @@ import {
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
-import { responsiveFlowMinimumWidth } from "../src/rendering";
+import {
+  formatActivityRow,
+  responsiveFlowMinimumWidth,
+} from "../src/rendering";
 import { createTelemetrySession } from "../src/telemetry";
 
 function makeTmp(): string {
@@ -222,6 +225,17 @@ describe("pollArtifactChanges", () => {
     item.state.parentSessionId = "session-a";
     item.state.cwd = join(item.artifactDir, "..");
     const art = artifactPath(item.state.cwd, item.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: `tool-activity-${item.id}`,
+      turnId: `turn-${item.id}`,
+      ts: 1,
+      type: "tool_activity",
+      phase: "start",
+      status: "running",
+      tool: "bash",
+      summary: "bash",
+    });
     appendCompletionEvent(art, {
       turnId: `turn-${item.id}`,
       outcome: "done",
@@ -565,6 +579,137 @@ describe("pollArtifactChanges", () => {
     );
     expect(wideRows.every((line) => !line.includes("\n"))).toBe(true);
   });
+
+  it("projects v2 tool activity in physical order into the activity row", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    item.state.name = "activity-agent";
+    item.state.cwd = join(item.artifactDir, "..");
+    const art = artifactPath(item.state.cwd, item.id);
+    fixtureScope.interactiveStates.set(item.id, item.state);
+    appendTestTurnStarted(art, 3_000, `turn-${item.id}`);
+    appendEvent(art, {
+      version: 2,
+      eventId: "tool-started",
+      turnId: `turn-${item.id}`,
+      ts: 2_000,
+      type: "tool_activity",
+      phase: "start",
+      status: "running",
+      tool: "bash",
+      summary: "bash",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "tool-ended-with-error",
+      turnId: `turn-${item.id}`,
+      ts: 1_000,
+      type: "tool_activity",
+      phase: "end",
+      status: "running",
+      tool: "bash",
+      summary: "bash failed",
+    });
+    const setStatus = vi.fn();
+    const setWidget = vi.fn();
+    fixtureScope.ui = {
+      notify: vi.fn(),
+      setStatus,
+      setWidget,
+    } as unknown as ExtensionUIContext;
+    const mux = {
+      getPaneLivenessAsync: async () => "alive" as const,
+    } satisfies Pick<Multiplexer, "getPaneLivenessAsync">;
+    multiplexer.__setTmuxMultiplexer(mux as unknown as Multiplexer);
+
+    await pollFixture(mod, { sendMessage: vi.fn() } as unknown as ExtensionAPI);
+
+    expect(item.state.status).toBe("running");
+    expect(item.state.lastToolName).toBe("bash");
+    expect(item.state.lastToolSummary).toBe("bash failed");
+    expect(item.state.lastActivityAt).toBe(1_000);
+    expect(formatActivityRow(item.state, 1_000)).toContain("bash failed");
+    const rows = renderedWidgetRows(setWidget, "subagentura-activity", 80).join(
+      "\n",
+    );
+    expect(rows).toContain("bash");
+    expect(rows).toContain("failed");
+    appendEvent(art, {
+      version: 2,
+      eventId: "tool-started-without-summary",
+      turnId: `turn-${item.id}`,
+      ts: 500,
+      type: "tool_activity",
+      phase: "start",
+      status: "running",
+      tool: "python",
+    });
+    await pollFixture(mod, { sendMessage: vi.fn() } as unknown as ExtensionAPI);
+
+    expect(item.state.lastToolName).toBe("python");
+    expect(item.state.lastToolSummary).toBe("python");
+    expect(item.state.lastActivityAt).toBe(500);
+    expect(formatActivityRow(item.state, 500)).toContain("python");
+    expect(
+      renderedWidgetRows(setWidget, "subagentura-activity", 80).join("\n"),
+    ).toContain("python");
+  });
+
+  it.each([
+    { label: "empty", summary: "" },
+    { label: "whitespace-only", summary: " \t\n" },
+    { label: "control-only", summary: "\u0001\u0085\u009f" },
+  ])(
+    "falls back to the supplied tool name for $label activity summaries",
+    async ({ summary }) => {
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const multiplexer = await import("../src/multiplexer");
+      const item = makeState();
+      item.state.name = "activity-agent";
+      item.state.cwd = join(item.artifactDir, "..");
+      const art = artifactPath(item.state.cwd, item.id);
+      const turnId = `turn-${item.id}`;
+      appendTestTurnStarted(art, 1_000, turnId);
+      appendEvent(art, {
+        version: 2,
+        eventId: `tool-${item.id}`,
+        turnId,
+        ts: 2_000,
+        type: "tool_activity",
+        phase: "start",
+        status: "running",
+        tool: "bash",
+        summary,
+      });
+      fixtureScope.interactiveStates.set(item.id, item.state);
+      const setWidget = vi.fn();
+      fixtureScope.ui = {
+        notify: vi.fn(),
+        setStatus: vi.fn(),
+        setWidget,
+      } as unknown as ExtensionUIContext;
+      const mux = {
+        getPaneLivenessAsync: async () => "alive" as const,
+      } satisfies Pick<Multiplexer, "getPaneLivenessAsync">;
+      multiplexer.__setTmuxMultiplexer(mux as unknown as Multiplexer);
+
+      await pollFixture(mod, {
+        sendMessage: vi.fn(),
+      } as unknown as ExtensionAPI);
+
+      expect(item.state.status).toBe("running");
+      expect(item.state.lastToolName).toBe("bash");
+      expect(item.state.lastToolSummary).toBe("bash");
+      expect(item.state.lastActivityAt).toBe(2_000);
+      expect(formatActivityRow(item.state, 2_000)).toContain("bash");
+      expect(
+        renderedWidgetRows(setWidget, "subagentura-activity", 80).join("\n"),
+      ).toContain("bash");
+    },
+  );
 
   it("hides owner-scoped activity rows from the global setting only", async () => {
     const item = makeState();
@@ -1618,6 +1763,9 @@ describe("pollArtifactChanges", () => {
     expect(result.state.eventByteCursor ?? 0).toBe(0);
     expect(result.state.pendingDeliveries ?? []).toEqual([]);
     expect(result.state.status).toBe("running");
+    expect(result.state.lastToolName).toBeUndefined();
+    expect(result.state.lastToolSummary).toBeUndefined();
+    expect(result.state.lastActivityAt).toBeUndefined();
     expect(
       loadInteractiveStates(result.state.cwd)?.states[result.state.id],
     ).toEqual(result.persistedBefore);
@@ -1634,6 +1782,9 @@ describe("pollArtifactChanges", () => {
     expect(result.state.eventByteCursor ?? 0).toBe(0);
     expect(result.state.pendingDeliveries ?? []).toEqual([]);
     expect(result.state.status).toBe("running");
+    expect(result.state.lastToolName).toBeUndefined();
+    expect(result.state.lastToolSummary).toBeUndefined();
+    expect(result.state.lastActivityAt).toBeUndefined();
     expect(
       loadInteractiveStates(result.state.cwd)?.states[result.state.id],
     ).toEqual(result.persistedBefore);
