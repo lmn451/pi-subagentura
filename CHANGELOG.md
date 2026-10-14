@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-process jobs and interactive sub-agent state. Runtime state now requires an
   exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
 
+### Fixed
+
+- Drain coordinated completion queues when an independent intent carries stale
+  group metadata, without blocking later deliveries.
+- Preserve early child-process failure snapshots by letting Pi lifecycle hooks,
+  rather than the launch wrapper, establish agent turns.
+- Reject removed lifecycle and cutover state fields before mutation, preserving
+  unsupported state files byte-for-byte.
+- Return current staging output when an incremental artifact read filters out
+  all events with `since`.
+- Restore interactive activity rows from protocol-v2 tool events in physical
+  byte order, including tool-name fallback for missing or non-visible summaries.
+
 ## [3.6.5] - 2026-10-14
 
 ### Added

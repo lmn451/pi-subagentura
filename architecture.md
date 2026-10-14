@@ -490,12 +490,14 @@ If command construction or mux input fails, persisted state and lineage are remo
 This prevents a running child with no recoverable identity and prevents registry exposure of a launch that was never dispatched.
 
 The wrapper exports `ARTIFACT_DIR`, `PI_SUBAGENTURA_CHILD=1`, and lineage environment.
-It runs `cli.mjs start`, installs an `EXIT` trap that runs `cli.mjs process-exit`, then executes:
+It installs an `EXIT` trap that runs `cli.mjs process-exit`, then executes:
 
 ```text
 pi --session <child-session.jsonl> --name <name> [model/thinking flags]
    --append-system-prompt <system.md> @<prompt.md>
 ```
+
+Agent turn starts come from child Pi lifecycle hooks, not the shell wrapper.
 
 The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
 `src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.
