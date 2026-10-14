@@ -1343,7 +1343,12 @@ export function registerInteractiveSubagentTools(
         };
       }
       try {
-        const events = readEvents(art, params.since);
+        const allEvents = readEvents(art);
+        const since = params.since;
+        const events =
+          since === undefined
+            ? allEvents
+            : allEvents.filter((event) => event.ts >= since);
         const wantsOutput =
           params.includeOutput !== false || params.turnId !== undefined;
         const selectedCompletion = wantsOutput
@@ -1352,6 +1357,7 @@ export function registerInteractiveSubagentTools(
         const readCompletion =
           selectedCompletion ??
           (!wantsOutput ? completionForRead(art, {}) : undefined);
+        const latestLifecycleEvent = allEvents.at(-1) ?? null;
         const lastEventValue =
           events.length > 0 ? events[events.length - 1] : null;
         const output = wantsOutput
@@ -1359,7 +1365,8 @@ export function registerInteractiveSubagentTools(
             ? readOutputForTurnId(art, params.turnId)
             : selectedCompletion
               ? readOutputForTurnId(art, selectedCompletion.turnId)
-              : lastEventValue && !isArtifactOutputSettled(lastEventValue)
+              : latestLifecycleEvent &&
+                  !isArtifactOutputSettled(latestLifecycleEvent)
                 ? readOutput(art)
                 : null
           : null;
@@ -1373,10 +1380,13 @@ export function registerInteractiveSubagentTools(
           if (params.turnId !== undefined) {
             outputText = `(no immutable snapshot for turnId ${params.turnId})`;
           } else {
-            const exited =
-              lastEventValue && isArtifactOutputSettled(lastEventValue);
-            outputText = exited
-              ? `(sub-agent exited without writing output.md — last event: ${lastEventValue.type} @ ${lastEventValue.ts})`
+            const settledEvent =
+              latestLifecycleEvent &&
+              isArtifactOutputSettled(latestLifecycleEvent)
+                ? latestLifecycleEvent
+                : null;
+            outputText = settledEvent
+              ? `(sub-agent exited without writing output.md — last event: ${settledEvent.type} @ ${settledEvent.ts})`
               : `(${events.length} events, last: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"} — output.md not written yet)`;
           }
         } else if (output.length === 0) {

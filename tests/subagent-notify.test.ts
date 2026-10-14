@@ -1325,6 +1325,52 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
+  it("returns current staging output when since excludes running events", async () => {
+    const id = "ab12cd3900000004";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false);
+      state.status = "running";
+      appendEvent(art, {
+        version: 2,
+        eventId: "running-tool-activity",
+        turnId: "turn-1",
+        ts: 100,
+        type: "tool_activity",
+        status: "running",
+        phase: "start",
+        tool: "bash",
+        summary: "partial work",
+      });
+      writeOutput(art, "partial result");
+
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "running-output-after-since",
+        { id, since: 101 },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(result.details.events).toEqual([]);
+      expect(result.details.lastEvent).toBeNull();
+      expect(result.details.output).toBe("partial result");
+      expect(result.content[0].text).toContain("Last event: (none)");
+      expect(result.content[0].text).toContain(
+        "<untrusted-subagent-output>\npartial result\n</untrusted-subagent-output>",
+      );
+      expect(readArtifactApi.appendEntry).not.toHaveBeenCalledWith(
+        "subagentura-completion-consumed",
+        expect.anything(),
+      );
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it("reports an empty protocol-v2 output snapshot", async () => {
     const id = "ab12cd3600000005";
     const parent = tmp();
