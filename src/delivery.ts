@@ -38,7 +38,6 @@ import {
 } from "./completion-coordinator";
 import {
   interactiveStateBelongsToOwner,
-  ownerlessEntitiesVisible,
   resolveActualStreamingFlag,
   resolveLiveSessionScope,
   resolveStreamingFlag,
@@ -57,20 +56,12 @@ export const MAX_OUTPUT_BYTES = 32 * 1024;
 export const MAX_FLUSH_BYTES = 64 * 1024;
 /** Maximum immutable output snapshot accepted from the artifact protocol. */
 export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_OUTPUT_SNAPSHOT_BYTES;
-interface DeliveryGlobalState {
-  __piSubagenturaInteractiveRegistry?: Map<string, InteractiveSubagentState>;
-  __piSubagenturaSessionManager?: { getEntries?: () => unknown[] };
-}
 
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
 const reportedNotificationFailures = new WeakMap<
   InteractiveSubagentState,
   Set<TelemetryCompletionFailureStage>
 >();
-
-function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
-  return globalThis as typeof globalThis & DeliveryGlobalState;
-}
 
 function interactiveStatesForOwner(
   owner?: SessionOwnerToken,
@@ -81,11 +72,7 @@ function interactiveStatesForOwner(
       EMPTY_INTERACTIVE_STATES
     );
   }
-  if (!ownerlessEntitiesVisible()) return EMPTY_INTERACTIVE_STATES;
-  return (
-    deliveryGlobals().__piSubagenturaInteractiveRegistry?.values() ??
-    EMPTY_INTERACTIVE_STATES
-  );
+  return EMPTY_INTERACTIVE_STATES;
 }
 
 function runningInProcessJobCount(owner?: SessionOwnerToken): number {
@@ -728,9 +715,9 @@ export function reconcileDeliveryReceipts(
 }
 
 export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
-  const entries = owner
-    ? resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.()
-    : deliveryGlobals().__piSubagenturaSessionManager?.getEntries?.();
+  if (!owner) return;
+  const entries =
+    resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
   const changedStates: InteractiveSubagentState[] = [];
   for (const state of interactiveStatesForOwner(owner)) {

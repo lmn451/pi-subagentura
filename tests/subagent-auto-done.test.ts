@@ -10,6 +10,13 @@ import { dirname, join } from "node:path";
 import { appendEvent, artifactPath, readEvents } from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { importFresh } from "./test-utils";
+import {
+  clearSessionScopes,
+  createSessionScope,
+  registerSessionScope,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-no-synthesis-"));
@@ -103,6 +110,15 @@ function writeAssistantTurn(
 
 describe("no parent-side timeout completion synthesis", () => {
   let root: string;
+  let scope: SessionScope;
+
+  function pollFixture(
+    mod: typeof import("../src/subagent"),
+    pi: Parameters<typeof mod.pollArtifactChanges>[0],
+  ) {
+    scope.pi = pi;
+    return mod.pollArtifactChanges(pi, sessionOwner(scope));
+  }
 
   beforeEach(() => {
     // A successful pane listing containing %99 keeps the synthetic child live.
@@ -117,10 +133,10 @@ describe("no parent-side timeout completion synthesis", () => {
       ) => callback(null, "%99\n"),
     }));
     root = makeTmp();
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaUi = undefined;
+    clearSessionScopes();
+    scope = createSessionScope({} as any);
+    scope.lifecycle = "started";
+    registerSessionScope(scope);
   });
 
   afterEach(() => {
@@ -133,10 +149,12 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "the result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const sendMessage = vi.fn();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -151,9 +169,11 @@ describe("no parent-side timeout completion synthesis", () => {
     const { state, artifactDir } = makeState({ outputContent: null });
     state.lastStopText =
       "Review complete. The findings file `/tmp/review-sec.md` contains 0 critical vulns.";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -166,9 +186,11 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({ outputContent: null });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(state.artifactDir), state.id);
     const events = readEvents(art);
@@ -182,9 +204,11 @@ describe("no parent-side timeout completion synthesis", () => {
     // Cast: the runtime value is intentionally outside the union so we can verify only
     // the four terminal stopReasons are accepted by the typecheck.
     state.lastStopReason = "toolUse" as unknown as "stop";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -202,9 +226,11 @@ describe("no parent-side timeout completion synthesis", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState({ outputContent: "result" });
       state.lastStopReason = reason;
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      state.sessionOwner = sessionOwner(scope);
+      scope.interactiveStates.set(state.id, state);
 
-      await mod.pollArtifactChanges({} as any);
+      await pollFixture(mod, {} as any);
+      expect(state.eventByteCursor).toBe(0);
 
       const art = artifactPath(dirname(artifactDir), state.id);
       const events = readEvents(art);
@@ -220,9 +246,11 @@ describe("no parent-side timeout completion synthesis", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
     state.lastStopReasonAt = Date.now() - 1_000; // legacy timestamp must not matter
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -237,7 +265,8 @@ describe("no parent-side timeout completion synthesis", () => {
 
     const { state, artifactDir } = makeState({ outputContent: "result" });
 
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const art = artifactPath(dirname(artifactDir), state.id);
 
@@ -248,7 +277,8 @@ describe("no parent-side timeout completion synthesis", () => {
       exitCode: 0,
     });
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBeGreaterThan(0);
 
     const events = readEvents(art);
 
@@ -281,7 +311,8 @@ describe("no parent-side timeout completion synthesis", () => {
 
     const { state, artifactDir } = makeState({ outputContent: "result" });
 
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const art = artifactPath(dirname(artifactDir), state.id);
 
@@ -369,7 +400,9 @@ describe("no parent-side timeout completion synthesis", () => {
 
     const sendMessage = vi.fn();
 
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
+    expect(state.lastDeliveredSessionByte).toBeGreaterThan(0);
+    expect(state.pendingDeliveries).toHaveLength(1);
 
     const events = readEvents(art);
 
@@ -402,11 +435,13 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
-    await mod.pollArtifactChanges({} as any);
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    await pollFixture(mod, {} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.eventByteCursor).toBe(0);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -418,10 +453,12 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const sendMessage = vi.fn();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
+    expect(state.eventByteCursor).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
 
     const art = artifactPath(dirname(artifactDir), state.id);
@@ -432,7 +469,7 @@ describe("no parent-side timeout completion synthesis", () => {
       exitCode: 0,
     });
 
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(state.pendingDeliveries).toHaveLength(1);
   });
 
@@ -440,9 +477,10 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.autoDoneForTurnAt).toBeUndefined();
 
     const userMsg = {
@@ -455,7 +493,8 @@ describe("no parent-side timeout completion synthesis", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(userMsg) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastDeliveredSessionByte).toBeGreaterThan(0);
     expect(state.autoDoneForTurnAt).toBeUndefined();
   });
 
@@ -463,9 +502,10 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // Simulate a terminal previous turn. The user has now sent a follow-up;
     // we want to verify the user-role revival clears "exited" too.
     state.status = "exited";
@@ -480,7 +520,7 @@ describe("no parent-side timeout completion synthesis", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(userMsg) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // Status revived so child lifecycle events for the next turn are observed.
     expect(state.status).toBe("running");
   });
@@ -489,7 +529,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({ outputContent: "result" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     // Simulate the post-turn state that follow-up work produces: the child called `cli.mjs done`
     // (so a `done` event is in the artifact and the poller would naturally transition to "idle" via
@@ -500,7 +541,7 @@ describe("no parent-side timeout completion synthesis", () => {
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
     state.status = "idle";
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.status).toBe("idle");
 
     const userMsg = {
@@ -513,7 +554,7 @@ describe("no parent-side timeout completion synthesis", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(userMsg) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.status).toBe("running");
   });
 
@@ -521,7 +562,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     state.lastStopReason = undefined;
     state.lastStopReasonAt = undefined;
@@ -535,7 +577,7 @@ describe("no parent-side timeout completion synthesis", () => {
       "Done. Wrote the result.",
     );
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     expect(state.lastStopReason).toBe("stop");
     expect(state.lastStopReasonAt).toBe(ts);
@@ -546,7 +588,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     state.lastStopReason = undefined;
     state.lastStopText = undefined;
@@ -559,7 +602,7 @@ describe("no parent-side timeout completion synthesis", () => {
       "I hit the token limit.",
     );
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     expect(state.lastStopReason).toBe("length");
     expect(state.lastStopText).toBeUndefined();
@@ -569,7 +612,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     // Simulate a prior turn that captured stop-capture state.
     state.lastStopReason = "stop";
@@ -591,11 +635,11 @@ describe("no parent-side timeout completion synthesis", () => {
       { flag: "a" },
     );
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     // All three per-turn fields must be cleared, matching the reset of
     // autoDoneForTurnAt on the same code path.
-    const after = mod.interactiveSubagentRegistry.get(state.id) as typeof state;
+    const after = scope.interactiveStates.get(state.id) as typeof state;
     expect(after.lastStopReason).toBeUndefined();
     expect(after.lastStopReasonAt).toBeUndefined();
     expect(after.lastStopText).toBeUndefined();
@@ -605,13 +649,15 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const longText = "X".repeat(1000); // >500 char slice threshold
     const ts = Date.now() - 11_000;
     writeAssistantTurn(state.sessionFile, ts, "stop", longText);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastStopText).toBe(longText);
 
     const events = readEvents(
       artifactPath(dirname(state.artifactDir), state.id),
@@ -623,13 +669,15 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const shortText = "short text that fits in the slice"; // well under 500
     const ts = Date.now() - 11_000;
     writeAssistantTurn(state.sessionFile, ts, "stop", shortText);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastStopText).toBe(shortText);
 
     const events = readEvents(
       artifactPath(dirname(state.artifactDir), state.id),
@@ -642,15 +690,17 @@ describe("no parent-side timeout completion synthesis", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({ outputContent: "final result" });
     state.notifyOnComplete = "inject";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const ts = Date.now() - 11_000;
     writeAssistantTurn(state.sessionFile, ts, "stop", "Done.");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastStopText).toBe("Done.");
 
     // Legacy state remains untouched; protocol-v2 delivery receipts own deduplication.
-    const after = mod.interactiveSubagentRegistry.get(state.id) as typeof state;
+    const after = scope.interactiveStates.get(state.id) as typeof state;
     expect(after.injected).not.toBe(true);
   });
 
@@ -659,15 +709,17 @@ describe("no parent-side timeout completion synthesis", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({ outputContent: "final result" });
     state.notifyOnComplete = "notify";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const ts = Date.now() - 11_000;
     writeAssistantTurn(state.sessionFile, ts, "stop", "Done.");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastStopText).toBe("Done.");
 
     // Legacy state remains untouched in notify mode too.
-    const after = mod.interactiveSubagentRegistry.get(state.id) as typeof state;
+    const after = scope.interactiveStates.get(state.id) as typeof state;
     expect(after.injected).toBeUndefined();
   });
 
@@ -684,7 +736,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const { state, artifactDir } = makeFreshState({
       outputContent: "the review findings",
     });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const stopTs = Date.now() - 11_000;
     writeFileSync(
@@ -718,7 +771,7 @@ describe("no parent-side timeout completion synthesis", () => {
     );
 
     const sendMessage = vi.fn();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     expect(state.lastStopReason).toBe("stop");
     expect(state.lastStopReasonAt).toBe(stopTs);
@@ -732,7 +785,8 @@ describe("no parent-side timeout completion synthesis", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeFreshState({ outputContent: null });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(state.id, state);
 
     const stopTs = Date.now() - 11_000;
     const summary =
@@ -767,7 +821,8 @@ describe("no parent-side timeout completion synthesis", () => {
       }) + "\n",
     );
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastStopText).toBe(summary);
 
     const art = artifactPath(dirname(artifactDir), state.id);
     const events = readEvents(art);
@@ -842,7 +897,8 @@ describe("no parent-side timeout completion synthesis", () => {
 
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    mod.interactiveSubagentRegistry.set(replayId, {
+    scope.interactiveStates.set(replayId, {
+      sessionOwner: sessionOwner(scope),
       id: replayId,
       name: "notdone.jsonl Replay",
       task: "(replay)",
@@ -858,7 +914,10 @@ describe("no parent-side timeout completion synthesis", () => {
       artifactDir: replayArtifactDir,
     });
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(scope.interactiveStates.get(replayId)?.lastStopText).toBe(
+      firstStopText,
+    );
 
     // Session text alone must not create a completion event.
     const eventsFile = join(replayArtifactDir, "events.ndjson");

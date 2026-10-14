@@ -239,7 +239,8 @@ groups before polling.
 
 **Crash-safe ordering at both write sites:**
 
-- **Spawn** — write the state file BEFORE `interactiveSubagentRegistry.set`.
+- **Spawn** — write the state file BEFORE registering the child in its owning
+  `SessionScope.interactiveStates` map.
   A crash between the two is recoverable on next reload.
   A crash before the write leaves no zombie.
 - **Poll enqueue** — persist the delivery intent before advancing the artifact

@@ -1,6 +1,6 @@
 /**
  * The artifact-driven poller fires pointer notifications for new events on
- * interactive sub-agents. Tests reset the global pi ref + registry, then write
+ * interactive sub-agents. Tests register explicit session scopes, then write
  * events directly to the artifact dir to drive the poller.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,8 +38,11 @@ import { importFresh } from "./test-utils";
 import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
+  createSessionScope,
   registerSessionScope,
   removeSessionScope,
+  sessionOwner,
+  type SessionScope,
 } from "../src/session-scope";
 import { responsiveFlowMinimumWidth } from "../src/rendering";
 import { createTelemetrySession } from "../src/telemetry";
@@ -57,6 +60,26 @@ let temporarySettingsRoot: string | undefined;
 let temporaryProcessCwd: string | undefined;
 let temporaryAgentDir: string | undefined;
 let previousAgentDir: string | undefined;
+let fixtureScope: SessionScope;
+
+function startFixtureScope(): void {
+  clearSessionScopes();
+  fixtureScope = createSessionScope({ sendMessage: vi.fn() } as any);
+  fixtureScope.lifecycle = "started";
+  fixtureScope.sessionManager = { getSessionId: () => "pi" };
+  registerSessionScope(fixtureScope);
+}
+
+function pollFixture(
+  mod: Pick<typeof import("../src/artifact-poller"), "pollArtifactChanges">,
+  pi: ExtensionAPI,
+) {
+  fixtureScope.pi = pi;
+  for (const state of fixtureScope.interactiveStates.values()) {
+    state.sessionOwner = sessionOwner(fixtureScope);
+  }
+  return mod.pollArtifactChanges(pi, sessionOwner(fixtureScope));
+}
 
 function makeSessionSettingsSandbox(root = makeTmp()): SessionSettingsSandbox {
   const cwd = join(root, "project");
@@ -100,11 +123,12 @@ function makeState(): {
 
 function installDeliverySpies() {
   const sendMessage = vi.fn();
-  (globalThis as any).__piSubagenturaUi = {
+  fixtureScope.pi = { sendMessage } as any;
+  fixtureScope.ui = {
     notify: vi.fn(),
     setStatus: vi.fn(),
     setWidget: vi.fn(),
-  };
+  } as any;
   return sendMessage;
 }
 
@@ -130,14 +154,8 @@ function renderedWidgetRows(
 
 describe("pollArtifactChanges", () => {
   beforeEach(() => {
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaRegistry?.clear?.();
-    g.__piSubagenturaWorkflowJobs?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaUi = undefined;
-    g.__piSubagenturaParentStreaming = false;
-    clearSessionScopes();
+    (globalThis as any).__piSubagenturaWorkflowJobs?.clear?.();
+    startFixtureScope();
     temporarySettingsRoot = undefined;
     temporaryProcessCwd = makeTmp();
     vi.spyOn(process, "cwd").mockReturnValue(temporaryProcessCwd);
@@ -147,8 +165,7 @@ describe("pollArtifactChanges", () => {
   });
 
   afterEach(() => {
-    (globalThis as any).__piSubagenturaParentStreaming = false;
-    (globalThis as any).__piSubagenturaRegistry?.clear?.();
+    clearSessionScopes();
     delete process.env.SUBAGENT_DEBUG_LOG_DIR;
     vi.doUnmock("node:child_process");
     vi.useRealTimers();
@@ -191,7 +208,6 @@ describe("pollArtifactChanges", () => {
     const persistedBefore = loadInteractiveStates(item.state.cwd)?.states[
       item.id
     ];
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
     const owner = { id: 701, generation: 1 };
     const sendMessage = vi.fn();
     const setStatus = vi.fn();
@@ -236,7 +252,7 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -302,7 +318,6 @@ describe("pollArtifactChanges", () => {
     item.state.telemetryModel = "default";
     item.state.completionOwner = "workflow";
     scope.interactiveStates.set(item.id, item.state);
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
     const art = artifactPath(join(item.artifactDir, ".."), item.id);
     appendEvent(art, {
       version: 2,
@@ -482,14 +497,14 @@ describe("pollArtifactChanges", () => {
       item.state.name = index === 0 ? "agent-0\nprimary" : `agent-${index}`;
       item.state.lastToolSummary =
         index === 0 ? `${"界🙂 reading ".repeat(80)}\nsecond` : `task-${index}`;
-      mod.interactiveSubagentRegistry.set(item.id, item.state);
+      fixtureScope.interactiveStates.set(item.id, item.state);
     }
-    (globalThis as any).__piSubagenturaUi = ui;
+    fixtureScope.ui = ui as any;
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const activityCall = setWidget.mock.calls.find(
       ([key]) => key === "subagentura-activity",
@@ -599,7 +614,6 @@ describe("pollArtifactChanges", () => {
       source: "agent_settled",
       agentStopReason: "aborted",
     });
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
 
     const owner = { id: 601, generation: 1 };
     const sendMessage = vi.fn();
@@ -678,7 +692,6 @@ describe("pollArtifactChanges", () => {
         outcome: "done",
         source: "agent_settled",
       });
-      mod.interactiveSubagentRegistry.set(item.id, item.state);
     }
     const ownerB = { id: 402, generation: 1 };
     const sendMessage = installDeliverySpies();
@@ -696,9 +709,6 @@ describe("pollArtifactChanges", () => {
     });
     scopeA.interactiveStates.set(a.id, a.state);
     scopeB.interactiveStates.set(b.id, b.state);
-    (globalThis as any).__piSubagenturaPiRef = {
-      sendMessage: wrongSendMessage,
-    };
     multiplexer.__setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -731,7 +741,6 @@ describe("pollArtifactChanges", () => {
       item.state.cwd = join(item.artifactDir, "..");
       const art = artifactPath(item.state.cwd, item.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
-      mod.interactiveSubagentRegistry.set(item.id, item.state);
     }
     const ownerA = { id: 501, generation: 1 };
     const ownerB = { id: 502, generation: 1 };
@@ -781,7 +790,6 @@ describe("pollArtifactChanges", () => {
     const a = makeState();
     a.state.name = "agent-a";
     a.state.parentSessionId = "session-a";
-    mod.interactiveSubagentRegistry.set(a.id, a.state);
     const ownerA = { id: 503, generation: 1 };
     const ownerB = { id: 504, generation: 1 };
     const scopeA = registerSessionScope({
@@ -925,6 +933,7 @@ describe("pollArtifactChanges", () => {
       "../src/artifact-poller",
     );
     const { workflowJobRegistry } = await import("../src/workflow");
+    const owner = sessionOwner(fixtureScope);
     workflowJobRegistry.set("zero-usage", {
       id: "zero-usage",
       name: "zero-flow",
@@ -932,6 +941,7 @@ describe("pollArtifactChanges", () => {
       startedAt: Date.now(),
       promise: Promise.resolve({}) as any,
       abort: new AbortController(),
+      parentSessionOwner: owner,
       snapshot: {
         agentsSpawned: 1,
         errorCount: 0,
@@ -961,12 +971,9 @@ describe("pollArtifactChanges", () => {
     });
     const setStatus = vi.fn();
     const setWidget = vi.fn();
-    (globalThis as any).__piSubagenturaUi = {
-      setStatus,
-      setWidget,
-    };
+    fixtureScope.ui = { setStatus, setWidget } as any;
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     expect(setStatus).toHaveBeenCalledWith(
       "subagentura-workflows",
@@ -1012,14 +1019,12 @@ describe("pollArtifactChanges", () => {
     child.state.workflowId = "wf-1";
     child.state.completionOwner = "workflow";
     child.state.parentSessionId = undefined;
-    mod.interactiveSubagentRegistry.set(child.id, child.state);
     scopeA.interactiveStates.set(child.id, child.state);
 
     // A sibling session's plain agent must be neither listed nor counted for A.
     const sibling = makeState();
     sibling.state.name = "sibling";
     sibling.state.parentSessionId = "session-b";
-    mod.interactiveSubagentRegistry.set(sibling.id, sibling.state);
     scopeB.interactiveStates.set(sibling.id, sibling.state);
 
     multiplexer.__setTmuxMultiplexer({
@@ -1059,8 +1064,6 @@ describe("pollArtifactChanges", () => {
     a.state.parentSessionId = "session-a";
     b.state.name = "agent-b";
     b.state.parentSessionId = "session-b";
-    mod.interactiveSubagentRegistry.set(a.id, a.state);
-    mod.interactiveSubagentRegistry.set(b.id, b.state);
     const ownerA = { id: 505, generation: 1 };
     const ownerB = { id: 506, generation: 1 };
     const scopeA = registerSessionScope({
@@ -1103,18 +1106,16 @@ describe("pollArtifactChanges", () => {
     };
     const unowned = makeState();
     unowned.state.name = "unowned-agent";
-    mod.interactiveSubagentRegistry.set(unowned.id, unowned.state);
-    registerSessionScope({
+    const scope = registerSessionScope({
       id: 507,
       generation: 1,
       pi: { sendMessage: vi.fn() } as any,
       ui: ui as any,
       sessionManager: { getSessionId: () => "session-a" },
     });
-    (globalThis as any).__piSubagenturaUi = ui;
-    multiplexer.__setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
-    } as any);
+    scope.interactiveStates.set(unowned.id, unowned.state);
+    const getPaneLivenessAsync = vi.fn(async () => "alive");
+    multiplexer.__setTmuxMultiplexer({ getPaneLivenessAsync } as any);
 
     await mod.pollArtifactChanges({} as any);
 
@@ -1123,6 +1124,13 @@ describe("pollArtifactChanges", () => {
     );
     expect(activityCalls).toEqual([]);
     expect(unowned.state.eventByteCursor).toBeUndefined();
+    expect(getPaneLivenessAsync).not.toHaveBeenCalled();
+    await mod.pollArtifactChanges(scope.pi, sessionOwner(scope));
+    expect(getPaneLivenessAsync).toHaveBeenCalledOnce();
+    expect(unowned.state.eventByteCursor).toBe(0);
+    expect(
+      renderedWidgetRows(ui.setWidget, "subagentura-activity", 80).join("\n"),
+    ).toContain("unowned-agent");
   });
 
   it("does not repaint unchanged poller UI", async () => {
@@ -1141,7 +1149,7 @@ describe("pollArtifactChanges", () => {
     item.state.name = "steady-agent";
     item.state.lastToolSummary = "reading src/main.ts";
     item.state.lastActivityAt = Date.now() - 10_000;
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
+    fixtureScope.interactiveStates.set(item.id, item.state);
     workflowJobRegistry.set("steady-workflow", {
       id: "steady-workflow",
       name: "steady-flow",
@@ -1151,6 +1159,7 @@ describe("pollArtifactChanges", () => {
       startedAt: 20_000,
       promise: Promise.resolve({}) as any,
       abort: new AbortController(),
+      parentSessionOwner: sessionOwner(fixtureScope),
       snapshot: {
         agentsSpawned: 1,
         errorCount: 0,
@@ -1159,14 +1168,14 @@ describe("pollArtifactChanges", () => {
         runningCount: 1,
       },
     });
-    (globalThis as any).__piSubagenturaUi = ui;
+    fixtureScope.ui = ui as any;
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     vi.setSystemTime(25_000);
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const activityCalls = ui.setWidget.mock.calls.filter(
       ([key]) => key === "subagentura-activity",
@@ -1205,19 +1214,19 @@ describe("pollArtifactChanges", () => {
     item.state.name = "ticking-agent";
     item.state.lastToolSummary = "reading src/main.ts";
     item.state.lastActivityAt = 10_000;
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
-    (globalThis as any).__piSubagenturaUi = ui;
+    fixtureScope.interactiveStates.set(item.id, item.state);
+    fixtureScope.ui = ui as any;
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // Still inside the 10s bucket — no repaint.
     vi.setSystemTime(29_000);
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // Crosses into the 20s bucket — one repaint with the advanced clock.
     vi.setSystemTime(31_000);
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const activityCalls = ui.setWidget.mock.calls.filter(
       ([key]) => key === "subagentura-activity",
@@ -1244,7 +1253,6 @@ describe("pollArtifactChanges", () => {
       outcome: "done",
       source: "agent_settled",
     });
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
     const owner = { id: 601, generation: 1 };
     const sendMessage = vi.fn();
     const scope = registerSessionScope({
@@ -1297,16 +1305,16 @@ describe("pollArtifactChanges", () => {
     item.state.cwd = join(item.artifactDir, "..");
     const art = artifactPath(item.state.cwd, item.id);
     appendEvent(art, { ts: 1, type: "done", status: "done" });
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
+    fixtureScope.interactiveStates.set(item.id, item.state);
     installDeliverySpies();
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "unknown",
     } as never);
 
-    await mod.pollArtifactChanges({} as never);
+    await pollFixture(mod, {} as never);
 
     expect(item.state.status).toBe("unknown");
-    expect(mod.interactiveSubagentRegistry.get(item.id)).toBe(item.state);
+    expect(fixtureScope.interactiveStates.get(item.id)).toBe(item.state);
     expect(item.state.eventByteCursor).toBeGreaterThan(0);
   });
   it("reports one mux probe runtime failure per outage episode", async () => {
@@ -1338,7 +1346,6 @@ describe("pollArtifactChanges", () => {
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(state.id, state);
-    mod.interactiveSubagentRegistry.set(state.id, state);
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "unknown",
     } as never);
@@ -1433,7 +1440,6 @@ describe("pollArtifactChanges", () => {
       item.state.telemetryDepthBucket = "1";
       item.state.telemetryModel = "default";
       scope.interactiveStates.set(item.id, item.state);
-      mod.interactiveSubagentRegistry.set(item.id, item.state);
       let diagnostic: PaneLivenessDiagnostic = {
         liveness: "unknown",
         failureReason: "timeout",
@@ -1509,7 +1515,6 @@ describe("pollArtifactChanges", () => {
       sessionManager: { getSessionId: () => "pi" },
     });
     scope.interactiveStates.set(item.id, item.state);
-    mod.interactiveSubagentRegistry.set(item.id, item.state);
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessDiagnosticAsync: async () => ({
         liveness: "unknown",
@@ -1542,7 +1547,7 @@ describe("pollArtifactChanges", () => {
     for (let index = 0; index < 12; index++) {
       const item = makeState();
       item.state.name = `agent-${index}`;
-      mod.interactiveSubagentRegistry.set(item.id, item.state);
+      fixtureScope.interactiveStates.set(item.id, item.state);
     }
     for (let index = 0; index < 7; index++) {
       workflowJobRegistry.set(`wf-${index}`, {
@@ -1552,6 +1557,7 @@ describe("pollArtifactChanges", () => {
         startedAt: Date.now(),
         promise: Promise.resolve({}) as any,
         abort: new AbortController(),
+        parentSessionOwner: sessionOwner(fixtureScope),
         snapshot: {
           agentsSpawned: 1,
           errorCount: 0,
@@ -1561,12 +1567,12 @@ describe("pollArtifactChanges", () => {
         },
       } as any);
     }
-    (globalThis as any).__piSubagenturaUi = ui;
+    fixtureScope.ui = ui as any;
     multiplexer.__setTmuxMultiplexer({
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const rowsFor = (key: string, width = 80): string[] =>
       renderedWidgetRows(ui.setWidget, key, width);
@@ -1616,14 +1622,14 @@ describe("pollArtifactChanges", () => {
   it("keeps running in-process jobs in the shared footer", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    mod.jobRegistry.set("async-1", { status: "running" } as any);
+    fixtureScope.inProcessJobs.set("async-1", { status: "running" } as any);
     const setStatus = vi.fn();
-    (globalThis as any).__piSubagenturaUi = {
+    fixtureScope.ui = {
       setStatus,
       setWidget: vi.fn(),
-    };
+    } as any;
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     expect(setStatus).toHaveBeenCalledWith(
       "subagentura-running",
@@ -1652,8 +1658,8 @@ describe("pollArtifactChanges", () => {
         return probe;
       },
     } as any);
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const polling = mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    fixtureScope.interactiveStates.set(state.id, state);
+    const polling = pollFixture(mod, { sendMessage: vi.fn() } as any);
     void Promise.resolve(polling).then(() => {
       settled = true;
     });
@@ -1697,11 +1703,11 @@ describe("pollArtifactChanges", () => {
       },
       getPaneLivenessAsync: () => probe,
     } as any);
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const sendMessage = vi.fn();
-    const polling = mod.pollArtifactChanges({ sendMessage } as any);
+    const polling = pollFixture(mod, { sendMessage } as any);
     await Promise.resolve();
-    mod.interactiveSubagentRegistry.clear();
+    fixtureScope.interactiveStates.clear();
     resolveProbe("alive");
     await polling;
     expect(state.eventByteCursor).toBeUndefined();
@@ -1729,9 +1735,9 @@ describe("pollArtifactChanges", () => {
         return probe;
       },
     } as any);
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    const first = mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
-    const second = mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    fixtureScope.interactiveStates.set(state.id, state);
+    const first = pollFixture(mod, { sendMessage: vi.fn() } as any);
+    const second = pollFixture(mod, { sendMessage: vi.fn() } as any);
     await Promise.resolve();
     expect(probeCalls).toBe(1);
     resolveProbe("alive");
@@ -1750,6 +1756,7 @@ describe("pollArtifactChanges", () => {
       startedAt: Date.now() - 5_000,
       promise: Promise.resolve({}) as any,
       abort: new AbortController(),
+      parentSessionOwner: sessionOwner(fixtureScope),
       snapshot: {
         agentsSpawned: 3,
         errorCount: 0,
@@ -1773,9 +1780,9 @@ describe("pollArtifactChanges", () => {
 
     const setStatus = vi.fn();
     const setWidget = vi.fn();
-    (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+    fixtureScope.ui = { setStatus, setWidget } as any;
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     expect(setStatus).toHaveBeenCalledWith(
       "subagentura-workflows",
@@ -1786,8 +1793,6 @@ describe("pollArtifactChanges", () => {
       [expect.stringContaining("demo-flow (wf_test): 3 agents · 2 running")],
       { placement: "belowEditor" },
     );
-
-    delete (globalThis as any).__piSubagenturaUi;
   });
 
   it("logs unexpected top-level poller errors to the debug log", async () => {
@@ -1797,14 +1802,14 @@ describe("pollArtifactChanges", () => {
 
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    mod.interactiveSubagentRegistry.set("bad-state", {
+    fixtureScope.interactiveStates.set("bad-state", {
       id: "bad-state",
       status: "running",
       artifactDir: undefined,
     } as any);
 
     await expect(
-      mod.pollArtifactChanges({
+      pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any),
@@ -1871,18 +1876,23 @@ describe("pollArtifactChanges", () => {
         persistedReceiptsAtKill = persisted?.deliveryReceipts.length ?? 0;
       },
     } as any);
-    interactive.interactiveSubagentRegistry.set(state.id, state);
-    (globalThis as any).__piSubagenturaParentStreaming = true;
+    state.sessionOwner = sessionOwner(fixtureScope);
+    fixtureScope.interactiveStates.set(state.id, state);
+    fixtureScope.parentStreaming = true;
 
-    interactive.cancelInteractiveSubagent(state.id);
+    interactive.cancelInteractiveSubagent(
+      state.id,
+      "cancel_interactive_subagent",
+      state,
+    );
     expect(completionsAtKill).toBe(1);
     expect(persistedIntentsAtKill).toBe(0);
     expect(persistedReceiptsAtKill).toBe(1);
 
-    (globalThis as any).__piSubagenturaParentStreaming = false;
+    fixtureScope.parentStreaming = false;
     const sendMessage = vi.fn();
-    await mod.pollArtifactChanges({ sendMessage } as any);
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
     expect(state.pendingDeliveries).toEqual([]);
     expect(state.deliveryReceipts).toHaveLength(1);
@@ -1908,9 +1918,14 @@ describe("pollArtifactChanges", () => {
       getPaneLiveness: () => "alive",
       killPane: vi.fn(),
     } as any);
-    interactive.interactiveSubagentRegistry.set(state.id, state);
+    state.sessionOwner = sessionOwner(fixtureScope);
+    fixtureScope.interactiveStates.set(state.id, state);
 
-    interactive.cancelInteractiveSubagent(state.id);
+    interactive.cancelInteractiveSubagent(
+      state.id,
+      "cancel_interactive_subagent",
+      state,
+    );
 
     const completions = readFileSync(art.statusFile, "utf8")
       .trim()
@@ -1933,14 +1948,16 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
-    mod.jobRegistry.set("still-running", { status: "running" } as any);
+    fixtureScope.interactiveStates.set(state.id, state);
+    fixtureScope.inProcessJobs.set("still-running", {
+      status: "running",
+    } as any);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     // Only done fires. started is silent (widget shows it).
     expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -1962,7 +1979,7 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, {
@@ -1974,7 +1991,7 @@ describe("pollArtifactChanges", () => {
     });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     // Both are silent (started → TUI widget row; tool_activity → TUI widget only).
     expect(sendMessage).not.toHaveBeenCalled();
@@ -1985,7 +2002,7 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, {
@@ -1997,7 +2014,7 @@ describe("pollArtifactChanges", () => {
     appendEvent(art, { ts: 3, type: "cancelled", status: "cancelled" });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(sendMessage.mock.calls[0][0].content).toContain("error");
@@ -2008,19 +2025,19 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     // Only done fires (started is silent).
     expect(sendMessage).toHaveBeenCalledTimes(1);
 
     // Second poll: no new events, no new notifications.
     sendMessage.mockClear();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -2034,12 +2051,12 @@ describe("pollArtifactChanges", () => {
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
     appendEvent(art, { ts: 3, type: "cancelled", status: "cancelled" });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     state.eventByteCursor = readEventRecords(art)[0].endOffset;
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     // Should deliver done + cancelled, not started.
     expect(sendMessage).toHaveBeenCalledOnce();
@@ -2064,12 +2081,12 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.status).toBe("idle");
     // exitCode is NOT set on idle — child is still around.
     expect(state.exitCode).toBeUndefined();
@@ -2090,12 +2107,12 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.status).toBe("exited");
     expect(state.exitCode).toBe(0);
   });
@@ -2104,11 +2121,11 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "cancelled", status: "cancelled" });
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.status).toBe("cancelled");
   });
 
@@ -2117,12 +2134,12 @@ describe("pollArtifactChanges", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
     state.status = "cancelled";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(sendMessage).toHaveBeenCalledOnce();
   });
 
@@ -2153,16 +2170,16 @@ describe("pollArtifactChanges", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
     expect(state.status).toBe("unknown");
 
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0][0].content).toContain("done");
@@ -2185,7 +2202,7 @@ describe("pollArtifactChanges", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
     state.status = "idle"; // simulate "already between turns"
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2193,7 +2210,7 @@ describe("pollArtifactChanges", () => {
     appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 }); // follow-up turn
 
     const sendMessage = installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     // The new done event (ts=3) is delivered as a pointer notification.
     expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -2214,7 +2231,7 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2222,7 +2239,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][0].content).not.toContain(
@@ -2256,7 +2273,7 @@ describe("pollArtifactChanges", () => {
         triggerTurnOnComplete: false,
         parentSessionId: "pi",
       });
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       multiplexer.__setTmuxMultiplexer({
         getPaneLiveness: () => "alive",
         getPaneLivenessAsync: async () => "alive",
@@ -2277,7 +2294,7 @@ describe("pollArtifactChanges", () => {
       writeFileSync(art.statusFile, raw);
       const sendMessage = installDeliverySpies();
 
-      await mod.pollArtifactChanges({ sendMessage } as any);
+      await pollFixture(mod, { sendMessage } as any);
 
       const persisted = loadInteractiveStates(state.cwd)?.states[state.id];
       expect(persisted?.eventByteCursor).toBe(eventLogEndOffset(art));
@@ -2296,7 +2313,7 @@ describe("pollArtifactChanges", () => {
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2304,7 +2321,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       // Legacy completions are pointer-only even when the delivery mode is inject.
       expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -2317,7 +2334,7 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "notify";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2325,7 +2342,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendUserMessage).not.toHaveBeenCalled();
@@ -2337,14 +2354,14 @@ describe("pollArtifactChanges", () => {
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "notify";
       state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][1]).toMatchObject({
@@ -2360,7 +2377,7 @@ describe("pollArtifactChanges", () => {
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
       state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2368,7 +2385,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][1]).toEqual({
@@ -2384,7 +2401,7 @@ describe("pollArtifactChanges", () => {
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
       state.triggerTurnOnComplete = true;
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, {
@@ -2396,7 +2413,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][1]).toMatchObject({
@@ -2411,7 +2428,7 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2419,14 +2436,14 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendUserMessage).not.toHaveBeenCalled();
 
       // Second poll: no new events (cursor advanced), inject is gated by state.injected.
       sendMessage.mockClear();
       sendUserMessage.mockClear();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
       expect(sendMessage).not.toHaveBeenCalled();
       expect(sendUserMessage).not.toHaveBeenCalled();
     });
@@ -2446,7 +2463,7 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       // Turn 1: child finishes, writes output v1, calls done.
       appendEvent(art, { ts: 1, type: "started", status: "running" });
@@ -2455,7 +2472,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][0].content).not.toContain("answer v1");
       expect(sendMessage.mock.calls[0][0].content).toContain("Output:");
@@ -2467,7 +2484,7 @@ describe("pollArtifactChanges", () => {
 
       sendMessage.mockClear();
       sendUserMessage.mockClear();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(sendMessage.mock.calls[0][0].content).not.toContain("answer v2");
@@ -2479,7 +2496,7 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
@@ -2487,7 +2504,7 @@ describe("pollArtifactChanges", () => {
 
       const sendMessage = installDeliverySpies();
       const sendUserMessage = vi.fn();
-      await mod.pollArtifactChanges({ sendMessage, sendUserMessage } as any);
+      await pollFixture(mod, { sendMessage, sendUserMessage } as any);
 
       expect(sendUserMessage).not.toHaveBeenCalled();
       expect(sendMessage).toHaveBeenCalledOnce();
@@ -2511,14 +2528,14 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       state.notifyOnComplete = "inject";
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
 
       // Turn 1.
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
       writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2526,7 +2543,7 @@ describe("pollArtifactChanges", () => {
       // Turn 2.
       appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
       writeOutput(art, "answer v2");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2552,13 +2569,13 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       // notifyOnComplete left undefined.
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
 
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
       writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2581,14 +2598,14 @@ describe("pollArtifactChanges", () => {
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
       const { state, artifactDir } = makeState();
       // notifyOnComplete left undefined (default inject).
-      mod.interactiveSubagentRegistry.set(state.id, state);
+      fixtureScope.interactiveStates.set(state.id, state);
       const art = artifactPath(join(artifactDir, ".."), state.id);
 
       // Turn 1 completes with mutable legacy output.
       appendEvent(art, { ts: 1, type: "started", status: "running" });
       appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
       writeOutput(art, "answer v1");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2597,7 +2614,7 @@ describe("pollArtifactChanges", () => {
       // Follow-up turn: the child overwrites output.md but its done event has NOT landed yet
       // (last event is still the turn-1 done@ts2). A poll lands in this window.
       writeOutput(art, "answer v2 in progress");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2607,7 +2624,7 @@ describe("pollArtifactChanges", () => {
       // A second legacy completion remains pointer-only.
       appendEvent(art, { ts: 3, type: "done", status: "done", exitCode: 0 });
       writeOutput(art, "answer v2 final");
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2643,7 +2660,7 @@ describe("pollArtifactChanges", () => {
       const running = makeState().state;
       running.id = "running-1";
       running.paneId = "%90";
-      mod.interactiveSubagentRegistry.set(running.id, running);
+      fixtureScope.interactiveStates.set(running.id, running);
 
       // Idle sub-agent: done event, pane alive. artifactDir must be set so the
       // poller reads from the same dir where we write the events.
@@ -2652,7 +2669,7 @@ describe("pollArtifactChanges", () => {
       idle.paneId = "%91";
       idle.lastDeliveredEventTs = 2;
       idle.artifactDir = join(idle.artifactDir, "..", idle.id);
-      mod.interactiveSubagentRegistry.set(idle.id, idle);
+      fixtureScope.interactiveStates.set(idle.id, idle);
       const idleArt = artifactPath(join(idle.artifactDir, ".."), idle.id);
       appendEvent(idleArt, { ts: 1, type: "started", status: "running" });
       appendEvent(idleArt, {
@@ -2668,7 +2685,7 @@ describe("pollArtifactChanges", () => {
       exited.paneId = "%92";
       exited.lastDeliveredEventTs = 2;
       exited.artifactDir = join(exited.artifactDir, "..", exited.id);
-      mod.interactiveSubagentRegistry.set(exited.id, exited);
+      fixtureScope.interactiveStates.set(exited.id, exited);
       const exitedArt = artifactPath(join(exited.artifactDir, ".."), exited.id);
       appendEvent(exitedArt, { ts: 1, type: "started", status: "running" });
       appendEvent(exitedArt, {
@@ -2680,9 +2697,9 @@ describe("pollArtifactChanges", () => {
 
       const setStatus = vi.fn();
       const setWidget = vi.fn();
-      (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+      fixtureScope.ui = { setStatus, setWidget } as any;
 
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2703,8 +2720,6 @@ describe("pollArtifactChanges", () => {
       expect(exited.status).toBe("exited");
       expect(idle.status).toBe("idle");
       expect(running.status).toBe("running");
-
-      delete (globalThis as any).__piSubagenturaUi;
     });
 
     it("AC-B1b: rehydrates a completed live pane as idle and ready", async () => {
@@ -2752,14 +2767,14 @@ describe("pollArtifactChanges", () => {
           completionSource: "explicit",
         },
       });
-      mod.rehydrateInteractiveSubagents(cwd, "pi");
-      const state = mod.interactiveSubagentRegistry.get(id)!;
+      mod.rehydrateInteractiveSubagents(cwd, "pi", [], fixtureScope);
+      const state = fixtureScope.interactiveStates.get(id)!;
       expect(state.status).toBe("idle");
       const setStatus = vi.fn();
       const setWidget = vi.fn();
-      (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+      fixtureScope.ui = { setStatus, setWidget } as any;
 
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2780,7 +2795,6 @@ describe("pollArtifactChanges", () => {
       expect(widgetRows.join("\n")).not.toContain("starting");
       expect(widgetRows.join("\n")).not.toContain("stale");
       multiplexer.__setTmuxMultiplexer(undefined);
-      delete (globalThis as any).__piSubagenturaUi;
     });
 
     it("AC-B2: clears footer and widget when all sub-agents are exited", async () => {
@@ -2801,7 +2815,7 @@ describe("pollArtifactChanges", () => {
       exited1.id = "exited-1";
       exited1.lastDeliveredEventTs = 2;
       exited1.artifactDir = join(exited1.artifactDir, "..", exited1.id);
-      mod.interactiveSubagentRegistry.set(exited1.id, exited1);
+      fixtureScope.interactiveStates.set(exited1.id, exited1);
       const exited1Art = artifactPath(
         join(exited1.artifactDir, ".."),
         exited1.id,
@@ -2816,9 +2830,9 @@ describe("pollArtifactChanges", () => {
 
       const setStatus = vi.fn();
       const setWidget = vi.fn();
-      (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+      fixtureScope.ui = { setStatus, setWidget } as any;
 
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2831,8 +2845,6 @@ describe("pollArtifactChanges", () => {
       );
 
       expect(exited1.status).toBe("exited");
-
-      delete (globalThis as any).__piSubagenturaUi;
     });
 
     it("AC-B3: combines interactive and in-process footer counts", async () => {
@@ -2848,20 +2860,20 @@ describe("pollArtifactChanges", () => {
       }));
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      mod.jobRegistry.set("async-1", { status: "running" } as any);
+      fixtureScope.inProcessJobs.set("async-1", { status: "running" } as any);
 
       const a = makeState().state;
       a.id = "a";
-      mod.interactiveSubagentRegistry.set(a.id, a);
+      fixtureScope.interactiveStates.set(a.id, a);
       const b = makeState().state;
       b.id = "b";
-      mod.interactiveSubagentRegistry.set(b.id, b);
+      fixtureScope.interactiveStates.set(b.id, b);
 
       const setStatus = vi.fn();
       const setWidget = vi.fn();
-      (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+      fixtureScope.ui = { setStatus, setWidget } as any;
 
-      await mod.pollArtifactChanges({
+      await pollFixture(mod, {
         sendMessage: vi.fn(),
         sendUserMessage: vi.fn(),
       } as any);
@@ -2873,8 +2885,6 @@ describe("pollArtifactChanges", () => {
       expect(
         renderedWidgetRows(setWidget, "subagentura-activity", 80),
       ).toHaveLength(2);
-
-      delete (globalThis as any).__piSubagenturaUi;
     });
   });
 });
@@ -2883,11 +2893,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
   const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
 
   beforeEach(() => {
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaSessionManager = undefined;
-    clearSessionScopes();
+    startFixtureScope();
   });
 
   function makePersistedState(): {
@@ -2930,19 +2936,19 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const { cwd, id, state } = makePersistedState();
     state.parentSessionId = "session-b";
     state.status = "exited";
-    mod.interactiveSubagentRegistry.set(id, state);
     const ownerA = { id: 601, generation: 1 };
     registerSessionScope({
       ...ownerA,
       pi: { sendMessage: vi.fn() } as any,
       sessionManager: { getSessionId: () => "session-a", getEntries: () => [] },
     });
-    registerSessionScope({
+    const scopeB = registerSessionScope({
       id: 602,
       generation: 1,
       pi: { sendMessage: vi.fn() } as any,
       sessionManager: { getSessionId: () => "session-b", getEntries: () => [] },
     });
+    scopeB.interactiveStates.set(id, state);
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
 
     await mod.pollArtifactChanges({} as any, ownerA);
@@ -2964,13 +2970,13 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
     installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -2994,14 +3000,15 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
     state.notifyOnComplete = "inject";
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
     const entries: unknown[] = [];
-    (globalThis as any).__piSubagenturaSessionManager = {
+    fixtureScope.sessionManager = {
+      getSessionId: () => "pi",
       getEntries: () => entries,
     };
-    await mod.pollArtifactChanges({
+    await pollFixture(mod, {
       sendMessage: vi.fn((message) => {
         entries.push({
           type: "custom_message",
@@ -3029,12 +3036,12 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -3055,7 +3062,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       version: 2,
@@ -3070,7 +3077,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     });
 
     installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     expect(state.status).toBe("idle");
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
@@ -3124,7 +3131,6 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       state.telemetryDepthBucket = "1";
       state.telemetryModel = "default";
       scope.interactiveStates.set(id, state);
-      mod.interactiveSubagentRegistry.set(id, state);
       const art = artifactPath(join(state.artifactDir, ".."), id);
       const secret =
         "provider failed: Bearer secret https://private.example/token /Users/alice/project";
@@ -3210,7 +3216,6 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(id, state);
-    mod.interactiveSubagentRegistry.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       version: 2,
@@ -3291,7 +3296,6 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(id, state);
-    mod.interactiveSubagentRegistry.set(id, state);
 
     const art = artifactPath(join(state.artifactDir, ".."), id);
     const secret = "malformed secret bearer token";
@@ -3372,7 +3376,6 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(state.id, state);
-    mod.interactiveSubagentRegistry.set(state.id, state);
 
     const art = artifactPath(join(state.artifactDir, ".."), state.id);
     mkdirSync(art.dir, { recursive: true });
@@ -3442,7 +3445,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       version: 2,
@@ -3454,7 +3457,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       exitCode: 1,
     });
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     expect(state.status).toBe("exited");
     expect(loadInteractiveStates(cwd)?.states[id]).toBeUndefined();
@@ -3464,7 +3467,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       ts: 1,
@@ -3474,7 +3477,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     });
 
     installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -3487,12 +3490,12 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "cancelled", status: "cancelled" });
 
     installDeliverySpies();
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -3508,7 +3511,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       ts: 1,
@@ -3517,14 +3520,14 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       message: "boom",
     });
 
-    (globalThis as any).__piSubagenturaUi = {
+    fixtureScope.ui = {
       notify: vi.fn(() => {
         throw new Error("stale pi");
       }),
       setStatus: vi.fn(),
       setWidget: vi.fn(),
-    };
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    } as any;
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -3546,7 +3549,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { cwd, id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, {
       ts: 1,
@@ -3556,7 +3559,7 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       summary: "ls",
     });
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[id]).toBeDefined();
@@ -3579,27 +3582,29 @@ describe("pollArtifactChanges — terminal cleanup of state.json", () => {
       attachCommand: "",
       selectPaneCommand: "",
       launchScriptFile: "/tmp/launch.sh",
-      artifactDir: "/tmp/art-" + id,
+      artifactDir: join(makeTmp(), id),
     };
-    mod.interactiveSubagentRegistry.set(id, state);
-    const art = artifactPath("/tmp", id);
+    fixtureScope.interactiveStates.set(id, state);
+    const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
 
     await expect(
-      mod.pollArtifactChanges({ sendMessage: vi.fn() } as any),
+      pollFixture(mod, { sendMessage: vi.fn() } as any),
     ).resolves.toBeUndefined();
+    expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
+    expect(state.pendingDeliveries).toHaveLength(1);
   });
 
   it("advances eventByteCursor before removing the state entry", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { id, state } = makePersistedState();
-    mod.interactiveSubagentRegistry.set(id, state);
+    fixtureScope.interactiveStates.set(id, state);
     const art = artifactPath(join(state.artifactDir, ".."), id);
     appendEvent(art, { ts: 1, type: "started", status: "running" });
     appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
 
-    await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any);
+    await pollFixture(mod, { sendMessage: vi.fn() } as any);
 
     expect(state.eventByteCursor).toBe(eventLogEndOffset(art));
   });

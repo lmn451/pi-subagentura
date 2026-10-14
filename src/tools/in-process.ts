@@ -69,7 +69,6 @@ import {
   formatCompletionDeliveryBehavior,
   notifyInProcessCompletionWithoutDelivery,
 } from "../notifications";
-import { interactiveSubagentRegistry } from "../interactive-tmux";
 import { renderSubagentCall, renderSubagentResult } from "../rendering";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import {
@@ -150,9 +149,7 @@ function resolveExecutionOwner(
 ): { owner?: SessionOwnerToken } | undefined {
   const scope = resolveToolSessionScope(token);
   if (scope) return { owner: sessionOwner(scope) };
-  // A supplied token must never fall back to whichever peer registered last.
-  if (token || getStartedSessionScopes().length > 0) return undefined;
-  return {};
+  return undefined;
 }
 
 function telemetryForAgent(
@@ -2076,11 +2073,7 @@ function registerCleanupArtifactsTool(
         };
       }
       const activeIds = new Set<string>();
-      const states =
-        scope?.interactiveStates ??
-        (getStartedSessionScopes().length === 0
-          ? interactiveSubagentRegistry
-          : new Map());
+      const states = scope?.interactiveStates ?? new Map();
       for (const state of states.values()) activeIds.add(state.id);
 
       const dryRun = params.dryRun !== false; // default true for safety

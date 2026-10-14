@@ -10,10 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { appendInteractiveState } from "../src/artifact";
-import {
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { type InteractiveSubagentState } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
@@ -53,7 +50,6 @@ function interactiveState(
 
 afterEach(() => {
   __setTmuxMultiplexer(undefined);
-  interactiveSubagentRegistry.clear();
   clearSessionScopes();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -161,7 +157,6 @@ describe("high-concurrency input latency regressions", () => {
         sessionFile: state.sessionFile,
         parentSessionId,
       });
-      interactiveSubagentRegistry.set(state.id, state);
       scope.interactiveStates.set(state.id, state);
     }
     __setTmuxMultiplexer({

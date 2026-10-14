@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
@@ -43,6 +43,7 @@ import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
+  type SessionScope,
 } from "../src/session-scope";
 import {
   clearCompletionCoordinator,
@@ -68,6 +69,18 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTelemetrySession } from "../src/telemetry";
+import { createTestSessionScope } from "./session-scope-fixture";
+
+let workflowScope: SessionScope;
+beforeEach(() => {
+  clearSessionScopes();
+  workflowJobRegistry.clear();
+  workflowScope = createTestSessionScope();
+});
+afterEach(() => {
+  clearSessionScopes();
+  workflowJobRegistry.clear();
+});
 
 // ── Mock sub-agent runner ────────────────────────────────────────────
 function ok(output: string, outTokens = 0): SubagentResult {
@@ -712,6 +725,9 @@ describe("agent() + budget", () => {
           }
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     try {
@@ -1292,7 +1308,14 @@ describe("background workflow jobs", () => {
 
   it("runs in the background and exposes status + result", async () => {
     const script = `export const meta = { name: "bg", description: "d" };\nreturn await agent("done");`;
-    const job = startWorkflowJob("bg", script, { runAgent: echoRunner() });
+    const job = startWorkflowJob(
+      "bg",
+      script,
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
     expect(workflowJobRegistry.get(job.id)).toBe(job);
     const run = await job.promise;
     expect(run.result).toBe("done");
@@ -1306,7 +1329,14 @@ describe("background workflow jobs", () => {
       `export const meta = { name: "records", description: "d" };\n` +
       `return await parallel(Array.from({ length: ${count} }, (_, index) => ` +
       `() => agent(String(index), { label: "worker" })));`;
-    const job = startWorkflowJob("records", script, { runAgent: echoRunner() });
+    const job = startWorkflowJob(
+      "records",
+      script,
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await job.promise;
 
@@ -1378,7 +1408,14 @@ describe("background workflow jobs", () => {
       `return await parallel([` +
       `() => agent("first", { label: "first", isolation: "in-process" }),` +
       `() => agent("second", { label: "second", isolation: "in-process" })]);`;
-    const job = startWorkflowJob("parallel-live", script, { runAgent });
+    const job = startWorkflowJob(
+      "parallel-live",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await bothStartedPromise;
     await vi.waitFor(() =>
@@ -1428,6 +1465,9 @@ describe("background workflow jobs", () => {
         },
         onProgress: (event) => progress.push(event),
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1448,6 +1488,9 @@ describe("background workflow jobs", () => {
         runAgent: async () => ({ ...ok("done"), model: undefined }),
         onProgress: (event) => progress.push(event),
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1469,6 +1512,7 @@ describe("background workflow jobs", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1493,6 +1537,7 @@ describe("background workflow jobs", () => {
       { runAgent },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     await expect(job.promise).rejects.toThrow("workflow boom");
@@ -1517,6 +1562,7 @@ describe("background workflow jobs", () => {
       { runAgent },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     job.abort.abort();
     release();
@@ -1541,6 +1587,7 @@ describe("background workflow jobs", () => {
       },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     job.suppressCompletionNotification = true;
@@ -1563,7 +1610,14 @@ describe("background workflow jobs", () => {
       return ok(prompt);
     };
     const script = `export const meta = { name: "bgs", description: "d" };\nreturn await agent("x");`;
-    const job = startWorkflowJob("bgs", script, { runAgent });
+    const job = startWorkflowJob(
+      "bgs",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     // Worker-backed workflows cross a thread boundary before the parent emits agent_start.
     // Wait for that handoff, but assert while runAgent is still blocked on gate.
@@ -1586,14 +1640,20 @@ describe("background workflow jobs", () => {
       throw new Error("boom");
     };
     const script = `export const meta = { name: "bgr", description: "d" };\nreturn await agent("x");`;
-    const job = startWorkflowJob("bgr", script, { runAgent });
+    const job = startWorkflowJob(
+      "bgr",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await expect(job.promise).rejects.toThrow("boom");
     expect(job.status).toBe("error");
     expect(job.snapshot.runningCount).toBe(0);
   });
   it("keeps an earlier grouped workflow result through cap pressure until collection", async () => {
-    clearSessionScopes();
     workflowJobRegistry.clear();
     const grouped = "workflow-retention-group";
     let releaseB!: () => void;
@@ -1608,6 +1668,9 @@ describe("background workflow jobs", () => {
       "retention-a",
       `export const meta = { name: "retention-a", description: "d" };\nreturn "A";`,
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     await workflowA.promise;
     workflowA.completionPolicy = "group";
@@ -1623,6 +1686,9 @@ describe("background workflow jobs", () => {
           return ok("B");
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     workflowB.completionPolicy = "group";
     workflowB.completionGroupId = grouped;
@@ -1634,6 +1700,7 @@ describe("background workflow jobs", () => {
         const id = `workflow-running-filler-${fillerIds.length}`;
         workflowJobRegistry.set(id, {
           id,
+          parentSessionOwner: sessionOwner(workflowScope),
           name: id,
           status: "running",
           startedAt: Date.now(),
@@ -1654,6 +1721,9 @@ describe("background workflow jobs", () => {
           "retention-c",
           `export const meta = { name: "retention-c", description: "d" };\nreturn "C";`,
           { runAgent: echoRunner() },
+          undefined,
+          undefined,
+          sessionOwner(workflowScope),
         ),
       ).toThrow(/workflow jobs are retained or running/);
       expect(workflowJobRegistry.get(workflowA.id)).toBe(workflowA);
@@ -1662,26 +1732,29 @@ describe("background workflow jobs", () => {
         name: string;
         execute: (...args: unknown[]) => Promise<unknown>;
       }> = [];
-      registerWorkflowTool({
-        registerTool: vi.fn((definition: unknown) => {
-          if (
-            definition &&
-            typeof definition === "object" &&
-            "name" in definition &&
-            typeof definition.name === "string" &&
-            "execute" in definition &&
-            typeof definition.execute === "function"
-          ) {
-            tools.push({
-              name: definition.name,
-              execute: definition.execute as (
-                ...args: unknown[]
-              ) => Promise<unknown>,
-            });
-          }
-        }),
-        registerCommand: vi.fn(),
-      } as unknown as Parameters<typeof registerWorkflowTool>[0]);
+      registerWorkflowTool(
+        {
+          registerTool: vi.fn((definition: unknown) => {
+            if (
+              definition &&
+              typeof definition === "object" &&
+              "name" in definition &&
+              typeof definition.name === "string" &&
+              "execute" in definition &&
+              typeof definition.execute === "function"
+            ) {
+              tools.push({
+                name: definition.name,
+                execute: definition.execute as (
+                  ...args: unknown[]
+                ) => Promise<unknown>,
+              });
+            }
+          }),
+          registerCommand: vi.fn(),
+        } as unknown as Parameters<typeof registerWorkflowTool>[0],
+        workflowScope,
+      );
       const resultTool = tools.find(
         (definition) => definition.name === "get_workflow_result",
       );
@@ -1703,6 +1776,9 @@ describe("background workflow jobs", () => {
         "retention-c",
         `export const meta = { name: "retention-c", description: "d" };\nreturn "C";`,
         { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        sessionOwner(workflowScope),
       );
       await replacement.promise;
       expect(workflowJobRegistry.has(workflowA.id)).toBe(false);
@@ -1839,6 +1915,8 @@ it("sets startedAt from the passed timestamp", () => {
     script,
     { runAgent: echoRunner() },
     startedAt,
+    undefined,
+    sessionOwner(workflowScope),
   );
   expect(job.startedAt).toBe(startedAt);
 });
@@ -1846,7 +1924,14 @@ it("sets startedAt from the passed timestamp", () => {
 it("defaults startedAt to Date.now() when not provided", () => {
   const before = Date.now();
   const script = `export const meta = { name: "ts2", description: "d" };\nreturn 1;`;
-  const job = startWorkflowJob("ts2", script, { runAgent: echoRunner() });
+  const job = startWorkflowJob(
+    "ts2",
+    script,
+    { runAgent: echoRunner() },
+    undefined,
+    undefined,
+    sessionOwner(workflowScope),
+  );
   expect(job.startedAt).toBeGreaterThanOrEqual(before);
   expect(job.startedAt).toBeLessThanOrEqual(Date.now());
 });
@@ -1874,7 +1959,14 @@ it("throws when all 100 job slots are full and none can be evicted", () => {
     }
     const script = `export const meta = { name: "x", description: "d" };\nreturn "ok";`;
     expect(() =>
-      startWorkflowJob("x", script, { runAgent: echoRunner() }),
+      startWorkflowJob(
+        "x",
+        script,
+        { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        sessionOwner(workflowScope),
+      ),
     ).toThrow(/100 workflow jobs are retained or running/);
   } finally {
     for (const id of filled) workflowJobRegistry.delete(id);
@@ -2638,7 +2730,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     expect(tools).toHaveLength(7);
     expect(tools.map((t) => t.name)).toEqual([
       "workflow",
@@ -2662,7 +2754,7 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
 
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
 
     expect(commands.map((c) => c.name)).toEqual([
       "workflow",
@@ -2690,7 +2782,7 @@ describe("registerWorkflowTool", () => {
       sendUserMessage: vi.fn(),
     };
 
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const cmd = commands.find((c) => c.name === "workflow")!;
     await cmd.handler("build a release checklist", ctx);
 
@@ -2711,7 +2803,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const wf = tools.find((t) => t.name === "workflow")!;
     expect(wf.description).toContain("agent(prompt, opts?)");
     expect(wf.description).toContain("workflow(name, args?)");
@@ -2751,7 +2843,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const result = await workflowTool.execute(
       "",
@@ -2780,7 +2872,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const execution = workflowTool.execute(
       "",
@@ -2842,7 +2934,14 @@ describe("registerWorkflowTool", () => {
         `return "done";`;
 
       expect(() =>
-        startWorkflowJob("async-at-cap", script, { runAgent: echoRunner() }),
+        startWorkflowJob(
+          "async-at-cap",
+          script,
+          { runAgent: echoRunner() },
+          undefined,
+          undefined,
+          sessionOwner(workflowScope),
+        ),
       ).toThrow(/workflow jobs are retained or running/);
 
       const job = startWorkflowJob(
@@ -2851,7 +2950,7 @@ describe("registerWorkflowTool", () => {
         { runAgent: echoRunner() },
         undefined,
         undefined,
-        undefined,
+        sessionOwner(workflowScope),
         "sync",
       );
       await expect(job.promise).resolves.toMatchObject({ result: "done" });
@@ -2867,7 +2966,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const started = await workflowTool.execute(
       "",
@@ -2906,7 +3005,7 @@ describe("registerWorkflowTool", () => {
       },
       undefined,
       undefined,
-      undefined,
+      sessionOwner(workflowScope),
       "sync",
     );
     controller.abort("test cancellation");
@@ -2922,7 +3021,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const result = await withOrchestrationContext(
       { ownerJobId: "parent-job", depth: 1 },
@@ -2955,11 +3054,14 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const job = startWorkflowJob(
       "already-done",
       `export const meta = { name: "already-done", description: "d" };\nreturn "done";`,
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
@@ -3161,7 +3263,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const save = tools.find((t) => t.name === "save_workflow")!;
     // Bad script (missing meta) should fail
     const result = await save.execute(
@@ -3183,7 +3285,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
 
     const list = tools.find((tool) => tool.name === "list_workflows")!;
     const listed = await list.execute();
@@ -3199,7 +3301,7 @@ describe("registerWorkflowTool", () => {
     expect(deleted.content[0].text).toContain("Could not delete workflow");
   });
 
-  it("notifies the captured parent when a background workflow completes", async () => {
+  it("delivers a retained legacy completion to its captured parent, not a peer", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const staleSendMessage = vi.fn();
     const sendMessage = vi.fn();
@@ -3210,11 +3312,8 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendMessage: staleSendMessage,
     };
-    const currentPi = { sendMessage };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = currentPi;
-    registerWorkflowTool(pi as any);
+    createTestSessionScope({ pi: { sendMessage } as any });
+    registerWorkflowTool(pi as any, workflowScope);
     try {
       const workflow = tools.find((tool) => tool.name === "workflow")!;
       const started = await workflow.execute(
@@ -3230,6 +3329,8 @@ describe("registerWorkflowTool", () => {
         { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
       );
       const job = workflowJobRegistry.get(started.details.workflowId)!;
+      // A retained pre-coordinator job still uses the compatibility renderer.
+      job.completionPolicy = undefined;
 
       await job.promise;
 
@@ -3251,11 +3352,11 @@ describe("registerWorkflowTool", () => {
       );
       workflowJobRegistry.delete(job.id);
     } finally {
-      g.__piSubagenturaPiRef = previousPi;
+      workflowJobRegistry.clear();
     }
   });
 
-  it("does not instruct Orchestratorv2 to call a workflow result tool", async () => {
+  it("does not instruct Orchestratorv2 to call a legacy workflow result tool", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const sendMessage = vi.fn();
     const sendUserMessage = vi.fn();
@@ -3269,7 +3370,7 @@ describe("registerWorkflowTool", () => {
       sendMessage,
       sendUserMessage,
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflow = tools.find((tool) => tool.name === "workflow")!;
     const started = await workflow.execute(
       "call-v2-compatibility",
@@ -3284,6 +3385,7 @@ describe("registerWorkflowTool", () => {
       { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
     );
     const job = workflowJobRegistry.get(started.details.workflowId)!;
+    job.completionPolicy = undefined;
 
     await job.promise;
 
@@ -3303,7 +3405,7 @@ describe("registerWorkflowTool", () => {
     workflowJobRegistry.delete(job.id);
   });
 
-  it("notifies and triggers a turn when a workflow returns no result", async () => {
+  it("notifies and triggers a turn for a retained legacy workflow with no result", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const sendMessage = vi.fn();
     const pi = {
@@ -3313,10 +3415,7 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendMessage,
     };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     try {
       const workflow = tools.find((tool) => tool.name === "workflow")!;
       const started = await workflow.execute(
@@ -3332,6 +3431,7 @@ describe("registerWorkflowTool", () => {
         { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
       );
       const job = workflowJobRegistry.get(started.details.workflowId)!;
+      job.completionPolicy = undefined;
 
       await job.promise;
 
@@ -3350,11 +3450,11 @@ describe("registerWorkflowTool", () => {
       );
       workflowJobRegistry.delete(job.id);
     } finally {
-      g.__piSubagenturaPiRef = previousPi;
+      workflowJobRegistry.clear();
     }
   });
 
-  it("sanitizes and caps workflow failure notifications", async () => {
+  it("sanitizes and caps retained legacy workflow failure notifications", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const sendMessage = vi.fn();
     const pi = {
@@ -3364,10 +3464,7 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendMessage,
     };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     try {
       const workflow = tools.find((tool) => tool.name === "workflow")!;
       const secret = "sk-" + "a".repeat(30);
@@ -3384,6 +3481,7 @@ describe("registerWorkflowTool", () => {
         { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
       );
       const job = workflowJobRegistry.get(started.details.workflowId)!;
+      job.completionPolicy = undefined;
 
       await expect(job.promise).rejects.toThrow();
 
@@ -3392,7 +3490,7 @@ describe("registerWorkflowTool", () => {
       expect(message.length).toBeLessThan(21_000);
       workflowJobRegistry.delete(job.id);
     } finally {
-      g.__piSubagenturaPiRef = previousPi;
+      workflowJobRegistry.clear();
     }
   });
 
@@ -3406,11 +3504,14 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendUserMessage,
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const job = startWorkflowJob(
       "errors",
       'export const meta = { name: "errors", description: "d" };\nreturn "ok";',
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     const run = await job.promise;
     run.errorCount = 2;
@@ -3451,7 +3552,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflow = tools.find((tool) => tool.name === "workflow")!;
     const started = await workflow.execute(
       "",
@@ -3481,7 +3582,7 @@ describe("registerWorkflowTool", () => {
     const onComplete = (job: any) => {
       attempts++;
       // Simulate a retry trigger from within the callback (e.g. poller re-entrance).
-      retryPendingWorkflowNotifications();
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     };
     const script =
       `export const meta = { name: "reentrant", description: "d" }\n` +
@@ -3492,6 +3593,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
     // Without the guard, the reentrant call would invoke the callback a second time.
@@ -3514,6 +3616,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
     // First call: hook throws, delivered stays false, attempt incremented to 1.
@@ -3521,7 +3624,7 @@ describe("registerWorkflowTool", () => {
     expect(job.notificationAttempt).toBe(1);
 
     // Simulate poller tick — retries the failed notification.
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(job.completionNotificationDelivered).toBe(true);
     // Attempt count is 2 (two total invocations); does NOT reset to 0.
     expect(job.notificationAttempt).toBe(2);
@@ -3543,6 +3646,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
@@ -3552,7 +3656,7 @@ describe("registerWorkflowTool", () => {
 
     // Exhaust remaining attempts via poller ticks (MAX-1 more calls).
     for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1; i++) {
-      retryPendingWorkflowNotifications();
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     }
 
     // Counter reached MAX; exhausted flag is set.
@@ -3563,7 +3667,8 @@ describe("registerWorkflowTool", () => {
 
     // Extra retries after exhaustion are no-ops: callback not re-invoked, counter unchanged.
     const callsBefore = attempts;
-    for (let i = 0; i < 10; i++) retryPendingWorkflowNotifications();
+    for (let i = 0; i < 10; i++)
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(attempts).toBe(callsBefore);
     expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
     expect(job._notificationExhausted).toBe(true);
@@ -3584,12 +3689,13 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
     // Exhaust: invoke MAX times (initial + MAX-1 retries), all throw.
     for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS; i++) {
-      retryPendingWorkflowNotifications();
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     }
 
     // Exhausted flag is set, callback never invoked again.
@@ -3597,7 +3703,8 @@ describe("registerWorkflowTool", () => {
     expect(attempts).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
     expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
     const callsBefore = attempts;
-    for (let i = 0; i < 5; i++) retryPendingWorkflowNotifications();
+    for (let i = 0; i < 5; i++)
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(attempts).toBe(callsBefore);
     expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
     expect(job._notificationExhausted).toBe(true);
@@ -3618,6 +3725,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
@@ -3626,11 +3734,11 @@ describe("registerWorkflowTool", () => {
     expect(job.completionNotificationDelivered).toBe(false);
 
     // Second call throws (attempt 2).
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(job.notificationAttempt).toBe(2);
 
     // Third call succeeds → attempt=3, delivered.
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(job.notificationAttempt).toBe(3);
     expect(job.completionNotificationDelivered).toBe(true);
     expect(count).toBe(3);
@@ -3654,6 +3762,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
@@ -3663,7 +3772,7 @@ describe("registerWorkflowTool", () => {
 
     // Retries 2-4 also throw.
     for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 2; i++) {
-      retryPendingWorkflowNotifications();
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     }
     expect(job.notificationAttempt).toBe(
       MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1,
@@ -3671,7 +3780,7 @@ describe("registerWorkflowTool", () => {
     expect(job.completionNotificationDelivered).toBe(false);
 
     // Attempt 5 (the MAXth) succeeds.
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
     expect(job.completionNotificationDelivered).toBe(true);
     // Crucially: must NOT be marked exhausted.
@@ -3693,6 +3802,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     // Mark suppressed before workflow settles.
@@ -3701,7 +3811,7 @@ describe("registerWorkflowTool", () => {
     expect(attempts).toBe(0);
 
     // Retry should still skip.
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(attempts).toBe(0);
   });
 
@@ -3713,7 +3823,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflow = tools.find((tool) => tool.name === "workflow")!;
     const result = await workflow.execute(
       "",
@@ -3745,10 +3855,7 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendMessage,
     };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     try {
       // Create a job that completes with errorCount > 0.
       const job = startWorkflowJob(
@@ -3761,6 +3868,7 @@ describe("registerWorkflowTool", () => {
           j.result!.errorCount = 1;
           // Trigger the real notification path via the tool's notifyWorkflowCompletion.
         },
+        sessionOwner(workflowScope),
       );
       await job.promise;
 
@@ -3782,6 +3890,7 @@ describe("registerWorkflowTool", () => {
         { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
       );
       const errJob = workflowJobRegistry.get(started.details.workflowId)!;
+      errJob.completionPolicy = undefined;
       await errJob.promise;
 
       // The notification should have been sent.
@@ -3798,7 +3907,7 @@ describe("registerWorkflowTool", () => {
       expect(notification.content).toContain(errJob.id);
       workflowJobRegistry.delete(errJob.id);
     } finally {
-      g.__piSubagenturaPiRef = previousPi;
+      workflowJobRegistry.clear();
     }
   });
 
@@ -3819,6 +3928,7 @@ describe("registerWorkflowTool", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -3829,7 +3939,7 @@ describe("registerWorkflowTool", () => {
 
     // Simulate retries by calling retryPendingWorkflowNotifications
     for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1; i++) {
-      retryPendingWorkflowNotifications();
+      retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     }
 
     // After MAX attempts total (1 initial + MAX-1 retries), should be exhausted
@@ -3840,7 +3950,7 @@ describe("registerWorkflowTool", () => {
     expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
 
     // Further calls should be no-ops (exhausted guard)
-    retryPendingWorkflowNotifications();
+    retryPendingWorkflowNotifications(sessionOwner(workflowScope));
     expect(onComplete).toHaveBeenCalledTimes(
       MAX_WORKFLOW_NOTIFICATION_ATTEMPTS,
     );
@@ -4096,6 +4206,9 @@ it("includes snapshot usage in failed completion notification summaries", async 
     `export const meta = { name: "notify-late-error", description: "d" };\n` +
       `await agent("hello"); throw new Error("later failure");`,
     { runAgent: async ({ prompt }) => richOk(prompt), budgetTotal: 20 },
+    undefined,
+    undefined,
+    sessionOwner(workflowScope),
   );
   try {
     await expect(job.promise).rejects.toThrow("later failure");
@@ -4418,7 +4531,14 @@ describe("workflow usage accounting", () => {
     expect(lastProgress?.usage).toEqual(usage);
     expect(result.usage).toEqual(usage);
 
-    const job = startWorkflowJob("usage", script, { runAgent: runner });
+    const job = startWorkflowJob(
+      "usage",
+      script,
+      { runAgent: runner },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
     try {
       await job.promise;
       expect(job.snapshot.tokensSpent).toBe(7);

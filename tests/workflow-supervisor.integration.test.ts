@@ -41,23 +41,18 @@ vi.mock("../src/helpers", async (importOriginal) => {
 });
 
 import { pollArtifactChanges } from "../src/artifact-poller";
-import { jobRegistry } from "../src/helpers";
 import {
   buildAsyncSupervisorItems,
   directSupervisorItems,
 } from "../src/interactive-supervisor-registration";
 import type { AsyncSupervisorItem } from "../src/interactive-supervisor-ui";
-import {
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { type InteractiveSubagentState } from "../src/interactive-tmux";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
 import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
-  registerSessionScope,
+  sessionOwner,
   removeSessionScope,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import {
@@ -68,6 +63,7 @@ import {
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { createTelemetrySession } from "../src/telemetry";
 import { registerCompletionCoordinator } from "../src/completion-coordinator";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
 const RUNNING_FOOTER_KEY = "subagentura-running";
@@ -113,7 +109,7 @@ function liveSessionContext(options: {
   ui?: ReturnType<typeof fakeUi>;
 }): { context: SessionScope; ui: ReturnType<typeof fakeUi> } {
   const ui = options.ui ?? fakeUi();
-  const context: SessionScope = {
+  const context = createTestSessionScope({
     id: options.id,
     generation: 1,
     lifecycle: "started",
@@ -121,21 +117,19 @@ function liveSessionContext(options: {
     ui: ui as never,
     sessionManager: {
       getSessionId: () => options.sessionId,
-      getEntries: () => [],
+      // makePi does not persist entries, so ledger observation is unavailable.
     },
     parentStreaming: false,
     inProcessJobs: new Map(),
     pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
     telemetry: createTelemetrySession(true),
-  };
-  registerSessionScope(context);
-  setLegacyActiveSessionRefs(context);
+  });
   return { context, ui };
 }
 
 function ownerOf(context: SessionScope) {
-  return { id: context.id, generation: context.generation };
+  return sessionOwner(context);
 }
 
 /** [id, depth] pairs, the two things the grouped supervisor list is about. */
@@ -231,11 +225,11 @@ function captureTelemetryPayloads(): TelemetryPayload[] {
 }
 
 beforeEach(() => {
+  mockAwaitInteractiveResult.mockReset();
+  mockLaunch.mockReset();
+  mockStartSubagentJob.mockReset();
   clearSessionScopes();
-  setLegacyActiveSessionRefs(undefined);
-  jobRegistry.clear();
   workflowJobRegistry.clear();
-  interactiveSubagentRegistry.clear();
   killPane = vi.fn();
   __setTmuxMultiplexer({
     getPaneLiveness: vi.fn(() => "alive"),
@@ -270,17 +264,15 @@ beforeEach(() => {
       workflowId: params.workflowId,
       completionOwner: params.completionOwner,
     };
-    interactiveSubagentRegistry.set(state.id, state as never);
+    if (!params.sessionScope) throw new Error("Missing workflow child scope");
+    params.sessionScope.interactiveStates.set(state.id, state as never);
     return state;
   });
 });
 
 afterEach(() => {
-  interactiveSubagentRegistry.clear();
   workflowJobRegistry.clear();
-  jobRegistry.clear();
   clearSessionScopes();
-  setLegacyActiveSessionRefs(undefined);
   __resetMuxInstances();
   vi.clearAllMocks();
   for (const dir of tempDirs.splice(0)) {
@@ -330,23 +322,33 @@ describe("workflow supervisor integration", () => {
     },
   );
 
-  it("threads legacy policy to an ownerless background process child", async () => {
+  it("rejects an ownerless background process invocation instead of borrowing a peer", async () => {
+    const { context } = liveSessionContext({
+      id: 43,
+      sessionId: "peer-session",
+    });
+    const sibling = plainInteractiveState("peer-child", "peer-session");
+    context.interactiveStates.set(sibling.id, sibling);
     const { pi, findTool } = makePi();
     registerWorkflowTool(pi as never);
 
-    await findTool().execute(
-      "call-legacy",
-      { script: SINGLE_AGENT_SCRIPT("policy-legacy"), async: true },
+    const result = await findTool().execute(
+      "call-ownerless",
+      { script: SINGLE_AGENT_SCRIPT("ownerless-process"), async: true },
       undefined,
       vi.fn(),
       { cwd: "/tmp", modelRegistry: {} },
     );
-    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
 
-    expect(mockLaunch).toHaveBeenCalledWith(
-      expect.objectContaining({ telemetryCompletionPolicy: "legacy" }),
-    );
-    releaseAgent(subagentResult("done"));
+    expect(result).toMatchObject({
+      isError: true,
+      details: { status: "session_unavailable" },
+    });
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(workflowJobRegistry.size).toBe(0);
+    expect(context.interactiveStates.get(sibling.id)).toBe(sibling);
+    expect(killPane).not.toHaveBeenCalled();
   });
 
   it("shows a live process child under its tracked sync workflow", async () => {
@@ -398,10 +400,10 @@ describe("workflow supervisor integration", () => {
     // Aggregating the result does not dispose the process pane. The registry keeps
     // the live state until artifact polling observes completion and transitions it
     // to idle, preserving the pane for inspection.
-    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(true);
+    expect(context.interactiveStates.has("workflow-child")).toBe(true);
     expect(
       (
-        interactiveSubagentRegistry.get(
+        context.interactiveStates.get(
           "workflow-child",
         ) as InteractiveSubagentState & {
           workflowResultConsumed?: boolean;
@@ -422,11 +424,9 @@ describe("workflow supervisor integration", () => {
     const a = liveSessionContext({ id: 7, sessionId: "session-a" });
     const b = liveSessionContext({ id: 8, sessionId: "session-b" });
     const ownerA = ownerOf(a.context);
-    setLegacyActiveSessionRefs(a.context);
 
     // A sibling session's plain agent must NOT be counted or listed for A.
     const sibling = plainInteractiveState("sibling-agent", "session-b");
-    interactiveSubagentRegistry.set(sibling.id, sibling);
     b.context.interactiveStates.set(sibling.id, sibling);
 
     const { pi, findTool } = makePi();
@@ -440,7 +440,7 @@ describe("workflow supervisor integration", () => {
     );
     await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
     expect(a.context.interactiveStates.get("workflow-child")).toBe(
-      interactiveSubagentRegistry.get("workflow-child"),
+      mockLaunch.mock.results[0]?.value,
     );
 
     await pollArtifactChanges(a.context.pi, ownerA);
@@ -511,7 +511,7 @@ describe("workflow supervisor integration", () => {
         rootSessionId: "session-a",
       }),
     );
-    const childJob = jobRegistry.get("fallback-child");
+    const childJob = context.inProcessJobs.get("fallback-child");
     expect(childJob).toBeDefined();
     expect(childJob?.status).toBe("running");
     expect(childJob?.completionOwner).toBe("workflow");
@@ -543,7 +543,7 @@ describe("workflow supervisor integration", () => {
     // session_shutdown's "status === running" cancellation-record loop.
     expect(childJob?.status).toBe("done");
     expect(childJob?.result?.output).toBe("fallback complete");
-    expect(jobRegistry.has("fallback-child")).toBe(false);
+    expect(context.inProcessJobs.has("fallback-child")).toBe(false);
   });
 
   it.each(["model_resolution", "session_creation"] as const)(
@@ -643,7 +643,7 @@ describe("workflow supervisor integration", () => {
       expect(start).not.toHaveBeenCalled();
       expect(disposeBeforeStart).toHaveBeenCalledOnce();
       expect(sessionAbort).toHaveBeenCalledOnce();
-      expect(jobRegistry.has("escaped-child")).toBe(false);
+      expect(context.inProcessJobs.has("escaped-child")).toBe(false);
       expect(result.details.status).toBe("error");
       const failures = payloads.filter(
         (payload) =>
@@ -664,19 +664,18 @@ describe("workflow supervisor integration", () => {
     }
   });
 
-  it("leaves an unownable in-process child out of the registry", async () => {
-    // With no session scope, the child cannot join an owner-scoped registry or
-    // shutdown sweep, so it must remain unregistered.
+  it("rejects an ownerless sync invocation before preparing an in-process fallback", async () => {
+    const { context } = liveSessionContext({
+      id: 12,
+      sessionId: "peer-session",
+    });
     const start = vi.fn();
-    let releaseChild!: (result: SubagentResult) => void;
     mockLaunch.mockImplementationOnce(() => {
       throw new Error("mux unavailable");
     });
     mockStartSubagentJob.mockResolvedValueOnce({
       jobId: "unowned-child",
-      jobPromise: new Promise<SubagentResult>((resolve) => {
-        releaseChild = resolve;
-      }),
+      jobPromise: new Promise<SubagentResult>(() => {}),
       liveStatus: { turn: 0, output: "", usage: {} },
       session: { abort: vi.fn() },
       modelLabel: "test/model",
@@ -685,25 +684,23 @@ describe("workflow supervisor integration", () => {
     const { pi, findTool } = makePi();
     registerWorkflowTool(pi as never);
 
-    const execution = findTool().execute(
+    const result = await findTool().execute(
       "call-unowned",
       { script: SINGLE_AGENT_SCRIPT("unowned"), async: false },
       undefined,
       vi.fn(),
       { cwd: "/tmp", modelRegistry: {} },
     );
-    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
 
-    // Inspected while the child is live, which is the only window in which an
-    // unreachable row would be observable.
-    expect(jobRegistry.size).toBe(0);
-
-    releaseChild(subagentResult("unowned complete"));
-    const result = await execution;
-
-    expect(result.details.status).toBe("done");
-    expect(result.content[0]?.text).toContain("unowned complete");
-    expect(jobRegistry.size).toBe(0);
+    expect(result).toMatchObject({
+      isError: true,
+      details: { status: "session_unavailable" },
+    });
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(context.inProcessJobs.size).toBe(0);
+    expect(workflowJobRegistry.size).toBe(0);
   });
 
   it("leaves a workflow child unattributed when the caller has no session id", async () => {
@@ -765,7 +762,7 @@ describe("workflow supervisor integration", () => {
       { cwd: "/tmp", modelRegistry: {} },
     );
     await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
-    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(true);
+    expect(context.interactiveStates.has("workflow-child")).toBe(true);
     const workflow = [...workflowJobRegistry.values()].find(
       (job) => job.name === "failing",
     );
@@ -777,7 +774,7 @@ describe("workflow supervisor integration", () => {
     expect(result.isError).toBe(true);
     // A later workflow-script error likewise does not dispose the child whose
     // successful result was already aggregated.
-    expect(interactiveSubagentRegistry.has("workflow-child")).toBe(true);
+    expect(context.interactiveStates.has("workflow-child")).toBe(true);
     expect(killPane).not.toHaveBeenCalled();
     expect(workflowJobRegistry.has(workflow!.id)).toBe(false);
   });

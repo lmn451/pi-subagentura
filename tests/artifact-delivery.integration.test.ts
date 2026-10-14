@@ -39,12 +39,17 @@ import {
   reconcileDeliveryReceipts,
 } from "../src/delivery";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import { registerInteractiveSubagentState } from "../src/interactive-tmux";
+import { createTestSessionScope } from "./session-scope-fixture";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import { renderSubagentNotify } from "../src/rendering";
 import { appendDeterministicTurn } from "./helpers/deterministic-artifacts";
-import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
 import {
   flushCompletionManifests,
   registerCompletionCoordinator,
@@ -97,21 +102,15 @@ function flushInjectedOutput(
     output,
     state: "queued",
   });
-  (globalThis as any).__piSubagenturaInteractiveRegistry = new Map([
-    [state.id, state],
-  ]);
+  const scope = createTestSessionScope();
+  registerInteractiveSubagentState(state, scope);
   const sendMessage = vi.fn();
-  flushDeliveries({ sendMessage } as any, undefined);
+  flushDeliveries({ sendMessage } as any, undefined, sessionOwner(scope));
   return sendMessage.mock.calls[0][0].content;
 }
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
-  (globalThis as any).__piSubagenturaInteractiveRegistry = undefined;
-  (globalThis as any).__piSubagenturaParentStreaming = false;
-  (globalThis as any).__piSubagenturaSessionManager = undefined;
-  (globalThis as any).__piSubagenturaPiRef = undefined;
-  interactiveSubagentRegistry.clear();
   clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
@@ -166,10 +165,8 @@ describe("artifact protocol v2 delivery", () => {
       message: "from-b",
       state: "queued",
     });
-    interactiveSubagentRegistry.set(stateA.id, stateA);
-    interactiveSubagentRegistry.set(stateB.id, stateB);
-    scopeA.interactiveStates.set(stateA.id, stateA);
-    scopeB.interactiveStates.set(stateB.id, stateB);
+    registerInteractiveSubagentState(stateA, scopeA);
+    registerInteractiveSubagentState(stateB, scopeB);
     const sendMessage = vi.fn();
 
     flushDeliveries({ sendMessage } as any, undefined, ownerB);
@@ -371,9 +368,8 @@ describe("artifact protocol v2 delivery", () => {
     state.notifyOnComplete = "inject";
     state.triggerTurnOnComplete = false;
     state.eventByteCursor = 0;
-    interactiveSubagentRegistry.set(state.id, state);
-    (globalThis as any).__piSubagenturaInteractiveRegistry =
-      interactiveSubagentRegistry;
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -381,8 +377,9 @@ describe("artifact protocol v2 delivery", () => {
     const first = appendDeterministicTurn(art, 1, "first immutable result");
     const second = appendDeterministicTurn(art, 2, "second immutable result");
     const sendMessage = vi.fn();
+    scope.pi = { sendMessage } as any;
 
-    await pollArtifactChanges({ sendMessage } as any);
+    await pollArtifactChanges({ sendMessage } as any, sessionOwner(scope));
 
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(sendMessage.mock.calls[0][0].details.deliveryIds).toHaveLength(2);
@@ -427,7 +424,6 @@ describe("artifact protocol v2 delivery", () => {
       eventByteCursor: 0,
     };
     scope.interactiveStates.set(state.id, state);
-    interactiveSubagentRegistry.set(state.id, state);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -568,16 +564,16 @@ describe("artifact protocol v2 delivery", () => {
     state.completionOwner = "workflow";
     state.notifyOnComplete = "inject";
     state.eventByteCursor = 0;
-    interactiveSubagentRegistry.set(state.id, state);
-    (globalThis as any).__piSubagenturaInteractiveRegistry =
-      interactiveSubagentRegistry;
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       isPaneAlive: () => true,
       isPaneAliveAsync: async () => true,
     } as any);
     appendDeterministicTurn(art, 1, "workflow-owned result");
     const sendMessage = vi.fn();
-    await pollArtifactChanges({ sendMessage } as any);
+    scope.pi = { sendMessage } as any;
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
     expect(sendMessage).not.toHaveBeenCalled();
     expect(state.pendingDeliveries).toEqual([]);
     expect(state.eventByteCursor).toBeGreaterThan(0);
@@ -599,10 +595,7 @@ describe("artifact protocol v2 delivery", () => {
       completionOwner: "standalone" as const,
       eventByteCursor: 0,
     };
-    (globalThis as any).__piSubagenturaInteractiveRegistry =
-      interactiveSubagentRegistry;
-    interactiveSubagentRegistry.set(state.id, state);
-    scope.interactiveStates.set(state.id, state);
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       isPaneAlive: () => true,
       isPaneAliveAsync: async () => true,
@@ -619,9 +612,8 @@ describe("artifact protocol v2 delivery", () => {
     state.notifyOnComplete = "inject";
     state.triggerTurnOnComplete = false;
     state.eventByteCursor = 0;
-    interactiveSubagentRegistry.set(state.id, state);
-    (globalThis as any).__piSubagenturaInteractiveRegistry =
-      interactiveSubagentRegistry;
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -636,8 +628,9 @@ describe("artifact protocol v2 delivery", () => {
       eventId: "oversized-poller-event",
     })!;
     const sendMessage = vi.fn();
+    scope.pi = { sendMessage } as any;
 
-    await pollArtifactChanges({ sendMessage } as any);
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
 
     expect(completion.output).toBeUndefined();
     expect(state.pendingDeliveries).toContainEqual(
@@ -696,15 +689,25 @@ describe("artifact protocol v2 delivery", () => {
       output: event.output,
       state: "queued",
     });
-    (globalThis as any).__piSubagenturaInteractiveRegistry = new Map([
-      [state.id, state],
-    ]);
-    const sendMessage = vi.fn();
+    const entries: unknown[] = [];
+    const scope = createTestSessionScope({
+      parentStreaming: true,
+      sessionManager: {
+        getSessionId: () => "parent",
+        getEntries: () => entries,
+      },
+    });
+    registerInteractiveSubagentState(state, scope);
+    const sendMessage = vi.fn((message, _options?: unknown) => {
+      entries.push({
+        type: "custom_message",
+        customType: message.customType,
+        details: message.details,
+      });
+    });
     const notify = vi.fn();
     const ui = { notify } as any;
-    (globalThis as any).__piSubagenturaParentStreaming = true;
-
-    flushDeliveries({ sendMessage } as any, ui);
+    flushDeliveries({ sendMessage } as any, ui, sessionOwner(scope));
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0][0].details.deliveryIds).toEqual([
@@ -728,8 +731,8 @@ describe("artifact protocol v2 delivery", () => {
       "A new parent turn will start automatically after the injection",
     );
 
-    (globalThis as any).__piSubagenturaParentStreaming = false;
-    flushDeliveries({ sendMessage } as any, ui);
+    scope.parentStreaming = false;
+    flushDeliveries({ sendMessage } as any, ui, sessionOwner(scope));
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -750,12 +753,11 @@ describe("artifact protocol v2 delivery", () => {
       state: "queued",
     });
     const sendMessage = vi.fn();
-    interactiveSubagentRegistry.set(state.id, state);
-    (globalThis as any).__piSubagenturaInteractiveRegistry =
-      interactiveSubagentRegistry;
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
 
     expect(() =>
-      flushDeliveries({ sendMessage } as any, undefined),
+      flushDeliveries({ sendMessage } as any, undefined, sessionOwner(scope)),
     ).not.toThrow();
     expect(sendMessage).toHaveBeenCalledOnce();
     const content = sendMessage.mock.calls[0][0].content as string;
@@ -787,13 +789,12 @@ describe("artifact protocol v2 delivery", () => {
       output: event.output,
       state: "queued",
     });
-    (globalThis as any).__piSubagenturaInteractiveRegistry = new Map([
-      [state.id, state],
-    ]);
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
     const sendMessage = vi.fn();
     const notify = vi.fn();
     const ui = { notify } as any;
-    flushDeliveries({ sendMessage } as any, ui);
+    flushDeliveries({ sendMessage } as any, ui, sessionOwner(scope));
 
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(sendMessage.mock.calls[0][0].content).not.toContain(
@@ -893,18 +894,14 @@ describe("artifact protocol v2 delivery", () => {
       artifactDir: art.dir,
       state: "queued",
     });
-    (globalThis as any).__piSubagenturaInteractiveRegistry = new Map([
-      [state.id, state],
-    ]);
-    flushDeliveries(
-      {
-        sendMessage: vi.fn(() => {
-          throw new Error("stale");
-        }),
-      } as any,
-      undefined,
-    );
+    const scope = createTestSessionScope();
+    registerInteractiveSubagentState(state, scope);
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale");
+    });
+    flushDeliveries({ sendMessage } as any, undefined, sessionOwner(scope));
     expect(state.pendingDeliveries?.[0].state).toBe("queued");
+    expect(sendMessage).toHaveBeenCalledOnce();
   });
 
   it("bounds overflow and preserves collapsed completion identities on disk", () => {
@@ -1001,13 +998,14 @@ describe("artifact protocol v2 delivery", () => {
       artifactDir: art.dir,
       state: "queued",
     });
-    (globalThis as any).__piSubagenturaInteractiveRegistry = new Map([
-      [state.id, state],
-    ]);
     const entries: unknown[] = [];
-    (globalThis as any).__piSubagenturaSessionManager = {
-      getEntries: () => entries,
-    };
+    const scope = createTestSessionScope({
+      sessionManager: {
+        getEntries: () => entries,
+        getSessionId: () => "parent",
+      },
+    });
+    registerInteractiveSubagentState(state, scope);
     flushDeliveries(
       {
         sendMessage: vi.fn((message) => {
@@ -1019,6 +1017,7 @@ describe("artifact protocol v2 delivery", () => {
         }),
       } as any,
       undefined,
+      sessionOwner(scope),
     );
 
     expect(state.pendingDeliveries).toEqual([]);

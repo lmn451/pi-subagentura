@@ -149,8 +149,10 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 
 **Who owns each registry?**
 
-- `src/helpers.ts` owns per-session in-process job maps and the legacy aggregate `jobRegistry` index.
-- `src/interactive-tmux.ts` owns per-session interactive state maps and the legacy aggregate `interactiveSubagentRegistry` index.
+- `src/helpers.ts` stores in-process jobs in the owning `SessionScope.inProcessJobs` map;
+  an explicit owner token is required for lookup and mutation.
+- `src/interactive-tmux.ts` stores interactive states in the owning
+  `SessionScope.interactiveStates` map; there is no aggregate compatibility index.
 - `src/artifact.ts` owns the schema and locking for durable `.pi/subagentura-state.json` recovery records.
 - `src/workflow-jobs.ts` owns `workflowJobRegistry` for background workflows.
 - `src/session-scope.ts` owns the live parent session-scope registry and generation fences.
@@ -377,7 +379,7 @@ sequenceDiagram
   T-->>P: final AgentToolResult inline
 ```
 
-The synchronous job is not inserted into `jobRegistry`.
+The synchronous job is not inserted into a session job map.
 Its generated ID still scopes `AsyncLocalStorage`, so nested descendants can record their parent and participate in cancellation.
 Progress uses Pi's execute `onUpdate` callback; final output is the tool return.
 No asynchronous notification and no artifact poller participates.
@@ -389,7 +391,7 @@ sequenceDiagram
   participant P as Parent Pi agent
   participant T as in-process tool
   participant H as startSubagentJob
-  participant R as jobRegistry
+  participant R as SessionScope.inProcessJobs
   participant S as child AgentSession
   participant C as completion coordinator
 
@@ -983,9 +985,9 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 
 | State                                   | Owner and location                                                     | Survives module reload | Survives process restart | Recovery path                          |
 | --------------------------------------- | ---------------------------------------------------------------------- | ---------------------: | -----------------------: | -------------------------------------- |
-| In-process jobs                         | `helpers.ts` per-session job maps plus legacy `jobRegistry` index      |                    Yes |                       No | None                                   |
+| In-process jobs                         | `SessionScope.inProcessJobs` owned by `helpers.ts`                     |                    Yes |                       No | None                                   |
 | Coordinated in-process/workflow state   | `completion-coordinator.ts` plus parent completion/consumption entries |  Yes within live scope |   No job/result recovery | Retired on session replacement         |
-| Interactive live objects                | `interactive-tmux.ts` per-session maps plus legacy aggregate registry  |                    Yes |                       No | Rebuilt from durable state             |
+| Interactive live objects                | `SessionScope.interactiveStates` owned by `interactive-tmux.ts`        |                    Yes |                       No | Rebuilt from durable state             |
 | Interactive lifecycle/output            | Artifact directory                                                     |                    Yes |                      Yes | Byte-cursor polling and artifact reads |
 | Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                     |                    Yes |                      Yes | `rehydrateInteractiveSubagents`        |
 | Parent completion entries               | Parent Pi session custom entries                                       |                    Yes |         Yes with session | Coordinator reconciliation             |
@@ -1001,7 +1003,7 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 
 | Question                                        | Authoritative source                                                                               | Explicit non-authorities                                    |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Is an in-process job running?                   | `JobState` in `jobRegistry` plus its signal/session                                                | Interactive artifacts, UI footer                            |
+| Is an in-process job running?                   | `JobState` in the exact live `SessionScope.inProcessJobs` plus its signal/session                  | Interactive artifacts, UI footer                            |
 | What did a sync in-process job return?          | Direct settled `SubagentResult`                                                                    | Notification queue                                          |
 | Has an interactive turn completed?              | Completion record in physical `events.ndjson` order                                                | Timestamp order, pane death, screen text, `output.md` alone |
 | What exact v2 bytes completed?                  | Contained regular immutable snapshot matching path, size, and SHA-256                              | Mutable staging file, mux capture                           |

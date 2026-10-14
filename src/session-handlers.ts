@@ -63,7 +63,6 @@ import {
   removeSessionScope,
   resolveLiveSessionScope,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
@@ -440,7 +439,6 @@ export function registerSessionHandlers(
   );
   const globalState = getGlobalState() as any;
   registerSessionScope(scope);
-  setLegacyActiveSessionRefs(scope);
   registerCompletionCoordinator(pi, scope);
   const flushAfterUiPrompt = (): void => {
     queueMicrotask(() => {
@@ -454,12 +452,10 @@ export function registerSessionHandlers(
   (pi as any).on?.("ui_prompt_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = true;
-    setLegacyActiveSessionRefs(scope);
   });
   (pi as any).on?.("ui_prompt_end", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = false;
-    setLegacyActiveSessionRefs(scope);
     flushAfterUiPrompt();
   });
   pi.on("input", (event) => {
@@ -482,14 +478,12 @@ export function registerSessionHandlers(
   pi.on("agent_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.parentStreaming = true;
-    setLegacyActiveSessionRefs(scope);
   });
   pi.on("agent_settled", (_event, ctx) => {
     if (scope.lifecycle !== "started") return;
     settleCompletionTurnWake(pi);
     scope.parentStreaming = false;
     const owner = sessionOwner(scope);
-    setLegacyActiveSessionRefs(scope);
     flushDeliveries(pi, scope.ui, owner);
     flushInProcessDeliveries(owner);
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
@@ -625,7 +619,6 @@ export function registerSessionHandlers(
       typeof ctx.isIdle === "function" ? ctx.isIdle.bind(ctx) : undefined;
     scope.parentStreaming = false;
     registerSessionScope(scope);
-    setLegacyActiveSessionRefs(scope);
     const hasFooterIdentity =
       orchestratorMode || scope.spawnTreeContext?.orchestratorMode === true;
     if (scope.ui && hasFooterIdentity) {
@@ -724,7 +717,6 @@ export function registerSessionHandlers(
       removeSessionScope(scope.id);
 
       const remainingScopes = getStartedSessionScopes();
-      setLegacyActiveSessionRefs(remainingScopes.at(-1));
       if (remainingScopes.length > 0) return;
 
       const handle = globalState.__piSubagenturaInteractivePollerHandle;

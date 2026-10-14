@@ -20,27 +20,13 @@ import { isCompletionEvent, type SubagentEvent } from "./artifact";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import {
   findSessionScope,
-  getStartedSessionScopes,
   resolveActualStreamingFlag,
   resolveLiveSessionScope,
   resolveStreamingFlag,
-  resolveToolSessionOwner,
   type SessionOwnerToken,
 } from "./session-scope";
 import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 import { captureTelemetry } from "./telemetry";
-interface NotificationGlobalState {
-  __piSubagenturaPiRef?: ExtensionAPI;
-  __piSubagenturaUi?: CompletionNotificationUi;
-  __piSubagenturaSessionManager?: {
-    getSessionId?: () => string;
-  };
-  __piSubagenturaPendingJobDeliveries?: PendingJobDelivery[];
-}
-
-function notificationGlobals(): typeof globalThis & NotificationGlobalState {
-  return globalThis as typeof globalThis & NotificationGlobalState;
-}
 
 /**
  * @deprecated Delivery is queue-bounded rather than concurrency-capped.
@@ -87,22 +73,11 @@ export type PendingJobDelivery = PendingJobCompletion | PendingJobOverflow;
 
 const scheduledFlushQueues = new WeakSet<PendingJobDelivery[]>();
 
-function effectiveDeliveryOwner(
-  owner?: SessionOwnerToken,
-): SessionOwnerToken | undefined {
-  return owner ?? resolveToolSessionOwner(undefined);
-}
-
 function pendingJobDeliveries(
   owner?: SessionOwnerToken,
 ): PendingJobDelivery[] | undefined {
-  const effectiveOwner = effectiveDeliveryOwner(owner);
-  if (effectiveOwner) {
-    return resolveLiveSessionScope(effectiveOwner)?.pendingInProcessDeliveries;
-  }
-  if (owner || getStartedSessionScopes().length > 0) return undefined;
-  const state = notificationGlobals();
-  return (state.__piSubagenturaPendingJobDeliveries ??= []);
+  if (!owner) return undefined;
+  return resolveLiveSessionScope(owner)?.pendingInProcessDeliveries;
 }
 
 function pendingDeliveryBytes(queue: PendingJobDelivery[]): number {
@@ -254,19 +229,7 @@ function resolvePendingDeliveryTarget(
     };
   }
 
-  const g = notificationGlobals();
-  const pi = g.__piSubagenturaPiRef as ExtensionAPI | undefined;
-  if (!pi || pending.ownerPi !== pi) return undefined;
-  if (
-    pending.ownerSessionId !== undefined &&
-    sessionIdFrom(g.__piSubagenturaSessionManager) !== pending.ownerSessionId
-  ) {
-    return undefined;
-  }
-  return {
-    pi,
-    ui: g.__piSubagenturaUi as CompletionNotificationUi | undefined,
-  };
+  return undefined;
 }
 
 function pendingTriggersTurn(pending: PendingJobDelivery): boolean {
@@ -464,10 +427,7 @@ function appendRunningJobsNote(
   return note ? `${content}\n${note}` : content;
 }
 
-/**
- * Resolve the async spawn's exact live owner.
- * Process-global compatibility refs are used only before any session starts.
- */
+/** Resolve the async spawn's exact live owner. */
 interface JobDeliveryContext {
   owner?: SessionOwnerToken;
   pi: ExtensionAPI;
@@ -477,24 +437,17 @@ interface JobDeliveryContext {
 function resolveJobDeliveryContext(
   jobState: JobState,
 ): JobDeliveryContext | undefined {
-  const globals = notificationGlobals();
-  const explicitOwner = inProcessJobOwner(jobState);
-  if (!explicitOwner && getStartedSessionScopes().length > 0) return undefined;
-  const owner = explicitOwner ?? resolveToolSessionOwner(undefined);
-  const scope = owner ? resolveLiveSessionScope(owner) : undefined;
-  if (explicitOwner && !scope) return undefined;
-  if (!owner && getStartedSessionScopes().length > 0) return undefined;
-  const pi =
-    jobState.deliveryOwner?.pi ?? scope?.pi ?? globals.__piSubagenturaPiRef;
-  if (!pi || (scope && scope.pi !== pi)) return undefined;
+  const owner = inProcessJobOwner(jobState);
+  if (!owner) return undefined;
+  const scope = resolveLiveSessionScope(owner);
+  if (!scope) return undefined;
+  const pi = jobState.deliveryOwner?.pi ?? scope.pi;
+  if (scope.pi !== pi) return undefined;
   return {
     owner,
     pi,
     sessionId:
-      jobState.deliveryOwner?.sessionId ??
-      sessionIdFrom(
-        scope?.sessionManager ?? globals.__piSubagenturaSessionManager,
-      ),
+      jobState.deliveryOwner?.sessionId ?? sessionIdFrom(scope.sessionManager),
   };
 }
 
@@ -574,18 +527,17 @@ export function notifyInProcessCompletionWithoutDelivery(
 }
 
 function requestInProcessDeliveryFlush(owner?: SessionOwnerToken): void {
-  const effectiveOwner = effectiveDeliveryOwner(owner);
-  const queue = pendingJobDeliveries(effectiveOwner);
+  const queue = pendingJobDeliveries(owner);
   if (!queue) return;
-  if (!resolveStreamingFlag(effectiveOwner)) {
-    flushInProcessDeliveries(effectiveOwner);
+  if (!resolveStreamingFlag(owner)) {
+    flushInProcessDeliveries(owner);
     return;
   }
   if (scheduledFlushQueues.has(queue)) return;
   scheduledFlushQueues.add(queue);
   queueMicrotask(() => {
     scheduledFlushQueues.delete(queue);
-    flushInProcessDeliveries(effectiveOwner);
+    flushInProcessDeliveries(owner);
   });
 }
 
@@ -608,8 +560,7 @@ export function clearInProcessDeliveries(owner: SessionOwnerToken): number {
 }
 
 export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
-  const effectiveOwner = effectiveDeliveryOwner(owner);
-  const queue = pendingJobDeliveries(effectiveOwner);
+  const queue = pendingJobDeliveries(owner);
   if (!queue) return;
   scheduledFlushQueues.delete(queue);
   for (let index = 0; index < queue.length;) {
@@ -621,8 +572,8 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   }
   if (queue.length === 0) return;
 
-  const streaming = resolveStreamingFlag(effectiveOwner);
-  const actualStreaming = resolveActualStreamingFlag(effectiveOwner);
+  const streaming = resolveStreamingFlag(owner);
+  const actualStreaming = resolveActualStreamingFlag(owner);
   const deliveryOwner =
     (streaming ? queue.find(pendingTriggersTurn) : undefined) ?? queue[0];
   const target = resolvePendingDeliveryTarget(deliveryOwner);
@@ -636,7 +587,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
     status: "done" | "error";
   }> = [];
   let bytes = 0;
-  const runningJobsCount = runningInProcessJobCount(effectiveOwner);
+  const runningJobsCount = runningInProcessJobCount(owner);
   for (const pending of queue) {
     if (!sameDeliveryOwner(pending, deliveryOwner)) continue;
     if (pending.kind === "overflow") {
@@ -646,7 +597,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
           `\nCompletion identity ledger: ${pending.overflowPath}`,
         "in-process sub-agent",
       );
-      content = appendRunningJobsNote(content, effectiveOwner);
+      content = appendRunningJobsNote(content, owner);
       const itemBytes = Buffer.byteLength(content, "utf8");
       if (llm.length > 0 && bytes + itemBytes > MAX_IN_PROCESS_FLUSH_BYTES)
         break;
@@ -680,7 +631,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
       content,
       "in-process sub-agent",
     );
-    content = appendRunningJobsNote(content, effectiveOwner);
+    content = appendRunningJobsNote(content, owner);
     const itemBytes = Buffer.byteLength(content, "utf8");
     if (llm.length > 0 && bytes + itemBytes > MAX_IN_PROCESS_FLUSH_BYTES) break;
     llm.push({
@@ -735,7 +686,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
     ),
   );
   captureTelemetry(
-    resolveLiveSessionScope(effectiveOwner)?.telemetry,
+    resolveLiveSessionScope(owner)?.telemetry,
     {
       event: "completion_delivered",
       delivery: "notification",
@@ -760,7 +711,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
   );
   for (const { pending } of llm) {
     if (pending.kind === "overflow") {
-      markOverflowDelivered(pending, effectiveOwner);
+      markOverflowDelivered(pending, owner);
     } else {
       pending.jobState.notificationDelivered = true;
     }
@@ -770,7 +721,7 @@ export function flushInProcessDeliveries(owner?: SessionOwnerToken): void {
     (pending) => !delivered.has(pending.deliveryId),
   );
   queue.splice(0, queue.length, ...remaining);
-  if (queue.length > 0) flushInProcessDeliveries(effectiveOwner);
+  if (queue.length > 0) flushInProcessDeliveries(owner);
 }
 
 function markOverflowDelivered(

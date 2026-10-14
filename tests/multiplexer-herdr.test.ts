@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 interface ExecCall {
   file: string;
@@ -361,6 +362,7 @@ describe("multiplexer-herdr", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
 
+      const scope = createTestSessionScope();
       const state = launchInteractiveSubagent({
         name: "persisted",
         task: "keep a stable attach target",
@@ -368,6 +370,7 @@ describe("multiplexer-herdr", () => {
         parentCwd: cwd,
         parentSessionId: "parent",
         muxPreference: "herdr",
+        sessionScope: scope,
       });
 
       expect(state.muxTerminalId).toBe("terminal-w1:p2");
@@ -404,6 +407,7 @@ describe("multiplexer-herdr", () => {
       const mod = await importFresh<typeof import("../src/interactive-tmux")>(
         "../src/interactive-tmux",
       );
+      const scope = createTestSessionScope();
       const state = mod.launchInteractiveSubagent({
         name: "rehydrate",
         task: "keep a stable attach target",
@@ -411,19 +415,20 @@ describe("multiplexer-herdr", () => {
         parentCwd: cwd,
         parentSessionId: "parent",
         muxPreference: "herdr",
+        sessionScope: scope,
       });
       const paneGetsBefore = calls.filter(
         (call) => call.args[0] === "pane" && call.args[1] === "get",
       ).length;
-      mod.interactiveSubagentRegistry.clear();
+      scope.interactiveStates.clear();
 
       const { rehydrateInteractiveSubagents } =
         await importFresh<typeof import("../src/rehydrate")>(
           "../src/rehydrate",
         );
-      rehydrateInteractiveSubagents(cwd, "parent");
+      rehydrateInteractiveSubagents(cwd, "parent", [], scope);
 
-      expect(mod.interactiveSubagentRegistry.get(state.id)).toMatchObject({
+      expect(scope.interactiveStates.get(state.id)).toMatchObject({
         muxTerminalId: "terminal-w1:p2",
         attachCommand: expect.stringContaining(
           "herdr terminal attach 'terminal-w1:p2'",

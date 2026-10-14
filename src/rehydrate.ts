@@ -29,7 +29,6 @@ import { debugLog } from "./helpers";
 import {
   buildAttachCommandsForState,
   deriveInteractiveSubagentStatusFromLifecycle,
-  interactiveSubagentRegistry,
   registerInteractiveSubagentState,
   isPaneAlive,
   type InteractiveSubagentState,
@@ -179,6 +178,9 @@ export function rehydrateInteractiveSubagents(
   terminal: number;
   unknown: number;
 } {
+  if (!scope) {
+    return { total: 0, recovered: 0, alive: 0, terminal: 0, unknown: 0 };
+  }
   const payload = loadInteractiveStates(cwd);
   if (!payload) {
     return { total: 0, recovered: 0, alive: 0, terminal: 0, unknown: 0 };
@@ -188,9 +190,7 @@ export function rehydrateInteractiveSubagents(
   let alive = 0;
   let terminal = 0;
   let unknown = 0;
-  const owner: SessionOwnerToken | undefined = scope
-    ? sessionOwner(scope)
-    : undefined;
+  const owner: SessionOwnerToken = sessionOwner(scope);
   const attemptedMemberships = new Set<string>();
   const failedGroupIds = new Set<string>();
 
@@ -230,9 +230,7 @@ export function rehydrateInteractiveSubagents(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
       }
     }
-    if (
-      (scope?.interactiveStates ?? interactiveSubagentRegistry).has(entry.id)
-    ) {
+    if (scope.interactiveStates.has(entry.id)) {
       continue;
     }
 

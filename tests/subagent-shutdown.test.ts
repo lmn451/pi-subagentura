@@ -25,11 +25,7 @@ import {
   artifactPath,
   readEvents,
 } from "../src/artifact";
-import {
-  jobRegistry,
-  registerInProcessJob,
-  type JobState,
-} from "../src/helpers";
+import { registerInProcessJob, type JobState } from "../src/helpers";
 import * as interactiveTmux from "../src/interactive-tmux";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import {
@@ -59,10 +55,6 @@ interface TestExtensionApi {
 
 interface ShutdownGlobalState {
   __piSubagenturaInteractivePollerHandle?: NodeJS.Timeout;
-  __piSubagenturaPiRef?: ExtensionAPI;
-  __piSubagenturaUi?: unknown;
-  __piSubagenturaSessionManager?: unknown;
-  __piSubagenturaParentStreaming?: boolean;
 }
 
 function shutdownGlobalState(): typeof globalThis & ShutdownGlobalState {
@@ -278,15 +270,9 @@ describe("session_shutdown handler", () => {
 
   beforeEach(() => {
     clearSessionScopes();
-    jobRegistry.clear();
     workflowJobRegistry.clear();
-    interactiveTmux.interactiveSubagentRegistry.clear();
     const globalState = shutdownGlobalState();
     globalState.__piSubagenturaInteractivePollerHandle = undefined;
-    globalState.__piSubagenturaPiRef = undefined;
-    globalState.__piSubagenturaUi = undefined;
-    globalState.__piSubagenturaSessionManager = undefined;
-    globalState.__piSubagenturaParentStreaming = false;
 
     installLivenessMultiplexer(async () => "alive");
     fakeHandle = { unref: vi.fn() };
@@ -307,9 +293,7 @@ describe("session_shutdown handler", () => {
     cancelByStateSpy.mockRestore();
     shutdownGlobalState().__piSubagenturaInteractivePollerHandle = undefined;
     clearSessionScopes();
-    jobRegistry.clear();
     workflowJobRegistry.clear();
-    interactiveTmux.interactiveSubagentRegistry.clear();
     __setTmuxMultiplexer(undefined);
     if (tmpRoot) {
       rmSync(tmpRoot, { recursive: true, force: true });
@@ -389,12 +373,12 @@ describe("session_shutdown handler", () => {
         survivingState,
         expect.anything(),
       );
-      expect(
-        interactiveTmux.interactiveSubagentRegistry.has(shuttingState.id),
-      ).toBe(false);
-      expect(
-        interactiveTmux.interactiveSubagentRegistry.get(survivingState.id),
-      ).toBe(survivingState);
+      expect(shutting.scope.interactiveStates.has(shuttingState.id)).toBe(
+        false,
+      );
+      expect(surviving.scope.interactiveStates.get(survivingState.id)).toBe(
+        survivingState,
+      );
       expect(shuttingWorkflow.abort.signal.aborted).toBe(true);
       expect(shuttingWorkflow.workflow.suppressCompletionNotification).toBe(
         true,
@@ -408,9 +392,11 @@ describe("session_shutdown handler", () => {
         survivingWorkflow.workflow,
       );
       expect(shuttingJob.abort).toHaveBeenCalledOnce();
-      expect(jobRegistry.has(shuttingJob.job.id)).toBe(false);
+      expect(shutting.scope.inProcessJobs.has(shuttingJob.job.id)).toBe(false);
       expect(survivingJob.abort).not.toHaveBeenCalled();
-      expect(jobRegistry.get(survivingJob.job.id)).toBe(survivingJob.job);
+      expect(surviving.scope.inProcessJobs.get(survivingJob.job.id)).toBe(
+        survivingJob.job,
+      );
       expect(shutdownGlobalState().__piSubagenturaInteractivePollerHandle).toBe(
         fakeHandle,
       );
@@ -533,9 +519,7 @@ describe("session_shutdown handler", () => {
       );
       expect(registration.scope.interactiveStates.size).toBe(0);
       for (const state of [running, idle, unknown, cancelled, exited]) {
-        expect(interactiveTmux.interactiveSubagentRegistry.has(state.id)).toBe(
-          false,
-        );
+        expect(registration.scope.interactiveStates.has(state.id)).toBe(false);
       }
     },
   );
@@ -656,9 +640,7 @@ describe("session_shutdown handler", () => {
       expect(cancelByStateSpy).not.toHaveBeenCalled();
       expect(registration.scope.interactiveStates.size).toBe(0);
       for (const state of [running, idle, unknown]) {
-        expect(interactiveTmux.interactiveSubagentRegistry.has(state.id)).toBe(
-          false,
-        );
+        expect(registration.scope.interactiveStates.has(state.id)).toBe(false);
       }
     },
   );

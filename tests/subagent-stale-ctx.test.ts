@@ -24,6 +24,13 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { importFresh } from "./test-utils";
+import {
+  clearSessionScopes,
+  createSessionScope,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
+import { registerInteractiveSubagentState } from "../src/interactive-tmux";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-stale-ctx-"));
@@ -56,10 +63,7 @@ function makeState(): {
 
 describe("pollArtifactChanges stale-ctx defenses", () => {
   beforeEach(() => {
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaInjectCount = 0;
+    clearSessionScopes();
     // The poller calls isPaneAlive → child_process.execFileSync. Default the
     // tmux mock so the pane is reported alive and the status-update branch
     // doesn't trip on a missing tmux.
@@ -74,9 +78,7 @@ describe("pollArtifactChanges stale-ctx defenses", () => {
 
   afterEach(() => {
     vi.doUnmock("node:child_process");
-    const g = globalThis as any;
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaInjectCount = 0;
+    clearSessionScopes();
   });
 
   it("keeps a custom-message delivery queued when stale Pi throws", async () => {
@@ -87,23 +89,20 @@ describe("pollArtifactChanges stale-ctx defenses", () => {
       "This extension ctx is stale after session replacement or reload.",
     );
 
-    // The interactiveSubagentRegistry prefers __piSubagenturaPiRef over its
-    // own arg, so we stub the global to make sure the poller uses our broken
-    // pi. (Mirrors the real prod path where the captured `pi` closure goes
-    // stale after a session reload — the global ref is also stale, but the
-    // belt-and-suspenders pattern is: any pi, however stale, must not crash.)
+    // A live owner can still hold a stale Pi API; delivery must remain queued.
     const brokenPi = {
       sendMessage: vi.fn(() => {
         throw staleErr;
       }),
     };
-    (globalThis as any).__piSubagenturaPiRef = brokenPi;
 
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
     state.notifyOnComplete = "inject";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    const scope = registerSessionScope(createSessionScope(brokenPi as any));
+    scope.lifecycle = "started";
+    registerInteractiveSubagentState(state, scope);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     writeOutput(art, "the answer");
     appendCompletionEvent(art, {
@@ -114,7 +113,7 @@ describe("pollArtifactChanges stale-ctx defenses", () => {
 
     // The call must NOT throw — that's the entire point of the fix.
     await expect(
-      mod.pollArtifactChanges(brokenPi as any),
+      mod.pollArtifactChanges(brokenPi as any, sessionOwner(scope)),
     ).resolves.toBeUndefined();
 
     expect(brokenPi.sendMessage).toHaveBeenCalledTimes(1);
@@ -133,13 +132,14 @@ describe("pollArtifactChanges stale-ctx defenses", () => {
       }),
       sendUserMessage: vi.fn(),
     };
-    (globalThis as any).__piSubagenturaPiRef = brokenPi;
 
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState();
     state.notifyOnComplete = "inject";
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    const scope = registerSessionScope(createSessionScope(brokenPi as any));
+    scope.lifecycle = "started";
+    registerInteractiveSubagentState(state, scope);
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendCompletionEvent(art, {
       turnId: "turn-1",
@@ -150,7 +150,7 @@ describe("pollArtifactChanges stale-ctx defenses", () => {
 
     // The call must NOT throw.
     await expect(
-      mod.pollArtifactChanges(brokenPi as any),
+      mod.pollArtifactChanges(brokenPi as any, sessionOwner(scope)),
     ).resolves.toBeUndefined();
 
     // sendMessage was attempted (we know it threw).

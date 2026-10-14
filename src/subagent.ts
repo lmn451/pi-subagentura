@@ -176,7 +176,6 @@ export {
   SubagentLiveStatus,
   ACTIVE_TOOL_DEBOUNCE_MS,
   // ── Async job machinery ──
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneOldestJob,
   pruneCompletedJobs,
@@ -187,8 +186,6 @@ export {
   type NotifyOnComplete,
 } from "./helpers";
 export { getInjectCount, MAX_INJECT } from "./notifications";
-/** @internal Interactive-subagent registry, consumed by session-handlers and tests */
-export { interactiveSubagentRegistry } from "./interactive-tmux";
 /** @internal Inject-count guard; exported for test assertions */
 /** @internal Artifact-change poller; exported for test access */
 export { pollArtifactChanges } from "./artifact-poller";

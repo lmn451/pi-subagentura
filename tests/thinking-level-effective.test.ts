@@ -29,7 +29,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   };
 });
 
-import { jobRegistry, startSubagentJob } from "../src/helpers";
+import { startSubagentJob } from "../src/helpers";
 import {
   createTelemetrySession,
   retireTelemetrySession,
@@ -72,7 +72,6 @@ function params(
 describe("startSubagentJob effective thinking level", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    jobRegistry.clear();
     mockCreateCompatibleSessionRuntime.mockResolvedValue({
       kind: "modern",
       modelRuntime: {},

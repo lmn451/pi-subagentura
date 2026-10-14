@@ -8,11 +8,7 @@ import {
   type Mock,
 } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-  jobRegistry,
-  type JobState,
-  type SubagentResult,
-} from "../src/helpers";
+import { type JobState, type SubagentResult } from "../src/helpers";
 import {
   deliverArtifactNotification,
   deliverNotification,
@@ -28,6 +24,7 @@ import {
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 const SUCCESS_RESULT: SubagentResult = {
   output: "All tests pass",
@@ -43,7 +40,19 @@ const SUCCESS_RESULT: SubagentResult = {
   isError: false,
 };
 
-function makeJobState(overrides?: Partial<JobState>): JobState {
+let activeScope: SessionScope | undefined;
+
+function makeJobState(overrides: Partial<JobState> = {}): JobState {
+  const owner = activeScope ? sessionOwner(activeScope) : undefined;
+  const defaultDeliveryOwner =
+    activeScope && owner
+      ? {
+          pi: activeScope.pi,
+          sessionId: activeScope.sessionManager?.getSessionId?.(),
+          sessionScopeId: owner.id,
+          sessionScopeGeneration: owner.generation,
+        }
+      : undefined;
   return {
     id: "test-job-1",
     status: "done",
@@ -64,18 +73,29 @@ function makeJobState(overrides?: Partial<JobState>): JobState {
     startedAt: Date.now(),
     notifyOnComplete: "notify",
     ...overrides,
+    ...(!Object.hasOwn(overrides, "deliveryOwner")
+      ? { deliveryOwner: defaultDeliveryOwner }
+      : {}),
   };
+}
+
+function resetActiveScope(
+  pi: Partial<ExtensionAPI> = {},
+  options: { parentStreaming?: boolean; sessionId?: string } = {},
+): SessionScope {
+  activeScope = createTestSessionScope({
+    pi: pi as ExtensionAPI,
+    parentStreaming: options.parentStreaming ?? false,
+    sessionManager: {
+      getSessionId: () => options.sessionId ?? "parent-session",
+    },
+  });
+  return activeScope;
 }
 
 function cleanGlobals() {
   clearSessionScopes();
-  const globalState = globalThis as any;
-  globalState.__piSubagenturaPiRef = undefined;
-  globalState.__piSubagenturaUi = undefined;
-  globalState.__piSubagenturaSessionManager = undefined;
-  globalState.__piSubagenturaParentStreaming = false;
-  globalState.__piSubagenturaPendingJobDeliveries = [];
-  jobRegistry.clear();
+  activeScope = undefined;
 }
 
 describe("in-process completion delivery queue", () => {
@@ -83,7 +103,7 @@ describe("in-process completion delivery queue", () => {
   afterEach(cleanGlobals);
 
   it("does nothing when the extension context is unavailable", () => {
-    const job = makeJobState();
+    const job = makeJobState({ deliveryOwner: undefined });
 
     expect(deliverNotification(job, SUCCESS_RESULT)).toBeUndefined();
     expect(job.notificationDelivered).toBeFalsy();
@@ -91,7 +111,7 @@ describe("in-process completion delivery queue", () => {
 
   it("delivers notify mode as a pointer-only custom message", () => {
     const sendMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = { sendMessage };
+    resetActiveScope({ sendMessage });
     const job = makeJobState({ notifyOnComplete: "notify" });
 
     deliverNotification(job, SUCCESS_RESULT);
@@ -109,7 +129,7 @@ describe("in-process completion delivery queue", () => {
 
   it("keeps job IDs in distinct in-process completion labels", () => {
     const sendMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = { sendMessage };
+    resetActiveScope({ sendMessage });
     const first = makeJobState({ id: "job-a" });
     const second = makeJobState({ id: "job-b" });
 
@@ -124,8 +144,8 @@ describe("in-process completion delivery queue", () => {
 
   it("reports other running in-process jobs in completion messages", () => {
     const sendMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = { sendMessage };
-    jobRegistry.set(
+    const scope = resetActiveScope({ sendMessage });
+    scope.inProcessJobs.set(
       "still-running",
       makeJobState({ id: "still-running", status: "running" }),
     );
@@ -149,7 +169,7 @@ describe("in-process completion delivery queue", () => {
     const pi: { sendMessage: (...args: any[]) => any } = {
       sendMessage: staleSend,
     };
-    (globalThis as any).__piSubagenturaPiRef = pi;
+    const scope = resetActiveScope(pi as ExtensionAPI);
     const job = makeJobState();
 
     deliverNotification(job, SUCCESS_RESULT);
@@ -158,8 +178,8 @@ describe("in-process completion delivery queue", () => {
 
     const freshSend = vi.fn();
     pi.sendMessage = freshSend;
-    (globalThis as any).__piSubagenturaPiRef = pi;
-    flushInProcessDeliveries();
+    scope.pi = pi as ExtensionAPI;
+    flushInProcessDeliveries(sessionOwner(scope));
 
     expect(freshSend).toHaveBeenCalledOnce();
     expect(job.notificationDelivered).toBe(true);
@@ -168,10 +188,10 @@ describe("in-process completion delivery queue", () => {
   it("delivers inject mode in one attributed custom message", () => {
     const sendMessage = vi.fn();
     const sendUserMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = {
+    resetActiveScope({
       sendMessage,
       sendUserMessage,
-    };
+    });
     const job = makeJobState({
       notifyOnComplete: "inject",
       triggerTurnOnComplete: true,
@@ -194,8 +214,7 @@ describe("in-process completion delivery queue", () => {
 
   it("dispatches triggering completion through native followUp while streaming", async () => {
     const sendMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = { sendMessage };
-    (globalThis as any).__piSubagenturaParentStreaming = true;
+    resetActiveScope({ sendMessage }, { parentStreaming: true });
     const job = makeJobState({ notifyOnComplete: "inject" });
 
     deliverNotification(job, SUCCESS_RESULT);
@@ -210,8 +229,7 @@ describe("in-process completion delivery queue", () => {
 
   it("waits for idle when completion must not trigger a turn", async () => {
     const sendMessage = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = { sendMessage };
-    (globalThis as any).__piSubagenturaParentStreaming = true;
+    const scope = resetActiveScope({ sendMessage }, { parentStreaming: true });
     const job = makeJobState({ notifyOnComplete: "notify" });
 
     deliverNotification(job, SUCCESS_RESULT);
@@ -219,8 +237,8 @@ describe("in-process completion delivery queue", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(job.notificationDelivered).toBeFalsy();
 
-    (globalThis as any).__piSubagenturaParentStreaming = false;
-    flushInProcessDeliveries();
+    scope.parentStreaming = false;
+    flushInProcessDeliveries(sessionOwner(scope));
 
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(sendMessage.mock.calls[0][1]).toMatchObject({
@@ -228,35 +246,6 @@ describe("in-process completion delivery queue", () => {
       triggerTurn: false,
     });
     expect(job.notificationDelivered).toBe(true);
-  });
-
-  it("does not deliver a queued completion into a replacement parent session", async () => {
-    const firstSessionSend = vi.fn();
-    const secondSessionSend = vi.fn();
-    (globalThis as any).__piSubagenturaPiRef = {
-      sendMessage: firstSessionSend,
-    };
-    (globalThis as any).__piSubagenturaSessionManager = {
-      getSessionId: () => "parent-session-a",
-    };
-    (globalThis as any).__piSubagenturaParentStreaming = true;
-    const job = makeJobState({ notifyOnComplete: "notify" });
-
-    deliverNotification(job, SUCCESS_RESULT);
-    await Promise.resolve();
-    expect(firstSessionSend).not.toHaveBeenCalled();
-
-    (globalThis as any).__piSubagenturaPiRef = {
-      sendMessage: secondSessionSend,
-    };
-    (globalThis as any).__piSubagenturaSessionManager = {
-      getSessionId: () => "parent-session-b",
-    };
-    (globalThis as any).__piSubagenturaParentStreaming = false;
-    flushInProcessDeliveries();
-
-    expect(secondSessionSend).not.toHaveBeenCalled();
-    expect(job.notificationDelivered).toBeFalsy();
   });
 
   it("does not deliver a queued completion into a replacement session scope", async () => {

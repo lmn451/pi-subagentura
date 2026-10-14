@@ -336,22 +336,6 @@ export interface InteractiveSubagentState {
   injected?: boolean;
 }
 
-declare global {
-  var __piSubagenturaInteractiveRegistry:
-    | Map<string, InteractiveSubagentState>
-    | undefined;
-}
-
-if (!globalThis.__piSubagenturaInteractiveRegistry) {
-  globalThis.__piSubagenturaInteractiveRegistry = new Map<
-    string,
-    InteractiveSubagentState
-  >();
-}
-
-export const interactiveSubagentRegistry =
-  globalThis.__piSubagenturaInteractiveRegistry!;
-
 interface InteractiveCreatedTelemetry {
   readonly session: TelemetrySession;
   readonly spawnStartedAt: number;
@@ -368,35 +352,31 @@ const interactiveCreatedTelemetry = new WeakMap<
   InteractiveSubagentState,
   InteractiveCreatedTelemetry
 >();
-/** Insert a state into its authoritative session map and the legacy aggregate index. */
+/** Insert a state into its authoritative session map. */
 export function registerInteractiveSubagentState(
   state: InteractiveSubagentState,
   scope?: SessionScope,
 ): void {
-  if (scope) {
-    state.sessionOwner = sessionOwner(scope);
-    scope.interactiveStates.set(state.id, state);
-  }
-  interactiveSubagentRegistry.set(state.id, state);
+  if (!scope) return;
+  state.sessionOwner = sessionOwner(scope);
+  scope.interactiveStates.set(state.id, state);
 }
 
-/** Remove the same state object from every registry that currently indexes it. */
+/** Remove the same state object from its owning session registry. */
 export function removeInteractiveSubagentState(
   state: InteractiveSubagentState,
 ): boolean {
-  let removed = false;
-  if (interactiveSubagentRegistry.get(state.id) === state) {
-    removed = interactiveSubagentRegistry.delete(state.id);
-  }
   const owner = state.sessionOwner;
-  if (owner) {
-    const scope = findSessionScope(owner.id);
-    if (scope?.interactiveStates.get(state.id) === state) {
-      scope.interactiveStates.delete(state.id);
-      removed = true;
-    }
+  if (!owner) return false;
+  const scope = findSessionScope(owner.id);
+  if (
+    scope?.generation !== owner.generation ||
+    scope.interactiveStates.get(state.id) !== state
+  ) {
+    return false;
   }
-  return removed;
+  scope.interactiveStates.delete(state.id);
+  return true;
 }
 
 /**
@@ -799,8 +779,20 @@ export function launchInteractiveSubagent(params: {
     );
     throw error;
   }
-  const liveScope =
-    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
+  const ownerScope = resolveLiveSessionScope(params.supervisorOwner);
+  const liveScope = params.sessionScope
+    ? resolveLiveSessionScope(sessionOwner(params.sessionScope))
+    : ownerScope;
+  if (
+    !liveScope ||
+    (params.sessionScope && liveScope !== params.sessionScope) ||
+    (params.supervisorOwner && liveScope !== ownerScope)
+  ) {
+    reportSpawnFailure("registration", undefined, "completion_registration");
+    throw new Error(
+      "interactive sub-agent spawn requires a live session scope",
+    );
+  }
   if (rootId && nextDepth > effectiveMaxDepth) {
     reportSpawnFailure("depth_limit");
     throw new Error(
@@ -1502,9 +1494,8 @@ export function cancelInteractiveSubagent(
 ): InteractiveSubagentState | undefined {
   const snapshotSource =
     source === "supervisor" ? "cancel_interactive_subagent" : source;
-  const state =
-    ownedState?.id === id ? ownedState : interactiveSubagentRegistry.get(id);
-  if (!state) return undefined;
+  if (!ownedState || ownedState.id !== id) return undefined;
+  const state = ownedState;
 
   const snapshot = snapshotInteractiveContext({
     kind: "interactive",
@@ -1836,7 +1827,7 @@ export function deriveInteractiveSubagentStatusFromLifecycle(
  * existence check — same heuristic as before.
  */
 export function pruneDeadInteractiveSubagents(
-  states: Iterable<InteractiveSubagentState> = interactiveSubagentRegistry.values(),
+  states: Iterable<InteractiveSubagentState> = [],
 ): void {
   for (const state of states) {
     if (

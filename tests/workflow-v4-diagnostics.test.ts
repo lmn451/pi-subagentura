@@ -26,6 +26,7 @@ import {
   type SessionOwnerToken,
 } from "../src/session-scope";
 import { createTelemetrySession } from "../src/telemetry";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 const SCRIPT =
   'export const meta = { name: "cancelled-child", description: "d" };\n' +
@@ -106,10 +107,18 @@ describe("workflow v4 cancellation diagnostics", () => {
           errorMessage: "aborted",
         }) as unknown as SubagentResult,
     );
-    const job = startWorkflowJob("cancelled-child", SCRIPT, {
-      runAgent,
-      onProgress: (event) => progress.push(event),
-    });
+    const scope = createTestSessionScope();
+    const job = startWorkflowJob(
+      "cancelled-child",
+      SCRIPT,
+      {
+        runAgent,
+        onProgress: (event) => progress.push(event),
+      },
+      undefined,
+      undefined,
+      sessionOwner(scope),
+    );
     jobs.push(job);
 
     const result = await job.promise;

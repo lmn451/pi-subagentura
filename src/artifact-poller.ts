@@ -32,7 +32,6 @@ import {
 import {
   deriveInteractiveSubagentStatusFromLifecycle,
   foldInteractiveLifecycle,
-  interactiveSubagentRegistry,
   getInteractivePaneLivenessDiagnosticAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -46,7 +45,7 @@ import {
   MAX_DELIVERY_RECORDS,
 } from "./delivery";
 import { completionDisplayLabel } from "./completion-presentation";
-import { debugLog, jobRegistry, type JobState } from "./helpers";
+import { debugLog, type JobState } from "./helpers";
 import {
   coarseElapsedMs,
   formatActivityRow,
@@ -70,7 +69,6 @@ import {
   workflowJobRegistry,
 } from "./workflow-jobs";
 import {
-  ownerlessEntitiesVisible,
   type SessionOwnerToken,
   resolveLiveSessionScope,
 } from "./session-scope";
@@ -132,11 +130,7 @@ const footerStatusesByUi = new WeakMap<
 function interactiveStatesForOwners(
   owners: (SessionOwnerToken | undefined)[],
 ): InteractiveSubagentState[] {
-  if (owners.some((owner) => owner === undefined)) {
-    return ownerlessEntitiesVisible()
-      ? [...interactiveSubagentRegistry.values()]
-      : [];
-  }
+  if (owners.some((owner) => owner === undefined)) return [];
   const states: InteractiveSubagentState[] = [];
   for (const owner of owners) {
     const scope = resolveLiveSessionScope(owner);
@@ -148,9 +142,7 @@ function interactiveStatesForOwners(
 function inProcessJobsForOwners(
   owners: (SessionOwnerToken | undefined)[],
 ): JobState[] {
-  if (owners.some((owner) => owner === undefined)) {
-    return ownerlessEntitiesVisible() ? [...jobRegistry.values()] : [];
-  }
+  if (owners.some((owner) => owner === undefined)) return [];
   const jobs: JobState[] = [];
   for (const owner of owners) {
     const scope = resolveLiveSessionScope(owner);
@@ -844,19 +836,10 @@ async function runPollArtifactChanges(
   // would crash the parent pi process. Better to swallow and let the next tick (with a refreshed
   // pi ctx) try again. A stale extension context after session replacement is the most likely cause.
   try {
-    const g2 = typeof global !== "undefined" ? global : globalThis;
-    const initialPiRef = g2.__piSubagenturaPiRef as ExtensionAPI | undefined;
     const ownerContext = owner ? resolveLiveSessionScope(owner) : undefined;
-    if ((owner && !ownerContext) || (!owner && !ownerlessEntitiesVisible()))
-      return;
-    const interactivePi =
-      ownerContext?.pi ??
-      (g2.__piSubagenturaPiRef as ExtensionAPI | undefined) ??
-      pi;
-    if (!interactivePi) return;
-
-    const stateMap =
-      ownerContext?.interactiveStates ?? interactiveSubagentRegistry;
+    if (!ownerContext) return;
+    const interactivePi = ownerContext.pi;
+    const stateMap = ownerContext.interactiveStates;
     const states = [...stateMap.values()];
     const liveness = await Promise.all(
       states.map(async (state) => {
@@ -883,17 +866,7 @@ async function runPollArtifactChanges(
         return;
       }
     }
-    const currentPiRef = g2.__piSubagenturaPiRef as ExtensionAPI | undefined;
-    if (
-      !owner &&
-      ((initialPiRef !== undefined && currentPiRef === undefined) ||
-        (currentPiRef !== undefined && currentPiRef !== interactivePi))
-    ) {
-      return;
-    }
-    const ui =
-      ownerContext?.ui ??
-      (g2.__piSubagenturaUi as ExtensionUIContext | undefined);
+    const ui = ownerContext.ui;
     const persistedStates: InteractiveSubagentState[] = [];
     for (const [state, livenessDiagnostic] of liveness) {
       if (stateMap.get(state.id) !== state) continue;
@@ -1400,18 +1373,13 @@ function destroySessionParser(state: InteractiveSubagentState): void {
   }
 }
 
-/** Release parsers for one exact live owner, or every parser for legacy callers. */
+/** Release parsers for one exact live owner. Missing ownership fails closed. */
 export function clearSessionParsers(owner?: SessionOwnerToken): void {
-  if (owner) {
-    const scope = resolveLiveSessionScope(owner);
-    if (!scope) return;
-    for (const state of scope.interactiveStates.values()) {
-      destroySessionParser(state);
-    }
-    return;
-  }
-  for (const parserState of [...sessionParsers.values()]) {
-    destroySessionParser(parserState.owner);
+  if (!owner) return;
+  const scope = resolveLiveSessionScope(owner);
+  if (!scope) return;
+  for (const state of scope.interactiveStates.values()) {
+    destroySessionParser(state);
   }
 }
 

@@ -36,10 +36,7 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { pollArtifactChanges } from "../src/artifact-poller";
-import {
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { type InteractiveSubagentState } from "../src/interactive-tmux";
 import {
   MAX_ORCHESTRATOR_ROUTING_RECORDS,
   ORCHESTRATOR_ROUTING_AUTHORITY_ENTRY_TYPE,
@@ -203,7 +200,6 @@ async function spawnAgentsAB(environment: ScenarioEnvironment): Promise<void> {
 beforeEach(() => {
   delete process.env.PI_SUBAGENTURA_CHILD;
   clearSessionScopes();
-  interactiveSubagentRegistry.clear();
   vi.clearAllMocks();
   launchIds = [CHILD_A, CHILD_B, CHILD_C];
   __setTmuxMultiplexer({
@@ -223,7 +219,6 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSessionScopes();
-  interactiveSubagentRegistry.clear();
   __resetMuxInstances();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });

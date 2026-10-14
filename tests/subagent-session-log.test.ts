@@ -32,8 +32,10 @@ import {
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import {
   clearSessionScopes,
+  createSessionScope,
   registerSessionScope,
   sessionOwner,
+  type SessionScope,
 } from "../src/session-scope";
 import { createTelemetrySession } from "../src/telemetry";
 import { rehydrateInteractiveSubagents } from "../src/rehydrate";
@@ -72,13 +74,25 @@ function makeState(overrides: { sessionFile?: string }): {
 
 describe("session-log tail-read", () => {
   let root: string;
+  let fixtureScope: SessionScope;
+
+  function pollFixture(
+    mod: typeof import("../src/subagent"),
+    pi: Parameters<typeof mod.pollArtifactChanges>[0],
+  ) {
+    fixtureScope.pi = pi;
+    for (const state of fixtureScope.interactiveStates.values()) {
+      state.sessionOwner = sessionOwner(fixtureScope);
+    }
+    return mod.pollArtifactChanges(pi, sessionOwner(fixtureScope));
+  }
 
   beforeEach(() => {
     root = makeTmp();
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaUi = undefined;
+    clearSessionScopes();
+    fixtureScope = createSessionScope({} as any);
+    fixtureScope.lifecycle = "started";
+    registerSessionScope(fixtureScope);
     // Force `isTmuxPaneAlive` to return true so the poller's status-decision does not flip our
     // sub-agent to "unknown" (which would skip it on subsequent polls). The test does not have a
     // live tmux server, and host tmux behaviour varies — some versions exit 0 for unknown panes,
@@ -108,7 +122,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     // Write a fake session log with one assistant message containing a toolCall.
     const sessionFile = state.sessionFile;
@@ -143,7 +157,7 @@ describe("session-log tail-read", () => {
     writeFileSync(sessionFile, JSON.stringify(entry) + "\n");
 
     const sendMessage = vi.fn();
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    await pollFixture(mod, { sendMessage } as any);
 
     // Should not have notified the LLM (tool_activity is silent).
     expect(sendMessage).not.toHaveBeenCalled();
@@ -1018,7 +1032,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1049,7 +1063,7 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const events = readEvents(art);
@@ -1067,7 +1081,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1098,7 +1112,8 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
+    expect(state.lastDeliveredSessionByte).toBeGreaterThan(0);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const events = readEvents(art);
@@ -1109,7 +1124,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const longCmd = "echo " + "x".repeat(200);
     const entry = {
@@ -1129,7 +1144,7 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const events = readEvents(art);
@@ -1143,7 +1158,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1162,11 +1177,11 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     const after1 = state.lastDeliveredSessionByte;
     expect(after1).toBeGreaterThan(0);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(after1); // unchanged
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
@@ -1178,7 +1193,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const e1 = {
       type: "message",
@@ -1212,13 +1227,13 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(e1) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     // Append second line.
     const { appendFileSync } = await import("node:fs");
     appendFileSync(state.sessionFile, JSON.stringify(e2) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const events = readEvents(art);
@@ -1232,7 +1247,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1254,7 +1269,7 @@ describe("session-log tail-read", () => {
     const partial = '{ "type": "mess';
     writeFileSync(state.sessionFile, complete + partial);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const events = readEvents(art);
@@ -1275,7 +1290,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1296,7 +1311,7 @@ describe("session-log tail-read", () => {
     const partial = '{ "type": "mess';
     writeFileSync(state.sessionFile, complete + partial);
     // First poll: record both the observed end and the safe replay boundary.
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(
       Buffer.byteLength(complete + partial, "utf8"),
     );
@@ -1311,7 +1326,7 @@ describe("session-log tail-read", () => {
       'age","message":{"role":"assistant","content":[{"type":"toolCall","id":"t2","name":"bash","arguments":{"command":"ls"}}]}}\n';
     appendFileSync(state.sessionFile, appended);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(
       Buffer.byteLength(complete + partial, "utf8") +
         Buffer.byteLength(appended, "utf8"),
@@ -1329,9 +1344,10 @@ describe("session-log tail-read", () => {
     const { state } = makeState({
       sessionFile: "/tmp/does-not-exist-" + Math.random() + ".jsonl",
     });
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
-    await expect(mod.pollArtifactChanges({} as any)).resolves.toBeUndefined();
+    await expect(pollFixture(mod, {} as any)).resolves.toBeUndefined();
+    expect(state.eventByteCursor).toBe(0);
     expect(state.lastDeliveredSessionByte).toBeUndefined();
   });
 
@@ -1339,7 +1355,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1358,7 +1374,7 @@ describe("session-log tail-read", () => {
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     expect(state.lastToolName).toBe("bash");
     expect(state.lastToolSummary).toBe("rg TODO src/");
@@ -1369,7 +1385,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry = {
       type: "message",
@@ -1390,9 +1406,9 @@ describe("session-log tail-read", () => {
 
     const setStatus = vi.fn();
     const setWidget = vi.fn();
-    (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+    fixtureScope.ui = { setStatus, setWidget } as any;
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     // Footer status shows count.
     expect(setStatus).toHaveBeenCalledWith(
@@ -1421,9 +1437,9 @@ describe("session-log tail-read", () => {
     // Empty registry.
     const setStatus = vi.fn();
     const setWidget = vi.fn();
-    (globalThis as any).__piSubagenturaUi = { setStatus, setWidget };
+    fixtureScope.ui = { setStatus, setWidget } as any;
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     expect(setStatus).toHaveBeenCalledWith("subagentura-running", undefined);
     expect(setWidget).toHaveBeenCalledWith("subagentura-activity", undefined, {
@@ -1436,7 +1452,7 @@ describe("session-log tail-read", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
 
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     appendEvent(art, { ts: 1, type: "done", status: "done", exitCode: 0 });
@@ -1449,12 +1465,12 @@ describe("session-log tail-read", () => {
 
     const sendMessage = vi.fn();
     const notify = vi.fn();
-    (globalThis as any).__piSubagenturaUi = {
+    fixtureScope.ui = {
       notify,
       setStatus: vi.fn(),
       setWidget: vi.fn(),
-    };
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    } as any;
+    await pollFixture(mod, { sendMessage } as any);
 
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith(
@@ -1480,7 +1496,7 @@ describe("session-log tail-read", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
 
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const longMsg = "x".repeat(2000);
     const art = artifactPath(join(artifactDir, ".."), state.id);
@@ -1493,12 +1509,12 @@ describe("session-log tail-read", () => {
 
     const sendMessage = vi.fn();
     const notify = vi.fn();
-    (globalThis as any).__piSubagenturaUi = {
+    fixtureScope.ui = {
       notify,
       setStatus: vi.fn(),
       setWidget: vi.fn(),
-    };
-    await mod.pollArtifactChanges({ sendMessage } as any);
+    } as any;
+    await pollFixture(mod, { sendMessage } as any);
 
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -1518,14 +1534,14 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     // write 1KB of content, poll to advance cursor
     writeFileSync(state.sessionFile, "x".repeat(1024) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(1025);
     // truncate to 0, then write new content
     writeFileSync(state.sessionFile, "new\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // cursor should have been reset, so it now points past the new content
     expect(state.lastDeliveredSessionByte).toBe(4);
   });
@@ -1533,14 +1549,14 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     // write 1KB of content, poll to advance cursor
     writeFileSync(state.sessionFile, "x".repeat(1024) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(1025);
     // truncate to 0, then write new content
     writeFileSync(state.sessionFile, "new\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     // cursor should have been reset, so it now points past the new content
     expect(state.lastDeliveredSessionByte).toBe(4);
   });
@@ -1552,7 +1568,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     // Build a single 1.5 MiB JSONL line. The old 1 MiB cap would have pinned the poller on this line forever.
     const bigPayload = "x".repeat(1.5 * 1024 * 1024);
@@ -1578,7 +1594,7 @@ describe("session-log tail-read", () => {
 
     // The observed cursor advances, while the replay point remains at the start
     // of the incomplete line.
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     const afterFirst = state.lastDeliveredSessionByte ?? 0;
     expect(afterFirst).toBe(1 * 1024 * 1024);
     expect(state.sessionPartialLineStart).toBe(0);
@@ -1591,7 +1607,7 @@ describe("session-log tail-read", () => {
 
     // The second poll resumes from the observed cursor and emits the completed
     // line without re-reading the buffered prefix.
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBeGreaterThan(afterFirst);
     const activityAfterSecond = readEvents(art).filter(
       (e) => e.type === "tool_activity",
@@ -1619,7 +1635,7 @@ describe("session-log tail-read", () => {
       },
     };
     appendFileSync(state.sessionFile, JSON.stringify(nextEntry) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     const activity = readEvents(art).filter((e) => e.type === "tool_activity");
     expect(activity).toHaveLength(2);
     expect(activity[1]).toMatchObject({ tool: "read", summary: "/tmp/x" });
@@ -1647,14 +1663,14 @@ describe("session-log tail-read", () => {
     const line = JSON.stringify(entry);
     const splitAt = Math.floor(line.length / 2);
     state.lastDeliveredSessionByte = 0;
-    first.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     writeFileSync(state.sessionFile, line.slice(0, splitAt));
 
-    await first.pollArtifactChanges({} as any);
+    await pollFixture(first, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(splitAt);
     expect(state.sessionPartialLineStart).toBe(0);
 
-    first.interactiveSubagentRegistry.clear();
+    fixtureScope.interactiveStates.clear();
     const second =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const rehydrated = {
@@ -1662,10 +1678,10 @@ describe("session-log tail-read", () => {
       lastDeliveredSessionByte: state.sessionPartialLineStart,
       sessionObservedByteCursor: state.lastDeliveredSessionByte,
     };
-    second.interactiveSubagentRegistry.set(rehydrated.id, rehydrated);
+    fixtureScope.interactiveStates.set(rehydrated.id, rehydrated);
     appendFileSync(state.sessionFile, line.slice(splitAt) + "\n");
 
-    await second.pollArtifactChanges({} as any);
+    await pollFixture(second, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     expect(
@@ -1694,16 +1710,16 @@ describe("session-log tail-read", () => {
     };
     const line = JSON.stringify(entry);
     const splitAt = Math.floor(line.length / 2);
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     writeFileSync(state.sessionFile, line.slice(0, splitAt));
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     expect(state.lastDeliveredSessionByte).toBe(splitAt);
 
-    clearSessionParsers();
+    clearSessionParsers(sessionOwner(fixtureScope));
     expect(state.lastDeliveredSessionByte).toBe(0);
     expect(state.sessionObservedByteCursor).toBe(splitAt);
     appendFileSync(state.sessionFile, line.slice(splitAt) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     expect(
@@ -1733,10 +1749,10 @@ describe("session-log tail-read", () => {
     state.lastDeliveredSessionByte = 10;
     state.sessionPartialLineStart = 10;
     state.sessionObservedByteCursor = Buffer.byteLength(line, "utf8") + 10;
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     writeFileSync(state.sessionFile, line);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     expect(
@@ -1748,9 +1764,9 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     writeFileSync(state.sessionFile, '{ "type": "mess');
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const replacement: InteractiveSubagentState = {
       ...state,
@@ -1772,9 +1788,9 @@ describe("session-log tail-read", () => {
       },
     };
     writeFileSync(state.sessionFile, JSON.stringify(entry) + "\n");
-    mod.interactiveSubagentRegistry.set(state.id, replacement);
+    fixtureScope.interactiveStates.set(state.id, replacement);
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     expect(
@@ -1786,7 +1802,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const oversized = {
       type: "message",
       message: {
@@ -1805,7 +1821,7 @@ describe("session-log tail-read", () => {
     writeFileSync(state.sessionFile, JSON.stringify(oversized) + "\n");
 
     for (let poll = 0; poll < 4; poll++) {
-      await mod.pollArtifactChanges({} as any);
+      await pollFixture(mod, {} as any);
     }
 
     const next = {
@@ -1823,7 +1839,7 @@ describe("session-log tail-read", () => {
       },
     };
     appendFileSync(state.sessionFile, JSON.stringify(next) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     expect(
@@ -1837,7 +1853,7 @@ describe("session-log tail-read", () => {
 
     // Build a 1 KB initial log, write to the file, poll once.
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
     const initialEntry = {
       type: "message",
       message: {
@@ -1857,7 +1873,7 @@ describe("session-log tail-read", () => {
       state.sessionFile,
       "x".repeat(1024) + "\n" + JSON.stringify(initialEntry) + "\n",
     );
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
     const cursorBeforeTruncation = state.lastDeliveredSessionByte;
     expect(cursorBeforeTruncation).toBeGreaterThan(1024);
 
@@ -1881,7 +1897,7 @@ describe("session-log tail-read", () => {
       },
     };
     writeFileSync(state.sessionFile, JSON.stringify(newEntry) + "\n");
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     // Cursor was reset to 0, then advanced to the end of the new content.
     const newSize = Buffer.byteLength(JSON.stringify(newEntry) + "\n", "utf8");
@@ -1902,7 +1918,7 @@ describe("session-log tail-read", () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { state, artifactDir } = makeState({});
-    mod.interactiveSubagentRegistry.set(state.id, state);
+    fixtureScope.interactiveStates.set(state.id, state);
 
     const entry1 = {
       type: "message",
@@ -1944,7 +1960,7 @@ describe("session-log tail-read", () => {
         JSON.stringify(entry2) +
         "\n",
     );
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const art = artifactPath(join(artifactDir, ".."), state.id);
     const activity = readEvents(art).filter((e) => e.type === "tool_activity");
@@ -1962,8 +1978,8 @@ describe("session-log tail-read", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const a = makeState({});
     const b = makeState({});
-    mod.interactiveSubagentRegistry.set(a.state.id, a.state);
-    mod.interactiveSubagentRegistry.set(b.state.id, b.state);
+    fixtureScope.interactiveStates.set(a.state.id, a.state);
+    fixtureScope.interactiveStates.set(b.state.id, b.state);
 
     const entryA = {
       type: "message",
@@ -1998,7 +2014,7 @@ describe("session-log tail-read", () => {
     writeFileSync(a.state.sessionFile, JSON.stringify(entryA) + "\n");
     writeFileSync(b.state.sessionFile, JSON.stringify(entryB) + "\n");
 
-    await mod.pollArtifactChanges({} as any);
+    await pollFixture(mod, {} as any);
 
     const artA = artifactPath(join(a.artifactDir, ".."), a.state.id);
     const artB = artifactPath(join(b.artifactDir, ".."), b.state.id);

@@ -9,10 +9,7 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { enqueueDelivery, flushDeliveries } from "../src/delivery";
-import {
-  interactiveSubagentRegistry,
-  registerInteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { registerInteractiveSubagentState } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import {
   deliverNotification,
@@ -21,6 +18,7 @@ import {
 import { pollArtifactChanges } from "../src/artifact-poller";
 import { rehydrateInteractiveSubagents } from "../src/rehydrate";
 import {
+  clearSessionScopes,
   getSessionScopes,
   sessionOwner,
   type SessionScope,
@@ -77,7 +75,7 @@ afterEach(() => {
   for (const root of artifactRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
 
