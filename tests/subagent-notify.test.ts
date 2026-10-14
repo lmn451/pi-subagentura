@@ -9,13 +9,11 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { importFresh } from "./test-utils";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { SubagentResult } from "../src/helpers";
 import {
   clearSessionScopes,
   getSessionScopes,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import { settleCompletionParentTurn } from "../src/completion-coordinator";
@@ -33,7 +31,6 @@ vi.mock("../src/helpers", async (importOriginal) => {
 
 // ── Imports (resolved after hoisted mock) ─────────────────────────────────
 import registerExtension from "../src/subagent";
-import { jobRegistry } from "../src/helpers";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -64,50 +61,6 @@ const ERROR_RESULT: SubagentResult = {
   model: undefined,
   isError: true,
   errorMessage: "API rate limit exceeded",
-};
-
-const EMPTY_OUTPUT_RESULT: SubagentResult = {
-  output: "",
-  usage: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  },
-  model: undefined,
-  isError: false,
-};
-
-const ZERO_USAGE_RESULT: SubagentResult = {
-  output: "Done",
-  usage: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  },
-  model: undefined,
-  isError: false,
-};
-
-/** Error result whose errorMessage contains an API key — triggers sanitizeOutput. */
-const SECRET_ERROR_RESULT: SubagentResult = {
-  output: "Some output",
-  usage: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    cost: 0,
-    turns: 0,
-  },
-  model: undefined,
-  isError: true,
-  errorMessage: "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz1234567890",
 };
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -190,8 +143,6 @@ function mockJobResult(
 /** Shared state that must be cleaned between tests. */
 function cleanGlobals() {
   clearSessionScopes();
-  setLegacyActiveSessionRefs(undefined);
-  jobRegistry.clear();
 }
 
 /**
@@ -281,38 +232,13 @@ describe("coordinated completion", () => {
     expect(statusToolDef).toBeDefined();
   });
 
-  it("routes a deprecated v2 in-process notification through one compact manifest", async () => {
-    api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
-    const control = createJobControl();
-    mockStartSubagentJob.mockImplementationOnce(() =>
-      mockJobResult("compatibility-job", control.jobPromise),
-    );
-
-    await isolatedToolDef.execute(
-      "call-v2-compatibility",
-      { async: true, task: "legacy", notifyOnComplete: "notify" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-    control.resolve(SUCCESS_RESULT);
-    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledOnce());
-
-    const content = sentMessageAt(api, 0).content;
-    expect(content).toContain("<completion-manifest>");
-    expect(content).toContain('"source":"in-process"');
-    expect(content).toContain("get_subagent_result");
-    expect(content).toContain("compatibility-job");
-    expect(api.sendUserMessage).toHaveBeenCalledOnce();
-  });
-
   afterEach(() => {
     cleanGlobals();
   });
 
   // ── Notification delivery (both tools) ──────────────────────────────
   // Key delivery assertions run for both subagent_isolated and subagent_with_context
-  describe("both tools deliver notifications", () => {
+  describe("both tools coordinate completions", () => {
     const toolCases = [
       ["subagent_isolated", () => isolatedToolDef, () => mockCtx()] as const,
       [
@@ -324,50 +250,6 @@ describe("coordinated completion", () => {
 
     for (const [label, getToolDef, getCtx] of toolCases) {
       describe(label, () => {
-        it("maps legacy notify mode to coordinated compact delivery", async () => {
-          const toolDef = getToolDef();
-          const jobId = `both-notify-${label}`;
-          const control = createJobControl();
-          mockStartSubagentJob.mockImplementationOnce(() =>
-            mockJobResult(jobId, control.jobPromise),
-          );
-
-          const spawnResult = await toolDef.execute(
-            "call-1",
-            { async: true, task: "test", notifyOnComplete: "notify" },
-            undefined,
-            undefined,
-            getCtx(),
-          );
-          expect(spawnResult.content[0].text).toContain(
-            "compact result reference when safely idle",
-          );
-
-          control.resolve(SUCCESS_RESULT);
-          await vi.waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledTimes(1);
-          });
-
-          const message = sentMessageAt(api, 0);
-          expect(message).toMatchObject({
-            customType: "subagent-manifest",
-            display: false,
-          });
-          expect(message.content).toContain(jobId);
-          expect(message.content).toContain("get_subagent_result");
-          expect(message.content).not.toContain(SUCCESS_RESULT.output);
-          expect(sentMessageOptsAt(api, 0)).toMatchObject({
-            deliverAs: "followUp",
-            triggerTurn: true,
-          });
-          expect(api.appendEntry).toHaveBeenCalledWith(
-            "subagentura-completion",
-            expect.objectContaining({ sourceId: jobId, policy: "each" }),
-          );
-          expect(api.notify).not.toHaveBeenCalled();
-          expect(api.sendUserMessage).not.toHaveBeenCalled();
-        });
-
         it("shows active async jobs in the footer and clears them on completion", async () => {
           const toolDef = getToolDef();
           const ctx = getCtx();
@@ -402,14 +284,14 @@ describe("coordinated completion", () => {
 
         it("defaults async completion delivery to coordinated references", async () => {
           const toolDef = getToolDef();
-          const jobId = `both-default-inject-${label}`;
+          const jobId = `both-default-completion-${label}`;
           const control = createJobControl();
           mockStartSubagentJob.mockImplementationOnce(() =>
             mockJobResult(jobId, control.jobPromise),
           );
 
           const spawnResult = await toolDef.execute(
-            "call-default-inject",
+            "call-default-completion",
             { async: true, task: "test" },
             undefined,
             undefined,
@@ -444,72 +326,6 @@ describe("coordinated completion", () => {
           );
         });
 
-        it("accepts legacy triggerTurnOnComplete through coordinated delivery", async () => {
-          const toolDef = getToolDef();
-          const jobId = `both-trigger-turn-${label}`;
-          const control = createJobControl();
-          mockStartSubagentJob.mockImplementationOnce(() =>
-            mockJobResult(jobId, control.jobPromise),
-          );
-          await toolDef.execute(
-            "call-trigger-turn",
-            {
-              async: true,
-              task: "test",
-              notifyOnComplete: "notify",
-              triggerTurnOnComplete: true,
-            },
-            undefined,
-            undefined,
-            getCtx(),
-          );
-          control.resolve(SUCCESS_RESULT);
-          await vi.waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledTimes(1);
-          });
-          expect(sentMessageOptsAt(api, 0)).toMatchObject({
-            deliverAs: "followUp",
-            triggerTurn: true,
-          });
-          expect(sentMessageAt(api, 0).content).not.toContain(
-            SUCCESS_RESULT.output,
-          );
-          expect(api.notify).not.toHaveBeenCalled();
-        });
-
-        it("maps legacy inject mode to a compact manifest", async () => {
-          const toolDef = getToolDef();
-          const jobId = `both-inject-${label}`;
-          const control = createJobControl();
-          mockStartSubagentJob.mockImplementationOnce(() =>
-            mockJobResult(jobId, control.jobPromise),
-          );
-          await toolDef.execute(
-            "call-2",
-            { async: true, task: "test", notifyOnComplete: "inject" },
-            undefined,
-            undefined,
-            getCtx(),
-          );
-          control.resolve(SUCCESS_RESULT);
-          await vi.waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledTimes(1);
-          });
-
-          const message = sentMessageAt(api, 0);
-          expect(message).toMatchObject({
-            customType: "subagent-manifest",
-            display: false,
-          });
-          expect(message.content).toContain(jobId);
-          expect(message.content).not.toContain(SUCCESS_RESULT.output);
-          expect(sentMessageOptsAt(api, 0)).toMatchObject({
-            deliverAs: "followUp",
-            triggerTurn: true,
-          });
-          expect(api.notify).not.toHaveBeenCalled();
-        });
-
         it("delivers a compact error reference when the job promise rejects", async () => {
           const toolDef = getToolDef();
           const jobId = `both-reject-${label}`;
@@ -519,7 +335,7 @@ describe("coordinated completion", () => {
           );
           await toolDef.execute(
             "call-3",
-            { async: true, task: "test", notifyOnComplete: "notify" },
+            { async: true, task: "test" },
             undefined,
             undefined,
             getCtx(),
@@ -538,36 +354,9 @@ describe("coordinated completion", () => {
     }
   });
 
-  // ── Notify mode ───────────────────────────────────────────────────
-  describe("notify mode", () => {
-    it("maps legacy notify to one triggering compact manifest", async () => {
-      const jobId = "notify-test-1";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-      await isolatedToolDef.execute(
-        "call-1",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-      control.resolve(SUCCESS_RESULT);
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      const content = sentMessageAt(api, 0).content;
-      expect(content).toContain(jobId);
-      expect(content).toContain("get_subagent_result");
-      expect(content).not.toContain(SUCCESS_RESULT.output);
-      expect(sentMessageOptsAt(api, 0).triggerTurn).toBe(true);
-      expect(api.notify).not.toHaveBeenCalled();
-    });
-
+  describe("coordinated completion notices", () => {
     it("retries a transient durable completion notice failure", async () => {
-      const jobId = "notify-transient-append-failure";
+      const jobId = "completion-transient-append-failure";
       const control = createJobControl();
       let completionAttempts = 0;
       api.appendEntry.mockImplementation((customType: string) => {
@@ -593,15 +382,15 @@ describe("coordinated completion", () => {
       expect(sentMessageAt(api, 0).content).toContain(jobId);
     });
 
-    it("keeps usage out of the compact legacy manifest", async () => {
-      const jobId = "notify-usage";
+    it("keeps usage out of the compact completion manifest", async () => {
+      const jobId = "completion-usage";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
         mockJobResult(jobId, control.jobPromise),
       );
       await isolatedToolDef.execute(
         "call-2",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockCtx(),
@@ -618,62 +407,24 @@ describe("coordinated completion", () => {
     });
   });
 
-  // ── Inject mode ───────────────────────────────────────────────────
-  describe("inject mode", () => {
-    it("maps legacy inject to one compact completion envelope", async () => {
-      const jobId = "inject-test-1";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-      await isolatedToolDef.execute(
-        "call-3",
-        { async: true, task: "test", notifyOnComplete: "inject" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-      control.resolve(SUCCESS_RESULT);
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      const message = sentMessageAt(api, 0);
-      expect(message).toMatchObject({
-        customType: "subagent-manifest",
-        display: false,
-      });
-      expect(message.content).toContain(jobId);
-      expect(message.content).not.toContain(SUCCESS_RESULT.output);
-      expect(sentMessageOptsAt(api, 0)).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(api.notify).not.toHaveBeenCalled();
-    });
-
-    it("defers a legacy inject completion while the parent is streaming", async () => {
+  describe("coordinated completion scheduling", () => {
+    it("defers each completion while the parent is streaming", async () => {
       scope.parentStreaming = true;
-      const jobId = "inject-cap";
+      const jobId = "completion-deferred";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
         mockJobResult(jobId, control.jobPromise),
       );
       await isolatedToolDef.execute(
         "call-4",
-        {
-          async: true,
-          task: "test",
-          notifyOnComplete: "inject",
-          triggerTurnOnComplete: true,
-        },
+        { async: true, task: "test", completionPolicy: "each" },
         undefined,
         undefined,
         mockCtx(),
       );
       control.resolve(SUCCESS_RESULT);
       await vi.waitFor(() => {
-        expect(jobRegistry.get(jobId)?.status).toBe("done");
+        expect(scope.inProcessJobs.get(jobId)?.status).toBe("done");
       });
       expect(api.sendMessage).not.toHaveBeenCalled();
 
@@ -686,17 +437,17 @@ describe("coordinated completion", () => {
       });
     });
 
-    it("allows sequential legacy completions after each parent settlement", async () => {
+    it("allows sequential each completions after each parent settlement", async () => {
       const completions = 6;
       for (let index = 0; index < completions; index++) {
-        const jobId = `inject-sequential-${index}`;
+        const jobId = `each-sequential-${index}`;
         const control = createJobControl();
         mockStartSubagentJob.mockImplementationOnce(() =>
           mockJobResult(jobId, control.jobPromise),
         );
         await isolatedToolDef.execute(
           `call-sequential-${index}`,
-          { async: true, task: "test", notifyOnComplete: "inject" },
+          { async: true, task: "test", completionPolicy: "each" },
           undefined,
           undefined,
           mockCtx(),
@@ -714,7 +465,7 @@ describe("coordinated completion", () => {
       const control = createJobControl();
       const parentSessionManager = {
         getSessionId: () => "parent-session",
-        getEntries: () => [],
+        // This lightweight host has no observable session-entry ledger.
       };
       const parentSessionStart = api.on.mock.calls.find(
         ([eventName]: any[]) => eventName === "session_start",
@@ -736,8 +487,7 @@ describe("coordinated completion", () => {
         {
           async: true,
           task: "test",
-          notifyOnComplete: "inject",
-          triggerTurnOnComplete: true,
+          completionPolicy: "each",
         },
         undefined,
         undefined,
@@ -755,7 +505,6 @@ describe("coordinated completion", () => {
           ui: { notify: child.api.notify },
           sessionManager: {
             getSessionId: () => "child-session",
-            getEntries: () => [],
           },
         },
       );
@@ -766,7 +515,7 @@ describe("coordinated completion", () => {
 
       control.resolve(SUCCESS_RESULT);
       await vi.waitFor(() => {
-        expect(jobRegistry.get(jobId)?.status).toBe("done");
+        expect(scope.inProcessJobs.get(jobId)?.status).toBe("done");
       });
       const status = await statusToolDef.execute(
         "nested-context-status",
@@ -788,33 +537,6 @@ describe("coordinated completion", () => {
       });
       expect(api.notify).not.toHaveBeenCalled();
       expect(child.api.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("uses fallback text when output is empty in inject mode", async () => {
-      const jobId = "inject-empty";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-
-      await isolatedToolDef.execute(
-        "call-5",
-        { async: true, task: "test", notifyOnComplete: "inject" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      control.resolve(EMPTY_OUTPUT_RESULT);
-
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      expect(sentMessageAt(api, 0).content).toContain(jobId);
-      expect(sentMessageAt(api, 0).content).not.toContain(
-        "(sub-agent produced no output)",
-      );
     });
   });
 
@@ -852,7 +574,7 @@ describe("coordinated completion", () => {
 
   // ── Suppression gates ─────────────────────────────────────────────
   describe("suppression gates", () => {
-    it("does NOT deliver notification when job is cancelled before completion", async () => {
+    it("does not publish completion for a cancelled job", async () => {
       const jobId = "cancel-suppress";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
@@ -861,7 +583,7 @@ describe("coordinated completion", () => {
 
       await isolatedToolDef.execute(
         "call-6",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockCtx(),
@@ -869,7 +591,7 @@ describe("coordinated completion", () => {
 
       // Mark the job as cancelled BEFORE resolving the promise.
       // The .then() handler checks jobState.status === "cancelled" and returns early.
-      const jobState = jobRegistry.get(jobId)!;
+      const jobState = scope.inProcessJobs.get(jobId)!;
       expect(jobState).toBeDefined();
       jobState.status = "cancelled";
 
@@ -881,70 +603,16 @@ describe("coordinated completion", () => {
         () => {
           expect(api.sendMessage).toHaveBeenCalledTimes(0);
           expect(api.sendUserMessage).toHaveBeenCalledTimes(0);
+          expect(api.appendEntry).not.toHaveBeenCalled();
         },
         { timeout: 50 },
       );
-    });
-
-    it("does not let the legacy resultRetrieved flag suppress coordinated delivery", async () => {
-      const jobId = "retrieve-suppress";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-      await isolatedToolDef.execute(
-        "call-7",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-      const jobState = jobRegistry.get(jobId)!;
-      jobState.resultRetrieved = true;
-      control.resolve(SUCCESS_RESULT);
-
-      await vi.waitFor(() => {
-        expect(jobState.status).toBe("done");
-        expect(api.sendMessage).toHaveBeenCalledOnce();
-      });
-      expect(api.appendEntry).toHaveBeenCalledWith(
-        "subagentura-completion",
-        expect.objectContaining({ sourceId: jobId }),
-      );
-      expect(api.notify).not.toHaveBeenCalled();
-    });
-
-    it("maps legacy inject retrieval flags to coordinated delivery", async () => {
-      const jobId = "retrieve-inject-suppress";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-      await isolatedToolDef.execute(
-        "call-8",
-        { async: true, task: "test", notifyOnComplete: "inject" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-      const jobState = jobRegistry.get(jobId)!;
-      jobState.resultRetrieved = true;
-      control.resolve(SUCCESS_RESULT);
-
-      await vi.waitFor(() => {
-        expect(jobState.status).toBe("done");
-        expect(api.sendMessage).toHaveBeenCalledOnce();
-      });
-      expect(sentMessageAt(api, 0).content).not.toContain(
-        SUCCESS_RESULT.output,
-      );
-      expect(api.notify).not.toHaveBeenCalled();
     });
   });
 
   // ── Error handling ────────────────────────────────────────────────
   describe("error handling", () => {
-    it("includes error message in notification when sub-agent returns isError", async () => {
+    it("publishes an error completion when the job returns an error", async () => {
       const jobId = "error-result";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
@@ -953,7 +621,7 @@ describe("coordinated completion", () => {
 
       await isolatedToolDef.execute(
         "call-9",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockCtx(),
@@ -971,7 +639,7 @@ describe("coordinated completion", () => {
       expect(content).not.toContain(ERROR_RESULT.errorMessage);
     });
 
-    it("delivers notification via promise rejection handler when the job promise rejects", async () => {
+    it("publishes an error completion when the job promise rejects", async () => {
       const jobId = "promise-reject";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
@@ -980,7 +648,7 @@ describe("coordinated completion", () => {
 
       await isolatedToolDef.execute(
         "call-10",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockCtx(),
@@ -1001,9 +669,9 @@ describe("coordinated completion", () => {
   });
 
   // ── Default delivery ──────────────────────────────────────────────
-  describe("default delivery", () => {
-    it("delivers a compact reference and triggers by default", async () => {
-      const jobId = "no-notify";
+  describe("default each completion", () => {
+    it("publishes a compact each manifest by default", async () => {
+      const jobId = "default-each";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
         mockJobResult(jobId, control.jobPromise),
@@ -1033,67 +701,7 @@ describe("coordinated completion", () => {
 
   // ── Edge cases ────────────────────────────────────────────────────
   describe("edge cases", () => {
-    it("fires notification with fallback message when output is empty in notify mode", async () => {
-      const jobId = "empty-output-notify";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-
-      await isolatedToolDef.execute(
-        "call-13",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      // Empty output — NOT ZERO_USAGE_RESULT which has output "Done"
-      control.resolve(EMPTY_OUTPUT_RESULT);
-
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      const content = sentMessageAt(api, 0).content;
-      expect(content).toContain('"status":"done"');
-      expect(content).toContain(jobId);
-      expect(content).toContain("done");
-    });
-
-    it("sanitizes sensitive tokens in notification content via errorMessage", async () => {
-      const jobId = "sanitize";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-
-      await isolatedToolDef.execute(
-        "call-14",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      // Use isError: true result where errorMessage contains an API key
-      // This ensures sanitizeOutput actually runs (it runs on errorMessage for isError results)
-      control.resolve(SECRET_ERROR_RESULT);
-
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      const content = sentMessageAt(api, 0).content;
-      // The raw secret must NOT appear in the output
-      expect(content).not.toContain(
-        "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz1234567890",
-      );
-      expect(content).not.toContain("[REDACTED]");
-      expect(content).toContain(jobId);
-    });
-
-    it("handles multiple concurrent async subagents with independent notifications", async () => {
+    it("coalesces multiple concurrent async completions in one manifest", async () => {
       const jobId1 = "multi-1";
       const jobId2 = "multi-2";
       const control1 = createJobControl();
@@ -1111,14 +719,14 @@ describe("coordinated completion", () => {
       await Promise.all([
         isolatedToolDef.execute(
           "call-15",
-          { async: true, task: "test-1", notifyOnComplete: "notify" },
+          { async: true, task: "test-1" },
           undefined,
           undefined,
           mockCtx(),
         ),
         isolatedToolDef.execute(
           "call-16",
-          { async: true, task: "test-2", notifyOnComplete: "notify" },
+          { async: true, task: "test-2" },
           undefined,
           undefined,
           mockCtx(),
@@ -1154,7 +762,7 @@ describe("coordinated completion", () => {
 
       await isolatedToolDef.execute(
         "call-stale-pi",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockCtx(),
@@ -1167,13 +775,13 @@ describe("coordinated completion", () => {
       await vi.waitFor(
         () => {
           expect(api.sendMessage).toHaveBeenCalledTimes(0);
-          expect(api.notify).toHaveBeenCalledTimes(0);
+          expect(api.appendEntry).not.toHaveBeenCalled();
         },
         { timeout: 50 },
       );
     });
 
-    it("delivers notification even when ctx is stale (ui.setStatus throws)", async () => {
+    it("continues coordinated delivery when the UI status update throws", async () => {
       const jobId = "stale-ctx";
       const control = createJobControl();
       mockStartSubagentJob.mockImplementationOnce(() =>
@@ -1185,7 +793,7 @@ describe("coordinated completion", () => {
       // continues through the coordinated delivery path.
       await isolatedToolDef.execute(
         "call-stale-ctx",
-        { async: true, task: "test", notifyOnComplete: "notify" },
+        { async: true, task: "test" },
         undefined,
         undefined,
         mockStaleCtx(),
@@ -1200,39 +808,6 @@ describe("coordinated completion", () => {
       const content = sentMessageAt(api, 0).content;
       expect(content).toContain('"status":"done"');
       expect(content).toContain(jobId);
-    });
-
-    it("delivers notification before resultRetrieved can suppress it when get_subagent_result is called after settlement", async () => {
-      const jobId = "race-delivers";
-      const control = createJobControl();
-      mockStartSubagentJob.mockImplementationOnce(() =>
-        mockJobResult(jobId, control.jobPromise),
-      );
-
-      await isolatedToolDef.execute(
-        "call-race",
-        { async: true, task: "test", notifyOnComplete: "notify" },
-        undefined,
-        undefined,
-        mockCtx(),
-      );
-
-      // Resolve the promise — .then() callback is queued as a microtask
-      control.resolve(SUCCESS_RESULT);
-
-      // Wait for the .then() microtask to fire and deliver the notification
-      await vi.waitFor(() => {
-        expect(api.sendMessage).toHaveBeenCalledTimes(1);
-      });
-
-      // By now, the notification was already delivered because .then()
-      // fires before get_subagent_result can set resultRetrieved.
-      // Simulate get_subagent_result being called now (after settlement).
-      const jobState = jobRegistry.get(jobId)!;
-      jobState.resultRetrieved = true;
-
-      // No double delivery — notificationDelivered guard prevents it
-      expect(api.sendMessage).toHaveBeenCalledTimes(1);
     });
   });
 });

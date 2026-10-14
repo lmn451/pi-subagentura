@@ -15,7 +15,6 @@
  *   - `SubagentResult`
  *   - `SubagentLiveStatus`
  *   - `ACTIVE_TOOL_DEBOUNCE_MS`
- *   - `jobRegistry`
  *   - `MAX_REGISTRY_SIZE`
  *   - `pruneOldestJob`
  *   - `pruneCompletedJobs`
@@ -23,7 +22,6 @@
  *   - `startSubagentJob`
  *   - `JobState`          (type-only, erased at runtime)
  *   - `JobStatus`         (type-only, erased at runtime)
- *   - `interactiveSubagentRegistry`
  *   - `pollArtifactChanges`
  *   - `findArtifactById`
  *
@@ -62,8 +60,6 @@ const RUNTIME_EXPORTS = [
   "SubagentResult",
   "findArtifactById",
   "formatUsage",
-  "interactiveSubagentRegistry",
-  "jobRegistry",
   "pollArtifactChanges",
   "pruneCompletedJobs",
   "pruneOldestJob",

@@ -36,7 +36,6 @@ import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import {
   captureInteractiveSubagent,
   focusInteractiveSubagent,
-  interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
@@ -48,7 +47,8 @@ import {
   supervisorStatusLines,
 } from "../src/interactive-supervisor-registration";
 import type { CancelSubtreeResult } from "../src/interactive-lineage";
-import { jobRegistry, type JobState } from "../src/helpers";
+import type { JobState } from "../src/helpers";
+import { createTestSessionScope } from "./session-scope-fixture";
 import {
   workflowJobRegistry,
   type WorkflowJobState,
@@ -165,6 +165,10 @@ const savedLineageEnv: Record<string, string | undefined> = {};
 async function lineageHarness(rootId: string) {
   const sessionRoot = tempDir();
   const paths = await resolveLineageStorePaths(sessionRoot, rootId);
+  const scope = createTestSessionScope({
+    sessionManager: { getSessionId: () => rootId },
+    spawnTreeContext: createRootSpawnTreeContext(rootId, sessionRoot),
+  });
   let commandHandler: ((args: string, ctx: any) => Promise<void>) | undefined;
   registerInteractiveSupervisor(
     {
@@ -173,13 +177,14 @@ async function lineageHarness(rootId: string) {
       },
       registerShortcut: vi.fn(),
     } as never,
-    undefined,
+    scope,
     createRootSpawnTreeContext(rootId, sessionRoot),
   );
 
   return {
     sessionRoot,
     paths,
+    scope,
     async writeNode(
       agentId: string,
       options: {
@@ -252,8 +257,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  interactiveSubagentRegistry.clear();
-  jobRegistry.clear();
   workflowJobRegistry.clear();
   clearSessionScopes();
   __resetMuxInstances();
@@ -286,14 +289,27 @@ afterAll(() => {
 });
 
 describe("interactive supervisor", () => {
+  it("requires an explicit item provider without leaking a registered peer", () => {
+    const peer = createTestSessionScope();
+    const item = state("peer", { sessionOwner: sessionOwner(peer) });
+    peer.interactiveStates.set(item.id, item);
+    const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+
+    expect(component.render(120).join("\n")).toContain("No async subagents.");
+    expect(component.render(120).join("\n")).not.toContain(item.name);
+    expect(peer.interactiveStates.get(item.id)).toBe(item);
+  });
+
   it("renders bounded summaries and activity", () => {
     const item = state("abcdef12", {
       name: "reader",
       lastToolSummary: "reading a very long and important source file",
     });
-    interactiveSubagentRegistry.set(item.id, item);
     const component = new InteractiveSupervisorComponent({
       done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
     });
 
     const lines = component.render(72);
@@ -830,8 +846,6 @@ describe("interactive supervisor", () => {
     const otherWorkflow = workflowJob("other-workflow", {
       parentSessionOwner: otherOwner,
     });
-    jobRegistry.set(processJob.id, processJob);
-    jobRegistry.set(otherProcessJob.id, otherProcessJob);
     workflowJobRegistry.set(workflow.id, workflow);
     workflowJobRegistry.set(otherWorkflow.id, otherWorkflow);
     const interactive = state("owned-interactive", {
@@ -842,8 +856,6 @@ describe("interactive supervisor", () => {
       sessionOwner: otherOwner,
       parentSessionId: "other-parent-session",
     });
-    interactiveSubagentRegistry.set(interactive.id, interactive);
-    interactiveSubagentRegistry.set(otherInteractive.id, otherInteractive);
     scope.inProcessJobs.set(processJob.id, processJob);
     otherScope.inProcessJobs.set(otherProcessJob.id, otherProcessJob);
     scope.interactiveStates.set(interactive.id, interactive);
@@ -925,9 +937,6 @@ describe("interactive supervisor", () => {
         sessionScopeGeneration: owner.generation,
       },
     });
-    jobRegistry.set(processA.id, processA);
-    jobRegistry.set(processB.id, processB);
-    jobRegistry.set(standalone.id, standalone);
     scope.inProcessJobs.set(processA.id, processA);
     scope.inProcessJobs.set(processB.id, processB);
     scope.inProcessJobs.set(standalone.id, standalone);
@@ -947,7 +956,6 @@ describe("interactive supervisor", () => {
       sessionOwner: owner,
     });
     for (const item of [interactiveA, interactiveB, standaloneInteractive]) {
-      interactiveSubagentRegistry.set(item.id, item);
       scope.interactiveStates.set(item.id, item);
     }
 
@@ -987,7 +995,6 @@ describe("interactive supervisor", () => {
       workflowId: workflow.id,
       completionOwner: "workflow",
     });
-    interactiveSubagentRegistry.set(child.id, child);
     scope.interactiveStates.set(child.id, child);
     const items = buildAsyncSupervisorItems(
       directSupervisorItems(undefined, owner),
@@ -1018,7 +1025,6 @@ describe("interactive supervisor", () => {
       workflowId: workflow.id,
       completionOwner: "workflow",
     });
-    interactiveSubagentRegistry.set(child.id, child);
     scope.interactiveStates.set(child.id, child);
 
     const items = buildAsyncSupervisorItems(
@@ -1055,7 +1061,6 @@ describe("interactive supervisor", () => {
       workflowId: "wf-already-gone",
       completionOwner: "workflow",
     });
-    interactiveSubagentRegistry.set(orphanInteractive.id, orphanInteractive);
     const orphanProcess = inProcessJob("orphan-process", {
       workflowId: "wf-already-gone",
       completionOwner: "workflow",
@@ -1065,7 +1070,6 @@ describe("interactive supervisor", () => {
         sessionScopeGeneration: owner.generation,
       },
     });
-    jobRegistry.set(orphanProcess.id, orphanProcess);
     scope.interactiveStates.set(orphanInteractive.id, orphanInteractive);
     scope.inProcessJobs.set(orphanProcess.id, orphanProcess);
 
@@ -1102,12 +1106,10 @@ describe("interactive supervisor", () => {
         sessionScopeGeneration: owner.generation,
       },
     });
-    jobRegistry.set(youngProcess.id, youngProcess);
     const oldInteractive = state("interactive-old", {
       startedAt: 1,
       sessionOwner: owner,
     });
-    interactiveSubagentRegistry.set(oldInteractive.id, oldInteractive);
     scope.inProcessJobs.set(youngProcess.id, youngProcess);
     scope.interactiveStates.set(oldInteractive.id, oldInteractive);
 
@@ -1123,8 +1125,13 @@ describe("interactive supervisor", () => {
   });
 
   it("navigates, expands, refreshes, and closes without cancelling", () => {
-    interactiveSubagentRegistry.set("one", state("one"));
-    interactiveSubagentRegistry.set("two", state("two"));
+    const scope = createTestSessionScope();
+    for (const id of ["one", "two"]) {
+      scope.interactiveStates.set(
+        id,
+        state(id, { sessionOwner: sessionOwner(scope) }),
+      );
+    }
     const done = vi.fn();
     const cancel = vi.fn();
     const requestRender = vi.fn();
@@ -1132,6 +1139,7 @@ describe("interactive supervisor", () => {
       done,
       cancel,
       requestRender,
+      items: () => directSupervisorItems(undefined, sessionOwner(scope)),
     });
 
     component.handleInput("j");
@@ -1168,8 +1176,12 @@ describe("interactive supervisor", () => {
         processStatus: "done",
       },
     });
-    interactiveSubagentRegistry.set(item.id, item);
-    const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
+    });
 
     // Artifact previews are read on the async refresh path, never in render().
     component.handleInput("\r");
@@ -1201,8 +1213,12 @@ describe("interactive supervisor", () => {
     writeFileSync(join(real, "output.md"), "secret through a symlink");
     symlinkSync(join(real, "output.md"), join(artifactDir, "output.md"));
     const item = state("symlinked", { artifactDir });
-    interactiveSubagentRegistry.set(item.id, item);
-    const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
+    });
 
     component.handleInput("\r");
     await vi.waitFor(() => {
@@ -1331,26 +1347,32 @@ describe("interactive supervisor", () => {
     expect(formatSupervisorSummary(item, Date.now())).not.toContain("NaN");
   });
 
-  it("closes every open overlay, not just the most recent one", async () => {
+  it("fails closed for ownerless close and closes every exact-owner overlay", async () => {
     const firstDone = vi.fn();
     const secondDone = vi.fn();
+    const owner = sessionOwner(createTestSessionScope());
     const openOverlay = (done: () => void) =>
-      showInteractiveSupervisor({
-        custom: async (factory: Function) => {
-          factory({ requestRender: vi.fn() }, undefined, undefined, done);
-          // Stay open until the shutdown hook closes us.
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          return { kind: "close" };
-        },
-        notify: vi.fn(),
-      } as never);
+      showInteractiveSupervisor(
+        {
+          custom: async (factory: Function) => {
+            factory({ requestRender: vi.fn() }, undefined, undefined, done);
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            return { kind: "close" };
+          },
+          notify: vi.fn(),
+        } as never,
+        {},
+        owner,
+      );
 
     const first = openOverlay(firstDone);
     const second = openOverlay(secondDone);
     await Promise.resolve();
     closeActiveInteractiveSupervisor();
+    expect(firstDone).not.toHaveBeenCalled();
+    expect(secondDone).not.toHaveBeenCalled();
+    closeActiveInteractiveSupervisor(owner);
     await Promise.all([first, second]);
-
     expect(firstDone).toHaveBeenCalledWith({ kind: "close" });
     expect(secondDone).toHaveBeenCalledWith({ kind: "close" });
   });
@@ -1390,9 +1412,12 @@ describe("interactive supervisor", () => {
 
   it("shows mux-native return controls with focus details", () => {
     const renderDetails = (item: InteractiveSubagentState): string => {
-      interactiveSubagentRegistry.clear();
-      interactiveSubagentRegistry.set(item.id, item);
-      const component = new InteractiveSupervisorComponent({ done: vi.fn() });
+      const component = new InteractiveSupervisorComponent({
+        done: vi.fn(),
+        items: () => [
+          { kind: "interactive", state: item, depth: 0, actionable: true },
+        ],
+      });
       component.handleInput("\r");
       return component.render(160).join("\n");
     };
@@ -1462,12 +1487,18 @@ describe("interactive supervisor", () => {
   });
 
   it("uses the direct cancellation path only for x", () => {
-    interactiveSubagentRegistry.set("one", state("one"));
+    const item = state("one");
     const done = vi.fn();
     const cancel = vi
       .fn()
       .mockReturnValue(state("one", { status: "cancelled" }));
-    const component = new InteractiveSupervisorComponent({ done, cancel });
+    const component = new InteractiveSupervisorComponent({
+      done,
+      cancel,
+      items: () => [
+        { kind: "interactive", state: item, depth: 0, actionable: true },
+      ],
+    });
 
     component.handleInput("x");
 
@@ -1509,18 +1540,23 @@ describe("interactive supervisor", () => {
     const processJob = inProcessJob("registered-job", { abort: processAbort });
     const workflow = workflowJob("registered-workflow");
     const workflowAbort = vi.spyOn(workflow.abort, "abort");
-    jobRegistry.set(processJob.id, processJob);
+    const scope = createTestSessionScope();
+    scope.inProcessJobs.set(processJob.id, processJob);
+    workflow.parentSessionOwner = sessionOwner(scope);
     workflowJobRegistry.set(workflow.id, workflow);
     let commandHandler: ((args: string, ctx: any) => Promise<void>) | undefined;
-    registerInteractiveSupervisor({
-      registerCommand: (
-        _name: string,
-        command: { handler: typeof commandHandler },
-      ) => {
-        commandHandler = command.handler;
-      },
-      registerShortcut: vi.fn(),
-    } as never);
+    registerInteractiveSupervisor(
+      {
+        registerCommand: (
+          _name: string,
+          command: { handler: typeof commandHandler },
+        ) => {
+          commandHandler = command.handler;
+        },
+        registerShortcut: vi.fn(),
+      } as never,
+      scope,
+    );
     const custom = vi.fn(async (factory: Function) => {
       const component = factory(
         { requestRender: vi.fn() },
@@ -1607,13 +1643,15 @@ describe("interactive supervisor", () => {
 
   it("hides exited registry children and ignores cancellation input", () => {
     const exited = state("exited-child", { status: "exited" });
-    interactiveSubagentRegistry.set(exited.id, exited);
     const cancel = vi.fn();
     const notify = vi.fn();
     const component = new InteractiveSupervisorComponent({
       done: vi.fn(),
       cancel,
       notify,
+      items: () => [
+        { kind: "interactive", state: exited, depth: 0, actionable: false },
+      ],
     });
 
     expect(component.render(120).join("\n")).not.toContain(exited.name);
@@ -1653,7 +1691,11 @@ describe("interactive supervisor", () => {
       artifactDir,
     });
     const getPaneLivenessAsync = vi.fn().mockResolvedValue("alive");
-    interactiveSubagentRegistry.set(exited.id, exited);
+    const scope = createTestSessionScope({
+      sessionManager: { getSessionId: () => rootId },
+      spawnTreeContext: createRootSpawnTreeContext(rootId, sessionRoot),
+    });
+    scope.interactiveStates.set(exited.id, exited);
     __setTmuxMultiplexer({
       getPaneLivenessAsync,
       getPaneLiveness: vi.fn().mockReturnValue("dead"),
@@ -1670,7 +1712,7 @@ describe("interactive supervisor", () => {
         },
         registerShortcut: vi.fn(),
       } as never,
-      undefined,
+      scope,
       createRootSpawnTreeContext(rootId, sessionRoot),
     );
     const custom = vi.fn(async (factory: Function) => {
@@ -1912,17 +1954,22 @@ describe("interactive supervisor", () => {
 
   it("requires confirmation before the registered subtree action runs", async () => {
     const root = state("root");
-    interactiveSubagentRegistry.set(root.id, root);
+    const scope = createTestSessionScope();
+    root.sessionOwner = sessionOwner(scope);
+    scope.interactiveStates.set(root.id, root);
     let commandHandler: ((args: string, ctx: any) => Promise<void>) | undefined;
-    registerInteractiveSupervisor({
-      registerCommand: (
-        _name: string,
-        command: { handler: typeof commandHandler },
-      ) => {
-        commandHandler = command.handler;
-      },
-      registerShortcut: vi.fn(),
-    } as never);
+    registerInteractiveSupervisor(
+      {
+        registerCommand: (
+          _name: string,
+          command: { handler: typeof commandHandler },
+        ) => {
+          commandHandler = command.handler;
+        },
+        registerShortcut: vi.fn(),
+      } as never,
+      scope,
+    );
     const confirm = vi.fn().mockResolvedValue(false);
     const custom = vi.fn(async (factory: Function) => {
       const component = factory(
@@ -1943,7 +1990,7 @@ describe("interactive supervisor", () => {
       "Cancel interactive subagent subtree?",
       expect.stringContaining("retains artifacts"),
     );
-    expect(interactiveSubagentRegistry.has(root.id)).toBe(true);
+    expect(scope.interactiveStates.has(root.id)).toBe(true);
   });
 
   it("does not authorize lineage projection from ambient environment alone", async () => {
@@ -1975,12 +2022,18 @@ describe("interactive supervisor", () => {
       }),
     } as never);
     let commandHandler: ((args: string, ctx: any) => Promise<void>) | undefined;
-    registerInteractiveSupervisor({
-      registerCommand: (_name: string, command: { handler: any }) => {
-        commandHandler = command.handler;
-      },
-      registerShortcut: vi.fn(),
-    } as never);
+    const scope = createTestSessionScope({
+      sessionManager: { getSessionId: () => rootId },
+    });
+    registerInteractiveSupervisor(
+      {
+        registerCommand: (_name: string, command: { handler: any }) => {
+          commandHandler = command.handler;
+        },
+        registerShortcut: vi.fn(),
+      } as never,
+      scope,
+    );
     let rendered = "";
     await commandHandler?.("", {
       sessionManager: { getSessionId: () => rootId },
@@ -2013,7 +2066,7 @@ describe("interactive supervisor", () => {
     await harness.writeNode("unknown", { paneId: "%unknown" });
     await harness.writeNode("dead", { paneId: "%dead" });
     for (const id of ["alive", "unknown", "dead"]) {
-      interactiveSubagentRegistry.set(id, state(id, { status: "exited" }));
+      harness.scope.interactiveStates.set(id, state(id, { status: "exited" }));
     }
     const getPaneLivenessAsync = vi.fn(async (paneId: string) =>
       paneId === "%dead" ? "dead" : paneId === "%unknown" ? "unknown" : "alive",
@@ -2176,7 +2229,10 @@ describe("interactive supervisor", () => {
         },
         registerShortcut: vi.fn(),
       } as never,
-      undefined,
+      createTestSessionScope({
+        sessionManager: { getSessionId: () => "failing-root" },
+        spawnTreeContext: createRootSpawnTreeContext("failing-root", file),
+      }),
       createRootSpawnTreeContext("failing-root", file),
     );
     try {

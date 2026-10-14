@@ -10,19 +10,20 @@ import {
   readOutputForTurnId,
   writeOutput,
 } from "../src/artifact";
-import { pollArtifactChanges } from "../src/artifact-poller";
-import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
-import { __setTmuxMultiplexer } from "../src/multiplexer";
-import { registerCompletionCoordinator } from "../src/completion-coordinator";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
+import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { pollArtifactChanges } from "../src/artifact-poller";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  sessionOwner,
+} from "../src/session-scope";
+import { registerCompletionCoordinator } from "../src/completion-coordinator";
 
 const roots: string[] = [];
 
 afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
-  interactiveSubagentRegistry.clear();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true });
   clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
@@ -123,14 +124,13 @@ describe("protocol-v2 artifact delivery", () => {
     });
     const state = makeState(art.dir);
     scope.interactiveStates.set(state.id, state);
-    interactiveSubagentRegistry.set(state.id, state);
     registerCompletionCoordinator(pi as any, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await pollArtifactChanges(pi as any, { id: 501, generation: 1 });
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
 
     expect(entries).toEqual([
       expect.objectContaining({
@@ -195,13 +195,12 @@ describe("protocol-v2 artifact delivery", () => {
       completionOwner: "workflow" as const,
     };
     scope.interactiveStates.set(state.id, state);
-    interactiveSubagentRegistry.set(state.id, state);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
     } as any);
 
-    await pollArtifactChanges(pi as any, { id: 502, generation: 1 });
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
 
     expect(entries).toEqual([]);
     expect(state.pendingDeliveries).toEqual([]);

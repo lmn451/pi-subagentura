@@ -17,10 +17,13 @@ import {
   workflowJobRegistry,
   type WorkflowJobState,
 } from "../src/workflow-jobs";
+import { clearSessionScopes, sessionOwner } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 describe("async workflow rejection accounting", () => {
   afterEach(() => {
     workflowJobRegistry.clear();
+    clearSessionScopes();
     vi.clearAllMocks();
   });
 
@@ -51,6 +54,7 @@ describe("async workflow rejection accounting", () => {
         }
       | undefined;
 
+    const scope = createTestSessionScope();
     const job = startWorkflowJob(
       "priced-failure",
       `export const meta = { name: "priced-failure", description: "d" };\nthrow new Error("boom");`,
@@ -70,6 +74,7 @@ describe("async workflow rejection accounting", () => {
         };
         return true;
       },
+      sessionOwner(scope),
     );
 
     job.abort.abort(new Error("cancelled by test"));

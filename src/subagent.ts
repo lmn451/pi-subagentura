@@ -175,7 +175,6 @@ export {
   SubagentLiveStatus,
   ACTIVE_TOOL_DEBOUNCE_MS,
   // ── Async job machinery ──
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneOldestJob,
   pruneCompletedJobs,
@@ -184,8 +183,6 @@ export {
   type JobState,
   type JobStatus,
 } from "./helpers";
-/** @internal Interactive-subagent registry, consumed by session-handlers and tests */
-export { interactiveSubagentRegistry } from "./interactive-tmux";
 /** @internal Artifact-change poller; exported for test access */
 export { pollArtifactChanges } from "./artifact-poller";
 /** @internal Interactive-artifact lookup; exported for test access */

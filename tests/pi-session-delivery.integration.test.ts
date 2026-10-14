@@ -1,20 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   artifactPath,
-  appendCompletionEvent,
   listOutputHistory,
   readEventRecords,
   writeOutput,
 } from "../src/artifact";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import {
+  clearSessionScopes,
   getSessionScopes,
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
 import { writeCliScript } from "../src/subagent-artifact-cli";
-import { normalizeProviderContext } from "../src/pi-sdk-compat";
 import {
   createPiSessionHarness,
   type PiSessionHarness,
@@ -30,7 +28,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { appendDeterministicTurn } from "./helpers/deterministic-artifacts";
 import {
   registerInProcessJob,
   removeInProcessJob,
@@ -38,14 +35,6 @@ import {
   type SubagentResult,
 } from "../src/helpers";
 import { sessionLedgerPath } from "../src/completion-ledger";
-import {
-  ORCHESTRATOR_V2_WAKE_DETAIL_KEY,
-  ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
-  ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS,
-  ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS,
-  ORCHESTRATOR_V2_WAKEUP_MESSAGE,
-  clearCompletionTurnWake,
-} from "../src/completion-turn";
 
 import {
   clearCompletionCoordinator,
@@ -64,7 +53,7 @@ afterEach(() => {
   for (const root of artifactRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
 

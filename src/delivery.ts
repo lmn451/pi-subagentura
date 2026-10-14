@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import isPathInside from "is-path-inside";
 import { MAX_DELIVERY_RECEIPTS, updateInteractiveStates } from "./artifact";
 import type {
   PersistedDeliveryIntent,
@@ -18,24 +17,14 @@ import {
 } from "./completion-coordinator";
 import {
   interactiveStateBelongsToOwner,
-  ownerlessEntitiesVisible,
   resolveLiveSessionScope,
   type SessionOwnerToken,
 } from "./session-scope";
-import { inProcessJobOwner, inProcessJobsForOwner } from "./helpers";
 
 export const MAX_DELIVERY_RECORDS = 32;
 export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
 
-interface DeliveryGlobalState {
-  __piSubagenturaInteractiveRegistry?: Map<string, InteractiveSubagentState>;
-  __piSubagenturaSessionManager?: { getEntries?: () => unknown[] };
-}
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
-
-function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
-  return globalThis as typeof globalThis & DeliveryGlobalState;
-}
 
 function interactiveStatesForOwner(
   owner?: SessionOwnerToken,
@@ -46,46 +35,7 @@ function interactiveStatesForOwner(
       EMPTY_INTERACTIVE_STATES
     );
   }
-  if (!ownerlessEntitiesVisible()) return EMPTY_INTERACTIVE_STATES;
-  return (
-    deliveryGlobals().__piSubagenturaInteractiveRegistry?.values() ??
-    EMPTY_INTERACTIVE_STATES
-  );
-}
-
-function runningInProcessJobCount(owner?: SessionOwnerToken): number {
-  return [...inProcessJobsForOwner(owner).values()].filter(
-    (job) =>
-      job.status === "running" &&
-      (owner !== undefined || !inProcessJobOwner(job)),
-  ).length;
-}
-
-function runningInProcessJobsNote(owner?: SessionOwnerToken): string {
-  const remaining = runningInProcessJobCount(owner);
-  if (remaining <= 0) return "";
-  const noun = remaining === 1 ? "job" : "jobs";
-  const verb = remaining === 1 ? "is" : "are";
-  return `${remaining} in-process sub-agent ${noun} ${verb} still running\nDo not claim all review work is complete yet`;
-}
-
-function appendRunningJobsNote(
-  content: string,
-  owner?: SessionOwnerToken,
-): string {
-  const note = runningInProcessJobsNote(owner);
-  return note ? `${content}\n${note}` : content;
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  let truncated = Buffer.from(value, "utf8")
-    .subarray(0, Math.max(0, maxBytes - 3))
-    .toString("utf8");
-  while (Buffer.byteLength(`${truncated}…`, "utf8") > maxBytes) {
-    truncated = truncated.slice(0, -1);
-  }
-  return `${truncated}…`;
+  return EMPTY_INTERACTIVE_STATES;
 }
 
 function compactDeliveryReceipts(state: InteractiveSubagentState): void {
@@ -384,9 +334,9 @@ export function reconcileDeliveryReceipts(
 }
 
 export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
-  const entries = owner
-    ? resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.()
-    : deliveryGlobals().__piSubagenturaSessionManager?.getEntries?.();
+  if (!owner) return;
+  const entries =
+    resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
   const changedStates: InteractiveSubagentState[] = [];
   for (const state of interactiveStatesForOwner(owner)) {

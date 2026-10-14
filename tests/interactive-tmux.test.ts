@@ -34,6 +34,8 @@ import {
 } from "../src/spawn-tree-context";
 
 import { loadInteractiveStates } from "../src/artifact";
+import { createTestSessionScope } from "./session-scope-fixture";
+import { clearSessionScopes, type SessionScope } from "../src/session-scope";
 /** Standard tmux pane id returned by mocks when "new-window"/"split-window" is called. */
 const MOCK_PANE_ID = "%42";
 /** Tab-separated session/window/pane — matches real tmux #{...} format. */
@@ -116,9 +118,10 @@ function makeArgs() {
 }
 
 describe("interactive-tmux", () => {
+  let scope: SessionScope;
   beforeEach(() => {
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
+    clearSessionScopes();
+    scope = createTestSessionScope();
     // Tests may run inside a live child; never let fixtures mutate its lineage.
     delete process.env.PI_SUBAGENTURA_AGENT_ID;
     delete process.env.PI_SUBAGENTURA_ROOT_ID;
@@ -172,6 +175,37 @@ describe("interactive-tmux", () => {
     expect(isTmuxAvailable()).toBe(false);
   });
 
+  it("rejects an ownerless launch even when a peer session is live", async () => {
+    const tmp = makeTmp();
+    process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+    process.env.TMUX = makeArgs().TMUX;
+    const calls: string[][] = [];
+    installMockExec((_file, args) => {
+      calls.push(args);
+      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+      if (args[0] === "display-message") return MOCK_LOCATION;
+      return "";
+    });
+    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+      "../src/interactive-tmux",
+    );
+
+    expect(() =>
+      mod.launchInteractiveSubagent({
+        name: "Ownerless",
+        task: "must not borrow the peer",
+        cwd: tmp,
+      }),
+    ).toThrow(/requires a live session scope/);
+    expect(scope.lifecycle).toBe("started");
+    expect(scope.interactiveStates.size).toBe(0);
+    expect(
+      calls.some(
+        (args) => args[0] === "new-window" || args[0] === "split-window",
+      ),
+    ).toBe(false);
+  });
+
   it("launches in background mode by default (new-window) and stores window-name attach commands", async () => {
     const tmp = makeTmp();
     process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
@@ -196,6 +230,7 @@ describe("interactive-tmux", () => {
       task: "Run tests",
       persona: "You are a tester",
       cwd: tmp,
+      sessionScope: scope,
     });
 
     expect(state.paneId).toBe(MOCK_PANE_ID);
@@ -225,7 +260,7 @@ describe("interactive-tmux", () => {
     expect(statSync(state.launchScriptFile).mode & 0o777).toBe(0o700);
 
     // Registry has the state.
-    expect(mod.interactiveSubagentRegistry.get(state.id)).toBe(state);
+    expect(scope.interactiveStates.get(state.id)).toBe(state);
 
     // Artifact dir was created and the inline CLI was written.
     expect(state.artifactDir).toBeTruthy();
@@ -259,6 +294,7 @@ describe("interactive-tmux", () => {
     let thrown: unknown;
     try {
       mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Missing cwd",
         task: "should fail before pane creation",
         cwd: missingCwd,
@@ -289,6 +325,7 @@ describe("interactive-tmux", () => {
       "../src/interactive-tmux",
     );
     const state = mod.launchInteractiveSubagent({
+      sessionScope: scope,
       name: "Custom cwd",
       task: "work elsewhere",
       cwd: childCwd,
@@ -325,6 +362,7 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
+      sessionScope: scope,
       name: "Nested",
       task: "spawn recursively",
       cwd: tmp,
@@ -389,6 +427,7 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Too deep",
         task: "fail",
         cwd: tmp,
@@ -430,6 +469,7 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Too many",
         task: "fail",
         cwd: tmp,
@@ -463,6 +503,7 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
+      sessionScope: scope,
       name: "Revived",
       task: "spawn after the tree filled up with dead nodes",
       cwd: tmp,
@@ -500,6 +541,7 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
+      sessionScope: scope,
       name: "Within active cap",
       task: "spawn while a stale ancestor preserves lineage",
       cwd: tmp,
@@ -541,6 +583,7 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Unknown capacity",
         task: "must remain bounded",
         cwd: tmp,
@@ -578,6 +621,7 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Too many",
         task: "fail",
         cwd: tmp,
@@ -609,6 +653,7 @@ describe("interactive-tmux", () => {
       "../src/interactive-tmux",
     );
     const state = mod.launchInteractiveSubagent({
+      sessionScope: scope,
       name: "Demo",
       task: "Run tests",
       cwd: tmp,
@@ -665,6 +710,7 @@ describe("interactive-tmux", () => {
         name: "Demo",
         task: "Run tests",
         cwd: tmp,
+        sessionScope: scope,
       }),
     ).toThrow(/simulated disk full/);
 
@@ -678,7 +724,7 @@ describe("interactive-tmux", () => {
     expect(killedPane).toBe(true);
 
     // Registry should not have the failed sub-agent.
-    expect(mod.interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("kills the pane and aborts launch if persisted state cannot be written", async () => {
@@ -718,6 +764,7 @@ describe("interactive-tmux", () => {
         task: "Run tests",
         cwd: tmp,
         parentSessionId: "parent-session",
+        sessionScope: scope,
       }),
     ).toThrow(/state write failed/);
 
@@ -729,7 +776,7 @@ describe("interactive-tmux", () => {
     );
     expect(killedPane).toBe(true);
     expect(calls.some((args) => args[0] === "send-keys")).toBe(false);
-    expect(mod.interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("readPaneExitCode returns the captured exit code, or null when unset", async () => {
@@ -839,8 +886,8 @@ describe("interactive-tmux", () => {
             completionExitCode: 0,
           },
         };
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      mod.pruneDeadInteractiveSubagents();
+      mod.registerInteractiveSubagentState(state, scope);
+      mod.pruneDeadInteractiveSubagents(scope.interactiveStates.values());
       expect(state.status).toBe("exited");
       expect(state.exitCode).toBe(0);
     }
@@ -866,8 +913,8 @@ describe("interactive-tmux", () => {
           artifactDir: dir,
           lifecycle: { parentCancelled: true },
         };
-      mod.interactiveSubagentRegistry.set(state.id, state);
-      mod.pruneDeadInteractiveSubagents();
+      mod.registerInteractiveSubagentState(state, scope);
+      mod.pruneDeadInteractiveSubagents(scope.interactiveStates.values());
       expect(state.status).toBe("cancelled");
     }
   });
@@ -1193,6 +1240,7 @@ describe("interactive-tmux", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const state = mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "NoPersona",
         task: "x",
         cwd: tmp,
@@ -1232,6 +1280,7 @@ describe("interactive-tmux", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const state = mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Orchestrated",
         task: "x",
         cwd: tmp,
@@ -1261,6 +1310,7 @@ describe("interactive-tmux", () => {
         "../src/interactive-tmux",
       );
       const state = mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "WithPersona",
         task: "x",
         persona: "PERSONA_MARKER",
@@ -1292,6 +1342,7 @@ describe("interactive-tmux", () => {
       let threw = false;
       try {
         mod.launchInteractiveSubagent({
+          sessionScope: scope,
           name: "BigPersona",
           task: "x",
           persona: tooBig,
@@ -1328,6 +1379,7 @@ describe("interactive-tmux", () => {
         "../src/interactive-tmux",
       );
       const state = mod.launchInteractiveSubagent({
+        sessionScope: scope,
         name: "Wire",
         task: "x",
         cwd: tmp,

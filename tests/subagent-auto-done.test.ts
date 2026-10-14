@@ -1,4 +1,5 @@
 /** Protocol-v2 artifact events are authoritative for interactive completion. */
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,10 +32,6 @@ describe("protocol-v2 interactive completion", () => {
       ) => callback(null, "%99\n"),
     }));
     root = makeTmp();
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
-    g.__piSubagenturaUi = undefined;
     clearSessionScopes();
   });
 
@@ -65,7 +62,6 @@ describe("protocol-v2 interactive completion", () => {
       launchScriptFile: join(root, "launch.sh"),
       artifactDir,
     };
-    mod.interactiveSubagentRegistry.set(id, state);
     const artifact = artifactPath(dirname(artifactDir), id);
     appendEvent(artifact, {
       version: 2,
@@ -80,16 +76,15 @@ describe("protocol-v2 interactive completion", () => {
 
     const entries: Array<{ type: string; customType: string; data: unknown }> =
       [];
-    const api = {
-      appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
-      }),
-    };
+    const appendEntry = vi.fn((customType: string, data: unknown) => {
+      entries.push({ type: "custom", customType, data });
+    });
+    const api = { appendEntry } as unknown as ExtensionAPI;
     const scope = registerSessionScope({
       id: 1,
       generation: 0,
       lifecycle: "started",
-      pi: api as any,
+      pi: api,
       sessionManager: {
         getSessionId: () => "parent-session",
         getEntries: () => entries,
@@ -98,18 +93,18 @@ describe("protocol-v2 interactive completion", () => {
     state.parentSessionId = "parent-session";
     scope.interactiveStates.set(id, state);
     const owner = sessionOwner(scope);
-    await mod.pollArtifactChanges(api as any, owner);
+    await mod.pollArtifactChanges(api, owner);
 
     expect(
       readEvents(artifact).filter((event) => event.type === "completion"),
     ).toHaveLength(1);
     expect(state.pendingDeliveries).toHaveLength(0);
-    expect(api.appendEntry).toHaveBeenCalledOnce();
+    expect(appendEntry).toHaveBeenCalledOnce();
     expect(entries[0]).toMatchObject({
       customType: "subagentura-completion",
       data: { completionId: expect.any(String), source: "interactive" },
     });
-    await mod.pollArtifactChanges(api as any, owner);
-    expect(api.appendEntry).toHaveBeenCalledOnce();
+    await mod.pollArtifactChanges(api, owner);
+    expect(appendEntry).toHaveBeenCalledOnce();
   });
 });

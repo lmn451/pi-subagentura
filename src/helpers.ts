@@ -42,11 +42,9 @@ import {
 } from "./cancellation-snapshots";
 import { withOrchestrationContext } from "./orchestration-context";
 import { asStringIdentifier, type InProcessJobId } from "./identifier-types";
-import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { CompletionPolicy } from "./completion-coordinator";
 import {
-  findSessionScope,
-  ownerlessEntitiesVisible,
+  resolveLiveSessionScope,
   type SessionOwnerToken,
 } from "./session-scope";
 import {
@@ -459,31 +457,16 @@ function telemetryErrorCategoryForResult(
 // ── Job Registry ────────────────────────────────────────────────────
 
 /**
- * Persisted job registry using global to survive module reloads (jiti).
- *
- * Lifecycle:
- *   - Jobs added on async subagent spawn
- *   - Completed/error jobs follow their optional maxAge; uncollected coordinated
- *     results remain protected until explicit collection
- *   - Cancelled jobs removed immediately
- *   - All jobs lost on Pi restart (in-memory only)
+ * In-process jobs are owned by a live SessionScope. There is intentionally no
+ * process-wide aggregate index: callers must carry the owner they received at
+ * tool registration/spawn time, and missing ownership fails closed.
  */
-
-// Use 'global' for Node.js global, fall back to globalThis
-const g = typeof global !== "undefined" ? global : globalThis;
-
-// Create or reuse the registry on the global object
-if (!g.__piSubagenturaRegistry) {
-  g.__piSubagenturaRegistry = new Map<string, JobState>();
-}
-
-export const jobRegistry = g.__piSubagenturaRegistry as Map<string, JobState>;
 
 export function inProcessJobBelongsToOwner(
   job: JobState,
   owner: SessionOwnerToken | undefined,
 ): boolean {
-  if (!owner) return true;
+  if (!owner) return false;
   return (
     job.deliveryOwner?.sessionScopeId === owner.id &&
     job.deliveryOwner?.sessionScopeGeneration === owner.generation
@@ -505,29 +488,26 @@ const EMPTY_IN_PROCESS_JOBS: ReadonlyMap<string, JobState> = new Map();
 function exactSessionJobRegistry(
   owner: SessionOwnerToken,
 ): Map<string, JobState> | undefined {
-  const scope = findSessionScope(owner.id);
-  return scope?.generation === owner.generation
-    ? scope.inProcessJobs
-    : undefined;
+  return resolveLiveSessionScope(owner)?.inProcessJobs;
 }
 
-/** Authoritative registry for one owner, or the legacy aggregate with no live scopes. */
+/** Authoritative registry for one owner. Missing ownership is empty. */
 export function inProcessJobsForOwner(
   owner?: SessionOwnerToken,
 ): ReadonlyMap<string, JobState> {
-  if (owner) return exactSessionJobRegistry(owner) ?? EMPTY_IN_PROCESS_JOBS;
-  return ownerlessEntitiesVisible() ? jobRegistry : EMPTY_IN_PROCESS_JOBS;
+  if (!owner) return EMPTY_IN_PROCESS_JOBS;
+  return exactSessionJobRegistry(owner) ?? EMPTY_IN_PROCESS_JOBS;
 }
 
 export function getInProcessJob(
   jobId: string,
   owner?: SessionOwnerToken,
 ): JobState | undefined {
-  if (owner) return exactSessionJobRegistry(owner)?.get(jobId);
-  return ownerlessEntitiesVisible() ? jobRegistry.get(jobId) : undefined;
+  if (!owner) return undefined;
+  return exactSessionJobRegistry(owner)?.get(jobId);
 }
 
-/** Add a job to its authoritative scope and the process-wide compatibility index. */
+/** Add a job to its authoritative session scope. */
 export function registerInProcessJob(
   job: JobState,
   owner?: SessionOwnerToken,
@@ -542,18 +522,13 @@ export function registerInProcessJob(
     return false;
   }
   const effectiveOwner = owner ?? embeddedOwner;
-  if (!effectiveOwner && !ownerlessEntitiesVisible()) return false;
-  if (effectiveOwner) {
-    const registry = exactSessionJobRegistry(effectiveOwner);
-    if (!registry) return false;
-    if (!registry.has(job.id) && !ensureInProcessJobCapacity(effectiveOwner)) {
-      return false;
-    }
-    registry.set(job.id, job);
-  } else {
-    if (!ensureInProcessJobCapacity()) return false;
+  if (!effectiveOwner) return false;
+  const registry = exactSessionJobRegistry(effectiveOwner);
+  if (!registry) return false;
+  if (!registry.has(job.id) && !ensureInProcessJobCapacity(effectiveOwner)) {
+    return false;
   }
-  jobRegistry.set(job.id, job);
+  registry.set(job.id, job);
   return true;
 }
 
@@ -562,30 +537,12 @@ export function removeInProcessJob(
   jobId: string,
   owner?: SessionOwnerToken,
 ): boolean {
-  if (!owner && !ownerlessEntitiesVisible()) return false;
-  if (!owner) {
-    const indexedJob = jobRegistry.get(jobId);
-    const indexedOwner = indexedJob ? inProcessJobOwner(indexedJob) : undefined;
-    return indexedOwner
-      ? removeInProcessJob(jobId, indexedOwner)
-      : jobRegistry.delete(jobId);
-  }
+  if (!owner) return false;
   const registry = exactSessionJobRegistry(owner);
-  if (!registry) {
-    const aggregateJob = jobRegistry.get(jobId);
-    return aggregateJob && inProcessJobBelongsToOwner(aggregateJob, owner)
-      ? jobRegistry.delete(jobId)
-      : false;
-  }
+  if (!registry) return false;
   const ownedJob = registry.get(jobId);
-  if (!ownedJob) {
-    const aggregateJob = jobRegistry.get(jobId);
-    return aggregateJob && inProcessJobBelongsToOwner(aggregateJob, owner)
-      ? jobRegistry.delete(jobId)
-      : false;
-  }
+  if (!ownedJob) return false;
   registry.delete(jobId);
-  if (jobRegistry.get(jobId) === ownedJob) jobRegistry.delete(jobId);
   return true;
 }
 
@@ -607,24 +564,9 @@ function ensureInProcessJobCapacity(owner?: SessionOwnerToken): boolean {
 }
 
 declare global {
-  var __piSubagenturaRegistry: Map<string, JobState> | undefined;
-  var __piSubagenturaInteractiveRegistry:
-    | Map<string, InteractiveSubagentState>
-    | undefined;
-  var __piSubagenturaPiRef: ExtensionAPI | undefined;
-  var __piSubagenturaUi: ExtensionUIContext | undefined;
-  var __piSubagenturaSessionManager:
-    | { getEntries?: () => unknown[]; getSessionId?: () => string }
-    | undefined;
-  var __piSubagenturaInjectCount: number | undefined;
   var __piSubagenturaInteractivePollerHandle:
     | ReturnType<typeof setInterval>
     | undefined;
-}
-
-// Initialize the global pi ref
-if (!g.__piSubagenturaPiRef) {
-  g.__piSubagenturaPiRef = undefined;
 }
 
 /** Jobs persist indefinitely — no automatic expiration */
@@ -945,6 +887,10 @@ export async function startSubagentJob(
     spawnRequestedAt,
   } = params;
 
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error("A live session owner is required to start a sub-agent.");
+  }
+
   // Enforce the cap within this exact scope; peer sessions never evict each other.
   while (inProcessJobsForOwner(owner).size >= MAX_REGISTRY_SIZE) {
     if (!pruneOldestJob(owner)) break; // registration rejects when no slot is available
@@ -956,6 +902,11 @@ export async function startSubagentJob(
     sessionRuntime = await createCompatibleSessionRuntime();
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
+  }
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error(
+      "Sub-agent owner session shut down before session creation.",
+    );
   }
 
   // Resolve model: exact match only, fallback to default
@@ -1070,6 +1021,11 @@ export async function startSubagentJob(
         ? { customTools: [workflowStructuredOutputTool] }
         : {}),
     });
+    if (!resolveLiveSessionScope(owner)) {
+      throw new Error(
+        "Sub-agent owner session shut down before session creation.",
+      );
+    }
     session = (
       await createAgentSession(
         sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
@@ -1252,8 +1208,17 @@ export async function startSubagentJob(
   const startGate = new Promise<void>((resolve) => {
     startGateResolve = resolve;
   });
+  const disposePreparedSession = (): void => {
+    if (started || disposedBeforeStart) return;
+    disposedBeforeStart = true;
+    startGateResolve();
+  };
   const start = (): void => {
     if (started || disposedBeforeStart) return;
+    if (!resolveLiveSessionScope(owner)) {
+      disposePreparedSession();
+      return;
+    }
     started = true;
     const startedAt = Date.now();
     telemetryStartedAt = startedAt;
@@ -1280,11 +1245,6 @@ export async function startSubagentJob(
       ...telemetryAgentDimensions,
       unit: "job",
     });
-    startGateResolve();
-  };
-  const disposePreparedSession = (): void => {
-    if (started || disposedBeforeStart) return;
-    disposedBeforeStart = true;
     startGateResolve();
   };
   let result: SubagentResult = {

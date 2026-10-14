@@ -49,7 +49,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/rendering.ts`                                     | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
 | `src/schemas.ts`                                       | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
 | `src/workflow*.ts`                                     | Workflow tool/core/worker/job/UI modules. Worker execution is isolated from the parent thread but the VM is not a security boundary.                                                                              |
-| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-level state (interactive sub-agent registry, mux mock, etc.).                                                                                                  |
+| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-local state; session scopes and mux test state have separate cleanup.                                                                                          |
 
 ## Code conventions
 
@@ -233,7 +233,8 @@ groups before polling.
 
 **Crash-safe ordering at both write sites:**
 
-- **Spawn** — write the state file BEFORE `interactiveSubagentRegistry.set`.
+- **Spawn** — write the state file BEFORE registering the child in its owning
+  `SessionScope.interactiveStates` map.
   A crash between the two is recoverable on next reload.
   A crash before the write leaves no zombie.
 - **Poll enqueue** — persist the delivery intent before advancing the artifact

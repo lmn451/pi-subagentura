@@ -16,7 +16,6 @@ import {
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import {
-  jobRegistry,
   registerInProcessJob,
   type JobState,
   type SubagentResult,
@@ -89,7 +88,7 @@ describe("result collection during receipt storage failure", () => {
 
   afterEach(() => {
     clearCompletionCoordinator(sessionOwner(scope));
-    jobRegistry.clear();
+    scope.inProcessJobs.clear();
     workflowJobRegistry.clear();
     clearSessionScopes();
     rmSync(root, { recursive: true, force: true });
@@ -160,7 +159,7 @@ describe("result collection during receipt storage failure", () => {
     await expect(read()).rejects.toThrow(/receipt.*persist|persist.*receipt/i);
     expect(job.resultRetrieved).not.toBe(true);
     expect(job.cleanupAfterCollection).toBe(true);
-    expect(jobRegistry.get(job.id)).toBe(job);
+    expect(scope.inProcessJobs.get(job.id)).toBe(job);
     restoreStorage();
     expect((await read()).content[0].text).toBe(result.output);
     expect(job.resultRetrieved).toBe(true);
