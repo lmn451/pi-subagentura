@@ -104,13 +104,13 @@ flowchart TB
 
 ### 2.1 The three execution shapes
 
-| Shape                    | Execution location                         | Primary live state                                            | Completion authority                                                          | Default parent-model delivery                                                    |
-| ------------------------ | ------------------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| In-process, synchronous  | Pi extension process, child `AgentSession` | Child Pi session and execute callback                         | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
-| In-process, asynchronous | Pi extension process, child `AgentSession` | Per-session scope registry (with a legacy process-wide index) | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
-| Interactive              | Separate `pi` process in tmux/Zellij/Herdr | Live interactive registry plus artifact files                 | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
-| Workflow, foreground     | Worker thread and VM in extension process  | `Engine`, worker RPC state, selected runner                   | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
-| Workflow, background     | Same Worker/VM arrangement                 | Global `workflowJobRegistry`                                  | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
+| Shape                    | Execution location                         | Primary live state                                              | Completion authority                                                          | Default parent-model delivery                                                    |
+| ------------------------ | ------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| In-process, synchronous  | Pi extension process, child `AgentSession` | Child Pi session and execute callback                           | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
+| In-process, asynchronous | Pi extension process, child `AgentSession` | Owning `SessionScope.inProcessJobs` map                         | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
+| Interactive              | Separate `pi` process in tmux/Zellij/Herdr | Owning `SessionScope.interactiveStates` map plus artifact files | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
+| Workflow, foreground     | Worker thread and VM in extension process  | `Engine`, worker RPC state, selected runner                     | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
+| Workflow, background     | Same Worker/VM arrangement                 | Global `workflowJobRegistry`                                    | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
 
 ### 2.2 Mode comparison
 
@@ -434,7 +434,7 @@ Successful terminal retrieval appends a consumption receipt before returning and
 The target controller aborts the `AgentSession`; `cascadeChildAborts` walks recorded `parentJobId` descendants.
 The kernel checks the signal after `prompt()` because Pi may resolve rather than reject a prompt on abort.
 
-The authoritative in-process registry is per session scope; its legacy process-wide index survives module reload but not process restart.
+The authoritative in-process registry is the exact live owner's session-scope map.
 Done/error entries persist when `maxAge` is omitted or `0`. A positive integer `maxAge` in the safe Node timer range (1–2,147,483,647 ms) schedules cleanup at settlement: ordinary terminal entries are removed when it elapses, while an uncollected coordinated result remains protected and is removed when collected after expiry (or when its TTL later elapses). Entries can also be pruned explicitly and may be evicted oldest-first at the 100-entry cap.
 Cancelled entries are scheduled for immediate deletion.
 
