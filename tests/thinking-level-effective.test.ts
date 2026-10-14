@@ -150,6 +150,20 @@ describe("startSubagentJob effective thinking level", () => {
     expect(session.dispose).toHaveBeenCalledOnce();
   });
 
+  it("does not allocate an SDK session if option preparation retires its owner", async () => {
+    mockBuildSessionOptions.mockImplementationOnce(() => {
+      advanceSessionScopeGeneration(testScope.id);
+      return {};
+    });
+
+    await expect(startSubagentJob(params())).rejects.toThrow(
+      /shut down before session creation/,
+    );
+
+    expect(mockBuildSessionOptions).toHaveBeenCalledOnce();
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
   it("threads explicit requested options to the SDK and exposes effective level", async () => {
     const session = createSession("low");
     mockCreateAgentSession.mockResolvedValue({ session });

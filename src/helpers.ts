@@ -1030,6 +1030,11 @@ export async function startSubagentJob(
         ? { customTools: [workflowStructuredOutputTool] }
         : {}),
     });
+    if (!resolveLiveSessionScope(owner)) {
+      throw new Error(
+        "Sub-agent owner session shut down before session creation.",
+      );
+    }
     session = (
       await createAgentSession(
         sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
