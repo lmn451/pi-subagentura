@@ -1527,7 +1527,43 @@ describe("persisted interactive state helpers", () => {
     expect(readFileSync(file)).toEqual(before);
   });
 
-  it("retains coordinated queued deliveries with obsolete routing fields", () => {
+  it.each([
+    "nested lifecycle.legacyTerminal",
+    "root legacyCutoverOffset",
+    "state legacyCutoverOffset",
+  ])("rejects and preserves schema-v2 state with %s", (removedField) => {
+    const file = stateFilePath(root);
+    mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+    const state = {
+      ...SAMPLE,
+      ...(removedField === "nested lifecycle.legacyTerminal"
+        ? { lifecycle: { legacyTerminal: { status: "done" } } }
+        : {}),
+      ...(removedField === "state legacyCutoverOffset"
+        ? { legacyCutoverOffset: 123 }
+        : {}),
+    };
+    const raw = JSON.stringify({
+      schemaVersion: 2,
+      parent: "pi",
+      ...(removedField === "root legacyCutoverOffset"
+        ? { legacyCutoverOffset: 123 }
+        : {}),
+      states: { [SAMPLE.id]: state },
+    });
+    writeFileSync(file, raw, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    expect(loadInteractiveStates(root)).toBeNull();
+    expect(() =>
+      updateInteractiveState(root, SAMPLE.id, (entry) => {
+        entry.eventByteCursor = 1;
+      }),
+    ).toThrow(/state file/i);
+    expect(readFileSync(file)).toEqual(before);
+  });
+
+  it("preserves queued deliveries and drops stale group metadata for each policy", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
     writeFileSync(

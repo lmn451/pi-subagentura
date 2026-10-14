@@ -1578,6 +1578,7 @@ const REMOVED_INTERACTIVE_STATE_FIELDS = [
   "lastStopReason",
   "lastStopReasonAt",
   "lastStopText",
+  "legacyCutoverOffset",
   "legacyTerminal",
   "injected",
 ] as const;
@@ -1585,6 +1586,7 @@ const REMOVED_INTERACTIVE_STATE_FIELDS = [
 function hasRemovedInteractiveStateFields(
   payload: Record<string, unknown>,
 ): boolean {
+  if ("legacyCutoverOffset" in payload) return true;
   const rawStates = payload.states;
   if (!rawStates || typeof rawStates !== "object" || Array.isArray(rawStates)) {
     return false;
@@ -1592,7 +1594,14 @@ function hasRemovedInteractiveStateFields(
   for (const value of Object.values(rawStates)) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const state = value as Record<string, unknown>;
-    if (REMOVED_INTERACTIVE_STATE_FIELDS.some((key) => key in state)) {
+    const lifecycle = state.lifecycle;
+    if (
+      REMOVED_INTERACTIVE_STATE_FIELDS.some((key) => key in state) ||
+      (lifecycle &&
+        typeof lifecycle === "object" &&
+        !Array.isArray(lifecycle) &&
+        "legacyTerminal" in lifecycle)
+    ) {
       return true;
     }
     if (!Array.isArray(state.pendingDeliveries)) continue;
