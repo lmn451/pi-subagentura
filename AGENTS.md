@@ -49,7 +49,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/rendering.ts`                                     | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
 | `src/schemas.ts`                                       | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
 | `src/workflow*.ts`                                     | Workflow tool/core/worker/job/UI modules. Worker execution is isolated from the parent thread but the VM is not a security boundary.                                                                              |
-| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-local state; session scopes and mux test state have separate cleanup.                                                                                         |
+| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-local state; session scopes and mux test state have separate cleanup.                                                                                          |
 
 ## Code conventions
 
