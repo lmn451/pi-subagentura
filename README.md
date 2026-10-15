@@ -897,8 +897,11 @@ parent was away.
 Reads a sub-agent's artifact by id. Returns protocol-v2 lifecycle events (pass
 `since` to fetch only new events) and, by default, the latest terminal immutable
 snapshot associated with a completed `turnId`. Mutable `output.md` is staging data,
-not a completed-result fallback. A successful read that returns a terminal snapshot
-consumes that turn's pending coordinated delivery; an events-only read does not.
+not a completed-result fallback. While the latest turn is still running, the read
+returns its current staging output even when `since` filters out all lifecycle
+events; the returned event list remains filtered. A successful read that returns
+a terminal snapshot consumes that turn's pending coordinated delivery; an
+events-only read does not.
 
 Protocol-v2 completions map each Pi-derived `turnId` to an immutable
 `outputs/<eventId>.md` snapshot. Pass `turnId` to read that output; the response's
