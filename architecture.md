@@ -114,7 +114,7 @@ flowchart TB
 | Process boundary              | None for the agent session                                                               | Child OS process                                                                              | Worker thread for script; runner may be in-process or child process                              |
 | Durable across parent restart | No                                                                                       | Yes, through artifacts and `.pi/subagentura-state.json`                                       | No                                                                                               |
 | Ongoing conversation          | No retained tool-facing conversation after completion                                    | Yes; a completed live pane becomes `idle` and accepts follow-up input                         | Workflow script is one run; nested saved workflows reuse the same worker                         |
-| Progress source               | Pi `session.subscribe` callbacks                                                         | Artifact events and child session observation                                                 | Worker progress/RPC plus runner progress                                                         |
+| Progress source               | Pi `session.subscribe` callbacks                                                         | Protocol-v2 artifact events                                                                   | Worker progress/RPC plus runner progress                                                         |
 | Result polling                | Explicit status/result tool reads memory                                                 | Sole recurring artifact poller reads files                                                    | Explicit workflow status/result reads memory; process runner has a private awaited artifact loop |
 | UI screen authority           | Not applicable                                                                           | No; mux capture is presentation only                                                          | Not applicable                                                                                   |
 | Cancellation transport        | `AbortController`, `session.abort()`, descendant cascade                                 | Durable cancellation event/marker, then mux pane kill                                         | Abort job/engine, post worker abort, terminate worker, cancel active runner                      |
@@ -138,7 +138,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - In-process child execution is direct Pi SDK use: `session.prompt`, `session.subscribe`, execute `onUpdate`, and shared memory.
 - Interactive launch and follow-up prompts cross the child boundary as mux terminal input plus a separate Enter.
 - Interactive lifecycle and result communication returns through filesystem artifacts, not through the mux screen.
-- Child session JSONL is observed for activity and usage, not used as completion truth.
+- Protocol-v2 artifact events provide interactive activity; child session JSONL is used for usage, not completion truth.
 - Workflow scripts use structured worker-thread `postMessage` RPC to ask the host to run agents.
 - Default asynchronous parent delivery makes each terminal record independently eligible and coalesces ready records into one hidden `subagent-manifest` at the next safe dispatch. TUI completion entries are a separate non-LLM channel. A related group is formed only when the caller supplies `completionPolicy="group"` and an explicit `completionGroupId`; same-turn launch and task text do not infer a group.
 
@@ -420,7 +420,7 @@ There is no autonomous in-process poller.
 A requested result wait races the existing promise against caller abort and a bounded timeout; cancelling the wait does not cancel the job.
 Successful terminal retrieval appends a consumption receipt before returning and suppresses later automatic delivery.
 
-`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership and for every member—including errors and cancellations—to become terminal; same-turn launch or task text never infers a group. Deprecated legacy fields map to coordinated `each`; only persisted pre-coordinator state retains bounded inject/pointer recovery behavior.
+`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership and for every member—including errors and cancellations—to become terminal; same-turn launch or task text never infers a group.
 
 ### 5.5 Cancellation and retention
 
@@ -490,12 +490,14 @@ If command construction or mux input fails, persisted state and lineage are remo
 This prevents a running child with no recoverable identity and prevents registry exposure of a launch that was never dispatched.
 
 The wrapper exports `ARTIFACT_DIR`, `PI_SUBAGENTURA_CHILD=1`, and lineage environment.
-It runs `cli.mjs start`, installs an `EXIT` trap that runs `cli.mjs process-exit`, then executes:
+It installs an `EXIT` trap that runs `cli.mjs process-exit`, then executes:
 
 ```text
 pi --session <child-session.jsonl> --name <name> [model/thinking flags]
    --append-system-prompt <system.md> @<prompt.md>
 ```
+
+Agent turn starts come from child Pi lifecycle hooks, not the shell wrapper.
 
 The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
 `src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.

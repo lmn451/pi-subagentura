@@ -10,8 +10,12 @@ import {
   readOutputForTurnId,
   writeOutput,
 } from "../src/artifact";
+import type {
+  ExtensionAPI,
+  ExtensionUIContext,
+} from "@earendil-works/pi-coding-agent";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
-import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { __setTmuxMultiplexer, type Multiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import {
   clearSessionScopes,
@@ -88,6 +92,70 @@ describe("protocol-v2 artifact delivery", () => {
       "second turn output",
     );
     expect(readFileSync(first.output!.path, "utf8")).toBe("first turn output");
+  });
+
+  it("projects v2 tool activity onto live state without creating a delivery", async () => {
+    const art = makeArtifact();
+    appendEvent(art, {
+      version: 2,
+      eventId: "turn-started",
+      turnId: "activity-turn",
+      ts: 10,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "tool-started",
+      turnId: "activity-turn",
+      ts: 20,
+      type: "tool_activity",
+      phase: "start",
+      status: "running",
+      tool: "bash",
+      summary: "bash",
+    });
+    const entries: Array<{ customType: string; data: unknown }> = [];
+    const pi = {
+      appendEntry: vi.fn((customType: string, data: unknown) => {
+        entries.push({ customType, data });
+      }),
+      registerEntryRenderer: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    };
+    const scope = registerSessionScope({
+      id: 503,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as unknown as ExtensionAPI,
+      ui: ui as unknown as ExtensionUIContext,
+      sessionManager: {
+        getSessionId: () => "parent-session",
+        getEntries: () => [],
+      },
+    });
+    const state = makeState(art.dir);
+    scope.interactiveStates.set(state.id, state);
+    const mux = {
+      getPaneLiveness: () => "alive",
+      getPaneLivenessAsync: async () => "alive",
+    } satisfies Pick<Multiplexer, "getPaneLiveness" | "getPaneLivenessAsync">;
+    __setTmuxMultiplexer(mux as unknown as Multiplexer);
+
+    await pollArtifactChanges(scope.pi, sessionOwner(scope));
+
+    expect(state.status).toBe("running");
+    expect(state.lastToolName).toBe("bash");
+    expect(state.lastToolSummary).toBe("bash");
+    expect(state.lastActivityAt).toBe(20);
+    expect(entries).toEqual([]);
+    expect(state.pendingDeliveries).toEqual([]);
+    expect(state.eventByteCursor).toBeGreaterThan(0);
   });
 
   it("queues a v2 completion as a coordinated entry with immutable references", async () => {

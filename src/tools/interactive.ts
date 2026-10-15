@@ -11,17 +11,14 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
   artifactPath,
-  eventLogEndOffset,
   removeInteractiveState,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   isArtifactOutputSettled,
-  isCompletionEvent,
   loadInteractiveStates,
   lastEvent,
   MAX_TURN_ID_LENGTH,
   listOutputHistory,
   readEvents,
-  readEventBatch,
   readOutput,
   readOutputForTurnId,
   updateInteractiveState,
@@ -333,31 +330,89 @@ interface SelectedCompletion {
   terminalTs: number;
 }
 
+interface ReadCompletionSelection {
+  completion: SelectedCompletion | undefined;
+  lifecycleEvent: SubagentEvent | null;
+  processExitEvent: SubagentEvent | null;
+}
+
 function completionForRead(
-  art: SubagentArtifact,
+  allEvents: readonly SubagentEvent[],
   selector: { turnId?: string },
-): SelectedCompletion | undefined {
-  const completions: ReturnType<typeof readEventBatch>["records"] = [];
-  const snapshotEndOffset = eventLogEndOffset(art);
-  let cursor = 0;
-  while (cursor < snapshotEndOffset) {
-    const batch = readEventBatch(art, cursor);
-    for (const record of batch.records) {
-      if (record.endOffset > snapshotEndOffset) break;
-      if (isCompletionEvent(record.event)) completions.push(record);
+): ReadCompletionSelection {
+  if (selector.turnId !== undefined) {
+    for (const event of allEvents) {
+      if (event.type === "completion" && event.turnId === selector.turnId) {
+        return {
+          completion: {
+            turnId: event.turnId,
+            outcome: event.outcome,
+            terminalTs: event.ts,
+          },
+          lifecycleEvent: event,
+          processExitEvent: null,
+        };
+      }
     }
-    const nextOffset = batch.records.at(-1)?.endOffset ?? batch.endOffset;
-    if (nextOffset <= cursor) break;
-    cursor = Math.min(nextOffset, snapshotEndOffset);
+    return {
+      completion: undefined,
+      lifecycleEvent: null,
+      processExitEvent: null,
+    };
   }
-  const selected = selector.turnId
-    ? completions.find(({ event }) => event.turnId === selector.turnId)
-    : completions.at(-1);
-  if (!selected || selected.event.type !== "completion") return undefined;
+
+  let activeTurnId: string | undefined;
+  let activeCompletionEvent:
+    | Extract<SubagentEvent, { type: "completion" }>
+    | undefined;
+  let activeLifecycleEvent: SubagentEvent | null = null;
+  let unscopedCompletionEvent:
+    | Extract<SubagentEvent, { type: "completion" }>
+    | undefined;
+  let unscopedLifecycleEvent: SubagentEvent | null = null;
+  let processExitEvent: SubagentEvent | null = null;
+  for (const event of allEvents) {
+    if (event.type === "turn_started") {
+      activeTurnId = event.turnId;
+      activeCompletionEvent = undefined;
+      activeLifecycleEvent = event;
+    } else if (event.type === "process_exited") {
+      processExitEvent = event;
+    } else if (event.type === "completion") {
+      if (activeTurnId === undefined) {
+        unscopedCompletionEvent = event;
+        unscopedLifecycleEvent = event;
+      } else if (event.turnId === activeTurnId) {
+        activeCompletionEvent = event;
+        activeLifecycleEvent = event;
+      }
+    } else if (activeTurnId === undefined) {
+      unscopedLifecycleEvent = event;
+    } else if (
+      event.turnId === activeTurnId &&
+      activeCompletionEvent === undefined
+    ) {
+      activeLifecycleEvent = event;
+    }
+  }
+
+  const selectedEvent =
+    activeTurnId === undefined
+      ? unscopedCompletionEvent
+      : activeCompletionEvent;
   return {
-    turnId: selected.event.turnId,
-    outcome: selected.event.outcome,
-    terminalTs: selected.event.ts,
+    completion: selectedEvent
+      ? {
+          turnId: selectedEvent.turnId,
+          outcome: selectedEvent.outcome,
+          terminalTs: selectedEvent.ts,
+        }
+      : undefined,
+    lifecycleEvent:
+      activeTurnId === undefined
+        ? unscopedLifecycleEvent
+        : activeLifecycleEvent,
+    processExitEvent,
   };
 }
 function readLatencyFromTerminal(
@@ -1250,10 +1305,10 @@ export function registerInteractiveSubagentTools(
     name: "read_subagent_artifact",
     label: "Read Subagent Artifact",
     description: [
-      "Read a protocol-v2 interactive sub-agent's artifact. Returns lifecycle events and, by default,",
-      "the latest terminal immutable output snapshot. Use `turnId` to select a specific Pi turn.",
-      "Use `since` (unix ms) to fetch only events newer than your last read. Reading a terminal",
-      "output records consumption so it is not delivered again automatically.",
+      "Read a protocol-v2 interactive sub-agent's artifact. By default, returns output for the latest established turn:",
+      "staging output while it is active, or its immutable snapshot after completion. Use `turnId` to select a specific Pi turn.",
+      "Use `since` (unix ms) to filter only the returned events; it does not change output selection. Reading a terminal output records",
+      "consumption so it is not delivered again automatically.",
     ].join("\n"),
     parameters: Type.Object({
       id: Type.String({
@@ -1343,15 +1398,19 @@ export function registerInteractiveSubagentTools(
         };
       }
       try {
-        const events = readEvents(art, params.since);
+        const allEvents = readEvents(art);
+        const since = params.since;
+        const events =
+          since === undefined
+            ? allEvents
+            : allEvents.filter((event) => event.ts >= since);
         const wantsOutput =
           params.includeOutput !== false || params.turnId !== undefined;
+        const readSelection = completionForRead(allEvents, params);
         const selectedCompletion = wantsOutput
-          ? completionForRead(art, params)
+          ? readSelection.completion
           : undefined;
-        const readCompletion =
-          selectedCompletion ??
-          (!wantsOutput ? completionForRead(art, {}) : undefined);
+        const readCompletion = readSelection.completion;
         const lastEventValue =
           events.length > 0 ? events[events.length - 1] : null;
         const output = wantsOutput
@@ -1359,7 +1418,9 @@ export function registerInteractiveSubagentTools(
             ? readOutputForTurnId(art, params.turnId)
             : selectedCompletion
               ? readOutputForTurnId(art, selectedCompletion.turnId)
-              : lastEventValue && !isArtifactOutputSettled(lastEventValue)
+              : readSelection.lifecycleEvent !== null &&
+                  readSelection.processExitEvent === null &&
+                  !isArtifactOutputSettled(readSelection.lifecycleEvent)
                 ? readOutput(art)
                 : null
           : null;
@@ -1373,10 +1434,14 @@ export function registerInteractiveSubagentTools(
           if (params.turnId !== undefined) {
             outputText = `(no immutable snapshot for turnId ${params.turnId})`;
           } else {
-            const exited =
-              lastEventValue && isArtifactOutputSettled(lastEventValue);
-            outputText = exited
-              ? `(sub-agent exited without writing output.md — last event: ${lastEventValue.type} @ ${lastEventValue.ts})`
+            const settledEvent =
+              readSelection.processExitEvent ??
+              (readSelection.lifecycleEvent &&
+              isArtifactOutputSettled(readSelection.lifecycleEvent)
+                ? readSelection.lifecycleEvent
+                : null);
+            outputText = settledEvent
+              ? `(sub-agent exited without writing output.md — last event: ${settledEvent.type} @ ${settledEvent.ts})`
               : `(${events.length} events, last: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"} — output.md not written yet)`;
           }
         } else if (output.length === 0) {
@@ -1408,7 +1473,8 @@ export function registerInteractiveSubagentTools(
           wantsOutput,
           output,
           selectedCompletion: readCompletion,
-          lastEvent: lastEventValue,
+          lastEvent:
+            readSelection.processExitEvent ?? readSelection.lifecycleEvent,
           firstConsumption,
         });
         captureResultRead(readOutcome, readCompletion?.terminalTs);

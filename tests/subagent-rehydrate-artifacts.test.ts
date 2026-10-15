@@ -10,6 +10,7 @@ import {
   artifactPath,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   loadInteractiveStates,
+  stateFilePath,
 } from "../src/artifact";
 import {
   clearCompletionCoordinator,
@@ -298,6 +299,116 @@ describe("rehydrateInteractiveSubagents", () => {
         sessionOwner(completionScope),
       ),
     ).toBeUndefined();
+  });
+  it("flushes both queued each-policy completion notices after dropping stale group metadata", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const id = "pending-each-stale-group";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+    const entries: unknown[] = [];
+    const pi = {
+      appendEntry: vi.fn((customType: string, data: unknown) => {
+        entries.push({ type: "custom", customType, data });
+      }),
+      sendMessage: vi.fn(),
+    };
+    const testScope = registerSessionScope({
+      id: 722,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as never,
+      parentStreaming: false,
+      sessionManager: {
+        getSessionId: () => "reload-parent",
+        getEntries: () => entries,
+      },
+    });
+    completionScope = testScope;
+    registerCompletionCoordinator(pi as never, testScope);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      stateFilePath(cwd),
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [id]: {
+            id,
+            paneId: "%106",
+            mux: "tmux",
+            artifactDir: artDir,
+            sessionFile: join(cwd, "child-each-stale-group.jsonl"),
+            parentSessionId: "reload-parent",
+            eventByteCursor: 0,
+            pendingDeliveries: [
+              {
+                deliveryId: "stale-each-delivery",
+                subagentId: id,
+                turnId: "stale-each-turn",
+                eventId: "stale-each-event",
+                mode: "notify",
+                triggerTurn: true,
+                status: "done",
+                artifactDir: artDir,
+                completionPolicy: "each",
+                completionGroupId: "stale-each-group",
+                state: "queued",
+              },
+              {
+                deliveryId: "valid-each-delivery",
+                subagentId: id,
+                turnId: "valid-each-turn",
+                eventId: "valid-each-event",
+                status: "done",
+                artifactDir: artDir,
+                completionPolicy: "each",
+                state: "queued",
+              },
+            ],
+            deliveryReceipts: [],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", entries, testScope);
+    expect(
+      testScope.interactiveStates.get(id)?.pendingDeliveries?.[0],
+    ).not.toHaveProperty("completionGroupId");
+
+    sealCompletionGroups(sessionOwner(testScope));
+    expect(() =>
+      flushDeliveries(pi as never, undefined, sessionOwner(testScope)),
+    ).not.toThrow();
+
+    const completions = entries
+      .filter(
+        (entry): entry is { customType: string; data: unknown } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "customType" in entry &&
+          entry.customType === "subagentura-completion" &&
+          "data" in entry,
+      )
+      .map((entry) => entry.data);
+    expect(completions).toHaveLength(2);
+    expect(completions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          completionId: "stale-each-delivery",
+          policy: "each",
+        }),
+        expect.objectContaining({
+          completionId: "valid-each-delivery",
+          policy: "each",
+        }),
+      ]),
+    );
+    for (const completion of completions) {
+      expect(completion).not.toHaveProperty("groupId");
+    }
   });
 
   it("registers pending receipt expectations before scanning fallback history", async () => {

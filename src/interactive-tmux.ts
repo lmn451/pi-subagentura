@@ -479,7 +479,6 @@ export function writeLaunchScript(
 
   // 2. Write the launch script. The script:
   //    - exports ARTIFACT_DIR so the child inherits it;
-  //    - calls `cli.mjs start` to record the started event;
   //    - traps EXIT to record process exit and, when needed, one lock-protected completion;
   //    - also writes the @pi-exit-code pane option for the readPaneExitCode
   //      fallback when the selected backend is tmux.
@@ -499,7 +498,6 @@ export function writeLaunchScript(
     ),
     // Single-quote the helper path like every other interpolated path in this
     // script; a double-quoted path still expands $, `` and \ inside it.
-    `${escape(cliPath)} start`,
     "on_exit() {",
     "    rc=$?",
     "    trap - EXIT",

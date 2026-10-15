@@ -23,10 +23,15 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { writeLaunchScript } from "../src/interactive-tmux";
+import {
+  writeLaunchScript,
+  type InteractiveSubagentState,
+} from "../src/interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
+import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { awaitInteractiveResult } from "../src/workflow-worker";
 import { createTelemetrySession } from "../src/telemetry";
 import {
   clearSessionScopes,
@@ -95,6 +100,7 @@ describe("launch script EXIT trap (idempotency)", () => {
 
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
+    __setTmuxMultiplexer(undefined);
   });
 
   it("preserves explicit completion and appends one process_exited event", () => {
@@ -166,6 +172,51 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(doneEvents[0].exitCode).toBe(1);
     expect(exits).toHaveLength(1);
     expect(exits[0].exitCode).toBe(1);
+  });
+  it("returns the process-exit snapshot for an unbound provisional turn", async () => {
+    const artDir = join(tmp, "artifacts", "early-exit");
+    const launchScript = join(artDir, "launch.sh");
+    const turnOutput = "startup diagnostics before exit";
+    const childBody = [
+      `printf '%s' '{"turnId":"turn-pending","started":false}' > "${join(artDir, "active-turn.json")}"`,
+      `printf '%s' '${turnOutput}' > "${join(artDir, "output.md")}"`,
+      "exit 1",
+    ].join("\n");
+
+    expect(runLaunchScript(artDir, launchScript, childBody)).toBe(1);
+    writeFileSync(join(artDir, "output.md"), "output changed after exit");
+
+    const state = {
+      id: "early-exit",
+      name: "Early exit",
+      task: "retain process-exit diagnostics",
+      paneId: "%99",
+      mux: "tmux",
+      sessionFile: join(tmp, "session.jsonl"),
+      cwd: tmp,
+      startedAt: Date.now(),
+      status: "running",
+      attachCommand: "",
+      selectPaneCommand: "",
+      launchScriptFile: launchScript,
+      artifactDir: artDir,
+    } satisfies InteractiveSubagentState;
+    __setTmuxMultiplexer({
+      getPaneLiveness: () => "dead",
+      getPaneLivenessAsync: async () => "dead",
+    } as never);
+
+    const result = await awaitInteractiveResult(state, undefined, 0);
+    const [completion] = countCompletions(artDir, "error");
+    expect(completion).toMatchObject({
+      turnId: "turn-pending",
+      source: "process_exit",
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      output: turnOutput,
+      errorMessage: completion.message,
+    });
   });
 
   it("writes exactly one `cancelled` event when the .cancelled flag is present and the child did not call done", () => {

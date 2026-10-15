@@ -83,6 +83,8 @@ const WIDGET_KEY = "subagentura-activity";
 const WORKFLOW_FOOTER_KEY = "subagentura-workflows";
 const WORKFLOW_WIDGET_KEY = "subagentura-workflow-activity";
 
+const HAS_VISIBLE_ACTIVITY_TEXT = /[^\s\u0000-\u001f\u007f-\u009f]/;
+
 /** Maximum widget rows before truncation with "… and N more". */
 const MAX_WIDGET_ROWS = 10;
 const MAX_WORKFLOW_WIDGET_ROWS = 5;
@@ -877,6 +879,26 @@ async function runPollArtifactChanges(
         }
         nextCursor = record.endOffset;
         foldInteractiveLifecycle(lifecycle, ev);
+        if (
+          "version" in ev &&
+          ev.version === 2 &&
+          ev.type === "tool_activity"
+        ) {
+          if (ev.tool !== undefined) state.lastToolName = ev.tool;
+          if (
+            ev.summary !== undefined &&
+            HAS_VISIBLE_ACTIVITY_TEXT.test(ev.summary)
+          ) {
+            state.lastToolSummary = ev.summary;
+          } else if (
+            ev.tool !== undefined &&
+            HAS_VISIBLE_ACTIVITY_TEXT.test(ev.tool)
+          ) {
+            state.lastToolSummary = ev.tool;
+          }
+          state.lastActivityAt = ev.ts;
+        }
+
         if ("version" in ev && ev.version === 2 && ev.type === "turn_started") {
           state.activeTurnId = ev.turnId;
           const telemetryEligible =
