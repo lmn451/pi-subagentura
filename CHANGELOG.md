@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than the launch wrapper, establish agent turns.
 - Reject removed lifecycle and cutover state fields before mutation, preserving
   unsupported state files byte-for-byte.
-- Return current staging output when an incremental artifact read filters out
-  all events with `since`.
+- Return active-turn staging output for default artifact reads, even after an
+  earlier turn completes or `since` filters out all events, without consuming
+  that earlier completion.
 - Restore interactive activity rows from protocol-v2 tool events in physical
   byte order, including tool-name fallback for missing or non-visible summaries.
 

@@ -894,19 +894,21 @@ parent was away.
 
 #### `read_subagent_artifact`
 
-Reads a sub-agent's artifact by id. Returns protocol-v2 lifecycle events (pass
-`since` to fetch only new events) and, by default, the latest terminal immutable
-snapshot associated with a completed `turnId`. Mutable `output.md` is staging data,
-not a completed-result fallback. While the latest turn is still running, the read
-returns its current staging output even when `since` filters out all lifecycle
-events; the returned event list remains filtered. A successful read that returns
-a terminal snapshot consumes that turn's pending coordinated delivery; an
-events-only read does not.
+Reads a sub-agent's protocol-v2 lifecycle events and, by default, the output for
+the latest turn in physical event order. A completed turn returns its immutable
+snapshot; a running turn returns its current staging `output.md`, even when an
+earlier turn has completed. Empty or missing current staging never falls back to
+an earlier snapshot.
+
+`since` filters only the returned events, not output selection. A successful read
+that returns a terminal snapshot consumes that turn's pending coordinated
+delivery; staging and events-only reads do not.
 
 Protocol-v2 completions map each Pi-derived `turnId` to an immutable
-`outputs/<eventId>.md` snapshot. Pass `turnId` to read that output; the response's
-`details.outputHistory` lists the available `turnId`/`eventId` mappings. Unsupported
-protocol-v1 artifacts and numeric `output-N.md` snapshots are not read or migrated.
+`outputs/<eventId>.md` snapshot. Pass `turnId` to select a historical snapshot
+even while a follow-up runs. The response's `details.outputHistory` lists the
+available `turnId`/`eventId` mappings. Unsupported protocol-v1 artifacts and numeric
+`output-N.md` snapshots are not read or migrated.
 
 Parameters:
 

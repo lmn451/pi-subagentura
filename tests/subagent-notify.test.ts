@@ -10,6 +10,7 @@ import {
 } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import type { SubagentResult } from "../src/helpers";
+import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import {
   clearSessionScopes,
   getSessionScopes,
@@ -875,9 +876,10 @@ describe("read_subagent_artifact (output reporting)", () => {
     id: string,
     parentDir: string,
     appendCompletion = true,
+    initialTurnId: string | null = "turn-1",
   ) {
     const dir = join(parentDir, id);
-    const state: import("../src/interactive-tmux").InteractiveSubagentState = {
+    const state: InteractiveSubagentState = {
       id,
       name: "Test",
       task: "t",
@@ -893,17 +895,19 @@ describe("read_subagent_artifact (output reporting)", () => {
       artifactDir: dir,
     };
     const art = artifactPath(parentDir, id);
-    appendEvent(art, {
-      version: 2,
-      eventId: "turn-started",
-      turnId: "turn-1",
-      ts: 1,
-      type: "turn_started",
-      status: "running",
-    });
-    if (appendCompletion) {
+    if (initialTurnId !== null) {
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-started",
+        turnId: initialTurnId,
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
+    }
+    if (appendCompletion && initialTurnId !== null) {
       appendCompletionEvent(art, {
-        turnId: "turn-1",
+        turnId: initialTurnId,
         eventId: "completion-1",
         outcome: "done",
         source: "agent_settled",
@@ -913,10 +917,7 @@ describe("read_subagent_artifact (output reporting)", () => {
     return { state, art, dir };
   }
 
-  function makeReadTool(
-    mod: any,
-    state?: import("../src/interactive-tmux").InteractiveSubagentState,
-  ) {
+  function makeReadTool(mod: any, state?: InteractiveSubagentState) {
     const _api = {
       registerTool: vi.fn(),
       registerMessageRenderer: vi.fn(),
@@ -952,7 +953,12 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3800000002";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "turn-without-output",
+      );
       appendCompletionEvent(art, {
         turnId: "turn-without-output",
         eventId: "completion-without-output",
@@ -988,7 +994,12 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3800000010";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "terminal-turn",
+      );
       writeOutput(art, "terminal result");
       appendCompletionEvent(art, {
         turnId: "terminal-turn",
@@ -1040,7 +1051,12 @@ describe("read_subagent_artifact (output reporting)", () => {
       const id = outcome === "error" ? "ab12cd3800000012" : "ab12cd3800000013";
       const parent = tmp();
       try {
-        const { state, art } = makeArtifactWithDone(id, parent, false);
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          `${outcome}-turn`,
+        );
         writeOutput(art, `${outcome} diagnostic output`);
         appendCompletionEvent(art, {
           turnId: `${outcome}-turn`,
@@ -1093,7 +1109,12 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3800000014";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "successful-turn",
+      );
       writeOutput(art, "successful output");
       appendCompletionEvent(art, {
         turnId: "successful-turn",
@@ -1144,11 +1165,16 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
-  it("reads the latest terminal snapshot instead of active staging output", async () => {
+  it("keeps a completed turn's immutable snapshot after its staging file is rewritten", async () => {
     const id = "ab12cd3800000011";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "completed-turn",
+      );
       writeOutput(art, "immutable terminal result");
       appendCompletionEvent(art, {
         turnId: "completed-turn",
@@ -1180,16 +1206,272 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
+  it("uses active follow-up staging for default and since reads without consuming the prior completion", async () => {
+    const id = "ab12cd3800000015";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false, "turn-a");
+      writeOutput(art, "A immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-a",
+        eventId: "completion-a",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 20,
+      });
+      state.status = "running";
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-b-started",
+        turnId: "turn-b",
+        ts: 3,
+        type: "turn_started",
+        status: "running",
+      });
+      writeOutput(art, "B staging output");
+      appendEvent(art, {
+        version: 2,
+        eventId: "late-turn-a-completion",
+        turnId: "turn-a",
+        ts: 2,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "agent_settled",
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "late-turn-a-activity",
+        turnId: "turn-a",
+        ts: 4,
+        type: "tool_activity",
+        status: "running",
+        phase: "start",
+        tool: "bash",
+        summary: "late activity from the previous turn",
+      });
+
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const defaultResult = await readTool.execute(
+        "read-active-follow-up",
+        { id },
+        undefined,
+        undefined,
+        {},
+      );
+      const sinceResult = await readTool.execute(
+        "read-active-follow-up-since",
+        { id, since: 21 },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(defaultResult.details.output).toBe("B staging output");
+      expect(sinceResult.details.events).toEqual([]);
+      expect(sinceResult.details.output).toBe("B staging output");
+      expect(readArtifactApi.appendEntry).not.toHaveBeenCalledWith(
+        "subagentura-completion-consumed",
+        expect.anything(),
+      );
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("reads and consumes only the follow-up turn's immutable snapshot after completion", async () => {
+    const id = "ab12cd3800000016";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false, "turn-a");
+      writeOutput(art, "A immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-a",
+        eventId: "completion-a",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
+      state.status = "running";
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-b-started",
+        turnId: "turn-b",
+        ts: 3,
+        type: "turn_started",
+        status: "running",
+      });
+      writeOutput(art, "B immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-b",
+        eventId: "completion-b",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 4,
+      });
+      state.status = "exited";
+      writeOutput(art, "post-completion staging rewrite");
+      appendEvent(art, {
+        version: 2,
+        eventId: "late-turn-b-activity",
+        turnId: "turn-b",
+        ts: 5,
+        type: "tool_activity",
+        status: "running",
+        phase: "start",
+        tool: "bash",
+        summary: "activity after terminal completion",
+      });
+
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-completed-follow-up",
+        { id },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(result.details.output).toBe("B immutable output");
+      expect(
+        readArtifactApi.appendEntry.mock.calls
+          .filter(([entry]) => entry === "subagentura-completion-consumed")
+          .map(([, payload]) => payload.turnId),
+      ).toEqual(["turn-b"]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("selects and consumes an explicitly requested historical turn while a follow-up runs", async () => {
+    const id = "ab12cd3800000017";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false, "turn-a");
+      writeOutput(art, "A immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-a",
+        eventId: "completion-a",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
+      state.status = "running";
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-b-started",
+        turnId: "turn-b",
+        ts: 3,
+        type: "turn_started",
+        status: "running",
+      });
+      writeOutput(art, "B staging output");
+
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-historical-turn-a",
+        { id, turnId: "turn-a" },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(result.details.output).toBe("A immutable output");
+      expect(
+        readArtifactApi.appendEntry.mock.calls
+          .filter(([entry]) => entry === "subagentura-completion-consumed")
+          .map(([, payload]) => payload.turnId),
+      ).toEqual(["turn-a"]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["missing", "empty"] as const)(
+    "does not fall back to a prior completion when active-turn staging is %s",
+    async (staging) => {
+      const id =
+        staging === "missing" ? "ab12cd3800000018" : "ab12cd3800000019";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          "turn-a",
+        );
+        writeOutput(art, "A immutable output");
+        appendCompletionEvent(art, {
+          turnId: "turn-a",
+          eventId: "completion-a",
+          outcome: "done",
+          source: "agent_settled",
+          ts: 2,
+        });
+        state.status = "running";
+        appendEvent(art, {
+          version: 2,
+          eventId: "turn-b-started",
+          turnId: "turn-b",
+          ts: 3,
+          type: "turn_started",
+          status: "running",
+        });
+        if (staging === "missing") {
+          rmSync(art.outputFile, { force: true });
+        } else {
+          writeOutput(art, "");
+        }
+
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const result = await readTool.execute(
+          `read-active-follow-up-${staging}`,
+          { id },
+          undefined,
+          undefined,
+          {},
+        );
+
+        if (staging === "missing") {
+          expect(result.details.output).toBeNull();
+        } else {
+          expect(result.details.output).toBe("");
+        }
+        expect(readArtifactApi.appendEntry).not.toHaveBeenCalledWith(
+          "subagentura-completion-consumed",
+          expect.anything(),
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("finds a terminal snapshot beyond the first event batch", async () => {
     const id = "ab12cd3800000012";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "late-completed-turn",
+      );
       for (let index = 0; index < 3_000; index++) {
         appendEvent(art, {
           version: 2,
           eventId: `tool-${index}`,
-          turnId: "turn-1",
+          turnId: "late-completed-turn",
           ts: index + 2,
           type: "tool_activity",
           status: "running",
@@ -1231,7 +1513,7 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3900000003";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(id, parent, false, null);
       appendEvent(art, {
         version: 2,
         eventId: "process-exit-without-output",
@@ -1269,22 +1551,21 @@ describe("read_subagent_artifact (output reporting)", () => {
     const parent = tmp();
     try {
       const dir = join(parent, id);
-      const state: import("../src/interactive-tmux").InteractiveSubagentState =
-        {
-          id,
-          name: "Test",
-          task: "t",
-          paneId: "%99",
-          sessionFile: "/tmp/sess.jsonl",
-          cwd: "/tmp",
-          startedAt: 1,
-          status: "running",
-          mux: "tmux",
-          attachCommand: "tmux attach",
-          selectPaneCommand: "tmux select-pane",
-          launchScriptFile: "/tmp/launch.sh",
-          artifactDir: dir,
-        };
+      const state: InteractiveSubagentState = {
+        id,
+        name: "Test",
+        task: "t",
+        paneId: "%99",
+        sessionFile: "/tmp/sess.jsonl",
+        cwd: "/tmp",
+        startedAt: 1,
+        status: "running",
+        mux: "tmux",
+        attachCommand: "tmux attach",
+        selectPaneCommand: "tmux select-pane",
+        launchScriptFile: "/tmp/launch.sh",
+        artifactDir: dir,
+      };
       const art = artifactPath(parent, id);
       appendEvent(art, {
         version: 2,
@@ -1375,7 +1656,12 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3600000005";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "empty-output-turn",
+      );
       writeOutput(art, "");
       appendCompletionEvent(art, {
         turnId: "empty-output-turn",
@@ -1406,7 +1692,12 @@ describe("read_subagent_artifact (output reporting)", () => {
     const id = "ab12cd3700000006";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "output-turn",
+      );
       writeOutput(art, "Hello, world!");
       appendCompletionEvent(art, {
         turnId: "output-turn",
@@ -1441,7 +1732,12 @@ Hello, world!
     const id = "ab12cd3700000007";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "oversized-output-turn",
+      );
       const oversized = "x".repeat(80 * 1024);
       writeOutput(art, oversized);
       appendCompletionEvent(art, {
@@ -1477,13 +1773,27 @@ Hello, world!
     const id = "ab12cd3800000007";
     const parent = tmp();
     try {
-      const { state, art } = makeArtifactWithDone(id, parent, false);
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "pi-user-entry-first",
+      );
       writeOutput(art, "first immutable output");
       appendCompletionEvent(art, {
         turnId: "pi-user-entry-first",
         eventId: "completion-first",
         outcome: "done",
         source: "agent_settled",
+        ts: 2,
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-started-second",
+        turnId: "pi-user-entry-second",
+        ts: 3,
+        type: "turn_started",
+        status: "running",
       });
       writeOutput(art, "second immutable output");
       appendCompletionEvent(art, {
@@ -1491,6 +1801,7 @@ Hello, world!
         eventId: "completion-second",
         outcome: "done",
         source: "agent_settled",
+        ts: 4,
       });
       const mod =
         await importFresh<typeof import("../src/subagent")>("../src/subagent");
