@@ -284,7 +284,7 @@ describe("peer session scope isolation", () => {
     const a = setupScopedExtension(801);
     const b = setupScopedExtension(802);
     const ownerA = sessionOwner(a.scope);
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     const pending = new Promise<SubagentResult>(() => {});
     mockStartSubagentJob.mockResolvedValue({
       ...defaultStartSubagentJobResult,
