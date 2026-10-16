@@ -460,7 +460,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -482,7 +482,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -584,7 +584,7 @@ Parameters:
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux` — optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, or `"herdr"`. Auto prefers a Herdr-managed pane (`HERDR_ENV=1`), then the attached Zellij/tmux environment, and finally an installed tmux or Zellij detached-session backend. Explicit choice forces that backend. Herdr mode requires Pi to be running inside a Herdr pane and preserves its exact socket path for reload/rehydration.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
-- `completionPolicy` — `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for a caller-declared named barrier
+- `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
 
 The spawn result describes the selected coordinated behavior.
