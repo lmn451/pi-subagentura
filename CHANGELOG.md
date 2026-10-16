@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that earlier completion.
 - Restore interactive activity rows from protocol-v2 tool events in physical
   byte order, including tool-name fallback for missing or non-visible summaries.
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
 
 ## [3.6.5] - 2026-10-14
 

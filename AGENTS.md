@@ -172,8 +172,10 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 The coordinated async default is `completionPolicy="each"`; grouped work must
 use `completionPolicy="group"` and a bounded explicit `completionGroupId`.
 Registration happens at spawn. Every parent `agent_settled` seals its registered
-groups, and a group becomes ready only after all members are terminal. `error`
-and `cancelled` are terminal; late members are rejected.
+groups, and a group itself becomes ready only after all members are terminal.
+Error records bypass the group barrier for delivery before the group is ready;
+this does not complete the group. Successful and `cancelled` records remain
+gated until the group is ready. Late members are rejected.
 
 Each parent-visible standalone terminal record and each background workflow
 aggregate appends

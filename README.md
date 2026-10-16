@@ -777,7 +777,16 @@ from the parent-model channel:
 `completionPolicy` controls readiness:
 
 - `"each"` (default) makes every independent result eligible immediately. Results that finish while the parent is busy are coalesced into one manifest at the next safe-idle dispatch; this is the default independent-delivery behavior.
-- `"group"` requires the caller to provide one shared, explicit `completionGroupId`. Same-turn launch and task text do not infer relatedness. Register all members in the intended group before the spawning parent turn settles; settlement seals the group, rejects late members, and blocks model delivery until every registered member is `done`, `error`, or `cancelled`. Per-member TUI notices still appear immediately, and an entirely consumed group does not trigger an empty turn.
+- `"group"` requires the caller to provide one shared, explicit
+  `completionGroupId`. Same-turn launch and task text do not infer relatedness.
+  Register all members before the spawning parent turn settles; settlement seals
+  the group and rejects late members. Error records bypass the group barrier and
+  become eligible for model delivery before the group completes; this does not
+  complete the group.
+  Successful and cancelled results remain gated until every registered member is
+  terminal. Per-member TUI notices still appear immediately, while busy-parent
+  manifests wait for a safe-idle dispatch. An entirely consumed group does not
+  trigger an empty turn.
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
