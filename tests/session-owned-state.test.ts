@@ -126,8 +126,8 @@ describe("session-owned runtime state", () => {
     );
     expect(firstEpisode).toBeDefined();
     expect(removeInteractiveSubagentState(state)).toBe(true);
-    expect(
-      beginRuntimeFailureEpisode(state.artifactDir, "mux_probe"),
-    ).not.toBe(firstEpisode);
+    expect(beginRuntimeFailureEpisode(state.artifactDir, "mux_probe")).not.toBe(
+      firstEpisode,
+    );
   });
 });
