@@ -53,6 +53,31 @@ workflow({
 });
 ```
 
+Each reviewer in the definition sets `readOnly: true` on its `ctx.agent()` call;
+this is an agent option, not a `workflow()` invocation option, and the example
+leaves the normal isolation default unchanged. The effective capability is
+snapshotted per call; omitted or false preserves the existing default
+model-facing tool set. The allowlist is exactly Pi `read`, `grep`, `find`, and
+`ls`; it excludes `edit`, `write`, `bash`, `powershell`, recursive
+subagent/workflow tools, and arbitrary extension tools, including `mcp__*`,
+`list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource`.
+In-process schema capture additionally permits the internal `structured_output`
+return tool. Process-backed reviewers return final assistant text directly;
+the trusted host captures it into the existing result artifact before the
+attempt settles, and the process-selected schema fallback remains text JSON for
+parent extraction and validation. This is a tool-dispatch restriction, not an
+OS sandbox or path confinement: the host and extensions still execute as the
+same OS user. The shared `# Goal` / `# Contract` context and per-aspect
+`# Target` / `# Change` / `# Acceptance` sections organize the work but do not
+enforce semantic scope.
+
+The existing workflow step records remain the source of progress; the agents
+do not maintain a second todo ledger or scheduler. Read-only capability is
+retained through schema-repair attempts and durable recovery/compatibility
+checks. If a multiplexer is unavailable, non-durable execution falls back to
+in-process execution with the same restriction; durable process launch
+continues to fail closed rather than falling back to an unrestricted child.
+
 `files` accepts 1–40 non-empty paths, each at most 512 characters and 8,192
 characters combined. `intendedChange` must be non-empty and at most 12,000
 characters. The deterministic aggregate reports `pass`, `concern`, `blocking`,

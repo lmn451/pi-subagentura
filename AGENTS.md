@@ -38,7 +38,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/rehydrate.ts`                                     | Reconstruct persisted cursors, queues, and delivery receipts on session start/reload/resume.                                                                                                                      |
 | `src/helpers.ts`                                       | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `formatUsage`, job registry and cleanup.                                                                                              |
 | `src/artifact.ts`                                      | Versioned artifact protocol, immutable `outputs/<eventId>.md`, byte readers, mixed-v1 compatibility, and state-v2 helpers.                                                                                        |
-| `src/child-protocol.ts`                                | Child-only Pi lifecycle hooks selected by `PI_SUBAGENTURA_CHILD=1`.                                                                                                                                               |
+| `src/child-protocol.ts`                                | Child-only lifecycle hooks; ordinary interactive turns use `cli.mjs done`, while flagged read-only workflow turns use host-owned final-output capture.                                                            |
 | `src/delivery.ts`                                      | Bounded durable trigger-aware delivery queue and deterministic delivery IDs.                                                                                                                                      |
 | `src/completion-coordinator.ts`                        | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and triggered parent continuation.                                                                      |
 | `src/interactive-tmux.ts`                              | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
@@ -48,6 +48,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/notifications.ts`                                 | Upgrade-only legacy in-process delivery broker and output sanitization.                                                                                                                                           |
 | `src/rendering.ts`                                     | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
 | `src/schemas.ts`                                       | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
+| `src/agent-capabilities.ts`                            | Dependency-free read-only workflow model-tool allowlist and child-mode flag.                                                                                                                                      |
 | `src/workflow*.ts`                                     | Workflow tool/core/worker/job/UI modules. Worker execution is isolated from the parent thread but the VM is not a security boundary.                                                                              |
 | `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-level state (interactive sub-agent registry, mux mock, etc.).                                                                                                  |
 
@@ -156,6 +157,25 @@ turn's `done` is deduplicated against the prior turn and its output is lost.
 Snapshot writers must enforce `MAX_OUTPUT_SNAPSHOT_BYTES` before reading or
 copying child-controlled `output.md`. Oversized staging output records explicit
 `outputError` metadata and must never be loaded synchronously into the parent.
+
+### Read-only workflow child output exception
+
+`ctx.agent(..., { readOnly: true })` snapshots the effective capability per
+call. Omitted or false preserves the existing default model-tool access. The
+read-only model allowlist is Pi `read`, `grep`, `find`, and `ls`; in-process
+native schema capture may additionally use the internal `structured_output`
+return tool. Process-selected schema fallback remains final text JSON, captured
+by the trusted host into the existing attempt artifact and validated by the
+parent. Do not ask the child to use forbidden write/shell tools for result
+handoff.
+
+This is model-facing tool dispatch, not an OS sandbox or path confinement.
+Latest SDKs can retain MCP tools despite a positive allowlist, so keep explicit
+exclusions for `mcp__*`, `list_mcp_resources`,
+`list_mcp_resource_templates`, and `read_mcp_resource`. These calls continue to
+use existing workflow step/attempt records; they add no progress ledger or
+scheduler. Prompt sections organize assignments but do not enforce semantic
+scope. Ordinary interactive child completion remains unchanged.
 
 ### `extractJson` in `src/workflow-core.ts` is dependency-free on purpose
 

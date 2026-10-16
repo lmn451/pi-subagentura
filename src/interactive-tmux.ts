@@ -105,6 +105,11 @@ import {
 } from "./spawn-tree-context";
 import { TELEMETRY_ENV } from "./settings";
 import {
+  READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES,
+  READ_ONLY_AGENT_TOOL_NAMES,
+  READ_ONLY_WORKFLOW_FLAG,
+} from "./agent-capabilities";
+import {
   captureTelemetry,
   sanitizeTelemetryModel,
   telemetryDepth,
@@ -126,23 +131,27 @@ import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
 
 /**
- * System prompt sent to every interactive sub-agent. Tells the child how to
- * signal completion so the parent can be notified, and where to write its
- * result. The persona (if provided) is placed ABOVE this so the protocol —
- * the part that keeps the parent-child notification loop working — is the
- * most recent instruction the LLM reads (recency wins for instruction
- * following).
+ * System prompt sent to every interactive sub-agent. The default protocol
+ * requires an output artifact and lifecycle CLI call; read-only workflow mode
+ * instead returns text directly for trusted host capture at settlement. The
+ * persona (if provided) is placed ABOVE this so the protocol is the most
+ * recent instruction the LLM reads.
  *
- * `artifactDir` is the resolved absolute path baked into the prompt so the
- * child can use it directly in `write` tool calls. Bash commands and `cli.mjs`
- * calls still work via the exported `ARTIFACT_DIR` env var from the launch
- * script, but the `write` tool treats its `path` argument as a literal string,
- * so we must give it the absolute path up front.
+ * `artifactDir` is used by the default protocol to provide literal artifact
+ * paths for `write` tool calls.
  */
 export function buildChildSubagentProtocol(
   artifactDir: string,
   requireActivePaneForUserAttention = false,
+  readOnly = false,
 ): string {
+  if (readOnly) {
+    return `You are running inside a Pi sub-agent launched by a parent agent in read-only workflow mode.
+
+Use the available read-only tools to complete the task. Return the requested result directly in your final assistant response. If the task requests JSON, return the JSON itself without surrounding prose or markdown.
+
+The host captures your final assistant text when the turn settles. Do not write a result file or invoke a lifecycle command. After responding, keep the Pi REPL open for possible parent follow-up.`;
+  }
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
   const userAttentionGuidance = requireActivePaneForUserAttention
@@ -455,15 +464,17 @@ export function createInteractiveSubagentPaths(params: {
 export function buildInteractivePrompt(params: {
   task: string;
   contextText?: string | null;
+  readOnly?: boolean;
 }): string {
-  const footer =
-    "\n\n" +
-    "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
-    "write your result to output.md (path from the system prompt), run the command below, " +
-    "and wait for it to succeed. Repeat this for every turn:\n" +
-    '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
-    "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
-    "Do not intentionally exit or close the pane unless explicitly asked.";
+  const footer = params.readOnly
+    ? "\n\nREAD-ONLY COMPLETION: return the requested result directly as your final assistant response. Preserve the requested format; if JSON is requested, return JSON without surrounding prose or markdown. The host captures this response when the turn settles. Keep the Pi REPL open for parent follow-up."
+    : "\n\n" +
+      "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
+      "write your result to output.md (path from the system prompt), run the command below, " +
+      "and wait for it to succeed. Repeat this for every turn:\n" +
+      '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
+      "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
+      "Do not intentionally exit or close the pane unless explicitly asked.";
 
   if (!params.contextText) return params.task + footer;
   return (
@@ -489,6 +500,7 @@ export function buildPiInteractiveCommand(params: {
   model?: string;
   cwd: string;
   thinkingLevel?: ThinkingLevel;
+  readOnly?: boolean;
 }): string {
   const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
   const parts = [
@@ -506,6 +518,15 @@ export function buildPiInteractiveCommand(params: {
   }
   if (params.systemPromptFile) {
     parts.push("--append-system-prompt", escape(params.systemPromptFile));
+  }
+  if (params.readOnly) {
+    parts.push(
+      "--tools",
+      escape(READ_ONLY_AGENT_TOOL_NAMES.join(",")),
+      "--exclude-tools",
+      escape(READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES.join(",")),
+      `--${READ_ONLY_WORKFLOW_FLAG}`,
+    );
   }
   parts.push(escape(`@${params.promptFile}`));
   return `cd ${escape(params.cwd)} && ${parts.join(" ")}`;
@@ -639,6 +660,8 @@ export function launchInteractiveSubagent(params: {
   persona?: string;
   model?: string;
   cwd: string;
+  /** Restrict model-facing tools to the read-only workflow allowlist. */
+  readOnly?: boolean;
   contextText?: string | null;
   /** Spawn in a detached named window (invisible) instead of a visible split. */
   background?: boolean;
@@ -688,6 +711,9 @@ export function launchInteractiveSubagent(params: {
   /** Caller-observed attempt start; direct callers default to launcher entry. */
   spawnRequestedAt?: number;
 }): InteractiveSubagentState {
+  if (params.readOnly !== undefined && typeof params.readOnly !== "boolean") {
+    throw new TypeError("readOnly must be a boolean");
+  }
   const spawnStartedAt = params.spawnRequestedAt ?? Date.now();
   let spawnFailureReported = false;
   let nextDepth: number | undefined;
@@ -822,6 +848,7 @@ export function launchInteractiveSubagent(params: {
   const prompt = buildInteractivePrompt({
     task: params.task,
     contextText: params.contextText,
+    readOnly: params.readOnly === true,
   });
   try {
     mkdirSync(paths.artifactDir, { recursive: true });
@@ -868,6 +895,7 @@ export function launchInteractiveSubagent(params: {
     const protocol = buildChildSubagentProtocol(
       paths.artifactDir,
       params.requireActivePaneForUserAttention,
+      params.readOnly === true,
     );
     const systemPromptContent = params.persona
       ? `# Persona\n\n${params.persona}\n\n${protocol}`
@@ -1080,6 +1108,7 @@ export function launchInteractiveSubagent(params: {
       model: params.model,
       cwd,
       thinkingLevel: params.thinkingLevel,
+      readOnly: params.readOnly === true,
     });
     if (spawnTreeContext) {
       lineageBootstrapPath = writeLineageBootstrap(

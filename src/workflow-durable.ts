@@ -35,6 +35,8 @@ export interface DurableAttemptContext {
   key: string;
   directory: string;
   recovering: boolean;
+  /** Capability mode of the process attempt, absent for the default policy. */
+  readOnly?: boolean;
   /** Adapter calls before a new process launch, not when adopting one. */
   recordDispatch?: () => Promise<void>;
 }
@@ -167,12 +169,34 @@ export class DurableWorkflow {
           `duplicate operation id ${key}. Use distinct ids for items and retry attempts.`,
         );
       this.operations.add(key);
+      let journalPayload = request.payload;
+      if (request.method === "agent") {
+        const rawPayload: unknown = request.payload;
+        if (
+          rawPayload &&
+          typeof rawPayload === "object" &&
+          !Array.isArray(rawPayload) &&
+          "opts" in rawPayload
+        ) {
+          const rawOptions = rawPayload.opts;
+          if (
+            rawOptions &&
+            typeof rawOptions === "object" &&
+            !Array.isArray(rawOptions) &&
+            "readOnly" in rawOptions &&
+            (rawOptions.readOnly === false || rawOptions.readOnly === undefined)
+          ) {
+            const { readOnly: _readOnly, ...options } = rawOptions;
+            journalPayload = { ...rawPayload, opts: options };
+          }
+        }
+      }
       const previous = this.requests[this.requestIndex++];
       if (
         previous &&
         (previous.id !== request.id ||
           previous.method !== request.method ||
-          !runValueMatches(previous.payload, request.payload))
+          !runValueMatches(previous.payload, journalPayload))
       ) {
         throw new WorkflowReplayError(
           `request ${request.id} does not match its recorded definition/arguments.`,
@@ -184,7 +208,7 @@ export class DurableWorkflow {
         void this.track(
           this.store.append("request", {
             ...request,
-            payload: encodeRunValue(request.payload),
+            payload: encodeRunValue(journalPayload),
           }),
         ).then(() => {
           pending.durable = true;
@@ -275,6 +299,8 @@ export class DurableWorkflow {
   ): Promise<SubagentResult> {
     if (this.stopped || request.signal?.aborted)
       throw new Error("Workflow interrupted.");
+    if (request.readOnly !== undefined && typeof request.readOnly !== "boolean")
+      throw new WorkflowReplayError("agent readOnly policy is invalid.");
     const persist = options.persist !== false;
     const baseKey = `${requestId}-${attempt}`;
     let key = baseKey;
@@ -294,6 +320,7 @@ export class DurableWorkflow {
       onCancellationSnapshot: _snapshot,
       ...behavior
     } = request;
+    if (behavior.readOnly !== true) delete behavior.readOnly;
     const previous = this.attempts.get(key);
     if (previous && !runValueMatches(previous.configuration, behavior))
       throw new WorkflowReplayError("agent attempt configuration changed.");
@@ -326,6 +353,7 @@ export class DurableWorkflow {
     const durableAttempt: DurableAttemptContext = {
       key,
       directory: this.store.directory,
+      ...(request.readOnly === true ? { readOnly: true } : {}),
       recovering: !!previous,
       recordDispatch: async () => {
         if (dispatched) return;

@@ -37,6 +37,42 @@ fixed or exponential backoff. `failure: "continue"` and `"collect"` return
 structured task results for failed branches. The per-step output-token budget
 is checked when that step settles.
 
+### Read-only agent capabilities
+
+Set `readOnly: true` in a V4 `ctx.agent()` options object when the model needs
+to inspect but not modify source. The effective capability is snapshotted per
+agent call; omitted or false preserves the existing default model-facing tool
+set. The allowlist is exactly Pi `read`, `grep`, `find`, and `ls`. It excludes
+`edit`, `write`, `bash`, `powershell`, recursive subagent/workflow tools, and
+arbitrary extension tools, including `mcp__*`, `list_mcp_resources`,
+`list_mcp_resource_templates`, and `read_mcp_resource`. In-process native
+schema capture additionally permits the internal `structured_output` return
+tool; this is return plumbing, not a general-purpose agent tool.
+
+For process-backed read-only agents, the child returns its final assistant
+prose/JSON directly. The trusted host captures that output into the existing
+result artifact before settling the attempt. The process-selected SDK schema
+fallback deliberately remains text JSON, which the parent workflow extracts
+and validates against the schema. Schema repair and retries retain the same
+capability policy.
+
+`readOnly` controls model-facing tool dispatch only. It does not sandbox the
+process, constrain filesystem paths, or restrict host/extension code, which
+still runs as the same OS user. Prompt `# Goal` / `# Contract` context and
+per-agent `# Target` / `# Change` / `# Acceptance` sections organize requested
+work but do not enforce semantic scope.
+
+When `readOnly` is omitted or false, the existing default model-facing tool set
+remains unchanged. The option does not change isolation selection: with
+isolation omitted, the runtime's existing process default applies; non-durable
+runs may fall back to in-process execution when no supported multiplexer is
+available, retaining the restriction. Durable process launch fails closed
+rather than falling back to an unrestricted child. Durable step and attempt
+compatibility include the effective policy, so a changed capability cannot
+reuse an incompatible result or adopt an attempt with a different policy.
+Recovery preserves the recorded policy. The normal workflow step records remain
+the progress source; this adds no separate ledger or scheduler.
+
 V4 definitions use project-scoped durable storage by default. Pass
 `durable: false` for a non-durable run. Completed durable steps are reused only
 when source definition, stable path, inputs, and policy remain compatible. A

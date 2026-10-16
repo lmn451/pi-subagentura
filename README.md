@@ -196,6 +196,21 @@ consume the active V4 worker's execution-time limit. See the
 [runtime contract](./WORKFLOW_RUNTIME.md#v4-definitions), and
 [runnable TypeScript example](./examples/workflows/review-source.ts).
 
+V4 `ctx.agent()` calls may set `readOnly: true` to restrict model-facing tools to
+Pi `read`, `grep`, `find`, and `ls`; it also excludes `edit`, `write`, `bash`,
+`powershell`, recursive subagent/workflow tools, and arbitrary extension tools,
+including `mcp__*`, `list_mcp_resources`, `list_mcp_resource_templates`, and
+`read_mcp_resource`. The effective capability is snapshotted per call. Omitted
+or false preserves the existing default model-facing tool set. In-process
+schema capture has the internal `structured_output` return tool as an
+exception. For process-backed agents, the host captures final assistant text;
+the process-selected schema fallback remains text JSON for parent extraction
+and validation. This is not an OS sandbox or path confinement: host and
+extension code still run as the same OS user. Read-only requests preserve the
+policy across fallback, schema repair, and durable compatibility/recovery. See
+the [V4 workflow guide](./docs/workflows.md#read-only-agent-capabilities) for
+process and recovery details.
+
 ## Why use it?
 
 - Route work to attachable interactive specialists with `--orchestratorv2`
