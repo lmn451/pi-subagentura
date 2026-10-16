@@ -11,6 +11,7 @@ import {
   findModel,
   registerProvider,
 } from "../../src/pi-sdk-compat";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,6 +72,7 @@ export async function createPiSessionHarness(
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
+  const missingAuthEnvVar = `PI_SUBAGENTURA_TEST_MISSING_AUTH_${randomUUID().replaceAll("-", "")}`;
   const sessionRuntime = await createCompatibleSessionRuntime({
     agentDir,
     authStorageData: options.missingAuth
@@ -84,7 +86,7 @@ export async function createPiSessionHarness(
     [];
   const fauxProvider = {
     api: "subagentura-faux",
-    ...(!options.missingAuth ? { apiKey: "test" } : {}),
+    apiKey: options.missingAuth ? `$${missingAuthEnvVar}` : "test",
     baseUrl: "http://127.0.0.1.invalid",
     models: [
       {
