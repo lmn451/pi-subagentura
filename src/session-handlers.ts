@@ -477,7 +477,7 @@ export function registerSessionHandlers(
   pi.on("before_agent_start", (event) => {
     if (scope.lifecycle !== "started") return;
     const owner = sessionOwner(scope);
-    markCompletionTurnWakeStarted(pi, event.prompt);
+    if ("prompt" in event) markCompletionTurnWakeStarted(pi, event.prompt);
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
     if (message) recordPreparedManifest(scope, message);
