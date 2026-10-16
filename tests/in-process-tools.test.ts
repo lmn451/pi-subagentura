@@ -460,6 +460,71 @@ describe("peer session scope isolation", () => {
   });
 });
 
+describe("model selection guidance", () => {
+  const rules = [
+    "By default, prefer the current/parent provider and model.",
+    "Honor any provider or model explicitly requested by the user.",
+    "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+  ];
+
+  it.each(["subagent_with_context", "subagent_isolated"])(
+    "%s describes provider-aware model selection",
+    (name) => {
+      const tool = getToolDef(setupExtension(), name);
+      const modelDescription = tool.parameters.properties.model.description;
+
+      for (const rule of rules) {
+        expect(tool.description).toContain(rule);
+        expect(modelDescription).toContain(rule);
+      }
+    },
+  );
+});
+
+describe("async review finalization guidance", () => {
+  it.each(["subagent_with_context", "subagent_isolated"])(
+    "%s distinguishes yielding from finalizing the review",
+    (name) => {
+      const tool = getToolDef(setupExtension(), name);
+
+      expect(tool.description).toContain(
+        "yield the parent turn so the group seals",
+      );
+      expect(tool.description).toContain(
+        "label findings as provisional and report pending jobIds",
+      );
+      expect(tool.description).toContain(
+        "disclose any failed or cancelled reviewers as coverage gaps",
+      );
+      expect(tool.description).toContain(
+        "Do not cancel unfinished reviewers merely to finalize an audit.",
+      );
+      expect(tool.parameters.properties.async.description).toContain(
+        "Yield the spawning turn to seal the group",
+      );
+    },
+  );
+
+  it("directs timed-out review waits back to background completion", () => {
+    const tool = getToolDef(setupExtension(), "get_subagent_result");
+
+    expect(tool.description).toContain(
+      "If a bounded wait times out, report the pending jobId and yield",
+    );
+    expect(tool.description).toContain(
+      "do not cancel the job merely to finish a review",
+    );
+  });
+
+  it("forbids using cancellation to finalize an audit", () => {
+    const tool = getToolDef(setupExtension(), "cancel_subagent");
+
+    expect(tool.description).toContain(
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+    );
+  });
+});
+
 // ── subagent_with_context ────────────────────────────────────────────
 
 describe("subagent_with_context tool", () => {
@@ -469,6 +534,18 @@ describe("subagent_with_context tool", () => {
   beforeEach(() => {
     api = setupExtension();
     toolDef = getToolDef(api, "subagent_with_context");
+  });
+
+  it("explains the async review lifecycle and cancellation guard", () => {
+    expect(toolDef.description).toContain(
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
+    );
+    expect(toolDef.description).toContain(
+      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
+    );
+    expect(toolDef.description).toContain(
+      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
+    );
   });
 
   it("returns 'No conversation history to inherit' when branch is empty (sync path)", async () => {
@@ -487,6 +564,67 @@ describe("subagent_with_context tool", () => {
     // No calls beyond the early return
     expect(mockStartSubagentJob).not.toHaveBeenCalled();
     expect(mockConvertToLlm).not.toHaveBeenCalled();
+  });
+
+  it("does not inherit a message omitted by the parent session projection", async () => {
+    const sessionManager = {
+      getBranch: vi.fn().mockReturnValue([
+        {
+          type: "message",
+          message: { role: "user", content: "RAW-OMITTED" },
+        },
+      ]),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
+      getSessionId: vi.fn().mockReturnValue("test-session"),
+    };
+    const ctx = mockCtx({ sessionManager });
+
+    const result = await toolDef.execute(
+      "omitted-context",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result.content[0].text).toBe("No conversation history to inherit.");
+    expect(sessionManager.buildSessionProjection).toHaveBeenCalledOnce();
+    expect(sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+  });
+
+  it("inherits replacement messages from the parent session projection", async () => {
+    const projectedMessages = [{ role: "user", content: "EDITED-REPLACEMENT" }];
+    const sessionManager = {
+      getBranch: vi.fn().mockReturnValue([
+        {
+          type: "message",
+          message: { role: "user", content: "RAW-ORIGINAL" },
+        },
+      ]),
+      buildSessionProjection: vi
+        .fn()
+        .mockReturnValue({ messages: projectedMessages }),
+      getSessionId: vi.fn().mockReturnValue("test-session"),
+    };
+    const ctx = mockCtx({ sessionManager });
+    mockConvertToLlm.mockReturnValue(projectedMessages);
+    mockSerializeConversation.mockReturnValue("serialized replacement");
+
+    await toolDef.execute(
+      "replacement-context",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(sessionManager.buildSessionProjection).toHaveBeenCalledOnce();
+    expect(sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(mockConvertToLlm).toHaveBeenCalledWith(projectedMessages);
+    expect(mockStartSubagentJob).toHaveBeenCalledWith(
+      expect.objectContaining({ contextText: "serialized replacement" }),
+    );
   });
 
   it("records one context-stage failure for missing history", async () => {
@@ -542,6 +680,19 @@ describe("subagent_isolated tool", () => {
   beforeEach(() => {
     api = setupExtension();
     toolDef = getToolDef(api, "subagent_isolated");
+  });
+
+  it("describes background review lifecycle and deliberate cancellation", () => {
+    expect(toolDef.description).toContain(
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
+    );
+    const cancelTool = getToolDef(api, "cancel_subagent");
+    expect(cancelTool.description).toContain(
+      "This is destructive terminal control: do not use it merely because the job is still running or to reclaim context.",
+    );
+    expect(cancelTool.description).toContain(
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence.",
+    );
   });
 
   it("passes null context to startSubagentJob (sync path)", async () => {
@@ -1082,6 +1233,13 @@ describe("get_subagent_result tool", () => {
     expect(toolDef.description).not.toContain(
       "Block until an async subagent job completes",
     );
+  });
+
+  it("allows bounded waits when a final synthesis depends on this result", () => {
+    expect(toolDef.description).toContain(
+      "or when a bounded final synthesis depends on this specific result",
+    );
+    expect(toolDef.description).toContain("A timeout does not cancel the job.");
   });
 
   it("returns immediately for a running job unless waiting is explicit", async () => {

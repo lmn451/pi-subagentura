@@ -46,7 +46,10 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
-import { restoreDurableWorkflowRuns } from "./workflow-durable-tools";
+import {
+  restoreDurableWorkflowRuns,
+  restoreWorkflowV4View,
+} from "./workflow-durable-tools";
 import {
   deleteOrchestratorRoutingFile,
   loadOrchestratorRoutingMetadata,
@@ -714,6 +717,7 @@ export function registerSessionHandlers(
       : undefined;
     ensureInteractivePoller(globalState);
     await durableRecovery;
+    await restoreWorkflowV4View(ctx);
   });
 
   (pi as any).on?.(

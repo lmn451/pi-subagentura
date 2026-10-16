@@ -21,6 +21,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -264,13 +265,23 @@ describe("published tarball", () => {
   });
 
   it("publishes workflow declarations through the workflow subpath", () => {
-    expect(entries).toContain("types/workflow.d.ts");
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        "types/workflow.d.ts",
+        "types/workflow-v4.d.ts",
+        "src/workflow-v4-sdk.mjs",
+        "src/workflow-v4-sdk.d.mts",
+      ]),
+    );
     const packedPackage = JSON.parse(
       readFileSync(join(pkgDir, "package.json"), "utf8"),
     );
     expect(packedPackage.exports).toEqual({
       ".": "./src/subagent.ts",
-      "./workflow": { types: "./types/workflow.d.ts" },
+      "./workflow": {
+        types: "./types/workflow.d.ts",
+        default: "./src/workflow-v4-sdk.mjs",
+      },
     });
   });
 
@@ -279,6 +290,7 @@ describe("published tarball", () => {
       expect.arrayContaining([
         "docs/workflows.md",
         "examples/workflows/README.md",
+        "examples/workflows/review-source.ts",
         "examples/workflows/package-to-skill.mjs",
         "examples/workflows/ralplan-consensus.mjs",
         "examples/workflows/ralplan-from-skill.mjs",
@@ -321,7 +333,10 @@ describe("published tarball", () => {
   });
 
   it("declares every bare runtime source import", () => {
-    const declared = new Set(Object.keys(PKG.dependencies ?? {}));
+    const declared = new Set([
+      PKG.name,
+      ...Object.keys(PKG.dependencies ?? {}),
+    ]);
     for (const peer of Object.keys(PKG.peerDependencies ?? {})) {
       if (APPROVED_PI_PEERS.has(peer)) declared.add(peer);
     }
@@ -353,7 +368,7 @@ describe("published tarball", () => {
     ).toEqual([]);
   });
 
-  it("loads and registers the packed extension in a clean production consumer", () => {
+  it("loads the packed extension and V4 workflow SDK in a clean production consumer", () => {
     const consumer = join(work, "consumer");
     mkdirSync(consumer);
     const install = spawnSync(
@@ -385,5 +400,29 @@ describe("published tarball", () => {
       { cwd: consumer, encoding: "utf8" },
     );
     expect(smoke.status, smoke.stderr || smoke.stdout).toBe(0);
+
+    const example = "examples/workflows/review-source.ts";
+    copyFileSync(join(pkgDir, example), join(consumer, "review-source.ts"));
+    const v4Smoke = spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--input-type=module",
+        "--eval",
+        [
+          'import { readFileSync } from "node:fs";',
+          'import { pathToFileURL } from "node:url";',
+          'import { defineWorkflow, schema } from "pi-subagentura/workflow";',
+          'import { parseWorkflow } from "./node_modules/pi-subagentura/src/workflow-script.mjs";',
+          'if (typeof defineWorkflow !== "function" || typeof schema.object !== "function") process.exit(2);',
+          'const example = await import(pathToFileURL(process.cwd() + "/review-source.ts").href);',
+          'if (example.default?.name !== "review-source" || typeof example.default.run !== "function") process.exit(3);',
+          'if (parseWorkflow(readFileSync("review-source.ts", "utf8")).format !== "definition") process.exit(4);',
+          'await import("./node_modules/pi-subagentura/src/workflow-v4-runtime.mjs");',
+        ].join("\n"),
+      ],
+      { cwd: consumer, encoding: "utf8" },
+    );
+    expect(v4Smoke.status, v4Smoke.stderr || v4Smoke.stdout).toBe(0);
   }, 60_000);
 });

@@ -1,4 +1,5 @@
 import type { SubagentResult } from "./helpers";
+import { parseWorkflow } from "./workflow-script";
 import {
   MAX_TOTAL_AGENTS,
   addWorkflowUsage,
@@ -46,6 +47,7 @@ export class WorkflowReplayError extends WorkflowPersistenceError {
 
 /** One transcript across root and nested scripts; no per-branch replay lanes. */
 export class DurableWorkflow {
+  readonly stepBased: boolean;
   readonly definition: any;
   readonly replaying: boolean;
   private requests: any[];
@@ -66,6 +68,10 @@ export class DurableWorkflow {
   private stopped = false;
   private inFlight = new Set<Promise<unknown>>();
   private attemptOutcomes = new Map<string, any>();
+  private privateOutcomes = new Map<
+    string,
+    { value: SubagentResult } | { error: unknown }
+  >();
   private attempts = new Map<string, any>();
   private send!: (value: unknown) => void;
   private fail!: (error: unknown) => void;
@@ -75,13 +81,18 @@ export class DurableWorkflow {
 
   constructor(readonly store: WorkflowRunStore) {
     this.definition = store.events[0].data;
+    this.stepBased =
+      parseWorkflow(this.definition.script).format === "definition";
     this.requests = store.events
       .filter((e) => e.kind === "request")
       .map((e) => e.data);
     this.responses = store.events
       .filter((e) => e.kind === "response")
       .map((e) => e.data);
-    this.replaying = this.requests.length > 0;
+    this.replaying =
+      this.requests.length > 0 ||
+      (this.stepBased &&
+        store.events.some((event) => event.kind === "accepted"));
     this.priorErrorCount = this.responses.reduce(
       (total, row) =>
         total +
@@ -100,9 +111,10 @@ export class DurableWorkflow {
         this.attemptOutcomes.set(event.data.key, event.data);
     }
     for (const outcome of this.attemptOutcomes.values()) {
-      const result = outcome.ok
-        ? decodeRunValue<SubagentResult>(outcome.value)
-        : outcome;
+      const result =
+        outcome.ok && !outcome.outputOmitted
+          ? decodeRunValue<SubagentResult>(outcome.value)
+          : outcome;
       this.recordedUsage = addWorkflowUsage(this.recordedUsage, result.usage);
     }
   }
@@ -255,14 +267,27 @@ export class DurableWorkflow {
   }
 
   async runAttempt(
-    requestId: number,
+    requestId: number | string,
     attempt: number,
     request: Parameters<WorkflowAgentRunner>[0],
     run: WorkflowAgentRunner,
+    options: { persist?: boolean } = {},
   ): Promise<SubagentResult> {
     if (this.stopped || request.signal?.aborted)
       throw new Error("Workflow interrupted.");
-    const key = `${requestId}-${attempt}`;
+    const persist = options.persist !== false;
+    const baseKey = `${requestId}-${attempt}`;
+    let key = baseKey;
+    let generation = 0;
+    // An accounting-only receipt cannot replay the private value. A fresh
+    // identity avoids adopting an already-finished process on recovery.
+    while (
+      !persist &&
+      this.attemptOutcomes.has(key) &&
+      !this.privateOutcomes.has(key)
+    ) {
+      key = `${baseKey}-private-${++generation}`;
+    }
     const {
       signal: _signal,
       onProgress: _progress,
@@ -273,6 +298,11 @@ export class DurableWorkflow {
     if (previous && !runValueMatches(previous.configuration, behavior))
       throw new WorkflowReplayError("agent attempt configuration changed.");
     const committed = this.attemptOutcomes.get(key);
+    const privateOutcome = this.privateOutcomes.get(key);
+    if (privateOutcome) {
+      if ("value" in privateOutcome) return privateOutcome.value;
+      throw privateOutcome.error;
+    }
     if (committed) return this.restoreOutcome(committed);
     if (!previous) {
       if (this.attempts.size >= MAX_TOTAL_AGENTS)
@@ -327,11 +357,19 @@ export class DurableWorkflow {
       const data = {
         key,
         ok: true,
-        value: encodeRunValue(result),
+        ...(persist
+          ? { value: encodeRunValue(result) }
+          : {
+              outputOmitted: true,
+              usage: result.usage,
+              isError: result.isError,
+              cancelled: result.cancelled === true,
+            }),
         failure: workflowFailureClassification(result),
       };
       await this.store.append("outcome", data);
       this.attemptOutcomes.set(key, data);
+      if (!persist) this.privateOutcomes.set(key, { value: result });
       this.recordedUsage = addWorkflowUsage(this.recordedUsage, result.usage);
       return result;
     } catch (error) {
@@ -344,12 +382,15 @@ export class DurableWorkflow {
       const data = {
         key,
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        ...(persist
+          ? { error: error instanceof Error ? error.message : String(error) }
+          : { outputOmitted: true }),
         failure: workflowFailureClassification(error),
         usage: (error as { usage?: SubagentResult["usage"] } | null)?.usage,
       };
       await this.store.append("outcome", data);
       this.attemptOutcomes.set(key, data);
+      if (!persist) this.privateOutcomes.set(key, { error });
       this.recordedUsage = addWorkflowUsage(this.recordedUsage, data.usage);
       throw error;
     }
@@ -380,6 +421,27 @@ export class DurableWorkflow {
 
   result(result: WorkflowRunResultWithUsage): WorkflowRunResultWithUsage {
     const usage = this.usage();
+    if (this.stepBased) {
+      let errors = 0;
+      let cancelled = 0;
+      for (const outcome of this.attemptOutcomes.values()) {
+        const value = outcome.outputOmitted
+          ? outcome
+          : outcome.ok
+            ? decodeRunValue<SubagentResult>(outcome.value)
+            : undefined;
+        if (value?.cancelled) cancelled++;
+        else if (!outcome.ok || value?.isError) errors++;
+      }
+      return {
+        ...result,
+        usage,
+        tokensSpent: usage.output,
+        errorCount: Math.max(result.errorCount, errors),
+        cancelledCount: Math.max(result.cancelledCount ?? 0, cancelled),
+        agentsSpawned: this.agentsSpawned,
+      };
+    }
     let errorCount = 0;
     let cancelledCount = 0;
     let failure = result.failure;

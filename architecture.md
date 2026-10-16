@@ -808,29 +808,37 @@ It selects inline versus saved source, foreground versus background, owner ident
 `src/workflow-worker.ts` is the host engine and worker RPC server.
 `src/workflow-worker-thread.mjs` evaluates the script and owns DSL calls.
 `src/workflow-jobs.ts` owns background workflow state.
-Opt-in durable runs add `workflow-run-store.ts` journals,
+Durable legacy runs are opt-in; V4 definition workflows use project-scoped
+durable runs by default unless `durable: false` is set. Both use
+`workflow-run-store.ts` journals,
 `workflow-durable.ts` replay/dispatch coordination,
 `workflow-durable-process.ts` process-attempt recovery, and
-`workflow-durable-tools.ts` start/resume/list/inspect integration. The default
-workflow tool path remains non-durable unless `durable: true` is selected.
+`workflow-durable-tools.ts` start/resume/list/inspect integration.
 
 ### 9.2 Parsing and VM boundary
 
-Saved workflows live under `~/.pi-subagentura/workflows/<slug>.js`.
-`src/workflow-script.mjs` parses ECMAScript modules with Acorn, requires one literal `export const meta`, evaluates metadata with a restricted literal evaluator, strips exports, and returns executable source.
-The TypeScript bridge is `src/workflow-script.ts`.
+Saved workflow sources live under `~/.pi-subagentura/workflows/<slug>.js`.
+`src/workflow-script.mjs` parses both formats with Acorn. Legacy scripts require
+one literal `export const meta`; V4 modules default-export
+`defineWorkflow({...})` and may use Node 24.12's erasable TypeScript syntax.
+The compiler injects only the named `defineWorkflow` and `schema` SDK
+bindings; other runtime imports, dynamic imports, `import.meta`, and additional
+exports are rejected. V4 type contracts are in `types/workflow-v4.d.ts`, and
+the package's `pi-subagentura/workflow` export resolves to the SDK runtime.
+`src/workflow-script.ts` is the typed bridge to the parser companion.
 
 The host starts the worker companion by file URL.
-The worker creates a null-prototype VM context, disables dynamic string/Wasm code generation, injects only the workflow DSL and guarded data/helpers, and applies a synchronous VM timeout.
+The worker creates a null-prototype VM context, disables dynamic string/Wasm code generation, injects the legacy globals or the V4 SDK/context, and applies a synchronous VM timeout. V4 orchestration uses the internal `effect@4.0.0-rc.117` runtime; Effect does not cross the workflow API boundary.
 `Date.now`, argumentless `new Date`, and `Math.random` are rejected for determinism.
 
 This VM is **not a security boundary**.
 It is an accidental-global and deterministic-execution guard for trusted workflow scripts, not a sandbox for hostile code.
 
 `workflow-durable-preflight.ts` hashes and statically checks durable
-definitions during save/list and saved-command readiness checks. It requires
-explicit safe operation IDs, reports duplicate literal IDs, and records
-literal nested workflow names without executing the source.
+definitions during save/list and saved-command readiness checks. V4 definitions
+are checked by the V4 compiler and their step paths are validated at runtime.
+Legacy sources require explicit safe operation IDs; preflight reports duplicate
+literal IDs and records literal nested workflow names without executing source.
 
 ### 9.3 Foreground lifecycle
 
@@ -953,14 +961,39 @@ On completion, `notifyWorkflowCompletion` publishes one coordinated workflow rec
 
 ### 9.7 Durable lifecycle and recovery
 
-Durability is opt-in for inline scripts and the workflow tool; saved slash
-commands run durably by default. A durable run records its source, arguments, definition digest,
-request outcomes, usage, and terminal state in a bounded journal under the run
-scope. `resume_workflow` explicitly reclaims an interrupted run only when the
-host, working directory, Pi session, and Node major version match; there is no
-daemon and no exactly-once side-effect guarantee. Uncommitted agent work may
-repeat after an interruption, while committed requests replay from recorded
-outcomes.
+Durability is opt-in for legacy `.mjs` scripts; V4 typed definitions use
+durable runs by default unless `durable: false` is passed. Compatible saved
+slash commands also start durably by default. A durable run records its source,
+arguments, definition digest, request outcomes, usage, and terminal state in a
+bounded journal under its run scope. Recovery is manual through
+`resume_workflow` from a live Pi process. Legacy runs require the same host,
+working directory, Pi session, and Node major version. V4 runs use the
+project-scoped store and require the same host, canonical working directory,
+and Node major version. There is no daemon or exactly-once side-effect
+guarantee. Uncommitted agent work may repeat after interruption, while
+committed requests replay from recorded outcomes.
+
+V4 workflow source is a default-exported `defineWorkflow()` module with typed
+input/output schemas and a `run(ctx, args)` callback. Node.js 24.12 or newer
+strips erasable TypeScript syntax; source is not type-checked and runtime imports
+are limited to named `defineWorkflow` and `schema` bindings from
+`pi-subagentura/workflow`. The worker uses `effect@4.0.0-rc.117` internally;
+Effect types are not part of the workflow API. The V4 context provides steps,
+agent calls, groups, bounded parallel/map/pipeline, repeat cycles, nested
+workflows, human input/gates, checkpoints, artifacts, logging, budget, and
+cancellation signal.
+
+The V4 step store appends step, progress, answer, and artifact-reference events
+to the durable journal. Step output values and answers remain private journal
+data; status snapshots omit step input, policy, output, and answer. Checkpoints
+persist their value. Artifact bytes live in private per-run files separate from
+the journal. A resumed definition re-executes from the beginning and skips a
+completed step only when the definition hash, stable step path, input, and
+policy match. Changing the source invalidates that reuse check. `persist:false`
+does not store a step result, while `cache:false` and `resume:false` disable
+reuse. Human questions and gates persist `waiting_for_input` state; the
+`respond_workflow_input` tool gathers the answer through Pi UI and persists it
+before a live or resumed run continues.
 
 The durable runner uses the same worker and runner selection as ordinary
 workflows. Process-backed attempts have a private recovery manifest, and a
@@ -1020,24 +1053,24 @@ Background jobs retain live samples by agent ID and aggregate only still-running
 
 ### 11.1 Persistence table
 
-| State                                   | Owner and location                                                     | Survives module reload | Survives process restart | Recovery path                                                     |
-| --------------------------------------- | ---------------------------------------------------------------------- | ---------------------: | -----------------------: | ----------------------------------------------------------------- |
-| In-process jobs                         | `helpers.ts` per-session job maps plus legacy `jobRegistry` index      |                    Yes |                       No | None                                                              |
-| Coordinated in-process/workflow state   | `completion-coordinator.ts` plus parent completion/consumption entries |  Yes within live scope |   No job/result recovery | Retired on session replacement                                    |
-| Interactive live objects                | `interactive-tmux.ts` per-session maps plus legacy aggregate registry  |                    Yes |                       No | Rebuilt from durable state                                        |
-| Interactive lifecycle/output            | Artifact directory                                                     |                    Yes |                      Yes | Byte-cursor polling and artifact reads                            |
-| Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                     |                    Yes |                      Yes | `rehydrateInteractiveSubagents`                                   |
-| Parent completion entries               | Parent Pi session custom entries                                       |                    Yes |         Yes with session | Coordinator reconciliation                                        |
-| Consumption receipt ledger              | Private ledger beneath parent Pi session directory, keyed by session   |                    Yes |         Yes with session | Bounded snapshot reconciliation                                   |
-| Child conversation                      | Child Pi session JSONL                                                 |                    Yes |                      Yes | Reopened by Pi; tailed for observation                            |
-| Workflow jobs/results                   | `workflow-jobs.ts` global registry                                     |                    Yes |                       No | None                                                              |
-| Durable workflow runs                   | `workflow-run-store.ts` journal under the run scope                    |                    Yes |                      Yes | Explicit same-host/cwd/session/Node-major resume                  |
-| Durable process attempts                | `workflow-durable-process.ts` private attempt manifests                |                    Yes |                      Yes | Durable attempt recovery                                          |
-| Persisted completion groups             | `completion-group-store.ts` parent-session group snapshots             |                    Yes |                      Yes | Failed group recovery blocks that group; `each` remains available |
-| Workflow scripts                        | `~/.pi-subagentura/workflows/*.js`                                     |                    Yes |                      Yes | Load by validated name                                            |
-| Session ownership                       | `session-scope.ts` live scope registry                                 |                    Yes |                       No | New `session_start` generation                                    |
-| Interactive lineage                     | bounded lineage manifests                                              |                    Yes |                      Yes | Supervisor projection                                             |
-| Cancellation diagnostics                | configured snapshot directory                                          |                    Yes |                      Yes | Explicit inspection only                                          |
+| State                                   | Owner and location                                                        | Survives module reload | Survives process restart | Recovery path                                                     |
+| --------------------------------------- | ------------------------------------------------------------------------- | ---------------------: | -----------------------: | ----------------------------------------------------------------- |
+| In-process jobs                         | `helpers.ts` per-session job maps plus legacy `jobRegistry` index         |                    Yes |                       No | None                                                              |
+| Coordinated in-process/workflow state   | `completion-coordinator.ts` plus parent completion/consumption entries    |  Yes within live scope |   No job/result recovery | Retired on session replacement                                    |
+| Interactive live objects                | `interactive-tmux.ts` per-session maps plus legacy aggregate registry     |                    Yes |                       No | Rebuilt from durable state                                        |
+| Interactive lifecycle/output            | Artifact directory                                                        |                    Yes |                      Yes | Byte-cursor polling and artifact reads                            |
+| Interactive cursors/queue/policy/groups | `<cwd>/.pi/subagentura-state.json`                                        |                    Yes |                      Yes | `rehydrateInteractiveSubagents`                                   |
+| Parent completion entries               | Parent Pi session custom entries                                          |                    Yes |         Yes with session | Coordinator reconciliation                                        |
+| Consumption receipt ledger              | Private ledger beneath parent Pi session directory, keyed by session      |                    Yes |         Yes with session | Bounded snapshot reconciliation                                   |
+| Child conversation                      | Child Pi session JSONL                                                    |                    Yes |                      Yes | Reopened by Pi; tailed for observation                            |
+| Workflow jobs/results                   | `workflow-jobs.ts` global registry                                        |                    Yes |                       No | None                                                              |
+| Durable workflow runs                   | `workflow-run-store.ts` journal; legacy session scope or V4 project scope |                    Yes |                      Yes | Manual same-host/cwd/Node-major resume from a live Pi session     |
+| Durable process attempts                | `workflow-durable-process.ts` private attempt manifests                   |                    Yes |                      Yes | Durable attempt recovery                                          |
+| Persisted completion groups             | `completion-group-store.ts` parent-session group snapshots                |                    Yes |                      Yes | Failed group recovery blocks that group; `each` remains available |
+| Workflow scripts                        | `~/.pi-subagentura/workflows/*.js`                                        |                    Yes |                      Yes | Load by validated name                                            |
+| Session ownership                       | `session-scope.ts` live scope registry                                    |                    Yes |                       No | New `session_start` generation                                    |
+| Interactive lineage                     | bounded lineage manifests                                                 |                    Yes |                      Yes | Supervisor projection                                             |
+| Cancellation diagnostics                | configured snapshot directory                                             |                    Yes |                      Yes | Explicit inspection only                                          |
 
 ### 11.2 Authority table
 
@@ -1152,6 +1185,11 @@ The following table inventories the tracked runtime source modules and companion
 |  62 | `src/workflow-durable-tools.ts`              | Durable workflow start, resume, listing, inspection, cancellation, and result integration                                       | `workflow-durable`, `workflow-run-store`, `workflow-worker`, `workflow-core`, `workflow-jobs`, `completion-coordinator`, `session-scope`                                                                                                                                                             |
 |  63 | `src/workflow-run-store.ts`                  | Crash-safe durable run journal, ownership lease, bounded replay, and same-scope recovery                                        | None project-internal                                                                                                                                                                                                                                                                                |
 |  64 | `src/workflow-process-worker.mjs`            | Child supervisor for one process-backed durable attempt                                                                         | None project-internal                                                                                                                                                                                                                                                                                |
+|  65 | `src/workflow-v4-sdk.mjs`                    | Runtime `defineWorkflow()` and typed JSON-schema builder                                                                        | `types/workflow-v4.d.ts`                                                                                                                                                                                                                                                                             |
+|  66 | `src/workflow-v4-sdk.d.mts`                  | Type declarations resolved by the package's `./workflow` export                                                                 | `types/workflow-v4.d.ts`                                                                                                                                                                                                                                                                             |
+|  67 | `src/workflow-v4-runtime.mjs`                | V4 context primitives, step policy, bounded combinators, human input, and Effect-backed execution                               | `effect`, `workflow-v4-sdk.mjs`; type-only `types/workflow-v4.d.ts`                                                                                                                                                                                                                                  |
+|  68 | `src/workflow-v4-runtime.d.mts`              | V4 runtime bridge and execution declarations                                                                                    | `types/workflow-v4.d.ts`                                                                                                                                                                                                                                                                             |
+|  69 | `src/workflow-v4-store.ts`                   | Durable V4 step state, human answers, privacy-safe snapshots, checkpoints, and artifact storage                                 | `workflow-run-store`, `workflow-core`                                                                                                                                                                                                                                                                |
 
 ---
 

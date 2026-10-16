@@ -33,7 +33,11 @@ export const BaseParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
+        "Optional model override. By default, prefer the current/parent provider and model. " +
+        "Honor any provider or model explicitly requested by the user. " +
+        "If a requested model omits its provider, qualify it with the current/parent provider " +
+        "unless the user explicitly requested another provider. " +
+        "For example, 'anthropic/claude-sonnet-4-5'.",
     }),
   ),
   thinkingLevel: Type.Optional(
@@ -49,7 +53,7 @@ export const BaseParams = Type.Object({
   async: Type.Optional(
     Type.Boolean({
       description:
-        "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false ONLY for a single short sub-agent whose answer you need inline before continuing. Async keeps the parent responsive but does NOT by itself prevent nested fan-out — depth is capped separately.",
+        "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false for one short, focused task whose answer you need inline; use a small number of focused async reviewers for broad work. A returned jobId is accepted background work: running or delayed is normal, not evidence of a hang. Do not cancel unfinished work merely to finalize or reclaim context; use an explicit group when a final synthesis depends on several reviewers. Yield the spawning turn to seal the group; report pending jobIds in provisional updates rather than cancelling reviewers to finalize.",
     }),
   ),
   notifyOnComplete: Type.Optional(
@@ -115,7 +119,7 @@ export const ResultParams = Type.Object({
   wait: Type.Optional(
     Type.Boolean({
       description:
-        "Explicitly wait for a running job. Set true ONLY when the user asks to wait. Otherwise running jobs return immediately and continue in the background.",
+        "Explicitly wait for a running job when the user asks or when a bounded final synthesis depends on that specific result. Otherwise running jobs return immediately and continue in the background. A timeout stops only this wait and does not cancel the job.",
     }),
   ),
   timeoutMs: Type.Optional(
@@ -153,7 +157,12 @@ const InteractiveSpawnFields = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Optional model override for the child Pi process",
+      description:
+        "Optional model override for the child Pi process. By default, prefer the current/parent provider and model. " +
+        "Honor any provider or model explicitly requested by the user. " +
+        "If a requested model omits its provider, qualify it with the current/parent provider " +
+        "unless the user explicitly requested another provider. " +
+        "For example, 'anthropic/claude-sonnet-4-5'.",
     }),
   ),
   thinkingLevel: Type.Optional(

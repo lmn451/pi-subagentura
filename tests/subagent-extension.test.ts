@@ -52,6 +52,7 @@ const WORKFLOW_TOOL_NAMES = [
   "get_workflow_result",
   "get_workflow_status",
   "resume_workflow",
+  "respond_workflow_input",
   "list_workflow_runs",
   "inspect_workflow",
   "list_workflows",
@@ -131,6 +132,23 @@ describe("extension registration", () => {
     }
   });
 
+  it("marks the workflow tool as explicit opt-in", () => {
+    const api = mockApi();
+
+    registerExtension(api as any);
+
+    const workflow = api.registerTool.mock.calls.find(
+      ([tool]: any[]) => tool.name === "workflow",
+    )?.[0];
+
+    expect(workflow.description).toContain(
+      "Only use this tool when the user explicitly requests a workflow",
+    );
+    expect(workflow.description).toContain(
+      "Without either, do not choose it automatically based on task suitability.",
+    );
+  });
+
   it("registers the --orchestrator flag", () => {
     const api = mockApi();
 
@@ -172,7 +190,25 @@ describe("extension registration", () => {
       "# Orchestratorv2 Thin Router System Prompt",
     );
     expect(result.systemPrompt).toContain("`workflow`");
+    expect(result.systemPrompt).toContain(
+      "yield the parent turn so the group seals",
+    );
+    expect(result.systemPrompt).toContain(
+      "label findings as provisional and report pending jobIds",
+    );
+    expect(result.systemPrompt).toContain(
+      "disclose any failed or cancelled reviewers as coverage gaps",
+    );
+    expect(result.systemPrompt).toContain(
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+    );
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
+    expect(result.systemPrompt).toContain(
+      "Workflow is opt-in: use `workflow` only when the user explicitly requests a workflow",
+    );
+    expect(result.systemPrompt).toContain(
+      "When neither applies (including when no mode is supplied), do not invoke it just because a task is bounded, reusable, parallelizable, or suitable for orchestration.",
+    );
   });
 
   it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {
@@ -234,6 +270,22 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain(
       "prompt-only routing policy over free-text responsibility descriptions",
     );
+    expect(result.systemPrompt).toContain(
+      "Retrieve every completed scout/planner report from this request before",
+    );
+    expect(result.systemPrompt).toContain(
+      "compare the handoff against every retrieved report",
+    );
+    expect(result.systemPrompt).toContain("acceptance");
+    expect(result.systemPrompt).toContain("expected tests/commands");
+    expect(result.systemPrompt).toContain("using `includeContext: false`");
+    expect(result.systemPrompt).toContain(
+      "Never rely on implicit sibling transcript visibility",
+    );
+    expect(result.systemPrompt).toContain(
+      "not to repeat broad scouting or planning",
+    );
+    expect(result.systemPrompt).toContain("inspect the named target");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 

@@ -4,7 +4,7 @@ Thanks for contributing to `pi-subagentura`.
 
 ## Local development
 
-Node.js 22.23.2 or newer is required for local development.
+Node.js 24.12.0 or newer is required for local development.
 
 ```bash
 npm install
@@ -30,6 +30,7 @@ The `Protect master` repository ruleset must require these stable CI check names
 The separate minimum-Node check makes runtime support visible rather than hiding
 it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
 coordinated ruleset update by a repository administrator.
+The historical `Minimum Node 22.23.2` check name now runs Node.js 24.12.0.
 
 ### Real Herdr integration coverage
 

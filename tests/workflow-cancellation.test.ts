@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SubagentResult } from "../src/helpers";
 import {
+  cancelWorkflowJob,
   startWorkflowJob,
   workflowJobRegistry,
   type WorkflowJobState,
@@ -82,6 +83,26 @@ function workflowTools(): Record<string, any> {
 }
 
 describe("cancelled workflow snapshot normalization", () => {
+  it("marks active live step nodes terminal when the aggregate is cancelled", () => {
+    const job = {
+      status: "running",
+      abort: new AbortController(),
+      snapshot: {
+        steps: [
+          { path: ["approval"], status: "waiting_for_input" },
+          { path: ["work"], status: "running" },
+        ],
+      },
+    } as WorkflowJobState;
+
+    cancelWorkflowJob(job, "explicit_cancel");
+
+    expect(job.snapshot.steps?.map((step) => step.status)).toEqual([
+      "cancelled",
+      "cancelled",
+    ]);
+  });
+
   it.each([false, true])(
     "does not accept or retry an independently cancelled child (schema=%s)",
     async (withSchema) => {

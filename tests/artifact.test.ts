@@ -317,6 +317,53 @@ describe("artifact", () => {
     });
   });
 
+  it("normalizes process-exit diagnostics while preserving legacy events", () => {
+    const art = artifactPath(root, "process-exit-diagnostics");
+    ensureArtifactDir(art);
+    appendFileSync(
+      art.statusFile,
+      [
+        JSON.stringify({ ts: 1, type: "done", status: "done", exitCode: 0 }),
+        JSON.stringify({
+          version: 2,
+          eventId: "legacy-process-exit",
+          turnId: "legacy-turn",
+          ts: 2,
+          type: "process_exited",
+          status: "done",
+          exitCode: 0,
+        }),
+        JSON.stringify({
+          version: 2,
+          eventId: "invalid-process-exit",
+          turnId: "invalid-turn",
+          ts: 3,
+          type: "process_exited",
+          status: "error",
+          exitCode: 17,
+          terminationReason: "not-closed",
+          signal: "SIGMADEUP",
+          lastTool: "npm test --secret",
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const events = readEvents(art);
+    expect(events[0]).toMatchObject({ type: "done", exitCode: 0 });
+    expect(events[1]).toMatchObject({
+      type: "process_exited",
+      exitCode: 0,
+    });
+    expect(events[1]).not.toHaveProperty("terminationReason");
+    expect(events[2]).toMatchObject({
+      type: "process_exited",
+      exitCode: 17,
+    });
+    expect(events[2]).not.toHaveProperty("terminationReason");
+    expect(events[2]).not.toHaveProperty("signal");
+    expect(events[2]).not.toHaveProperty("lastTool");
+  });
+
   it("reads long logs in bounded physical batches", () => {
     const art = artifactPath(root, "long-log");
     ensureArtifactDir(art);

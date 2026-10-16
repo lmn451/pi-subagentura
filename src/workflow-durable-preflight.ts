@@ -26,7 +26,14 @@ export function inspectDurableWorkflow(
   const referencedWorkflows = new Set<string>();
 
   try {
-    parseWorkflow(script);
+    const parsed = parseWorkflow(script);
+    if (parsed.format === "definition")
+      return {
+        durableReady: true,
+        definitionDigest,
+        errors: [],
+        referencedWorkflows: [],
+      };
   } catch (error) {
     errors.push(`Workflow definition is invalid: ${errorMessage(error)}`);
     return {
@@ -67,7 +74,16 @@ export function inspectDurableWorkflow(
       return;
     }
     if (node.type !== "CallExpression") return;
-    const name = node.callee?.type === "Identifier" ? node.callee.name : null;
+    const name =
+      node.callee?.type === "Identifier"
+        ? node.callee.name
+        : node.callee?.type === "MemberExpression" &&
+            node.callee.computed === false &&
+            node.callee.object?.type === "Identifier" &&
+            node.callee.object.name === "globalThis" &&
+            node.callee.property?.type === "Identifier"
+          ? node.callee.property.name
+          : null;
     if (name !== "agent" && name !== "workflow") return;
 
     const location = node.loc?.start

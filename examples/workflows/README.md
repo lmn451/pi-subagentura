@@ -1,8 +1,8 @@
 # Bundled workflow examples
 
-These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They demonstrate reusable workflow structure and provide practical planning and
-conversion flows.
+The trusted `.mjs` scripts are included in the `pi-subagentura` npm package and
+demonstrate the legacy injected-global API. The repository also includes a
+TypeScript V4 definition example; it uses the `pi-subagentura/workflow` SDK.
 
 ## Running an example
 
@@ -30,8 +30,59 @@ workflow({
 To reuse a script by name, pass the same source to `save_workflow` once, then
 run it with `workflow({ name, args })` or select it with `/workflows`.
 
-All bundled examples accept either an args object or its JSON-string form. JSON
-strings are useful when another tool boundary serializes the payload:
+## Typed V4 definition
+
+[`review-source.ts`](./review-source.ts) is a TypeScript V4 definition that
+reviews the same supplied files independently across four aspects: intent/design
+alignment, compatibility, unintended behavior changes, and correctness/quality.
+Each reviewer returns a schema-validated verdict and up to 15 findings with
+severity, location, direct evidence, and explanation; the workflow combines
+these results without deduplicating independent evidence.
+
+Pass the full source to the `workflow` tool with both `files` and
+`intendedChange`, for example:
+
+```js
+workflow({
+  script: "<contents of examples/workflows/review-source.ts>",
+  args: {
+    files: ["src/auth.ts", "src/session.ts"],
+    intendedChange:
+      "Replace the token cache while preserving existing callers.",
+  },
+});
+```
+
+`files` accepts 1–40 non-empty paths, each at most 512 characters and 8,192
+characters combined. `intendedChange` must be non-empty and at most 12,000
+characters. The deterministic aggregate reports `pass`, `concern`, `blocking`,
+or `uncertain`. Any `blocking` verdict or critical/high finding yields blocking;
+otherwise failed/uncertain reviews yield uncertain; otherwise a concern verdict
+or any finding yields concern; pass requires four completed pass reviews and no
+findings. Findings sort by severity (critical to low), fixed aspect order,
+location, evidence, and explanation; severity counts include every finding.
+Failed/unknown aspects never pass. After review, the workflow optionally asks
+whether to save the report as a run artifact; it never asks for permission to run
+the read-only review.
+
+V4 definitions are durable by default and use project-scoped run storage; set
+`durable: false` for an in-memory invocation. They support Node's erasable
+TypeScript syntax, but the workflow runner does not type-check it. Runtime
+imports must be named `defineWorkflow` / `schema` imports from
+`pi-subagentura/workflow`; other runtime imports are rejected. Node.js 24.12 or
+newer is required. The exact `effect@4.0.0-rc.117` runtime dependency remains
+internal.
+
+To inspect a paused run, use `list_workflow_runs` or `get_workflow_status`, then
+call `respond_workflow_input({workflowId, path})`; Pi asks the person at the UI
+and persists the answer before resuming. With `async: false`, input is collected
+directly by the workflow tool. After interruption, use
+`resume_workflow({workflowId})` while Pi is running. V4 status summaries omit
+step outputs and answers. See the [runtime contract](../../WORKFLOW_RUNTIME.md#v4-definitions).
+
+Legacy `.mjs` examples accept either an args object or its JSON-string form.
+V4 definitions receive schema-validated argument objects. JSON strings are
+useful when another tool boundary serializes a legacy payload:
 
 ```js
 workflow({
@@ -71,7 +122,7 @@ so delivery is at-least-once.
 
 ## Authoring guidance
 
-Write raw JavaScript without fences. Include a top-level pure-literal
+For the legacy `.mjs` examples, write raw JavaScript without fences. Include a top-level pure-literal
 `export const meta = { name, description, phases? }` statement; helper
 declarations may appear before or after it. Do not use TypeScript, imports,
 `require`, filesystem APIs, `Date.now()`, `Math.random()`, or argless `new Date()`.
@@ -179,8 +230,9 @@ source is parsed in the test suite before it is accepted.
 - Process-isolated agents require tmux or Zellij; non-durable runs otherwise
   fall back to in-process execution. Durable runs fail closed when the
   process backend is unavailable.
-- Interactive user-question pauses are represented by pending-approval output;
-  a workflow cannot suspend and later resume at an `AskUserQuestion` checkpoint.
+- Legacy `.mjs` workflows cannot suspend for interactive user input. V4
+  definitions can pause through `ctx.ask()` / `ctx.gate()` and
+  `respond_workflow_input`.
 - File-writing examples depend on the delegated agents having appropriate read
   and write tools and permissions.
 - Model overrides must name models configured in the active Pi installation.
@@ -191,8 +243,9 @@ source is parsed in the test suite before it is accepted.
 bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, then
 run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
 durable: true})`. Use `async: false` for an immediate result. After an
-interruption, use `resume_workflow({workflowId})` in the same Pi session/cwd.
-Other examples are not automatically durable merely because they are saved.
+interruption, use `resume_workflow({workflowId})` in the same project. This
+legacy `.mjs` example opts into durability; V4 definitions are durable by
+default unless `durable: false` is supplied.
 
 `retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
 and `null`, but never cancellation. Every attempt may repeat agent side effects;

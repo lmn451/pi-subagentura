@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 0.80.6. CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `is-path-inside`, and `ndjson`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 24.12.0, Pi SDK ≥ 0.80.6. CI verifies Node 24/26 and both the minimum and latest published Pi SDKs. V4 workflow definitions use a private, exactly pinned Effect v4 runtime; Effect types do not enter the public SDK.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `effect`, `is-path-inside`, and `ndjson`. Effect v4 is pinned and loaded only inside v4 workflow workers. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
@@ -210,20 +210,9 @@ exists only to drain persisted pre-coordinator state and support internal tests.
 
 ### Background workflows are parent-session scoped
 
-This section describes the compatibility default. Opt-in `durable:true` code
-workflows use `workflow-run-store.ts` and `workflow-durable.ts`: immutable root
-inputs/settings, fsynced request/response transcripts, stable operation ids,
-explicit same-session recovery, and one-use process attempt wrappers. See
-`WORKFLOW_RUNTIME.md`. Durable continuity interrupts the controller and releases
-it only after its runners drain; never retain a stale `runAgent` closure across
-generations. Replay divergence must terminate the host worker, not become a
-catchable script error. Persisted mux pane ids alone never authorize cancellation.
-Durable aggregate notices use the existing completion coordinator and unfinished
-mixed-source group barriers; do not add another notification scheduler. Saving
-a script or running asynchronously without `durable:true` changes none of the
-session-scoped behavior below.
-
-Background workflow jobs and in-process async sub-agent jobs do **not** survive
+Durable workflow storage, recovery, cancellation, and V4 execution invariants
+are documented in [`WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md). In-process
+jobs and non-durable background workflow jobs do **not** survive
 parent session replacement. On every `session_shutdown` reason (`reload`,
 `resume`, `quit`, `new`, and similar), `src/session-handlers.ts` suppresses late
 workflow completion hooks, aborts running workflow workers, and clears

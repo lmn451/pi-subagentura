@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const REPO = resolve(fileURLToPath(import.meta.url), "..", "..");
 const workflow = readFileSync(
@@ -57,7 +58,11 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
 
     expect(jobIds).toEqual(["minimum-node", "test"]);
     expect(minimumNode).toContain("name: Minimum Node 22.23.2");
-    expect(minimumNode).toContain("node-version: 22.23.2");
+    expect(
+      parse(workflow).jobs["minimum-node"].steps.find((step: any) =>
+        step.uses?.startsWith("actions/setup-node@"),
+      )?.with["node-version"],
+    ).toBe("24.12.0");
     expect(minimumNode).toContain("run: npm run typecheck");
     expect(minimumNode).toContain("run: npm run test:property");
     expect(minimumNode).toContain("run: npm run pack:check");
