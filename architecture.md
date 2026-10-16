@@ -719,8 +719,10 @@ For an explicit group, every member is registered before the spawning parent tur
 
 The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
 `read_subagent_artifact` keeps that manifest compact and exposes a selected terminal
-error summary separately in model-facing result content; it is bounded and sanitized,
-and does not alter immutable snapshots or telemetry.
+error diagnostic separately in model-facing result content. It normalizes controls,
+escapes its untrusted-text boundary, and caps the reason at 512 UTF-8 bytes; error
+diagnostics are intentionally not credential-redacted. The boundary is advisory, not
+a prompt-injection defense, and immutable snapshots and telemetry are unchanged.
 
 Successful terminal retrieval through `read_subagent_artifact`, `get_subagent_result`, or `get_workflow_result` appends a consumption receipt before returning. The coordinator first losslessly appends the receipt and calls `fsyncSync` in a private, session-scoped append-only NDJSON ledger beneath the parent Pi session directory, outside the project working tree, keyed by the parent session identity. It then best-effort mirrors the receipt into a parent session entry. A ledger write failure blocks manual collection; lifecycle retirement has a separate best-effort path. A manager without a session directory uses a random process-private temporary root and does not claim restart durability. The coordinator omits consumed records, and an entirely consumed explicit group creates no empty turn. Workflow-owned children are suppressed before this path, so only the background workflow aggregate publishes.
 
