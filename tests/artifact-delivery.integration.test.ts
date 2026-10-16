@@ -11,6 +11,7 @@ import {
   readOutputForTurnId,
   writeOutput,
 } from "../src/artifact";
+import { readActiveTurn } from "../src/child-protocol";
 import type {
   ExtensionAPI,
   ExtensionUIContext,
@@ -269,6 +270,7 @@ describe("protocol-v2 artifact delivery", () => {
         throw new Error("local provider server did not bind a TCP port");
       }
       const harness = await createPiSessionHarness(repoRoot, {
+        bindExtensionLifecycle: true,
         childArtifactDir: art.dir,
         providerErrorUrl: `http://127.0.0.1:${address.port}/chat`,
         retrySettings: {
@@ -417,6 +419,190 @@ describe("protocol-v2 artifact delivery", () => {
       expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
     },
   );
+
+  it.each(["each", "group"] as const)(
+    "reports a missing-auth startup failure to the parent with %s policy",
+    async (policy) => {
+      const art = makeArtifact();
+      const siblingArt = policy === "group" ? makeArtifact() : undefined;
+      const harness = await createPiSessionHarness(repoRoot, {
+        bindExtensionLifecycle: true,
+        childArtifactDir: art.dir,
+        missingAuth: true,
+      });
+      childHarnesses.push(harness);
+      await expect(
+        harness.session.prompt("exercise missing authentication"),
+      ).rejects.toThrow(/No API key/);
+      await harness.session.waitForIdle();
+      expect(harness.contexts).toHaveLength(0);
+      expect(readActiveTurn(art)).toBeNull();
+      const completion = readEventRecords(art)
+        .map(({ event }) => event)
+        .find((event) => event.type === "completion");
+      expect(completion).toMatchObject({
+        type: "completion",
+        turnId: "process",
+        outcome: "error",
+        source: "explicit",
+        message: "Selected model has no configured authentication.",
+        errorMessage: "Selected model has no configured authentication.",
+      });
+      expect(
+        appendCompletionEvent(art, {
+          turnId: "process",
+          outcome: "error",
+          source: "agent_settled",
+        }),
+      ).toBeNull();
+      const entries: Array<{ customType: string; data: any }> = [];
+      const pi = {
+        appendEntry: vi.fn((customType: string, data: unknown) => {
+          entries.push({ customType, data });
+        }),
+        registerEntryRenderer: vi.fn(),
+        sendMessage: vi.fn((message: any) => {
+          entries.push({ customType: message.customType, data: message });
+        }),
+      };
+      const scope = registerSessionScope({
+        id: 505,
+        generation: 1,
+        lifecycle: "started",
+        pi: pi as any,
+        sessionManager: {
+          getSessionId: () => "parent-session",
+          getEntries: () =>
+            entries.map(({ customType, data }) => ({
+              type: "custom",
+              customType,
+              data,
+            })),
+        },
+      });
+      const groupId = "startup-error-group";
+      const state = {
+        ...makeState(art.dir),
+        status: "running" as const,
+        completionPolicy: policy,
+        ...(policy === "group" ? { completionGroupId: groupId } : {}),
+      };
+      const siblingState = siblingArt
+        ? { ...makeState(siblingArt.dir), id: "sibling" }
+        : undefined;
+      const owner = sessionOwner(scope);
+      scope.interactiveStates.set(state.id, state);
+      if (siblingState)
+        scope.interactiveStates.set(siblingState.id, siblingState);
+      registerCompletionCoordinator(pi as any, scope);
+      if (policy === "group") {
+        registerCompletionMember(
+          "interactive",
+          state.id,
+          "group",
+          groupId,
+          owner,
+        );
+        registerCompletionMember(
+          "interactive",
+          "sibling",
+          "group",
+          groupId,
+          owner,
+        );
+      }
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "alive",
+        getPaneLivenessAsync: async () => "alive",
+      } as any);
+
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+      expect(state.status).toBe("idle");
+      const completionEntries = () =>
+        entries.filter(
+          ({ customType }) => customType === "subagentura-completion",
+        );
+      expect(completionEntries()).toHaveLength(1);
+      expect(completionEntries()[0]?.data).toMatchObject({
+        turnId: completion?.turnId,
+        status: "error",
+        policy,
+        ...(policy === "group" ? { groupRemaining: 1 } : {}),
+      });
+      expect(pi.sendMessage).toHaveBeenCalledOnce();
+
+      if (siblingArt && siblingState) {
+        writeOutput(siblingArt, "sibling success");
+        appendCompletionEvent(siblingArt, {
+          turnId: "sibling-turn",
+          outcome: "done",
+          source: "agent_settled",
+          eventId: "sibling-completion",
+        });
+        await pollArtifactChanges(scope.pi, owner);
+        expect(completionEntries()).toHaveLength(2);
+        expect(pi.sendMessage).toHaveBeenCalledOnce();
+        settleCompletionParentTurn(owner);
+        flushCompletionManifests(owner);
+        expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+        expect(pi.sendMessage.mock.calls[1][0].content).toContain(
+          '"sourceId":"sibling"',
+        );
+        expect(pi.sendMessage.mock.calls[1][0].content).not.toContain(
+          '"sourceId":"child0001"',
+        );
+      }
+
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+      expect(completionEntries()).toHaveLength(policy === "group" ? 2 : 1);
+      expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
+    },
+  );
+
+  it("continues on a new Pi turn after test auth is configured", async () => {
+    const art = makeArtifact();
+    const harness = await createPiSessionHarness(repoRoot, {
+      bindExtensionLifecycle: true,
+      childArtifactDir: art.dir,
+      missingAuth: true,
+    });
+    childHarnesses.push(harness);
+    await expect(
+      harness.session.prompt("initial task before /login"),
+    ).rejects.toThrow(/No API key/);
+    await harness.session.waitForIdle();
+    expect(harness.contexts).toHaveLength(0);
+    expect(readActiveTurn(art)).toBeNull();
+    harness.configureTestAuth();
+    const continuation = harness.session.prompt("continue after /login");
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+    harness.completeNext("continued after login");
+    await continuation;
+    await harness.session.waitForIdle();
+    const completions = readEventRecords(art)
+      .map(({ event }) => event)
+      .filter((event) => event.type === "completion");
+    const resumedUserEntry = harness.sessionManager
+      .getEntries()
+      .findLast(
+        (entry) => entry.type === "message" && entry.message.role === "user",
+      );
+    expect(completions).toHaveLength(2);
+    expect(completions[0]).toMatchObject({
+      turnId: "process",
+      outcome: "error",
+      source: "explicit",
+    });
+    expect(completions[1]).toMatchObject({
+      turnId: resumedUserEntry?.id,
+      outcome: "done",
+      source: "agent_settled",
+    });
+    expect(completions[1]?.turnId).not.toBe("process");
+    expect(readActiveTurn(art)?.turnId).toBe(resumedUserEntry?.id);
+  });
 
   it("does not publish workflow-owned child completions independently", async () => {
     const art = makeArtifact();

@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte order, including tool-name fallback for missing or non-visible summaries.
 - Make grouped error completions eligible before the rest of the group finishes;
   successful and cancelled results retain the group barrier.
+- Record a process-level error completion for missing selected-model authentication
+  during child session startup, so pre-run failures become reportable while the
+  child REPL remains available for `/login` and a later turn.
 
 ## [3.6.5] - 2026-10-14
 
