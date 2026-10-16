@@ -909,6 +909,16 @@ snapshot; a running turn returns its current staging `output.md`, even when an
 earlier turn has completed. Empty or missing current staging never falls back to
 an earlier snapshot.
 
+For a selected terminal `error`, the model-facing response also includes a
+separate status/reason summary, even when the immutable snapshot is empty.
+Structured envelopes contribute recognized error/message text or a safe HTTP
+status prefix; provider metadata and request-ID values are omitted. Plain-text
+credential labels may remain with their matched values replaced by `[REDACTED]`.
+Text is normalized, passed through the existing credential redactor plus explicit
+header/token/URL credential filters, and capped at 512 UTF-8 bytes. This
+pattern-based redaction is best-effort, not a guarantee against arbitrary secrets.
+Snapshots, manifests, and telemetry payloads are unchanged.
+
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated
 delivery; staging and events-only reads do not.
