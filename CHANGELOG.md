@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record a process-level error completion for missing selected-model authentication
   during child session startup, so pre-run failures become reportable while the
   child REPL remains available for `/login` and a later turn.
+- Include a bounded, sanitized terminal error reason in interactive artifact
+  reads, including when the selected immutable output snapshot is empty.
 
 ## [3.6.5] - 2026-10-14
 

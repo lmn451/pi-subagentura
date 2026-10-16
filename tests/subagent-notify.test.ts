@@ -991,6 +991,339 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
+  it("shows a sanitized terminal reason for a selected empty error snapshot", async () => {
+    const id = "ab12cd3800000003";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "failed-turn",
+      );
+      appendCompletionEvent(art, {
+        turnId: "failed-turn",
+        eventId: "failed-event",
+        outcome: "error",
+        source: "agent_settled",
+        ts: 2,
+        errorMessage:
+          '402 {"error":{"message":"Insufficient credits.","type":"billing_error"},' +
+          '"request_id":"private-request","headers":{"authorization":"Bearer sk-' +
+          "a".repeat(24) +
+          '"}}',
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-empty-error",
+        { id, turnId: "failed-turn" },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      const text = result.content[0].text;
+      const defaultResult = await readTool.execute(
+        "read-default-error",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(text).toContain("Terminal status: error");
+      expect(text).toContain("Failure reason: Insufficient credits.");
+      expect(text).toContain("Output: (empty — 0 chars)");
+      expect(defaultResult.content[0].text).toContain(
+        "Failure reason: Insufficient credits.",
+      );
+      expect(text).not.toContain("request_id");
+      expect(text).not.toContain("private-request");
+      expect(text).not.toContain("sk-");
+      expect(readArtifactApi.appendEntry).toHaveBeenCalledWith(
+        "subagentura-completion-consumed",
+        expect.objectContaining({ turnId: "failed-turn" }),
+      );
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "legacy message",
+      message: "Provider refused the request.",
+      errorMessage: undefined,
+      expected: "Failure reason: Provider refused the request.",
+    },
+    {
+      label: "missing diagnostic",
+      message: undefined,
+      errorMessage: undefined,
+      expected: "Failure reason: No safe error detail was recorded.",
+    },
+    {
+      label: "malformed provider envelope",
+      message: undefined,
+      errorMessage: '402 {"request_id":"private-request"',
+      expected: "Failure reason: Provider returned HTTP 402.",
+    },
+  ])(
+    "uses a safe fallback for $label",
+    async ({ message, errorMessage, expected }) => {
+      const id = "ab12cd3800000004";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          "fallback-turn",
+        );
+        appendCompletionEvent(art, {
+          turnId: "fallback-turn",
+          eventId: "fallback-event",
+          outcome: "error",
+          source: "agent_settled",
+          ts: 2,
+          ...(errorMessage === undefined ? {} : { errorMessage }),
+          ...(message === undefined ? {} : { message }),
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const result = await readTool.execute(
+          "read-error-fallback",
+          { id, turnId: "fallback-turn" },
+          undefined,
+          undefined,
+          {} as any,
+        );
+
+        expect(result.content[0].text).toContain("Terminal status: error");
+        expect(result.content[0].text).toContain(expected);
+        expect(result.content[0].text).not.toContain("request_id");
+        expect(result.content[0].text).not.toContain("private-request");
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("bounds and sanitizes multiline terminal error reasons", async () => {
+    const id = "ab12cd3800000005";
+    const parent = tmp();
+    const token = `sk-${"s".repeat(24)}`;
+    try {
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "unsafe-turn",
+      );
+      appendCompletionEvent(art, {
+        turnId: "unsafe-turn",
+        eventId: "unsafe-event",
+        outcome: "error",
+        source: "agent_settled",
+        ts: 2,
+        message:
+          `Provider refused the request.\nAuthorization: Bearer ${token}\u001b[31m ` +
+          `request_id=private-request ${"x".repeat(1200)}\u001b[0m`,
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-unsafe-error",
+        { id, turnId: "unsafe-turn" },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      const text = result.content[0].text;
+      const reason = text.split("Failure reason: ")[1]?.split("\n")[0] ?? "";
+
+      expect(reason).toContain("Provider refused the request.");
+      expect(reason).toContain("Authorization=[REDACTED]");
+      expect(reason).toContain("[truncated]");
+      expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(512);
+      expect(text).not.toContain(token);
+      expect(text).not.toContain("\u001b");
+      expect(text).toContain("request_id=[REDACTED]");
+      expect(text).not.toContain("private-request");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a nonempty error snapshot separate from its terminal summary", async () => {
+    const id = "ab12cd3800000006";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "error-with-output",
+      );
+      writeOutput(art, "Useful report body");
+      appendCompletionEvent(art, {
+        turnId: "error-with-output",
+        eventId: "error-output-event",
+        outcome: "error",
+        source: "agent_settled",
+        ts: 2,
+        errorMessage: "Network request failed.",
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-error-with-output",
+        { id, turnId: "error-with-output" },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      const text = result.content[0].text;
+
+      expect(text).toContain("Failure reason: Network request failed.");
+      expect(result.details.output).toBe("Useful report body");
+      expect(text.split("Useful report body")).toHaveLength(2);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps terminal error summaries bound to the selected turn across since filters", async () => {
+    const id = "ab12cd3800000007";
+    const parent = tmp();
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false, "turn-a");
+      writeOutput(art, "A immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-a",
+        eventId: "completion-a",
+        outcome: "error",
+        source: "agent_settled",
+        ts: 2,
+        errorMessage: "Turn A failed.",
+      });
+      state.status = "running";
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-b-started",
+        turnId: "turn-b",
+        ts: 3,
+        type: "turn_started",
+        status: "running",
+      });
+      writeOutput(art, "B staging output");
+
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const active = await readTool.execute(
+        "read-active-b",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(active.content[0].text).not.toContain("Terminal status: error");
+      expect(active.content[0].text).not.toContain("Turn A failed.");
+      expect(active.details.output).toBe("B staging output");
+
+      appendCompletionEvent(art, {
+        turnId: "turn-b",
+        eventId: "completion-b",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 4,
+      });
+      state.status = "exited";
+      const successful = await readTool.execute(
+        "read-successful-b",
+        { id },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      const historical = await readTool.execute(
+        "read-historical-a",
+        { id, turnId: "turn-a", since: 10 },
+        undefined,
+        undefined,
+        {} as any,
+      );
+
+      expect(successful.content[0].text).not.toContain(
+        "Terminal status: error",
+      );
+      expect(successful.details.output).toBe("B staging output");
+      expect(historical.content[0].text).toContain(
+        "Failure reason: Turn A failed.",
+      );
+      expect(historical.details.events).toEqual([]);
+      expect(historical.details.output).toBe("A immutable output");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { outcome: "done" as const, agentStopReason: undefined },
+    { outcome: "cancelled" as const, agentStopReason: undefined },
+    { outcome: "error" as const, agentStopReason: "aborted" as const },
+  ])(
+    "does not present $outcome/$agentStopReason as a terminal error",
+    async ({ outcome, agentStopReason }) => {
+      const id = "ab12cd3800000008";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          "non-error-turn",
+        );
+        appendCompletionEvent(art, {
+          turnId: "non-error-turn",
+          eventId: "non-error-event",
+          outcome,
+          source: "agent_settled",
+          ts: 2,
+          errorMessage: "must not be surfaced as a failure",
+          ...(agentStopReason ? { agentStopReason } : {}),
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const result = await readTool.execute(
+          "read-non-error",
+          { id, turnId: "non-error-turn" },
+          undefined,
+          undefined,
+          {} as any,
+        );
+
+        expect(result.content[0].text).not.toContain("Terminal status: error");
+        expect(result.content[0].text).not.toContain(
+          "must not be surfaced as a failure",
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("consumes only a terminal result whose output was requested", async () => {
     const id = "ab12cd3800000010";
     const parent = tmp();

@@ -100,6 +100,117 @@ function formatFollowupPreview(message: string): string {
   return `${message.slice(0, MAX_FOLLOWUP_PREVIEW_CHARS)}… [truncated; ${message.length} chars total]`;
 }
 
+const MAX_ARTIFACT_ERROR_SUMMARY_BYTES = 512;
+const ANSI_ESCAPE_SEQUENCES =
+  /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\u0007|\u001b\\)|[PX^_][\s\S]*?\u001b\\)/g;
+const SENSITIVE_ERROR_VALUE =
+  /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-request-id|request[ _-]?id|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|password|secret)\s*[:=]\s*(?:"[^"]*"|'[^']*'|Bearer\s+\S+|Basic\s+\S+|[^\s,;]+)/gi;
+
+function isErrorSummaryRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorPrefixSummary(prefix: string): string | undefined {
+  const status = prefix
+    .trim()
+    .match(/^(?:(?:HTTP|Error)\s*:?\s*)?(\d{3})(?:\s|$)/i)?.[1];
+  return status ? `Provider returned HTTP ${status}.` : undefined;
+}
+
+function extractTerminalErrorReason(
+  raw: string,
+  depth = 0,
+): string | undefined {
+  const value = raw.trim();
+  if (!value) return undefined;
+  if (value.startsWith("[")) return undefined;
+  if (value.startsWith('"')) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return typeof parsed === "string"
+        ? extractTerminalErrorReason(parsed, depth + 1)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const jsonStart = value.indexOf("{");
+  if (jsonStart < 0) return value;
+  const prefix = value.slice(0, jsonStart);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.slice(jsonStart));
+  } catch {
+    return errorPrefixSummary(prefix);
+  }
+  if (!isErrorSummaryRecord(parsed)) return errorPrefixSummary(prefix);
+  const error = parsed.error;
+  const nestedMessage = isErrorSummaryRecord(error) ? error.message : error;
+  const reason =
+    typeof nestedMessage === "string"
+      ? nestedMessage
+      : typeof parsed.message === "string"
+        ? parsed.message
+        : undefined;
+  if (!reason || depth >= 2) return errorPrefixSummary(prefix);
+  return extractTerminalErrorReason(reason, depth + 1);
+}
+
+function boundTerminalErrorReason(reason: string): string {
+  const marker = "… [truncated]";
+  const prefixBytes =
+    MAX_ARTIFACT_ERROR_SUMMARY_BYTES - Buffer.byteLength(marker, "utf8");
+  let bounded = Buffer.from(reason, "utf8")
+    .subarray(0, prefixBytes)
+    .toString("utf8");
+  while (
+    Buffer.byteLength(`${bounded}${marker}`, "utf8") >
+    MAX_ARTIFACT_ERROR_SUMMARY_BYTES
+  ) {
+    bounded = bounded.slice(0, -1);
+  }
+  return `${bounded}${marker}`;
+}
+
+function sanitizeTerminalErrorReason(reason: string): string | undefined {
+  const normalized = reason
+    .replace(ANSI_ESCAPE_SEQUENCES, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const redacted = sanitizeOutput(normalized)
+    .replace(SENSITIVE_ERROR_VALUE, "$1=[REDACTED]")
+    .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [REDACTED]")
+    .replace(/\b(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[REDACTED]@");
+  if (!redacted) return undefined;
+  return Buffer.byteLength(redacted, "utf8") > MAX_ARTIFACT_ERROR_SUMMARY_BYTES
+    ? boundTerminalErrorReason(redacted)
+    : redacted;
+}
+
+function formatTerminalErrorSummary(
+  event: Extract<SubagentEvent, { type: "completion" }> | undefined,
+): string {
+  if (
+    !event ||
+    event.outcome !== "error" ||
+    event.agentStopReason === "aborted"
+  ) {
+    return "";
+  }
+  let reason: string | undefined;
+  for (const candidate of [event.errorMessage, event.message]) {
+    if (!candidate) continue;
+    const extracted = extractTerminalErrorReason(candidate);
+    if (!extracted) continue;
+    reason = sanitizeTerminalErrorReason(extracted);
+    if (reason) break;
+  }
+  return `Terminal status: error\nFailure reason: ${reason ?? "No safe error detail was recorded."}`;
+}
+
 function formatArtifactProviderOutput(output: string | null): string {
   if (output === null) return "";
   const sanitized = sanitizeOutput(output);
@@ -1369,6 +1480,7 @@ export function registerInteractiveSubagentTools(
     description: [
       "Read a protocol-v2 interactive sub-agent's artifact. By default, returns output for the latest established turn:",
       "staging output while it is active, or its immutable snapshot after completion. Use `turnId` to select a specific Pi turn.",
+      "A selected terminal error also includes a bounded, sanitized status and reason.",
       "Use `since` (unix ms) to filter only the returned events; it does not change output selection. Reading a terminal output records",
       "consumption so it is not delivered again automatically.",
     ].join("\n"),
@@ -1473,6 +1585,16 @@ export function registerInteractiveSubagentTools(
           ? readSelection.completion
           : undefined;
         const readCompletion = readSelection.completion;
+        const selectedTerminalEvent =
+          readSelection.completion &&
+          readSelection.lifecycleEvent?.type === "completion" &&
+          readSelection.lifecycleEvent.turnId ===
+            readSelection.completion.turnId
+            ? readSelection.lifecycleEvent
+            : undefined;
+        const terminalErrorSummary = formatTerminalErrorSummary(
+          selectedTerminalEvent,
+        );
         const lastEventValue =
           events.length > 0 ? events[events.length - 1] : null;
         const output = wantsOutput
@@ -1551,6 +1673,7 @@ export function registerInteractiveSubagentTools(
                   ? `Reading turnId: ${params.turnId}\n`
                   : "") +
                 historyLine +
+                (terminalErrorSummary ? `${terminalErrorSummary}\n` : "") +
                 `Output: ${outputText}` +
                 (wantsOutput ? formatArtifactProviderOutput(output) : ""),
             },
