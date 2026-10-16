@@ -810,7 +810,9 @@ export function registerWorkflowTool(
       "Orchestrate decomposable multi-agent work with trusted raw JavaScript workflows.",
     promptGuidelines: [
       "Use workflows for repeatable multi-agent work, including sequential pipelines; handle simple one-off tasks directly.",
-      "A vague workflow request means suggest a reusable script and confirm before saving/running; explicit /workflow creation or run requests authorize that action.",
+      "A vague request to create a new workflow means suggest one and confirm before saving/running.",
+      "An explicit `/workflow` request opts into authoring but still requires feasibility assessment and distinct semantic review of the exact final source before saving or running; decline unsuitable/infeasible drafts or unresolved material findings.",
+      "Explicit requests to run an existing named workflow keep the normal saved-workflow execution path.",
       "V4 definitions are durable by default. Legacy durability is opt-in with durable:true and requires unique stable id options on agent() and workflow(). Resume interrupted runs explicitly with resume_workflow.",
       "Omit async for the default background behavior; use async: false only when synchronous execution is required.",
       "For new workflows pass a raw defineWorkflow module with no markdown fences. Legacy scripts may use top-level pure-literal `export const meta = { name, description, phases? }`.",
@@ -1989,7 +1991,7 @@ export function registerWorkflowTool(
 
     registerCommandWithTelemetry(pi, "workflow", {
       description:
-        "Create a reusable workflow from a task, save it, and run it immediately.",
+        "Assess feasibility, draft, review, save, and run a suitable reusable V4 workflow.",
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const inlineTask = args.trim();
         const editor = (ctx.ui as any).editor;
@@ -2126,17 +2128,25 @@ export function registerWorkflowTool(
     return [
       "You are handling the `/workflow <task>` command.",
       "",
-      "Create a reusable TypeScript v4 workflow for the user's task, save it, and run it immediately.",
+      "First assess whether the task is feasible and suitable for a reusable V4 workflow with the available SDK, runtime, and tools. Prefer a bounded plan with reusable inputs. If it is unsuitable, unsupported, materially underspecified, or otherwise infeasible, explain why and do not save or start a workflow.",
+      "",
+      "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation. Do not route ordinary requests to workflows. Ask for human input only when the user requests it or the task's risk warrants it.",
+      "",
+      "Once feasibility is established, draft a reusable TypeScript V4 workflow. Keep orchestration in the saved program rather than an improvised sequence of parent calls.",
       "",
       "Requirements:",
-      "1. Import defineWorkflow/schema from pi-subagentura/workflow and export default defineWorkflow({ name, version: 1, description, input, output, async run(ctx, args) { ... } }).",
-      "2. The workflow should accept its task/config through `args` so it can be reused later.",
-      "3. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow with stable step IDs and item keys; repeat requires a hard iteration cap. Use literal saved names for nested workflows and handle TaskResult values when collecting failures.",
-      "4. Save the script with `save_workflow` using a lowercase slug name and `requireDurable: true`; fix validation errors before proceeding.",
-      "5. Immediately start it with the `workflow` tool by saved `name`, suitable `args`, `durable: true`, and `async: true`. Do not silently fall back to a session-scoped run.",
-      "6. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
-      "7. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
-      "8. Report the saved workflow name and returned workflowId. Explain that recovery is manual in the same cwd, including new Pi sessions; execution requires Pi to be running. Human gates wait for respond_workflow_input.",
+      "1. Import defineWorkflow/schema from pi-subagentura/workflow and default-export defineWorkflow({ name, version: 1, description, input, output, async run(ctx, args) { ... } }). Pass task/config through args and define meaningful input/output schemas and structured agent-output contracts.",
+      "2. Use ordinary JavaScript control flow where it is clearest. Give persisted steps stable unique IDs; bound loops, repeat iterations, map/parallel work, and other fan-out. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow as appropriate, literal saved names for nested workflows, and handle TaskResult failures explicitly.",
+      "3. Do not use Node APIs inside the workflow script. Workflow-agent file I/O must use tools actually available to those agents.",
+      "4. Before saving or running anything, semantically review the exact draft in a distinct pass. Use an independent reviewer through an available existing tool when possible; otherwise do a fresh self-review as a separate phase. Review task fit, contracts, prompts/roles, stable bounded control flow, failure handling, side effects, and whether available tools can do the work. Parsing, durable-readiness checks, and execution/smoke tests are not semantic review.",
+      "5. Address material findings and repeat semantic review after every source revision. If material issues remain or you cannot reach a sound review, explain why and do not save or start. Any validation-driven or other source change requires another semantic review before saving.",
+      "6. After review is complete, fix validation errors before persistence. Save the final reviewed source with save_workflow using a lowercase slug name and requireDurable: true.",
+      "Use inspect_workflow({ name }) to read the saved source and confirm an exact match to the reviewed source. If it differs, do not start it; reconcile and re-review the final source first.",
+      "Only then start that saved name with the workflow tool, suitable args, durable: true, and async: true; never silently fall back to a session-scoped run.",
+      "7. Do not set isolation unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
+      "8. Report the saved workflow name and returned workflowId. Explain that V4 recovery is manual in the same project and requires Pi to be running. Human gates wait for respond_workflow_input.",
+      "",
+      "The save/runtime checks do not prove semantic suitability or that this review occurred; do not describe them as doing so.",
       "",
       "User task:",
       task,

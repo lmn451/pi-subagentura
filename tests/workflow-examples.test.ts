@@ -59,6 +59,252 @@ afterEach(() => {
 });
 
 describe("bundled workflow examples", () => {
+  const sourceReviewAspects = [
+    "intent-design",
+    "compatibility",
+    "behavior-change",
+    "correctness-quality",
+  ] as const;
+  const sourceReviewLabels: Record<
+    (typeof sourceReviewAspects)[number],
+    string
+  > = {
+    "intent-design": "Intent and design alignment",
+    compatibility: "Compatibility",
+    "behavior-change": "Unintended behavior changes",
+    "correctness-quality": "Correctness and quality",
+  };
+  const sourceReviewArgs = {
+    files: ["src/auth.ts", "src/session.ts"],
+    intendedChange:
+      "Replace the token cache while preserving existing callers.",
+  };
+
+  function passingSourceReviewResponses(): Record<string, unknown | Error> {
+    const responses: Record<string, unknown | Error> = {};
+    for (const aspect of sourceReviewAspects) {
+      responses[sourceReviewLabels[aspect]] = {
+        verdict: "pass",
+        findings: [],
+      };
+    }
+    return responses;
+  }
+
+  async function runSourceReview(responses: Record<string, unknown | Error>) {
+    const run = await runWorkflow(script("review-source.ts"), {
+      args: sourceReviewArgs,
+      runAgent: async ({ label }) => {
+        const key = label ?? "";
+        if (!Object.hasOwn(responses, key)) {
+          throw new Error(`Unexpected source-review agent: ${key}`);
+        }
+        const response = responses[key];
+        if (response instanceof Error) throw response;
+        return json(response);
+      },
+      requestInput: async () => true,
+    });
+    return run;
+  }
+
+  it("passes only when all aspect reviews complete cleanly", async () => {
+    const run = await runSourceReview(passingSourceReviewResponses());
+
+    expect(run.result).toMatchObject({
+      status: "pass",
+      reviews: [
+        { aspect: "intent-design", outcome: "completed", verdict: "pass" },
+        { aspect: "compatibility", outcome: "completed", verdict: "pass" },
+        { aspect: "behavior-change", outcome: "completed", verdict: "pass" },
+        {
+          aspect: "correctness-quality",
+          outcome: "completed",
+          verdict: "pass",
+        },
+      ],
+      findings: [],
+      severityCounts: { critical: 0, high: 0, medium: 0, low: 0 },
+    });
+  });
+
+  it("sorts findings deterministically and preserves independent evidence", async () => {
+    const responses = passingSourceReviewResponses();
+    responses["Intent and design alignment"] = {
+      verdict: "pass",
+      findings: [
+        {
+          severity: "low",
+          location: "src/z.ts:9",
+          evidence: "the fallback remains",
+          explanation: "The fallback no longer matches the intended design.",
+        },
+      ],
+    };
+    responses["Compatibility"] = {
+      verdict: "concern",
+      findings: [
+        {
+          severity: "medium",
+          location: "src/a.ts:12",
+          evidence: "export function refresh()",
+          explanation: "The exported function signature changes.",
+        },
+      ],
+    };
+    responses["Unintended behavior changes"] = {
+      verdict: "pass",
+      findings: [
+        {
+          severity: "high",
+          location: "src/auth.ts:4",
+          evidence: "return legacyResult()",
+          explanation: "Existing callers now receive a different result.",
+        },
+      ],
+    };
+    responses["Correctness and quality"] = {
+      verdict: "pass",
+      findings: [
+        {
+          severity: "high",
+          location: "src/auth.ts:4",
+          evidence: "return legacyResult()",
+          explanation: "The new branch returns stale state.",
+        },
+      ],
+    };
+
+    const run = await runSourceReview(responses);
+
+    expect(run.result).toMatchObject({
+      status: "blocking",
+      severityCounts: { critical: 0, high: 2, medium: 1, low: 1 },
+    });
+    const output = run.result as { findings: unknown[] };
+    expect(output.findings).toEqual([
+      {
+        aspect: "behavior-change",
+        severity: "high",
+        location: "src/auth.ts:4",
+        evidence: "return legacyResult()",
+        explanation: "Existing callers now receive a different result.",
+      },
+      {
+        aspect: "correctness-quality",
+        severity: "high",
+        location: "src/auth.ts:4",
+        evidence: "return legacyResult()",
+        explanation: "The new branch returns stale state.",
+      },
+      {
+        aspect: "compatibility",
+        severity: "medium",
+        location: "src/a.ts:12",
+        evidence: "export function refresh()",
+        explanation: "The exported function signature changes.",
+      },
+      {
+        aspect: "intent-design",
+        severity: "low",
+        location: "src/z.ts:9",
+        evidence: "the fallback remains",
+        explanation: "The fallback no longer matches the intended design.",
+      },
+    ]);
+  });
+
+  it("keeps lower-severity findings in a concern result", async () => {
+    const responses = passingSourceReviewResponses();
+    responses["Intent and design alignment"] = {
+      verdict: "pass",
+      findings: [
+        {
+          severity: "low",
+          location: "src/auth.ts:30",
+          evidence: "cacheTTL = 0",
+          explanation: "The default may cause avoidable cache churn.",
+        },
+      ],
+    };
+
+    const run = await runSourceReview(responses);
+
+    expect(run.result).toMatchObject({
+      status: "concern",
+      findings: [
+        {
+          aspect: "intent-design",
+          severity: "low",
+          location: "src/auth.ts:30",
+        },
+      ],
+      severityCounts: { critical: 0, high: 0, medium: 0, low: 1 },
+    });
+  });
+
+  it("marks a failed or explicitly uncertain review as uncertain, not pass", async () => {
+    const responses = passingSourceReviewResponses();
+    responses["Compatibility"] = new Error("Compatibility review failed.");
+    responses["Correctness and quality"] = {
+      verdict: "uncertain",
+      findings: [],
+    };
+
+    const run = await runSourceReview(responses);
+
+    expect(run.result).toMatchObject({
+      status: "uncertain",
+      reviews: [
+        { aspect: "intent-design", outcome: "completed", verdict: "pass" },
+        {
+          aspect: "compatibility",
+          outcome: "failed",
+          verdict: "uncertain",
+          failure: {
+            name: expect.any(String),
+            message: expect.any(String),
+          },
+        },
+        { aspect: "behavior-change", outcome: "completed", verdict: "pass" },
+        {
+          aspect: "correctness-quality",
+          outcome: "completed",
+          verdict: "uncertain",
+        },
+      ],
+    });
+  });
+
+  it("lets blocking findings take precedence over failed reviews", async () => {
+    const responses = passingSourceReviewResponses();
+    responses["Compatibility"] = new Error("Compatibility review failed.");
+    responses["Unintended behavior changes"] = {
+      verdict: "blocking",
+      findings: [],
+    };
+
+    const run = await runSourceReview(responses);
+
+    expect(run.result).toMatchObject({
+      status: "blocking",
+      reviews: [
+        { aspect: "intent-design", outcome: "completed", verdict: "pass" },
+        { aspect: "compatibility", outcome: "failed", verdict: "uncertain" },
+        {
+          aspect: "behavior-change",
+          outcome: "completed",
+          verdict: "blocking",
+        },
+        {
+          aspect: "correctness-quality",
+          outcome: "completed",
+          verdict: "pass",
+        },
+      ],
+    });
+  });
+
   it("parses every bundled .mjs workflow", () => {
     const files = readdirSync(EXAMPLES)
       .filter((file) => file.endsWith(".mjs"))

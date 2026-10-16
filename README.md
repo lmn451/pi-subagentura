@@ -83,10 +83,21 @@ pi --orchestrator
 /workflow-tree
 ```
 
-`/workflow` asks the parent to create, validate, save, and immediately run a
-durable reusable workflow. `/workflows` labels saved scripts as `durable-ready`
-or `session-scoped` and runs compatible scripts durably by default.
-`/workflow-tree` shows live phases, agents, and cancellation controls.
+`/workflow` is explicit opt-in. The parent first assesses feasibility and, if
+suitable, drafts a reusable V4 workflow with structured contracts and stable,
+bounded steps. It performs a distinct semantic review (using an independent
+reviewer when available), addresses findings, and re-reviews revisions before
+saving and starting the reviewed source durably in the background. If the task
+is infeasible or material issues remain, it explains without saving or starting.
+An explicit request needs no routine approval unless the user or task risk
+warrants it. This is prompt guidance, not an enforced semantic gate:
+`save_workflow` parses the source and, with `requireDurable: true`, checks static
+durable readiness; it cannot prove suitability, semantic correctness, or whether
+a review occurred. See [workflow authoring details](./docs/workflows.md#creating-and-resuming-workflows).
+
+`/workflows` labels saved scripts as `durable-ready` or `session-scoped` and runs
+compatible scripts durably by default. `/workflow-tree` shows live phases,
+agents, and cancellation controls.
 
 ## Reusable workflows
 
@@ -209,7 +220,7 @@ These commands are intended for people at the Pi prompt.
 
 | Command             | Purpose                                                           |
 | ------------------- | ----------------------------------------------------------------- |
-| `/workflow`         | Create, save, and run a reusable workflow from a task             |
+| `/workflow`         | Assess, review, save, and run a suitable reusable workflow        |
 | `/workflows`        | Select and run a saved workflow                                   |
 | `/list-workflows`   | Alias for `/workflows`                                            |
 | `/workflow-status`  | List workflow jobs and their live or terminal status              |

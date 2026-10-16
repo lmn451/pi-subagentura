@@ -30,12 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved-definition readiness and source digests, and durable execution by default
   for compatible `/workflows` selections. `/workflow <task>` generates stable
   IDs, validates before saving, and requests a durable background run.
+- A reusable four-aspect source-review example with schema-validated findings,
+  deterministic severity counts and verdict precedence, and explicit failed or
+  uncertain review outcomes.
 
 ### Changed
 
 - Require Node.js 24.12 or newer for native erasable TypeScript workflow
   syntax. The workflow worker pins Effect 4 internally; Effect remains outside
   the public workflow API.
+- `/workflow <task>` now instructs the parent to assess feasibility, draft and
+  semantically review the script, re-review revisions, then save and inspect the
+  reviewed source before durable execution. These authoring phases are model
+  guidance, not runtime-enforced approval gates.
 
 ### Fixed
 

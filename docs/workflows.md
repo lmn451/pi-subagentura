@@ -65,14 +65,34 @@ definition.
 
 ## Creating and resuming workflows
 
-`/workflow <task>` creates a reusable TypeScript V4 workflow, saves it with
-`requireDurable: true`, and starts a durable background run. `/workflows` shows
-`durable-ready` or `session-scoped` beside saved scripts and starts compatible
-scripts durably by default. The `list_workflows` tool returns readiness and a
-SHA-256 source digest. Use `resume_workflow({workflowId})` from a live Pi
-process in the same project after interruption; recovery is manual. A direct
-V4 `workflow` call is durable by default, while legacy `.mjs` calls require
-`durable: true` to opt in.
+`/workflow <task>` is explicit opt-in, not automatic workflow routing. The
+command hands the task to the parent with authoring guidance: first assess
+feasibility and suitability. If suitable, draft a reusable TypeScript V4
+definition with meaningful structured input/output/agent contracts and stable,
+bounded steps. Semantically review the exact draft in a distinct pass, using
+an independent reviewer when available; otherwise do a fresh self-review as a
+separate phase. Address findings and re-review every revision before saving.
+An explicit request normally authorizes saving and running without routine
+confirmation; human input is needed only when requested or when the task's risk
+warrants it. If the task is infeasible, unsupported, or materially
+underspecified, or material review issues remain unresolved, explain why and
+do not save or start.
+
+This sequence is parent prompt guidance, not an enforced semantic-review gate or
+authorization state machine. `save_workflow({name, script, requireDurable:true})`
+parses source and checks static durable readiness, but cannot determine task
+suitability, semantic correctness, or whether a review occurred. Parsing,
+durable-readiness checks, and execution tests do not substitute for semantic
+review. `inspect_workflow({name})` reads/parses the exact saved source without
+running agents, so the parent can confirm it matches the reviewed source before
+launch.
+
+`/workflows` shows `durable-ready` or `session-scoped` beside saved scripts and
+starts compatible scripts durably by default. The `list_workflows` tool returns
+readiness and a SHA-256 source digest. Use `resume_workflow({workflowId})` from
+a live Pi process in the same project after interruption; recovery is manual. A
+direct V4 `workflow` call is durable by default, while legacy `.mjs` calls
+require `durable: true` to opt in.
 
 ## Legacy `.mjs` workflow scripts
 

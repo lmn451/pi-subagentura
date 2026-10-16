@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -2689,33 +2692,40 @@ describe("registerWorkflowTool", () => {
     ]);
   });
 
-  it("/workflow queues a prompt to create, save, and run a workflow", async () => {
-    const commands: Array<{ name: string; handler: Function }> = [];
+  it("/workflow forwards the original task as a follow-up", async () => {
+    type WorkflowCommand = {
+      name: string;
+      handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+    };
+    const commands: WorkflowCommand[] = [];
     const pi = {
       registerTool: vi.fn(),
       registerFlag: vi.fn(),
-      registerCommand: vi.fn((name: string, def: any) =>
-        commands.push({ name, ...def }),
+      registerCommand: vi.fn(
+        (name: string, def: Omit<WorkflowCommand, "name">) =>
+          commands.push({ name, ...def }),
       ),
       on: vi.fn(),
       sendUserMessage: vi.fn(),
     };
+    // Minimal context fake for the command's follow-up dispatch.
+    const sendUserMessage = vi.fn();
     const ctx = {
       ui: { notify: vi.fn() },
-      sendUserMessage: vi.fn(),
-    };
+      sendUserMessage,
+    } as unknown as ExtensionCommandContext;
 
-    registerWorkflowTool(pi as any);
+    // The dispatch test only exercises command registration and follow-up.
+    registerWorkflowTool(pi as unknown as ExtensionAPI);
     const cmd = commands.find((c) => c.name === "workflow")!;
-    await cmd.handler("build a release checklist", ctx);
+    const task = "build a release checklist";
+    await cmd.handler(task, ctx);
 
-    expect(ctx.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [prompt, opts] = ctx.sendUserMessage.mock.calls[0];
-    expect(prompt).toContain("save_workflow");
-    expect(prompt).toContain("workflow` tool");
-    expect(prompt).toContain("build a release checklist");
-    expect(prompt).not.toContain("Big Pickle");
-    expect(opts).toEqual({ deliverAs: "followUp" });
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining(task),
+      { deliverAs: "followUp" },
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
   it("workflow tool has the expected description and parameters", () => {

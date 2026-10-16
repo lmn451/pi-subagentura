@@ -124,15 +124,31 @@ objects, and literal nested workflow names are required; computed IDs are
 checked for validity and uniqueness at runtime. V4 IDs are validated and
 scoped by the runtime at each step.
 
-`/workflow <task>` asks the parent to generate stable IDs, save with
-`requireDurable:true`, and start with `durable:true`. `/workflows` labels saved
-definitions as `durable-ready` or `session-scoped` and starts compatible scripts
-durably by default. Compatibility is rechecked at launch. A failed durable start
-reports its error without falling back to a session-scoped execution. V4 typed
-definitions run durably by default through the `workflow` tool; pass
-`durable:false` to disable persistence. Legacy `.mjs` calls retain their
-existing non-durable default.
+`/workflow <task>` is explicit opt-in. It hands the task to the parent with
+guidance to assess feasibility first, then—if suitable—draft a reusable V4
+definition with structured contracts and stable bounded steps, semantically
+review the exact source in a distinct pass, using an independent reviewer when
+available; otherwise do a fresh self-review as a separate phase. Address
+findings and re-review revisions, then save with `requireDurable:true` and
+start the reviewed saved definition with `durable:true, async:true`. If infeasible
+or material review issues remain unresolved, the parent should explain without
+saving or starting. The explicit request needs no routine approval unless the
+user or task risk warrants it. Ordinary requests are not automatically routed
+to workflows.
 
+This is prompt guidance, not an enforced semantic-review or authorization
+state machine. `save_workflow` checks that source parses and, with
+`requireDurable:true`, passes static durable-readiness checks; it cannot prove
+suitability, semantic correctness, or that review occurred. `inspect_workflow`
+reads/parses saved source without executing agents, allowing the parent to
+confirm the reviewed definition is what will run.
+
+`/workflows` labels saved definitions as `durable-ready` or `session-scoped` and
+starts compatible scripts durably by default. Compatibility is rechecked at
+launch. A failed durable start reports its error without falling back to a
+session-scoped execution. V4 typed definitions run durably by default through
+the `workflow` tool; pass `durable:false` to disable persistence. Legacy `.mjs`
+calls retain their existing non-durable default.
 `workflow({name, args, durable:true})` creates a separately persisted run. It
 captures the root source, arguments, cwd, model default, concurrency, output
 budget, and configured execution time limit. In V4, a paused human-input wait

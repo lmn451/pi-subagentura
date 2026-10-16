@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const fixture = vi.hoisted(() => ({ dir: "", run: vi.fn() }));
+const fixture = vi.hoisted(() => ({
+  dir: "",
+  run: vi.fn(),
+  save: vi.fn(),
+}));
 vi.mock("../src/workflow-core", async (importOriginal) => {
   const core = await importOriginal<typeof import("../src/workflow-core")>();
   return {
@@ -17,8 +27,11 @@ vi.mock("../src/workflow-core", async (importOriginal) => {
       name: string,
       script: string,
       _dir: unknown,
-      options: any,
-    ) => core.saveWorkflowScript(name, script, fixture.dir, options),
+      options: { requireDurable?: boolean },
+    ) => {
+      fixture.save(name, script, options);
+      return core.saveWorkflowScript(name, script, fixture.dir, options);
+    },
   };
 });
 vi.mock("../src/workflow-durable-tools", () => ({
@@ -53,6 +66,7 @@ beforeEach(() => {
     content: [{ type: "text", text: "Started durable run." }],
     details: { status: "started", workflowId: "wfd_test", durable: true },
   });
+  fixture.save.mockReset();
 });
 
 afterEach(async () => {
@@ -186,13 +200,17 @@ describe("durable workflow authoring", () => {
     );
   });
 
-  it("emits a durable authoring request without executing a workflow itself", async () => {
+  it("forwards the original task without saving or running a workflow", async () => {
     const { commands, ctx, pi } = setup();
-    await commands.get("workflow").handler("review my changes", ctx);
-    const prompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(prompt).toContain("requireDurable: true");
-    expect(prompt).toContain("durable: true");
-    expect(prompt).toContain("stable");
+    const task = "review my changes";
+    await commands.get("workflow").handler(task, ctx);
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining(task),
+      { deliverAs: "followUp" },
+    );
+    expect(fixture.save).not.toHaveBeenCalled();
+    expect(readdirSync(fixture.dir)).toEqual([]);
     expect(fixture.run).not.toHaveBeenCalled();
+    expect(workflowJobRegistry.size).toBe(0);
   });
 });
