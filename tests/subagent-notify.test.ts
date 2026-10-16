@@ -125,6 +125,7 @@ function mockJobResult(
     jobId,
     jobPromise,
     session: { abort: vi.fn() },
+    start: () => true,
     liveStatus: {
       turn: 0,
       output: "",
