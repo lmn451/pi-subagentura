@@ -420,7 +420,7 @@ There is no autonomous in-process poller.
 A requested result wait races the existing promise against caller abort and a bounded timeout; cancelling the wait does not cancel the job.
 Successful terminal retrieval appends a consumption receipt before returning and suppresses later automatic delivery.
 
-`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership and for every member—including errors and cancellations—to become terminal; same-turn launch or task text never infers a group.
+`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership. Errors are eligible for parent delivery before the group barrier; success and cancellation remain gated until every registered member is terminal. Early error delivery does not satisfy the member's terminal accounting or release the remaining group records. Same-turn launch or task text never infers a group.
 
 ### 5.5 Cancellation and retention
 
@@ -708,7 +708,7 @@ For every parent-visible standalone terminal record and every background workflo
 
 `completionPolicy="each"` is the default. Records become independently eligible as soon as they are terminal; records that finish while the parent is busy coalesce into one manifest at the next safe dispatch. A related group is formed only when the caller explicitly selects `completionPolicy="group"` and provides a shared `completionGroupId`; same-turn launch and task text never infer relatedness.
 
-For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group, late members are rejected, and parent delivery waits for every registered member to be `done`, `error`, or `cancelled`. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
+For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group and late members are rejected. Errors are eligible for parent delivery before the group barrier; success and cancellation wait until every registered member is terminal. Early error delivery leaves the group member registered and its terminal accounting intact, so remaining successful or cancelled members stay gated until the group is ready. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
 
 The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
 
@@ -1128,7 +1128,7 @@ The restrictive exports map matters: shipping all source files in `package.json#
 
 - [ ] Every terminal record appends one deterministic TUI completion entry excluded from LLM context.
 - [ ] Default `completionPolicy="each"` records become eligible independently and coalesce while the parent is busy.
-- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and waits for all `done`/`error`/`cancelled` members; same-turn launch and task text do not infer a group.
+- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and retains all members in terminal accounting; errors are eligible before the barrier, while success and cancellation wait for every member to become terminal. Same-turn launch and task text do not infer a group.
 - [ ] Every idle coordinated manifest passes through `sendCompletionTurn` with
       the actual parent streaming state.
 - [ ] Non-v2 delivery falls through to native `sendMessage`; idle Orchestratorv2
