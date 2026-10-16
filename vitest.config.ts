@@ -8,6 +8,7 @@ export default defineConfig({
     // `--testTimeout` does not raise this, and the terminal E2E suite tears a
     // tmux server plus a real Pi process down inside afterEach. Left at the 10s
     // default, a genuine failure can surface as a confusing hook timeout.
+    hookTimeout: 30_000,
     sequence: { setupFiles: "list" },
     setupFiles: [
       "./tests/setup-telemetry-fetch-sentinel.ts",
