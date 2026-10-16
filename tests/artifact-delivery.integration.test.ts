@@ -27,6 +27,7 @@ import {
   flushCompletionManifests,
   registerCompletionCoordinator,
   registerCompletionMember,
+  settleCompletionParentTurn,
 } from "../src/completion-coordinator";
 import {
   createPiSessionHarness,
@@ -247,6 +248,7 @@ describe("protocol-v2 artifact delivery", () => {
     "publishes settled HTTP 402 provider errors before group completion with %s policy",
     async (policy) => {
       const art = makeArtifact();
+      const siblingArt = policy === "group" ? makeArtifact() : undefined;
       let providerRequests = 0;
       const providerServer = createServer((_request, response) => {
         providerRequests += 1;
@@ -319,8 +321,14 @@ describe("protocol-v2 artifact delivery", () => {
         completionPolicy: policy,
         ...(policy === "group" ? { completionGroupId: groupId } : {}),
       };
+      const siblingState = siblingArt
+        ? { ...makeState(siblingArt.dir), id: "sibling" }
+        : undefined;
       const owner = sessionOwner(scope);
       scope.interactiveStates.set(state.id, state);
+      if (siblingState) {
+        scope.interactiveStates.set(siblingState.id, siblingState);
+      }
       registerCompletionCoordinator(pi as any, scope);
       if (policy === "group") {
         registerCompletionMember(
@@ -365,9 +373,43 @@ describe("protocol-v2 artifact delivery", () => {
         '"status":"error"',
       );
 
+      if (siblingArt && siblingState) {
+        expect(
+          entries.filter(
+            ({ customType }) => customType === "subagentura-completion",
+          ),
+        ).toHaveLength(1);
+        expect(pi.sendMessage).toHaveBeenCalledOnce();
+
+        writeOutput(siblingArt, "sibling success");
+        appendCompletionEvent(siblingArt, {
+          turnId: "sibling-turn",
+          outcome: "done",
+          source: "agent_settled",
+          eventId: "sibling-completion",
+        });
+        await pollArtifactChanges(scope.pi, owner);
+        expect(
+          entries.filter(
+            ({ customType }) => customType === "subagentura-completion",
+          ),
+        ).toHaveLength(2);
+        expect(pi.sendMessage).toHaveBeenCalledOnce();
+
+        settleCompletionParentTurn(owner);
+        flushCompletionManifests(owner);
+        expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+        expect(pi.sendMessage.mock.calls[1][0].content).toContain(
+          '"sourceId":"sibling"',
+        );
+        expect(pi.sendMessage.mock.calls[1][0].content).not.toContain(
+          '"sourceId":"child0001"',
+        );
+      }
+
       await pollArtifactChanges(scope.pi, owner);
       flushCompletionManifests(owner);
-      expect(pi.sendMessage).toHaveBeenCalledOnce();
+      expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
     },
   );
 
