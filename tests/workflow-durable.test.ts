@@ -161,27 +161,76 @@ describe("durable workflow journal", () => {
     child.stderr!.on("data", (data) => {
       stderr += data.toString();
     });
-    const exit = new Promise<void>((resolve) =>
-      child.once("exit", () => resolve()),
+    const exit = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
     );
+    const childDiagnostic = (message: string) =>
+      `${message}${stderr.trim() ? `\nChild stderr:\n${stderr.trim()}` : ""}`;
     try {
       const id = await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const fail = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        };
+        // This child crosses a real process/IPC boundary, so fake timers cannot
+        // bound startup; keep the wall-clock deadline explicit and fail loudly.
         const timer = setTimeout(
-          () => reject(new Error("Crash fixture did not reach its boundary.")),
+          () =>
+            fail(
+              new Error(
+                childDiagnostic(
+                  "Crash fixture did not reach its IPC boundary within 10 seconds.",
+                ),
+              ),
+            ),
           10_000,
         );
-        child.once("message", (message: any) => {
+        child.once("message", (message: unknown) => {
+          if (
+            !message ||
+            typeof message !== "object" ||
+            !("id" in message) ||
+            typeof message.id !== "string"
+          ) {
+            fail(
+              new Error(
+                childDiagnostic("Crash fixture sent an invalid IPC boundary."),
+              ),
+            );
+            return;
+          }
+          settled = true;
           clearTimeout(timer);
           resolve(message.id);
         });
-        child.once("exit", () => {
-          clearTimeout(timer);
-          reject(new Error(stderr || "Child exited before crash boundary."));
+        child.once("close", (code, signal) => {
+          fail(
+            new Error(
+              childDiagnostic(
+                `Child closed before crash boundary (code ${code}, signal ${signal}).`,
+              ),
+            ),
+          );
         });
-        child.once("error", reject);
+        child.once("error", (error) => {
+          fail(
+            new Error(
+              childDiagnostic(
+                `Crash fixture failed to start: ${error.message}`,
+              ),
+            ),
+          );
+        });
       });
-      child.kill("SIGKILL");
-      await exit;
+      expect(child.kill("SIGKILL")).toBe(true);
+      const termination = await exit;
+      expect(termination.signal).toBe("SIGKILL");
       const reopened = await WorkflowRunStore.resume(scope, id);
       stores.push(reopened);
       const runner = vi.fn(async ({ prompt }) => ok(prompt + " resumed"));
