@@ -196,6 +196,7 @@ describe("subagent_interactive tool lifecycle", () => {
     g.__piSubagenturaInteractivePollerHandle = undefined;
     api = setupExtension() as any;
     startSession(mockCtx());
+    api.scope.telemetry = createTelemetrySession(false);
     mockLaunchInteractiveSubagent.mockReset();
     mockCancelInteractiveSubagent.mockReset();
     mockPruneDeadInteractiveSubagents.mockReset();

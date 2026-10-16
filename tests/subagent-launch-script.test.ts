@@ -766,6 +766,14 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
+    const payloads: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 204 });
+      }),
+    );
     scope.telemetry = createTelemetrySession(true);
     const state = launchInteractiveSubagent({
       name: "Demo",

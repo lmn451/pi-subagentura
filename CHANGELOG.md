@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve a known initial mux when shutdown prevents a prepared workflow
   fallback from starting, keeping its logical outcome cancelled rather than
   accepted.
+- Prevent ordinary Vitest fixtures from sending telemetry to PostHog: reject
+  unmocked capture attempts visibly and keep intentional telemetry assertions
+  isolated behind in-memory collectors.
 
 - Drain coordinated completion queues when an independent intent carries stale
   group metadata, without blocking later deliveries.

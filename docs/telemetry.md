@@ -118,6 +118,25 @@ Capture remains best-effort: no queue/retry, a 1.5-second timeout, and no durabl
 capture acknowledgement. All reports describe observed telemetry-enabled traffic.
 Missing completion events do not by themselves prove a crash, hang, or data loss.
 
+## Repository test isolation
+
+Normal CI/Vitest opt-outs are not a transport guarantee: a fixture can construct
+an enabled telemetry session directly. Standard Vitest workers therefore guard
+the default global `fetch` transport for PostHog service hosts. Unmocked attempts
+are rejected and fail the test or suite lifecycle even when `captureTelemetry`
+swallows the transport rejection.
+
+Ordinary behavior fixtures disable telemetry. Capture assertions explicitly
+enable their session and install in-memory collectors. Mock restoration preserves
+the guarded default, while suite-scoped local collectors remain supported. The
+behavioral regression runs actual Vitest consumers with a fake underlying
+transport and an independent Node-level network fence, including a consumer that
+must fail after its capture callback returns.
+
+This repository test-harness guard does not change published runtime opt-outs,
+provide an OS network sandbox, or retroactively classify unknown historical
+traffic. Terminal E2E children retain their separate network guard.
+
 ## Report setup
 
 Create three SQL insights using the queries below. PostHog's

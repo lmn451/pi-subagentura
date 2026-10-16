@@ -123,7 +123,7 @@ function liveSessionContext(options: {
     parentStreaming: false,
     inProcessJobs: new Map(),
     interactiveStates: new Map(),
-    telemetry: createTelemetrySession(true),
+    telemetry: createTelemetrySession(false),
   });
   return { context, ui };
 }
@@ -463,6 +463,7 @@ describe("workflow supervisor integration", () => {
   it("registers, settles, and deregisters an in-process fallback child", async () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
     const owner = ownerOf(context);
     const start = vi.fn(() => true);
     let releaseChild!: (result: SubagentResult) => void;
@@ -623,6 +624,7 @@ describe("workflow supervisor integration", () => {
         id: 6,
         sessionId: "session-a",
       });
+      context.telemetry = createTelemetrySession(true);
       mockLaunch.mockImplementationOnce(
         (
           params: Parameters<
@@ -694,6 +696,7 @@ describe("workflow supervisor integration", () => {
   it("preserves the failed mux when a prepared fallback declines to start", async () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 14, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
     mockLaunch.mockImplementationOnce(
       (
         params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
@@ -761,6 +764,7 @@ describe("workflow supervisor integration", () => {
   it("does not start an in-process child whose parent shut down mid-spawn", async () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
     const start = vi.fn();
     const disposeBeforeStart = vi.fn();
     const sessionAbort = vi.fn();
