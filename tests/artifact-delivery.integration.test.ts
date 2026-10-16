@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,11 +35,17 @@ import {
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const childHarnesses: PiSessionHarness[] = [];
+const providerServers: Server[] = [];
 
 const roots: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const harness of childHarnesses.splice(0)) harness.dispose();
+  await Promise.all(
+    providerServers
+      .splice(0)
+      .map((server) => new Promise<void>((resolve) => server.close(resolve))),
+  );
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
   clearSessionScopes();
   __setTmuxMultiplexer(undefined);
@@ -240,8 +247,23 @@ describe("protocol-v2 artifact delivery", () => {
     "publishes settled HTTP 402 provider errors before group completion with %s policy",
     async (policy) => {
       const art = makeArtifact();
+      let providerRequests = 0;
+      const providerServer = createServer((_request, response) => {
+        providerRequests += 1;
+        response.writeHead(402, { "content-type": "text/plain" });
+        response.end("insufficient credits");
+      });
+      providerServers.push(providerServer);
+      await new Promise<void>((resolve) =>
+        providerServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = providerServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("local provider server did not bind a TCP port");
+      }
       const harness = await createPiSessionHarness(repoRoot, {
         childArtifactDir: art.dir,
+        providerErrorUrl: `http://127.0.0.1:${address.port}/chat`,
         retrySettings: {
           enabled: false,
           maxRetries: 0,
@@ -252,10 +274,10 @@ describe("protocol-v2 artifact delivery", () => {
       childHarnesses.push(harness);
       const prompt = harness.session.prompt("exercise provider failure");
       await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
-      harness.failNext("HTTP 402: insufficient credits");
       await prompt;
       await harness.session.waitForIdle();
 
+      expect(providerRequests).toBe(1);
       const childCompletion = readEventRecords(art)
         .map(({ event }) => event)
         .find((event) => event.type === "completion");
