@@ -18,6 +18,7 @@ import {
   createAssistantMessageEventStream,
   type AssistantMessage,
   type Context,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
 
 function assistant(text: string): AssistantMessage {
@@ -44,6 +45,7 @@ export interface PiSessionHarness {
   session: AgentSession;
   sessionManager: SessionManager;
   contexts: Context[];
+  completeNextTool(name: string, arguments_: ToolCall["arguments"]): void;
   completeNext(text?: string): void;
   failNext(errorMessage?: string): void;
   reload(): Promise<void>;
@@ -77,6 +79,7 @@ export async function createPiSessionHarness(
   const contexts: Context[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
+  let toolCallSequence = 0;
   const fauxProvider = {
     api: "subagentura-faux",
     apiKey: "test",
@@ -191,6 +194,41 @@ export async function createPiSessionHarness(
         partial: message,
       });
       stream.push({ type: "done", reason: "stop", message });
+      stream.end(message);
+    },
+    completeNextTool(name, arguments_) {
+      const stream = pending.shift();
+      if (!stream) throw new Error("no pending faux provider response");
+      const call: ToolCall = {
+        type: "toolCall",
+        id: `harness-tool-${++toolCallSequence}`,
+        name,
+        arguments: arguments_,
+      };
+      const message: AssistantMessage = {
+        ...assistant(""),
+        content: [call],
+        stopReason: "toolUse",
+      };
+      stream.push({ type: "start", partial: { ...message, content: [] } });
+      stream.push({
+        type: "toolcall_start",
+        contentIndex: 0,
+        partial: { ...message, content: [{ ...call, arguments: {} }] },
+      });
+      stream.push({
+        type: "toolcall_delta",
+        contentIndex: 0,
+        delta: JSON.stringify(arguments_),
+        partial: message,
+      });
+      stream.push({
+        type: "toolcall_end",
+        contentIndex: 0,
+        toolCall: call,
+        partial: message,
+      });
+      stream.push({ type: "done", reason: "toolUse", message });
       stream.end(message);
     },
     failNext(errorMessage = "rate limit, please retry your request") {

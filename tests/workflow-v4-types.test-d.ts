@@ -38,8 +38,15 @@ const definition = defineWorkflow({
     const result = await ctx.agent("security", {
       prompt: `Review ${path}`,
       output: Review,
+      readOnly: true,
       retry: { attempts: 2, backoff: "exponential" },
     });
+    const invalidReadOnly = ctx.agent("invalid-read-only", {
+      prompt: "Review",
+      // @ts-expect-error readOnly is a boolean capability selector
+      readOnly: "yes",
+    });
+    void invalidReadOnly;
     const fanout = await ctx.parallel(
       {
         security: () => result,

@@ -349,11 +349,14 @@ export function registerWorkflowTool(
       isolation,
       label,
       schema,
+      readOnly,
       thinkingLevel,
       onProgress,
       onCancellationSnapshot,
       durableAttempt,
     }) => {
+      if (readOnly !== undefined && typeof readOnly !== "boolean")
+        throw new Error("Workflow agent readOnly must be a boolean.");
       if (supervisorOwner && !isSessionOwnerLive(supervisorOwner)) {
         throw new Error(
           "Workflow agent cancelled: its parent session is no longer live.",
@@ -395,6 +398,7 @@ export function registerWorkflowTool(
               cwd: ctx.cwd,
               contextText: null,
               background: true,
+              ...(readOnly === true ? { readOnly: true } : {}),
               thinkingLevel,
               supervisorOwner,
               sessionScope: childScope,
@@ -517,6 +521,7 @@ export function registerWorkflowTool(
           parentModelRegistry: ctx.modelRegistry,
           onCancellationSnapshot,
           cancellationSource: "workflow",
+          ...(readOnly === true ? { readOnly: true } : {}),
           thinkingLevel,
           // The child binds this depth into its own orchestration context, so a
           // sub-agent it spawns counts from here. Left unset, the child bound
@@ -768,10 +773,13 @@ export function registerWorkflowTool(
       "V4 shape (preferred for new workflows):",
       "  import { defineWorkflow, schema } from 'pi-subagentura/workflow';",
       "  export default defineWorkflow({ name: 'my-flow', version: 1, async run(ctx, args) {",
-      "    return ctx.agent('review', { prompt: 'Review the change', output: schema.object({ ok: schema.boolean() }) });",
+      "    return ctx.agent('review', { prompt: 'Review the change', readOnly: true, output: schema.object({ ok: schema.boolean() }) });",
       "  } });",
       "V4 ctx exposes step, agent, group, named-object parallel, map, streaming pipeline, repeat, workflow, ask, gate, checkpoint, artifact, log, budget, and signal.",
       "Use stable explicit step IDs and item keys; repeat requires maxIterations. Steps throw failures by default; collection policies return typed TaskResult errors. Agent output uses the supported schema subset.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this organizes prompts but does not enforce semantic scope.",
+      "For purely observational review or research, set readOnly: true. It restricts model-facing tools to Pi read/grep/find/ls (in-process schema capture may also use internal structured_output), not OS access or paths.",
+      "Read-only process agents should return final prose/JSON directly rather than writing an output file or using bash for handoff. Progress comes from actual workflow step records; do not maintain a second model-authored todo ledger.",
       "V4 definitions are durable by default and can resume in a new Pi session in the same cwd. respond_workflow_input asks the human to answer waiting questions or approvals. async:false collects input directly through Pi UI.",
       "Erasable TypeScript and named imports of defineWorkflow/schema from pi-subagentura/workflow are supported; other runtime imports and dynamic imports are rejected.",
       "",
@@ -822,6 +830,9 @@ export function registerWorkflowTool(
       "Call phase(title) at real work-group transitions. Agent phase defaults to the current phase; an explicit agent phase overrides it.",
       "parallel() takes thunks such as `() => agent(...)`; pipeline() streams each item through every stage independently, with no barrier between stages.",
       "Give agent calls unique short labels, include enough task context and relevant paths, and treat failed agents or stages as null.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this organizes prompts but does not enforce semantic scope.",
+      "Use readOnly: true for purely observational review/research. It limits model-facing tools to Pi read/grep/find/ls (in-process schema capture may use internal structured_output), not OS/path access; read-only process agents return final prose/JSON directly rather than using write/bash handoff.",
+      "Track progress with actual workflow step records, not a second model-maintained todo ledger.",
       "By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
       "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
@@ -2133,6 +2144,9 @@ export function registerWorkflowTool(
       "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation. Do not route ordinary requests to workflows. Ask for human input only when the user requests it or the task's risk warrants it.",
       "",
       "Once feasibility is established, draft a reusable TypeScript V4 workflow. Keep orchestration in the saved program rather than an improvised sequence of parent calls.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this is prompt organization, not semantic scope enforcement.",
+      "Use readOnly: true for purely observational review/research. It restricts model-facing tools to Pi read/grep/find/ls, with internal structured_output only for in-process schema capture; it is not an OS sandbox or path restriction.",
+      "Read-only process agents should return final prose/JSON directly rather than requiring a file write or bash handoff. Track progress using actual workflow step records, not a second model-maintained todo ledger.",
       "",
       "Requirements:",
       "1. Import defineWorkflow/schema from pi-subagentura/workflow and default-export defineWorkflow({ name, version: 1, description, input, output, async run(ctx, args) { ... } }). Pass task/config through args and define meaningful input/output schemas and structured agent-output contracts.",

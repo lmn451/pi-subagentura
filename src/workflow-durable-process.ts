@@ -22,8 +22,12 @@ interface ProcessManifest {
   version: 1;
   nonce: string;
   state: InteractiveSubagentState;
+  /** Effective model-facing read-only policy; absent is the default mode. */
+  readOnly?: boolean;
 }
 
+const SAFE_DURABLE_PROCESS_KEY =
+  /^(?:\d{1,16}-\d{1,16}|[a-f0-9]{64}-\d{1,16}(?:-private-\d{1,16})?)$/;
 function persist(path: string, value: unknown): void {
   const json = JSON.stringify(value);
   if (Buffer.byteLength(json) > 64 * 1024)
@@ -66,7 +70,8 @@ export async function readDurableProcess(
       value.version !== 1 ||
       typeof value.nonce !== "string" ||
       !value.state?.artifactDir ||
-      !value.state?.id
+      !value.state?.id ||
+      (value.readOnly !== undefined && typeof value.readOnly !== "boolean")
     ) {
       throw new Error("Invalid process manifest.");
     }
@@ -83,7 +88,7 @@ export async function readDurableProcess(
 }
 
 export function durableProcessPath(context: DurableAttemptContext): string {
-  if (!/^\d+-\d+$/.test(context.key))
+  if (!SAFE_DURABLE_PROCESS_KEY.test(context.key))
     throw new WorkflowPersistenceError("Invalid process attempt key.");
   return join(context.directory, "attempts", `${context.key}.json`);
 }
@@ -108,15 +113,29 @@ export async function stopDurableProcessAttempts(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  for (const name of names.filter((name) => /^\d+-\d+\.json$/.test(name))) {
+  for (const name of names.filter(
+    (name) =>
+      name.endsWith(".json") &&
+      SAFE_DURABLE_PROCESS_KEY.test(name.slice(0, -5)),
+  )) {
     cancelDurableProcess(join(attempts, name));
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 
 export async function prepareDurableProcess(context: DurableAttemptContext) {
+  if (context.readOnly !== undefined && typeof context.readOnly !== "boolean")
+    throw new WorkflowPersistenceError("Invalid process read-only policy.");
   const path = durableProcessPath(context);
   const previous = await readDurableProcess(path);
+  if (
+    previous &&
+    (previous.readOnly === true) !== (context.readOnly === true)
+  ) {
+    throw new WorkflowRecoveryRequiredError(
+      "Durable process read-only policy changed; cannot adopt the previous attempt.",
+    );
+  }
   if (previous && context.recovering) {
     let receipt;
     try {
@@ -163,6 +182,7 @@ export async function prepareDurableProcess(context: DurableAttemptContext) {
         ...snapshot
       } = state;
       persist(path, {
+        ...(context.readOnly === true ? { readOnly: true } : {}),
         version: 1,
         nonce: randomUUID(),
         state: { ...snapshot, task: snapshot.task?.slice(0, 4096) },
