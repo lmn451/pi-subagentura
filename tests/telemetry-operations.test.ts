@@ -39,7 +39,12 @@ describe("operation telemetry", () => {
     const pi = { registerTool: vi.fn() } as any;
     const scope = createSessionScope(pi);
     scope.lifecycle = "started";
-    scope.telemetry = createTelemetrySession(enabled);
+    scope.telemetry = createTelemetrySession(
+      enabled,
+      "straight",
+      undefined,
+      "unknown",
+    );
     registerSessionScope(scope);
     return { pi, scope };
   }
@@ -92,6 +97,8 @@ describe("operation telemetry", () => {
         outcome: "returned",
         result_status: "ok",
         duration_ms: 1_200,
+        schema_version: 6,
+        traffic_origin: "unknown",
       },
     });
     expect(JSON.stringify(payloads)).not.toMatch(/private|secret/);
@@ -105,6 +112,7 @@ describe("operation telemetry", () => {
     ["wait_timeout", false, "wait_timeout"],
     ["running", false, "running"],
     ["error", false, "error"],
+    ["degraded", false, "degraded"],
     ["private arbitrary status", true, "unknown"],
   ] as const)(
     "reports bounded status %s independently of the tool error flag",

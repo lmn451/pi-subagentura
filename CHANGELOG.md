@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Telemetry schema v6 records one logical child-launch resolution, separating
+  direct acceptance, automatic fallback recovery, rejection, and cancellation
+  from technical spawn attempts and terminal task outcomes.
+- Closed traffic provenance distinguishes explicitly classified usage and
+  development from unknown traffic, survives child bootstrap and recovery, and
+  suppresses normal capture for test-marked runs without weakening other opt-outs.
+- Published PostHog report queries define reliability, feature volume versus
+  logical-session reach, and provenance/schema/unknown-data coverage.
+
 ### Changed
 
 - Removed obsolete aggregate indexes and active-session compatibility helpers for
@@ -14,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
 
 ### Fixed
+
+- Attribute mux-probe observations to the selected backend and reporter, sharing
+  pane-level outage episode authority across poller and workflow waiter so
+  workflow settlement does not count the same observation again.
+- Mark missing inherited history as an explicit rejected tool result and
+  live-child routing-metadata persistence warnings as degraded operation results.
+- Preserve a known initial mux when shutdown prevents a prepared workflow
+  fallback from starting, keeping its logical outcome cancelled rather than
+  accepted.
+- Prevent ordinary Vitest fixtures from sending telemetry to PostHog: reject
+  unmocked capture attempts visibly and keep intentional telemetry assertions
+  isolated behind in-memory collectors.
 
 - Drain coordinated completion queues when an independent intent carries stale
   group metadata, without blocking later deliveries.

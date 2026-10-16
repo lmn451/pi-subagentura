@@ -2,7 +2,6 @@ import { Type } from "typebox";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
-  type InProcessSpawnFailureStage,
   MAX_REGISTRY_SIZE,
   registerInProcessJob,
   removeInProcessJob,
@@ -88,7 +87,11 @@ import {
   telemetryDepthBucket,
   type TelemetryCompletionPolicy,
   type TelemetryResultReadOutcome,
+  type TelemetrySpawnFailureMux,
+  type TelemetrySpawnFailureOperation,
+  type TelemetrySpawnFailureStage,
 } from "./telemetry";
+import { createLaunchResolutionReporter } from "./telemetry-launch";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -259,7 +262,59 @@ export function registerWorkflowTool(
       onProgress,
       onCancellationSnapshot,
     }) => {
+      const launchRequestedAt = Date.now();
+      const tryProcess = isolation !== "in-process";
+      const childScope = resolveLiveSessionScope(supervisorOwner);
+      const childOwner = supervisorOwner;
+      const childTelemetry = childScope?.telemetry;
+      const launchResolution = createLaunchResolutionReporter(
+        childTelemetry,
+        {
+          requested_execution: tryProcess ? "interactive" : "in-process",
+          requested_mux: tryProcess ? "auto" : "none",
+          invocation_source: "workflow",
+          async: workflowAsync,
+          depth: telemetryDepth(spawn.childDepth),
+          depth_bucket: telemetryDepthBucket(spawn.childDepth),
+          completion_policy: telemetryCompletionPolicy,
+        },
+        launchRequestedAt,
+      );
+      let initialFailure:
+        | {
+            stage: TelemetrySpawnFailureStage;
+            mux?: TelemetrySpawnFailureMux;
+            operation?: TelemetrySpawnFailureOperation;
+          }
+        | undefined;
+      let finalFailure: TelemetrySpawnFailureStage | undefined;
+      let finalFailureOperation: TelemetrySpawnFailureOperation | undefined;
+      let fallbackAttempted = false;
+      const resolveFailedLaunch = (outcome: "rejected" | "cancelled"): void => {
+        launchResolution({
+          outcome,
+          mux: initialFailure?.mux ?? (finalFailure ? "none" : "unknown"),
+          fallback_attempted: fallbackAttempted,
+          ...(initialFailure
+            ? {
+                initial_failure_stage: initialFailure.stage,
+                initial_failure_operation: initialFailure.operation,
+              }
+            : {}),
+          ...(finalFailure
+            ? {
+                final_failure_stage: finalFailure,
+                final_failure_operation: finalFailureOperation,
+              }
+            : {}),
+        });
+      };
+      if (signal?.aborted) {
+        resolveFailedLaunch("cancelled");
+        throw new Error("Workflow agent cancelled before launch.");
+      }
       if (supervisorOwner && !isSessionOwnerLive(supervisorOwner)) {
+        resolveFailedLaunch("cancelled");
         throw new Error(
           "Workflow agent cancelled: its parent session is no longer live.",
         );
@@ -276,8 +331,6 @@ export function registerWorkflowTool(
         }
       };
 
-      const childScope = resolveLiveSessionScope(supervisorOwner);
-      const tryProcess = isolation !== "in-process";
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
         try {
@@ -299,8 +352,15 @@ export function registerWorkflowTool(
             telemetryInvocationSource: "workflow",
             telemetryAsync: workflowAsync,
             telemetryCompletionPolicy,
+            spawnRequestedAt: launchRequestedAt,
+            onSpawnFailure: (failure) => {
+              initialFailure = failure;
+            },
           });
         } catch (err) {
+          initialFailure ??= {
+            stage: spawnFailureStage(err) ?? "unknown",
+          };
           const msg = err instanceof Error ? err.message : String(err);
           debugLog("warn", "isolation_process_fallback", { reason: msg });
           onProgress?.({
@@ -310,28 +370,35 @@ export function registerWorkflowTool(
           });
         }
         if (state) {
+          launchResolution({
+            outcome: "started",
+            execution: "interactive",
+            mux: state.mux,
+            fallback_attempted: false,
+          });
           const result = await awaitInteractiveResult(
             state,
             signal,
             undefined,
             onCancellationSnapshot,
+            childTelemetry,
           );
           state.workflowResultConsumed = true;
           return result;
         }
       }
+      if (signal?.aborted) {
+        resolveFailedLaunch("cancelled");
+        throw new Error("Workflow agent cancelled before in-process fallback.");
+      }
+      fallbackAttempted = tryProcess;
 
-      const childOwner = supervisorOwner;
-      // Telemetry has to name the scope the job actually registers under. Reading
-      // it from `supervisorOwner` instead drops every child event whenever the
-      // workflow tool was registered without a session scope.
-      const childTelemetry = childOwner
-        ? resolveLiveSessionScope(childOwner)?.telemetry
-        : undefined;
       const captureSpawnFailure = (
-        failureStage: InProcessSpawnFailureStage,
+        failureStage: TelemetrySpawnFailureStage,
         attemptStartedAt: number,
       ): void => {
+        finalFailure = failureStage;
+        finalFailureOperation = undefined;
         captureTelemetry(
           childTelemetry,
           {
@@ -355,8 +422,7 @@ export function registerWorkflowTool(
       // shutdown can drain it from the authoritative job map.
       const abort = new AbortController();
       const forwardAbort = () => abort.abort(signal?.reason);
-      if (signal?.aborted) abort.abort(signal.reason);
-      else signal?.addEventListener("abort", forwardAbort, { once: true });
+      signal?.addEventListener("abort", forwardAbort, { once: true });
       const spawnRequestedAt = Date.now();
       let prepared: StartSubagentJobResult;
       try {
@@ -410,12 +476,19 @@ export function registerWorkflowTool(
           spawnRequestedAt,
         });
       } catch (error) {
-        captureSpawnFailure(
-          spawnFailureStage(error) ?? "unknown",
-          spawnRequestedAt,
-        );
+        const failureStage = spawnFailureStage(error) ?? "unknown";
+        captureSpawnFailure(failureStage, spawnRequestedAt);
         signal?.removeEventListener("abort", forwardAbort);
+        resolveFailedLaunch(signal?.aborted ? "cancelled" : "rejected");
         throw error;
+      }
+      if (signal?.aborted) {
+        signal.removeEventListener("abort", forwardAbort);
+        discardWorkflowChildSpawn(abort, prepared);
+        resolveFailedLaunch("cancelled");
+        throw new Error(
+          "Workflow agent cancelled before the child was registered.",
+        );
       }
       // The parent session can shut down while startSubagentJob is awaited above.
       // session_shutdown drains the SessionScope registry, so registering now would re-insert
@@ -425,6 +498,7 @@ export function registerWorkflowTool(
         signal?.removeEventListener("abort", forwardAbort);
         captureSpawnFailure("parent_shutdown", spawnRequestedAt);
         discardWorkflowChildSpawn(abort, prepared);
+        resolveFailedLaunch("cancelled");
         throw new Error(
           "Workflow agent cancelled: parent session shut down before the child was registered.",
         );
@@ -450,15 +524,26 @@ export function registerWorkflowTool(
         },
       };
       if (childOwner) {
-        if (!registerInProcessJob(childJob, childOwner)) {
+        let registered: boolean;
+        try {
+          registered = registerInProcessJob(childJob, childOwner);
+        } catch (error) {
           signal?.removeEventListener("abort", forwardAbort);
-          captureSpawnFailure(
-            childOwner && !isSessionOwnerLive(childOwner)
-              ? "parent_shutdown"
-              : "registration",
-            spawnRequestedAt,
-          );
+          captureSpawnFailure("registration", spawnRequestedAt);
           discardWorkflowChildSpawn(abort, prepared);
+          resolveFailedLaunch("rejected");
+          throw error;
+        }
+        if (!registered) {
+          const failureStage = isSessionOwnerLive(childOwner)
+            ? "registration"
+            : "parent_shutdown";
+          signal?.removeEventListener("abort", forwardAbort);
+          captureSpawnFailure(failureStage, spawnRequestedAt);
+          discardWorkflowChildSpawn(abort, prepared);
+          resolveFailedLaunch(
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          );
           throw new Error(
             `Workflow agent could not start: ${MAX_REGISTRY_SIZE} in-process sub-agent jobs are retained or running.`,
           );
@@ -474,7 +559,23 @@ export function registerWorkflowTool(
           reason: "no live session scope to own the child",
         });
       }
-      prepared.start?.();
+      const started = prepared.start?.() ?? false;
+      launchResolution({
+        outcome: started
+          ? fallbackAttempted
+            ? "recovered"
+            : "started"
+          : "cancelled",
+        ...(started ? { execution: "in-process" as const } : {}),
+        mux: started ? "none" : (initialFailure?.mux ?? "unknown"),
+        fallback_attempted: fallbackAttempted,
+        ...(initialFailure
+          ? {
+              initial_failure_stage: initialFailure.stage,
+              initial_failure_operation: initialFailure.operation,
+            }
+          : {}),
+      });
       try {
         return await prepared.jobPromise;
       } finally {

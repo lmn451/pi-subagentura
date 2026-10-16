@@ -1540,6 +1540,10 @@ describe("pollArtifactChanges", () => {
       error_category: "mux",
       error_stage: "polling",
       failure_kind: "mux_probe",
+      execution: "interactive",
+      mux: "tmux",
+      reporter: "artifact_poller",
+      impact: "unknown",
     });
     expect(state.status).toBe("unknown");
 

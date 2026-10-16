@@ -12,6 +12,7 @@ import {
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
 import { clearSessionScopes, sessionOwner } from "../src/session-scope";
+import { beginRuntimeFailureEpisode } from "../src/telemetry-runtime";
 import { createTestSessionScope } from "./session-scope-fixture";
 
 function job(id: string, owner: ReturnType<typeof sessionOwner>): JobState {
@@ -101,5 +102,32 @@ describe("session-owned runtime state", () => {
 
     expect(removeInteractiveSubagentState(state)).toBe(false);
     expect(scope.interactiveStates.get(state.id)).toBe(state);
+  });
+
+  it("clears active runtime episodes when their state is removed", () => {
+    const scope = createTestSessionScope();
+    const state = {
+      id: "retired-interactive-child",
+      name: "child",
+      task: "test task",
+      paneId: "%2",
+      mux: "tmux",
+      artifactDir: "/tmp/retired-artifact",
+      sessionFile: "",
+      cwd: "/tmp",
+      startedAt: 1,
+      status: "running",
+    } as InteractiveSubagentState;
+    registerInteractiveSubagentState(state, scope);
+
+    const firstEpisode = beginRuntimeFailureEpisode(
+      state.artifactDir,
+      "mux_probe",
+    );
+    expect(firstEpisode).toBeDefined();
+    expect(removeInteractiveSubagentState(state)).toBe(true);
+    expect(beginRuntimeFailureEpisode(state.artifactDir, "mux_probe")).not.toBe(
+      firstEpisode,
+    );
   });
 });

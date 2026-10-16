@@ -47,6 +47,7 @@ import {
 } from "../src/interactive-supervisor-registration";
 import type { AsyncSupervisorItem } from "../src/interactive-supervisor-ui";
 import { type InteractiveSubagentState } from "../src/interactive-tmux";
+import type * as InteractiveTmux from "../src/interactive-tmux";
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
 import {
   advanceSessionScopeGeneration,
@@ -122,7 +123,7 @@ function liveSessionContext(options: {
     parentStreaming: false,
     inProcessJobs: new Map(),
     interactiveStates: new Map(),
-    telemetry: createTelemetrySession(true),
+    telemetry: createTelemetrySession(false),
   });
   return { context, ui };
 }
@@ -460,88 +461,159 @@ describe("workflow supervisor integration", () => {
   });
 
   it("registers, settles, and deregisters an in-process fallback child", async () => {
+    const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
     const owner = ownerOf(context);
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     let releaseChild!: (result: SubagentResult) => void;
-    mockLaunch.mockImplementationOnce(() => {
-      throw new Error("mux unavailable");
-    });
-    mockStartSubagentJob.mockResolvedValueOnce({
-      jobId: "fallback-child",
-      jobPromise: new Promise<SubagentResult>((resolve) => {
-        releaseChild = resolve;
-      }),
-      liveStatus: { turn: 0, output: "", usage: {} },
-      session: { abort: vi.fn() },
-      modelLabel: "test/model",
-      thinkingLevel: "medium",
-      start,
-    });
-    const { pi, findTool } = makePi();
-    registerWorkflowTool(pi as never, context);
-
-    const execution = findTool().execute(
-      "call-fallback",
-      { script: SINGLE_AGENT_SCRIPT("fallback"), async: false },
-      undefined,
-      vi.fn(),
-      {
-        cwd: "/tmp",
-        modelRegistry: {},
-        sessionManager: { getSessionId: () => "session-a" },
-      },
+    const tempSessionDir = tempDir();
+    const envNames = [
+      "TMUX",
+      "TMUX_PANE",
+      "PI_CODING_AGENT_SESSION_DIR",
+      "PI_SUBAGENTURA_TMUX_SOCKET",
+      "HERDR_ENV",
+      "ZELLIJ",
+      "ZELLIJ_SESSION_NAME",
+    ];
+    const previousEnv = new Map(
+      envNames.map((name) => [name, process.env[name]] as const),
     );
-
-    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
-    expect(mockStartSubagentJob).toHaveBeenCalledWith(
-      expect.objectContaining({
-        telemetry: expect.objectContaining({
-          completionPolicy: "inline",
-          depth: 1,
+    const restoreEnv = (): void => {
+      for (const [name, value] of previousEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    };
+    try {
+      process.env.TMUX = "/tmp/tmux-test,123,0";
+      process.env.TMUX_PANE = "%9";
+      process.env.PI_CODING_AGENT_SESSION_DIR = tempSessionDir;
+      delete process.env.PI_SUBAGENTURA_TMUX_SOCKET;
+      delete process.env.HERDR_ENV;
+      delete process.env.ZELLIJ;
+      delete process.env.ZELLIJ_SESSION_NAME;
+      __setTmuxMultiplexer({
+        name: "tmux",
+        isAvailable: vi.fn(() => true),
+        createPane: vi.fn(() => {
+          throw new Error("mux unavailable");
         }),
-        // The runtime depth must match the reported one. Left unset, the child
-        // bound depth 0, so its own nested spawns reported depth 1 — the same
-        // as their parent — and never counted against the depth cap.
-        depth: 1,
-        // No ambient orchestration context here, so the child's logs are
-        // attributed through the parent's own session id.
-        rootSessionId: "session-a",
-      }),
-    );
-    const childJob = context.inProcessJobs.get("fallback-child");
-    expect(childJob).toBeDefined();
-    expect(childJob?.status).toBe("running");
-    expect(childJob?.completionOwner).toBe("workflow");
-    expect(childJob?.abort).toBeInstanceOf(AbortController);
-    // Reachable by every owner-scoped sweep, including session_shutdown's drain.
-    expect(childJob?.deliveryOwner).toMatchObject({
-      sessionScopeId: owner.id,
-      sessionScopeGeneration: owner.generation,
-    });
-    const workflow = [...workflowJobRegistry.values()].find(
-      (job) => job.name === "fallback",
-    );
-    const items = buildAsyncSupervisorItems(
-      directSupervisorItems(undefined, owner),
-      owner,
-    );
-    expect(rowShape(items)).toEqual([
-      [workflow!.id, 0],
-      ["fallback-child", 1],
-    ]);
+        killPane,
+      } as never);
+      const actualTmux = await vi.importActual<typeof InteractiveTmux>(
+        "../src/interactive-tmux",
+      );
+      mockLaunch.mockImplementationOnce(
+        (
+          params: Parameters<
+            typeof InteractiveTmux.launchInteractiveSubagent
+          >[0],
+        ) => actualTmux.launchInteractiveSubagent(params),
+      );
+      mockStartSubagentJob.mockResolvedValueOnce({
+        jobId: "fallback-child",
+        jobPromise: new Promise<SubagentResult>((resolve) => {
+          releaseChild = resolve;
+        }),
+        liveStatus: { turn: 0, output: "", usage: {} },
+        session: { abort: vi.fn() },
+        modelLabel: "test/model",
+        thinkingLevel: "medium",
+        start,
+      });
+      const { pi, findTool } = makePi();
+      registerWorkflowTool(pi as never, context);
 
-    releaseChild(subagentResult("fallback complete"));
-    const result = await execution;
+      const execution = findTool().execute(
+        "call-fallback",
+        { script: SINGLE_AGENT_SCRIPT("fallback"), async: false },
+        undefined,
+        vi.fn(),
+        {
+          cwd: "/tmp",
+          modelRegistry: {},
+          sessionManager: { getSessionId: () => "session-a" },
+        },
+      );
 
-    expect(result.details.status).toBe("done");
-    expect(result.content[0]?.text).toContain("fallback complete");
-    // Settlement wrote a terminal status, so the row is never actionable-forever,
-    // never double-counted against its own workflow, and never picked up by
-    // session_shutdown's "status === running" cancellation-record loop.
-    expect(childJob?.status).toBe("done");
-    expect(childJob?.result?.output).toBe("fallback complete");
-    expect(context.inProcessJobs.has("fallback-child")).toBe(false);
+      await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+      expect(mockStartSubagentJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          telemetry: expect.objectContaining({
+            completionPolicy: "inline",
+            depth: 1,
+          }),
+          // The runtime depth must match the reported one. Left unset, the child
+          // bound depth 0, so its own nested spawns reported depth 1 — the same
+          // as their parent — and never counted against the depth cap.
+          depth: 1,
+          // No ambient orchestration context here, so the child's logs are
+          // attributed through the parent's own session id.
+          rootSessionId: "session-a",
+        }),
+      );
+      const childJob = context.inProcessJobs.get("fallback-child");
+      expect(childJob).toBeDefined();
+      expect(childJob?.status).toBe("running");
+      expect(childJob?.completionOwner).toBe("workflow");
+      expect(childJob?.abort).toBeInstanceOf(AbortController);
+      // Reachable by every owner-scoped sweep, including session_shutdown's drain.
+      expect(childJob?.deliveryOwner).toMatchObject({
+        sessionScopeId: owner.id,
+        sessionScopeGeneration: owner.generation,
+      });
+      const workflow = [...workflowJobRegistry.values()].find(
+        (job) => job.name === "fallback",
+      );
+      const items = buildAsyncSupervisorItems(
+        directSupervisorItems(undefined, owner),
+        owner,
+      );
+      expect(rowShape(items)).toEqual([
+        [workflow!.id, 0],
+        ["fallback-child", 1],
+      ]);
+
+      releaseChild(subagentResult("fallback complete"));
+      const result = await execution;
+
+      expect(result.details.status).toBe("done");
+      expect(result.content[0]?.text).toContain("fallback complete");
+      // Settlement wrote a terminal status, so the row is never actionable-forever,
+      // never double-counted against its own workflow, and never picked up by
+      // session_shutdown's "status === running" cancellation-record loop.
+      expect(childJob?.status).toBe("done");
+      expect(childJob?.result?.output).toBe("fallback complete");
+      expect(context.inProcessJobs.has("fallback-child")).toBe(false);
+      const launchResolutions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      );
+      expect(launchResolutions).toHaveLength(1);
+      expect(launchResolutions[0].properties).toMatchObject({
+        outcome: "recovered",
+        requested_execution: "interactive",
+        requested_mux: "auto",
+        execution: "in-process",
+        mux: "none",
+        fallback_attempted: true,
+        initial_failure_stage: "pane_launch",
+        initial_failure_operation: "pane_launch",
+      });
+      const processFailures = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+      );
+      expect(processFailures).toHaveLength(1);
+      expect(processFailures[0].properties).toMatchObject({
+        execution: "interactive",
+        mux: "tmux",
+        failure_stage: "pane_launch",
+        failure_operation: "pane_launch",
+      });
+    } finally {
+      restoreEnv();
+    }
   });
 
   it.each(["model_resolution", "session_creation"] as const)(
@@ -552,9 +624,21 @@ describe("workflow supervisor integration", () => {
         id: 6,
         sessionId: "session-a",
       });
-      mockLaunch.mockImplementationOnce(() => {
-        throw new Error("mux unavailable");
-      });
+      context.telemetry = createTelemetrySession(true);
+      mockLaunch.mockImplementationOnce(
+        (
+          params: Parameters<
+            typeof InteractiveTmux.launchInteractiveSubagent
+          >[0],
+        ) => {
+          params.onSpawnFailure?.({
+            stage: "mux_resolution",
+            mux: "tmux",
+            operation: "mux_resolution",
+          });
+          throw new Error("mux unavailable");
+        },
+      );
       mockStartSubagentJob.mockRejectedValueOnce(
         annotateSpawnFailure(new Error("preparation failed"), failureStage),
       );
@@ -589,22 +673,114 @@ describe("workflow supervisor integration", () => {
             (payload) => payload.event === "pi_subagentura_agent_created",
           ),
         ).toHaveLength(0);
+        const resolutions = payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+        );
+        expect(resolutions).toHaveLength(1);
+        expect(resolutions[0].properties).toMatchObject({
+          outcome: "rejected",
+          requested_execution: "interactive",
+          requested_mux: "auto",
+          mux: "tmux",
+          fallback_attempted: true,
+          initial_failure_stage: "mux_resolution",
+          initial_failure_operation: "mux_resolution",
+          final_failure_stage: failureStage,
+        });
       } finally {
         vi.unstubAllGlobals();
       }
     },
   );
 
+  it("preserves the failed mux when a prepared fallback declines to start", async () => {
+    const payloads = captureTelemetryPayloads();
+    const { context } = liveSessionContext({ id: 14, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
+    mockLaunch.mockImplementationOnce(
+      (
+        params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
+      ) => {
+        params.onSpawnFailure?.({
+          stage: "pane_launch",
+          mux: "tmux",
+          operation: "pane_launch",
+        });
+        throw new Error("pane launch unavailable");
+      },
+    );
+    mockStartSubagentJob.mockResolvedValueOnce({
+      jobId: "declined-fallback",
+      jobPromise: Promise.resolve({
+        isError: true,
+        cancelled: true,
+        output: "",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turns: 0,
+        },
+      }),
+      liveStatus: { turn: 0, output: "", usage: {} },
+      session: { abort: vi.fn() },
+      modelLabel: "test/model",
+      start: () => false,
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    try {
+      await findTool().execute(
+        "call-declined-fallback",
+        { script: SINGLE_AGENT_SCRIPT("declined-fallback"), async: false },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+
+      const resolutions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      );
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0].properties).toMatchObject({
+        outcome: "cancelled",
+        requested_execution: "interactive",
+        requested_mux: "auto",
+        mux: "tmux",
+        fallback_attempted: true,
+        initial_failure_stage: "pane_launch",
+        initial_failure_operation: "pane_launch",
+      });
+      expect(resolutions[0].properties).not.toHaveProperty("execution");
+      expect(context.inProcessJobs.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not start an in-process child whose parent shut down mid-spawn", async () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
     const start = vi.fn();
     const disposeBeforeStart = vi.fn();
     const sessionAbort = vi.fn();
     let releaseSpawn!: (prepared: unknown) => void;
-    mockLaunch.mockImplementationOnce(() => {
-      throw new Error("mux unavailable");
-    });
+    mockLaunch.mockImplementationOnce(
+      (
+        params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
+      ) => {
+        params.onSpawnFailure?.({
+          stage: "mux_resolution",
+          mux: "tmux",
+          operation: "mux_resolution",
+        });
+        throw new Error("mux unavailable");
+      },
+    );
     mockStartSubagentJob.mockReturnValueOnce(
       new Promise((resolve) => {
         releaseSpawn = resolve;
@@ -657,6 +833,20 @@ describe("workflow supervisor integration", () => {
           (payload) => payload.event === "pi_subagentura_agent_created",
         ),
       ).toHaveLength(0);
+      const resolutions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      );
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0].properties).toMatchObject({
+        outcome: "cancelled",
+        requested_execution: "interactive",
+        requested_mux: "auto",
+        mux: "tmux",
+        fallback_attempted: true,
+        initial_failure_stage: "mux_resolution",
+        initial_failure_operation: "mux_resolution",
+        final_failure_stage: "parent_shutdown",
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -703,7 +893,7 @@ describe("workflow supervisor integration", () => {
 
   it("leaves a workflow child unattributed when the caller has no session id", async () => {
     const { context } = liveSessionContext({ id: 11, sessionId: "session-a" });
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     let releaseChild!: (result: SubagentResult) => void;
     mockLaunch.mockImplementationOnce(() => {
       throw new Error("mux unavailable");

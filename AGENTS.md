@@ -96,43 +96,9 @@ invalid candidate, and continue to the next applicable scope or default.
 
 ### Telemetry schema invariants
 
-- Schema v4 shipped in the 3.6.2 release; schema v5 adds the optional closed
-  `failure_operation` dimension. `TELEMETRY_SCHEMA_VERSION` in
-  `src/telemetry.ts` is the source of truth for the current schema; when
-  documenting telemetry, attribute schema changes to the release that shipped
-  them (per CHANGELOG.md) rather than restating a release status that can go
-  stale.
-- Telemetry dimensions are closed enums. Use only the literals in the schema
-  (and `unknown` only where that field permits it); never forward arbitrary
-  strings. Counts remain bounded and duration/latency numbers remain rounded
-  to the existing `0..30`-day representation.
-- Diagnostic fields are status-scoped: `task_completed` carries
-  `error_category` and `error_stage` only for errors, `agent_stop_reason`
-  (`error` or `aborted`) for errors or cancellations, and `exit_code_bucket`
-  only when `terminal_reason` is `process_exit`; `workflow_completed` carries
-  `error_category` and `error_stage` only for `error` or `partial` status.
-  `runtime_failure` carries only its closed category, stage, and failure kind.
-- Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `failure_operation`, `terminal_reason`, result-outcome,
-  error-category, and error-stage values; error counts use bounded buckets.
-  Invalid categories map to `unknown`; invalid stages, operations, stop
-  reasons, exit buckets, and failure kinds are omitted. Cancellation is not an
-  error, and runtime failures are reported once per failure episode rather than
-  once per poll.
-- Never send exception text or stacks, prompts, tasks, personas, tool
-  arguments, message content, outputs, paths, or agent/job/workflow/session
-  identifiers.
-- The workflow runner is the sole owner of the aggregate lifecycle pair:
-  exactly one `workflow_started` and one `workflow_completed` for an accepted
-  invocation. Child agent/task records must not emit duplicate workflow
-  lifecycle aggregates.
-- Elapsed values may subtract only Unix-ms timestamps from the same event clock
-  domain. Copy terminal event `ts` into optional `JobState.completedAt?`,
-  `WorkflowJobState.completedAt?`, and `PersistedDeliveryIntent.completedAt?`;
-  never mix monotonic/process-local readings with persisted or child event
-  timestamps. If timestamps are unavailable or untrustworthy, omit the numeric
-  value and emit the matching `unknown` bucket. Batch delivery latency is the
-  maximum known completion age in that batch.
+The authoritative schema, privacy, provenance, attribution, and reporting
+contracts are maintained in [docs/telemetry.md](./docs/telemetry.md). Keep
+implementation aligned with that reference and `src/telemetry.ts`.
 
 ### Physical byte order is authoritative
 

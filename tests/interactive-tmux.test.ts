@@ -36,6 +36,12 @@ import {
 import { loadInteractiveStates } from "../src/artifact";
 import { createTestSessionScope } from "./session-scope-fixture";
 import { clearSessionScopes, type SessionScope } from "../src/session-scope";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { registerInteractiveSubagentTools } from "../src/tools/interactive";
+
+type InteractiveToolsModule = {
+  registerInteractiveSubagentTools: typeof registerInteractiveSubagentTools;
+};
 /** Standard tmux pane id returned by mocks when "new-window"/"split-window" is called. */
 const MOCK_PANE_ID = "%42";
 /** Tab-separated session/window/pane — matches real tmux #{...} format. */
@@ -142,6 +148,7 @@ describe("interactive-tmux", () => {
     vi.doUnmock("node:child_process");
     vi.doUnmock("node:fs");
     vi.doUnmock("../src/artifact");
+    vi.unstubAllGlobals();
   });
 
   afterAll(() => {
@@ -272,6 +279,148 @@ describe("interactive-tmux", () => {
 
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
+  });
+  it("reports the real automatic mux selection once for a direct launch", async () => {
+    const tmp = makeTmp();
+    const envNames = [
+      "TMUX",
+      "TMUX_PANE",
+      "PI_CODING_AGENT_SESSION_DIR",
+      "PI_SUBAGENTURA_TMUX_SOCKET",
+      "HERDR_ENV",
+      "ZELLIJ",
+      "ZELLIJ_SESSION_NAME",
+    ];
+    const previousEnv = new Map(
+      envNames.map((name) => [name, process.env[name]] as const),
+    );
+    const restoreEnv = (): void => {
+      for (const [name, value] of previousEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    };
+    try {
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+      delete process.env.PI_SUBAGENTURA_TMUX_SOCKET;
+      delete process.env.HERDR_ENV;
+
+      const calls: string[][] = [];
+      installMockExec((_file, args) => {
+        calls.push(args);
+        if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      // Reload the tool graph after installing the tmux mock so the real
+      // launcher observes the mock, without starting a Pi/provider process.
+      const { registerInteractiveSubagentTools } =
+        await importFresh<InteractiveToolsModule>("../src/tools/interactive");
+      // These modules must share the post-reset scope and telemetry registries.
+      const { registerSessionScope } = await import("../src/session-scope");
+      const { createTelemetrySession } = await import("../src/telemetry");
+      type CapturedTool = {
+        name: string;
+        execute: (
+          toolCallId: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal | undefined,
+          onUpdate: ((update: unknown) => void) | undefined,
+          context: unknown,
+        ) => Promise<{ details?: unknown; isError?: boolean }>;
+      };
+      const tools: CapturedTool[] = [];
+      const api = {
+        registerTool: vi.fn((tool: CapturedTool) => {
+          tools.push(tool);
+        }),
+        registerMessageRenderer: vi.fn(),
+        registerFlag: vi.fn(),
+        getFlag: vi.fn().mockReturnValue(false),
+        sendMessage: vi.fn(),
+        sendUserMessage: vi.fn(),
+        on: vi.fn(),
+      };
+      const extensionApi = api as unknown as ExtensionAPI;
+      scope.pi = extensionApi;
+      scope.telemetry = createTelemetrySession(
+        true,
+        "straight",
+        undefined,
+        "unknown",
+      );
+      registerSessionScope(scope);
+      registerInteractiveSubagentTools(extensionApi, scope);
+
+      const payloads: Array<{
+        event?: string;
+        properties?: unknown;
+      }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input, init) => {
+          const payload: unknown = JSON.parse(String(init?.body));
+          if (payload && typeof payload === "object" && "event" in payload) {
+            payloads.push({
+              event:
+                typeof payload.event === "string" ? payload.event : undefined,
+              properties:
+                "properties" in payload ? payload.properties : undefined,
+            });
+          }
+          return new Response(null, { status: 200 });
+        }),
+      );
+
+      const tool = tools.find(
+        (candidate) => candidate.name === "subagent_interactive",
+      );
+      if (!tool) throw new Error("Interactive tool was not registered");
+      const result = await tool.execute(
+        "automatic-mux-selection",
+        {
+          task: "launch through the selected mux",
+          mux: "auto",
+        },
+        undefined,
+        undefined,
+        {
+          cwd: tmp,
+          ui: { notify: vi.fn(), setStatus: vi.fn() },
+          sessionManager: {
+            getBranch: vi.fn().mockReturnValue([]),
+            getSessionId: vi.fn().mockReturnValue("parent-session"),
+          },
+        },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(result.details).toMatchObject({
+        status: "started",
+        mux: "tmux",
+        paneId: MOCK_PANE_ID,
+      });
+      expect(calls.some((args) => args[0] === "new-window")).toBe(true);
+      const resolutions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      );
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0].properties).toMatchObject({
+        outcome: "started",
+        requested_execution: "interactive",
+        requested_mux: "auto",
+        execution: "interactive",
+        mux: "tmux",
+        fallback_attempted: false,
+      });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+      restoreEnv();
+    }
   });
   it("rejects a missing child working directory before creating a pane", async () => {
     const tmp = makeTmp();
