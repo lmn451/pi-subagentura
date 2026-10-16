@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
+- Handle promptless Pi custom agent-start events in completion coordination.
+- Retain terminal fixture gate routing for async children and workflow agents
+  under strict known-marker validation.
 
 ## [3.6.4] - 2026-10-03
 
