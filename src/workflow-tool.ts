@@ -567,7 +567,7 @@ export function registerWorkflowTool(
             : "started"
           : "cancelled",
         ...(started ? { execution: "in-process" as const } : {}),
-        mux: started ? "none" : "unknown",
+        mux: started ? "none" : (initialFailure?.mux ?? "unknown"),
         fallback_attempted: fallbackAttempted,
         ...(initialFailure
           ? {

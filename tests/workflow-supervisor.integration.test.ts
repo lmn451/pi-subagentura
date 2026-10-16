@@ -691,6 +691,73 @@ describe("workflow supervisor integration", () => {
     },
   );
 
+  it("preserves the failed mux when a prepared fallback declines to start", async () => {
+    const payloads = captureTelemetryPayloads();
+    const { context } = liveSessionContext({ id: 14, sessionId: "session-a" });
+    mockLaunch.mockImplementationOnce(
+      (
+        params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
+      ) => {
+        params.onSpawnFailure?.({
+          stage: "pane_launch",
+          mux: "tmux",
+          operation: "pane_launch",
+        });
+        throw new Error("pane launch unavailable");
+      },
+    );
+    mockStartSubagentJob.mockResolvedValueOnce({
+      jobId: "declined-fallback",
+      jobPromise: Promise.resolve({
+        isError: true,
+        cancelled: true,
+        output: "",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turns: 0,
+        },
+      }),
+      liveStatus: { turn: 0, output: "", usage: {} },
+      session: { abort: vi.fn() },
+      modelLabel: "test/model",
+      start: () => false,
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    try {
+      await findTool().execute(
+        "call-declined-fallback",
+        { script: SINGLE_AGENT_SCRIPT("declined-fallback"), async: false },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+
+      const resolutions = payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      );
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0].properties).toMatchObject({
+        outcome: "cancelled",
+        requested_execution: "interactive",
+        requested_mux: "auto",
+        mux: "tmux",
+        fallback_attempted: true,
+        initial_failure_stage: "pane_launch",
+        initial_failure_operation: "pane_launch",
+      });
+      expect(resolutions[0].properties).not.toHaveProperty("execution");
+      expect(context.inProcessJobs.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not start an in-process child whose parent shut down mid-spawn", async () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });

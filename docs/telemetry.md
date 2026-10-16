@@ -53,6 +53,11 @@ These reuse the closed launch-stage and operation enums, never exception text.
 Launch `duration_ms` and `duration_bucket` use the existing rounded, bounded
 representation. Timing ends at acceptance/rejection, not task completion.
 
+If shutdown makes a prepared fallback decline to start, its resolution is
+`cancelled` without an accepted `execution`. Keep an already resolved initial mux
+in that cancellation record; do not replace known backend attribution with
+`unknown`.
+
 An empty inherited conversation is an explicit rejected tool result. A live
 interactive child with an initial routing-metadata persistence warning remains
 an accepted launch and returns `details.status=degraded`; operation telemetry
