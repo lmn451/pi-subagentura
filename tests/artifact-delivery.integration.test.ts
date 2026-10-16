@@ -22,7 +22,11 @@ import {
   registerSessionScope,
   sessionOwner,
 } from "../src/session-scope";
-import { registerCompletionCoordinator } from "../src/completion-coordinator";
+import {
+  flushCompletionManifests,
+  registerCompletionCoordinator,
+  registerCompletionMember,
+} from "../src/completion-coordinator";
 
 const roots: string[] = [];
 
@@ -223,6 +227,95 @@ describe("protocol-v2 artifact delivery", () => {
     ]);
     expect(state.eventByteCursor).toBeGreaterThan(0);
   });
+
+  it.each(["each", "group"] as const)(
+    "publishes provider errors before group completion with %s policy",
+    async (policy) => {
+      const art = makeArtifact();
+      const completion = appendCompletionEvent(art, {
+        turnId: "provider-error-turn",
+        outcome: "error",
+        source: "agent_settled",
+        eventId: "provider-error",
+        errorMessage: "402 insufficient credits",
+      })!;
+      const entries: Array<{ customType: string; data: any }> = [];
+      const pi = {
+        appendEntry: vi.fn((customType: string, data: unknown) => {
+          entries.push({ customType, data });
+        }),
+        registerEntryRenderer: vi.fn(),
+        sendMessage: vi.fn((message: any) => {
+          entries.push({ customType: message.customType, data: message });
+        }),
+      };
+      const scope = registerSessionScope({
+        id: 504,
+        generation: 1,
+        lifecycle: "started",
+        pi: pi as any,
+        sessionManager: {
+          getSessionId: () => "parent-session",
+          getEntries: () =>
+            entries.map(({ customType, data }) => ({
+              type: "custom",
+              customType,
+              data,
+            })),
+        },
+      });
+      const groupId = "provider-error-group";
+      const state = {
+        ...makeState(art.dir),
+        completionPolicy: policy,
+        ...(policy === "group" ? { completionGroupId: groupId } : {}),
+      };
+      const owner = sessionOwner(scope);
+      scope.interactiveStates.set(state.id, state);
+      registerCompletionCoordinator(pi as any, scope);
+      if (policy === "group") {
+        registerCompletionMember(
+          "interactive",
+          state.id,
+          "group",
+          groupId,
+          owner,
+        );
+        registerCompletionMember(
+          "interactive",
+          "sibling",
+          "group",
+          groupId,
+          owner,
+        );
+      }
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "alive",
+        getPaneLivenessAsync: async () => "alive",
+      } as any);
+
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+
+      const errorEntry = entries.find(
+        ({ customType }) => customType === "subagentura-completion",
+      );
+      expect(errorEntry?.data).toMatchObject({
+        turnId: completion.turnId,
+        status: "error",
+        policy,
+      });
+      if (policy === "group") {
+        expect(errorEntry?.data.groupRemaining).toBe(1);
+      } else {
+        expect(errorEntry?.data).not.toHaveProperty("groupRemaining");
+      }
+      expect(pi.sendMessage).toHaveBeenCalledOnce();
+      expect(pi.sendMessage.mock.calls[0][0].content).toContain(
+        '"status":"error"',
+      );
+    },
+  );
 
   it("does not publish workflow-owned child completions independently", async () => {
     const art = makeArtifact();
