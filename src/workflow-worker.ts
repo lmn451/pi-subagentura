@@ -67,6 +67,12 @@ import {
 } from "./interactive-tmux";
 import type { PaneLiveness } from "./multiplexer-contracts";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
+import {
+  beginRuntimeFailureEpisode,
+  clearRuntimeFailureEpisode,
+  runtimeFailureDedupeKey,
+} from "./telemetry-runtime";
+import { captureTelemetry, type TelemetrySession } from "./telemetry";
 
 // ── Engine (shared across nested workflows) ──────────────────────────
 
@@ -985,6 +991,36 @@ function abortedInteractiveResult(usage: Usage): SubagentResult {
     errorMessage: "aborted",
   };
 }
+function reportMuxProbeRuntimeFailure(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+): void {
+  if (
+    !telemetry ||
+    !telemetry.enabled ||
+    !telemetry.active ||
+    !state.telemetryEligible ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const episodeId = beginRuntimeFailureEpisode(state.artifactDir, "mux_probe");
+  if (episodeId === undefined) return;
+  captureTelemetry(
+    telemetry,
+    {
+      event: "runtime_failure",
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+      execution: "interactive",
+      mux: state.mux,
+      reporter: "workflow_waiter",
+      impact: "unknown",
+    },
+    { dedupeKey: runtimeFailureDedupeKey("mux_probe", episodeId) },
+  );
+}
 
 /**
  * Await a process-backed sub-agent's owned terminal artifact event, then read the
@@ -996,6 +1032,7 @@ export async function awaitInteractiveResult(
   signal: AbortSignal | undefined,
   pollMs = INTERACTIVE_POLL_MS,
   onCancellationSnapshot?: (receipt: CancellationSnapshotReceipt) => void,
+  telemetry?: TelemetrySession,
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
@@ -1065,6 +1102,7 @@ export async function awaitInteractiveResult(
         liveness = "unknown";
       }
       if (liveness === "dead") {
+        clearRuntimeFailureEpisode(state.artifactDir, "mux_probe");
         deadTicks++;
         muxProbeFailureTicks = 0;
         debugLog("warn", "interactive_dead_pane", {
@@ -1088,6 +1126,7 @@ export async function awaitInteractiveResult(
       } else if (liveness === "unknown") {
         deadTicks = 0;
         muxProbeFailureTicks++;
+        reportMuxProbeRuntimeFailure(state, telemetry);
         debugLog("warn", "interactive_mux_probe_unknown", {
           probeFailureTicks: muxProbeFailureTicks,
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
@@ -1116,6 +1155,7 @@ export async function awaitInteractiveResult(
       } else {
         deadTicks = 0;
         muxProbeFailureTicks = 0;
+        clearRuntimeFailureEpisode(state.artifactDir, "mux_probe");
       }
       await new Promise<void>((resolve) => {
         let settled = false;

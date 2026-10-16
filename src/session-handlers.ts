@@ -35,6 +35,7 @@ import {
 } from "./completion-coordinator";
 import {
   createRootSpawnTreeContext,
+  parseSpawnTreeContext,
   releaseRuntimeSpawnTreeContext,
   retireLineageBootstraps,
   type ParsedSpawnTreeContext,
@@ -82,6 +83,8 @@ import {
   retireTelemetrySession,
   resolveTelemetryMode,
   type TelemetryTerminalReason,
+  resolveTelemetryTrafficOrigin,
+  TELEMETRY_ORIGIN_ENV,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -529,6 +532,7 @@ export function registerSessionHandlers(
         ? {
             correlationId: scope.spawnTreeContext.telemetrySessionId,
             mode: scope.spawnTreeContext.telemetryMode,
+            trafficOrigin: scope.spawnTreeContext.telemetryOrigin,
           }
         : undefined;
     const recoveredTelemetry = continuityReason
@@ -536,15 +540,27 @@ export function registerSessionHandlers(
         ? {
             correlationId: previousTelemetry.correlationId,
             mode: previousTelemetry.mode,
+            trafficOrigin: previousTelemetry.trafficOrigin,
           }
-        : (persistedTelemetry ??
-          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+        : ((persistedTelemetry
             ? {
-                correlationId: activeSpawnTelemetry.correlationId,
-                mode: activeSpawnTelemetry.mode,
+                ...persistedTelemetry,
+                trafficOrigin:
+                  persistedTelemetry.trafficOrigin ??
+                  resolveTelemetryTrafficOrigin(),
               }
+            : undefined) ??
+          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+            ? activeSpawnTelemetry
             : undefined))
       : undefined;
+    const currentTrafficOrigin = resolveTelemetryTrafficOrigin();
+    const trafficOrigin =
+      process.env[TELEMETRY_ORIGIN_ENV] !== undefined
+        ? currentTrafficOrigin
+        : (recoveredTelemetry?.trafficOrigin ??
+          activeSpawnTelemetry?.trafficOrigin ??
+          currentTrafficOrigin);
     const mode =
       recoveredTelemetry?.mode ??
       (isChild
@@ -556,7 +572,17 @@ export function registerSessionHandlers(
       ),
       mode,
       recoveredTelemetry?.correlationId,
+      trafficOrigin,
     );
+    if (
+      scope.spawnTreeContext?.role === "descendant" &&
+      scope.spawnTreeContext.telemetryOrigin !== scope.telemetry.trafficOrigin
+    ) {
+      scope.spawnTreeContext = parseSpawnTreeContext({
+        ...scope.spawnTreeContext,
+        telemetryOrigin: scope.telemetry.trafficOrigin,
+      });
+    }
     if (!isChild && recoveredTelemetry === undefined) {
       captureTelemetry(scope.telemetry, { event: "session_started" });
     }
@@ -577,6 +603,7 @@ export function registerSessionHandlers(
             ? {
                 correlationId: scope.telemetry.correlationId,
                 mode: scope.telemetry.mode,
+                trafficOrigin: scope.telemetry.trafficOrigin,
               }
             : undefined,
         );
@@ -604,6 +631,7 @@ export function registerSessionHandlers(
         maxDepth,
         scope.telemetry.enabled ? scope.telemetry.correlationId : undefined,
         scope.telemetry.mode,
+        scope.telemetry.trafficOrigin,
       );
     }
     scope.isParentIdle =

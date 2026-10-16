@@ -138,14 +138,20 @@ function emitWorkflowRuntimeFailure(
   session: TelemetrySession | undefined,
   failure: WorkflowFailureClassification | undefined,
 ): void {
-  if (!session || !failure?.runtimeFailureKind) return;
+  const kind = failure?.runtimeFailureKind;
+  if (!session || !failure || !kind) return;
+  // The waiter reports mux-probe episodes with pane identity. Re-emitting the
+  // same classification at workflow settlement would count that observation twice.
+  if (kind === "mux_probe") return;
   captureTelemetry(
     session,
     {
       event: "runtime_failure",
       error_category: failure.errorCategory,
       error_stage: failure.errorStage,
-      failure_kind: failure.runtimeFailureKind,
+      failure_kind: kind,
+      reporter: "workflow_runner",
+      ...(kind === "workflow_capacity" ? { impact: "blocked" } : {}),
     },
     { allowInactive: true },
   );

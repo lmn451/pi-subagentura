@@ -61,6 +61,7 @@ import {
 import { createTestSessionScope } from "./session-scope-fixture";
 import { InteractiveParams } from "../src/schemas";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
+import { createTelemetrySession } from "../src/telemetry";
 
 const savedTmux = process.env.TMUX;
 
@@ -114,7 +115,35 @@ function mockInteractiveState(status = "running") {
     artifactDir: "/tmp/artifacts/abc12345",
   };
 }
+function getRenderedText(value: unknown): string {
+  if (value && typeof value === "object" && "text" in value) {
+    return typeof value.text === "string" ? value.text : "";
+  }
+  return "";
+}
 
+type TelemetryPayloadForTest = {
+  event?: string;
+  properties?: unknown;
+};
+
+function captureTelemetryPayloads(): TelemetryPayloadForTest[] {
+  const payloads: TelemetryPayloadForTest[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      const payload: unknown = JSON.parse(String(init?.body));
+      if (payload && typeof payload === "object" && "event" in payload) {
+        payloads.push({
+          event: typeof payload.event === "string" ? payload.event : undefined,
+          properties: "properties" in payload ? payload.properties : undefined,
+        });
+      }
+      return new Response(null, { status: 200 });
+    }),
+  );
+  return payloads;
+}
 describe("subagent_interactive tool lifecycle", () => {
   let api: ReturnType<typeof setupExtension>;
 
@@ -200,6 +229,7 @@ describe("subagent_interactive tool lifecycle", () => {
       g.__piSubagenturaInteractivePollerHandle = undefined;
     }
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
     if (savedTmux === undefined) delete process.env.TMUX;
     else process.env.TMUX = savedTmux;
   });
@@ -558,6 +588,43 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
+  it("resolves a cancelled direct launch once without starting a child", async () => {
+    const payloads = captureTelemetryPayloads();
+    api.scope.telemetry = createTelemetrySession(
+      true,
+      "straight",
+      undefined,
+      "unknown",
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await getInteractiveToolDef(api).execute(
+      "cancelled-direct-launch",
+      { task: "cancel before launch" },
+      controller.signal,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: { status: "cancelled" },
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+    const resolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0].properties).toMatchObject({
+      outcome: "cancelled",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      mux: "unknown",
+      fallback_attempted: false,
+    });
+  });
+
   it("reports routing persistence failure without pretending the child failed", async () => {
     api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
     const toolDef = getInteractiveToolDef(api);
@@ -566,6 +633,13 @@ describe("subagent_interactive tool lifecycle", () => {
       id: "0123456789abcdef",
       artifactDir: "/tmp/artifacts/0123456789abcdef",
     };
+    const payloads = captureTelemetryPayloads();
+    api.scope.telemetry = createTelemetrySession(
+      true,
+      "straight",
+      undefined,
+      "unknown",
+    );
     mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
     mockUpsertOrchestratorRoutingEntry.mockImplementationOnce(() => {
       throw new Error("routing record count exceeds 128");
@@ -586,7 +660,9 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(result.isError).not.toBe(true);
     expect(result.details).toMatchObject({
       id: state.id,
-      status: "started",
+      paneId: state.paneId,
+      artifactDir: state.artifactDir,
+      status: "degraded",
       routingMetadata: {
         status: "warning",
         error: "routing record count exceeds 128",
@@ -595,12 +671,42 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(result.content[0].text).toContain(
       `Interactive sub-agent ${state.id} started`,
     );
+    expect(result.content[0].text).toContain(`Artifact: ${state.artifactDir}`);
     expect(result.content[0].text).toContain(
       "Warning: initial routing metadata was not persisted: routing record count exceeds 128",
     );
     expect(result.content[0].text).not.toContain(
       "Failed to start interactive sub-agent",
     );
+    const rendered = toolDef.renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+    );
+    expect(getRenderedText(rendered)).toContain(
+      `Interactive sub-agent ${state.id}`,
+    );
+    expect(getRenderedText(rendered)).toContain(`pane ${state.paneId}`);
+    expect(getRenderedText(rendered)).not.toContain(
+      "Failed to start interactive sub-agent",
+    );
+    const launchResolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(launchResolutions).toHaveLength(1);
+    expect(launchResolutions[0].properties).toMatchObject({
+      outcome: "started",
+      execution: "interactive",
+      mux: "tmux",
+    });
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_operation_completed",
+      )?.properties,
+    ).toMatchObject({
+      operation: "subagent_interactive",
+      result_status: "degraded",
+    });
   });
 
   it("uses the tool-entry clock for a context-inclusive spawn", async () => {

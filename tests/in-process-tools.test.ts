@@ -568,10 +568,64 @@ describe("subagent_with_context tool", () => {
     );
 
     expect(result.content[0].text).toBe("No conversation history to inherit.");
-    expect(result.details).toEqual({});
+    expect(result.details).toMatchObject({
+      status: "error",
+      contextMessages: 0,
+    });
+    expect(result.isError).toBe(true);
     // No calls beyond the early return
     expect(mockStartSubagentJob).not.toHaveBeenCalled();
     expect(mockConvertToLlm).not.toHaveBeenCalled();
+  });
+
+  it("rejects with_context when no conversation history exists", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(723);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const scopedTool = getToolDef(scoped.api, "subagent_with_context");
+    const result = await scopedTool.execute(
+      "no-history-rejection",
+      { task: "do something", async: false },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("error");
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      )?.properties,
+    ).toMatchObject({
+      outcome: "rejected",
+      requested_execution: "in-process",
+      mux: "unknown",
+      fallback_attempted: false,
+      final_failure_stage: "context",
+    });
+    const technicalFailures = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
+    );
+    expect(technicalFailures).toHaveLength(1);
+    expect(technicalFailures[0].properties).toMatchObject({
+      execution: "in-process",
+      mux: "none",
+      failure_stage: "context",
+    });
+    expect(
+      payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_created",
+      ),
+    ).toHaveLength(0);
   });
 
   it("does not inherit a message omitted by the parent session projection", async () => {
@@ -596,6 +650,11 @@ describe("subagent_with_context tool", () => {
     );
 
     expect(result.content[0].text).toBe("No conversation history to inherit.");
+    expect(result.details).toMatchObject({
+      status: "error",
+      contextMessages: 0,
+    });
+    expect(result.isError).toBe(true);
     expect(sessionManager.buildSessionProjection).toHaveBeenCalledOnce();
     expect(sessionManager.getBranch).not.toHaveBeenCalled();
     expect(mockStartSubagentJob).not.toHaveBeenCalled();
@@ -633,34 +692,6 @@ describe("subagent_with_context tool", () => {
     expect(mockStartSubagentJob).toHaveBeenCalledWith(
       expect.objectContaining({ contextText: "serialized replacement" }),
     );
-  });
-
-  it("records one context-stage failure for missing history", async () => {
-    const payloads = captureTelemetryPayloads();
-    const scoped = setupScopedExtension(718);
-    scoped.scope.telemetry = createTelemetrySession(true);
-    const scopedTool = getToolDef(scoped.api, "subagent_with_context");
-    const result = await scopedTool.execute(
-      "missing-context",
-      { task: "do something", async: false },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    expect(result.isError).toBeFalsy();
-    await vi.waitFor(() =>
-      expect(
-        payloads.filter(
-          (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
-        ),
-      ).toHaveLength(1),
-    );
-    expect(
-      payloads.find(
-        (payload) => payload.event === "pi_subagentura_agent_spawn_failed",
-      )?.properties?.failure_stage,
-    ).toBe("context");
   });
 
   it("registers with BaseParams schema", () => {
@@ -2602,7 +2633,9 @@ describe("subagent_with_context async path", () => {
     toolDef = getToolDef(api, "subagent_with_context");
   });
 
-  it("returns 'No conversation history' when branch empty with async:true", async () => {
+  it("rejects with no conversation history when branch empty with async:true", async () => {
+    const payloads = captureTelemetryPayloads();
+    toolScope.telemetry = createTelemetrySession(true);
     const ctx = mockCtx();
     const result = await toolDef.execute(
       "call-1",
@@ -2612,7 +2645,23 @@ describe("subagent_with_context async path", () => {
       ctx,
     );
     expect(result.content[0].text).toBe("No conversation history to inherit.");
-    expect(result.isError).toBeUndefined();
+    expect(result.details).toMatchObject({
+      status: "error",
+      contextMessages: 0,
+    });
+    expect(result.isError).toBe(true);
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    const resolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0].properties).toMatchObject({
+      outcome: "rejected",
+      requested_execution: "in-process",
+      mux: "unknown",
+      fallback_attempted: false,
+      final_failure_stage: "context",
+    });
   });
 
   it("starts async job with serialized context when branch has messages", async () => {

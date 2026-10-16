@@ -76,6 +76,11 @@ import {
   type TelemetrySession,
   type TelemetryTerminalReason,
 } from "./telemetry";
+import {
+  beginRuntimeFailureEpisode,
+  clearRuntimeFailureEpisode,
+  runtimeFailureDedupeKey,
+} from "./telemetry-runtime";
 // ── Footer / Widget Status Keys ────────────────────────────────────────
 
 export const FOOTER_KEY = "subagentura-running";
@@ -576,12 +581,6 @@ type ArtifactRuntimeFailureKind = Extract<
   | "mux_probe"
 >;
 
-interface RuntimeFailureEpisodeState {
-  active: Set<ArtifactRuntimeFailureKind>;
-  sequence: Map<ArtifactRuntimeFailureKind, number>;
-}
-
-const runtimeFailureEpisodes = new Map<string, RuntimeFailureEpisodeState>();
 const debuggedMuxProbeStates = new WeakSet<InteractiveSubagentState>();
 
 function runtimeFailureKindForIssue(
@@ -597,19 +596,6 @@ function runtimeFailureKindForIssue(
     default:
       return undefined;
   }
-}
-
-function runtimeFailureEpisodeState(
-  artifactDir: string,
-): RuntimeFailureEpisodeState {
-  const existing = runtimeFailureEpisodes.get(artifactDir);
-  if (existing) return existing;
-  const created: RuntimeFailureEpisodeState = {
-    active: new Set(),
-    sequence: new Map(),
-  };
-  runtimeFailureEpisodes.set(artifactDir, created);
-  return created;
 }
 
 function reportRuntimeFailure(
@@ -629,16 +615,15 @@ function reportRuntimeFailure(
   }
   if (
     !telemetry ||
+    !telemetry.enabled ||
+    !telemetry.active ||
     !state.telemetryEligible ||
     state.telemetryCorrelationId !== telemetry.correlationId
   ) {
     return;
   }
-  const episode = runtimeFailureEpisodeState(state.artifactDir);
-  if (episode.active.has(kind)) return;
-  episode.active.add(kind);
-  const sequence = (episode.sequence.get(kind) ?? 0) + 1;
-  episode.sequence.set(kind, sequence);
+  const episodeId = beginRuntimeFailureEpisode(state.artifactDir, kind);
+  if (episodeId === undefined) return;
   captureTelemetry(
     telemetry,
     {
@@ -646,19 +631,20 @@ function reportRuntimeFailure(
       error_category: category,
       error_stage: stage,
       failure_kind: kind,
+      execution: "interactive",
+      mux: state.mux,
+      reporter: "artifact_poller",
+      impact: kind === "mux_probe" ? "unknown" : "degraded",
     },
-    {
-      dedupeKey: `runtime-failure:interactive:${state.id}:${kind}:${sequence}`,
-    },
+    { dedupeKey: runtimeFailureDedupeKey(kind, episodeId) },
   );
 }
 
-function clearRuntimeFailureEpisode(
+function clearRuntimeFailureEpisodeForState(
   state: InteractiveSubagentState,
   kind: ArtifactRuntimeFailureKind,
 ): void {
-  const episode = runtimeFailureEpisodes.get(state.artifactDir);
-  episode?.active.delete(kind);
+  clearRuntimeFailureEpisode(state.artifactDir, kind);
   if (kind === "mux_probe") debuggedMuxProbeStates.delete(state);
 }
 
@@ -680,7 +666,7 @@ function reportArtifactReadIssues(
     "artifact_oversized",
   ] as const) {
     if (!observedKinds.has(kind)) {
-      clearRuntimeFailureEpisode(state, kind);
+      clearRuntimeFailureEpisodeForState(state, kind);
     }
   }
 }
@@ -844,7 +830,7 @@ async function runPollArtifactChanges(
           livenessDiagnostic.failureReason,
         );
       } else {
-        clearRuntimeFailureEpisode(state, "mux_probe");
+        clearRuntimeFailureEpisodeForState(state, "mux_probe");
       }
       // Cancelled is terminal. Unknown means pane liveness is unavailable, so keep polling
       // the artifact log: a later done/error event must still reach the parent.

@@ -628,8 +628,14 @@ export function launchInteractiveSubagent(params: {
   telemetryAsync?: boolean;
   /** Aggregate policy attributed to workflow-owned child execution. */
   telemetryCompletionPolicy?: TelemetryCompletionPolicy;
-  /** Hold `agent_created` until coordinated completion registration succeeds. */
+  /** Defer agent_created until the caller finishes completion registration. */
   deferAgentCreatedTelemetry?: boolean;
+  /** Report the closed launch failure to the logical-launch owner. */
+  onSpawnFailure?: (failure: {
+    stage: TelemetrySpawnFailureStage;
+    mux?: TelemetrySpawnFailureMux;
+    operation?: TelemetrySpawnFailureOperation;
+  }) => void;
   /** Caller-observed attempt start; direct callers default to launcher entry. */
   spawnRequestedAt?: number;
 }): InteractiveSubagentState {
@@ -644,6 +650,12 @@ export function launchInteractiveSubagent(params: {
   ): void => {
     if (spawnFailureReported) return;
     spawnFailureReported = true;
+    const failure = { stage, mux, operation };
+    try {
+      params.onSpawnFailure?.(failure);
+    } catch {
+      // Logical telemetry must never change launch behavior.
+    }
     captureInteractiveSpawnFailure({
       telemetry:
         params.sessionScope?.telemetry ??

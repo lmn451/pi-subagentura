@@ -36,8 +36,13 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
-import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
 import { asStringIdentifier, type EventId } from "./identifier-types";
+import {
+  sanitizeTelemetryModel,
+  sanitizeTelemetryTrafficOrigin,
+  type TelemetryMux,
+  type TelemetryTrafficOrigin,
+} from "./telemetry";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -1430,6 +1435,7 @@ export interface PersistedInteractiveTelemetry {
 export interface PersistedTelemetrySession {
   correlationId: string;
   mode: "straight" | "orchestrator" | "orchestrator_v2";
+  trafficOrigin?: TelemetryTrafficOrigin;
 }
 
 export interface PersistedDeliveryIntent {
@@ -1722,6 +1728,13 @@ function normalizeV2StatePayload(
       ? {
           correlationId: rawTelemetry.correlationId.toLowerCase(),
           mode: rawTelemetryMode,
+          ...(Object.hasOwn(rawTelemetry, "trafficOrigin")
+            ? {
+                trafficOrigin: sanitizeTelemetryTrafficOrigin(
+                  rawTelemetry.trafficOrigin,
+                ),
+              }
+            : {}),
         }
       : undefined;
 
