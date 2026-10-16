@@ -1114,7 +1114,7 @@ Logs can include task/persona text, paths, identifiers, and tool contents.
 Keep them private and redact entries before sharing. These local diagnostics
 are separate from anonymous telemetry.
 
-Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is independent of anonymous telemetry, whose runtime-failure event keeps its existing closed schema. Probe timeout and polling behavior are unchanged.
+Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is separate from anonymous telemetry; see the [telemetry reference](docs/telemetry.md) for runtime-failure attribution. Probe timeout and polling behavior are unchanged.
 
 ```bash
 mkdir -p .pi-debug
