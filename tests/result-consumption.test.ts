@@ -16,7 +16,6 @@ import {
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import {
-  jobRegistry,
   registerInProcessJob,
   type JobState,
   type SubagentResult,
@@ -89,7 +88,7 @@ describe("result collection during receipt storage failure", () => {
 
   afterEach(() => {
     clearCompletionCoordinator(sessionOwner(scope));
-    jobRegistry.clear();
+    scope.inProcessJobs.clear();
     workflowJobRegistry.clear();
     clearSessionScopes();
     rmSync(root, { recursive: true, force: true });
@@ -160,7 +159,7 @@ describe("result collection during receipt storage failure", () => {
     await expect(read()).rejects.toThrow(/receipt.*persist|persist.*receipt/i);
     expect(job.resultRetrieved).not.toBe(true);
     expect(job.cleanupAfterCollection).toBe(true);
-    expect(jobRegistry.get(job.id)).toBe(job);
+    expect(scope.inProcessJobs.get(job.id)).toBe(job);
     restoreStorage();
     expect((await read()).content[0].text).toBe(result.output);
     expect(job.resultRetrieved).toBe(true);
@@ -239,5 +238,32 @@ describe("result collection during receipt storage failure", () => {
     restoreStorage();
     expect((await read()).details.output).toBe("retained snapshot");
     expectDurableConsumption();
+  });
+
+  it("does not return mutable output without a protocol-v2 completion", async () => {
+    const id = "abcd123400000002";
+    const art = artifactPath(root, id);
+    writeOutput(art, "stale legacy output");
+    scope.interactiveStates.set(id, {
+      id,
+      name: "Legacy",
+      task: "task",
+      cwd: root,
+      artifactDir: art.dir,
+      status: "exited",
+      mux: "tmux",
+      paneId: "%100",
+      startedAt: Date.now(),
+      sessionFile: join(root, "session.jsonl"),
+      launchScriptFile: join(root, "launch.sh"),
+      attachCommand: "",
+      selectPaneCommand: "",
+    } satisfies InteractiveSubagentState);
+
+    const result = await tools
+      .get("read_subagent_artifact")!
+      .execute("read-legacy", { id }, undefined, undefined, { cwd: root });
+
+    expect(result.details.output).toBeNull();
   });
 });

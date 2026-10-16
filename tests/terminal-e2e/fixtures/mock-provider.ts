@@ -732,8 +732,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_PROVIDER_ERROR] Fail the provider fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   if (marker.includes("INTERACTIVE")) {
@@ -742,8 +740,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_INTERACTIVE] Complete the artifact fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   const isolated = marker.includes("ISOLATED");
@@ -754,9 +750,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: `[E2E:CHILD_${marker.replace("[E2E:", "").replace("]", "")}] Return the deterministic fixture.`,
       model: "subagentura-e2e/mock",
       async: marker.includes("ASYNC"),
-      ...(marker.includes("ASYNC")
-        ? { notifyOnComplete: "notify", triggerTurnOnComplete: false }
-        : {}),
     },
   );
 }

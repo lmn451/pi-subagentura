@@ -123,10 +123,6 @@ Prefer a small explicit handoff for a new specialist. Include the full parent br
 - At an idle dispatch, the coordinator passes the manifest through the lower-level `sendCompletionTurn` transport with the actual parent streaming state. Non-v2 modes fall through to native `sendMessage`; idle Orchestratorv2 uses a durable wake request and a synthetic user follow-up so this prompt is installed for the consuming run.
 - Wake state is process-global and run-bound. `before_agent_start` marks only the exact synthetic wake prompt, and that marked run's `agent_settled` performs acknowledgement. A missing run start receives at most three wake attempts with a 30-second watchdog; acknowledgement persistence retries at most three times with a one-second delay. Session replacement and shutdown clear timers, while reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
 
-Deprecated `notifyOnComplete` and `triggerTurnOnComplete` inputs remain accepted
-for compatibility but map to coordinated `each`; they cannot request full-output
-injection or override completion policy, group barriers, or human-input priority.
-
 ## Control boundary and legacy mode
 
 This control-only role is prompt policy, not a security boundary. Host tool allowlisting is intentionally not enforced in Phase 1: normal workflow and in-process tools remain registered for compatibility, even though Orchestratorv2 must not use them. A compatibility completion message never overrides this rule.

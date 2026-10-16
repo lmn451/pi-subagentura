@@ -77,7 +77,7 @@ Do not reuse a child artifact directory between tests. The child protocol
 mutates `events.ndjson`, `active-turn.json`, `output.md`, and immutable output
 snapshots.
 
-## Module and registry reset
+## Module reload and scope reset
 
 `tests/test-utils.ts#importFresh()` calls `vi.resetModules()` and then performs
 a dynamic import. Use it after changing environment values or installing a
@@ -85,14 +85,23 @@ a dynamic import. Use it after changing environment values or installing a
 state. The multiplexer unit suites use this pattern to test command selection
 without invoking a real backend.
 
-Module reset does not clear state stored on `globalThis`. The interactive
-registry is deliberately held at
-`globalThis.__piSubagenturaInteractiveRegistry`, so it survives a module
-reload. Tests that populate it clear it in `beforeEach` or `afterEach`. Session
-scopes and cached mux instances need their own cleanup:
+Module reset clears module-local state, but session-owned maps are shared only
+through the process-wide `SessionScope` registry, which also handles multiple
+SDK module copies. Do not add a second aggregate index for jobs or interactive
+states. Give each test a real started scope and pass its exact owner to the
+operations under test:
 
 ```ts
-interactiveSubagentRegistry.clear();
+const scope = createTestSessionScope();
+const owner = sessionOwner(scope);
+scope.interactiveStates.set(state.id, state);
+await pollArtifactChanges(scope.pi, owner);
+```
+
+`clearSessionScopes()` removes test scopes; `__setTmuxMultiplexer()` and
+`__resetMuxInstances()` reset multiplexer test state:
+
+```ts
 clearSessionScopes();
 __setTmuxMultiplexer(undefined);
 __resetMuxInstances();
@@ -106,21 +115,21 @@ the command line accepted by a real tmux or Zellij process.
 
 ## Ownership and cancellation
 
-`registerInteractiveSubagentState(state, scope)` inserts the same state into
-both `scope.interactiveStates` and the global compatibility registry. The
-owner-scoped poller and `cancelAllFlows(owner)` use the scope map; ownerless
-operations can fall back to the global registry. A state left in either map can
-therefore be observed or cancelled by a later test.
+`registerInteractiveSubagentState(state, scope)` records the state in exactly
+one `SessionScope.interactiveStates` map and stamps its owner token. Lookups,
+polling, cancellation, and removal require that same scope id and generation;
+missing or stale ownership fails closed. Another session cannot observe,
+replace, or cancel the state by reusing its id.
 
-When testing ownership, register each fake state with its exact
-`SessionScope`, pass that owner to poll/cancel helpers, and clear both scope and
-global registries in teardown. Give every state a temporary artifact directory
-and a fake mux whose `getPaneLiveness` and `killPane` behavior is explicit.
-`tests/artifact-delivery.integration.test.ts`,
-`tests/subagent-poll.test.ts`, and `tests/subagent-shutdown.test.ts` exercise
-these paths. Shutdown cancellation receives a complete state snapshot because
-the live registry is cleared before pane teardown; tests must not assume an id
-lookup will still find it.
+When testing ownership, create a real `SessionScope`, register fake state only
+in its map, and pass `sessionOwner(scope)` to poll/cancel helpers. Teardown
+clears the session scopes. Give every state a temporary artifact directory and
+a fake mux whose `getPaneLiveness` and `killPane` behavior is explicit.
+`tests/artifact-delivery.integration.test.ts`, `tests/subagent-poll.test.ts`,
+and `tests/subagent-shutdown.test.ts` exercise these paths. Shutdown
+cancellation receives a complete state snapshot because the live scope is
+cleared before pane teardown; tests must not assume an id lookup will still
+find it.
 
 The cancellation path attempts to write `.cancelled`, append a parent
 cancellation event, and ask the recorded mux to kill the pane. The marker and

@@ -15,7 +15,6 @@
  *   - `SubagentResult`
  *   - `SubagentLiveStatus`
  *   - `ACTIVE_TOOL_DEBOUNCE_MS`
- *   - `jobRegistry`
  *   - `MAX_REGISTRY_SIZE`
  *   - `pruneOldestJob`
  *   - `pruneCompletedJobs`
@@ -23,10 +22,6 @@
  *   - `startSubagentJob`
  *   - `JobState`          (type-only, erased at runtime)
  *   - `JobStatus`         (type-only, erased at runtime)
- *   - `NotifyOnComplete`  (type-only, erased at runtime)
- *   - `interactiveSubagentRegistry`
- *   - `getInjectCount`
- *   - `MAX_INJECT`
  *   - `pollArtifactChanges`
  *   - `findArtifactById`
  *
@@ -47,13 +42,11 @@ import { describe, expect, it } from "vitest";
 
 import type { JobState } from "../src/subagent";
 import type { JobStatus } from "../src/subagent";
-import type { NotifyOnComplete } from "../src/subagent";
 import type { SubagentDetails } from "../src/subagent";
 
 function _typeExportGuard(
   _a: JobState,
   _b: JobStatus,
-  _c: NotifyOnComplete,
   _d: SubagentDetails,
 ): void {}
 
@@ -62,15 +55,11 @@ function _typeExportGuard(
 // (a) Runtime-visible named exports (value exports visible via Object.keys)
 const RUNTIME_EXPORTS = [
   "ACTIVE_TOOL_DEBOUNCE_MS",
-  "MAX_INJECT",
   "MAX_REGISTRY_SIZE",
   "SubagentLiveStatus",
   "SubagentResult",
   "findArtifactById",
   "formatUsage",
-  "getInjectCount",
-  "interactiveSubagentRegistry",
-  "jobRegistry",
   "pollArtifactChanges",
   "pruneCompletedJobs",
   "pruneOldestJob",
@@ -80,12 +69,7 @@ const RUNTIME_EXPORTS = [
 ] as const;
 
 // (b) Type-only exports (export type …, erased at runtime)
-const TYPE_ONLY_EXPORTS = [
-  "JobState",
-  "JobStatus",
-  "NotifyOnComplete",
-  "SubagentDetails",
-] as const;
+const TYPE_ONLY_EXPORTS = ["JobState", "JobStatus", "SubagentDetails"] as const;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

@@ -13,7 +13,12 @@ import {
   updateInteractiveState,
 } from "../src/artifact";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import {
+  clearSessionScopes,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import { flushDeliveries } from "../src/delivery";
 import { importFresh } from "./test-utils";
 import { makeTmp, makeState } from "./subagent-rehydrate-helpers";
@@ -26,6 +31,7 @@ let buildAttachCommands: AttachCommandBuilder;
 
 describe("rehydrateInteractiveSubagents", () => {
   let cwd: string;
+  let scope: SessionScope;
 
   beforeEach(() => {
     buildAttachCommands = (state) => ({
@@ -42,12 +48,8 @@ describe("rehydrateInteractiveSubagents", () => {
       }),
       NoMultiplexerAvailableError: class extends Error {},
     }));
-    const g = globalThis as typeof globalThis & {
-      __piSubagenturaInteractiveRegistry?: { clear?: () => void };
-      __piSubagenturaPiRef?: unknown;
-    };
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
+    clearSessionScopes();
+    scope = createTestSessionScope({ cwd });
   });
 
   afterEach(() => {
@@ -58,7 +60,7 @@ describe("rehydrateInteractiveSubagents", () => {
   it("returns zero recovery counts when the state file is missing", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
     expect(result).toEqual({
       total: 0,
       recovered: 0,
@@ -79,20 +81,18 @@ describe("rehydrateInteractiveSubagents", () => {
       mux: state.mux,
       artifactDir: state.artifactDir,
       sessionFile: state.sessionFile,
-      triggerTurnOnComplete: true,
       completionPolicy: "group",
       completionGroupId: "review",
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
     expect(result.total).toBe(1);
-    const rehydrated = interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.paneId).toBe("%42");
     expect(rehydrated?.mux).toBe("tmux");
     expect(rehydrated?.parentSessionId).toBe("pi");
-    expect(rehydrated?.triggerTurnOnComplete).toBe(true);
     expect(rehydrated?.completionPolicy).toBe("group");
     expect(rehydrated?.completionGroupId).toBe("review");
   });
@@ -110,31 +110,11 @@ describe("rehydrateInteractiveSubagents", () => {
       workingCwd: childCwd,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(state.id);
+    const rehydrated = scope.interactiveStates.get(state.id);
     expect(rehydrated?.cwd).toBe(cwd);
     expect(rehydrated?.workingCwd).toBe(childCwd);
-  });
-
-  it("preserves an explicit false trigger override across rehydrate", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const state = makeState(cwd, "explicit-false");
-    appendInteractiveState(cwd, {
-      id: state.id,
-      paneId: state.paneId,
-      mux: state.mux,
-      artifactDir: state.artifactDir,
-      sessionFile: state.sessionFile,
-      triggerTurnOnComplete: false,
-    });
-
-    mod.rehydrateInteractiveSubagents(cwd);
-
-    expect(
-      interactiveSubagentRegistry.get(state.id)?.triggerTurnOnComplete,
-    ).toBe(false);
   });
 
   it("rebuilds attach and focus commands on rehydrate", async () => {
@@ -150,9 +130,9 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = mod.interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated?.attachCommand).toContain("tmux attach");
     expect(rehydrated?.selectPaneCommand).toContain("tmux select-window");
   });
@@ -179,9 +159,11 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    expect(mod.rehydrateInteractiveSubagents(cwd).total).toBe(1);
+    expect(
+      mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope).total,
+    ).toBe(1);
 
-    const rehydrated = mod.interactiveSubagentRegistry.get("abc12345");
+    const rehydrated = scope.interactiveStates.get("abc12345");
     expect(rehydrated?.attachCommand).toBe(ATTACH_UNAVAILABLE);
     expect(rehydrated?.selectPaneCommand).toBe(ATTACH_UNAVAILABLE);
     // A shell would run the old value as a command name; this one cannot be
@@ -205,11 +187,11 @@ describe("rehydrateInteractiveSubagents", () => {
 
     // Pre-populate the registry with a different (older) state.
     const older: InteractiveSubagentState = { ...state, paneId: "%OLD" };
-    interactiveSubagentRegistry.set("abc12345", older);
+    scope.interactiveStates.set("abc12345", older);
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const after = interactiveSubagentRegistry.get("abc12345");
+    const after = scope.interactiveStates.get("abc12345");
     expect(after?.paneId).toBe("%OLD");
   });
 
@@ -226,145 +208,10 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: state.sessionFile,
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get("abc12345")!;
+    const rehydrated = scope.interactiveStates.get("abc12345")!;
     expect(rehydrated.eventByteCursor).toBe(0);
-    expect(rehydrated.lastDeliveredEventTs).toBeUndefined();
-    expect(rehydrated.lastDeliveredSessionByte).toBe(0);
-    expect(rehydrated.lastInjectedEventTs).toBeUndefined();
-    expect(rehydrated.lastSnapshotEventTs).toBeUndefined();
-    expect(rehydrated.injected).toBeUndefined();
-    expect(rehydrated.autoDoneForTurnAt).toBeUndefined();
-  });
-
-  it("restores a persisted partial session line from its replay point", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const state = makeState(cwd, "abc12345");
-    appendInteractiveState(cwd, {
-      id: state.id,
-      paneId: state.paneId,
-      windowName: state.windowName,
-      mux: state.mux,
-      artifactDir: state.artifactDir,
-      sessionFile: state.sessionFile,
-    });
-    updateInteractiveState(cwd, state.id, (entry) => {
-      entry.sessionByteCursor = 200;
-      entry.sessionPartialLineStart = 125;
-    });
-
-    mod.rehydrateInteractiveSubagents(cwd);
-
-    const rehydrated = interactiveSubagentRegistry.get(state.id)!;
-    expect(rehydrated.lastDeliveredSessionByte).toBe(125);
-    expect(rehydrated.sessionPartialLineStart).toBe(125);
-    expect(rehydrated.sessionObservedByteCursor).toBe(200);
-  });
-
-  it("conservatively replays legacy session cursors from zero", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const state = makeState(cwd, "abc12345");
-    appendInteractiveState(cwd, {
-      id: state.id,
-      paneId: state.paneId,
-      windowName: state.windowName,
-      mux: state.mux,
-      artifactDir: state.artifactDir,
-      sessionFile: state.sessionFile,
-    });
-    updateInteractiveState(cwd, state.id, (entry) => {
-      entry.sessionByteCursor = 200;
-      delete entry.sessionPartialLineStart;
-    });
-
-    mod.rehydrateInteractiveSubagents(cwd);
-
-    const rehydrated = interactiveSubagentRegistry.get(state.id)!;
-    expect(rehydrated.lastDeliveredSessionByte).toBe(0);
-    expect(rehydrated.sessionPartialLineStart).toBeUndefined();
-    expect(rehydrated.sessionObservedByteCursor).toBe(200);
-  });
-
-  it("requeues unmatched dispatchAttempted delivery after rehydrate", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const state = makeState(cwd, "abc12345");
-    appendInteractiveState(cwd, {
-      id: state.id,
-      paneId: state.paneId,
-      mux: state.mux,
-      artifactDir: state.artifactDir,
-      sessionFile: state.sessionFile,
-      eventByteCursor: 10,
-      sessionByteCursor: 0,
-      pendingDeliveries: [
-        {
-          deliveryId: "retry-me",
-          subagentId: state.id,
-          turnId: "turn",
-          eventId: "event",
-          mode: "inject",
-          triggerTurn: false,
-          status: "done",
-          artifactDir: state.artifactDir,
-          state: "dispatchAttempted",
-        },
-      ],
-      deliveryReceipts: [],
-    });
-
-    mod.rehydrateInteractiveSubagents(cwd, undefined, []);
-    const rehydrated = interactiveSubagentRegistry.get("abc12345")!;
-    expect(rehydrated.pendingDeliveries?.[0].state).toBe("queued");
-    const sendMessage = vi.fn();
-    flushDeliveries({ sendMessage } as any, undefined);
-    expect(sendMessage).toHaveBeenCalledOnce();
-  });
-
-  it("removes matched dispatchAttempted delivery after rehydrate", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const state = makeState(cwd, "abc12345");
-    appendInteractiveState(cwd, {
-      id: state.id,
-      paneId: state.paneId,
-      mux: state.mux,
-      artifactDir: state.artifactDir,
-      sessionFile: state.sessionFile,
-      eventByteCursor: 10,
-      sessionByteCursor: 0,
-      pendingDeliveries: [
-        {
-          deliveryId: "already-sent",
-          subagentId: state.id,
-          turnId: "turn",
-          eventId: "event",
-          mode: "inject",
-          triggerTurn: true,
-          status: "done",
-          artifactDir: state.artifactDir,
-          state: "dispatchAttempted",
-        },
-      ],
-      deliveryReceipts: [],
-    });
-
-    mod.rehydrateInteractiveSubagents(cwd, undefined, [
-      {
-        type: "custom_message",
-        customType: "subagent-notify",
-        details: { deliveryIds: ["already-sent"] },
-      },
-    ]);
-    const rehydrated = interactiveSubagentRegistry.get("abc12345")!;
-    expect(rehydrated.pendingDeliveries).toEqual([]);
-    expect(rehydrated.deliveryReceipts).toContain("already-sent");
-    const sendMessage = vi.fn();
-    flushDeliveries({ sendMessage } as any, undefined);
-    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("rehydrates parent process cancellation as terminal without process exit", async () => {
@@ -378,7 +225,6 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: state.artifactDir,
       sessionFile: state.sessionFile,
       eventByteCursor: 10,
-      sessionByteCursor: 0,
       pendingDeliveries: [],
       deliveryReceipts: [],
       lifecycle: {
@@ -389,9 +235,9 @@ describe("rehydrateInteractiveSubagents", () => {
       },
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwd);
+    const result = mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("cancelled");
+    expect(scope.interactiveStates.get(state.id)?.status).toBe("cancelled");
     expect(result.terminal).toBe(1);
   });
 
@@ -406,7 +252,6 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: state.artifactDir,
       sessionFile: state.sessionFile,
       eventByteCursor: 1_000_000,
-      sessionByteCursor: 0,
       pendingDeliveries: [],
       deliveryReceipts: [],
       lifecycle: {
@@ -417,10 +262,10 @@ describe("rehydrateInteractiveSubagents", () => {
       },
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    expect(interactiveSubagentRegistry.get(state.id)?.status).toBe("exited");
-    expect(interactiveSubagentRegistry.get(state.id)?.eventByteCursor).toBe(
+    expect(scope.interactiveStates.get(state.id)?.status).toBe("exited");
+    expect(scope.interactiveStates.get(state.id)?.eventByteCursor).toBe(
       1_000_000,
     );
   });
@@ -442,8 +287,24 @@ describe("rehydrateInteractiveSubagents", () => {
       });
     }
     const art1 = artifactPath(cwdB, "done1");
-    appendEvent(art1, { ts: 1, type: "started", status: "running" });
-    appendEvent(art1, { ts: 2, type: "done", status: "done", exitCode: 0 });
+    appendEvent(art1, {
+      version: 2,
+      eventId: "start-done1",
+      turnId: "turn-done1",
+      ts: 1,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art1, {
+      version: 2,
+      eventId: "completion-done1",
+      turnId: "turn-done1",
+      ts: 2,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+    });
     updateInteractiveState(cwd, "done1", (entry) => {
       entry.lifecycle = {
         completionOutcome: "done",
@@ -452,15 +313,20 @@ describe("rehydrateInteractiveSubagents", () => {
       };
     });
 
-    const result = mod.rehydrateInteractiveSubagents(cwdA);
+    const result = mod.rehydrateInteractiveSubagents(
+      cwdA,
+      undefined,
+      [],
+      scope,
+    );
 
     expect(result.total).toBe(2);
     expect(result.recovered).toBe(2);
     expect(result.alive).toBe(0);
     expect(result.terminal).toBe(1);
     expect(result.unknown).toBe(1);
-    expect(interactiveSubagentRegistry.get("alive1")?.status).toBe("unknown");
-    expect(interactiveSubagentRegistry.get("done1")?.status).toBe("exited");
+    expect(scope.interactiveStates.get("alive1")?.status).toBe("unknown");
+    expect(scope.interactiveStates.get("done1")?.status).toBe("exited");
   });
 
   it("does not throw when ctx.cwd is unreachable (best-effort recovery)", async () => {
@@ -469,11 +335,17 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(() =>
       mod.rehydrateInteractiveSubagents(
         "/nonexistent/path/that/does/not/exist",
+        undefined,
+        [],
+        scope,
       ),
     ).not.toThrow();
     expect(() =>
       mod.rehydrateInteractiveSubagents(
         "/nonexistent/path/that/does/not/exist",
+        undefined,
+        [],
+        scope,
       ),
     ).not.toThrow();
   });

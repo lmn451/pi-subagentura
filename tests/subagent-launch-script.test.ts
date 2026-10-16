@@ -23,12 +23,22 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { writeLaunchScript } from "../src/interactive-tmux";
+import {
+  writeLaunchScript,
+  type InteractiveSubagentState,
+} from "../src/interactive-tmux";
 import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
+import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { awaitInteractiveResult } from "../src/workflow-worker";
 import { createTelemetrySession } from "../src/telemetry";
-import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
+import {
+  clearSessionScopes,
+  registerSessionScope,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-launch-"));
@@ -90,6 +100,7 @@ describe("launch script EXIT trap (idempotency)", () => {
 
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
+    __setTmuxMultiplexer(undefined);
   });
 
   it("preserves explicit completion and appends one process_exited event", () => {
@@ -161,6 +172,51 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(doneEvents[0].exitCode).toBe(1);
     expect(exits).toHaveLength(1);
     expect(exits[0].exitCode).toBe(1);
+  });
+  it("returns the process-exit snapshot for an unbound provisional turn", async () => {
+    const artDir = join(tmp, "artifacts", "early-exit");
+    const launchScript = join(artDir, "launch.sh");
+    const turnOutput = "startup diagnostics before exit";
+    const childBody = [
+      `printf '%s' '{"turnId":"turn-pending","started":false}' > "${join(artDir, "active-turn.json")}"`,
+      `printf '%s' '${turnOutput}' > "${join(artDir, "output.md")}"`,
+      "exit 1",
+    ].join("\n");
+
+    expect(runLaunchScript(artDir, launchScript, childBody)).toBe(1);
+    writeFileSync(join(artDir, "output.md"), "output changed after exit");
+
+    const state = {
+      id: "early-exit",
+      name: "Early exit",
+      task: "retain process-exit diagnostics",
+      paneId: "%99",
+      mux: "tmux",
+      sessionFile: join(tmp, "session.jsonl"),
+      cwd: tmp,
+      startedAt: Date.now(),
+      status: "running",
+      attachCommand: "",
+      selectPaneCommand: "",
+      launchScriptFile: launchScript,
+      artifactDir: artDir,
+    } satisfies InteractiveSubagentState;
+    __setTmuxMultiplexer({
+      getPaneLiveness: () => "dead",
+      getPaneLivenessAsync: async () => "dead",
+    } as never);
+
+    const result = await awaitInteractiveResult(state, undefined, 0);
+    const [completion] = countCompletions(artDir, "error");
+    expect(completion).toMatchObject({
+      turnId: "turn-pending",
+      source: "process_exit",
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      output: turnOutput,
+      errorMessage: completion.message,
+    });
   });
 
   it("writes exactly one `cancelled` event when the .cancelled flag is present and the child did not call done", () => {
@@ -310,6 +366,7 @@ type SpawnEnvName = (typeof SPAWN_ENV_NAMES)[number];
 
 describe("spawn-time state persistence", () => {
   let cwd: string;
+  let scope: SessionScope;
   let tmuxCalls: string[][];
   let savedEnv: Record<SpawnEnvName, string | undefined>;
   const SESSION = "019e500a-bae9-783a-869a-ac7c106b4ab7";
@@ -317,6 +374,11 @@ describe("spawn-time state persistence", () => {
   beforeEach(() => {
     tmuxCalls = installTmuxMock();
     cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-spawn-persist-"));
+    clearSessionScopes();
+    scope = createTestSessionScope({
+      cwd,
+      sessionManager: { getSessionId: () => "pi" },
+    });
     savedEnv = Object.fromEntries(
       SPAWN_ENV_NAMES.map((name) => [name, process.env[name]]),
     ) as Record<SpawnEnvName, string | undefined>;
@@ -360,6 +422,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     expect(existsSync(stateFilePath(cwd))).toBe(true);
     const loaded = loadInteractiveStates(cwd);
@@ -609,7 +672,12 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
-    launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+    launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      sessionScope: scope,
+    });
     expect(existsSync(stateFilePath(cwd))).toBe(false);
   });
 
@@ -617,7 +685,12 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
-    launchInteractiveSubagent({ name: "Demo", task: "t", cwd });
+    launchInteractiveSubagent({
+      name: "Demo",
+      task: "t",
+      cwd,
+      sessionScope: scope,
+    });
 
     const sendKeys = tmuxCalls.find((args) => args[0] === "send-keys");
     expect(sendKeys).toBeDefined();
@@ -634,6 +707,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
       spawnTreeContext: createRootSpawnTreeContext(
         "pi",
         cwd,
@@ -678,6 +752,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     const loaded = loadInteractiveStates(cwd);
     const entry = loaded?.states[state.id];
@@ -691,18 +766,22 @@ describe("spawn-time state persistence", () => {
     const { launchInteractiveSubagent } = await importFresh<
       typeof import("../src/interactive-tmux")
     >("../src/interactive-tmux");
+    const payloads: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 204 });
+      }),
+    );
+    scope.telemetry = createTelemetrySession(true);
     const state = launchInteractiveSubagent({
       name: "Demo",
       task: "t",
       cwd,
       parentSessionId: "pi",
       model: "private-provider/customer-deployment-secret",
-      sessionScope: {
-        id: 1,
-        generation: 1,
-        interactiveStates: new Map(),
-        telemetry: createTelemetrySession(true),
-      } as any,
+      sessionScope: scope,
     });
 
     expect(loadInteractiveStates(cwd)?.states[state.id]?.telemetry?.model).toBe(
@@ -722,6 +801,7 @@ describe("spawn-time state persistence", () => {
       task: "t",
       cwd,
       parentSessionId: "pi",
+      sessionScope: scope,
     });
     expect(state.parentSessionId).toBe("pi");
     expect(state.cwd).toBe(cwd);

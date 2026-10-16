@@ -1,34 +1,13 @@
-import {
-  completionDisplayLabel,
-  formatCompletionMessage,
-} from "./completion-presentation";
 import { createHash } from "node:crypto";
-import {
-  appendFileSync,
-  closeSync,
-  constants,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-} from "node:fs";
-import { join, resolve } from "node:path";
-import isPathInside from "is-path-inside";
+import { join } from "node:path";
+import { MAX_DELIVERY_RECEIPTS, updateInteractiveStates } from "./artifact";
 import type {
-  ExtensionAPI,
-  ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
-import {
-  MAX_DELIVERY_RECEIPTS,
-  MAX_OUTPUT_SNAPSHOT_BYTES,
-  updateInteractiveStates,
-  type PersistedDeliveryIntent,
-  type InteractiveSubagentPersistedStateV2,
+  PersistedDeliveryIntent,
+  InteractiveSubagentPersistedStateV2,
 } from "./artifact";
+import { completionDisplayLabel } from "./completion-presentation";
 import { asStringIdentifier, type DeliveryId } from "./identifier-types";
 import type { InteractiveSubagentState } from "./interactive-tmux";
-import { notifyCompletionDelivery, sanitizeOutput } from "./notifications";
 import {
   COMPLETION_CONSUMED_ENTRY_TYPE,
   COMPLETION_ENTRY_TYPE,
@@ -38,39 +17,14 @@ import {
 } from "./completion-coordinator";
 import {
   interactiveStateBelongsToOwner,
-  ownerlessEntitiesVisible,
-  resolveActualStreamingFlag,
   resolveLiveSessionScope,
-  resolveStreamingFlag,
   type SessionOwnerToken,
 } from "./session-scope";
-import { inProcessJobOwner, inProcessJobsForOwner } from "./helpers";
-import { sendCompletionTurn } from "./completion-turn";
-import {
-  captureTelemetry,
-  type TelemetryCompletionFailureStage,
-} from "./telemetry";
 
 export const MAX_DELIVERY_RECORDS = 32;
 export const MAX_DELIVERY_QUEUE_BYTES = 256 * 1024;
-export const MAX_OUTPUT_BYTES = 32 * 1024;
-export const MAX_FLUSH_BYTES = 64 * 1024;
-/** Maximum immutable output snapshot accepted from the artifact protocol. */
-export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_OUTPUT_SNAPSHOT_BYTES;
-interface DeliveryGlobalState {
-  __piSubagenturaInteractiveRegistry?: Map<string, InteractiveSubagentState>;
-  __piSubagenturaSessionManager?: { getEntries?: () => unknown[] };
-}
 
 const EMPTY_INTERACTIVE_STATES: readonly InteractiveSubagentState[] = [];
-const reportedNotificationFailures = new WeakMap<
-  InteractiveSubagentState,
-  Set<TelemetryCompletionFailureStage>
->();
-
-function deliveryGlobals(): typeof globalThis & DeliveryGlobalState {
-  return globalThis as typeof globalThis & DeliveryGlobalState;
-}
 
 function interactiveStatesForOwner(
   owner?: SessionOwnerToken,
@@ -81,46 +35,7 @@ function interactiveStatesForOwner(
       EMPTY_INTERACTIVE_STATES
     );
   }
-  if (!ownerlessEntitiesVisible()) return EMPTY_INTERACTIVE_STATES;
-  return (
-    deliveryGlobals().__piSubagenturaInteractiveRegistry?.values() ??
-    EMPTY_INTERACTIVE_STATES
-  );
-}
-
-function runningInProcessJobCount(owner?: SessionOwnerToken): number {
-  return [...inProcessJobsForOwner(owner).values()].filter(
-    (job) =>
-      job.status === "running" &&
-      (owner !== undefined || !inProcessJobOwner(job)),
-  ).length;
-}
-
-function runningInProcessJobsNote(owner?: SessionOwnerToken): string {
-  const remaining = runningInProcessJobCount(owner);
-  if (remaining <= 0) return "";
-  const noun = remaining === 1 ? "job" : "jobs";
-  const verb = remaining === 1 ? "is" : "are";
-  return `${remaining} in-process sub-agent ${noun} ${verb} still running\nDo not claim all review work is complete yet`;
-}
-
-function appendRunningJobsNote(
-  content: string,
-  owner?: SessionOwnerToken,
-): string {
-  const note = runningInProcessJobsNote(owner);
-  return note ? `${content}\n${note}` : content;
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  let truncated = Buffer.from(value, "utf8")
-    .subarray(0, Math.max(0, maxBytes - 3))
-    .toString("utf8");
-  while (Buffer.byteLength(`${truncated}…`, "utf8") > maxBytes) {
-    truncated = truncated.slice(0, -1);
-  }
-  return `${truncated}…`;
+  return EMPTY_INTERACTIVE_STATES;
 }
 
 function compactDeliveryReceipts(state: InteractiveSubagentState): void {
@@ -141,12 +56,11 @@ export function deliveryIdFor(params: {
   parentSessionId: string;
   subagentId: string;
   turnId: string;
-  mode: "notify" | "inject";
 }): DeliveryId {
   return asStringIdentifier<"delivery">(
     createHash("sha256")
       .update(
-        `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}\0${params.mode}`,
+        `${params.parentSessionId}\0${params.subagentId}\0${params.turnId}`,
       )
       .digest("hex")
       .slice(0, 32),
@@ -158,9 +72,6 @@ function copyDeliveryState(
   entry: InteractiveSubagentPersistedStateV2,
 ): void {
   entry.eventByteCursor = state.eventByteCursor ?? 0;
-  entry.sessionByteCursor =
-    state.sessionObservedByteCursor ?? state.lastDeliveredSessionByte ?? 0;
-  entry.sessionPartialLineStart = state.sessionPartialLineStart ?? null;
   entry.activeTurnId = state.activeTurnId;
   entry.pendingDeliveries = state.pendingDeliveries ?? [];
   entry.deliveryReceipts = state.deliveryReceipts ?? [];
@@ -215,89 +126,6 @@ function maxKnownCompletionAge(
   return maximum;
 }
 
-function persistOverflowIdentity(
-  state: InteractiveSubagentState,
-  intent: PersistedDeliveryIntent,
-): void {
-  const path = join(state.artifactDir, "delivery-overflow.ndjson");
-  mkdirSync(state.artifactDir, { recursive: true, mode: 0o700 });
-  appendFileSync(
-    path,
-    `${JSON.stringify({
-      deliveryId: intent.deliveryId,
-      eventId: intent.eventId,
-      turnId: intent.turnId,
-      mode: intent.mode,
-      triggerTurn: intent.triggerTurn,
-      status: intent.status,
-      ...(intent.completedAt === undefined
-        ? {}
-        : { completedAt: intent.completedAt }),
-    })}\n`,
-    { mode: 0o600 },
-  );
-}
-
-function mergeOverflowSemantics(
-  summary: PersistedDeliveryIntent,
-  collapsed: PersistedDeliveryIntent,
-): void {
-  if (collapsed.mode === "inject") summary.mode = "inject";
-  if (collapsed.triggerTurn) summary.triggerTurn = true;
-  if (collapsed.status === "error") summary.status = "error";
-  else if (collapsed.status === "cancelled" && summary.status !== "error") {
-    summary.status = "cancelled";
-  }
-  if (collapsed.completedAt !== undefined) {
-    summary.completedAt =
-      summary.completedAt === undefined
-        ? collapsed.completedAt
-        : Math.min(summary.completedAt, collapsed.completedAt);
-  }
-}
-
-function collapseOldestIntent(state: InteractiveSubagentState): boolean {
-  const queue = state.pendingDeliveries ?? [];
-  const summary = queue.find((item) => item.eventId === "delivery-overflow");
-  const oldestIndex = queue.findIndex(
-    (item) => item.eventId !== "delivery-overflow" && !item.completionPolicy,
-  );
-  if (oldestIndex < 0) return false;
-  const [oldest] = queue.splice(oldestIndex, 1);
-  persistOverflowIdentity(state, oldest);
-  if (summary) {
-    mergeOverflowSemantics(summary, oldest);
-    return true;
-  }
-  const secondIndex = queue.findIndex(
-    (item) => item.eventId !== "delivery-overflow" && !item.completionPolicy,
-  );
-  const second = secondIndex >= 0 ? queue.splice(secondIndex, 1)[0] : undefined;
-  if (second) persistOverflowIdentity(state, second);
-  const overflowId = deliveryIdFor({
-    parentSessionId: state.parentSessionId ?? "pi",
-    subagentId: state.id,
-    turnId: `delivery-overflow-${oldest.deliveryId}`,
-    mode: "notify",
-  });
-  const overflow: PersistedDeliveryIntent = {
-    deliveryId: overflowId,
-    subagentId: state.id,
-    turnId: "delivery-overflow",
-    eventId: "delivery-overflow",
-    mode: "notify",
-    triggerTurn: false,
-    status: "done",
-    artifactDir: state.artifactDir,
-    message: `Completion payloads exceeded the delivery queue bound. Every completion identity and delivery mode is preserved in ${join(state.artifactDir, "delivery-overflow.ndjson")}.`,
-    state: "queued",
-  };
-  mergeOverflowSemantics(overflow, oldest);
-  if (second) mergeOverflowSemantics(overflow, second);
-  queue.unshift(overflow);
-  return true;
-}
-
 export function enqueueDelivery(
   state: InteractiveSubagentState,
   intent: PersistedDeliveryIntent,
@@ -331,14 +159,13 @@ export function enqueueDelivery(
     candidate.message =
       `${candidate.message ?? ""}\nPayload omitted because the durable delivery queue reached its bound.`.trim();
   }
-  while (
+  if (
     queue.length > MAX_DELIVERY_RECORDS ||
     queueBytes(queue) > MAX_DELIVERY_QUEUE_BYTES
   ) {
-    if (collapseOldestIntent(state)) continue;
     if (queue.at(-1) === intent) queue.pop();
     throw new Error(
-      `Coordinated delivery queue exceeded its ${MAX_DELIVERY_RECORDS}-record bound before it could be drained`,
+      `Coordinated delivery queue exceeded its ${MAX_DELIVERY_RECORDS}-record bound before it could be drained; delivery ${intent.deliveryId} remains in the artifact log for retry`,
     );
   }
   if (options.persist !== false) persistState(state);
@@ -358,100 +185,17 @@ export function acknowledgeDeliveryWithoutDispatch(
   persistState(state);
 }
 
-function readBoundedOutput(intent: PersistedDeliveryIntent): string | null {
-  if (!intent.output) return null;
-  const expected = resolve(
-    intent.artifactDir,
-    "outputs",
-    `${intent.eventId}.md`,
-  );
-  if (resolve(intent.output.path) !== expected) return null;
-  if (
-    !Number.isSafeInteger(intent.output.bytes) ||
-    intent.output.bytes < 0 ||
-    intent.output.bytes > MAX_ARTIFACT_OUTPUT_BYTES ||
-    !/^[a-f0-9]{64}$/i.test(intent.output.sha256)
-  ) {
-    return null;
-  }
-  let fd: number | undefined;
-  try {
-    const realArtifactDir = realpathSync(intent.artifactDir);
-    const realExpected = realpathSync(expected);
-    if (!isPathInside(realExpected, realArtifactDir)) return null;
-    fd = openSync(expected, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size !== intent.output.bytes) return null;
-    const content = readFileSync(fd);
-    if (
-      content.byteLength !== intent.output.bytes ||
-      createHash("sha256").update(content).digest("hex") !==
-        intent.output.sha256.toLowerCase()
-    ) {
-      return null;
-    }
-    return sanitizeOutput(
-      content.subarray(0, MAX_OUTPUT_BYTES).toString("utf8"),
-    );
-  } catch {
-    // Any artifact read or integrity failure must fail closed.
-    return null;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function pointer(intent: PersistedDeliveryIntent): string {
-  const output = intent.output
-    ? join(intent.artifactDir, "outputs", `${intent.eventId}.md`)
-    : join(intent.artifactDir, "output.md");
-  return `Output: ${output}\nActivity log: ${intent.artifactDir}/events.ndjson`;
-}
-
-function formatIntent(
-  intent: PersistedDeliveryIntent,
-  displayLabel: string,
-  owner?: SessionOwnerToken,
-): string {
-  const output = intent.mode === "inject" ? readBoundedOutput(intent) : null;
-  const message =
-    typeof intent.message === "string" ? sanitizeOutput(intent.message) : "";
-
-  const body =
-    intent.mode === "notify"
-      ? message
-        ? `\n${message}`
-        : ""
-      : output === null
-        ? message
-          ? `\n${message}`
-          : "\n(no immutable output available)"
-        : `\n<untrusted-subagent-output>\n${output || "(empty output)"}\n</untrusted-subagent-output>`;
-  const content = formatCompletionMessage(
-    displayLabel,
-    `[${intent.status}]${body}\n${pointer(intent)}`,
-    "interactive sub-agent",
-  );
-  return appendRunningJobsNote(truncateUtf8(content, MAX_FLUSH_BYTES), owner);
-}
-
 function publishCoordinatedInteractiveCompletion(
   state: InteractiveSubagentState,
   intent: PersistedDeliveryIntent,
   owner?: SessionOwnerToken,
 ): void {
-  if (!intent.completionPolicy) return;
   const outputReference = intent.output
     ? {
         label: "output",
         value: join(intent.artifactDir, "outputs", `${intent.eventId}.md`),
       }
-    : intent.eventId.startsWith("legacy-")
-      ? {
-          label: "output (legacy)",
-          value: join(intent.artifactDir, "output.md"),
-        }
-      : undefined;
+    : undefined;
   const references = [
     ...(outputReference ? [outputReference] : []),
     {
@@ -482,143 +226,19 @@ function publishCoordinatedInteractiveCompletion(
   );
 }
 
-function reportNotificationDispatchFailure(
-  states: readonly InteractiveSubagentState[],
-  owner?: SessionOwnerToken,
-): void {
-  const telemetry = resolveLiveSessionScope(owner)?.telemetry;
-  if (!telemetry?.enabled || !telemetry.active) return;
-  let alreadyReported = false;
-  for (const state of states) {
-    if (reportedNotificationFailures.get(state)?.has("notification_dispatch")) {
-      alreadyReported = true;
-      break;
-    }
-  }
-  if (alreadyReported) return;
-  for (const state of states) {
-    const reported =
-      reportedNotificationFailures.get(state) ??
-      new Set<TelemetryCompletionFailureStage>();
-    reported.add("notification_dispatch");
-    reportedNotificationFailures.set(state, reported);
-  }
-  captureTelemetry(telemetry, {
-    event: "completion_delivery_failed",
-    failure_stage: "notification_dispatch",
-    retry_attempt: 0,
-  });
-}
-
 export function flushDeliveries(
-  pi: ExtensionAPI,
-  ui: ExtensionUIContext | undefined,
+  _pi: unknown,
+  _ui: unknown,
   owner?: SessionOwnerToken,
 ): void {
   reconcileAllDeliveryReceipts(owner);
-  const llm: Array<{
-    state: InteractiveSubagentState;
-    intent: PersistedDeliveryIntent;
-    content: string;
-  }> = [];
   for (const state of interactiveStatesForOwner(owner)) {
     if (!interactiveStateBelongsToOwner(state, owner)) continue;
     if (state.completionOwner === "workflow") continue;
     for (const intent of state.pendingDeliveries ?? []) {
-      if (intent.state === "dispatchAttempted") continue;
-      if (intent.completionPolicy) {
-        publishCoordinatedInteractiveCompletion(state, intent, owner);
-        continue;
-      }
-      llm.push({
-        state,
-        intent,
-        content: formatIntent(intent, state.name, owner),
-      });
+      publishCoordinatedInteractiveCompletion(state, intent, owner);
     }
   }
-  reconcileAllDeliveryReceipts(owner);
-  const runningJobsCount = runningInProcessJobCount(owner);
-  if (llm.length === 0) return;
-  const selected: typeof llm = [];
-  let bytes = 0;
-  for (const item of llm) {
-    const itemBytes = Buffer.byteLength(item.content, "utf8");
-    const separatorBytes = selected.length > 0 ? 9 : 0;
-    if (bytes + separatorBytes + itemBytes > MAX_FLUSH_BYTES) break;
-    selected.push(item);
-    bytes += separatorBytes + itemBytes;
-  }
-  const triggersTurn = selected.some(({ intent }) => intent.triggerTurn);
-  const parentStreaming = resolveStreamingFlag(owner);
-  const actualParentStreaming = resolveActualStreamingFlag(owner);
-  if (parentStreaming && !triggersTurn) return;
-  const deliveryIds = selected.map(({ intent }) => intent.deliveryId);
-  try {
-    sendCompletionTurn(
-      pi,
-      {
-        customType: "subagent-notify",
-        content: selected.map(({ content }) => content).join("\n\n---\n\n"),
-        display: true,
-        details: {
-          deliveryIds,
-          mode: selected.some(({ intent }) => intent.mode === "inject")
-            ? "inject"
-            : "notify",
-          statuses: selected.map(({ intent }) => intent.status),
-          status: selected.some(({ intent }) => intent.status === "error")
-            ? "error"
-            : selected.some(({ intent }) => intent.status === "cancelled")
-              ? "cancelled"
-              : "done",
-          remainingRunningJobs: runningJobsCount,
-          error: selected.some(({ intent }) => intent.status === "error"),
-        },
-      },
-      {
-        deliverAs: "followUp",
-        triggerTurn: triggersTurn,
-        parentStreaming: actualParentStreaming,
-      },
-    );
-  } catch {
-    // Keep intents pending so a later flush can retry the dispatch.
-    reportNotificationDispatchFailure(
-      selected.map(({ state }) => state),
-      owner,
-    );
-    return;
-  }
-  for (const { state } of selected) {
-    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
-  }
-  const deliveryLatencyMs = maxKnownCompletionAge(
-    selected.map(({ intent }) => intent.completedAt),
-  );
-  captureTelemetry(
-    resolveLiveSessionScope(owner)?.telemetry,
-    {
-      event: "completion_delivered",
-      delivery: "notification",
-      count: deliveryIds.length,
-      ...(deliveryLatencyMs === undefined
-        ? {}
-        : { delivery_latency_ms: deliveryLatencyMs }),
-    },
-    { dedupeKey: `notification:${deliveryIds.join(":")}` },
-  );
-  notifyCompletionDelivery(
-    ui,
-    selected.map(({ state, intent }) => ({
-      label: completionDisplayLabel(state.name, "interactive sub-agent"),
-      mode: intent.mode,
-      triggerTurn: intent.triggerTurn,
-      status: intent.status,
-    })),
-  );
-  for (const { intent } of selected) intent.state = "dispatchAttempted";
-  persistStates(selected.map(({ state }) => state));
   reconcileAllDeliveryReceipts(owner);
 }
 
@@ -655,8 +275,7 @@ function deliveryIdsFromEntry(
       ? details.completionIds
       : undefined;
   }
-  if (customType !== "subagent-notify") return undefined;
-  return Array.isArray(details?.deliveryIds) ? details.deliveryIds : undefined;
+  return undefined;
 }
 
 function consumedInteractiveDeliveryIds(
@@ -680,7 +299,6 @@ function consumedInteractiveDeliveryIds(
 function reconcileDeliveryReceiptsInMemory(
   state: InteractiveSubagentState,
   entries: unknown[],
-  owner?: SessionOwnerToken,
 ): boolean {
   compactDeliveryReceipts(state);
   const seen = new Set<string>();
@@ -692,18 +310,9 @@ function reconcileDeliveryReceiptsInMemory(
     for (const id of ids) if (typeof id === "string") seen.add(id);
   }
   let changed = false;
-  let reconciledDelivery = false;
-  const canRetryUncommittedDispatch = !resolveStreamingFlag(owner);
   for (const intent of state.pendingDeliveries ?? []) {
     if (seen.has(intent.deliveryId)) {
       (state.deliveryReceipts ??= []).push(intent.deliveryId);
-      changed = true;
-      reconciledDelivery = true;
-    } else if (
-      intent.state === "dispatchAttempted" &&
-      canRetryUncommittedDispatch
-    ) {
-      intent.state = "queued";
       changed = true;
     }
   }
@@ -711,31 +320,28 @@ function reconcileDeliveryReceiptsInMemory(
     (intent) => !seen.has(intent.deliveryId),
   );
   if (changed) compactDeliveryReceipts(state);
-  if (reconciledDelivery) {
-    reportedNotificationFailures.get(state)?.delete("notification_dispatch");
-  }
   return changed;
 }
 
 export function reconcileDeliveryReceipts(
   state: InteractiveSubagentState,
   entries: unknown[],
-  owner?: SessionOwnerToken,
+  _owner?: SessionOwnerToken,
 ): void {
-  if (reconcileDeliveryReceiptsInMemory(state, entries, owner)) {
+  if (reconcileDeliveryReceiptsInMemory(state, entries)) {
     persistState(state);
   }
 }
 
 export function reconcileAllDeliveryReceipts(owner?: SessionOwnerToken): void {
-  const entries = owner
-    ? resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.()
-    : deliveryGlobals().__piSubagenturaSessionManager?.getEntries?.();
+  if (!owner) return;
+  const entries =
+    resolveLiveSessionScope(owner)?.sessionManager?.getEntries?.();
   if (!Array.isArray(entries)) return;
   const changedStates: InteractiveSubagentState[] = [];
   for (const state of interactiveStatesForOwner(owner)) {
     if (!interactiveStateBelongsToOwner(state, owner)) continue;
-    if (reconcileDeliveryReceiptsInMemory(state, entries, owner)) {
+    if (reconcileDeliveryReceiptsInMemory(state, entries)) {
       changedStates.push(state);
     }
   }

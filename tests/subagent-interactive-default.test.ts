@@ -1,5 +1,5 @@
 /**
- * Focused tool-lifecycle coverage for interactive notification defaults and
+ * Focused tool-lifecycle coverage for coordinated completion defaults and
  * prompt running-footer refreshes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,18 +49,19 @@ vi.mock("../src/orchestrator-routing", async (importOriginal) => {
 import registerExtension from "../src/subagent";
 import {
   formatInteractiveState,
-  interactiveSubagentRegistry,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
-import { enqueueDelivery, flushDeliveries } from "../src/delivery";
 import { registerCompletionMember } from "../src/completion-coordinator";
 import {
   clearSessionScopes,
-  getStartedSessionScopes,
+  sessionOwner,
+  getSessionScopes,
   registerSessionScope,
 } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import { InteractiveParams } from "../src/schemas";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
+import { createTelemetrySession } from "../src/telemetry";
 
 const savedTmux = process.env.TMUX;
 
@@ -114,7 +115,35 @@ function mockInteractiveState(status = "running") {
     artifactDir: "/tmp/artifacts/abc12345",
   };
 }
+function getRenderedText(value: unknown): string {
+  if (value && typeof value === "object" && "text" in value) {
+    return typeof value.text === "string" ? value.text : "";
+  }
+  return "";
+}
 
+type TelemetryPayloadForTest = {
+  event?: string;
+  properties?: unknown;
+};
+
+function captureTelemetryPayloads(): TelemetryPayloadForTest[] {
+  const payloads: TelemetryPayloadForTest[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input, init) => {
+      const payload: unknown = JSON.parse(String(init?.body));
+      if (payload && typeof payload === "object" && "event" in payload) {
+        payloads.push({
+          event: typeof payload.event === "string" ? payload.event : undefined,
+          properties: "properties" in payload ? payload.properties : undefined,
+        });
+      }
+      return new Response(null, { status: 200 });
+    }),
+  );
+  return payloads;
+}
 describe("subagent_interactive tool lifecycle", () => {
   let api: ReturnType<typeof setupExtension>;
 
@@ -129,7 +158,10 @@ describe("subagent_interactive tool lifecycle", () => {
       on: vi.fn(),
     };
     registerExtension(_api as any);
-    return _api;
+    const scope = getSessionScopes().find(
+      (candidate) => candidate.pi === (_api as unknown),
+    )!;
+    return Object.assign(_api, { scope });
   }
   function setupScopeLessExtension() {
     const _api = {
@@ -164,6 +196,7 @@ describe("subagent_interactive tool lifecycle", () => {
     g.__piSubagenturaInteractivePollerHandle = undefined;
     api = setupExtension() as any;
     startSession(mockCtx());
+    api.scope.telemetry = createTelemetrySession(false);
     mockLaunchInteractiveSubagent.mockReset();
     mockCancelInteractiveSubagent.mockReset();
     mockPruneDeadInteractiveSubagents.mockReset();
@@ -190,7 +223,6 @@ describe("subagent_interactive tool lifecycle", () => {
   });
 
   afterEach(() => {
-    interactiveSubagentRegistry.clear();
     clearSessionScopes();
     const g = globalThis as any;
     if (g.__piSubagenturaInteractivePollerHandle) {
@@ -198,6 +230,7 @@ describe("subagent_interactive tool lifecycle", () => {
       g.__piSubagenturaInteractivePollerHandle = undefined;
     }
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
     if (savedTmux === undefined) delete process.env.TMUX;
     else process.env.TMUX = savedTmux;
   });
@@ -255,63 +288,6 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
-  it.each(["notify", "inject"] as const)(
-    "keeps legacy %s delivery for a scope-less registration",
-    async (mode) => {
-      clearSessionScopes();
-      const scopeLessApi = setupScopeLessExtension();
-      const toolDef = getInteractiveToolDef(scopeLessApi);
-      const state =
-        mockInteractiveState() as unknown as InteractiveSubagentState;
-      mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
-      const ctx = mockCtx();
-
-      const result = await toolDef.execute(
-        `call-scope-less-${mode}`,
-        { task: "legacy delivery", notifyOnComplete: mode },
-        undefined,
-        undefined,
-        ctx,
-      );
-
-      expect(result.details.status).toBe("started");
-      expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
-      const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-      expect(launch.notifyOnComplete).toBe(mode);
-      expect(launch.triggerTurnOnComplete).toBe(true);
-      expect(launch.completionPolicy).toBeUndefined();
-      expect(launch.completionGroupId).toBeUndefined();
-
-      interactiveSubagentRegistry.set(state.id, state);
-      enqueueDelivery(
-        state,
-        {
-          deliveryId: `scope-less-${mode}`,
-          subagentId: state.id,
-          turnId: "legacy-turn",
-          eventId: "legacy-event",
-          mode,
-          triggerTurn: true,
-          status: "done",
-          artifactDir: state.artifactDir,
-          state: "queued",
-        },
-        { persist: false },
-      );
-      flushDeliveries(
-        scopeLessApi as unknown as Parameters<typeof flushDeliveries>[0],
-        ctx.ui as unknown as Parameters<typeof flushDeliveries>[1],
-      );
-
-      expect(scopeLessApi.sendMessage).toHaveBeenCalledOnce();
-      expect(scopeLessApi.sendMessage.mock.calls[0][1]).toMatchObject({
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
-      expect(scopeLessApi.sendUserMessage).not.toHaveBeenCalled();
-    },
-  );
-
   it.each([
     ["each", { completionPolicy: "each" }],
     ["group", { completionPolicy: "group", completionGroupId: "legacy-group" }],
@@ -332,9 +308,8 @@ describe("subagent_interactive tool lifecycle", () => {
 
       expect(result).toMatchObject({
         isError: true,
-        details: { status: "error" },
+        details: { status: "session_unavailable" },
       });
-      expect(result.content[0].text).toContain("live parent session scope");
       expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
     },
   );
@@ -353,8 +328,6 @@ describe("subagent_interactive tool lifecycle", () => {
 
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
     const callArgs = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(callArgs.notifyOnComplete).toBeUndefined();
-    expect(callArgs.triggerTurnOnComplete).toBeUndefined();
     expect(callArgs.completionPolicy).toBe("each");
     expect(callArgs.deferAgentCreatedTelemetry).toBe(true);
     expect(callArgs.spawnTreeContext).toMatchObject({
@@ -550,8 +523,7 @@ describe("subagent_interactive tool lifecycle", () => {
   });
   it("rejects a v2 spawn without routingDescription before reserving a group", async () => {
     api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
-    const scope = getStartedSessionScopes()[0]!;
-    const owner = { id: scope.id, generation: scope.generation };
+    const owner = sessionOwner(api.scope);
     for (let index = 0; index < 512; index++) {
       registerCompletionMember(
         "interactive",
@@ -617,6 +589,43 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
+  it("resolves a cancelled direct launch once without starting a child", async () => {
+    const payloads = captureTelemetryPayloads();
+    api.scope.telemetry = createTelemetrySession(
+      true,
+      "straight",
+      undefined,
+      "unknown",
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await getInteractiveToolDef(api).execute(
+      "cancelled-direct-launch",
+      { task: "cancel before launch" },
+      controller.signal,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      details: { status: "cancelled" },
+    });
+    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
+    const resolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0].properties).toMatchObject({
+      outcome: "cancelled",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      mux: "unknown",
+      fallback_attempted: false,
+    });
+  });
+
   it("reports routing persistence failure without pretending the child failed", async () => {
     api.getFlag.mockImplementation((name: string) => name === "orchestratorv2");
     const toolDef = getInteractiveToolDef(api);
@@ -625,6 +634,13 @@ describe("subagent_interactive tool lifecycle", () => {
       id: "0123456789abcdef",
       artifactDir: "/tmp/artifacts/0123456789abcdef",
     };
+    const payloads = captureTelemetryPayloads();
+    api.scope.telemetry = createTelemetrySession(
+      true,
+      "straight",
+      undefined,
+      "unknown",
+    );
     mockLaunchInteractiveSubagent.mockReturnValueOnce(state);
     mockUpsertOrchestratorRoutingEntry.mockImplementationOnce(() => {
       throw new Error("routing record count exceeds 128");
@@ -645,7 +661,9 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(result.isError).not.toBe(true);
     expect(result.details).toMatchObject({
       id: state.id,
-      status: "started",
+      paneId: state.paneId,
+      artifactDir: state.artifactDir,
+      status: "degraded",
       routingMetadata: {
         status: "warning",
         error: "routing record count exceeds 128",
@@ -654,12 +672,42 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(result.content[0].text).toContain(
       `Interactive sub-agent ${state.id} started`,
     );
+    expect(result.content[0].text).toContain(`Artifact: ${state.artifactDir}`);
     expect(result.content[0].text).toContain(
       "Warning: initial routing metadata was not persisted: routing record count exceeds 128",
     );
     expect(result.content[0].text).not.toContain(
       "Failed to start interactive sub-agent",
     );
+    const rendered = toolDef.renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+    );
+    expect(getRenderedText(rendered)).toContain(
+      `Interactive sub-agent ${state.id}`,
+    );
+    expect(getRenderedText(rendered)).toContain(`pane ${state.paneId}`);
+    expect(getRenderedText(rendered)).not.toContain(
+      "Failed to start interactive sub-agent",
+    );
+    const launchResolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(launchResolutions).toHaveLength(1);
+    expect(launchResolutions[0].properties).toMatchObject({
+      outcome: "started",
+      execution: "interactive",
+      mux: "tmux",
+    });
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_operation_completed",
+      )?.properties,
+    ).toMatchObject({
+      operation: "subagent_interactive",
+      result_status: "degraded",
+    });
   });
 
   it("uses the tool-entry clock for a context-inclusive spawn", async () => {
@@ -709,8 +757,7 @@ describe("subagent_interactive tool lifecycle", () => {
   });
 
   it("rejects a new group before launching at the group cap", async () => {
-    const scope = getStartedSessionScopes()[0]!;
-    const owner = { id: scope.id, generation: scope.generation };
+    const owner = sessionOwner(api.scope);
     for (let index = 0; index < 512; index++) {
       registerCompletionMember(
         "interactive",
@@ -736,87 +783,6 @@ describe("subagent_interactive tool lifecycle", () => {
     expect(mockUpsertOrchestratorRoutingEntry).not.toHaveBeenCalled();
   });
 
-  it("rejects conflicting coordinated and legacy delivery options", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-conflict",
-      {
-        task: "review shard",
-        completionPolicy: "each",
-        notifyOnComplete: "notify",
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("cannot be combined");
-    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
-  });
-
-  it("maps explicit legacy notify mode to coordinated each delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-2",
-      { task: "research X", notifyOnComplete: "notify" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.notifyOnComplete).toBeUndefined();
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("notify the user immediately");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
-
-  it("maps explicit legacy inject controls to coordinated each delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-3",
-      {
-        task: "research X",
-        notifyOnComplete: "inject",
-        triggerTurnOnComplete: false,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.notifyOnComplete).toBeUndefined();
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-    expect(result.content[0].text).not.toContain(
-      "Completion output will be injected",
-    );
-  });
-
-  it("accepts legacy triggerTurnOnComplete through coordinated delivery", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-trigger-turn",
-      {
-        task: "research X",
-        notifyOnComplete: "notify",
-        triggerTurnOnComplete: true,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
-
   it("updates the running footer immediately after launch", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();
@@ -826,11 +792,7 @@ describe("subagent_interactive tool lifecycle", () => {
       parentSessionId: "test-session-id",
     };
     mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
-      interactiveSubagentRegistry.set(state.id, state as any);
-      getStartedSessionScopes()[0]?.interactiveStates.set(
-        state.id,
-        state as any,
-      );
+      api.scope.interactiveStates.set(state.id, state as any);
       return state;
     });
 
@@ -858,11 +820,7 @@ describe("subagent_interactive tool lifecycle", () => {
         parentSessionId: "test-session-id",
       };
       mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
-        interactiveSubagentRegistry.set(state.id, state as any);
-        getStartedSessionScopes()[0]?.interactiveStates.set(
-          state.id,
-          state as any,
-        );
+        api.scope.interactiveStates.set(state.id, state as any);
         return state;
       });
 
@@ -901,10 +859,10 @@ describe("subagent_interactive tool lifecycle", () => {
       id: "def67890",
       parentSessionId: "another-session-id",
     };
-    interactiveSubagentRegistry.set(foreign.id, foreign as any);
+    const peer = createTestSessionScope();
+    peer.interactiveStates.set(foreign.id, foreign as any);
     mockLaunchInteractiveSubagent.mockImplementationOnce(() => {
-      interactiveSubagentRegistry.set(mine.id, mine as any);
-      getStartedSessionScopes()[0]?.interactiveStates.set(mine.id, mine as any);
+      api.scope.interactiveStates.set(mine.id, mine as any);
       return mine;
     });
 
@@ -933,9 +891,9 @@ describe("subagent_interactive tool lifecycle", () => {
       id: "def67890",
       parentSessionId: "another-session-id",
     };
-    interactiveSubagentRegistry.set(foreign.id, foreign as any);
-    const [scope] = getStartedSessionScopes();
-    if (scope) scope.lifecycle = "shutdown";
+    const peer = createTestSessionScope();
+    peer.interactiveStates.set(foreign.id, foreign as any);
+    api.scope.lifecycle = "shutdown";
 
     const result = await toolDef.execute(
       "call-footer-stale",
@@ -951,9 +909,8 @@ describe("subagent_interactive tool lifecycle", () => {
 
   it("denies recursive spawning when a child has no bootstrap context", async () => {
     const toolDef = getInteractiveToolDef(api);
-    const scope = getStartedSessionScopes()[0];
-    scope!.lineageMode = "child";
-    scope!.spawnTreeContext = undefined;
+    api.scope.lineageMode = "child";
+    api.scope.spawnTreeContext = undefined;
 
     const result = await toolDef.execute(
       "call-no-lineage",
@@ -974,8 +931,7 @@ describe("subagent_interactive tool lifecycle", () => {
     const toolDef = getStatusToolDef(api);
     const ctx = mockCtx();
     const state = mockInteractiveState();
-    interactiveSubagentRegistry.set(state.id, state as any);
-    getStartedSessionScopes()[0]?.interactiveStates.set(state.id, state as any);
+    api.scope.interactiveStates.set(state.id, state as any);
     mockPruneDeadInteractiveSubagents.mockImplementationOnce(() => {
       state.status = "exited";
     });
@@ -993,32 +949,12 @@ describe("subagent_interactive tool lifecycle", () => {
       undefined,
     );
   });
-  it("maps legacy false triggering to coordinated timing", async () => {
-    const toolDef = getInteractiveToolDef(api);
-    const result = await toolDef.execute(
-      "call-notify-no-trigger",
-      {
-        task: "research X",
-        notifyOnComplete: "notify",
-        triggerTurnOnComplete: false,
-      },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    const launch = mockLaunchInteractiveSubagent.mock.calls[0][0];
-    expect(launch.triggerTurnOnComplete).toBeUndefined();
-    expect(launch.completionPolicy).toBe("each");
-    expect(result.content[0].text).toContain("immutable result references");
-  });
 
   it("notifies the user without scheduling another LLM completion when cancelled", async () => {
     const toolDef = getCancelToolDef(api);
     const ctx = mockCtx();
     const state = mockInteractiveState();
-    interactiveSubagentRegistry.set(state.id, state as any);
-    getStartedSessionScopes()[0]?.interactiveStates.set(state.id, state as any);
+    api.scope.interactiveStates.set(state.id, state as any);
     mockCancelInteractiveSubagent.mockImplementationOnce(() => {
       state.status = "cancelled";
       return state;
@@ -1058,16 +994,13 @@ describe("subagent_interactive tool lifecycle", () => {
     const [commonFields, contextModes] = (params as any).allOf;
     const properties = commonFields.properties;
     expect(properties).toBeDefined();
-    expect(properties.notifyOnComplete).toBeDefined();
-    expect(properties.triggerTurnOnComplete).toBeDefined();
+    expect(properties.notifyOnComplete).toBeUndefined();
+    expect(properties.triggerTurnOnComplete).toBeUndefined();
     expect(properties.routingDescription).toBeDefined();
     expect(properties.routingAliases).toBeDefined();
     expect(properties.completionPolicy).toBeDefined();
     expect(properties.completionGroupId).toBeDefined();
     expect(contextModes.anyOf).toHaveLength(3);
-    const desc = properties.notifyOnComplete.description ?? "";
-    expect(desc).toMatch(/deprecated compatibility/i);
-    expect(desc).toContain("coordinated each");
     expect(properties.completionPolicy.description).toMatch(
       /defaults to "each"/i,
     );
@@ -1076,7 +1009,6 @@ describe("subagent_interactive tool lifecycle", () => {
 
   it("isolates peer status, cancel, send, list, and read tools", async () => {
     clearSessionScopes();
-    interactiveSubagentRegistry.clear();
     const toolsA = new Map<string, { execute: Function }>();
     const toolsB = new Map<string, { execute: Function }>();
     const piA = {
@@ -1119,18 +1051,14 @@ describe("subagent_interactive tool lifecycle", () => {
     };
     scopeA.interactiveStates.set(owned.id, owned as never);
     scopeB.interactiveStates.set(foreign.id, foreign as never);
-    interactiveSubagentRegistry.set(owned.id, owned as never);
-    interactiveSubagentRegistry.set(foreign.id, foreign as never);
 
     const ctx = mockCtx();
-    interactiveSubagentRegistry.delete(owned.id);
     mockCancelInteractiveSubagent.mockClear();
     const ownedCancel = await toolsA
       .get("cancel_interactive_subagent")
       ?.execute("cancel-owned", { jobId: owned.id }, undefined, undefined, ctx);
     expect(ownedCancel.isError).not.toBe(true);
     expect(mockCancelInteractiveSubagent).toHaveBeenCalledOnce();
-    interactiveSubagentRegistry.set(owned.id, owned as never);
 
     const status = await toolsA
       .get("get_interactive_subagent_status")

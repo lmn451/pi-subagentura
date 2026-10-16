@@ -42,12 +42,13 @@
     "ORCHESTRATOR_SYSTEM_PROMPT.md",
     "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
     "docs/workflows.md",
+    "docs/telemetry.md",
+    "docs/protocol-v1-compatibility.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
     "skills/ralplan",
     "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
-    "src/ndjson.d.ts",
     "src/notifications.ts",
     "src/rendering.ts",
     "src/schemas.ts",
@@ -85,6 +86,8 @@
     "src/settings.ts",
     "src/telemetry.ts",
     "src/telemetry-operations.ts",
+    "src/telemetry-launch.ts",
+    "src/telemetry-runtime.ts",
     "src/subagent.ts",
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",
@@ -171,7 +174,6 @@
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
-    "is-path-inside": "^4.0.0",
-    "ndjson": "^2.0.0"
+    "is-path-inside": "^4.0.0"
   }
 }

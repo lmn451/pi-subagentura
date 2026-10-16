@@ -5,15 +5,10 @@ import type {
 import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
-import type { PendingJobDelivery } from "./notifications";
 import type { TelemetrySession } from "./telemetry";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
 const SESSION_SCOPE_ID_COUNTER_KEY = "__piSubagenturaSessionScopeIdCounter";
-export const ACTIVE_SESSION_SCOPE_ID_KEY =
-  "__piSubagenturaActiveSessionScopeId";
-const ACTIVE_SESSION_SCOPE_GENERATION_KEY =
-  "__piSubagenturaActiveSessionScopeGeneration";
 
 export type SessionScopeLifecycle = "registered" | "started" | "shutdown";
 
@@ -39,7 +34,6 @@ export interface SessionScope {
   uiPromptActive?: boolean;
   parentStreaming: boolean;
   inProcessJobs: Map<string, JobState>;
-  pendingInProcessDeliveries: PendingJobDelivery[];
   interactiveStates: Map<string, InteractiveSubagentState>;
   /** Anonymous correlation state for this exact lifecycle generation. */
   telemetry?: TelemetrySession;
@@ -61,7 +55,6 @@ export interface SessionScopeRegistration {
   uiPromptActive?: boolean;
   parentStreaming?: boolean;
   inProcessJobs?: Map<string, JobState>;
-  pendingInProcessDeliveries?: PendingJobDelivery[];
   interactiveStates?: Map<string, InteractiveSubagentState>;
   telemetry?: TelemetrySession;
 }
@@ -78,13 +71,6 @@ export interface SessionToolToken {
 interface SessionScopeGlobalState {
   __piSubagenturaSessionScopes?: Map<number, SessionScope>;
   __piSubagenturaSessionScopeIdCounter?: number;
-  __piSubagenturaActiveSessionScopeId?: number;
-  __piSubagenturaActiveSessionScopeGeneration?: number;
-  __piSubagenturaPiRef?: ExtensionAPI;
-  __piSubagenturaUi?: ExtensionUIContext;
-  __piSubagenturaSessionManager?: SessionScopeManager;
-  __piSubagenturaParentStreaming?: boolean;
-  __piSubagenturaUiPromptActive?: boolean;
 }
 
 function getGlobalState(): typeof globalThis & SessionScopeGlobalState {
@@ -103,7 +89,6 @@ export function clearSessionScopes(): void {
   getSessionScopeRegistry().clear();
   const state = getGlobalState();
   state[SESSION_SCOPE_ID_COUNTER_KEY] = 0;
-  setLegacyActiveSessionRefs(undefined);
 }
 export function getStartedSessionScopes(): SessionScope[] {
   return getSessionScopes().filter((scope) => scope.lifecycle === "started");
@@ -131,7 +116,6 @@ export function createSessionScope(
     parentStreaming: false,
     uiPromptActive: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
     interactiveStates: new Map(),
     telemetry: undefined,
   };
@@ -146,7 +130,6 @@ function isCompleteSessionScope(
       registration.lifecycle === "shutdown") &&
     typeof registration.parentStreaming === "boolean" &&
     registration.inProcessJobs instanceof Map &&
-    Array.isArray(registration.pendingInProcessDeliveries) &&
     registration.interactiveStates instanceof Map
   );
 }
@@ -187,10 +170,6 @@ export function registerSessionScope(
     if (registration.inProcessJobs !== undefined) {
       existing.inProcessJobs = registration.inProcessJobs;
     }
-    if (registration.pendingInProcessDeliveries !== undefined) {
-      existing.pendingInProcessDeliveries =
-        registration.pendingInProcessDeliveries;
-    }
     if (registration.interactiveStates !== undefined) {
       existing.interactiveStates = registration.interactiveStates;
     }
@@ -216,8 +195,6 @@ export function registerSessionScope(
         uiPromptActive: registration.uiPromptActive ?? false,
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),
-        pendingInProcessDeliveries:
-          registration.pendingInProcessDeliveries ?? [],
         interactiveStates: registration.interactiveStates ?? new Map(),
         telemetry: registration.telemetry,
       };
@@ -242,10 +219,6 @@ export function advanceSessionScopeGeneration(id: number): number {
   const scope = findSessionScope(id);
   if (!scope) return 0;
   scope.generation++;
-  const state = getGlobalState();
-  if (state[ACTIVE_SESSION_SCOPE_ID_KEY] === id) {
-    state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = scope.generation;
-  }
   return scope.generation;
 }
 
@@ -268,12 +241,9 @@ export function resolveLiveSessionScope(
 export function resolveToolSessionScope(
   token: SessionToolToken | undefined,
 ): SessionScope | undefined {
-  if (token) {
-    const scope = findSessionScope(token.id);
-    return scope?.lifecycle === "started" ? scope : undefined;
-  }
-  const started = getStartedSessionScopes();
-  return started.length === 1 ? started[0] : undefined;
+  if (!token) return undefined;
+  const scope = findSessionScope(token.id);
+  return scope?.lifecycle === "started" ? scope : undefined;
 }
 
 export function resolveToolSessionOwner(
@@ -286,10 +256,7 @@ export function resolveToolSessionOwner(
 export function isSessionOwnerLive(
   owner: SessionOwnerToken | undefined,
 ): boolean {
-  return !owner || resolveLiveSessionScope(owner) !== undefined;
-}
-export function ownerlessEntitiesVisible(): boolean {
-  return getStartedSessionScopes().length === 0;
+  return owner !== undefined && resolveLiveSessionScope(owner) !== undefined;
 }
 
 export function sessionIdForOwner(
@@ -307,57 +274,14 @@ export function parentSessionBelongsToOwner(
   parentSessionId: string | undefined,
   owner: SessionOwnerToken | undefined,
 ): boolean {
-  if (!owner) return true;
+  if (!owner) return false;
   const ownerSessionId = sessionIdForOwner(owner);
   return ownerSessionId !== undefined && parentSessionId === ownerSessionId;
 }
 
-/** Keep legacy process-global refs usable only as a single-session fallback. */
-export function setLegacyActiveSessionRefs(scope?: SessionScope): void {
-  const state = getGlobalState();
-  if (!scope) {
-    state.__piSubagenturaPiRef = undefined;
-    state.__piSubagenturaUi = undefined;
-    state.__piSubagenturaSessionManager = undefined;
-    state[ACTIVE_SESSION_SCOPE_ID_KEY] = undefined;
-    state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = undefined;
-    state.__piSubagenturaParentStreaming = false;
-    state.__piSubagenturaUiPromptActive = false;
-    return;
-  }
-
-  state.__piSubagenturaPiRef = scope.pi;
-  state.__piSubagenturaUi = scope.ui;
-  state.__piSubagenturaSessionManager = scope.sessionManager;
-  state[ACTIVE_SESSION_SCOPE_ID_KEY] = scope.id;
-  state[ACTIVE_SESSION_SCOPE_GENERATION_KEY] = scope.generation;
-  state.__piSubagenturaParentStreaming = scope.parentStreaming;
-  state.__piSubagenturaUiPromptActive = scope.uiPromptActive === true;
-}
-
-export function getActiveSessionOwner(): SessionOwnerToken | undefined {
-  const state = getGlobalState();
-  const id = state[ACTIVE_SESSION_SCOPE_ID_KEY];
-  const generation = state[ACTIVE_SESSION_SCOPE_GENERATION_KEY];
-  if (typeof id !== "number" || typeof generation !== "number") {
-    return undefined;
-  }
-  return { id, generation };
-}
-
-export function getActiveSessionScopeId(): number | undefined {
-  return getGlobalState()[ACTIVE_SESSION_SCOPE_ID_KEY];
-}
-
 export function resolveStreamingFlag(owner?: SessionOwnerToken): boolean {
   const scope = owner ? resolveLiveSessionScope(owner) : undefined;
-  const state = getGlobalState();
-  if (owner) {
-    return Boolean(scope?.parentStreaming || scope?.uiPromptActive);
-  }
-  return Boolean(
-    state.__piSubagenturaParentStreaming || state.__piSubagenturaUiPromptActive,
-  );
+  return Boolean(scope?.parentStreaming || scope?.uiPromptActive);
 }
 export function resolveActualStreamingFlag(owner?: SessionOwnerToken): boolean {
   const scope = owner ? resolveLiveSessionScope(owner) : undefined;
@@ -366,7 +290,7 @@ export function resolveActualStreamingFlag(owner?: SessionOwnerToken): boolean {
     try {
       return !scope.isParentIdle();
     } catch {
-      // A stale context falls back to the event-maintained compatibility flag.
+      // A stale context falls back to the scoped event-maintained flag.
     }
   }
   return resolveStreamingFlag(owner);

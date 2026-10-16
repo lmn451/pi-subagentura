@@ -2,7 +2,6 @@ import { Type } from "typebox";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
-  type InProcessSpawnFailureStage,
   MAX_REGISTRY_SIZE,
   registerInProcessJob,
   removeInProcessJob,
@@ -11,10 +10,7 @@ import {
   type JobState,
   type StartSubagentJobResult,
 } from "./helpers";
-import {
-  launchInteractiveSubagent,
-  registerInteractiveSubagentState,
-} from "./interactive-tmux";
+import { launchInteractiveSubagent } from "./interactive-tmux";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -47,11 +43,7 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
-import { sanitizeOutput } from "./notifications";
-import {
-  completionDisplayLabel,
-  formatCompletionMessage,
-} from "./completion-presentation";
+import { completionDisplayLabel } from "./completion-presentation";
 import { showWorkflowTree } from "./workflow-tree-ui";
 import {
   WorkflowPickerComponent,
@@ -69,15 +61,12 @@ import {
   type SpawnDepthDecision,
 } from "./orchestration-context";
 import {
-  getActiveSessionOwner,
   isSessionOwnerLive,
-  resolveActualStreamingFlag,
   resolveLiveSessionScope,
   sessionOwner,
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
-import { isOrchestratorV2Enabled, sendCompletionTurn } from "./completion-turn";
 import { attachAsyncJobSettlement } from "./tools/in-process";
 import { registerToolWithDefaultGuidance } from "./tool-guidance";
 import { registerCommandWithTelemetry } from "./telemetry-operations";
@@ -98,7 +87,11 @@ import {
   telemetryDepthBucket,
   type TelemetryCompletionPolicy,
   type TelemetryResultReadOutcome,
+  type TelemetrySpawnFailureMux,
+  type TelemetrySpawnFailureOperation,
+  type TelemetrySpawnFailureStage,
 } from "./telemetry";
+import { createLaunchResolutionReporter } from "./telemetry-launch";
 
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
@@ -113,9 +106,7 @@ function workflowTelemetryCompletionPolicy(
   runAsync: boolean,
   completion: ResolvedCompletionPolicy,
 ): TelemetryCompletionPolicy {
-  if (!runAsync) return "inline";
-  if (completion.legacy) return "legacy";
-  return completion.policy ?? "each";
+  return runAsync ? completion.policy : "inline";
 }
 
 /**
@@ -197,28 +188,6 @@ function workflowErrorUsage(error: unknown): WorkflowUsage | undefined {
     : undefined;
 }
 
-export function formatWorkflowNotificationSummary(
-  job: WorkflowJobState,
-): string {
-  const run = job.result;
-  if (run) {
-    const usage = presentWorkflowUsage(run.usage);
-    const usageSummary = usage
-      ? `, ${formatWorkflowUsage(usage, {
-          outputBudget: job.snapshot.budgetTotal,
-        })}`
-      : "";
-    return `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${usageSummary}.`;
-  }
-  const usage = presentWorkflowUsage(job.snapshot.usage);
-  return `${job.error ?? "Workflow did not produce a result."}${
-    usage
-      ? ` (${formatWorkflowUsage(usage, {
-          outputBudget: job.snapshot.budgetTotal,
-        })})`
-      : ""
-  }`;
-}
 function workflowReadLatencyMs(job: WorkflowJobState): number | undefined {
   if (job.completedAt === undefined) return undefined;
   try {
@@ -266,9 +235,7 @@ export function registerWorkflowTool(
 ): void {
   debugLog("info", "workflow_registered", {});
   const owner = (): SessionOwnerToken | undefined =>
-    sessionScope
-      ? { id: sessionScope.id, generation: sessionScope.generation }
-      : getActiveSessionOwner();
+    sessionScope ? sessionOwner(sessionScope) : undefined;
   // Build the real spawn function from the tool ctx. Switches backend on `isolation`.
   function makeRunAgent(
     ctx: any,
@@ -295,7 +262,59 @@ export function registerWorkflowTool(
       onProgress,
       onCancellationSnapshot,
     }) => {
+      const launchRequestedAt = Date.now();
+      const tryProcess = isolation !== "in-process";
+      const childScope = resolveLiveSessionScope(supervisorOwner);
+      const childOwner = supervisorOwner;
+      const childTelemetry = childScope?.telemetry;
+      const launchResolution = createLaunchResolutionReporter(
+        childTelemetry,
+        {
+          requested_execution: tryProcess ? "interactive" : "in-process",
+          requested_mux: tryProcess ? "auto" : "none",
+          invocation_source: "workflow",
+          async: workflowAsync,
+          depth: telemetryDepth(spawn.childDepth),
+          depth_bucket: telemetryDepthBucket(spawn.childDepth),
+          completion_policy: telemetryCompletionPolicy,
+        },
+        launchRequestedAt,
+      );
+      let initialFailure:
+        | {
+            stage: TelemetrySpawnFailureStage;
+            mux?: TelemetrySpawnFailureMux;
+            operation?: TelemetrySpawnFailureOperation;
+          }
+        | undefined;
+      let finalFailure: TelemetrySpawnFailureStage | undefined;
+      let finalFailureOperation: TelemetrySpawnFailureOperation | undefined;
+      let fallbackAttempted = false;
+      const resolveFailedLaunch = (outcome: "rejected" | "cancelled"): void => {
+        launchResolution({
+          outcome,
+          mux: initialFailure?.mux ?? (finalFailure ? "none" : "unknown"),
+          fallback_attempted: fallbackAttempted,
+          ...(initialFailure
+            ? {
+                initial_failure_stage: initialFailure.stage,
+                initial_failure_operation: initialFailure.operation,
+              }
+            : {}),
+          ...(finalFailure
+            ? {
+                final_failure_stage: finalFailure,
+                final_failure_operation: finalFailureOperation,
+              }
+            : {}),
+        });
+      };
+      if (signal?.aborted) {
+        resolveFailedLaunch("cancelled");
+        throw new Error("Workflow agent cancelled before launch.");
+      }
       if (supervisorOwner && !isSessionOwnerLive(supervisorOwner)) {
+        resolveFailedLaunch("cancelled");
         throw new Error(
           "Workflow agent cancelled: its parent session is no longer live.",
         );
@@ -312,8 +331,6 @@ export function registerWorkflowTool(
         }
       };
 
-      const childScope = resolveLiveSessionScope(supervisorOwner);
-      const tryProcess = isolation !== "in-process";
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
         try {
@@ -335,8 +352,15 @@ export function registerWorkflowTool(
             telemetryInvocationSource: "workflow",
             telemetryAsync: workflowAsync,
             telemetryCompletionPolicy,
+            spawnRequestedAt: launchRequestedAt,
+            onSpawnFailure: (failure) => {
+              initialFailure = failure;
+            },
           });
         } catch (err) {
+          initialFailure ??= {
+            stage: spawnFailureStage(err) ?? "unknown",
+          };
           const msg = err instanceof Error ? err.message : String(err);
           debugLog("warn", "isolation_process_fallback", { reason: msg });
           onProgress?.({
@@ -346,35 +370,35 @@ export function registerWorkflowTool(
           });
         }
         if (state) {
-          // launchInteractiveSubagent performs this registration itself. Repeating
-          // the idempotent synchronization here keeps alternate launch adapters and
-          // test doubles on the same production contract: the owner scope is the
-          // authoritative index, while the process-global registry is compatibility.
-          registerInteractiveSubagentState(state, childScope);
+          launchResolution({
+            outcome: "started",
+            execution: "interactive",
+            mux: state.mux,
+            fallback_attempted: false,
+          });
           const result = await awaitInteractiveResult(
             state,
             signal,
             undefined,
             onCancellationSnapshot,
+            childTelemetry,
           );
           state.workflowResultConsumed = true;
           return result;
         }
       }
+      if (signal?.aborted) {
+        resolveFailedLaunch("cancelled");
+        throw new Error("Workflow agent cancelled before in-process fallback.");
+      }
+      fallbackAttempted = tryProcess;
 
-      // A child whose deliveryOwner carries no session-scope identity matches
-      // no owner-scoped sweep: it is invisible in the supervisor and the footer,
-      // and session shutdown skips it outright. Prefer the live owner, and leave
-      // the child unregistered rather than create an unreachable registry row.
-      const childOwner = supervisorOwner ?? getActiveSessionOwner();
-      // Telemetry has to name the scope the job actually registers under. Reading
-      // it from `supervisorOwner` instead drops every child event whenever the
-      // workflow tool was registered without a session scope.
-      const childTelemetry = resolveLiveSessionScope(childOwner)?.telemetry;
       const captureSpawnFailure = (
-        failureStage: InProcessSpawnFailureStage,
+        failureStage: TelemetrySpawnFailureStage,
         attemptStartedAt: number,
       ): void => {
+        finalFailure = failureStage;
+        finalFailureOperation = undefined;
         captureTelemetry(
           childTelemetry,
           {
@@ -398,8 +422,7 @@ export function registerWorkflowTool(
       // shutdown can drain it from the authoritative job map.
       const abort = new AbortController();
       const forwardAbort = () => abort.abort(signal?.reason);
-      if (signal?.aborted) abort.abort(signal.reason);
-      else signal?.addEventListener("abort", forwardAbort, { once: true });
+      signal?.addEventListener("abort", forwardAbort, { once: true });
       const spawnRequestedAt = Date.now();
       let prepared: StartSubagentJobResult;
       try {
@@ -453,21 +476,29 @@ export function registerWorkflowTool(
           spawnRequestedAt,
         });
       } catch (error) {
-        captureSpawnFailure(
-          spawnFailureStage(error) ?? "unknown",
-          spawnRequestedAt,
-        );
+        const failureStage = spawnFailureStage(error) ?? "unknown";
+        captureSpawnFailure(failureStage, spawnRequestedAt);
         signal?.removeEventListener("abort", forwardAbort);
+        resolveFailedLaunch(signal?.aborted ? "cancelled" : "rejected");
         throw error;
       }
+      if (signal?.aborted) {
+        signal.removeEventListener("abort", forwardAbort);
+        discardWorkflowChildSpawn(abort, prepared);
+        resolveFailedLaunch("cancelled");
+        throw new Error(
+          "Workflow agent cancelled before the child was registered.",
+        );
+      }
       // The parent session can shut down while startSubagentJob is awaited above.
-      // session_shutdown drains jobRegistry, so registering now would re-insert
+      // session_shutdown drains the SessionScope registry, so registering now would re-insert
       // into an already-drained registry and start a model turn that no abort path
       // can reach (the PR #59 shutdown-escape hole).
       if (childOwner && !isSessionOwnerLive(childOwner)) {
         signal?.removeEventListener("abort", forwardAbort);
         captureSpawnFailure("parent_shutdown", spawnRequestedAt);
         discardWorkflowChildSpawn(abort, prepared);
+        resolveFailedLaunch("cancelled");
         throw new Error(
           "Workflow agent cancelled: parent session shut down before the child was registered.",
         );
@@ -493,15 +524,26 @@ export function registerWorkflowTool(
         },
       };
       if (childOwner) {
-        if (!registerInProcessJob(childJob, childOwner)) {
+        let registered: boolean;
+        try {
+          registered = registerInProcessJob(childJob, childOwner);
+        } catch (error) {
           signal?.removeEventListener("abort", forwardAbort);
-          captureSpawnFailure(
-            childOwner && !isSessionOwnerLive(childOwner)
-              ? "parent_shutdown"
-              : "registration",
-            spawnRequestedAt,
-          );
+          captureSpawnFailure("registration", spawnRequestedAt);
           discardWorkflowChildSpawn(abort, prepared);
+          resolveFailedLaunch("rejected");
+          throw error;
+        }
+        if (!registered) {
+          const failureStage = isSessionOwnerLive(childOwner)
+            ? "registration"
+            : "parent_shutdown";
+          signal?.removeEventListener("abort", forwardAbort);
+          captureSpawnFailure(failureStage, spawnRequestedAt);
+          discardWorkflowChildSpawn(abort, prepared);
+          resolveFailedLaunch(
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          );
           throw new Error(
             `Workflow agent could not start: ${MAX_REGISTRY_SIZE} in-process sub-agent jobs are retained or running.`,
           );
@@ -517,7 +559,23 @@ export function registerWorkflowTool(
           reason: "no live session scope to own the child",
         });
       }
-      prepared.start?.();
+      const started = prepared.start?.() ?? false;
+      launchResolution({
+        outcome: started
+          ? fallbackAttempted
+            ? "recovered"
+            : "started"
+          : "cancelled",
+        ...(started ? { execution: "in-process" as const } : {}),
+        mux: started ? "none" : (initialFailure?.mux ?? "unknown"),
+        fallback_attempted: fallbackAttempted,
+        ...(initialFailure
+          ? {
+              initial_failure_stage: initialFailure.stage,
+              initial_failure_operation: initialFailure.operation,
+            }
+          : {}),
+      });
       try {
         return await prepared.jobPromise;
       } finally {
@@ -525,16 +583,6 @@ export function registerWorkflowTool(
         if (childOwner) removeInProcessJob(childJob.id, childOwner);
       }
     };
-  }
-
-  const MAX_WORKFLOW_NOTIFICATION_CHARS = 20_000;
-  const WORKFLOW_TRUNCATION_MARKER = "\n\n[Content truncated.]";
-
-  function truncateWorkflowNotification(text: string): string {
-    if (text.length <= MAX_WORKFLOW_NOTIFICATION_CHARS) return text;
-    const end =
-      MAX_WORKFLOW_NOTIFICATION_CHARS - WORKFLOW_TRUNCATION_MARKER.length;
-    return text.slice(0, Math.max(0, end)) + WORKFLOW_TRUNCATION_MARKER;
   }
 
   function configureWorkflowCompletion(
@@ -561,94 +609,51 @@ export function registerWorkflowTool(
     return completionDisplayLabel(job.name, "workflow");
   }
 
-  function notifyWorkflowCompletion(job: WorkflowJobState): boolean {
-    const run = job.result;
-    const errorCount = run?.errorCount ?? job.snapshot.errorCount;
+  function notifyWorkflowCompletion(job: WorkflowJobState): void {
+    const errorCount = job.result?.errorCount ?? job.snapshot.errorCount;
     const presentation = getWorkflowCompletionPresentation(
       job.status,
       errorCount,
     );
-    if (job.completionPolicy) {
-      publishCompletion(
-        {
-          schemaVersion: 1,
-          completionId: `workflow:${job.id}`,
-          source: "workflow",
-          sourceId: job.id,
-          label: workflowCompletionLabel(job),
-          status:
-            job.status === "cancelled"
-              ? "cancelled"
-              : job.status === "error" ||
-                  presentation.label === "completed with errors"
-                ? "error"
-                : "done",
-          ...(job.status === "done" &&
-          presentation.label === "completed with errors"
-            ? { presentation: "completed-with-errors" as const }
-            : {}),
-          policy: job.completionPolicy,
-          ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
-          references:
-            job.status === "cancelled"
-              ? [{ label: "status", value: "cancelled; no result retained" }]
-              : [
-                  {
-                    label: "result",
-                    value: `call get_workflow_result with workflowId ${JSON.stringify(job.id)}`,
-                  },
-                ],
-          completedAt: Date.now(),
-        },
-        job.parentSessionOwner,
-      );
-      return true;
-    }
-    const icon = presentation.icon || (job.status === "done" ? "✅" : "❌");
-    const rawSummary = formatWorkflowNotificationSummary(job);
-    const summary = truncateWorkflowNotification(sanitizeOutput(rawSummary));
-    let content = formatCompletionMessage(
-      completionDisplayLabel(job.name, "workflow"),
-      `${icon} ${presentation.label} — ${summary}`,
-      "workflow",
-    );
-    if (run) {
-      content += isOrchestratorV2Enabled(pi)
-        ? "\n\nThis completion came from the separate workflow compatibility mode. Surface its status without calling workflow tools in Orchestratorv2 mode."
-        : `\n\nCall get_workflow_result with workflowId "${job.id}" to retrieve the result.`;
-    }
-    try {
-      const owner =
-        job.parentSessionOwner ??
-        (sessionScope ? sessionOwner(sessionScope) : undefined);
-      sendCompletionTurn(
-        pi,
-        {
-          customType: "workflow-notify",
-          content,
-          display: true,
-          details: {
-            workflowId: job.id,
-            status: job.status,
-            presentationStatus: presentation.label,
-            usage: run?.usage ?? job.snapshot.usage,
-            budgetTotal: job.snapshot.budgetTotal,
-          },
-        },
-        {
-          deliverAs: "followUp",
-          triggerTurn: true,
-          parentStreaming: resolveActualStreamingFlag(owner),
-        },
-      );
-      return true;
-    } catch (err) {
-      debugLog("warn", "workflow_completion_notification_failed", {
+    if (!job.completionPolicy) {
+      debugLog("warn", "workflow_completion_policy_missing", {
         workflowId: job.id,
-        error: err instanceof Error ? err.message : String(err),
       });
-      return false;
+      return;
     }
+    publishCompletion(
+      {
+        schemaVersion: 1,
+        completionId: `workflow:${job.id}`,
+        source: "workflow",
+        sourceId: job.id,
+        label: workflowCompletionLabel(job),
+        status:
+          job.status === "cancelled"
+            ? "cancelled"
+            : job.status === "error" ||
+                presentation.label === "completed with errors"
+              ? "error"
+              : "done",
+        ...(job.status === "done" &&
+        presentation.label === "completed with errors"
+          ? { presentation: "completed-with-errors" as const }
+          : {}),
+        policy: job.completionPolicy,
+        ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
+        references:
+          job.status === "cancelled"
+            ? [{ label: "status", value: "cancelled; no result retained" }]
+            : [
+                {
+                  label: "result",
+                  value: `call get_workflow_result with workflowId ${JSON.stringify(job.id)}`,
+                },
+              ],
+        completedAt: Date.now(),
+      },
+      job.parentSessionOwner,
+    );
   }
 
   registerToolWithDefaultGuidance(pi, {
@@ -779,10 +784,7 @@ export function registerWorkflowTool(
         };
       }
       const workflowOwner = owner();
-      if (
-        sessionScope &&
-        (!workflowOwner || !isSessionOwnerLive(workflowOwner))
-      ) {
+      if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         const error =
           "Workflow tool registration is no longer attached to a live session.";
         return {
@@ -796,20 +798,8 @@ export function registerWorkflowTool(
       try {
         completion =
           params.async === false
-            ? { legacy: false }
-            : sessionScope
-              ? resolveCompletionPolicy(params)
-              : (() => {
-                  if (
-                    params.completionPolicy !== undefined ||
-                    params.completionGroupId !== undefined
-                  ) {
-                    throw new Error(
-                      "completionPolicy or completionGroupId requires an active parent session",
-                    );
-                  }
-                  return { legacy: true };
-                })();
+            ? { policy: "each" }
+            : resolveCompletionPolicy(params);
         if (
           params.async === false &&
           (params.completionPolicy !== undefined ||
@@ -1515,19 +1505,14 @@ export function registerWorkflowTool(
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
       const workflowOwner = owner();
-      if (
-        sessionScope &&
-        (!workflowOwner || !isSessionOwnerLive(workflowOwner))
-      ) {
+      if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         throw new Error(
           "Workflow command registration is no longer attached to a live session.",
         );
       }
       // One completion decision drives both the coordination that is installed
       // and the dimension that is reported, so the two cannot drift apart.
-      const commandCompletion: ResolvedCompletionPolicy = sessionScope
-        ? { policy: "each", legacy: false }
-        : { legacy: true };
+      const commandCompletion: ResolvedCompletionPolicy = { policy: "each" };
       // A slash command runs at the prompt, so this is the root's own depth,
       // and the root's own session id is the only attribution available.
       const spawn = resolveWorkflowSpawn(ctx);

@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Telemetry schema v6 records one logical child-launch resolution, separating
+  direct acceptance, automatic fallback recovery, rejection, and cancellation
+  from technical spawn attempts and terminal task outcomes.
+- Closed traffic provenance distinguishes explicitly classified usage and
+  development from unknown traffic, survives child bootstrap and recovery, and
+  suppresses normal capture for test-marked runs without weakening other opt-outs.
+- Published PostHog report queries define reliability, feature volume versus
+  logical-session reach, and provenance/schema/unknown-data coverage.
+
+### Changed
+
+- Removed obsolete aggregate indexes and active-session compatibility helpers for
+  in-process jobs and interactive sub-agent state. Runtime state now requires an
+  exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
+
+### Fixed
+
+- Attribute mux-probe observations to the selected backend and reporter, sharing
+  pane-level outage episode authority across poller and workflow waiter so
+  workflow settlement does not count the same observation again.
+- Mark missing inherited history as an explicit rejected tool result and
+  live-child routing-metadata persistence warnings as degraded operation results.
+- Preserve a known initial mux when shutdown prevents a prepared workflow
+  fallback from starting, keeping its logical outcome cancelled rather than
+  accepted.
+- Prevent ordinary Vitest fixtures from sending telemetry to PostHog: reject
+  unmocked capture attempts visibly and keep intentional telemetry assertions
+  isolated behind in-memory collectors.
+
+- Drain coordinated completion queues when an independent intent carries stale
+  group metadata, without blocking later deliveries.
+- Preserve early child-process failure snapshots by letting Pi lifecycle hooks,
+  rather than the launch wrapper, establish agent turns.
+- Reject removed lifecycle and cutover state fields before mutation, preserving
+  unsupported state files byte-for-byte.
+- Return active-turn staging output for default artifact reads, even after an
+  earlier turn completes or `since` filters out all events, without consuming
+  that earlier completion.
+- Restore interactive activity rows from protocol-v2 tool events in physical
+  byte order, including tool-name fallback for missing or non-visible summaries.
+
 ## [3.6.5] - 2026-10-14
 
 ### Added
@@ -24,6 +67,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
+
+### Changed
+
+- Breaking: make the interactive runtime protocol-v2-only. Remove v1 event/state
+  migration, synthetic identities, numeric snapshot readers, and child session-log
+  tailing. Existing legacy files are not deleted or rewritten, but this runtime no
+  longer reads them and does not provide migration tooling.
+- Breaking: remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
+  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
+  now uses the coordinated each/group protocol only.
+- Remove the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 
