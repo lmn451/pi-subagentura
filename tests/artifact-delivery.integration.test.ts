@@ -27,10 +27,18 @@ import {
   registerCompletionCoordinator,
   registerCompletionMember,
 } from "../src/completion-coordinator";
+import {
+  createPiSessionHarness,
+  type PiSessionHarness,
+} from "./helpers/pi-session-harness";
+
+const repoRoot = new URL("..", import.meta.url).pathname;
+const childHarnesses: PiSessionHarness[] = [];
 
 const roots: string[] = [];
 
 afterEach(() => {
+  for (const harness of childHarnesses.splice(0)) harness.dispose();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
   clearSessionScopes();
   __setTmuxMultiplexer(undefined);
@@ -229,16 +237,35 @@ describe("protocol-v2 artifact delivery", () => {
   });
 
   it.each(["each", "group"] as const)(
-    "publishes provider errors before group completion with %s policy",
+    "publishes settled HTTP 402 provider errors before group completion with %s policy",
     async (policy) => {
       const art = makeArtifact();
-      const completion = appendCompletionEvent(art, {
-        turnId: "provider-error-turn",
+      const harness = await createPiSessionHarness(repoRoot, {
+        childArtifactDir: art.dir,
+        retrySettings: {
+          enabled: false,
+          maxRetries: 0,
+          baseDelayMs: 0,
+          maxAgentDelayMs: 0,
+        },
+      });
+      childHarnesses.push(harness);
+      const prompt = harness.session.prompt("exercise provider failure");
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.failNext("HTTP 402: insufficient credits");
+      await prompt;
+      await harness.session.waitForIdle();
+
+      const childCompletion = readEventRecords(art)
+        .map(({ event }) => event)
+        .find((event) => event.type === "completion");
+      expect(childCompletion).toMatchObject({
+        type: "completion",
         outcome: "error",
         source: "agent_settled",
-        eventId: "provider-error",
-        errorMessage: "402 insufficient credits",
-      })!;
+        errorMessage: "HTTP 402: insufficient credits",
+        agentStopReason: "error",
+      });
       const entries: Array<{ customType: string; data: any }> = [];
       const pi = {
         appendEntry: vi.fn((customType: string, data: unknown) => {
@@ -296,12 +323,13 @@ describe("protocol-v2 artifact delivery", () => {
 
       await pollArtifactChanges(scope.pi, owner);
       flushCompletionManifests(owner);
+      expect(state.status).toBe("idle");
 
       const errorEntry = entries.find(
         ({ customType }) => customType === "subagentura-completion",
       );
       expect(errorEntry?.data).toMatchObject({
-        turnId: completion.turnId,
+        turnId: childCompletion?.turnId,
         status: "error",
         policy,
       });
@@ -314,6 +342,10 @@ describe("protocol-v2 artifact delivery", () => {
       expect(pi.sendMessage.mock.calls[0][0].content).toContain(
         '"status":"error"',
       );
+
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+      expect(pi.sendMessage).toHaveBeenCalledOnce();
     },
   );
 
