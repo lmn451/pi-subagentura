@@ -909,15 +909,17 @@ snapshot; a running turn returns its current staging `output.md`, even when an
 earlier turn has completed. Empty or missing current staging never falls back to
 an earlier snapshot.
 
-For a selected terminal `error`, the model-facing response also includes a
-separate status/reason summary, even when the immutable snapshot is empty.
-Structured envelopes contribute recognized error/message text or a safe HTTP
-status prefix; provider metadata and request-ID values are omitted. Plain-text
-credential labels may remain with their matched values replaced by `[REDACTED]`.
-Text is normalized, passed through the existing credential redactor plus explicit
-header/token/URL credential filters, and capped at 512 UTF-8 bytes. This
-pattern-based redaction is best-effort, not a guarantee against arbitrary secrets.
-Snapshots, manifests, and telemetry payloads are unchanged.
+For a selected terminal `error`, the model-facing response includes a separate
+status and explicitly untrusted diagnostic, even when the immutable snapshot is
+empty. Structured envelopes contribute only recognized `error.message`, string
+`error`, top-level `message`, or a safe HTTP status prefix; other provider fields
+are not copied. ANSI escapes are removed, controls become spaces, whitespace is
+collapsed, and wrapper delimiters are escaped. The diagnostic is capped at 512
+UTF-8 bytes including any truncation marker. Error diagnostics are intentionally
+not credential-redacted: credential-shaped text in a recognized message may reach
+the parent model. The boundary labels the text as data but is not a prompt-injection
+defense. Existing snapshot output sanitization, snapshots, manifests, and telemetry
+are unchanged.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated
