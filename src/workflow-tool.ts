@@ -293,7 +293,7 @@ export function registerWorkflowTool(
       const resolveFailedLaunch = (outcome: "rejected" | "cancelled"): void => {
         launchResolution({
           outcome,
-          mux: "unknown",
+          mux: initialFailure?.mux ?? (finalFailure ? "none" : "unknown"),
           fallback_attempted: fallbackAttempted,
           ...(initialFailure
             ? {
@@ -559,11 +559,15 @@ export function registerWorkflowTool(
           reason: "no live session scope to own the child",
         });
       }
-      prepared.start?.();
+      const started = prepared.start?.() ?? false;
       launchResolution({
-        outcome: fallbackAttempted ? "recovered" : "started",
-        execution: "in-process",
-        mux: "none",
+        outcome: started
+          ? fallbackAttempted
+            ? "recovered"
+            : "started"
+          : "cancelled",
+        ...(started ? { execution: "in-process" as const } : {}),
+        mux: started ? "none" : "unknown",
         fallback_attempted: fallbackAttempted,
         ...(initialFailure
           ? {

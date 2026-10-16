@@ -606,7 +606,7 @@ export function registerInteractiveSubagentTools(
       const resolveFailedLaunch = (outcome: "rejected" | "cancelled"): void => {
         launchResolution({
           outcome,
-          mux: "unknown",
+          mux: lastFailure?.mux ?? "unknown",
           fallback_attempted: false,
           ...(lastFailure
             ? {

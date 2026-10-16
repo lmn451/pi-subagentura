@@ -608,14 +608,20 @@ async function runSubagent(
       telemetry,
       spawnRequestedAt,
     });
-    start?.();
-    started = typeof start === "function";
+    started = start?.() ?? false;
     if (started) {
       launchResolution({
         outcome: "started",
         execution: "in-process",
         mux: "none",
         fallback_attempted: false,
+      });
+    } else {
+      launchResolution({
+        outcome: "cancelled",
+        mux: "none",
+        fallback_attempted: false,
+        final_failure_stage: "parent_shutdown",
       });
     }
     const result = await jobPromise;
@@ -971,7 +977,13 @@ function registerSubagentWithContextTool(
         updateRunningFooter(ctx, owner);
 
         attachAsyncJobSettlement(jobId, jobState, ctx);
-        start?.();
+        if (!(start?.() ?? false)) {
+          resolveFailedLaunch("parent_shutdown", "cancelled");
+          removeInProcessJob(jobId, owner);
+          releaseCompletionGroup(completionReservation);
+          discardAsyncSpawn(abort, session, disposeBeforeStart);
+          return cancelledAsyncSpawnResult();
+        }
         launchResolution({
           outcome: "started",
           execution: "in-process",
@@ -1353,7 +1365,13 @@ function registerSubagentIsolatedTool(
         updateRunningFooter(ctx, owner);
 
         attachAsyncJobSettlement(jobId, jobState, ctx);
-        start?.();
+        if (!(start?.() ?? false)) {
+          resolveFailedLaunch("parent_shutdown", "cancelled");
+          removeInProcessJob(jobId, owner);
+          releaseCompletionGroup(completionReservation);
+          discardAsyncSpawn(abort, session, disposeBeforeStart);
+          return cancelledAsyncSpawnResult();
+        }
         launchResolution({
           outcome: "started",
           execution: "in-process",

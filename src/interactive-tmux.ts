@@ -64,6 +64,7 @@ import {
   removeInteractiveState,
 } from "./artifact";
 import type { CompletionPolicy } from "./completion-coordinator";
+import { clearRuntimeFailureEpisodes } from "./telemetry-runtime";
 import {
   type CapturePaneOptions,
   type CapturePaneResult,
@@ -349,6 +350,7 @@ export function removeInteractiveSubagentState(
     return false;
   }
   scope.interactiveStates.delete(state.id);
+  clearRuntimeFailureEpisodes(state.artifactDir);
   return true;
 }
 

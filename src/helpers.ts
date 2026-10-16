@@ -844,7 +844,7 @@ export interface StartSubagentJobResult {
   session: AgentSession;
   liveStatus: SubagentLiveStatus;
   /** Begin prompt execution after the caller validates and registers the job. */
-  start: () => void;
+  start: () => boolean;
   /** Settle and dispose a prepared session without ever starting its prompt. */
   disposeBeforeStart: () => void;
   modelLabel?: string;
@@ -1213,11 +1213,11 @@ export async function startSubagentJob(
     disposedBeforeStart = true;
     startGateResolve();
   };
-  const start = (): void => {
-    if (started || disposedBeforeStart) return;
+  const start = (): boolean => {
+    if (started || disposedBeforeStart) return started;
     if (!resolveLiveSessionScope(owner)) {
       disposePreparedSession();
-      return;
+      return false;
     }
     started = true;
     const startedAt = Date.now();
@@ -1246,6 +1246,7 @@ export async function startSubagentJob(
       unit: "job",
     });
     startGateResolve();
+    return true;
   };
   let result: SubagentResult = {
     isError: true,

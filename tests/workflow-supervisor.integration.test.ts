@@ -464,7 +464,7 @@ describe("workflow supervisor integration", () => {
     const payloads = captureTelemetryPayloads();
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const owner = ownerOf(context);
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     let releaseChild!: (result: SubagentResult) => void;
     const tempSessionDir = tempDir();
     const envNames = [
@@ -679,7 +679,7 @@ describe("workflow supervisor integration", () => {
           outcome: "rejected",
           requested_execution: "interactive",
           requested_mux: "auto",
-          mux: "unknown",
+          mux: "tmux",
           fallback_attempted: true,
           initial_failure_stage: "mux_resolution",
           initial_failure_operation: "mux_resolution",
@@ -770,7 +770,7 @@ describe("workflow supervisor integration", () => {
         outcome: "cancelled",
         requested_execution: "interactive",
         requested_mux: "auto",
-        mux: "unknown",
+        mux: "tmux",
         fallback_attempted: true,
         initial_failure_stage: "mux_resolution",
         initial_failure_operation: "mux_resolution",
@@ -822,7 +822,7 @@ describe("workflow supervisor integration", () => {
 
   it("leaves a workflow child unattributed when the caller has no session id", async () => {
     const { context } = liveSessionContext({ id: 11, sessionId: "session-a" });
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     let releaseChild!: (result: SubagentResult) => void;
     mockLaunch.mockImplementationOnce(() => {
       throw new Error("mux unavailable");

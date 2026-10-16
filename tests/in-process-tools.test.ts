@@ -256,6 +256,7 @@ const defaultStartSubagentJobResult = {
     },
   },
   modelLabel: "test/model",
+  start: vi.fn(() => true),
 };
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -752,6 +753,51 @@ describe("subagent_isolated tool", () => {
     // Result should come from the mocked runSubagent path
     expect(result.content[0].text).toBe("task completed");
     expect(result.details.status).toBe("done");
+  });
+
+  it("reports cancellation when the prepared job declines to start", async () => {
+    const payloads = captureTelemetryPayloads();
+    const scoped = setupScopedExtension(724);
+    scoped.scope.telemetry = createTelemetrySession(true);
+    const start = vi.fn(() => false);
+    mockStartSubagentJob.mockResolvedValueOnce({
+      ...defaultStartSubagentJobResult,
+      start,
+      jobPromise: Promise.resolve({
+        ...defaultSuccessResult,
+        cancelled: true,
+      }),
+    });
+
+    await getToolDef(scoped.api, "subagent_isolated").execute(
+      "start-declined",
+      { task: "run the prepared task", async: false },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(
+      payloads.filter(
+        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+      ),
+    ).toMatchObject([
+      {
+        properties: {
+          outcome: "cancelled",
+          requested_execution: "in-process",
+          mux: "none",
+          fallback_attempted: false,
+          final_failure_stage: "parent_shutdown",
+        },
+      },
+    ]);
+    expect(
+      payloads.some(
+        (payload) => payload.event === "pi_subagentura_agent_created",
+      ),
+    ).toBe(false);
   });
 
   it("rejects completion coordination controls on the sync path", async () => {

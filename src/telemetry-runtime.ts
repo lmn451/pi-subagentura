@@ -33,6 +33,10 @@ export function clearRuntimeFailureEpisode(
   if (kinds.size === 0) activeEpisodes.delete(artifactDir);
 }
 
+export function clearRuntimeFailureEpisodes(artifactDir: string): void {
+  activeEpisodes.delete(artifactDir);
+}
+
 export function runtimeFailureDedupeKey(
   kind: TelemetryRuntimeFailureKind,
   episodeId: number,
