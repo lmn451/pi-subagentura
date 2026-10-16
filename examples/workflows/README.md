@@ -32,19 +32,46 @@ run it with `workflow({ name, args })` or select it with `/workflows`.
 
 ## Typed V4 definition
 
-[`review-source.ts`](./review-source.ts) is a TypeScript module that default
-exports `defineWorkflow()`. It validates input and output with SDK schemas,
-reviews each file through a stable map step, checkpoints the synthesis, pauses
-for human confirmation, and writes the result as an artifact.
+[`review-source.ts`](./review-source.ts) is a TypeScript V4 definition that
+reviews the same supplied files independently across four aspects: intent/design
+alignment, compatibility, unintended behavior changes, and correctness/quality.
+Each reviewer returns a schema-validated verdict and up to 15 findings with
+severity, location, direct evidence, and explanation; the workflow combines
+these results without deduplicating independent evidence.
 
-Pass the full source to the `workflow` tool with a JSON input such as
-`{ files: ["src/auth.ts", "src/session.ts"] }`. V4 definitions are durable by
-default and use project-scoped run storage; set `durable: false` for an
-in-memory invocation. They support Node's erasable TypeScript syntax, but the
-workflow runner does not type-check it. Runtime imports must be named
-`defineWorkflow` / `schema` imports from `pi-subagentura/workflow`; other runtime
-imports are rejected. Node.js 24.12 or newer is required. The exact
-`effect@4.0.0-rc.117` runtime dependency remains internal.
+Pass the full source to the `workflow` tool with both `files` and
+`intendedChange`, for example:
+
+```js
+workflow({
+  script: "<contents of examples/workflows/review-source.ts>",
+  args: {
+    files: ["src/auth.ts", "src/session.ts"],
+    intendedChange:
+      "Replace the token cache while preserving existing callers.",
+  },
+});
+```
+
+`files` accepts 1–40 non-empty paths, each at most 512 characters and 8,192
+characters combined. `intendedChange` must be non-empty and at most 12,000
+characters. The deterministic aggregate reports `pass`, `concern`, `blocking`,
+or `uncertain`. Any `blocking` verdict or critical/high finding yields blocking;
+otherwise failed/uncertain reviews yield uncertain; otherwise a concern verdict
+or any finding yields concern; pass requires four completed pass reviews and no
+findings. Findings sort by severity (critical to low), fixed aspect order,
+location, evidence, and explanation; severity counts include every finding.
+Failed/unknown aspects never pass. After review, the workflow optionally asks
+whether to save the report as a run artifact; it never asks for permission to run
+the read-only review.
+
+V4 definitions are durable by default and use project-scoped run storage; set
+`durable: false` for an in-memory invocation. They support Node's erasable
+TypeScript syntax, but the workflow runner does not type-check it. Runtime
+imports must be named `defineWorkflow` / `schema` imports from
+`pi-subagentura/workflow`; other runtime imports are rejected. Node.js 24.12 or
+newer is required. The exact `effect@4.0.0-rc.117` runtime dependency remains
+internal.
 
 To inspect a paused run, use `list_workflow_runs` or `get_workflow_status`, then
 call `respond_workflow_input({workflowId, path})`; Pi asks the person at the UI
@@ -53,8 +80,9 @@ directly by the workflow tool. After interruption, use
 `resume_workflow({workflowId})` while Pi is running. V4 status summaries omit
 step outputs and answers. See the [runtime contract](../../WORKFLOW_RUNTIME.md#v4-definitions).
 
-All bundled examples accept either an args object or its JSON-string form. JSON
-strings are useful when another tool boundary serializes the payload:
+Legacy `.mjs` examples accept either an args object or its JSON-string form.
+V4 definitions receive schema-validated argument objects. JSON strings are
+useful when another tool boundary serializes a legacy payload:
 
 ```js
 workflow({
