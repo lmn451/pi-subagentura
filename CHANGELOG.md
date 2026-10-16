@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-10-16
+
 ### Added
 
 - Telemetry schema v6 records one logical child-launch resolution, separating
@@ -18,11 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Published PostHog report queries define reliability, feature volume versus
   logical-session reach, and provenance/schema/unknown-data coverage.
 
+### Breaking
+
+- Breaking: This major release makes protocol-v2 the only interactive runtime.
+  It removes protocol-v1 event/state migration, synthetic identities, numeric
+  snapshot readers, and child session-log tailing. Existing unsupported legacy
+  artifacts and state are preserved unchanged, but are not read or migrated.
+  Before upgrading, finish or cancel agents that depend on legacy state; use
+  fresh compatible sessions after the upgrade.
+- Breaking: Remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
+  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
+  now uses the coordinated `each`/`group` protocol only.
+
 ### Changed
 
 - Removed obsolete aggregate indexes and active-session compatibility helpers for
   in-process jobs and interactive sub-agent state. Runtime state now requires an
   exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
+- Removed the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 
@@ -37,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevent ordinary Vitest fixtures from sending telemetry to PostHog: reject
   unmocked capture attempts visibly and keep intentional telemetry assertions
   isolated behind in-memory collectors.
-
 - Drain coordinated completion queues when an independent intent carries stale
   group metadata, without blocking later deliveries.
 - Preserve early child-process failure snapshots by letting Pi lifecycle hooks,
@@ -67,17 +81,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
-
-### Changed
-
-- Breaking: make the interactive runtime protocol-v2-only. Remove v1 event/state
-  migration, synthetic identities, numeric snapshot readers, and child session-log
-  tailing. Existing legacy files are not deleted or rewritten, but this runtime no
-  longer reads them and does not provide migration tooling.
-- Breaking: remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
-  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
-  now uses the coordinated each/group protocol only.
-- Remove the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 
@@ -387,7 +390,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
 [3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
 [3.6.1]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...v3.6.1
