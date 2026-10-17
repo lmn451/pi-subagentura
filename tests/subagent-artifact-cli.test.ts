@@ -599,10 +599,14 @@ describe("subagent-artifact CLI", () => {
           .split("\n")
           .map((line) => JSON.parse(line));
         const promptErrorIndex = events.findIndex(
-          (event) => event.type === "completion" && event.source === "prompt_error",
+          (event) =>
+            event.type === "completion" && event.source === "prompt_error",
         );
         const cancellationIndex = events.findIndex(
-          (event) => event.type === "completion" && event.source === "parent" && event.outcome === "cancelled",
+          (event) =>
+            event.type === "completion" &&
+            event.source === "parent" &&
+            event.outcome === "cancelled",
         );
         expect(promptErrorIndex).toBeGreaterThanOrEqual(0);
         expect(cancellationIndex).toBeGreaterThan(promptErrorIndex);

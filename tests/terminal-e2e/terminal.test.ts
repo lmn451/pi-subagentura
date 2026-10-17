@@ -366,7 +366,8 @@ async function retryPromptErrorAfterNativeNew(
           event.eventType === "artifact_read_observed" &&
           event.childId === childId &&
           event.turnId === secondCompletion?.turnId &&
-          event.resultText?.includes(String(secondCompletion.errorMessage)),
+          typeof event.resultText === "string" &&
+          event.resultText.includes(String(secondCompletion.errorMessage)),
       ),
     "parent observes the second raw error from the replacement session",
   );
