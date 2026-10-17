@@ -261,7 +261,8 @@ function installPromptErrorHook(
     const sessionFile = sessionManager.getSessionFile();
     const isPrimary =
       primarySessions.has(session) ||
-      (typeof sessionFile === "string" && resolve(sessionFile) === selectedFile);
+      (typeof sessionFile === "string" &&
+        resolve(sessionFile) === selectedFile);
     if (!isPrimary) {
       return originalPrompt.apply(session, args);
     }
@@ -321,7 +322,9 @@ function installPromptErrorHook(
   const runtimePrototype = AgentSessionRuntime?.prototype;
   const originalApply = runtimePrototype?.apply;
   if (typeof originalApply !== "function") {
-    throw new TypeError("Pi public AgentSessionRuntime.apply API is unavailable");
+    throw new TypeError(
+      "Pi public AgentSessionRuntime.apply API is unavailable",
+    );
   }
   runtimePrototype.apply = function (...args) {
     const replacesPrimary = primarySessions.has(this.session);
