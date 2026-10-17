@@ -131,7 +131,7 @@ function hasUntrustedEnvelopeField(value: string): boolean {
       )
       .replace(/\\(["\\/bfnrt])/g, "$1");
     if (decoded === unescaped) {
-      return /["']?(?:request[_-]?id|headers|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|credential|password|passwd|passphrase|private[_-]?key|stack)["']?\s*:/i.test(
+      return /["']?(?:request[_-]?id|headers|authorization|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|credential|password|passwd|passphrase|private[_-]?key|stack|error[_-]?(?:description|uri|code|type)|trace[_-]?id|details?)["']?\s*:/i.test(
         unescaped,
       );
     }

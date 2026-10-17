@@ -1191,6 +1191,17 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-request",
     },
     {
+      label: "prose prefix with unsupported error description",
+      errorMessage: JSON.stringify({
+        error: {
+          message:
+            'Expected response: {"error_description":"private-token-value"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-token-value",
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {
