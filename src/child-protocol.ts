@@ -301,10 +301,24 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
         const isNativeProvider = Boolean(
           registry.getRegisteredNativeProvider?.(model.provider),
         );
+        // The fallback omits apiKey; resolved keyless auth can precede the
+        // auth-status snapshot.
+        const requestAuth = auth as typeof auth & {
+          baseUrl?: string;
+        };
+        const hasResolvedRequestConfig =
+          auth.ok &&
+          Boolean(
+            Object.prototype.hasOwnProperty.call(auth, "apiKey") ||
+            requestAuth.baseUrl ||
+            Object.keys(auth.headers ?? {}).length ||
+            Object.keys(auth.env ?? {}).length,
+          );
         const missingLegacyAuth =
           !isNativeProvider &&
           typeof registry.hasConfiguredAuth === "function" &&
-          !registry.hasConfiguredAuth(model);
+          !registry.hasConfiguredAuth(model) &&
+          !hasResolvedRequestConfig;
         if (auth.ok && !missingLegacyAuth) return;
         if (!auth.ok) {
           const missingAuthError =

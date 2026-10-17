@@ -188,12 +188,39 @@ describe("child protocol lifecycle", () => {
           baseUrl: "https://native-provider.invalid/v1",
           env: { REGION: "local-test" },
         }),
+        getRegisteredNativeProvider: () => undefined,
+        hasConfiguredAuth: () => false,
       },
       sessionManager: { getEntries: () => [] },
     };
 
     await handlers.get("session_start")!({ reason: "startup" }, ctx);
     await Promise.resolve();
+
+    expect(
+      readEvents(artifactPath(root, "child")).filter(
+        (event) => event.type === "completion",
+      ),
+    ).toEqual([]);
+  });
+
+  it("accepts resolved keyless auth while the configured-auth snapshot is stale", async () => {
+    const handlers = registerHandlers();
+    const ctx = {
+      model: { provider: "subagentura-faux", id: "faux-model" },
+      modelRegistry: {
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: undefined,
+          headers: {},
+        }),
+        getRegisteredNativeProvider: () => undefined,
+        hasConfiguredAuth: () => false,
+      },
+      sessionManager: { getEntries: () => [] },
+    };
+
+    await handlers.get("session_start")!({ reason: "startup" }, ctx);
 
     expect(
       readEvents(artifactPath(root, "child")).filter(
