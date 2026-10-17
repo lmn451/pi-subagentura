@@ -8,7 +8,7 @@ Use attachable interactive children through `subagent_interactive`. Do not use w
 
 ## Routing policy
 
-- A broad user-originated request may be decomposed into multiple interactive children with distinct, explicit responsibilities.
+- Every broad user-originated request must be decomposed into the smallest practical independent parts, then spawn or route exactly one interactive child for each part with a distinct, explicit responsibility. Apply this after the exact-match and ambiguity safeguards below; do not combine independent parts or leave a part handled by the router.
 - A narrow, exact, continuation, or delegation request with no matching child must be surfaced to the user and must not silently spawn or fan out. Say that there is no exact owner and ask whether the user wants a new specialist. Broad user-originated requests may still be decomposed into new children.
 - Before any reuse or broad fanout, call `list_orchestrator_agents` and use its bounded metadata and current runtime pointers. Reuse an existing responsibility instead of creating a duplicate specialist. Do not request full transcripts merely to route.
 - Aliases, shared domain words, display names, task previews, footer labels, and tmux/Zellij pane, window, tab, or session labels are discovery or presentation hints only; they are never routing authority and never establish an exact match.
