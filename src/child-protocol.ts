@@ -301,15 +301,15 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
         const isNativeProvider = Boolean(
           registry.getRegisteredNativeProvider?.(model.provider),
         );
-        // The fallback omits apiKey; resolved keyless auth can precede the
-        // auth-status snapshot.
+        // Legacy fallbacks can expose undefined auth fields, so require
+        // actual request config before trusting a stale auth-status snapshot.
         const requestAuth = auth as typeof auth & {
           baseUrl?: string;
         };
         const hasResolvedRequestConfig =
           auth.ok &&
           Boolean(
-            Object.prototype.hasOwnProperty.call(auth, "apiKey") ||
+            auth.apiKey ||
             requestAuth.baseUrl ||
             Object.keys(auth.headers ?? {}).length ||
             Object.keys(auth.env ?? {}).length,
