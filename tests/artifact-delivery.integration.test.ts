@@ -28,6 +28,7 @@ import {
 } from "../src/session-scope";
 import {
   flushCompletionManifests,
+  prepareCompletionManifest,
   registerCompletionCoordinator,
   registerCompletionMember,
   settleCompletionParentTurn,
@@ -333,7 +334,12 @@ describe("protocol-v2 artifact delivery", () => {
         ...(policy === "group" ? { completionGroupId: groupId } : {}),
       };
       const siblingState = siblingArt
-        ? { ...makeState(siblingArt.dir), id: "sibling" }
+        ? {
+            ...makeState(siblingArt.dir),
+            id: "sibling",
+            completionPolicy: "group" as const,
+            completionGroupId: groupId,
+          }
         : undefined;
       const owner = sessionOwner(scope);
       registerInteractiveSubagentState(state, scope);
@@ -398,16 +404,30 @@ describe("protocol-v2 artifact delivery", () => {
           eventId: "sibling-completion",
         });
         await pollArtifactChanges(scope.pi, owner);
+        expect(prepareCompletionManifest(owner)).toBeUndefined();
         expect(
           entries.filter(
             ({ customType }) => customType === "subagentura-completion",
           ),
         ).toHaveLength(2);
+        expect(
+          entries.findLast(
+            ({ customType }) => customType === "subagentura-completion",
+          )?.data,
+        ).toMatchObject({
+          sourceId: "sibling",
+          policy: "group",
+          groupId,
+          groupRemaining: 0,
+        });
         expect(pi.sendMessage).toHaveBeenCalledOnce();
 
         settleCompletionParentTurn(owner);
         flushCompletionManifests(owner);
         expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+        expect(pi.sendMessage.mock.calls[1][0]).toMatchObject({
+          details: { groups: [groupId] },
+        });
         expect(pi.sendMessage.mock.calls[1][0].content).toContain(
           '"sourceId":"sibling"',
         );
@@ -416,6 +436,7 @@ describe("protocol-v2 artifact delivery", () => {
         );
       }
 
+      settleCompletionParentTurn(owner);
       await pollArtifactChanges(scope.pi, owner);
       flushCompletionManifests(owner);
       expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
