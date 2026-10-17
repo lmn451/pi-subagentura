@@ -295,18 +295,18 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       .getApiKeyAndHeaders(model)
       .then((auth) => {
         if (startupAgentStarted) return;
-        if (auth.ok) return;
+        const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+          getRegisteredNativeProvider?: (provider: string) => unknown;
+        };
+        const isNativeProvider = Boolean(
+          registry.getRegisteredNativeProvider?.(model.provider),
+        );
+        const missingLegacyAuth =
+          !isNativeProvider &&
+          typeof registry.hasConfiguredAuth === "function" &&
+          !registry.hasConfiguredAuth(model);
+        if (auth.ok && !missingLegacyAuth) return;
         if (!auth.ok) {
-          const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
-            getRegisteredNativeProvider?: (provider: string) => unknown;
-          };
-          const isNativeProvider = Boolean(
-            registry.getRegisteredNativeProvider?.(model.provider),
-          );
-          const missingLegacyAuth =
-            !isNativeProvider &&
-            typeof registry.hasConfiguredAuth === "function" &&
-            !registry.hasConfiguredAuth(model);
           const missingAuthError =
             missingLegacyAuth ||
             /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(

@@ -147,6 +147,37 @@ describe("child protocol lifecycle", () => {
     expect(completions).toHaveLength(2);
   });
 
+  it("reports missing legacy auth when Pi returns an empty compatibility result", async () => {
+    const handlers = registerHandlers();
+    const ctx = {
+      model: { provider: "subagentura-faux", id: "faux-model" },
+      modelRegistry: {
+        getApiKeyAndHeaders: async () => ({ ok: true, headers: {} }),
+        getRegisteredNativeProvider: () => undefined,
+        hasConfiguredAuth: () => false,
+      },
+      sessionManager: { getEntries: () => [] },
+    };
+
+    await handlers.get("session_start")!({ reason: "startup" }, ctx);
+
+    const completions = readEvents(artifactPath(root, "child")).filter(
+      (event) => event.type === "completion",
+    );
+    expect(completions).toMatchObject([
+      expect.objectContaining({
+        type: "completion",
+        turnId: "process",
+        outcome: "error",
+        source: "explicit",
+        exitCode: 1,
+        message: "Selected model has no configured authentication.",
+        errorMessage: "Selected model has no configured authentication.",
+      }),
+    ]);
+    expect(completions).toHaveLength(1);
+  });
+
   it("accepts successful auth resolved through endpoint and env fields", async () => {
     const handlers = registerHandlers();
     const ctx = {
