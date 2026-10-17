@@ -456,11 +456,24 @@ describe("subagent-artifact CLI", () => {
         });
 
         const loaderPath = join(tmp, "ts-loader.mjs");
+        const settingsStubPath = join(tmp, "settings-stub.mjs");
+        writeFileSync(
+          settingsStubPath,
+          "export const getSetting = () => undefined;",
+        );
         writeFileSync(
           loaderPath,
           `import { existsSync } from "node:fs";
            import { fileURLToPath, pathToFileURL } from "node:url";
            export async function resolve(specifier, context, nextResolve) {
+             if (specifier === "@juanibiapina/pi-extension-settings") {
+               return {
+                 url: pathToFileURL(
+                   ${JSON.stringify(settingsStubPath)}
+                 ).href,
+                 shortCircuit: true,
+               };
+             }
              if (specifier.startsWith(".") && !/\\.[a-z0-9]+$/i.test(specifier)) {
                for (const suffix of [".ts", ".mjs", ".js"]) {
                  const candidate = new URL(specifier + suffix, context.parentURL);

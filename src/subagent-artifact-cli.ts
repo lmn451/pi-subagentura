@@ -469,7 +469,7 @@ switch (cmd) {
       ...(errorMessage ? { message: errorMessage, errorMessage } : {}),
     });
     break;
-  case "cancelled":
+  case "cancelled": {
     withActiveTurnLock(() => {
       try {
         writeFileSync(join(dir, ".cancelled"), "", { mode: 0o600 });
@@ -478,10 +478,11 @@ switch (cmd) {
       }
       const activeTurnId = activeTurnMetadata()?.turnId ?? "process";
       if (!completionFor(activeTurnId, "cancelled", "parent")) {
-        completionFor(`process-cancel-${randomUUID()}`, "cancelled", "parent");
+        completionFor("process-cancel-" + randomUUID(), "cancelled", "parent");
       }
     });
     break;
+  }
   case "process-exit": {
     const exitCode = Number(arg ?? 0);
     const cancelled = existsSync(join(dir, ".cancelled"));

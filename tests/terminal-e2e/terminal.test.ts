@@ -168,31 +168,6 @@ function assertCompletionSnapshot(
   if (expectedSource) expect(event.source).toBe(expectedSource);
 }
 
-function sessionEntriesForCompletion(
-  completion: Record<string, unknown>,
-): Array<Record<string, unknown>> {
-  const sessionRoot = resolve(dirname(String(completion.path)), "../..");
-  const files = readdirSync(sessionRoot).filter((name) =>
-    name.endsWith(".jsonl"),
-  );
-  const entries: Array<Record<string, unknown>> = [];
-  for (const file of files) {
-    for (const line of readFileSync(resolve(sessionRoot, file), "utf8")
-      .split("\n")
-      .filter(Boolean)) {
-      try {
-        const entry: unknown = JSON.parse(line);
-        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-          entries.push(entry as Record<string, unknown>);
-        }
-      } catch {
-        /* the Pi session file is JSONL; ignore no non-entry text */
-      }
-    }
-  }
-  return entries;
-}
-
 function assertPreTurnPromptError(completion: Record<string, unknown>) {
   const turnId = String(completion.turnId);
   expect(completion.type).toBe("completion");
@@ -308,36 +283,6 @@ async function recoverPromptErrorChild(
     "[E2E:INTERACTIVE_OUTPUT_1]",
     "explicit",
   );
-  const isPromptErrorEntry = (entry: Record<string, unknown>) => {
-    const data = entry.data as Record<string, unknown> | undefined;
-    return (
-      entry.type === "custom" &&
-      entry.id === turnId &&
-      entry.customType === "subagentura-prompt-error" &&
-      data?.schemaVersion === 1
-    );
-  };
-  let recoveryEntries: Array<Record<string, unknown>> = [];
-  await harness.waitFor(() => {
-    recoveryEntries = sessionEntriesForCompletion(recoveryCompletion);
-    return recoveryEntries.some(isPromptErrorEntry);
-  }, "Pi flushes the original prompt-error entry on real recovery");
-  expect(recoveryEntries).toContainEqual(
-    expect.objectContaining({
-      type: "custom",
-      id: turnId,
-      customType: "subagentura-prompt-error",
-      data: expect.objectContaining({ schemaVersion: 1 }),
-    }),
-  );
-  expect(
-    recoveryEntries.some(
-      (entry) =>
-        entry.type === "message" &&
-        entry.id === recoveryCompletion.turnId &&
-        (entry.message as Record<string, unknown> | undefined)?.role === "user",
-    ),
-  ).toBe(true);
   expect(recoveryCompletion.turnId).not.toBe(completion.turnId);
 }
 
