@@ -1272,8 +1272,7 @@ describe("read_subagent_artifact (output reporting)", () => {
       label: "quoted prose after a safe object",
       errorMessage: JSON.stringify({
         error: {
-          message:
-            'Expected shape {data: null}, "token" value must be empty',
+          message: 'Expected shape {data: null}, "token" value must be empty',
         },
       }),
       expected: 'Expected shape {data: null}, "token" value must be empty',
@@ -1445,11 +1444,13 @@ describe("read_subagent_artifact (output reporting)", () => {
   it.each([
     {
       field: "errorMessage" as const,
-      diagnostic: 'Expected response: {"status":"bad" "session_token":"private-marker"}',
+      diagnostic:
+        'Expected response: {"status":"bad" "session_token":"private-marker"}',
     },
     {
       field: "message" as const,
-      diagnostic: 'Expected response: {"status":"bad" "session_token":"private-marker"}',
+      diagnostic:
+        'Expected response: {"status":"bad" "session_token":"private-marker"}',
     },
     {
       field: "errorMessage" as const,
@@ -1461,45 +1462,47 @@ describe("read_subagent_artifact (output reporting)", () => {
       diagnostic:
         'Provider response: {"error_description":"private-description","headers":{"authorization":"Bearer private-token"}}',
     },
-  ])("passes raw terminal $field diagnostics through read_subagent_artifact", async ({
-    field,
-    diagnostic,
-  }) => {
-    const id = "ab12cd3800000016";
-    const parent = tmp();
-    try {
-      const { state, art } = makeArtifactWithDone(
-        id,
-        parent,
-        false,
-        "raw-error-turn",
-      );
-      appendCompletionEvent(art, {
-        turnId: "raw-error-turn",
-        eventId: "raw-error-event",
-        outcome: "error",
-        source: "agent_settled",
-        ts: 2,
-        [field]: diagnostic,
-      });
-      const mod =
-        await importFresh<typeof import("../src/subagent")>("../src/subagent");
-      const readTool = makeReadTool(mod, state);
-      const result = await readTool.execute(
-        "read-raw-error",
-        { id, turnId: "raw-error-turn" },
-        undefined,
-        undefined,
-        {} as any,
-      );
+  ])(
+    "passes raw terminal $field diagnostics through read_subagent_artifact",
+    async ({ field, diagnostic }) => {
+      const id = "ab12cd3800000016";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          "raw-error-turn",
+        );
+        appendCompletionEvent(art, {
+          turnId: "raw-error-turn",
+          eventId: "raw-error-event",
+          outcome: "error",
+          source: "agent_settled",
+          ts: 2,
+          [field]: diagnostic,
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const result = await readTool.execute(
+          "read-raw-error",
+          { id, turnId: "raw-error-turn" },
+          undefined,
+          undefined,
+          {} as any,
+        );
 
-      expect(result.content[0].text).toContain(
-        `\n${diagnostic}\n</untrusted-subagent-error>`,
-      );
-    } finally {
-      rmSync(parent, { recursive: true, force: true });
-    }
-  });
+        expect(result.content[0].text).toContain(
+          `\n${diagnostic}\n</untrusted-subagent-error>`,
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("preserves synthetic credential-shaped terminal diagnostics", async () => {
     const id = "ab12cd3800000012";
