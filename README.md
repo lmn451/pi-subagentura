@@ -911,15 +911,13 @@ an earlier snapshot.
 
 For a selected terminal `error`, the model-facing response includes a separate
 status and explicitly untrusted diagnostic, even when the immutable snapshot is
-empty. Structured envelopes contribute only recognized `error.message`, string
-`error`, top-level `message`, or a safe HTTP status prefix; other provider fields
-are not copied. ANSI escapes are removed, controls become spaces, whitespace is
-collapsed, and wrapper delimiters are escaped. The diagnostic is capped at 512
-UTF-8 bytes including any truncation marker. Error diagnostics are intentionally
-not credential-redacted: credential-shaped text in a recognized message may reach
-the parent model. The boundary labels the text as data but is not a prompt-injection
-defense. Existing snapshot output sanitization, snapshots, manifests, and telemetry
-are unchanged.
+empty. The recorded `errorMessage` or `message` is passed through without parsing
+or credential redaction; provider diagnostics may include credential-shaped text.
+Markup delimiters are escaped before insertion into the wrapper, and the
+diagnostic is capped at 512 UTF-8 bytes including any truncation marker. The
+boundary labels the text as data but
+is not a prompt-injection defense. Existing snapshot output sanitization,
+snapshots, manifests, and telemetry are unchanged.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated

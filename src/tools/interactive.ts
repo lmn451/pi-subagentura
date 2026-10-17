@@ -136,12 +136,8 @@ function formatTerminalErrorSummary(
     return "";
   }
   const reason =
-    event.errorMessage ||
-    event.message ||
-    "No safe error detail was recorded.";
-  const escapedReason = escapeUntrustedTerminalErrorReason(
-    reason,
-  );
+    event.errorMessage || event.message || "No safe error detail was recorded.";
+  const escapedReason = escapeUntrustedTerminalErrorReason(reason);
   const boundedReason =
     Buffer.byteLength(escapedReason, "utf8") > MAX_ARTIFACT_ERROR_SUMMARY_BYTES
       ? boundTerminalErrorReason(escapedReason)
