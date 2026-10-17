@@ -322,8 +322,8 @@ describe("launch script EXIT trap (idempotency)", () => {
     const uiErrorFile = join(tmp, "ui-error.txt");
     const customEntryFile = join(tmp, "custom-entry.json");
     const originalCliMarker = join(tmp, "original-cli-ran");
-    const guardPath = join(childRoot, "network guard.cjs");
-    const inheritedNodeOptions = `--require="${guardPath}"`;
+    const guardPath = join(tmp, "network-guard.cjs");
+    const inheritedNodeOptions = `--require=${guardPath}`;
     const injectionMarker = join(tmp, "preload-command-ran");
     const preloadPath = join(
       tmp,
@@ -389,6 +389,10 @@ describe("launch script EXIT trap (idempotency)", () => {
         "    throw new Error(process.env.PI_TEST_PROMPT_ERROR);",
         "  }",
         "}",
+        "export class AgentSessionRuntime {",
+        "  constructor(session) { this.session = session; }",
+        "  apply() { return this.session; }",
+        "}",
         "export async function main(args) {",
         '  const sessionIndex = args.indexOf("--session");',
         "  const session = new AgentSession(args[sessionIndex + 1]);",
@@ -444,7 +448,7 @@ describe("launch script EXIT trap (idempotency)", () => {
       },
       encoding: "utf8",
     });
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
 
     const proof = JSON.parse(readFileSync(proofFile, "utf8"));
     expect(proof).toEqual({
