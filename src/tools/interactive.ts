@@ -134,6 +134,7 @@ function hasSensitiveFieldName(fieldName: string): boolean {
       [
         "auth",
         "authorization",
+        "bearer",
         "cookie",
         "credential",
         "credentials",
@@ -165,6 +166,82 @@ function hasSensitiveFieldName(fieldName: string): boolean {
   });
 }
 
+function hasUntrustedObjectKey(value: string, depth = 0): boolean {
+  if (depth > 4) return true;
+  const stack: Array<
+    { kind: "object"; expectingKey: boolean } | { kind: "array" }
+  > = [];
+  let index = 0;
+  while (index < value.length) {
+    const character = value.charAt(index);
+    const current = stack.at(-1);
+    if (character === '"' || character === "'") {
+      const nestedObject = value.slice(index + 1).match(/^\s*\{/);
+      if (
+        nestedObject &&
+        hasUntrustedObjectKey(value.slice(index + 1), depth + 1)
+      ) {
+        return true;
+      }
+      const quote = character;
+      let cursor = index + 1;
+      let fieldName = "";
+      while (cursor < value.length && value.charAt(cursor) !== quote) {
+        if (value.charAt(cursor) === "\\" && cursor + 1 < value.length) {
+          cursor++;
+        }
+        fieldName += value.charAt(cursor);
+        cursor++;
+      }
+      if (cursor >= value.length) {
+        return /[\[{]/.test(fieldName)
+          ? hasUntrustedObjectKey(fieldName, depth + 1)
+          : false;
+      }
+      if (current?.kind === "object" && current.expectingKey) {
+        if (hasSensitiveFieldName(fieldName)) return true;
+        current.expectingKey = false;
+      } else if (
+        /[\[{]/.test(fieldName) &&
+        hasUntrustedObjectKey(fieldName, depth + 1)
+      ) {
+        return true;
+      }
+      index = cursor + 1;
+      continue;
+    }
+    if (character === "{") {
+      stack.push({ kind: "object", expectingKey: true });
+    } else if (character === "[") {
+      stack.push({ kind: "array" });
+    } else if (character === "}" && current?.kind === "object") {
+      stack.pop();
+    } else if (character === "]" && current?.kind === "array") {
+      stack.pop();
+    } else if (character === "," && current?.kind === "object") {
+      current.expectingKey = true;
+    } else if (
+      current?.kind === "object" &&
+      current.expectingKey &&
+      !/\s|[:,}=]/.test(character)
+    ) {
+      let end = index;
+      while (
+        end < value.length &&
+        !/[\s:,}=\]]/.test(value.charAt(end))
+      ) {
+        end++;
+      }
+      if (hasSensitiveFieldName(value.slice(index, end))) return true;
+      current.expectingKey = false;
+      index = end;
+      continue;
+    }
+    index++;
+  }
+  return false;
+}
+
 function hasUntrustedEnvelopeField(value: string): boolean {
   let unescaped = value;
   for (let depth = 0; depth < 4; depth++) {
@@ -174,19 +251,7 @@ function hasUntrustedEnvelopeField(value: string): boolean {
       )
       .replace(/\\(["\\/bfnrt])/g, "$1");
     if (decoded === unescaped) {
-      const objectKeyPattern = /(?:\{|,)\s*["']([^"'\\]*(?:\\.[^"'\\]*)*)["']/g;
-      let objectKeyMatch: RegExpExecArray | null;
-      while ((objectKeyMatch = objectKeyPattern.exec(unescaped)) !== null) {
-        if (hasSensitiveFieldName(objectKeyMatch[1])) return true;
-      }
-      const fieldPattern =
-        /(?:["']([^"'\\]*(?:\\.[^"'\\]*)*)["']|([A-Za-z][A-Za-z0-9_\s-]*?))\s*:/g;
-      let match: RegExpExecArray | null;
-      while ((match = fieldPattern.exec(unescaped)) !== null) {
-        const fieldName = match[1] ?? match[2];
-        if (fieldName && hasSensitiveFieldName(fieldName)) return true;
-      }
-      return false;
+      return hasUntrustedObjectKey(unescaped);
     }
     unescaped = decoded;
   }

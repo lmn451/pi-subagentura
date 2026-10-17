@@ -1263,6 +1263,26 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-marker",
     },
     {
+      label: "prose prefix with unsupported bearer field",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"bearer":"private-bearer"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-bearer",
+    },
+    {
+      label: "quoted prose after a safe object",
+      errorMessage: JSON.stringify({
+        error: {
+          message:
+            'Expected shape {data: null}, "token" value must be empty',
+        },
+      }),
+      expected: 'Expected shape {data: null}, "token" value must be empty',
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {
