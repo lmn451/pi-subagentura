@@ -1253,6 +1253,16 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-api-key",
     },
     {
+      label: "prose prefix with malformed sensitive envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"session_token" "private-marker"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-marker",
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {

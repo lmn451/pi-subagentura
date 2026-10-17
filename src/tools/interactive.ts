@@ -174,6 +174,11 @@ function hasUntrustedEnvelopeField(value: string): boolean {
       )
       .replace(/\\(["\\/bfnrt])/g, "$1");
     if (decoded === unescaped) {
+      const objectKeyPattern = /(?:\{|,)\s*["']([^"'\\]*(?:\\.[^"'\\]*)*)["']/g;
+      let objectKeyMatch: RegExpExecArray | null;
+      while ((objectKeyMatch = objectKeyPattern.exec(unescaped)) !== null) {
+        if (hasSensitiveFieldName(objectKeyMatch[1])) return true;
+      }
       const fieldPattern =
         /(?:["']([^"'\\]*(?:\\.[^"'\\]*)*)["']|([A-Za-z][A-Za-z0-9_\s-]*?))\s*:/g;
       let match: RegExpExecArray | null;
