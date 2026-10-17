@@ -1222,6 +1222,27 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-set-cookie",
     },
     {
+      label: "prose prefix with unsupported session token",
+      errorMessage: JSON.stringify({
+        error: {
+          message:
+            'Expected response: {"session_token":"private-session-token"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-session-token",
+    },
+    {
+      label: "prose prefix with unsupported auth context",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"auth_context":"private-auth-context"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-auth-context",
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {

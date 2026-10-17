@@ -122,6 +122,49 @@ function isPlainTextPrefix(prefix: string): boolean {
   );
 }
 
+function hasSensitiveFieldName(fieldName: string): boolean {
+  const normalized = fieldName
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const segments = normalized.split("_");
+  if (
+    segments.some((segment) =>
+      [
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "detail",
+        "details",
+        "header",
+        "headers",
+        "passphrase",
+        "password",
+        "passwd",
+        "secret",
+        "stack",
+        "token",
+      ].includes(segment),
+    )
+  ) {
+    return true;
+  }
+  return segments.some((segment, index) => {
+    const next = segments[index + 1];
+    return (
+      (segment === "api" && next === "key") ||
+      (segment === "private" && next === "key") ||
+      (segment === "request" && next === "id") ||
+      (segment === "trace" && next === "id") ||
+      (segment === "error" &&
+        ["code", "description", "type", "uri"].includes(next))
+    );
+  });
+}
+
 function hasUntrustedEnvelopeField(value: string): boolean {
   let unescaped = value;
   for (let depth = 0; depth < 4; depth++) {
@@ -131,9 +174,12 @@ function hasUntrustedEnvelopeField(value: string): boolean {
       )
       .replace(/\\(["\\/bfnrt])/g, "$1");
     if (decoded === unescaped) {
-      return /["']?(?:request[_-]?id|headers|authorization|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|credential|password|passwd|passphrase|private[_-]?key|set[_-]?cookie|cookie|stack|error[_-]?(?:description|uri|code|type)|trace[_-]?id|details?)["']?\s*:/i.test(
-        unescaped,
-      );
+      const fieldPattern = /["']?([A-Za-z][A-Za-z0-9_-]*)["']?\s*:/g;
+      let match: RegExpExecArray | null;
+      while ((match = fieldPattern.exec(unescaped)) !== null) {
+        if (hasSensitiveFieldName(match[1])) return true;
+      }
+      return false;
     }
     unescaped = decoded;
   }
