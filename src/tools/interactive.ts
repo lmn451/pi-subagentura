@@ -103,11 +103,7 @@ function formatFollowupPreview(message: string): string {
 function formatTerminalErrorSummary(
   event: Extract<SubagentEvent, { type: "completion" }> | undefined,
 ): string {
-  if (
-    !event ||
-    event.outcome !== "error" ||
-    event.agentStopReason === "aborted"
-  ) {
+  if (!event || event.outcome !== "error") {
     return "";
   }
   const diagnostic =

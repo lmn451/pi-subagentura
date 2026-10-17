@@ -1264,13 +1264,9 @@ describe("read_subagent_artifact (output reporting)", () => {
     }
   });
 
-  it.each([
-    { outcome: "done" as const, agentStopReason: undefined },
-    { outcome: "cancelled" as const, agentStopReason: undefined },
-    { outcome: "error" as const, agentStopReason: "aborted" as const },
-  ])(
-    "does not present $outcome/$agentStopReason as a terminal error",
-    async ({ outcome, agentStopReason }) => {
+  it.each([{ outcome: "done" as const }, { outcome: "cancelled" as const }])(
+    "does not present $outcome as a terminal error",
+    async ({ outcome }) => {
       const id = "ab12cd3800000008";
       const parent = tmp();
       try {
@@ -1287,7 +1283,6 @@ describe("read_subagent_artifact (output reporting)", () => {
           source: "agent_settled",
           ts: 2,
           errorMessage: "must not be surfaced as a failure",
-          ...(agentStopReason ? { agentStopReason } : {}),
         });
         const mod =
           await importFresh<typeof import("../src/subagent")>(
@@ -1311,6 +1306,45 @@ describe("read_subagent_artifact (output reporting)", () => {
       }
     },
   );
+
+  it("returns the recorded diagnostic for an aborted error", async () => {
+    const id = "ab12cd3800000008";
+    const parent = tmp();
+    const diagnostic =
+      '[aborted] 402 {"error":{"message":"Insufficient credits."}}';
+    try {
+      const { state, art } = makeArtifactWithDone(
+        id,
+        parent,
+        false,
+        "aborted-error-turn",
+      );
+      appendCompletionEvent(art, {
+        turnId: "aborted-error-turn",
+        eventId: "aborted-error-event",
+        outcome: "error",
+        source: "agent_settled",
+        ts: 2,
+        agentStopReason: "aborted",
+        errorMessage: diagnostic,
+      });
+      const mod =
+        await importFresh<typeof import("../src/subagent")>("../src/subagent");
+      const readTool = makeReadTool(mod, state);
+      const result = await readTool.execute(
+        "read-aborted-error",
+        { id, turnId: "aborted-error-turn" },
+        undefined,
+        undefined,
+        {} as any,
+      );
+      const text = result.content[0].text;
+
+      expect(text).toContain(diagnostic);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 
   it("consumes only a terminal result whose output was requested", async () => {
     const id = "ab12cd3800000010";
