@@ -1140,6 +1140,45 @@ describe("persisted interactive state helpers", () => {
       states: { abc12345: SAMPLE },
     });
   });
+  it("round-trips only the closed traffic origin in persisted telemetry", () => {
+    const correlationId = "11111111-1111-4111-8111-111111111111";
+    updatePersistedTelemetrySession(root, "session-a", {
+      correlationId,
+      mode: "straight",
+      trafficOrigin: "usage",
+    });
+    expect(loadInteractiveStates(root)?.telemetry).toEqual({
+      correlationId,
+      mode: "straight",
+      trafficOrigin: "usage",
+    });
+
+    const persisted = JSON.parse(readFileSync(stateFilePath(root), "utf8")) as {
+      telemetry: {
+        correlationId: string;
+        mode: string;
+        trafficOrigin?: unknown;
+      };
+    };
+    persisted.telemetry.trafficOrigin = "private / arbitrary";
+    writeFileSync(stateFilePath(root), JSON.stringify(persisted), {
+      mode: 0o600,
+    });
+    expect(loadInteractiveStates(root)?.telemetry).toEqual({
+      correlationId,
+      mode: "straight",
+      trafficOrigin: "unknown",
+    });
+
+    delete persisted.telemetry.trafficOrigin;
+    writeFileSync(stateFilePath(root), JSON.stringify(persisted), {
+      mode: 0o600,
+    });
+    expect(loadInteractiveStates(root)?.telemetry).toEqual({
+      correlationId,
+      mode: "straight",
+    });
+  });
 
   it("round-trips the Herdr socket target used for rehydration", () => {
     const herdrState: InteractiveSubagentPersistedStateV2 = {

@@ -18,6 +18,7 @@ published injector.
 | [bun.md](./bun.md)                                                                 | JavaScript runtime and package manager conventions                     |
 | [publish.md](./publish.md)                                                         | OIDC publishing and the authoritative release procedure                |
 | [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools           |
+| [telemetry.md](./telemetry.md)                                                     | Telemetry contract, privacy, and PostHog report definitions            |
 | [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                            |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters |
 | [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                     | Protocol-v1 compatibility removal status and user-data behavior        |

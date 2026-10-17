@@ -76,10 +76,15 @@ import {
 } from "../session-scope";
 import {
   captureTelemetry,
+  telemetryDepth,
+  telemetryDepthBucket,
+  type TelemetryCompletionPolicy,
   type TelemetryResultReadOutcome,
+  type TelemetrySpawnFailureMux,
   type TelemetrySpawnFailureOperation,
   type TelemetrySpawnFailureStage,
 } from "../telemetry";
+import { createLaunchResolutionReporter } from "../telemetry-launch";
 
 function isValidSubagentId(id: string): boolean {
   return isValidOrchestratorChildId(id);
@@ -580,7 +585,7 @@ export function registerInteractiveSubagentTools(
     ].join("\n"),
     parameters: InteractiveParams,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const spawnStartedAt = Date.now();
       const registration = resolveInteractiveToolStates(toolToken);
       const staleScope =
@@ -588,28 +593,82 @@ export function registerInteractiveSubagentTools(
       const spawnTreeDepth =
         registration?.scope?.spawnTreeContext?.depth ??
         staleScope?.spawnTreeContext?.depth;
+      const launchDepth =
+        spawnTreeDepth === undefined ? undefined : spawnTreeDepth + 1;
+      const telemetry = registration?.scope?.telemetry ?? staleScope?.telemetry;
+      const completionPolicy: TelemetryCompletionPolicy =
+        params.completionPolicy ?? "each";
+      let lastFailure:
+        | {
+            stage: TelemetrySpawnFailureStage;
+            mux?: TelemetrySpawnFailureMux;
+            operation?: TelemetrySpawnFailureOperation;
+          }
+        | undefined;
+      const launchResolution = createLaunchResolutionReporter(
+        telemetry,
+        {
+          requested_execution: "interactive",
+          requested_mux: params.mux ?? "auto",
+          invocation_source: "interactive",
+          async: true,
+          depth: telemetryDepth(launchDepth),
+          depth_bucket: telemetryDepthBucket(launchDepth),
+          completion_policy: completionPolicy,
+        },
+        spawnStartedAt,
+      );
+      const resolveFailedLaunch = (outcome: "rejected" | "cancelled"): void => {
+        launchResolution({
+          outcome,
+          mux: lastFailure?.mux ?? "unknown",
+          fallback_attempted: false,
+          ...(lastFailure
+            ? {
+                final_failure_stage: lastFailure.stage,
+                final_failure_operation: lastFailure.operation,
+              }
+            : {}),
+        });
+      };
       const reportSpawnFailure = (
         stage: TelemetrySpawnFailureStage,
-        mux?: "tmux" | "zellij" | "herdr",
+        mux?: TelemetrySpawnFailureMux,
         operation?: TelemetrySpawnFailureOperation,
       ): void => {
+        lastFailure = { stage, mux, operation };
         captureInteractiveSpawnFailure({
-          telemetry: registration?.scope?.telemetry ?? staleScope?.telemetry,
+          telemetry,
           stage,
           operation,
           startedAt: spawnStartedAt,
           mux,
           invocationSource: "interactive",
           async: true,
-          depth: spawnTreeDepth === undefined ? undefined : spawnTreeDepth + 1,
-          completionPolicy: params.completionPolicy ?? "each",
+          depth: launchDepth,
+          completionPolicy,
           model: params.model,
         });
+        resolveFailedLaunch(
+          stage === "parent_shutdown" ? "cancelled" : "rejected",
+        );
       };
+      if (signal?.aborted) {
+        resolveFailedLaunch("cancelled");
+        return {
+          content: [
+            { type: "text", text: "Interactive sub-agent launch cancelled." },
+          ],
+          details: { status: "cancelled" },
+          isError: true,
+        };
+      }
       if (!registration) {
-        if (staleScope && staleScope.lifecycle !== "started") {
-          reportSpawnFailure("parent_shutdown");
-        }
+        reportSpawnFailure(
+          staleScope?.lifecycle === "shutdown"
+            ? "parent_shutdown"
+            : "session_creation",
+        );
         return {
           content: [
             {
@@ -812,6 +871,9 @@ export function registerInteractiveSubagentTools(
           telemetryAsync: true,
           spawnRequestedAt: spawnStartedAt,
           deferAgentCreatedTelemetry: true,
+          onSpawnFailure: (failure) => {
+            lastFailure = failure;
+          },
         });
         if (registration.scope && completion.policy) {
           try {
@@ -824,20 +886,11 @@ export function registerInteractiveSubagentTools(
               completionReservation,
             );
           } catch (error) {
-            captureInteractiveSpawnFailure({
-              telemetry: registration.scope.telemetry,
-              stage: "registration",
-              operation: "completion_registration",
-              startedAt: spawnStartedAt,
-              mux: state.mux,
-              invocationSource:
-                state.telemetryInvocationSource ?? "interactive",
-              async: state.telemetryAsync ?? true,
-              depth: state.telemetryDepth,
-              completionPolicy:
-                state.telemetryCompletionPolicy ?? completion.policy,
-              model: state.telemetryModel ?? state.model,
-            });
+            reportSpawnFailure(
+              "registration",
+              state.mux,
+              "completion_registration",
+            );
             releaseCompletionGroup(completionReservation);
             rollbackInteractiveSpawn(state);
             return {
@@ -853,6 +906,12 @@ export function registerInteractiveSubagentTools(
           }
           captureInteractiveSubagentCreatedTelemetry(state);
         }
+        launchResolution({
+          outcome: "started",
+          execution: "interactive",
+          mux: state.mux,
+          fallback_attempted: false,
+        });
         const routingMetadata = persistInitialRoutingMetadata({
           cwd: ctx.cwd,
           childId: state.id,
@@ -896,13 +955,16 @@ export function registerInteractiveSubagentTools(
           ],
           details: {
             ...state,
-            status: "started",
+            status:
+              routingMetadata?.status === "warning" ? "degraded" : "started",
             thinkingLevel: params.thinkingLevel,
             ...(routingMetadata === undefined ? {} : { routingMetadata }),
           },
         };
       } catch (error) {
         releaseCompletionGroup(completionReservation);
+        lastFailure ??= { stage: "unknown" };
+        resolveFailedLaunch(signal?.aborted ? "cancelled" : "rejected");
         const msg = error instanceof Error ? error.message : String(error);
         return {
           content: [

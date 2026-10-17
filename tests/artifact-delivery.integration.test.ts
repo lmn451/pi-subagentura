@@ -15,7 +15,10 @@ import type {
   ExtensionAPI,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import type { InteractiveSubagentState } from "../src/interactive-tmux";
+import {
+  registerInteractiveSubagentState,
+  type InteractiveSubagentState,
+} from "../src/interactive-tmux";
 import { __setTmuxMultiplexer, type Multiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import {
@@ -165,7 +168,7 @@ describe("protocol-v2 artifact delivery", () => {
       },
     });
     const state = makeState(art.dir);
-    scope.interactiveStates.set(state.id, state);
+    registerInteractiveSubagentState(state, scope);
     const mux = {
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -192,7 +195,7 @@ describe("protocol-v2 artifact delivery", () => {
       source: "agent_settled",
       eventId: "event-completion",
     })!;
-    const entries: Array<{ customType: string; data: any }> = [];
+    const entries: Array<{ customType: string; data: unknown }> = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
         entries.push({ customType, data });
@@ -204,7 +207,7 @@ describe("protocol-v2 artifact delivery", () => {
       id: 501,
       generation: 1,
       lifecycle: "started",
-      pi: pi as any,
+      pi: pi as unknown as ExtensionAPI,
       sessionManager: {
         getSessionId: () => "parent-session",
         getEntries: () =>
@@ -216,12 +219,12 @@ describe("protocol-v2 artifact delivery", () => {
       },
     });
     const state = makeState(art.dir);
-    scope.interactiveStates.set(state.id, state);
-    registerCompletionCoordinator(pi as any, scope);
+    registerInteractiveSubagentState(state, scope);
+    registerCompletionCoordinator(pi as unknown as ExtensionAPI, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
-    } as any);
+    } as unknown as Multiplexer);
 
     await pollArtifactChanges(scope.pi, sessionOwner(scope));
 
@@ -296,21 +299,23 @@ describe("protocol-v2 artifact delivery", () => {
         errorMessage: "HTTP 402: insufficient credits",
         agentStopReason: "error",
       });
-      const entries: Array<{ customType: string; data: any }> = [];
+      const entries: Array<{ customType: string; data: unknown }> = [];
       const pi = {
         appendEntry: vi.fn((customType: string, data: unknown) => {
           entries.push({ customType, data });
         }),
         registerEntryRenderer: vi.fn(),
-        sendMessage: vi.fn((message: any) => {
-          entries.push({ customType: message.customType, data: message });
-        }),
+        sendMessage: vi.fn(
+          (message: { customType: string; content: string }) => {
+            entries.push({ customType: message.customType, data: message });
+          },
+        ),
       };
       const scope = registerSessionScope({
         id: 504,
         generation: 1,
         lifecycle: "started",
-        pi: pi as any,
+        pi: pi as unknown as ExtensionAPI,
         sessionManager: {
           getSessionId: () => "parent-session",
           getEntries: () =>
@@ -331,11 +336,9 @@ describe("protocol-v2 artifact delivery", () => {
         ? { ...makeState(siblingArt.dir), id: "sibling" }
         : undefined;
       const owner = sessionOwner(scope);
-      scope.interactiveStates.set(state.id, state);
-      if (siblingState) {
-        scope.interactiveStates.set(siblingState.id, siblingState);
-      }
-      registerCompletionCoordinator(pi as any, scope);
+      registerInteractiveSubagentState(state, scope);
+      if (siblingState) registerInteractiveSubagentState(siblingState, scope);
+      registerCompletionCoordinator(pi as unknown as ExtensionAPI, scope);
       if (policy === "group") {
         registerCompletionMember(
           "interactive",
@@ -355,7 +358,7 @@ describe("protocol-v2 artifact delivery", () => {
       __setTmuxMultiplexer({
         getPaneLiveness: () => "alive",
         getPaneLivenessAsync: async () => "alive",
-      } as any);
+      } as unknown as Multiplexer);
 
       await pollArtifactChanges(scope.pi, owner);
       flushCompletionManifests(owner);
@@ -370,7 +373,7 @@ describe("protocol-v2 artifact delivery", () => {
         policy,
       });
       if (policy === "group") {
-        expect(errorEntry?.data.groupRemaining).toBe(1);
+        expect(errorEntry?.data).toMatchObject({ groupRemaining: 1 });
       } else {
         expect(errorEntry?.data).not.toHaveProperty("groupRemaining");
       }
@@ -418,7 +421,6 @@ describe("protocol-v2 artifact delivery", () => {
       expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
     },
   );
-
   it("does not publish workflow-owned child completions independently", async () => {
     const art = makeArtifact();
     appendEvent(art, {
@@ -447,7 +449,7 @@ describe("protocol-v2 artifact delivery", () => {
       id: 502,
       generation: 1,
       lifecycle: "started",
-      pi: pi as any,
+      pi: pi as unknown as ExtensionAPI,
       sessionManager: {
         getSessionId: () => "parent-session",
         getEntries: () => [],
@@ -457,11 +459,11 @@ describe("protocol-v2 artifact delivery", () => {
       ...makeState(art.dir),
       completionOwner: "workflow" as const,
     };
-    scope.interactiveStates.set(state.id, state);
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
-    } as any);
+    } as unknown as Multiplexer);
 
     await pollArtifactChanges(scope.pi, sessionOwner(scope));
 

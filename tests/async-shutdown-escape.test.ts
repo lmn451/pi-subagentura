@@ -166,7 +166,7 @@ describe("async spawn shutdown handoff", () => {
     expect(parentScope.lifecycle).toBe("started");
 
     const sessionAbort = vi.fn();
-    const start = vi.fn();
+    const start = vi.fn(() => true);
     const disposeBeforeStart = vi.fn();
     gate.resolve({
       jobId: "parent-owned-job",
@@ -234,7 +234,7 @@ describe("async spawn shutdown handoff", () => {
       childScope.ui = ctx.ui;
       childScope.sessionManager = ctx.sessionManager;
 
-      const start = vi.fn();
+      const start = vi.fn(() => true);
       const disposeBeforeStart = vi.fn();
       gate.resolve({
         jobId: `${toolName}-nested-job`,

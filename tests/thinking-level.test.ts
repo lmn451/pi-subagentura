@@ -158,6 +158,7 @@ describe("in-process subagent thinkingLevel propagation", () => {
         isError: false,
       }),
       session: { abort: vi.fn() },
+      start: () => true,
       liveStatus: {
         turn: 0,
         output: "",
