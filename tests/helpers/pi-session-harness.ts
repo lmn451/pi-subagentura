@@ -5,6 +5,7 @@ import {
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
+import * as CodingAgent from "@earendil-works/pi-coding-agent";
 import {
   buildSessionOptions,
   createCompatibleSessionRuntime,
@@ -19,6 +20,7 @@ import {
   createAssistantMessageEventStream,
   type AssistantMessage,
   type Context,
+  type Model,
 } from "@earendil-works/pi-ai";
 
 function assistant(text: string): AssistantMessage {
@@ -52,6 +54,15 @@ export interface PiSessionHarness {
   dispose(): void;
 }
 
+export function supportsNativeProviderRegistration(): boolean {
+  const modelRuntime = (
+    CodingAgent as unknown as {
+      ModelRuntime?: unknown;
+    }
+  ).ModelRuntime;
+  return typeof modelRuntime === "function";
+}
+
 export async function createPiSessionHarness(
   cwd: string,
   options: {
@@ -61,6 +72,9 @@ export async function createPiSessionHarness(
     extensionRoot?: string;
     includeTools?: boolean;
     sessionManager?: SessionManager;
+    nativeModel?: Model<any>;
+    nativeProvider?: unknown;
+    onNativeSessionStart?: (ctx: any) => Promise<void> | void;
     retrySettings?: {
       enabled: boolean;
       maxRetries: number;
@@ -130,13 +144,27 @@ export async function createPiSessionHarness(
   const registerFauxProvider = () =>
     registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
   registerFauxProvider();
-  const model = findModel(sessionRuntime, "subagentura-faux", "faux-model");
-  if (!model) throw new Error("faux model registration failed");
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
     settingsManager.getRetrySettings = () => options.retrySettings!;
   }
+  const extensionFactories = options.nativeProvider
+    ? [
+        {
+          name: "test-native-provider",
+          factory: (pi: any) => {
+            pi.registerProvider(options.nativeProvider);
+            const onNativeSessionStart = options.onNativeSessionStart;
+            if (onNativeSessionStart) {
+              pi.on("session_start", (_event: any, ctx: any) =>
+                onNativeSessionStart(ctx),
+              );
+            }
+          },
+        },
+      ]
+    : [];
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -144,11 +172,12 @@ export async function createPiSessionHarness(
     additionalExtensionPaths: [
       join(options.extensionRoot ?? cwd, "src/subagent.ts"),
     ],
+    extensionFactories,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-  });
+  } as any);
   const previousChild = process.env.PI_SUBAGENTURA_CHILD;
   const previousArtifactDir = process.env.ARTIFACT_DIR;
   if (options.childArtifactDir) {
@@ -166,6 +195,10 @@ export async function createPiSessionHarness(
     if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
     else process.env.ARTIFACT_DIR = previousArtifactDir;
   }
+  const model =
+    options.nativeModel ??
+    findModel(sessionRuntime, "subagentura-faux", "faux-model");
+  if (!model) throw new Error("test model registration failed");
   const sessionOptions = buildSessionOptions(sessionRuntime, {
     cwd,
     agentDir,

@@ -16,6 +16,11 @@ import type {
   ExtensionAPI,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type Model,
+} from "@earendil-works/pi-ai";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer, type Multiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
@@ -32,6 +37,7 @@ import {
 } from "../src/completion-coordinator";
 import {
   createPiSessionHarness,
+  supportsNativeProviderRegistration,
   type PiSessionHarness,
 } from "./helpers/pi-session-harness";
 
@@ -84,6 +90,124 @@ function makeState(artifactDir: string): InteractiveSubagentState {
     deliveryReceipts: [],
     eventByteCursor: 0,
     completionPolicy: "each",
+  };
+}
+
+const nativeAuthProviderId = "subagentura-native-auth";
+const nativeAuthModelId = "native-auth-model";
+const nativeAuthResponse = "Native provider authenticated locally";
+
+function createNativeAssistantMessage(): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text: nativeAuthResponse }],
+    api: "openai-completions",
+    provider: nativeAuthProviderId,
+    model: nativeAuthModelId,
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
+function createNativeResponseStream() {
+  const message = createNativeAssistantMessage();
+  const stream = createAssistantMessageEventStream();
+  stream.push({ type: "start", partial: { ...message, content: [] } });
+  const partial = {
+    ...message,
+    content: [{ type: "text" as const, text: "" }],
+  };
+  stream.push({ type: "text_start", contentIndex: 0, partial });
+  stream.push({
+    type: "text_delta",
+    contentIndex: 0,
+    delta: nativeAuthResponse,
+    partial: message,
+  });
+  stream.push({
+    type: "text_end",
+    contentIndex: 0,
+    content: nativeAuthResponse,
+    partial: message,
+  });
+  stream.push({ type: "done", reason: "stop", message });
+  stream.end(message);
+  return stream;
+}
+
+function createNativeAuthProvider(
+  options: { firstResolutionError?: string } = {},
+) {
+  let resolveGate!: () => void;
+  const authGate = new Promise<void>((resolve) => {
+    resolveGate = resolve;
+  });
+  let resolveStarted!: () => void;
+  const resolverStarted = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+  let streamCalls = 0;
+  let resolverCalls = 0;
+  let requestApiKey: string | undefined;
+  const model: Model<any> = {
+    id: nativeAuthModelId,
+    name: "Native auth fixture",
+    api: "openai-completions",
+    provider: nativeAuthProviderId,
+    baseUrl: "http://127.0.0.1.invalid/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 8_000,
+    maxTokens: 512,
+  };
+  const stream = (_model: unknown, _context: unknown, options: any) => {
+    streamCalls++;
+    requestApiKey = options?.apiKey;
+    return createNativeResponseStream();
+  };
+  const provider = {
+    id: nativeAuthProviderId,
+    name: "Subagentura native auth fixture",
+    auth: {
+      apiKey: {
+        name: "Local test key",
+        resolve: async () => {
+          resolverCalls++;
+          resolveStarted();
+          if (
+            options.firstResolutionError !== undefined &&
+            resolverCalls === 1
+          ) {
+            throw new Error(options.firstResolutionError);
+          }
+          await authGate;
+          return { auth: { apiKey: "local-test-api-key" } };
+        },
+      },
+    },
+    getModels: () => [model],
+    stream,
+    streamSimple: stream,
+  };
+  return {
+    provider,
+    model,
+    resolverStarted,
+    resolveAuthentication() {
+      resolveGate();
+    },
+    streamCalls: () => streamCalls,
+    resolverCalls: () => resolverCalls,
+    requestApiKey: () => requestApiKey,
   };
 }
 
@@ -603,6 +727,111 @@ describe("protocol-v2 artifact delivery", () => {
     expect(completions[1]?.turnId).not.toBe("process");
     expect(readActiveTurn(art)?.turnId).toBe(resumedUserEntry?.id);
   });
+
+  it.skipIf(!supportsNativeProviderRegistration())(
+    "does not record a startup auth error while a native provider resolver is pending",
+    async () => {
+      const art = makeArtifact();
+      const native = createNativeAuthProvider();
+      const harness = await createPiSessionHarness(repoRoot, {
+        bindExtensionLifecycle: true,
+        childArtifactDir: art.dir,
+        nativeProvider: native.provider,
+        nativeModel: native.model,
+        onNativeSessionStart: async (ctx: any) => {
+          const pendingAuth = ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          void pendingAuth.catch(() => {});
+          await native.resolverStarted;
+          expect(
+            ctx.modelRegistry.hasConfiguredAuth(native.model.provider),
+          ).toBe(false);
+        },
+      });
+      childHarnesses.push(harness);
+      const completionBeforeResolution = readEventRecords(art)
+        .map(({ event }) => event)
+        .find(
+          (event) => event.type === "completion" && event.turnId === "process",
+        );
+      const prompt = harness.session.prompt(
+        "exercise pending native authentication",
+      );
+      await native.resolverStarted;
+      native.resolveAuthentication();
+      await prompt;
+      await harness.session.waitForIdle();
+      const completions = readEventRecords(art)
+        .map(({ event }) => event)
+        .filter((event) => event.type === "completion");
+      expect(completionBeforeResolution).toBeUndefined();
+      expect(completions.some((event) => event.turnId === "process")).toBe(
+        false,
+      );
+      expect(completions).toMatchObject([
+        expect.objectContaining({ outcome: "done", source: "agent_settled" }),
+      ]);
+      expect(harness.session.getLastAssistantText()).toContain(
+        "Native provider authenticated locally",
+      );
+      expect(native.streamCalls()).toBe(1);
+      expect(native.requestApiKey()).toBe("local-test-api-key");
+    },
+  );
+
+  for (const firstResolutionError of [
+    "No response from authentication provider",
+    "Authentication resolver failed; retry required",
+    "Authentication resolver failed: response body missing",
+  ]) {
+    it.skipIf(!supportsNativeProviderRegistration())(
+      `does not report missing auth for ${firstResolutionError}`,
+      async () => {
+        const art = makeArtifact();
+        const native = createNativeAuthProvider({ firstResolutionError });
+        const harness = await createPiSessionHarness(repoRoot, {
+          bindExtensionLifecycle: true,
+          childArtifactDir: art.dir,
+          nativeProvider: native.provider,
+          nativeModel: native.model,
+        });
+        childHarnesses.push(harness);
+        await native.resolverStarted;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(
+          readEventRecords(art)
+            .map(({ event }) => event)
+            .filter(
+              (event) =>
+                event.type === "completion" && event.turnId === "process",
+            ),
+        ).toEqual([]);
+
+        native.resolveAuthentication();
+        const prompt = harness.session.prompt(
+          "retry after a transient authentication failure",
+        );
+        await prompt;
+        await harness.session.waitForIdle();
+
+        const completions = readEventRecords(art)
+          .map(({ event }) => event)
+          .filter((event) => event.type === "completion");
+        expect(completions.some((event) => event.turnId === "process")).toBe(
+          false,
+        );
+        expect(completions).toMatchObject([
+          expect.objectContaining({
+            outcome: "done",
+            source: "agent_settled",
+          }),
+        ]);
+        expect(native.resolverCalls()).toBeGreaterThan(1);
+        expect(native.streamCalls()).toBe(1);
+        expect(native.requestApiKey()).toBe("local-test-api-key");
+      },
+    );
+  }
 
   it("does not publish workflow-owned child completions independently", async () => {
     const art = makeArtifact();

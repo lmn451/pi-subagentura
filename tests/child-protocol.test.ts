@@ -93,17 +93,22 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
-  it("keeps startup auth failure separate from a later successful turn", () => {
+  it("keeps startup auth failure separate from a later successful turn", async () => {
     const handlers = registerHandlers();
     let configuredAuth = false;
     let entries: any[] = [];
     const ctx = {
       model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: { hasConfiguredAuth: () => configuredAuth },
+      modelRegistry: {
+        getApiKeyAndHeaders: async () =>
+          configuredAuth
+            ? { ok: true, apiKey: "test-key" }
+            : { ok: false, error: "No API key found" },
+      },
       sessionManager: { getEntries: () => entries },
     };
 
-    handlers.get("session_start")!({ reason: "startup" }, ctx);
+    await handlers.get("session_start")!({ reason: "startup" }, ctx);
     expect(readActiveTurn()).toBeNull();
     expect(readEvents(artifactPath(root, "child"))).toMatchObject([
       expect.objectContaining({
@@ -115,7 +120,7 @@ describe("child protocol lifecycle", () => {
     ]);
 
     configuredAuth = true;
-    handlers.get("session_start")!({ reason: "reload" }, ctx);
+    await handlers.get("session_start")!({ reason: "reload" }, ctx);
     handlers.get("before_agent_start")!({}, ctx);
     entries = [
       { id: "after-login", type: "message", message: { role: "user" } },
@@ -123,9 +128,7 @@ describe("child protocol lifecycle", () => {
     handlers.get("turn_start")!({ timestamp: 100 }, ctx);
     vi.runAllTimers();
     handlers.get("agent_end")!(
-      {
-        messages: [{ role: "assistant", stopReason: "stop" }],
-      },
+      { messages: [{ role: "assistant", stopReason: "stop" }] },
       ctx,
     );
     handlers.get("agent_settled")!({}, ctx);
@@ -142,6 +145,56 @@ describe("child protocol lifecycle", () => {
       }),
     ]);
     expect(completions).toHaveLength(2);
+  });
+
+  it("accepts successful auth resolved through endpoint and env fields", async () => {
+    const handlers = registerHandlers();
+    const ctx = {
+      model: { provider: "subagentura-faux", id: "faux-model" },
+      modelRegistry: {
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          baseUrl: "https://native-provider.invalid/v1",
+          env: { REGION: "local-test" },
+        }),
+      },
+      sessionManager: { getEntries: () => [] },
+    };
+
+    await handlers.get("session_start")!({ reason: "startup" }, ctx);
+    await Promise.resolve();
+
+    expect(
+      readEvents(artifactPath(root, "child")).filter(
+        (event) => event.type === "completion",
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not append a late startup auth failure after an agent run starts", async () => {
+    const handlers = registerHandlers();
+    let resolveAuth!: (result: { ok: boolean; error?: string }) => void;
+    const pendingAuth = new Promise<{ ok: boolean; error?: string }>(
+      (resolve) => {
+        resolveAuth = resolve;
+      },
+    );
+    const ctx = {
+      model: { provider: "subagentura-faux", id: "faux-model" },
+      modelRegistry: { getApiKeyAndHeaders: () => pendingAuth },
+      sessionManager: { getEntries: () => [] },
+    };
+
+    handlers.get("session_start")!({ reason: "startup" }, ctx);
+    handlers.get("before_agent_start")!({}, ctx);
+    resolveAuth({ ok: false, error: "No API key found" });
+    await pendingAuth;
+
+    expect(
+      readEvents(artifactPath(root, "child")).filter(
+        (event) => event.type === "completion",
+      ),
+    ).toEqual([]);
   });
 
   it("retains the newest active tool across concurrent starts", () => {

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { debugLog } from "./helpers";
 import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
@@ -286,19 +287,61 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
+  let startupAgentStarted = false;
   pi.on("session_start", (event, ctx) => {
-    if (event.reason !== "startup" || !ctx.model) return;
-    if (ctx.modelRegistry.hasConfiguredAuth(ctx.model)) return;
-
-    const message = "Selected model has no configured authentication.";
-    appendCompletionEvent(art, {
-      turnId: "process",
-      outcome: "error",
-      source: "explicit",
-      exitCode: 1,
-      message,
-      errorMessage: message,
-    });
+    const model = ctx.model;
+    if (event.reason !== "startup" || !model) return;
+    void ctx.modelRegistry
+      .getApiKeyAndHeaders(model)
+      .then((auth) => {
+        if (startupAgentStarted) return;
+        if (auth.ok) return;
+        if (!auth.ok) {
+          const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+            getRegisteredNativeProvider?: (provider: string) => unknown;
+          };
+          const isNativeProvider = Boolean(
+            registry.getRegisteredNativeProvider?.(model.provider),
+          );
+          const missingLegacyAuth =
+            !isNativeProvider &&
+            typeof registry.hasConfiguredAuth === "function" &&
+            !registry.hasConfiguredAuth(model);
+          const missingAuthError =
+            missingLegacyAuth ||
+            /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:missing|required)\s+(?:api key|credentials?|authentication|auth)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:api key|credentials?)(?:\s+(?:is|are|was|were))?\s+(?:missing|not found|not configured|not provided|not set|unset|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:authentication|auth)(?:\s+(?:is|are|was|were))?\s+(?:missing|not configured|not provided|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\bno\s+(?:authentication|auth)\s+(?:configured|available|provided|set)\b/i.test(
+              auth.error,
+            );
+          if (!missingAuthError) {
+            debugLog("warn", "child_startup_auth_resolution_unavailable");
+            return;
+          }
+        }
+        const message = "Selected model has no configured authentication.";
+        appendCompletionEvent(art, {
+          turnId: "process",
+          outcome: "error",
+          source: "explicit",
+          exitCode: 1,
+          message,
+          errorMessage: message,
+        });
+      })
+      .catch(() => {
+        debugLog("warn", "child_startup_auth_check_failed");
+      });
   });
   const startPersistedTurn = (
     turnId: string,
@@ -348,6 +391,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
+    startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
       startedAt: Date.now(),
