@@ -235,12 +235,14 @@ function hasTrackedThrownValue(error, objects, primitives) {
 
 function installPromptErrorHook(
   AgentSession,
+  AgentSessionRuntime,
   selectedFile,
   reportPromptError,
   promptFailures,
   promptFailurePrimitives,
 ) {
   if (!selectedFile) return;
+  const primarySessions = new WeakSet();
   const prototype = AgentSession?.prototype;
   const originalPrompt = prototype?.prompt;
   if (typeof originalPrompt !== "function") {
@@ -257,12 +259,13 @@ function installPromptErrorHook(
       return originalPrompt.apply(session, args);
     }
     const sessionFile = sessionManager.getSessionFile();
-    if (
-      typeof sessionFile !== "string" ||
-      resolve(sessionFile) !== selectedFile
-    ) {
+    const isPrimary =
+      primarySessions.has(session) ||
+      (typeof sessionFile === "string" && resolve(sessionFile) === selectedFile);
+    if (!isPrimary) {
       return originalPrompt.apply(session, args);
     }
+    primarySessions.add(session);
 
     const wasStreaming = session.isStreaming === true;
     let snapshot;
@@ -314,6 +317,18 @@ function installPromptErrorHook(
       throw error;
     });
   };
+
+  const runtimePrototype = AgentSessionRuntime?.prototype;
+  const originalApply = runtimePrototype?.apply;
+  if (typeof originalApply !== "function") {
+    throw new TypeError("Pi public AgentSessionRuntime.apply API is unavailable");
+  }
+  runtimePrototype.apply = function (...args) {
+    const replacesPrimary = primarySessions.has(this.session);
+    const result = originalApply.apply(this, args);
+    if (replacesPrimary) primarySessions.add(this.session);
+    return result;
+  };
 }
 
 async function reportFatalError(reportPromptError, error) {
@@ -362,15 +377,17 @@ async function runPi(piPackage) {
     const piRoot = await import(publicPiRootUrl(piPackage));
     if (
       typeof piRoot.main !== "function" ||
-      typeof piRoot.AgentSession !== "function"
+      typeof piRoot.AgentSession !== "function" ||
+      typeof piRoot.AgentSessionRuntime !== "function"
     ) {
       throw new TypeError(
-        "Pi public root main and AgentSession APIs are required",
+        "Pi public root main, AgentSession, and AgentSessionRuntime APIs are required",
       );
     }
 
     installPromptErrorHook(
       piRoot.AgentSession,
+      piRoot.AgentSessionRuntime,
       sessionFile,
       reportPromptError,
       promptFailures,

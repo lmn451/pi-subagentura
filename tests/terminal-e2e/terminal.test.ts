@@ -363,6 +363,70 @@ async function waitForPromptErrorCompletion() {
   return completion;
 }
 
+async function waitForPromptErrorAfter(firstTurnId: string) {
+  let completion: Record<string, unknown> | undefined;
+  await harness.waitFor(
+    () => {
+      completion = harness
+        .artifactEvents()
+        .find(
+          (event) =>
+            event.type === "completion" &&
+            event.source === "prompt_error" &&
+            event.outcome === "error" &&
+            typeof event.errorMessage === "string" &&
+            event.turnId !== firstTurnId,
+        );
+      return completion !== undefined;
+    },
+    "second pre-turn prompt-error completion after native session replacement",
+    20_000,
+  );
+  if (!completion) throw new Error("second prompt-error completion missing");
+  return completion;
+}
+
+async function sendChildPrompt(pane: PaneInfo, text: string): Promise<void> {
+  harness.tmux(["send-keys", "-t", pane.id, "-l", "--", text]);
+  await harness.waitFor(
+    () => harness.paneScreen(pane.id).includes(text),
+    "child Pi echoes the prompt after native session replacement",
+  );
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+}
+
+async function retryPromptErrorAfterNativeNew(
+  firstCompletion: Record<string, unknown>,
+  pane: PaneInfo,
+  childId: string,
+): Promise<void> {
+  const firstTurnId = String(firstCompletion.turnId);
+  harness.tmux(["send-keys", "-t", pane.id, "-l", "--", "/new"]);
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+  await harness.waitFor(
+    () => harness.paneScreen(pane.id).includes("New session started"),
+    "native /new replaces the child Pi session",
+  );
+  await sendChildPrompt(
+    pane,
+    "Retry the Anthropic request after starting a new session.",
+  );
+
+  const secondCompletion = await waitForPromptErrorAfter(firstTurnId);
+  assertPreTurnPromptError(secondCompletion);
+  await harness.waitForProvider(
+    (events) =>
+      events.some(
+        (event) =>
+          event.eventType === "artifact_read_observed" &&
+          event.childId === childId &&
+          event.turnId === secondCompletion?.turnId &&
+          event.resultText?.includes(String(secondCompletion.errorMessage)),
+      ),
+    "parent observes the second raw error from the replacement session",
+  );
+}
+
 describe("real Pi terminal E2E", () => {
   it(
     "shows extension tool parameters only after Ctrl+O expansion",
@@ -769,6 +833,7 @@ describe("real Pi terminal E2E", () => {
         true,
       );
 
+      await retryPromptErrorAfterNativeNew(completion, errorPane, childId);
       await recoverPromptErrorChild(completion, errorPane);
       await harness.assertNoNetwork();
     },
