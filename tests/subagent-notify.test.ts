@@ -1243,6 +1243,16 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-auth-context",
     },
     {
+      label: "prose prefix with unsupported api key",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"api key":"private-api-key"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-api-key",
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {
