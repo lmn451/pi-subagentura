@@ -1202,6 +1202,26 @@ describe("read_subagent_artifact (output reporting)", () => {
       excluded: "private-token-value",
     },
     {
+      label: "prose prefix with unsupported cookie",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"cookie":"private-cookie"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-cookie",
+    },
+    {
+      label: "prose prefix with unsupported set-cookie",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected response: {"set-cookie":"private-set-cookie"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-set-cookie",
+    },
+    {
       label: "HTTP status prefix around unsupported JSON envelope",
       errorMessage: JSON.stringify({
         error: {
