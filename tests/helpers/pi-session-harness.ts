@@ -5,12 +5,14 @@ import {
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
+import * as CodingAgent from "@earendil-works/pi-coding-agent";
 import {
   buildSessionOptions,
   createCompatibleSessionRuntime,
   findModel,
   registerProvider,
 } from "../../src/pi-sdk-compat";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +20,7 @@ import {
   createAssistantMessageEventStream,
   type AssistantMessage,
   type Context,
+  type Model,
 } from "@earendil-works/pi-ai";
 
 function assistant(text: string): AssistantMessage {
@@ -45,9 +48,19 @@ export interface PiSessionHarness {
   sessionManager: SessionManager;
   contexts: Context[];
   completeNext(text?: string): void;
+  configureTestAuth(): void;
   failNext(errorMessage?: string): void;
   reload(): Promise<void>;
   dispose(): void;
+}
+
+export function supportsNativeProviderRegistration(): boolean {
+  const modelRuntime = (
+    CodingAgent as unknown as {
+      ModelRuntime?: unknown;
+    }
+  ).ModelRuntime;
+  return typeof modelRuntime === "function";
 }
 
 export async function createPiSessionHarness(
@@ -59,27 +72,35 @@ export async function createPiSessionHarness(
     extensionRoot?: string;
     includeTools?: boolean;
     sessionManager?: SessionManager;
+    nativeModel?: Model<any>;
+    nativeProvider?: unknown;
+    onNativeSessionStart?: (ctx: any) => Promise<void> | void;
     retrySettings?: {
       enabled: boolean;
       maxRetries: number;
       baseDelayMs: number;
       maxAgentDelayMs: number;
     };
+    providerErrorUrl?: string;
+    missingAuth?: boolean;
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
+  const missingAuthEnvVar = `PI_SUBAGENTURA_TEST_MISSING_AUTH_${randomUUID().replaceAll("-", "")}`;
   const sessionRuntime = await createCompatibleSessionRuntime({
     agentDir,
-    authStorageData: {
-      "subagentura-faux": { type: "api_key", key: "test" },
-    },
+    authStorageData: options.missingAuth
+      ? {}
+      : {
+          "subagentura-faux": { type: "api_key", key: "test" },
+        },
   });
   const contexts: Context[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   const fauxProvider = {
     api: "subagentura-faux",
-    apiKey: "test",
+    apiKey: options.missingAuth ? `$${missingAuthEnvVar}` : "test",
     baseUrl: "http://127.0.0.1.invalid",
     models: [
       {
@@ -101,20 +122,49 @@ export async function createPiSessionHarness(
     streamSimple: (_model: unknown, context: Context) => {
       contexts.push(context);
       const stream = createAssistantMessageEventStream();
-      pending.push(stream);
+      if (options.providerErrorUrl) {
+        void fetch(options.providerErrorUrl).then(async (response) => {
+          const errorMessage = `HTTP ${response.status}: ${await response.text()}`;
+          const message: AssistantMessage = {
+            ...assistant(""),
+            content: [],
+            stopReason: "error",
+            errorMessage,
+          };
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "error", reason: "error", error: message });
+          stream.end(message);
+        });
+      } else {
+        pending.push(stream);
+      }
       return stream;
     },
   };
   const registerFauxProvider = () =>
     registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
   registerFauxProvider();
-  const model = findModel(sessionRuntime, "subagentura-faux", "faux-model");
-  if (!model) throw new Error("faux model registration failed");
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
     settingsManager.getRetrySettings = () => options.retrySettings!;
   }
+  const extensionFactories = options.nativeProvider
+    ? [
+        {
+          name: "test-native-provider",
+          factory: (pi: any) => {
+            pi.registerProvider(options.nativeProvider);
+            const onNativeSessionStart = options.onNativeSessionStart;
+            if (onNativeSessionStart) {
+              pi.on("session_start", (_event: any, ctx: any) =>
+                onNativeSessionStart(ctx),
+              );
+            }
+          },
+        },
+      ]
+    : [];
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -122,11 +172,12 @@ export async function createPiSessionHarness(
     additionalExtensionPaths: [
       join(options.extensionRoot ?? cwd, "src/subagent.ts"),
     ],
+    extensionFactories,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-  });
+  } as any);
   const previousChild = process.env.PI_SUBAGENTURA_CHILD;
   const previousArtifactDir = process.env.ARTIFACT_DIR;
   if (options.childArtifactDir) {
@@ -144,6 +195,10 @@ export async function createPiSessionHarness(
     if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
     else process.env.ARTIFACT_DIR = previousArtifactDir;
   }
+  const model =
+    options.nativeModel ??
+    findModel(sessionRuntime, "subagentura-faux", "faux-model");
+  if (!model) throw new Error("test model registration failed");
   const sessionOptions = buildSessionOptions(sessionRuntime, {
     cwd,
     agentDir,
@@ -163,6 +218,12 @@ export async function createPiSessionHarness(
     session,
     sessionManager,
     contexts,
+    configureTestAuth() {
+      registerProvider(sessionRuntime, "subagentura-faux", {
+        ...fauxProvider,
+        apiKey: "test",
+      });
+    },
     completeNext(text = "ok") {
       const stream = pending.shift();
       if (!stream) throw new Error("no pending faux provider response");

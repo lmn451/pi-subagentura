@@ -163,7 +163,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - Asynchronous in-process completions publish a reference to `get_subagent_result`.
 - Interactive artifact intents publish immutable snapshot and activity references.
 - Background workflows publish a reference to `get_workflow_result`; their owned children never publish directly.
-- `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId` and waits for a sealed all-terminal group.
+- `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId`; see [coordinated readiness](#84-coordinated-readiness-consumption-and-dispatch) for its error bypass and terminal barrier.
 - The coordinator attaches one ready manifest to pending human input or prepares one follow-up only after safe idleness. It passes that idle manifest to `sendCompletionTurn` with the actual parent streaming state; non-v2 falls through to native `sendMessage`, while idle Orchestratorv2 uses the synthetic user-wake transport.
 - Full output is not automatic by default, and successful manual retrieval consumes the matching record. Related group membership is explicit: same-turn launch and task text do not infer relatedness.
 - Parent session ownership and generation fencing prevent delivery across session replacement.
@@ -420,7 +420,7 @@ There is no autonomous in-process poller.
 A requested result wait races the existing promise against caller abort and a bounded timeout; cancelling the wait does not cancel the job.
 Successful terminal retrieval appends a consumption receipt before returning and suppresses later automatic delivery.
 
-`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership and for every member—including errors and cancellations—to become terminal; same-turn launch or task text never infers a group.
+`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership. Errors are eligible for parent delivery before the group barrier; success and cancellation remain gated until every registered member is terminal. Early error delivery does not satisfy the member's terminal accounting or release the remaining group records. Same-turn launch or task text never infers a group.
 
 ### 5.5 Cancellation and retention
 
@@ -500,7 +500,7 @@ pi --session <child-session.jsonl> --name <name> [model/thinking flags]
 Agent turn starts come from child Pi lifecycle hooks, not the shell wrapper.
 
 The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
-`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.
+`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback. On initial `session_start`, it also records an explicit process-level error when the selected model has no configured authentication, before Pi's prompt preflight can reject without entering agent lifecycle hooks.
 
 ### 6.3 Mux boundary
 
@@ -538,6 +538,9 @@ A successful completion while the pane remains alive folds to `idle`, not `exite
 `send_interactive_subagent_message` accepts `running` or `idle`, bounds the input, appends the mandatory completion reminder, sends literal text, then Enter.
 The REPL can queue mid-turn input.
 A new persisted user entry establishes the next turn.
+The startup error uses the reserved `process` turn identity and does not bind
+`active-turn.json`; after authentication, the first normal run receives its own
+Pi-persisted user-entry identity and can complete independently.
 
 ### 6.5 Interactive cancellation
 
@@ -632,6 +635,10 @@ For a completion with captured output, `eventId` names the physical snapshot; `t
 `process-exit` first synthesizes a missing completion—cancelled when `.cancelled` exists, otherwise error—then appends `process_exited`.
 A clean shell exit without an earlier completion is therefore still an error completion.
 `agent_settled` is only a fallback and races safely through the same exactly-once lock.
+The initial child `session_start` auth check emits that explicit error only when
+the selected model has no configured authentication; the REPL remains open for
+`/login`. It does not classify later provider/network failures, which continue
+through the normal agent lifecycle.
 
 ### 7.4 Physical authority
 
@@ -708,9 +715,12 @@ For every parent-visible standalone terminal record and every background workflo
 
 `completionPolicy="each"` is the default. Records become independently eligible as soon as they are terminal; records that finish while the parent is busy coalesce into one manifest at the next safe dispatch. A related group is formed only when the caller explicitly selects `completionPolicy="group"` and provides a shared `completionGroupId`; same-turn launch and task text never infer relatedness.
 
-For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group, late members are rejected, and parent delivery waits for every registered member to be `done`, `error`, or `cancelled`. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
+For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group and late members are rejected. Errors are eligible for parent delivery before the group barrier; success and cancellation wait until every registered member is terminal. Early error delivery leaves the group member registered and its terminal accounting intact, so remaining successful or cancelled members stay gated until the group is ready. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
 
 The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
+The user-visible handling and limits for terminal error diagnostics are documented
+with [`read_subagent_artifact`](README.md#read_subagent_artifact). These diagnostics
+do not change immutable snapshots or telemetry.
 
 Successful terminal retrieval through `read_subagent_artifact`, `get_subagent_result`, or `get_workflow_result` appends a consumption receipt before returning. The coordinator first losslessly appends the receipt and calls `fsyncSync` in a private, session-scoped append-only NDJSON ledger beneath the parent Pi session directory, outside the project working tree, keyed by the parent session identity. It then best-effort mirrors the receipt into a parent session entry. A ledger write failure blocks manual collection; lifecycle retirement has a separate best-effort path. A manager without a session directory uses a random process-private temporary root and does not claim restart durability. The coordinator omits consumed records, and an entirely consumed explicit group creates no empty turn. Workflow-owned children are suppressed before this path, so only the background workflow aggregate publishes.
 
@@ -908,7 +918,7 @@ At capacity, only an eligible terminal job belonging to the requesting owner may
 `cancel_workflow` aborts the job, normalizes state immediately, briefly waits for active runner cancellation receipts, posts worker abort, and terminates the worker.
 When execution rejects, `WorkflowExecutionError.usage` is copied into the job snapshot before cancellation normalization and completion callbacks, so status, result, notification, and tree consumers observe the same terminal accounting.
 
-On completion, `notifyWorkflowCompletion` publishes one coordinated workflow record by default. The aggregate produces a TUI-only terminal entry, and the compact manifest points to `get_workflow_result` when the parent is safely idle; successful terminal retrieval consumes pending automatic delivery. Independent `completionPolicy="each"` records become eligible immediately and coalesce while busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` shares the parent-settlement seal and all-terminal barrier; same-turn launch and task text never infer a group. Workflow-owned process and in-process children are suppressed, so internal fan-out never wakes the parent per child. Publication is owner-fenced and suppressed by owner cleanup.
+On completion, `notifyWorkflowCompletion` publishes one coordinated workflow record by default. The aggregate produces a TUI-only terminal entry, and the compact manifest points to `get_workflow_result` when the parent is safely idle; successful terminal retrieval consumes pending automatic delivery. Independent `completionPolicy="each"` records become eligible immediately and coalesce while busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` shares the parent-settlement seal and readiness rules described in [coordinated readiness](#84-coordinated-readiness-consumption-and-dispatch). Same-turn launch and task text never infer a group. Workflow-owned process and in-process children are suppressed, so internal fan-out never wakes the parent per child. Publication is owner-fenced and suppressed by owner cleanup.
 
 ### 9.7 Usage accounting, pricing provenance, and live projection
 
@@ -1130,7 +1140,7 @@ The restrictive exports map matters: shipping all source files in `package.json#
 
 - [ ] Every terminal record appends one deterministic TUI completion entry excluded from LLM context.
 - [ ] Default `completionPolicy="each"` records become eligible independently and coalesce while the parent is busy.
-- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and waits for all `done`/`error`/`cancelled` members; same-turn launch and task text do not infer a group.
+- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and retains all members in terminal accounting; errors are eligible before the barrier, while success and cancellation wait for every member to become terminal. Same-turn launch and task text do not infer a group.
 - [ ] Every idle coordinated manifest passes through `sendCompletionTurn` with
       the actual parent streaming state.
 - [ ] Non-v2 delivery falls through to native `sendMessage`; idle Orchestratorv2

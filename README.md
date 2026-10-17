@@ -460,7 +460,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -482,7 +482,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -584,7 +584,7 @@ Parameters:
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux` — optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, or `"herdr"`. Auto prefers a Herdr-managed pane (`HERDR_ENV=1`), then the attached Zellij/tmux environment, and finally an installed tmux or Zellij detached-session backend. Explicit choice forces that backend. Herdr mode requires Pi to be running inside a Herdr pane and preserves its exact socket path for reload/rehydration.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
-- `completionPolicy` — `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for a caller-declared named barrier
+- `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
 
 The spawn result describes the selected coordinated behavior.
@@ -777,7 +777,16 @@ from the parent-model channel:
 `completionPolicy` controls readiness:
 
 - `"each"` (default) makes every independent result eligible immediately. Results that finish while the parent is busy are coalesced into one manifest at the next safe-idle dispatch; this is the default independent-delivery behavior.
-- `"group"` requires the caller to provide one shared, explicit `completionGroupId`. Same-turn launch and task text do not infer relatedness. Register all members in the intended group before the spawning parent turn settles; settlement seals the group, rejects late members, and blocks model delivery until every registered member is `done`, `error`, or `cancelled`. Per-member TUI notices still appear immediately, and an entirely consumed group does not trigger an empty turn.
+- `"group"` requires the caller to provide one shared, explicit
+  `completionGroupId`. Same-turn launch and task text do not infer relatedness.
+  Register all members before the spawning parent turn settles; settlement seals
+  the group and rejects late members. Error records bypass the group barrier and
+  become eligible for model delivery before the group completes; this does not
+  complete the group.
+  Successful and cancelled results remain gated until every registered member is
+  terminal. Per-member TUI notices still appear immediately, while busy-parent
+  manifests wait for a safe-idle dispatch. An entirely consumed group does not
+  trigger an empty turn.
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
@@ -899,6 +908,16 @@ the latest turn in physical event order. A completed turn returns its immutable
 snapshot; a running turn returns its current staging `output.md`, even when an
 earlier turn has completed. Empty or missing current staging never falls back to
 an earlier snapshot.
+
+For a selected terminal `error`, the model-facing response includes a separate
+status and explicitly untrusted diagnostic, even when the immutable snapshot is
+empty. The recorded `errorMessage` or `message` is passed through without parsing
+or credential redaction; provider diagnostics may include credential-shaped text.
+Markup delimiters are escaped before insertion into the wrapper, and the
+diagnostic is capped at 512 UTF-8 bytes including any truncation marker. The
+boundary labels the text as data but
+is not a prompt-injection defense. Existing snapshot output sanitization,
+snapshots, manifests, and telemetry are unchanged.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated
