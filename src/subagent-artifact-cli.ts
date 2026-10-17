@@ -20,6 +20,8 @@
  */
 
 import {
+  ACTIVE_TURN_LOCK_STALE_MS,
+  ACTIVE_TURN_LOCK_TIMEOUT_MS,
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
   MAX_ACTIVE_TURN_BYTES,
@@ -77,6 +79,8 @@ const activeTurnFile = join(dir, "active-turn.json");
 const MAX_OUTPUT_SNAPSHOT_BYTES = ${MAX_OUTPUT_SNAPSHOT_BYTES};
 const MAX_EVENT_TEXT_LENGTH = ${MAX_EVENT_TEXT_LENGTH};
 const MAX_ACTIVE_TURN_BYTES = ${MAX_ACTIVE_TURN_BYTES};
+const ACTIVE_TURN_LOCK_TIMEOUT_MS = ${ACTIVE_TURN_LOCK_TIMEOUT_MS};
+const ACTIVE_TURN_LOCK_STALE_MS = ${ACTIVE_TURN_LOCK_STALE_MS};
 const MAX_ACTIVE_TOOL_RECORDS = ${MAX_ACTIVE_TOOL_RECORDS};
 const MAX_ACTIVE_TOOL_ID_LENGTH = ${MAX_ACTIVE_TOOL_ID_LENGTH};
 const MAX_TOOL_NAME_LENGTH = ${MAX_TOOL_NAME_LENGTH};
@@ -189,6 +193,47 @@ const withCompletionLock = (targetTurnId, operation) => {
     rmSync(completionLock, { recursive: true, force: true });
   }
 };
+const withActiveTurnLock = (operation) => {
+  const activeTurnLock = join(dir, ".active-turn.lock");
+  const deadline = Date.now() + ACTIVE_TURN_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      mkdirSync(activeTurnLock, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      try {
+        if (
+          Date.now() - statSync(activeTurnLock).mtimeMs >
+          ACTIVE_TURN_LOCK_STALE_MS
+        ) {
+          rmSync(activeTurnLock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("timed out acquiring active-turn lock");
+      }
+      Atomics.wait(lockWaiter, 0, 0, 10);
+    }
+  }
+  try {
+    return operation();
+  } finally {
+    rmSync(activeTurnLock, { recursive: true, force: true });
+  }
+};
+const isCancelled = () =>
+  existsSync(join(dir, ".cancelled")) ||
+  readEvents().some(
+    (event) =>
+      event.version === 2 &&
+      event.type === "completion" &&
+      event.outcome === "cancelled" &&
+      event.source === "parent",
+  );
 const completed = (targetTurnId) =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === targetTurnId);
@@ -393,17 +438,21 @@ if (options.promptError) {
     typeof request.message === "string"
       ? request.message.slice(0, MAX_EVENT_TEXT_LENGTH)
       : String(request.message).slice(0, MAX_EVENT_TEXT_LENGTH);
-  withCompletionLock(promptTurnId, () => {
-    if (existsSync(join(dir, ".cancelled"))) return;
-    if (appendCompletion(
-      promptTurnId,
-      "error",
-      "prompt_error",
-      { exitCode: 1, message: errorMessage, errorMessage },
-      emptySnapshot,
-    )) {
-      writePromptErrorActiveTurn(promptTurnId, previousUserEntryId);
-    }
+  withActiveTurnLock(() => {
+    if (isCancelled()) return;
+    withCompletionLock(promptTurnId, () => {
+      if (
+        appendCompletion(
+          promptTurnId,
+          "error",
+          "prompt_error",
+          { exitCode: 1, message: errorMessage, errorMessage },
+          emptySnapshot,
+        )
+      ) {
+        writePromptErrorActiveTurn(promptTurnId, previousUserEntryId);
+      }
+    });
   });
   return;
 }
@@ -421,7 +470,17 @@ switch (cmd) {
     });
     break;
   case "cancelled":
-    completion("cancelled", "parent");
+    withActiveTurnLock(() => {
+      try {
+        writeFileSync(join(dir, ".cancelled"), "", { mode: 0o600 });
+      } catch {
+        /* the parent cancellation event remains authoritative */
+      }
+      const activeTurnId = activeTurnMetadata()?.turnId ?? "process";
+      if (!completionFor(activeTurnId, "cancelled", "parent")) {
+        completionFor(`process-cancel-${randomUUID()}`, "cancelled", "parent");
+      }
+    });
     break;
   case "process-exit": {
     const exitCode = Number(arg ?? 0);

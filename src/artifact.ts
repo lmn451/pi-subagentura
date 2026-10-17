@@ -463,6 +463,46 @@ export function newEventId(): EventId {
 const COMPLETION_LOCK_TIMEOUT_MS = 2_000;
 const COMPLETION_LOCK_STALE_MS = 30_000;
 const completionLockWaiter = new Int32Array(new SharedArrayBuffer(4));
+export const ACTIVE_TURN_LOCK_TIMEOUT_MS = 2_000;
+export const ACTIVE_TURN_LOCK_STALE_MS = 30_000;
+const activeTurnLockWaiter = new Int32Array(new SharedArrayBuffer(4));
+
+export function withActiveTurnLock<T>(
+  art: SubagentArtifact,
+  operation: () => T,
+): T {
+  ensureArtifactDir(art);
+  const lockPath = join(art.dir, ".active-turn.lock");
+  const deadline = Date.now() + ACTIVE_TURN_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (
+          Date.now() - statSync(lockPath).mtimeMs >
+          ACTIVE_TURN_LOCK_STALE_MS
+        ) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("timed out acquiring active-turn lock");
+      }
+      Atomics.wait(activeTurnLockWaiter, 0, 0, 10);
+    }
+  }
+  try {
+    return operation();
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+  }
+}
 
 function completionLockPath(art: SubagentArtifact, turnId: string): string {
   const key = createHash("sha256").update(turnId).digest("hex").slice(0, 24);

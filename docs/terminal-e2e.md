@@ -113,8 +113,10 @@ uses an intentionally unconfigured Anthropic model. They exercise Pi's real
 missing-auth prompt rejection, not an auth probe or the scripted provider-error
 fixture. The `each` case asserts that the parent's `read_subagent_artifact`
 request selects the exact prompt-error `turnId` and returns the raw diagnostic;
-it then retasks the still-live pane and expects a later normal completion from
-that same child. The grouped case checks that the error is eligible while a
+then it runs native `/new`, sends another prompt into the replacement Pi
+session, and asserts a second exact prompt-error completion from the same
+artifact before retasking the still-live pane for a normal completion. The
+grouped case checks that the error is eligible while a
 registered sibling is still provider-gated without marking the group complete.
 It then releases the sibling and expects its separate completion, before
 retasking the failed child and expecting a separate normal recovery completion.

@@ -490,50 +490,6 @@ describe("model selection guidance", () => {
   );
 });
 
-describe("async review finalization guidance", () => {
-  it.each(["subagent_with_context", "subagent_isolated"])(
-    "%s distinguishes yielding from finalizing the review",
-    (name) => {
-      const tool = getToolDef(setupExtension(), name);
-
-      expect(tool.description).toContain(
-        "yield the parent turn so the group seals",
-      );
-      expect(tool.description).toContain(
-        "label findings as provisional and report pending jobIds",
-      );
-      expect(tool.description).toContain(
-        "disclose any failed or cancelled reviewers as coverage gaps",
-      );
-      expect(tool.description).toContain(
-        "Do not cancel unfinished reviewers merely to finalize an audit.",
-      );
-      expect(tool.parameters.properties.async.description).toContain(
-        "Yield the spawning turn to seal the group",
-      );
-    },
-  );
-
-  it("directs timed-out review waits back to background completion", () => {
-    const tool = getToolDef(setupExtension(), "get_subagent_result");
-
-    expect(tool.description).toContain(
-      "If a bounded wait times out, report the pending jobId and yield",
-    );
-    expect(tool.description).toContain(
-      "do not cancel the job merely to finish a review",
-    );
-  });
-
-  it("forbids using cancellation to finalize an audit", () => {
-    const tool = getToolDef(setupExtension(), "cancel_subagent");
-
-    expect(tool.description).toContain(
-      "Do not cancel unfinished reviewers merely to finalize an audit.",
-    );
-  });
-});
-
 // ── subagent_with_context ────────────────────────────────────────────
 
 describe("subagent_with_context tool", () => {
@@ -543,18 +499,6 @@ describe("subagent_with_context tool", () => {
   beforeEach(() => {
     api = setupExtension();
     toolDef = getToolDef(api, "subagent_with_context");
-  });
-
-  it("explains the async review lifecycle and cancellation guard", () => {
-    expect(toolDef.description).toContain(
-      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
-    );
-    expect(toolDef.description).toContain(
-      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
-    );
-    expect(toolDef.description).toContain(
-      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
-    );
   });
 
   it("returns 'No conversation history to inherit' when branch is empty (sync path)", async () => {

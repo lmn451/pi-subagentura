@@ -947,7 +947,7 @@ export function registerInteractiveSubagentTools(
                 `Interactive sub-agent ${state.id} started (${displayMode}) in ${state.mux} pane ${state.paneId}.\n\n` +
                 `${
                   completion.policy === "group"
-                    ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
+                    ? `Error notices are immediate; after parent settlement seals membership, they become eligible for parent delivery before the remaining members finish. Safe-idle and human-input fences still apply. Successful and cancelled results wait until every registered member is terminal; group ${completion.groupId} remains incomplete until then.`
                     : "Completion will notify the user immediately and resume the parent with immutable result references when safely idle."
                 }\n\n` +
                 locationLines.join("\n"),

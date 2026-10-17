@@ -54,6 +54,7 @@ import {
   appendInteractiveState,
   appendCompletionEvent,
   artifactPath,
+  withActiveTurnLock,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   assertNever,
   MAX_PERSISTED_WORKING_CWD_BYTES,
@@ -1500,18 +1501,10 @@ export function cancelInteractiveSubagent(
   });
   state.cancellationSnapshot = snapshot;
 
-  // 1. Drop a `.cancelled` flag file in the artifact dir. The wrapper's EXIT trap
-  //    checks for this before writing the `done` event; if present, it writes
-  //    `cancelled` instead so the artifact log is self-describing.
   try {
-    writeFileSync(join(state.artifactDir, ".cancelled"), "", { mode: 0o600 });
-  } catch {
-    /* best effort — dir may not exist yet if the launch script is still warming up */
-  }
-  retireLineageBootstraps(state.artifactDir);
-  try {
-    appendCancellation(state, { origin: source });
+    publishCancellation(state, { origin: source });
   } finally {
+    retireLineageBootstraps(state.artifactDir);
     // A failed artifact write must not prevent the requested stop.
     state.status = "cancelled";
     const mux = getMuxForState(state);
@@ -1520,6 +1513,26 @@ export function cancelInteractiveSubagent(
     }
   }
   return state;
+}
+
+function publishCancellation(
+  state: InteractiveSubagentState,
+  context: ParentCancellationContext,
+): void {
+  const art = artifactPath(
+    dirname(state.artifactDir),
+    basename(state.artifactDir),
+  );
+  withActiveTurnLock(art, () => {
+    try {
+      writeFileSync(join(state.artifactDir, ".cancelled"), "", {
+        mode: 0o600,
+      });
+    } catch {
+      /* best effort — dir may not exist yet if the launch script is warming up */
+    }
+    appendCancellation(state, context);
+  });
 }
 
 function appendCancellation(
@@ -1579,14 +1592,9 @@ export function cancelInteractiveDescendantByState(
     cancellationOrigin: "supervisor_descendant",
   });
   try {
-    writeFileSync(join(state.artifactDir, ".cancelled"), "", { mode: 0o600 });
-  } catch {
-    /* best effort; the owner will reconcile the durable pane state */
-  }
-  retireLineageBootstraps(state.artifactDir);
-  try {
-    appendCancellation(state, { origin: "supervisor_descendant" });
+    publishCancellation(state, { origin: "supervisor_descendant" });
   } finally {
+    retireLineageBootstraps(state.artifactDir);
     state.status = "cancelled";
     const mux = getMuxForState(state);
     if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
@@ -1637,16 +1645,10 @@ export function cancelInteractiveSubagentByState(
   });
   state.cancellationSnapshot = snapshot;
 
-  // 1. Write .cancelled flag (best-effort)
   try {
-    writeFileSync(join(state.artifactDir, ".cancelled"), "", { mode: 0o600 });
-  } catch {
-    /* best-effort */
-  }
-  retireLineageBootstraps(state.artifactDir);
-  try {
-    appendCancellation(state, context);
+    publishCancellation(state, context);
   } finally {
+    retireLineageBootstraps(state.artifactDir);
     // Teardown must outlive artifact failures during destructive transitions.
     const mux = getMuxForState(state);
     if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {

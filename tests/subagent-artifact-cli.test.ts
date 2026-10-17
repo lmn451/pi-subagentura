@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   lstatSync,
@@ -79,14 +79,51 @@ function runImportedReporter(
   };
 }
 
+function waitForChild(child: ReturnType<typeof spawn>): Promise<{
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}> {
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  return new Promise((resolve) => {
+    child.once("close", (status, signal) => {
+      resolve({ status, signal, stdout, stderr });
+    });
+  });
+}
+
 describe("subagent-artifact CLI", () => {
   let tmp: string;
+  let spawnedChildren: ReturnType<typeof spawn>[];
 
   beforeEach(() => {
     tmp = makeTmp();
+    spawnedChildren = [];
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const exits = spawnedChildren.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null) {
+            resolve();
+            return;
+          }
+          child.once("close", () => resolve());
+        }),
+    );
+    for (const child of spawnedChildren) {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+    await Promise.all(exits);
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -362,56 +399,211 @@ describe("subagent-artifact CLI", () => {
         ).size,
       ).toBe(4);
     });
-    it("keeps parent cancellation authoritative over a late prompt rejection", () => {
-      const manager = SessionManager.create(tmp, join(tmp, "sessions"));
-      const cancelledTurnId = manager.appendCustomEntry(
-        "subagentura-prompt-error",
-        { schemaVersion: 1 },
-      );
-      const activeTurn = {
-        turnId: cancelledTurnId,
-        started: false,
-      };
-      const activeTurnPath = join(tmp, "active-turn.json");
-      const activeTurnContent = JSON.stringify(activeTurn);
-      const outputPath = join(tmp, "output.md");
-      const staleOutput = "output staging preserved after cancellation";
-      writeFileSync(activeTurnPath, activeTurnContent);
-      writeFileSync(join(tmp, ".cancelled"), "");
-      writeFileSync(outputPath, staleOutput);
+    it.each(["parent API", "CLI command"])(
+      "serializes real prompt-error publication with %s cancellation",
+      async (cancellationWriter) => {
+        const cliPath = join(tmp, "cli.mjs");
+        writeCliScript(cliPath);
+        const cliUrl = pathToFileURL(cliPath).href;
+        const moduleUrl = pathToFileURL(
+          join(process.cwd(), "src", "interactive-tmux.ts"),
+        ).href;
+        const pausedPath = join(tmp, "reporter-paused");
+        const releasePath = join(tmp, "release-reporter");
+        const waitingPath = join(tmp, "cancellation-waiting");
+        const observerPath = join(tmp, "lock-observer.mjs");
+        const attemptTurnId = "pi-prompt-attempt";
+        const previousTurnId = "previous-pi-turn";
+        const eventsPath = join(tmp, "events.ndjson");
+        writeFileSync(
+          join(tmp, "active-turn.json"),
+          JSON.stringify({ turnId: previousTurnId, started: true }),
+        );
+        const reporterSource = `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const append = fs.appendFileSync.bind(fs);
+          fs.appendFileSync = (path, data, ...args) => {
+            if (String(path) === ${JSON.stringify(eventsPath)}) {
+              const event = JSON.parse(String(data));
+              if (event.type === "completion" && event.source === "prompt_error") {
+                fs.writeFileSync(${JSON.stringify(pausedPath)}, "");
+                const waiter = new Int32Array(new SharedArrayBuffer(4));
+                while (!fs.existsSync(${JSON.stringify(releasePath)})) {
+                  Atomics.wait(waiter, 0, 0, 10);
+                }
+              }
+            }
+            return append(path, data, ...args);
+          };
+          syncBuiltinESMExports();
+          const { reportPromptError } = await import(${JSON.stringify(cliUrl)});
+          reportPromptError(${JSON.stringify(attemptTurnId)}, "raw provider rejection", ${JSON.stringify(previousTurnId)});
+        `;
+        const reporter = spawn(
+          process.execPath,
+          ["--input-type=module", "-e", reporterSource],
+          {
+            env: { ...process.env, ARTIFACT_DIR: tmp },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        spawnedChildren.push(reporter);
+        const reporterResult = waitForChild(reporter);
+        await vi.waitFor(() => expect(existsSync(pausedPath)).toBe(true), {
+          timeout: 5_000,
+          interval: 10,
+        });
 
-      expect(
-        runImportedReporter(tmp, [
-          { turnId: cancelledTurnId, message: "late provider rejection" },
-        ]).status,
-      ).toBe(0);
-      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
-      expect(readFileSync(activeTurnPath, "utf8")).toBe(activeTurnContent);
-      expect(readFileSync(outputPath, "utf8")).toBe(staleOutput);
+        const loaderPath = join(tmp, "ts-loader.mjs");
+        writeFileSync(
+          loaderPath,
+          `import { existsSync } from "node:fs";
+           import { fileURLToPath, pathToFileURL } from "node:url";
+           export async function resolve(specifier, context, nextResolve) {
+             if (specifier.startsWith(".") && !/\\.[a-z0-9]+$/i.test(specifier)) {
+               for (const suffix of [".ts", ".mjs", ".js"]) {
+                 const candidate = new URL(specifier + suffix, context.parentURL);
+                 if (existsSync(fileURLToPath(candidate))) {
+                   return { url: pathToFileURL(fileURLToPath(candidate)).href, shortCircuit: true };
+                 }
+               }
+             }
+             return nextResolve(specifier, context);
+           }`,
+        );
+        writeFileSync(
+          observerPath,
+          `import fs from "node:fs";
+           import { syncBuiltinESMExports } from "node:module";
+           const mkdir = fs.mkdirSync.bind(fs);
+           fs.mkdirSync = (path, ...args) => {
+             try { return mkdir(path, ...args); }
+             catch (error) {
+               if (error?.code === "EEXIST" && String(path).endsWith(".active-turn.lock")) {
+                 fs.writeFileSync(${JSON.stringify(waitingPath)}, "");
+               }
+               throw error;
+             }
+           };
+           syncBuiltinESMExports();`,
+        );
+        const state = {
+          id: "cancel-race-agent",
+          name: "cancel race",
+          task: "cancel race",
+          paneId: "%42",
+          mux: "tmux",
+          sessionFile: join(tmp, "child-session.jsonl"),
+          cwd: tmp,
+          startedAt: Date.now(),
+          status: "running",
+          attachCommand: "",
+          selectPaneCommand: "",
+          launchScriptFile: join(tmp, "launch.sh"),
+          artifactDir: tmp,
+        };
+        const cancellationSource = `
+          import childProcess from "node:child_process";
+              import { syncBuiltinESMExports } from "node:module";
+          childProcess.execFileSync = () => "";
+              syncBuiltinESMExports();
+          const { cancelInteractiveSubagent } = await import(${JSON.stringify(moduleUrl)});
+          cancelInteractiveSubagent(${JSON.stringify(state.id)}, "cancel_interactive_subagent", ${JSON.stringify(state)});
+        `;
+        const cancellationArgs =
+          cancellationWriter === "CLI command"
+            ? ["--import", observerPath, cliPath, "cancelled"]
+            : [
+                "--no-warnings",
+                "--experimental-strip-types",
+                "--loader",
+                loaderPath,
+                "--import",
+                observerPath,
+                "--input-type=module",
+                "-e",
+                cancellationSource,
+              ];
+        const cancellation = spawn(process.execPath, cancellationArgs, {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            ARTIFACT_DIR: tmp,
+            SUBAGENT_CANCEL_SNAPSHOT: "",
+            SUBAGENT_CANCEL_SNAPSHOT_DIR: "",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        spawnedChildren.push(cancellation);
+        const cancellationResult = waitForChild(cancellation);
+        const hasParentCancellation = () => {
+          if (!existsSync(eventsPath)) return false;
+          return readFileSync(eventsPath, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .some((line) => {
+              try {
+                const event = JSON.parse(line);
+                return (
+                  event.type === "completion" &&
+                  event.source === "parent" &&
+                  event.outcome === "cancelled"
+                );
+              } catch (error) {
+                if (error instanceof SyntaxError) return false;
+                throw error;
+              }
+            });
+        };
+        await vi.waitFor(
+          () => {
+            expect(
+              existsSync(waitingPath) ||
+                hasParentCancellation() ||
+                cancellation.exitCode !== null,
+            ).toBe(true);
+          },
+          { timeout: 5_000, interval: 10 },
+        );
+        const cancellationHadToWait = existsSync(waitingPath);
+        if (!cancellationHadToWait && !hasParentCancellation()) {
+          writeFileSync(releasePath, "");
+          const result = await cancellationResult;
+          throw new Error(`cancellation writer failed: ${result.stderr}`);
+        }
+        writeFileSync(releasePath, "");
 
-      expect(runCli(tmp, ["process-exit", "1"]).status).toBe(0);
-      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      const completion = events.find(
-        (event) =>
-          event.type === "completion" && event.turnId === cancelledTurnId,
-      );
-      expect(completion).toMatchObject({
-        type: "completion",
-        status: "cancelled",
-        outcome: "cancelled",
-        source: "process_exit",
-      });
-      expect(completion).not.toHaveProperty("message");
-      expect(
-        events.filter(
-          (event) =>
-            event.type === "completion" && event.turnId === cancelledTurnId,
-        ),
-      ).toHaveLength(1);
-    });
+        const [reporterExit, cancellationExit] = await Promise.all([
+          reporterResult,
+          cancellationResult,
+        ]);
+        expect(reporterExit.status, reporterExit.stderr).toBe(0);
+        expect(cancellationExit.status, cancellationExit.stderr).toBe(0);
+
+        const events = readFileSync(eventsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        const promptErrorIndex = events.findIndex(
+          (event) => event.type === "completion" && event.source === "prompt_error",
+        );
+        const cancellationIndex = events.findIndex(
+          (event) => event.type === "completion" && event.source === "parent" && event.outcome === "cancelled",
+        );
+        expect(promptErrorIndex).toBeGreaterThanOrEqual(0);
+        expect(cancellationIndex).toBeGreaterThan(promptErrorIndex);
+        expect(events[promptErrorIndex]).toMatchObject({
+          turnId: attemptTurnId,
+          errorMessage: "raw provider rejection",
+        });
+        expect(events[cancellationIndex].turnId).not.toBe(previousTurnId);
+        expect(readFileSync(join(tmp, "active-turn.json"), "utf8")).toContain(
+          attemptTurnId,
+        );
+        expect(existsSync(join(tmp, ".cancelled"))).toBe(true);
+      },
+    );
   });
 
   describe("done", () => {

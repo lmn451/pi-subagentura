@@ -563,9 +563,24 @@ entry before a real conversation message, while the artifact event and snapshot
 persist independently. If failed prompt attempt B follows completed turn A, B
 is selected as the latest attempt and a late normal completion for A cannot
 displace it. A later real user entry has its own Pi-derived turn ID. The pane
-stays live and can be retasked.
+stays live and can be retasked. The initial selected session establishes
+primary-session affinity; Pi's public `AgentSessionRuntime.apply()` replacement
+path carries that affinity through `/new`, `/resume`, and `/fork` without
+claiming unrelated sessions.
+
+If Pi's public `main()` rejects outside a tracked primary prompt, the preloader
+records the actual rejection with the reserved `process` turn identity. It does
+not probe credentials or synthesize a provider failure.
 
 ### 6.5 Interactive cancellation
+
+Prompt-error publication and parent cancellation share the artifact's
+`.active-turn.lock`. Prompt-error append and active-turn replacement are one
+critical section. Cancellation writes `.cancelled`, reads the active turn, and
+appends its parent completion under the same lock. The first operation to
+commit determines the order: cancellation prevents a later prompt-error append,
+while an error already committed remains in the artifact. The lock is released
+before lineage cleanup and mux teardown.
 
 Cancellation first preserves authority on disk, then tears down the process:
 
