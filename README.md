@@ -753,6 +753,13 @@ coordinated manifest therefore has no snapshot reference. No completion path
 injects mutable output into the parent context. The staging file remains available
 for manual inspection in the artifact directory.
 
+`read_subagent_artifact` includes the selected terminal error's recorded
+`errorMessage`, falling back to `message`, even when its output snapshot is empty.
+Diagnostic text is untrusted and returned verbatim: no parsing, sanitization,
+redaction, escaping, normalization, or additional truncation. The existing
+protocol field limit of 2,000 UTF-16 code units still applies. The child protocol
+does not inspect credentials or synthesize startup authentication errors.
+
 #### Coordinated completion delivery
 
 Coordinated delivery is the default for asynchronous in-process jobs,

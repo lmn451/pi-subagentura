@@ -286,20 +286,6 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
-  pi.on("session_start", (event, ctx) => {
-    if (event.reason !== "startup" || !ctx.model) return;
-    if (ctx.modelRegistry.hasConfiguredAuth(ctx.model)) return;
-
-    const message = "Selected model has no configured authentication.";
-    appendCompletionEvent(art, {
-      turnId: "process",
-      outcome: "error",
-      source: "explicit",
-      exitCode: 1,
-      message,
-      errorMessage: message,
-    });
-  });
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,

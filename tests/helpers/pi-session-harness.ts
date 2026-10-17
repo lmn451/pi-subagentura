@@ -11,7 +11,6 @@ import {
   findModel,
   registerProvider,
 } from "../../src/pi-sdk-compat";
-import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +45,6 @@ export interface PiSessionHarness {
   sessionManager: SessionManager;
   contexts: Context[];
   completeNext(text?: string): void;
-  configureTestAuth(): void;
   failNext(errorMessage?: string): void;
   reload(): Promise<void>;
   dispose(): void;
@@ -68,25 +66,21 @@ export async function createPiSessionHarness(
       maxAgentDelayMs: number;
     };
     providerErrorUrl?: string;
-    missingAuth?: boolean;
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
-  const missingAuthEnvVar = `PI_SUBAGENTURA_TEST_MISSING_AUTH_${randomUUID().replaceAll("-", "")}`;
   const sessionRuntime = await createCompatibleSessionRuntime({
     agentDir,
-    authStorageData: options.missingAuth
-      ? {}
-      : {
-          "subagentura-faux": { type: "api_key", key: "test" },
-        },
+    authStorageData: {
+      "subagentura-faux": { type: "api_key", key: "test" },
+    },
   });
   const contexts: Context[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   const fauxProvider = {
     api: "subagentura-faux",
-    apiKey: options.missingAuth ? `$${missingAuthEnvVar}` : "test",
+    apiKey: "test",
     baseUrl: "http://127.0.0.1.invalid",
     models: [
       {
@@ -185,12 +179,6 @@ export async function createPiSessionHarness(
     session,
     sessionManager,
     contexts,
-    configureTestAuth() {
-      registerProvider(sessionRuntime, "subagentura-faux", {
-        ...fauxProvider,
-        apiKey: "test",
-      });
-    },
     completeNext(text = "ok") {
       const stream = pending.shift();
       if (!stream) throw new Error("no pending faux provider response");

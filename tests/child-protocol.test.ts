@@ -93,57 +93,6 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
-  it("keeps startup auth failure separate from a later successful turn", () => {
-    const handlers = registerHandlers();
-    let configuredAuth = false;
-    let entries: any[] = [];
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: { hasConfiguredAuth: () => configuredAuth },
-      sessionManager: { getEntries: () => entries },
-    };
-
-    handlers.get("session_start")!({ reason: "startup" }, ctx);
-    expect(readActiveTurn()).toBeNull();
-    expect(readEvents(artifactPath(root, "child"))).toMatchObject([
-      expect.objectContaining({
-        type: "completion",
-        turnId: "process",
-        outcome: "error",
-        source: "explicit",
-      }),
-    ]);
-
-    configuredAuth = true;
-    handlers.get("session_start")!({ reason: "reload" }, ctx);
-    handlers.get("before_agent_start")!({}, ctx);
-    entries = [
-      { id: "after-login", type: "message", message: { role: "user" } },
-    ];
-    handlers.get("turn_start")!({ timestamp: 100 }, ctx);
-    vi.runAllTimers();
-    handlers.get("agent_end")!(
-      {
-        messages: [{ role: "assistant", stopReason: "stop" }],
-      },
-      ctx,
-    );
-    handlers.get("agent_settled")!({}, ctx);
-
-    const completions = readEvents(artifactPath(root, "child")).filter(
-      (event) => event.type === "completion",
-    );
-    expect(completions).toMatchObject([
-      expect.objectContaining({ turnId: "process", outcome: "error" }),
-      expect.objectContaining({
-        turnId: "after-login",
-        outcome: "done",
-        source: "agent_settled",
-      }),
-    ]);
-    expect(completions).toHaveLength(2);
-  });
-
   it("retains the newest active tool across concurrent starts", () => {
     const handlers = registerHandlers();
     const entries = [

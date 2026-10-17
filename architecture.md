@@ -500,7 +500,8 @@ pi --session <child-session.jsonl> --name <name> [model/thinking flags]
 Agent turn starts come from child Pi lifecycle hooks, not the shell wrapper.
 
 The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
-`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback. On initial `session_start`, it also records an explicit process-level error when the selected model has no configured authentication, before Pi's prompt preflight can reject without entering agent lifecycle hooks.
+`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.
+Authentication preflight belongs to Pi; the child protocol does not inspect credentials or synthesize startup authentication errors.
 
 ### 6.3 Mux boundary
 
@@ -538,9 +539,6 @@ A successful completion while the pane remains alive folds to `idle`, not `exite
 `send_interactive_subagent_message` accepts `running` or `idle`, bounds the input, appends the mandatory completion reminder, sends literal text, then Enter.
 The REPL can queue mid-turn input.
 A new persisted user entry establishes the next turn.
-The startup error uses the reserved `process` turn identity and does not bind
-`active-turn.json`; after authentication, the first normal run receives its own
-Pi-persisted user-entry identity and can complete independently.
 
 ### 6.5 Interactive cancellation
 
@@ -629,16 +627,17 @@ When snapshot capture succeeds, it writes `outputs/<eventId>.md` and the complet
 A completion may instead carry `outputError`, or no output descriptor when staging output is absent.
 A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes.
 
+Artifact reads include the selected terminal error's recorded `errorMessage`,
+falling back to `message`, verbatim as untrusted diagnostic text. They do not
+parse, sanitize, redact, escape, normalize, or additionally truncate it. The
+existing protocol field limit of 2,000 UTF-16 code units still applies.
+
 `output.md` is mutable staging and is never historical proof.
 For a completion with captured output, `eventId` names the physical snapshot; `turnId` selects the logical turn.
 
 `process-exit` first synthesizes a missing completion—cancelled when `.cancelled` exists, otherwise error—then appends `process_exited`.
 A clean shell exit without an earlier completion is therefore still an error completion.
 `agent_settled` is only a fallback and races safely through the same exactly-once lock.
-The initial child `session_start` auth check emits that explicit error only when
-the selected model has no configured authentication; the REPL remains open for
-`/login`. It does not classify later provider/network failures, which continue
-through the normal agent lifecycle.
 
 ### 7.4 Physical authority
 
