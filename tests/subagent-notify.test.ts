@@ -1115,6 +1115,206 @@ describe("read_subagent_artifact (output reporting)", () => {
     },
   );
 
+  it.each([
+    {
+      label: "error.message with embedded JSON",
+      errorMessage: JSON.stringify({
+        error: { message: 'Expected a JSON object such as {"city":"Paris"}.' },
+      }),
+      expected: 'Expected a JSON object such as {"city":"Paris"}.',
+    },
+    {
+      label: "bracket-prefixed error.message",
+      errorMessage: JSON.stringify({
+        error: { message: "[provider] invalid response format" },
+      }),
+      expected: "[provider] invalid response format",
+    },
+    {
+      label: "malformed JSON-looking error.message",
+      errorMessage: JSON.stringify({
+        error: { message: "Expected an object like {city: Paris}." },
+      }),
+      expected: "Expected an object like {city: Paris}.",
+    },
+    {
+      label: "top-level recognized message with embedded JSON",
+      errorMessage: JSON.stringify({
+        message: 'Expected a JSON object such as {"city":"Paris"}.',
+      }),
+      expected: 'Expected a JSON object such as {"city":"Paris"}.',
+    },
+    {
+      label: "plain text ending with envelope-shaped JSON",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Expected a payload like {"error":{"message":"example"}}',
+        },
+      }),
+      expected: 'Expected a payload like {"error":{"message":"example"}}',
+    },
+    {
+      label: "supported nested envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: JSON.stringify({
+            error: { message: "Nested provider detail" },
+          }),
+        },
+      }),
+      expected: "Nested provider detail",
+    },
+    {
+      label: "unsupported nested envelope",
+      errorMessage: JSON.stringify({
+        error: { message: JSON.stringify({ request_id: "private-request" }) },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "bare malformed JSON envelope",
+      errorMessage: JSON.stringify({
+        error: { message: '{"request_id":"private-request"' },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "prefixed unsupported JSON envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Provider response: {"request_id":"private-request"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "HTTP status prefix around unsupported JSON envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'HTTP 402: {"request_id":"private-request"}',
+        },
+      }),
+      expected: "Provider returned HTTP 402.",
+      excluded: "private-request",
+    },
+    {
+      label: "quoted malformed JSON envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: JSON.stringify('{"request_id":"private-request"').slice(
+            0,
+            -1,
+          ),
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "prefixed malformed JSON envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: `Request failed: ${JSON.stringify({
+            request_id: "private-request",
+          }).slice(0, -1)}`,
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "prefixed Unicode-escaped envelope key",
+      errorMessage: JSON.stringify({
+        error: {
+          message: String.raw`Request failed: {"request\u005fid":"private-request"}`,
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-request",
+    },
+    {
+      label: "prefixed password envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: 'Request failed: {"password":"private-password"}',
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-password",
+    },
+    {
+      label: "prefixed multi-escaped password envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: String.raw`Request failed: {\\"password\\":\\"private-password\\"}`,
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-password",
+    },
+    {
+      label: "over-limit multi-escaped password envelope",
+      errorMessage: JSON.stringify({
+        error: {
+          message: `Request failed: {${"\\".repeat(16)}"password"${"\\".repeat(16)}:${"\\".repeat(16)}"private-password"${"\\".repeat(16)}}`,
+        },
+      }),
+      expected: "No safe error detail was recorded.",
+      excluded: "private-password",
+    },
+  ])(
+    "preserves selected plain-text terminal messages through read_subagent_artifact: $label",
+    async ({ errorMessage, expected, excluded }) => {
+      const id = "ab12cd3800000015";
+      const parent = tmp();
+      try {
+        const { state, art } = makeArtifactWithDone(
+          id,
+          parent,
+          false,
+          "message-turn",
+        );
+        appendCompletionEvent(art, {
+          turnId: "message-turn",
+          eventId: "message-error-event",
+          outcome: "error",
+          source: "agent_settled",
+          ts: 2,
+          errorMessage,
+        });
+        const mod =
+          await importFresh<typeof import("../src/subagent")>(
+            "../src/subagent",
+          );
+        const readTool = makeReadTool(mod, state);
+        const result = await readTool.execute(
+          "read-message-error",
+          { id, turnId: "message-turn" },
+          undefined,
+          undefined,
+          {} as any,
+        );
+        const text = result.content[0].text;
+
+        expect(text).toContain(expected);
+        if (expected !== "No safe error detail was recorded.") {
+          expect(text).not.toContain("No safe error detail was recorded.");
+        }
+        if (excluded) expect(text).not.toContain(excluded);
+        expect(result.details.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "completion", errorMessage }),
+          ]),
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("marks terminal diagnostics as untrusted data", async () => {
     const id = "ab12cd3800000011";
     const parent = tmp();

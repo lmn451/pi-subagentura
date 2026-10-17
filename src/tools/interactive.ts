@@ -112,8 +112,33 @@ function isErrorSummaryRecord(
 function errorPrefixSummary(prefix: string): string | undefined {
   const status = prefix
     .trim()
-    .match(/^(?:(?:HTTP|Error)\s*:?\s*)?(\d{3})(?:\s|$)/i)?.[1];
+    .match(/^(?:(?:HTTP|Error)\s*:?\s*)?(\d{3})(?:\s|:|$)/i)?.[1];
   return status ? `Provider returned HTTP ${status}.` : undefined;
+}
+
+function isPlainTextPrefix(prefix: string): boolean {
+  return /\b(?:expected|expecting|invalid|malformed|failed|rejected|unexpected|unable|cannot|could not|please|like|such as|for example|for instance)\b/i.test(
+    prefix,
+  );
+}
+
+function hasUntrustedEnvelopeField(value: string): boolean {
+  let unescaped = value;
+  for (let depth = 0; depth < 4; depth++) {
+    const decoded = unescaped
+      .replace(/\\u([0-9a-f]{4})/gi, (_, code: string) =>
+        String.fromCharCode(Number.parseInt(code, 16)),
+      )
+      .replace(/\\(["\\/bfnrt])/g, "$1");
+    if (decoded === unescaped) {
+      return /["']?(?:request[_-]?id|headers|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|credential|password|passwd|passphrase|private[_-]?key|stack)["']?\s*:/i.test(
+        unescaped,
+      );
+    }
+    unescaped = decoded;
+  }
+  // Refuse deeply escaped content rather than expose an ambiguous envelope.
+  return true;
 }
 
 function extractTerminalErrorReason(
@@ -122,7 +147,7 @@ function extractTerminalErrorReason(
 ): string | undefined {
   const value = raw.trim();
   if (!value) return undefined;
-  if (value.startsWith("[")) return undefined;
+  const hasUntrustedField = hasUntrustedEnvelopeField(value);
   if (value.startsWith('"')) {
     try {
       const parsed: unknown = JSON.parse(value);
@@ -130,19 +155,36 @@ function extractTerminalErrorReason(
         ? extractTerminalErrorReason(parsed, depth + 1)
         : undefined;
     } catch {
+      return hasUntrustedField ? undefined : value;
+    }
+  }
+  if (value.startsWith("[")) {
+    try {
+      JSON.parse(value);
       return undefined;
+    } catch {
+      return /^\[\s*\{/.test(value) || hasUntrustedField ? undefined : value;
     }
   }
   const jsonStart = value.indexOf("{");
   if (jsonStart < 0) return value;
   const prefix = value.slice(0, jsonStart);
+  const prefixSummary = errorPrefixSummary(prefix);
   let parsed: unknown;
   try {
     parsed = JSON.parse(value.slice(jsonStart));
   } catch {
-    return errorPrefixSummary(prefix);
+    return (
+      prefixSummary ??
+      (!hasUntrustedField && isPlainTextPrefix(prefix) ? value : undefined)
+    );
   }
-  if (!isErrorSummaryRecord(parsed)) return errorPrefixSummary(prefix);
+  if (!isErrorSummaryRecord(parsed)) {
+    return (
+      prefixSummary ??
+      (!hasUntrustedField && isPlainTextPrefix(prefix) ? value : undefined)
+    );
+  }
   const error = parsed.error;
   const nestedMessage = isErrorSummaryRecord(error) ? error.message : error;
   const reason =
@@ -151,8 +193,14 @@ function extractTerminalErrorReason(
       : typeof parsed.message === "string"
         ? parsed.message
         : undefined;
-  if (!reason || depth >= 2) return errorPrefixSummary(prefix);
-  return extractTerminalErrorReason(reason, depth + 1);
+  if (!reason || depth >= 2) {
+    return (
+      prefixSummary ??
+      (!hasUntrustedField && isPlainTextPrefix(prefix) ? value : undefined)
+    );
+  }
+  if (!hasUntrustedField && isPlainTextPrefix(prefix)) return value;
+  return extractTerminalErrorReason(reason, depth + 1) ?? prefixSummary;
 }
 
 function normalizeTerminalErrorReason(reason: string): string | undefined {
