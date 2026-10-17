@@ -11,19 +11,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  buildPiInteractiveCommand,
   writeLaunchScript,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
@@ -296,6 +301,186 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(countEvents(artDir, "process_exited")).toEqual([
       expect.objectContaining({ exitCode: 7 }),
     ]);
+  });
+
+  it("uses the public Pi entry, preserves nested Node options, and reports a raw pre-turn error", () => {
+    const childRoot = join(tmp, "child workspace with spaces ' and $()");
+    const cwd = join(childRoot, "cwd with spaces ' and $()");
+    const packageRoot = join(childRoot, "installed Pi package");
+    const binDir = join(childRoot, "bin");
+    const artifactDir = join(tmp, "artifact path with spaces ' and $()");
+    const launchScript = join(artifactDir, "launch script.sh");
+    const sessionFile = join(cwd, "session ' with spaces.jsonl");
+    const promptFile = join(artifactDir, "prompt ' with spaces.md");
+    const systemPromptFile = join(artifactDir, "system ' with spaces.md");
+    const name = "Pi's Child $()";
+    const model = "anthropic/claude-sonnet-4-5";
+    const promptMessage =
+      "Anthropic provider is not configured: raw value <unchanged>";
+    const entryId = "pi-owned-prompt-error-entry";
+    const proofFile = join(tmp, "public-main.json");
+    const uiErrorFile = join(tmp, "ui-error.txt");
+    const customEntryFile = join(tmp, "custom-entry.json");
+    const originalCliMarker = join(tmp, "original-cli-ran");
+    const guardPath = join(childRoot, "network guard.cjs");
+    const inheritedNodeOptions = `--require="${guardPath}"`;
+    const injectionMarker = join(tmp, "preload-command-ran");
+    const preloadPath = join(
+      tmp,
+      `preloader $(touch$IFS${injectionMarker}) $HOME`,
+      "child-prompt-errors.mjs",
+    );
+    const preloadUrl = pathToFileURL(preloadPath).href;
+    expect(preloadUrl).toContain("$(");
+    expect(preloadUrl).toContain("$HOME");
+
+    mkdirSync(join(preloadPath, ".."), { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL("../src/child-prompt-errors.mjs", import.meta.url)),
+      preloadPath,
+    );
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    const cliPath = join(packageRoot, "dist", "bundle", "cli.mjs");
+    mkdirSync(join(packageRoot, "dist", "bundle"), { recursive: true });
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "@earendil-works/pi-coding-agent",
+        type: "module",
+        bin: { pi: "./dist/bundle/cli.mjs" },
+        exports: {
+          ".": {
+            import: "./index.mjs",
+            default: "./non-import-root.mjs",
+          },
+        },
+      }),
+    );
+    writeFileSync(
+      join(packageRoot, "non-import-root.mjs"),
+      'throw new Error("the wrong conditional root was imported");',
+    );
+    writeFileSync(
+      join(packageRoot, "index.mjs"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        "export class AgentSession {",
+        "  constructor(sessionFile) {",
+        "    this.isStreaming = false;",
+        "    this.sessionManager = {",
+        "      sessionFile,",
+        "      getSessionFile() {",
+        "        return this.sessionFile;",
+        "      },",
+        "      getLeafId() {",
+        "        return null;",
+        "      },",
+        "      getEntries() {",
+        "        return [];",
+        "      },",
+        "      appendCustomEntry(type, data) {",
+        "        writeFileSync(process.env.PI_TEST_CUSTOM_ENTRY, JSON.stringify({ type, data }));",
+        `        return ${JSON.stringify(entryId)};`,
+        "      },",
+        "    };",
+        "  }",
+        "  async prompt() {",
+        "    throw new Error(process.env.PI_TEST_PROMPT_ERROR);",
+        "  }",
+        "}",
+        "export async function main(args) {",
+        '  const sessionIndex = args.indexOf("--session");',
+        "  const session = new AgentSession(args[sessionIndex + 1]);",
+        "  writeFileSync(process.env.PI_TEST_PROOF, JSON.stringify({",
+        "    args,",
+        "    cwd: process.cwd(),",
+        "    nodeOptions: process.env.NODE_OPTIONS,",
+        "    guardLoaded: process.env.PI_TEST_GUARD_LOADED,",
+        "  }));",
+        "  try {",
+        "    await session.prompt();",
+        "  } catch (error) {",
+        "    writeFileSync(process.env.PI_TEST_UI_ERROR, error.message);",
+        "  }",
+        "  return 0;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(
+      cliPath,
+      [
+        "#!/usr/bin/env node",
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync(process.env.PI_TEST_ORIGINAL_MARKER, "original CLI ran");',
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+    chmodSync(cliPath, 0o700);
+    symlinkSync(cliPath, join(binDir, "pi"));
+    writeFileSync(guardPath, 'process.env.PI_TEST_GUARD_LOADED = "yes";');
+
+    const command = buildPiInteractiveCommand({
+      sessionFile,
+      name,
+      promptFile,
+      systemPromptFile,
+      model,
+      cwd,
+    });
+    writeLaunchScript(launchScript, command, artifactDir, {}, preloadUrl);
+    const result = spawnSync("bash", [launchScript], {
+      env: {
+        ...process.env,
+        ARTIFACT_DIR: artifactDir,
+        NODE_OPTIONS: inheritedNodeOptions,
+        PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        PI_TEST_CUSTOM_ENTRY: customEntryFile,
+        PI_TEST_GUARD_LOADED: "",
+        PI_TEST_ORIGINAL_MARKER: originalCliMarker,
+        PI_TEST_PROOF: proofFile,
+        PI_TEST_PROMPT_ERROR: promptMessage,
+        PI_TEST_UI_ERROR: uiErrorFile,
+      },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+
+    const proof = JSON.parse(readFileSync(proofFile, "utf8"));
+    expect(proof).toEqual({
+      args: [
+        "--session",
+        sessionFile,
+        "--name",
+        name,
+        "--model",
+        model,
+        "--append-system-prompt",
+        systemPromptFile,
+        `@${promptFile}`,
+      ],
+      cwd: expect.any(String),
+      nodeOptions: inheritedNodeOptions,
+      guardLoaded: "yes",
+    });
+    expect(realpathSync(proof.cwd)).toBe(realpathSync(cwd));
+    expect(readFileSync(uiErrorFile, "utf8")).toBe(promptMessage);
+    expect(JSON.parse(readFileSync(customEntryFile, "utf8"))).toEqual({
+      type: "subagentura-prompt-error",
+      data: { schemaVersion: 1 },
+    });
+    expect(existsSync(originalCliMarker)).toBe(false);
+    expect(existsSync(injectionMarker)).toBe(false);
+    expect(countCompletions(artifactDir, "error")).toContainEqual(
+      expect.objectContaining({
+        turnId: entryId,
+        status: "error",
+        outcome: "error",
+        source: "prompt_error",
+        message: promptMessage,
+        errorMessage: promptMessage,
+      }),
+    );
   });
 });
 

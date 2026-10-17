@@ -1636,6 +1636,114 @@ describe("read_subagent_artifact (output reporting)", () => {
       rmSync(parent, { recursive: true, force: true });
     }
   });
+  it("selects and consumes a terminal-only prompt failure without losing prior or later turns", async () => {
+    const id = "ab12cd3800000021";
+    const parent = tmp();
+    const diagnostic = "[provider 402]\nRequest rejected verbatim.";
+    try {
+      const { state, art } = makeArtifactWithDone(id, parent, false, "turn-a");
+      writeOutput(art, "A immutable output");
+      appendCompletionEvent(art, {
+        turnId: "turn-a",
+        eventId: "completion-a",
+        outcome: "done",
+        source: "agent_settled",
+        ts: 2,
+      });
+
+      writeOutput(art, "");
+      appendCompletionEvent(art, {
+        turnId: "pi-user-entry-b",
+        eventId: "prompt-error-b",
+        outcome: "error",
+        source: "prompt_error",
+        ts: 3,
+        errorMessage: diagnostic,
+      });
+      appendEvent(art, {
+        version: 2,
+        eventId: "late-turn-a-completion-after-prompt-error",
+        turnId: "turn-a",
+        ts: 4,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "agent_settled",
+      });
+
+      const mod = await importFresh<{ default: typeof registerExtension }>(
+        "../src/subagent",
+      );
+      const readTool = makeReadTool(mod, state);
+      const failedAttempt = await readTool.execute(
+        "read-prompt-error",
+        { id },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(failedAttempt.details.output).toBe("");
+      expect(failedAttempt.content[0].text).toContain("Terminal status: error");
+      expect(failedAttempt.content[0].text).toContain(diagnostic);
+      expect(failedAttempt.content[0].text).toContain(
+        "Output: (empty — 0 chars)",
+      );
+      expect(readArtifactApi.appendEntry).toHaveBeenCalledWith(
+        "subagentura-completion-consumed",
+        expect.objectContaining({
+          source: "interactive",
+          sourceId: id,
+          turnId: "pi-user-entry-b",
+          reason: "manual",
+        }),
+      );
+
+      const historicalA = await readTool.execute(
+        "read-historical-a-after-prompt-error",
+        { id, turnId: "turn-a", since: 10 },
+        undefined,
+        undefined,
+        {},
+      );
+      expect(historicalA.details.events).toEqual([]);
+      expect(historicalA.details.output).toBe("A immutable output");
+      expect(historicalA.content[0].text).not.toContain(diagnostic);
+
+      appendEvent(art, {
+        version: 2,
+        eventId: "turn-c-started",
+        turnId: "turn-c",
+        ts: 5,
+        type: "turn_started",
+        status: "running",
+      });
+      writeOutput(art, "C staging output");
+      appendEvent(art, {
+        version: 2,
+        eventId: "late-turn-a-completion-after-turn-c-start",
+        turnId: "turn-a",
+        ts: 6,
+        type: "completion",
+        status: "done",
+        outcome: "done",
+        source: "agent_settled",
+      });
+      const activeC = await readTool.execute(
+        "read-active-c",
+        { id },
+        undefined,
+        undefined,
+        {},
+      );
+
+      expect(activeC.details.output).toBe("C staging output");
+      expect(activeC.content[0].text).not.toContain(diagnostic);
+      expect(activeC.content[0].text).not.toContain("Terminal status: error");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 
   it("reads and consumes only the follow-up turn's immutable snapshot after completion", async () => {
     const id = "ab12cd3800000016";

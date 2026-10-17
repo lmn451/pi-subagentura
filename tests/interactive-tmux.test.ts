@@ -11,6 +11,8 @@ import {
 import {
   deriveInteractiveSubagentStatus,
   deriveInteractiveSubagentStatusFromEvents,
+  deriveInteractiveSubagentStatusFromLifecycle,
+  foldInteractiveLifecycle,
 } from "../src/interactive-tmux";
 import {
   mkdtempSync,
@@ -33,7 +35,10 @@ import {
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 
-import { loadInteractiveStates } from "../src/artifact";
+import {
+  loadInteractiveStates,
+  type PersistedLifecycleFold,
+} from "../src/artifact";
 import { createTestSessionScope } from "./session-scope-fixture";
 import { clearSessionScopes, type SessionScope } from "../src/session-scope";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -1133,6 +1138,85 @@ describe("interactive-tmux", () => {
       expect(deriveInteractiveSubagentStatus(v2ErrorCompletion, true)).toBe(
         "idle",
       );
+    });
+    it("uses prompt_error as the latest attempt after a real turn", () => {
+      const priorStart = {
+        version: 2 as const,
+        eventId: "start-old-turn",
+        turnId: "old-turn",
+        ts: 1,
+        type: "turn_started" as const,
+        status: "running" as const,
+      };
+      const priorCompletion = {
+        version: 2 as const,
+        eventId: "completion-old-turn",
+        turnId: "old-turn",
+        ts: 2,
+        type: "completion" as const,
+        status: "done" as const,
+        outcome: "done" as const,
+        source: "agent_settled" as const,
+      };
+      const runningStart = {
+        version: 2 as const,
+        eventId: "start-running-turn",
+        turnId: "running-old-turn",
+        ts: 3,
+        type: "turn_started" as const,
+        status: "running" as const,
+      };
+      const promptError = {
+        version: 2 as const,
+        eventId: "completion-prompt-error",
+        turnId: "prompt-error-entry",
+        ts: 4,
+        type: "completion" as const,
+        status: "error" as const,
+        outcome: "error" as const,
+        source: "prompt_error" as const,
+      };
+      const lateOldCompletion = {
+        ...priorCompletion,
+        eventId: "late-old-completion",
+        turnId: "running-old-turn",
+        ts: 5,
+      };
+      const lifecycle: PersistedLifecycleFold = {};
+
+      for (const event of [
+        priorStart,
+        priorCompletion,
+        runningStart,
+        promptError,
+        lateOldCompletion,
+      ]) {
+        foldInteractiveLifecycle(lifecycle, event);
+      }
+
+      expect(lifecycle).toMatchObject({
+        currentTurnId: "prompt-error-entry",
+        completionTurnId: "prompt-error-entry",
+        completionOutcome: "error",
+        completionSource: "prompt_error",
+      });
+      expect(
+        deriveInteractiveSubagentStatusFromLifecycle(lifecycle, true),
+      ).toBe("idle");
+
+      foldInteractiveLifecycle(lifecycle, {
+        version: 2,
+        eventId: "start-new-turn",
+        turnId: "new-turn",
+        ts: 6,
+        type: "turn_started",
+        status: "running",
+      });
+      expect(lifecycle.currentTurnId).toBe("new-turn");
+      expect(lifecycle.completionTurnId).toBeUndefined();
+      expect(
+        deriveInteractiveSubagentStatusFromLifecycle(lifecycle, true),
+      ).toBe("running");
     });
     it("process_exited + pane alive → 'exited' terminal", () => {
       expect(deriveInteractiveSubagentStatus(processExited, true)).toBe(

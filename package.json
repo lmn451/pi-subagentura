@@ -57,6 +57,7 @@
     "src/identifier-types.ts",
     "src/artifact-poller.ts",
     "src/child-protocol.ts",
+    "src/child-prompt-errors.mjs",
     "src/completion-turn.ts",
     "src/completion-presentation.ts",
     "src/delivery.ts",

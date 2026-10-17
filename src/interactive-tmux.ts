@@ -42,11 +42,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
 import {
   appendInteractiveState,
@@ -125,6 +127,12 @@ import {
 // event is the source of truth in production.
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
+
+const CHILD_PROMPT_ERRORS_PRELOAD_URL = pathToFileURL(
+  realpathSync(
+    fileURLToPath(new URL("./child-prompt-errors.mjs", import.meta.url)),
+  ),
+).href;
 
 /**
  * System prompt sent to every interactive sub-agent. Tells the child how to
@@ -470,7 +478,12 @@ export function writeLaunchScript(
   command: string,
   artifactDir: string,
   internalEnv: Record<string, string> = {},
+  promptErrorsPreloadUrl = CHILD_PROMPT_ERRORS_PRELOAD_URL,
 ): void {
+  const canonicalPromptErrorsPreloadUrl = pathToFileURL(
+    realpathSync(fileURLToPath(promptErrorsPreloadUrl)),
+  ).href;
+
   mkdirSync(dirname(path), { recursive: true });
 
   // 1. Write the inline `subagent-artifact` CLI helper into the artifact dir.
@@ -481,6 +494,8 @@ export function writeLaunchScript(
 
   // 2. Write the launch script. The script:
   //    - exports ARTIFACT_DIR so the child inherits it;
+  //    - adds the package-local prompt-error loader without replacing existing
+  //      Node options (for example, the inherited network guard);
   //    - traps EXIT to record process exit and, when needed, one lock-protected completion;
   //    - also writes the @pi-exit-code pane option for the readPaneExitCode
   //      fallback when the selected backend is tmux.
@@ -498,6 +513,9 @@ export function writeLaunchScript(
     ...Object.entries(internalEnv).map(
       ([name, value]) => `export ${name}=${escape(value)}`,
     ),
+    // Keep inherited options as an expansion, but quote the added URL literally;
+    // shell metacharacters can be present in the preloader's checkout path.
+    `export NODE_OPTIONS="\${NODE_OPTIONS:+\$NODE_OPTIONS }"${escape(`--import=${canonicalPromptErrorsPreloadUrl}`)}`,
     // Single-quote the helper path like every other interpolated path in this
     // script; a double-quoted path still expands $, `` and \ inside it.
     "on_exit() {",
@@ -1691,6 +1709,14 @@ export function foldInteractiveLifecycle(
       return;
     }
     case "completion": {
+      if (event.source === "prompt_error") {
+        lifecycle.currentTurnId = event.turnId;
+        lifecycle.completionTurnId = event.turnId;
+        lifecycle.completionOutcome = event.outcome;
+        lifecycle.completionSource = event.source;
+        lifecycle.completionExitCode = event.exitCode;
+        return;
+      }
       if (event.outcome === "cancelled" && event.source === "parent") {
         lifecycle.parentCancelled = true;
       }

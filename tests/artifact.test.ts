@@ -1140,6 +1140,21 @@ describe("persisted interactive state helpers", () => {
       states: { abc12345: SAMPLE },
     });
   });
+  it("normalizes prompt_error completion source in persisted lifecycle state", () => {
+    const state = {
+      ...SAMPLE,
+      lifecycle: { completionSource: "prompt_error" as const },
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { abc12345: state },
+    });
+
+    expect(
+      loadInteractiveStates(root)?.states.abc12345.lifecycle?.completionSource,
+    ).toBe("prompt_error");
+  });
   it("round-trips only the closed traffic origin in persisted telemetry", () => {
     const correlationId = "11111111-1111-4111-8111-111111111111";
     updatePersistedTelemetrySession(root, "session-a", {

@@ -395,7 +395,11 @@ function completionForRead(
     } else if (event.type === "process_exited") {
       processExitEvent = event;
     } else if (event.type === "completion") {
-      if (activeTurnId === undefined) {
+      if (event.source === "prompt_error") {
+        activeTurnId = event.turnId;
+        activeCompletionEvent = event;
+        activeLifecycleEvent = event;
+      } else if (activeTurnId === undefined) {
         unscopedCompletionEvent = event;
         unscopedLifecycleEvent = event;
       } else if (event.turnId === activeTurnId) {

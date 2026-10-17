@@ -86,6 +86,7 @@ export type CompletionSource =
   | "agent_settled"
   | "agent_end"
   | "explicit"
+  | "prompt_error"
   | "process_exit"
   | "parent";
 export type ParentCancellationOrigin =
@@ -782,6 +783,7 @@ function normalizeEvent(value: unknown): SubagentEvent | null {
       obj.outcome === "cancelled") &&
     (obj.source === "agent_settled" ||
       obj.source === "agent_end" ||
+      obj.source === "prompt_error" ||
       obj.source === "explicit" ||
       obj.source === "process_exit" ||
       obj.source === "parent")
@@ -1937,6 +1939,7 @@ function normalizeV2StatePayload(
             ...(rawLifecycle.completionSource === "agent_settled" ||
             rawLifecycle.completionSource === "agent_end" ||
             rawLifecycle.completionSource === "explicit" ||
+            rawLifecycle.completionSource === "prompt_error" ||
             rawLifecycle.completionSource === "process_exit" ||
             rawLifecycle.completionSource === "parent"
               ? { completionSource: rawLifecycle.completionSource }

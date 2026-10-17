@@ -1,19 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
+  readEvents,
 } from "../src/artifact";
 
 function makeTmp(): string {
@@ -31,6 +36,40 @@ function runCli(
   const res = spawnSync("node", [cliPath, ...args], {
     env: { ...process.env, ARTIFACT_DIR: artDir },
     input,
+    encoding: "utf8",
+  });
+  return {
+    status: res.status ?? -1,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+  };
+}
+
+interface PromptErrorCall {
+  turnId: string;
+  message: string;
+  previousUserEntryId?: string;
+}
+
+function runImportedReporter(
+  artDir: string,
+  calls: PromptErrorCall[],
+): { status: number; stdout: string; stderr: string } {
+  const cliPath = join(artDir, "cli.mjs");
+  writeCliScript(cliPath);
+  const cliUrl = pathToFileURL(cliPath).href;
+  // The generated module is emitted under ARTIFACT_DIR, so its runtime import cannot be static.
+  const source = [
+    `const { reportPromptError } = await import(${JSON.stringify(cliUrl)});`,
+    `for (const call of ${JSON.stringify(calls)}) {`,
+    "  const result = reportPromptError(call.turnId, call.message, call.previousUserEntryId);",
+    "  if (result !== undefined || result instanceof Promise) {",
+    "    throw new Error('reportPromptError must synchronously return undefined');",
+    "  }",
+    "}",
+  ].join("\n");
+  const res = spawnSync("node", ["--input-type=module", "-e", source], {
+    env: { ...process.env, ARTIFACT_DIR: artDir },
     encoding: "utf8",
   });
   return {
@@ -69,6 +108,309 @@ describe("subagent-artifact CLI", () => {
       const cliPath = join(tmp, "cli.mjs");
       writeCliScript(cliPath);
       expect(statSync(cliPath).mode & 0o777).toBe(0o700);
+    });
+  });
+  describe("prompt errors", () => {
+    it("imports without dispatch and keeps direct CLI execution through symlinks", () => {
+      const cliPath = join(tmp, "cli.mjs");
+      writeCliScript(cliPath);
+      const cliUrl = pathToFileURL(cliPath).href;
+      // The generated module is created in the artifact directory, so its import boundary must be exercised dynamically.
+      const imported = spawnSync(
+        "node",
+        [
+          "--input-type=module",
+          "-e",
+          `await import(${JSON.stringify(cliUrl)});`,
+        ],
+        { env: { ...process.env, ARTIFACT_DIR: "" }, encoding: "utf8" },
+      );
+      expect(imported.status).toBe(0);
+      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
+
+      const linkedCliPath = join(tmp, "linked-cli.mjs");
+      symlinkSync(cliPath, linkedCliPath);
+      const executed = spawnSync("node", [linkedCliPath, "done", "0"], {
+        env: { ...process.env, ARTIFACT_DIR: tmp },
+        encoding: "utf8",
+      });
+      expect(executed.status).toBe(0);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8"),
+      );
+      expect(event).toMatchObject({
+        type: "completion",
+        outcome: "done",
+        source: "explicit",
+        exitCode: 0,
+      });
+    });
+
+    it("reports raw pre-turn errors with distinct Pi IDs, empty snapshots, and process-exit dedup", () => {
+      const manager = SessionManager.create(tmp, join(tmp, "sessions"));
+      const previousUserEntryId = manager.appendMessage({
+        role: "user",
+        content: "previous user turn",
+        timestamp: Date.now(),
+      });
+      const failedTurnId = manager.appendCustomEntry(
+        "subagentura-prompt-error",
+        { schemaVersion: 1 },
+      );
+      const oversizedTurnId = manager.appendCustomEntry(
+        "subagentura-prompt-error",
+        { schemaVersion: 1 },
+      );
+      const symlinkTurnId = manager.appendCustomEntry(
+        "subagentura-prompt-error",
+        { schemaVersion: 1 },
+      );
+      const recoveredTurnId = manager.appendMessage({
+        role: "user",
+        content: "recovery turn",
+        timestamp: Date.now(),
+      });
+      const outputPath = join(tmp, "output.md");
+      const staleOutput = "stale output from a prior turn";
+      writeFileSync(outputPath, staleOutput);
+      const rawMessage =
+        'provider error: {"credential":"not-redacted"}\u0000\n\u001b[31mraw\u001b[0m';
+
+      const firstReport = runImportedReporter(tmp, [
+        {
+          turnId: failedTurnId,
+          message: rawMessage,
+          previousUserEntryId,
+        },
+        { turnId: failedTurnId, message: "must not replace first report" },
+      ]);
+      expect(firstReport.status).toBe(0);
+      let events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      let completion = events.find(
+        (event) => event.type === "completion" && event.turnId === failedTurnId,
+      );
+      expect(completion).toMatchObject({
+        version: 2,
+        status: "error",
+        outcome: "error",
+        source: "prompt_error",
+        exitCode: 1,
+        message: rawMessage,
+        errorMessage: rawMessage,
+        output: { bytes: 0 },
+      });
+      expect(readFileSync(completion.output.path, "utf8")).toBe("");
+      const parsedCompletion = readEvents({
+        id: failedTurnId,
+        dir: tmp,
+        statusFile: join(tmp, "events.ndjson"),
+        outputFile: outputPath,
+      }).find(
+        (event) => event.type === "completion" && event.turnId === failedTurnId,
+      );
+      expect(parsedCompletion).toMatchObject({
+        source: "prompt_error",
+        outcome: "error",
+        output: { bytes: 0 },
+      });
+      expect(readFileSync(outputPath, "utf8")).toBe(staleOutput);
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "completion" && event.turnId === failedTurnId,
+        ),
+      ).toHaveLength(1);
+      expect(events.some((event) => event.type === "turn_started")).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(tmp, "active-turn.json"), "utf8")),
+      ).toMatchObject({
+        turnId: failedTurnId,
+        started: false,
+        previousUserEntryId,
+      });
+
+      expect(runCli(tmp, ["process-exit", "1"]).status).toBe(0);
+      events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "completion" && event.turnId === failedTurnId,
+        ),
+      ).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({
+        type: "process_exited",
+        turnId: failedTurnId,
+        exitCode: 1,
+      });
+
+      const newerActiveTurn = JSON.stringify({
+        turnId: recoveredTurnId,
+        started: true,
+        previousUserEntryId,
+      });
+      writeFileSync(join(tmp, "active-turn.json"), newerActiveTurn);
+      expect(
+        runImportedReporter(tmp, [
+          {
+            turnId: failedTurnId,
+            message: "late duplicate must not reset active metadata",
+          },
+        ]).status,
+      ).toBe(0);
+      expect(readFileSync(join(tmp, "active-turn.json"), "utf8")).toBe(
+        newerActiveTurn,
+      );
+      events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "completion" && event.turnId === failedTurnId,
+        ),
+      ).toHaveLength(1);
+
+      const oversizedOutput = Buffer.alloc(MAX_OUTPUT_SNAPSHOT_BYTES + 1, 120);
+      writeFileSync(outputPath, oversizedOutput);
+      const longMessage = "x".repeat(MAX_EVENT_TEXT_LENGTH + 10);
+      const oversizedReport = runImportedReporter(tmp, [
+        { turnId: oversizedTurnId, message: longMessage },
+      ]);
+      expect(oversizedReport.status).toBe(0);
+      events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      completion = events.find(
+        (event) =>
+          event.type === "completion" && event.turnId === oversizedTurnId,
+      );
+      expect(completion).toMatchObject({
+        source: "prompt_error",
+        exitCode: 1,
+        message: longMessage.slice(0, MAX_EVENT_TEXT_LENGTH),
+        errorMessage: longMessage.slice(0, MAX_EVENT_TEXT_LENGTH),
+        output: { bytes: 0 },
+      });
+      expect(completion).not.toHaveProperty("outputError");
+      expect(readFileSync(completion.output.path)).toEqual(Buffer.alloc(0));
+      expect(readFileSync(outputPath)).toEqual(oversizedOutput);
+
+      rmSync(outputPath);
+      const stagedOutputPath = join(tmp, "staged-output.md");
+      const stagedOutput = "symlinked stale output";
+      writeFileSync(stagedOutputPath, stagedOutput);
+      symlinkSync(stagedOutputPath, outputPath);
+      const symlinkReport = runImportedReporter(tmp, [
+        { turnId: symlinkTurnId, message: "symlink staging remains untouched" },
+      ]);
+      expect(symlinkReport.status).toBe(0);
+      expect(lstatSync(outputPath).isSymbolicLink()).toBe(true);
+      expect(readFileSync(stagedOutputPath, "utf8")).toBe(stagedOutput);
+      events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      completion = events.find(
+        (event) =>
+          event.type === "completion" && event.turnId === symlinkTurnId,
+      );
+      expect(completion).toMatchObject({
+        source: "prompt_error",
+        exitCode: 1,
+        output: { bytes: 0 },
+      });
+      expect(completion).not.toHaveProperty("outputError");
+      expect(readFileSync(completion.output.path)).toEqual(Buffer.alloc(0));
+
+      rmSync(outputPath);
+      writeFileSync(outputPath, "normal recovery output");
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId: recoveredTurnId, started: true }),
+      );
+      expect(runCli(tmp, ["done", "0"]).status).toBe(0);
+      events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      completion = events.find(
+        (event) =>
+          event.type === "completion" && event.turnId === recoveredTurnId,
+      );
+      expect(completion).toMatchObject({
+        type: "completion",
+        outcome: "done",
+        source: "explicit",
+        exitCode: 0,
+      });
+      expect(readFileSync(completion.output.path, "utf8")).toBe(
+        "normal recovery output",
+      );
+      expect(
+        new Set(
+          events
+            .filter((event) => event.type === "completion")
+            .map((event) => event.turnId),
+        ).size,
+      ).toBe(4);
+    });
+    it("keeps parent cancellation authoritative over a late prompt rejection", () => {
+      const manager = SessionManager.create(tmp, join(tmp, "sessions"));
+      const cancelledTurnId = manager.appendCustomEntry(
+        "subagentura-prompt-error",
+        { schemaVersion: 1 },
+      );
+      const activeTurn = {
+        turnId: cancelledTurnId,
+        started: false,
+      };
+      const activeTurnPath = join(tmp, "active-turn.json");
+      const activeTurnContent = JSON.stringify(activeTurn);
+      const outputPath = join(tmp, "output.md");
+      const staleOutput = "output staging preserved after cancellation";
+      writeFileSync(activeTurnPath, activeTurnContent);
+      writeFileSync(join(tmp, ".cancelled"), "");
+      writeFileSync(outputPath, staleOutput);
+
+      expect(
+        runImportedReporter(tmp, [
+          { turnId: cancelledTurnId, message: "late provider rejection" },
+        ]).status,
+      ).toBe(0);
+      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
+      expect(readFileSync(activeTurnPath, "utf8")).toBe(activeTurnContent);
+      expect(readFileSync(outputPath, "utf8")).toBe(staleOutput);
+
+      expect(runCli(tmp, ["process-exit", "1"]).status).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const completion = events.find(
+        (event) =>
+          event.type === "completion" && event.turnId === cancelledTurnId,
+      );
+      expect(completion).toMatchObject({
+        type: "completion",
+        status: "cancelled",
+        outcome: "cancelled",
+        source: "process_exit",
+      });
+      expect(completion).not.toHaveProperty("message");
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "completion" && event.turnId === cancelledTurnId,
+        ),
+      ).toHaveLength(1);
     });
   });
 

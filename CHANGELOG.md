@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Return recorded terminal error diagnostics verbatim in interactive artifact
   reads, including for empty snapshots, without parsing or sanitization; existing
   protocol storage limits still apply.
+- Record actual interactive Pi prompt rejections before a persisted user entry
+  as `prompt_error` completions keyed by Pi-issued custom-entry IDs, with empty
+  immutable snapshots and no credential probe or fabricated user turn.
 
 ## [4.0.0] - 2026-10-16
 

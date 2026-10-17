@@ -48,6 +48,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -55,11 +56,19 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
+export function reportPromptError(turnId, message, previousUserEntryId) {
+  runCli({ promptError: { turnId, message, previousUserEntryId } });
+}
+
+function runCli(options = {}) {
 const dir = process.env.ARTIFACT_DIR;
 if (!dir) {
+  if (options.promptError) throw new Error("ARTIFACT_DIR not set");
   process.stderr.write("ARTIFACT_DIR not set\n");
-  process.exit(2);
+  process.exitCode = 2;
+  return;
 }
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 
@@ -149,10 +158,10 @@ const activeTurnMetadata = () => {
 };
 const activeState = activeTurnMetadata();
 const turnId = activeState?.turnId ?? "process";
-const lockKey = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
-const completionLock = join(dir, ".completion-" + lockKey + ".lock");
 const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
-const withCompletionLock = (operation) => {
+const withCompletionLock = (targetTurnId, operation) => {
+  const lockKey = createHash("sha256").update(targetTurnId).digest("hex").slice(0, 24);
+  const completionLock = join(dir, ".completion-" + lockKey + ".lock");
   const deadline = Date.now() + 2000;
   while (true) {
     try {
@@ -169,7 +178,7 @@ const withCompletionLock = (operation) => {
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring completion lock for " + turnId);
+        throw new Error("timed out acquiring completion lock for " + targetTurnId);
       }
       Atomics.wait(lockWaiter, 0, 0, 10);
     }
@@ -180,9 +189,9 @@ const withCompletionLock = (operation) => {
     rmSync(completionLock, { recursive: true, force: true });
   }
 };
-const completed = () =>
+const completed = (targetTurnId) =>
   readEvents().some((event) =>
-    event.version === 2 && event.type === "completion" && event.turnId === turnId);
+    event.version === 2 && event.type === "completion" && event.turnId === targetTurnId);
 const signalNames = [
   undefined,
   "SIGHUP",
@@ -297,25 +306,107 @@ const snapshot = (eventId) => {
     },
   };
 };
-const completion = (outcome, source, extra = {}) => {
-  withCompletionLock(() => {
-    if (completed()) return;
-    const eventId = randomUUID();
-    const snapshotResult = snapshot(eventId);
-    write({
-      version: 2,
-      eventId,
-      turnId,
-      ts: Date.now(),
-      type: "completion",
-      status: outcome,
-      outcome,
-      source,
-      ...snapshotResult,
-      ...extra,
-    });
-  });
+const emptySnapshot = (eventId) => {
+  const content = Buffer.alloc(0);
+  const outputs = join(dir, "outputs");
+  mkdirSync(outputs, { recursive: true, mode: 0o700 });
+  const target = join(outputs, eventId + ".md");
+  if (!existsSync(target)) {
+    const tmp = target + ".tmp";
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, target);
+  }
+  return {
+    output: {
+      path: target,
+      bytes: 0,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    },
+  };
 };
+const appendCompletion = (targetTurnId, outcome, source, extra, makeSnapshot) => {
+  if (completed(targetTurnId)) return false;
+  const eventId = randomUUID();
+  const snapshotResult = makeSnapshot(eventId);
+  write({
+    version: 2,
+    eventId,
+    turnId: targetTurnId,
+    ts: Date.now(),
+    type: "completion",
+    status: outcome,
+    outcome,
+    source,
+    ...snapshotResult,
+    ...extra,
+  });
+  return true;
+};
+const completionFor = (targetTurnId, outcome, source, extra = {}) =>
+  withCompletionLock(targetTurnId, () =>
+    appendCompletion(targetTurnId, outcome, source, extra, snapshot));
+const completion = (outcome, source, extra = {}) =>
+  completionFor(turnId, outcome, source, extra);
+const writePromptErrorActiveTurn = (targetTurnId, previousUserEntryId) => {
+  const payload = JSON.stringify({
+    turnId: targetTurnId,
+    startedAt: Date.now(),
+    started: false,
+    ...(previousUserEntryId ? { previousUserEntryId } : {}),
+    activeTools: [],
+  });
+  if (Buffer.byteLength(payload, "utf8") > MAX_ACTIVE_TURN_BYTES) {
+    throw new Error("prompt error active-turn metadata exceeds its size limit");
+  }
+  const tmp = activeTurnFile + "." + randomUUID() + ".tmp";
+  let fd;
+  try {
+    fd = openSync(
+      tmp,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    writeFileSync(fd, payload);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, activeTurnFile);
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the metadata write error */ }
+    }
+    try { rmSync(tmp, { force: true }); } catch { /* preserve the metadata write error */ }
+    throw error;
+  }
+};
+if (options.promptError) {
+  const request = options.promptError;
+  const promptTurnId = boundedMetadataIdentifier(request.turnId, MAX_TURN_ID_LENGTH);
+  if (!promptTurnId) throw new TypeError("prompt error turnId is not a valid Pi entry ID");
+  const previousUserEntryId =
+    request.previousUserEntryId === undefined
+      ? undefined
+      : boundedMetadataIdentifier(request.previousUserEntryId, MAX_TURN_ID_LENGTH);
+  if (request.previousUserEntryId !== undefined && !previousUserEntryId) {
+    throw new TypeError("previousUserEntryId is not a valid Pi entry ID");
+  }
+  const errorMessage =
+    typeof request.message === "string"
+      ? request.message.slice(0, MAX_EVENT_TEXT_LENGTH)
+      : String(request.message).slice(0, MAX_EVENT_TEXT_LENGTH);
+  withCompletionLock(promptTurnId, () => {
+    if (existsSync(join(dir, ".cancelled"))) return;
+    if (appendCompletion(
+      promptTurnId,
+      "error",
+      "prompt_error",
+      { exitCode: 1, message: errorMessage, errorMessage },
+      emptySnapshot,
+    )) {
+      writePromptErrorActiveTurn(promptTurnId, previousUserEntryId);
+    }
+  });
+  return;
+}
 
 switch (cmd) {
   case "done": {
@@ -335,7 +426,7 @@ switch (cmd) {
   case "process-exit": {
     const exitCode = Number(arg ?? 0);
     const cancelled = existsSync(join(dir, ".cancelled"));
-    const alreadyCompleted = completed();
+    const alreadyCompleted = completed(turnId);
     const diagnostics = processExitDiagnostics(
       exitCode,
       cancelled,
@@ -363,6 +454,17 @@ switch (cmd) {
     process.stderr.write("Unknown command: " + cmd + "\n");
     process.exit(2);
 }
+
+}
+const isDirectEntry = () => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isDirectEntry()) runCli();
 `;
 
 /** Test-only helper: write the CLI to a file and chmod it. */

@@ -26,8 +26,8 @@ Requirements:
 - **`fd` and `ripgrep`.** Pi 0.80.6 uses these commands to discover explicitly
   loaded resources for the startup screen. CI installs `fd-find` and `ripgrep`
   and exposes Ubuntu's `fdfind` binary as `fd`.
-- **The Pi CLI.** Resolved from `node_modules/.bin/pi`, then `PATH`, then
-  `SUBAGENTURA_E2E_REAL_PI`. Because `node_modules/.bin/pi` is a
+- **The Pi CLI.** Resolved from `SUBAGENTURA_E2E_REAL_PI` first, then
+  `node_modules/.bin/pi`, then `PATH`. Because the local binary is a
   `#!/usr/bin/env node` script, the harness also asserts that the child
   environment can exec `node` before starting a pane.
 
@@ -37,6 +37,19 @@ Useful environment variables:
 | ----------------------------- | ------------------------------------------------------------------ |
 | `SUBAGENTURA_E2E_REAL_PI`     | Absolute path to the Pi binary under test.                         |
 | `SUBAGENTURA_E2E_DIAGNOSTICS` | Where failure diagnostics are written (default: the harness temp). |
+
+To run the two real Anthropic pre-turn cases against a chosen installed Pi CLI:
+
+```bash
+SUBAGENTURA_E2E_REAL_PI=/path/to/pi npm run test:tui -- -t 'real Anthropic pre-turn'
+```
+
+For minimum-SDK coverage, select Pi `0.80.6` using the existing CI workflow's
+no-save SDK-install convention, then target the local selected CLI:
+
+```bash
+SUBAGENTURA_E2E_REAL_PI=./node_modules/.bin/pi npm run test:tui -- -t 'real Anthropic pre-turn'
+```
 
 Each harness picks its own tmux socket (`pid` + random), so nothing needs a
 socket name from the outside and parallel runs cannot collide.
@@ -77,17 +90,37 @@ automatically instead of being silently excluded everywhere.
   unexplained gate timeout.
 - **A screen assertion after a provider-log wait needs its own wait.** The child
   writes the log before the parent repaints.
-- **Captures use `capture-pane -J`** so a line Pi wrapped at the pane width still
-  matches a single-line expectation. Diagnostics keep the un-joined capture.
+- **`capture-pane -J` joins tmux soft-wrap rows**, not explicit line breaks Pi
+  renders inside long paths. Assert raw diagnostic text against the SDK tool
+  result; tolerate whitespace differences only when matching its rendered
+  screen. Diagnostics keep the un-joined capture.
 
 ### Screen assertions are pinned to one SDK leg
 
 The suite matches literal Pi chrome (`ctrl+c/ctrl+d clear/exit`,
 `Model: subagentura-e2e/mock`, `Workflow "e2e-workflow" complete`,
-`Async Subagents`). CI therefore runs `test:tui` only on the **pinned** Pi SDK
-leg; a cosmetic upstream TUI change must not turn master red on the floating
-`latest` leg where it would read as a flake. Unit and integration coverage stays
-strict on both legs.
+`Async Subagents`). CI runs `test:tui` only on the **pinned Pi SDK 0.80.6**
+leg; it does not run the full visual suite on the floating `latest` leg. Unit
+and integration coverage remains strict on both SDK legs. The pre-user prompt
+error bridge has also been manually smoke-checked with an actual Pi 1.3.0 CLI;
+that is not a latest-SDK TUI CI claim.
+
+### Real Anthropic pre-turn rejection coverage
+
+The two `terminal.test.ts` cases named `real Anthropic pre-turn` run the actual
+Pi CLI in tmux; the parent uses the scripted fixture provider while the child
+uses an intentionally unconfigured Anthropic model. They exercise Pi's real
+missing-auth prompt rejection, not an auth probe or the scripted provider-error
+fixture. The `each` case asserts that the parent's `read_subagent_artifact`
+request selects the exact prompt-error `turnId` and returns the raw diagnostic;
+it then retasks the still-live pane and expects a later normal completion from
+that same child. The grouped case checks that the error is eligible while a
+registered sibling is still provider-gated without marking the group complete.
+It then releases the sibling and expects its separate completion, before
+retasking the failed child and expecting a separate normal recovery completion.
+
+These cases are distinct from `interactive-error`, whose scripted provider
+failure settles through the normal `agent_settled` lifecycle path.
 
 ## Hermeticity boundary
 

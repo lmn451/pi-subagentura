@@ -850,6 +850,82 @@ describe("pollArtifactChanges", () => {
     expect(ui.notify).not.toHaveBeenCalled();
   });
 
+  it("records a prompt_error as the latest identity and queues its completion", async () => {
+    const mod = await importFresh<{
+      pollArtifactChanges: (
+        pi: ExtensionAPI,
+        owner: { id: number; generation: number },
+      ) => Promise<void>;
+    }>("../src/artifact-poller");
+    const multiplexer = await import("../src/multiplexer");
+    const item = makeState();
+    item.state.parentSessionId = "session-prompt-error";
+    item.state.cwd = join(item.artifactDir, "..");
+    const art = artifactPath(item.state.cwd, item.id);
+    appendEvent(art, {
+      version: 2,
+      eventId: "turn-a-started",
+      turnId: "turn-a",
+      ts: 1,
+      type: "turn_started",
+      status: "running",
+    });
+    writeOutput(art, "A immutable output");
+    appendCompletionEvent(art, {
+      turnId: "turn-a",
+      eventId: "completion-a",
+      outcome: "done",
+      source: "agent_settled",
+      ts: 2,
+    });
+    item.state.activeTurnId = "turn-a";
+    item.state.eventByteCursor = eventLogEndOffset(art);
+
+    writeOutput(art, "");
+    appendCompletionEvent(art, {
+      turnId: "pi-user-entry-b",
+      eventId: "prompt-error-b",
+      outcome: "error",
+      source: "prompt_error",
+      ts: 3,
+      errorMessage: "Provider rejected the prompt.",
+    });
+
+    const owner = { id: 603, generation: 1 };
+    const sendMessage = vi.fn();
+    const pi = { sendMessage } as unknown as ExtensionAPI;
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    } as unknown as ExtensionUIContext;
+    const scope = registerSessionScope({
+      ...owner,
+      pi,
+      ui,
+      sessionManager: {
+        getSessionId: () => "session-prompt-error",
+        getEntries: () => [],
+      },
+    });
+    scope.interactiveStates.set(item.id, item.state);
+    multiplexer.__setTmuxMultiplexer({
+      getPaneLivenessAsync: async () => "alive",
+    } as unknown as Multiplexer);
+
+    await mod.pollArtifactChanges(pi, owner);
+
+    expect(item.state.activeTurnId).toBe("pi-user-entry-b");
+    expect(item.state.pendingDeliveries).toEqual([
+      expect.objectContaining({
+        turnId: "pi-user-entry-b",
+        eventId: "prompt-error-b",
+        status: "error",
+        state: "queued",
+      }),
+    ]);
+  });
+
   it("polls and dispatches only interactive states owned by the supplied context", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");

@@ -715,7 +715,20 @@ after retries, compaction, and queued continuations. When Pi accepts Enter while
 streaming, it treats the message as steering inside the current agent run and
 does not emit another `before_agent_start`. The child protocol therefore detects
 the newly persisted steering user entry before its provider request and starts a
-distinct artifact turn for it. The explicit CLI remains supported:
+distinct artifact turn for it.
+
+A private child-only `--import` companion wraps the actual installed Pi SDK's
+public `AgentSession.prompt` and runs that installation's public root `main`.
+If a prompt rejects before Pi persists a new user entry, it records a
+`prompt_error` completion keyed by the ID Pi returns for the
+`subagentura-prompt-error` custom entry (`schemaVersion: 1`). It does not invent
+a user turn or `turn_started`. Pi may buffer custom entries before a real
+conversation message; the protocol-v2 completion and empty immutable snapshot
+persist independently. This reports Pi's actual rejection, not a credential
+probe or synthesized authentication error. The preloader is attached at child
+launch: reload the extension and spawn a fresh child to obtain it. Already
+running panes cannot gain the hook or recover missed prompt errors retroactively.
+The explicit CLI remains supported:
 
 ```bash
 "${ARTIFACT_DIR}/cli.mjs" done 0       # success — parent reads the literal output.md path baked into the child prompt
@@ -913,8 +926,19 @@ For a selected terminal `error`, the response includes the recorded
 `errorMessage`, falling back to `message`, even when its output snapshot is empty.
 Diagnostic text is untrusted and returned verbatim: no parsing, sanitization,
 redaction, escaping, normalization, or additional truncation. The existing
-protocol field limit of 2,000 UTF-16 code units still applies. The child protocol
-does not inspect credentials or synthesize startup authentication errors.
+protocol field limit of 2,000 UTF-16 code units still applies. No code probes
+credential availability or synthesizes authentication errors; the bridge records
+only an actual Pi prompt rejection.
+
+A pre-user `prompt_error` uses its Pi-issued custom-entry ID as `turnId` and
+stores an empty immutable snapshot without reading, copying, or clearing
+`output.md`. Pi may buffer that custom entry before a real conversation message,
+but the artifact event and snapshot persist independently.
+
+If failed prompt attempt B follows completed turn A, B is selected as the latest
+attempt; a late normal completion for A cannot replace it. A later real user
+entry starts a separate turn; pass the error's exact `turnId` to select it after
+recovery.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated

@@ -885,6 +885,14 @@ async function runPollArtifactChanges(
           state.lastActivityAt = ev.ts;
         }
 
+        if (
+          "version" in ev &&
+          ev.version === 2 &&
+          ev.type === "completion" &&
+          ev.source === "prompt_error"
+        ) {
+          state.activeTurnId = ev.turnId;
+        }
         if ("version" in ev && ev.version === 2 && ev.type === "turn_started") {
           state.activeTurnId = ev.turnId;
           const telemetryEligible =
