@@ -947,9 +947,9 @@ For a selected terminal `error`, the response includes the recorded
 `errorMessage`, falling back to `message`, even when its output snapshot is empty.
 Diagnostic text is untrusted and returned verbatim: no parsing, sanitization,
 redaction, escaping, normalization, or additional truncation. The existing
-protocol field limit of 2,000 UTF-16 code units still applies. No code probes
-credential availability or synthesizes authentication errors; the bridge records
-only an actual Pi prompt rejection.
+1 MiB whole-event record limit still applies. No code probes credential
+availability or synthesizes authentication errors; the bridge records only an
+actual Pi prompt rejection.
 
 A pre-user `prompt_error` uses its Pi-issued custom-entry ID as `turnId` and
 stores an empty immutable snapshot without reading, copying, or clearing
