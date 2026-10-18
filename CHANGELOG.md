@@ -79,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that earlier completion.
 - Restore interactive activity rows from protocol-v2 tool events in physical
   byte order, including tool-name fallback for missing or non-visible summaries.
+- Serialize child terminal completions with parent cancellation, preventing
+  late output snapshots while preserving already committed artifact history.
+- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
+  for an uncompleted current turn when `.cancelled` exists, then record
+  `process_exited`.
+- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
+  also retains a nonempty owner-token tombstone until artifact retirement so
+  delayed waiters cannot rename a fresh owner into a vacant path.
+- Preserve terminal `message` and `errorMessage` diagnostics verbatim through
+  event normalization within the existing 1 MiB event-record limit.
 
 ## [3.6.5] - 2026-10-14
 

@@ -766,6 +766,27 @@ coordinated manifest therefore has no snapshot reference. No completion path
 injects mutable output into the parent context. The staging file remains available
 for manual inspection in the artifact directory.
 
+Child terminal completion writers—including explicit `done`/`error`,
+`prompt_error`, process-exit fallback, and lifecycle completion—serialize with
+parent cancellation under `.active-turn.lock`. Cancellation publishes its marker
+and parent completion before releasing the synchronous lock, then tears down the
+mux. A later child completion is suppressed before snapshotting; already
+committed history is retained.
+
+The wrapper's exit command fills in a missing parent-source cancellation
+completion for the current turn when `.cancelled` is present, then records
+`process_exited`.
+
+Stale locks are reclaimed only when their
+recorded owner is old and its PID is dead, by atomically moving the nonempty lock
+to a retained owner-specific quarantine.
+Normal release uses the same tombstone; deleting it could let a delayed waiter
+rename a newly acquired owner's lock into the now-vacant quarantine. Retain
+tombstones until artifact retirement.
+
+Artifact readers preserve recorded terminal `message` and `errorMessage`
+diagnostics verbatim within the existing 1 MiB event-record limit.
+
 #### Coordinated completion delivery
 
 Coordinated delivery is the default for asynchronous in-process jobs,

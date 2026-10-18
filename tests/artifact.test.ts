@@ -481,18 +481,34 @@ describe("artifact", () => {
     expect((events[0] as any).eventId).toBe("oversized-completion");
   });
 
-  it("bounds first-party completion text so the record remains readable", () => {
-    const art = artifactPath(root, "bounded-completion");
+  it("preserves long completion diagnostics through append and read", () => {
+    const art = artifactPath(root, "raw-completion");
+    const message = "m".repeat(MAX_EVENT_TEXT_LENGTH + 10);
+    const errorMessage = "e".repeat(MAX_EVENT_TEXT_LENGTH + 10);
     const event = appendCompletionEvent(art, {
-      turnId: "bounded-turn",
+      turnId: "raw-turn",
       outcome: "error",
       source: "agent_settled",
-      message: "m".repeat(MAX_EVENT_TEXT_LENGTH + 10),
-      errorMessage: "e".repeat(MAX_EVENT_TEXT_LENGTH + 10),
+      message,
+      errorMessage,
     });
 
-    expect(event?.message).toBe("m".repeat(MAX_EVENT_TEXT_LENGTH));
-    expect(event?.errorMessage).toBe("e".repeat(MAX_EVENT_TEXT_LENGTH));
+    expect(event?.message).toBe(message);
+    expect(event?.errorMessage).toBe(errorMessage);
+    expect(readEvents(art)).toContainEqual(event);
+  });
+  it("preserves a message-only terminal diagnostic through normalization", () => {
+    const art = artifactPath(root, "raw-message-only-completion");
+    const message = "m".repeat(MAX_EVENT_TEXT_LENGTH + 10);
+    const event = appendCompletionEvent(art, {
+      turnId: "message-only-turn",
+      outcome: "error",
+      source: "agent_settled",
+      message,
+    });
+
+    expect(event?.message).toBe(message);
+    expect(event).not.toHaveProperty("errorMessage");
     expect(readEvents(art)).toContainEqual(event);
   });
 

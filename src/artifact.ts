@@ -14,10 +14,12 @@
  */
 
 import {
+  type Stats,
   appendFileSync,
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
   openSync,
   readSync,
   existsSync,
@@ -452,8 +454,12 @@ export function ensureArtifactDir(art: SubagentArtifact): void {
 
 /** Append one event to the NDJSON log. Creates the dir if needed. */
 export function appendEvent(art: SubagentArtifact, event: SubagentEvent): void {
+  const record = JSON.stringify(event);
+  if (Buffer.byteLength(record, "utf8") > MAX_EVENT_RECORD_BYTES) {
+    throw new Error(`artifact event exceeds ${MAX_EVENT_RECORD_BYTES} bytes`);
+  }
   ensureArtifactDir(art);
-  appendFileSync(art.statusFile, JSON.stringify(event) + "\n", { mode: 0o600 });
+  appendFileSync(art.statusFile, record + "\n", { mode: 0o600 });
 }
 
 export function newEventId(): EventId {
@@ -466,42 +472,212 @@ const completionLockWaiter = new Int32Array(new SharedArrayBuffer(4));
 export const ACTIVE_TURN_LOCK_TIMEOUT_MS = 2_000;
 export const ACTIVE_TURN_LOCK_STALE_MS = 30_000;
 const activeTurnLockWaiter = new Int32Array(new SharedArrayBuffer(4));
+const LOCK_OWNER_FILE = "owner.json";
+const MAX_LOCK_OWNER_BYTES = 1_024;
+
+interface LockOwner {
+  pid: number;
+  token: string;
+  createdAt: number;
+}
+
+function isLockPathOccupied(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR";
+}
+
+function lockQuarantinePath(lockPath: string, owner: LockOwner): string {
+  return `${lockPath}.reclaimed-${owner.pid}-${owner.token}`;
+}
+
+function isLockOwnerProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function readLockOwner(lockPath: string): LockOwner | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      join(lockPath, LOCK_OWNER_FILE),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const metadata = fstatSync(fd);
+    if (
+      !metadata.isFile() ||
+      metadata.size <= 0 ||
+      metadata.size > MAX_LOCK_OWNER_BYTES
+    ) {
+      return null;
+    }
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        buffer.length - offset,
+        offset,
+      );
+      if (bytesRead <= 0) return null;
+      offset += bytesRead;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(buffer.toString("utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) return null;
+      throw error;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const owner = parsed as Record<string, unknown>;
+    if (
+      typeof owner.pid !== "number" ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      typeof owner.token !== "string" ||
+      owner.token.length !== 36 ||
+      !/^[0-9a-f-]+$/i.test(owner.token) ||
+      typeof owner.createdAt !== "number" ||
+      !Number.isSafeInteger(owner.createdAt) ||
+      owner.createdAt < 0
+    ) {
+      return null;
+    }
+    return {
+      pid: owner.pid,
+      token: owner.token,
+      createdAt: owner.createdAt,
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") {
+      return null;
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function tryAcquireLock(lockPath: string): LockOwner | null {
+  const owner = {
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  const candidatePath = `${lockPath}.owner-${owner.pid}-${owner.token}`;
+  mkdirSync(candidatePath, { mode: 0o700 });
+  let installed = false;
+  try {
+    writeFileSync(join(candidatePath, LOCK_OWNER_FILE), JSON.stringify(owner), {
+      mode: 0o600,
+      flag: "wx",
+    });
+    try {
+      renameSync(candidatePath, lockPath);
+      installed = true;
+      return owner;
+    } catch (error) {
+      if (isLockPathOccupied(error)) return null;
+      throw error;
+    }
+  } finally {
+    if (!installed) rmSync(candidatePath, { recursive: true, force: true });
+  }
+}
+
+function reclaimStaleLock(lockPath: string, staleMs: number): boolean {
+  let lockStat: Stats;
+  try {
+    lockStat = lstatSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (!lockStat.isDirectory()) {
+    throw new Error(`lock path is not a directory: ${lockPath}`);
+  }
+  const owner = readLockOwner(lockPath);
+  if (!owner || Date.now() - owner.createdAt <= staleMs) return false;
+  if (isLockOwnerProcessAlive(owner.pid)) return false;
+  const quarantinePath = lockQuarantinePath(lockPath, owner);
+  try {
+    renameSync(lockPath, quarantinePath);
+    return true;
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      isLockPathOccupied(error)
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function acquireFilesystemLock(
+  lockPath: string,
+  timeoutMs: number,
+  staleMs: number,
+  waiter: Int32Array,
+  timeoutMessage: string,
+): LockOwner {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const owner = tryAcquireLock(lockPath);
+    if (owner) return owner;
+    if (reclaimStaleLock(lockPath, staleMs)) continue;
+    if (Date.now() >= deadline) throw new Error(timeoutMessage);
+    Atomics.wait(waiter, 0, 0, 10);
+  }
+}
+
+function withFilesystemLock<T>(
+  lockPath: string,
+  timeoutMs: number,
+  staleMs: number,
+  waiter: Int32Array,
+  timeoutMessage: string,
+  operation: () => T,
+): T {
+  const owner = acquireFilesystemLock(
+    lockPath,
+    timeoutMs,
+    staleMs,
+    waiter,
+    timeoutMessage,
+  );
+  try {
+    return operation();
+  } finally {
+    renameSync(lockPath, lockQuarantinePath(lockPath, owner));
+  }
+}
 
 export function withActiveTurnLock<T>(
   art: SubagentArtifact,
   operation: () => T,
 ): T {
   ensureArtifactDir(art);
-  const lockPath = join(art.dir, ".active-turn.lock");
-  const deadline = Date.now() + ACTIVE_TURN_LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (
-          Date.now() - statSync(lockPath).mtimeMs >
-          ACTIVE_TURN_LOCK_STALE_MS
-        ) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring active-turn lock");
-      }
-      Atomics.wait(activeTurnLockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(lockPath, { recursive: true, force: true });
-  }
+  return withFilesystemLock(
+    join(art.dir, ".active-turn.lock"),
+    ACTIVE_TURN_LOCK_TIMEOUT_MS,
+    ACTIVE_TURN_LOCK_STALE_MS,
+    activeTurnLockWaiter,
+    "timed out acquiring active-turn lock",
+    operation,
+  );
 }
 
 function completionLockPath(art: SubagentArtifact, turnId: string): string {
@@ -515,36 +691,14 @@ function withCompletionLock<T>(
   operation: () => T,
 ): T {
   ensureArtifactDir(art);
-  const lockPath = completionLockPath(art, turnId);
-  const deadline = Date.now() + COMPLETION_LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (
-          Date.now() - statSync(lockPath).mtimeMs >
-          COMPLETION_LOCK_STALE_MS
-        ) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring completion lock for ${turnId}`);
-      }
-      Atomics.wait(completionLockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(lockPath, { recursive: true, force: true });
-  }
+  return withFilesystemLock(
+    completionLockPath(art, turnId),
+    COMPLETION_LOCK_TIMEOUT_MS,
+    COMPLETION_LOCK_STALE_MS,
+    completionLockWaiter,
+    `timed out acquiring completion lock for ${turnId}`,
+    operation,
+  );
 }
 
 /**
@@ -653,7 +807,22 @@ export function appendCompletionEvent(
   },
 ): CompletionEventV2 | null {
   return withCompletionLock(art, params.turnId, () => {
-    const existing = readEvents(art).find(
+    const events = readEvents(art);
+    if (
+      params.source !== "parent" &&
+      (existsSync(join(art.dir, ".cancelled")) ||
+        events.some(
+          (event) =>
+            "version" in event &&
+            event.version === 2 &&
+            event.type === "completion" &&
+            event.outcome === "cancelled" &&
+            event.source === "parent",
+        ))
+    ) {
+      return null;
+    }
+    const existing = events.find(
       (event) =>
         "version" in event &&
         event.version === 2 &&
@@ -663,8 +832,8 @@ export function appendCompletionEvent(
     if (existing) return null;
     const eventId = params.eventId ?? newEventId();
     const snapshot = snapshotOutputForEvent(art, eventId);
-    const message = boundedOptionalEventText(params.message);
-    const errorMessage = boundedOptionalEventText(params.errorMessage);
+    const message = params.message;
+    const errorMessage = params.errorMessage;
     const isParentCancellation =
       params.outcome === "cancelled" && params.source === "parent";
     const cancellationOrigin = isParentCancellation
@@ -695,8 +864,8 @@ export function appendCompletionEvent(
       source: params.source,
       ...snapshot,
       ...(params.exitCode === undefined ? {} : { exitCode: params.exitCode }),
-      ...(message ? { message } : {}),
-      ...(errorMessage ? { errorMessage } : {}),
+      ...(message === undefined ? {} : { message }),
+      ...(errorMessage === undefined ? {} : { errorMessage }),
       ...(cancellationOrigin ? { cancellationOrigin } : {}),
       ...(cancellationLifecycleReason ? { cancellationLifecycleReason } : {}),
       ...(agentStopReason ? { agentStopReason } : {}),
@@ -896,8 +1065,9 @@ function normalizeEvent(value: unknown): SubagentEvent | null {
       output,
       outputError,
       exitCode,
-      message,
-      errorMessage: boundedOptionalEventText(obj.errorMessage),
+      message: typeof obj.message === "string" ? obj.message : undefined,
+      errorMessage:
+        typeof obj.errorMessage === "string" ? obj.errorMessage : undefined,
       summary,
       cancellationOrigin,
       cancellationLifecycleReason,

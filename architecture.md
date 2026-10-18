@@ -574,13 +574,24 @@ not probe credentials or synthesize a provider failure.
 
 ### 6.5 Interactive cancellation
 
-Prompt-error publication and parent cancellation share the artifact's
-`.active-turn.lock`. Prompt-error append and active-turn replacement are one
-critical section. Cancellation writes `.cancelled`, reads the active turn, and
-appends its parent completion under the same lock. The first operation to
-commit determines the order: cancellation prevents a later prompt-error append,
-while an error already committed remains in the artifact. The lock is released
-before lineage cleanup and mux teardown.
+Child terminal completion writers—the explicit CLI `done`/`error`, pre-turn
+`prompt_error`, process-exit fallback, and lifecycle `agent_settled`—share
+`.active-turn.lock` with parent cancellation. The critical sections contain
+only synchronous artifact publication. A child checks the cancellation marker
+or parent cancellation receipt before snapshotting or appending; cancellation
+writes its marker, reads the active turn, and appends its parent completion in
+the same section. Whichever section commits first wins, preserving all earlier
+records; a later child completion is suppressed before snapshotting.
+`process_exited` remains a provenance record after cancellation.
+
+Lock candidates are fully populated, nonempty directories containing owner PID,
+nonce, and creation time before atomic installation. Reclaim only when the owner
+record is old and its PID is proven dead, moving the lock into a deterministic
+owner-token quarantine that remains until artifact retirement.
+Normal release also renames its lock into that same tombstone. Deleting it
+would let a delayed waiter holding the old owner record rename a fresh lock
+into the now-vacant path.
+Cancellation releases the lock before lineage cleanup and mux teardown.
 
 Cancellation first preserves authority on disk, then tears down the process:
 
@@ -589,7 +600,9 @@ Cancellation first preserves authority on disk, then tears down the process:
 3. append a parent-source cancelled completion;
 4. mark live state cancelled;
 5. kill the recorded mux pane best-effort;
-6. let the wrapper's `EXIT` trap append `process_exited`.
+6. let the wrapper's `EXIT` trap append a parent-source cancelled completion
+   for the current turn when `.cancelled` is set and no completion exists, then
+   append `process_exited`.
 
 The filesystem action precedes pane kill so a crash between those operations still leaves cancellation truth.
 
@@ -668,8 +681,9 @@ A result reader reconstructs the expected contained path, rejects symlink traver
 
 Artifact reads include the selected terminal error's recorded `errorMessage`,
 falling back to `message`, verbatim as untrusted diagnostic text. They do not
-parse, sanitize, redact, escape, normalize, or additionally truncate it. The
-existing protocol field limit of 2,000 UTF-16 code units still applies.
+parse, sanitize, redact, escape, normalize, or additionally truncate it. These
+completion fields are governed by the existing 1 MiB whole-record byte limit;
+the unrelated bounded display and metadata fields retain their own limits.
 
 A `prompt_error` uses an empty immutable snapshot instead of reading or copying
 mutable staging; it never clears `output.md`. Pi may buffer its custom entry

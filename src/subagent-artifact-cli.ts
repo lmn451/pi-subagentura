@@ -25,6 +25,7 @@ import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
   MAX_ACTIVE_TURN_BYTES,
+  MAX_EVENT_RECORD_BYTES,
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
   MAX_TOOL_NAME_LENGTH,
@@ -46,6 +47,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -53,7 +55,6 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -77,10 +78,13 @@ mkdirSync(dir, { recursive: true, mode: 0o700 });
 const statusFile = join(dir, "events.ndjson");
 const activeTurnFile = join(dir, "active-turn.json");
 const MAX_OUTPUT_SNAPSHOT_BYTES = ${MAX_OUTPUT_SNAPSHOT_BYTES};
+const MAX_EVENT_RECORD_BYTES = ${MAX_EVENT_RECORD_BYTES};
 const MAX_EVENT_TEXT_LENGTH = ${MAX_EVENT_TEXT_LENGTH};
 const MAX_ACTIVE_TURN_BYTES = ${MAX_ACTIVE_TURN_BYTES};
 const ACTIVE_TURN_LOCK_TIMEOUT_MS = ${ACTIVE_TURN_LOCK_TIMEOUT_MS};
 const ACTIVE_TURN_LOCK_STALE_MS = ${ACTIVE_TURN_LOCK_STALE_MS};
+const COMPLETION_LOCK_TIMEOUT_MS = 2000;
+const COMPLETION_LOCK_STALE_MS = 30000;
 const MAX_ACTIVE_TOOL_RECORDS = ${MAX_ACTIVE_TOOL_RECORDS};
 const MAX_ACTIVE_TOOL_ID_LENGTH = ${MAX_ACTIVE_TOOL_ID_LENGTH};
 const MAX_TOOL_NAME_LENGTH = ${MAX_TOOL_NAME_LENGTH};
@@ -98,7 +102,13 @@ const boundedMetadataIdentifier = (value, maxLength) =>
 
 const cmd = process.argv[2];
 const arg = process.argv[3];
-const write = (obj) => appendFileSync(statusFile, JSON.stringify(obj) + "\n", { mode: 0o600 });
+const write = (obj) => {
+  const record = JSON.stringify(obj);
+  if (Buffer.byteLength(record, "utf8") > MAX_EVENT_RECORD_BYTES) {
+    throw new Error("artifact event exceeds " + MAX_EVENT_RECORD_BYTES + " bytes");
+  }
+  appendFileSync(statusFile, record + "\n", { mode: 0o600 });
+};
 const readEvents = () => {
   try {
     return readFileSync(statusFile, "utf8")
@@ -163,68 +173,189 @@ const activeTurnMetadata = () => {
 const activeState = activeTurnMetadata();
 const turnId = activeState?.turnId ?? "process";
 const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
+const LOCK_OWNER_FILE = "owner.json";
+const MAX_LOCK_OWNER_BYTES = 1024;
+const isLockPathOccupied = (error) =>
+  error?.code === "EEXIST" ||
+  error?.code === "ENOTEMPTY" ||
+  error?.code === "EISDIR";
+const lockQuarantinePath = (lockPath, owner) =>
+  lockPath + ".reclaimed-" + owner.pid + "-" + owner.token;
+const isLockOwnerProcessAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
+};
+const readLockOwner = (lockPath) => {
+  let fd;
+  try {
+    fd = openSync(
+      join(lockPath, LOCK_OWNER_FILE),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const metadata = fstatSync(fd);
+    if (
+      !metadata.isFile() ||
+      metadata.size <= 0 ||
+      metadata.size > MAX_LOCK_OWNER_BYTES
+    ) {
+      return null;
+    }
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        buffer.length - offset,
+        offset,
+      );
+      if (bytesRead <= 0) return null;
+      offset += bytesRead;
+    }
+    let owner;
+    try {
+      owner = JSON.parse(buffer.toString("utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) return null;
+      throw error;
+    }
+    if (!owner || typeof owner !== "object" || Array.isArray(owner)) return null;
+    if (
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      typeof owner.token !== "string" ||
+      owner.token.length !== 36 ||
+      !/^[0-9a-f-]+$/i.test(owner.token) ||
+      typeof owner.createdAt !== "number" ||
+      !Number.isSafeInteger(owner.createdAt) ||
+      owner.createdAt < 0
+    ) {
+      return null;
+    }
+    return {
+      pid: owner.pid,
+      token: owner.token,
+      createdAt: owner.createdAt,
+    };
+  } catch (error) {
+    if (
+      error?.code === "ENOENT" ||
+      error?.code === "ENOTDIR" ||
+      error?.code === "ELOOP"
+    ) {
+      return null;
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+};
+const tryAcquireLock = (lockPath) => {
+  const owner = {
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  const candidatePath =
+    lockPath + ".owner-" + owner.pid + "-" + owner.token;
+  mkdirSync(candidatePath, { mode: 0o700 });
+  let installed = false;
+  try {
+    writeFileSync(
+      join(candidatePath, LOCK_OWNER_FILE),
+      JSON.stringify(owner),
+      { mode: 0o600, flag: "wx" },
+    );
+    try {
+      renameSync(candidatePath, lockPath);
+      installed = true;
+      return owner;
+    } catch (error) {
+      if (isLockPathOccupied(error)) return null;
+      throw error;
+    }
+  } finally {
+    if (!installed) rmSync(candidatePath, { recursive: true, force: true });
+  }
+};
+const reclaimStaleLock = (lockPath, staleMs) => {
+  let lockStat;
+  try {
+    lockStat = lstatSync(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (!lockStat.isDirectory()) {
+    throw new Error("lock path is not a directory: " + lockPath);
+  }
+  const owner = readLockOwner(lockPath);
+  if (!owner || Date.now() - owner.createdAt <= staleMs) return false;
+  if (isLockOwnerProcessAlive(owner.pid)) return false;
+  const quarantinePath = lockQuarantinePath(lockPath, owner);
+  try {
+    renameSync(lockPath, quarantinePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT" || isLockPathOccupied(error)) return false;
+    throw error;
+  }
+};
+const acquireFilesystemLock = (lockPath, timeoutMs, staleMs, timeoutMessage) => {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const owner = tryAcquireLock(lockPath);
+    if (owner) return owner;
+    if (reclaimStaleLock(lockPath, staleMs)) continue;
+    if (Date.now() >= deadline) throw new Error(timeoutMessage);
+    Atomics.wait(lockWaiter, 0, 0, 10);
+  }
+};
+const withFilesystemLock = (
+  lockPath,
+  timeoutMs,
+  staleMs,
+  timeoutMessage,
+  operation,
+) => {
+  const owner = acquireFilesystemLock(
+    lockPath,
+    timeoutMs,
+    staleMs,
+    timeoutMessage,
+  );
+  try {
+    return operation();
+  } finally {
+    renameSync(lockPath, lockQuarantinePath(lockPath, owner));
+  }
+};
 const withCompletionLock = (targetTurnId, operation) => {
   const lockKey = createHash("sha256").update(targetTurnId).digest("hex").slice(0, 24);
   const completionLock = join(dir, ".completion-" + lockKey + ".lock");
-  const deadline = Date.now() + 2000;
-  while (true) {
-    try {
-      mkdirSync(completionLock, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(completionLock).mtimeMs > 30000) {
-          rmSync(completionLock, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring completion lock for " + targetTurnId);
-      }
-      Atomics.wait(lockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(completionLock, { recursive: true, force: true });
-  }
+  return withFilesystemLock(
+    completionLock,
+    COMPLETION_LOCK_TIMEOUT_MS,
+    COMPLETION_LOCK_STALE_MS,
+    "timed out acquiring completion lock for " + targetTurnId,
+    operation,
+  );
 };
-const withActiveTurnLock = (operation) => {
-  const activeTurnLock = join(dir, ".active-turn.lock");
-  const deadline = Date.now() + ACTIVE_TURN_LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      mkdirSync(activeTurnLock, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      try {
-        if (
-          Date.now() - statSync(activeTurnLock).mtimeMs >
-          ACTIVE_TURN_LOCK_STALE_MS
-        ) {
-          rmSync(activeTurnLock, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring active-turn lock");
-      }
-      Atomics.wait(lockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(activeTurnLock, { recursive: true, force: true });
-  }
-};
+const withActiveTurnLock = (operation) =>
+  withFilesystemLock(
+    join(dir, ".active-turn.lock"),
+    ACTIVE_TURN_LOCK_TIMEOUT_MS,
+    ACTIVE_TURN_LOCK_STALE_MS,
+    "timed out acquiring active-turn lock",
+    operation,
+  );
 const isCancelled = () =>
   existsSync(join(dir, ".cancelled")) ||
   readEvents().some(
@@ -436,8 +567,8 @@ if (options.promptError) {
   }
   const errorMessage =
     typeof request.message === "string"
-      ? request.message.slice(0, MAX_EVENT_TEXT_LENGTH)
-      : String(request.message).slice(0, MAX_EVENT_TEXT_LENGTH);
+      ? request.message
+      : String(request.message);
   withActiveTurnLock(() => {
     if (isCancelled()) return;
     withCompletionLock(promptTurnId, () => {
@@ -460,15 +591,22 @@ if (options.promptError) {
 switch (cmd) {
   case "done": {
     const exitCode = Number(arg ?? 0);
-    completion(exitCode === 0 ? "done" : "error", "explicit", { exitCode });
-    break;
-  }
-  case "error":
-    const errorMessage = boundedOptionalEventText(arg ?? "unknown error");
-    completion("error", "explicit", {
-      ...(errorMessage ? { message: errorMessage, errorMessage } : {}),
+    withActiveTurnLock(() => {
+      if (isCancelled()) return;
+      completion(exitCode === 0 ? "done" : "error", "explicit", { exitCode });
     });
     break;
+  }
+  case "error": {
+    const errorMessage = boundedOptionalEventText(arg ?? "unknown error");
+    withActiveTurnLock(() => {
+      if (isCancelled()) return;
+      completion("error", "explicit", {
+        ...(errorMessage ? { message: errorMessage, errorMessage } : {}),
+      });
+    });
+    break;
+  }
   case "cancelled": {
     withActiveTurnLock(() => {
       try {
@@ -485,28 +623,37 @@ switch (cmd) {
   }
   case "process-exit": {
     const exitCode = Number(arg ?? 0);
-    const cancelled = existsSync(join(dir, ".cancelled"));
-    const alreadyCompleted = completed(turnId);
-    const diagnostics = processExitDiagnostics(
-      exitCode,
-      cancelled,
-      alreadyCompleted,
-    );
-    if (!alreadyCompleted) {
-      completion(cancelled ? "cancelled" : "error", "process_exit", {
+    withActiveTurnLock(() => {
+      const cancelled = isCancelled();
+      const alreadyCompleted = completed(turnId);
+      const diagnostics = processExitDiagnostics(
         exitCode,
-        ...(!cancelled ? { message: "sub-agent process exited before turn completion" } : {}),
-      });
-    }
-    write({
-      version: 2,
-      eventId: randomUUID(),
-      turnId,
-      ts: Date.now(),
-      type: "process_exited",
-      status: cancelled ? "cancelled" : exitCode === 0 ? "done" : "error",
-      exitCode,
-      ...diagnostics,
+        cancelled,
+        alreadyCompleted,
+      );
+      try {
+        if (!alreadyCompleted) {
+          if (cancelled) {
+            completion("cancelled", "parent");
+          } else {
+            completion("error", "process_exit", {
+              exitCode,
+              message: "sub-agent process exited before turn completion",
+            });
+          }
+        }
+      } finally {
+        write({
+          version: 2,
+          eventId: randomUUID(),
+          turnId,
+          ts: Date.now(),
+          type: "process_exited",
+          status: cancelled ? "cancelled" : exitCode === 0 ? "done" : "error",
+          exitCode,
+          ...diagnostics,
+        });
+      }
     });
     break;
   }

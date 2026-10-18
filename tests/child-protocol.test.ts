@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { artifactPath, readEvents } from "../src/artifact";
+import { writeCliScript } from "../src/subagent-artifact-cli";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
 
 function registerHandlers() {
@@ -209,6 +211,59 @@ describe("child protocol lifecycle", () => {
       source: "agent_settled",
       agentStopReason: "aborted",
       errorMessage: "Operation aborted",
+    });
+  });
+
+  it("blocks a late settled completion after parent cancellation", () => {
+    const handlers = registerHandlers();
+    const entries: unknown[] = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+    const lifecycleTurnId = "lifecycle-turn";
+    const cancelledTurnId = "cancelled-turn";
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: lifecycleTurnId,
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("agent_end")!(
+      {
+        messages: [{ role: "assistant", stopReason: "stop" }],
+      },
+      ctx,
+    );
+    writeFileSync(
+      join(artifactDir, "active-turn.json"),
+      JSON.stringify({ turnId: cancelledTurnId, started: true }),
+    );
+
+    const cliPath = join(artifactDir, "cli.mjs");
+    writeCliScript(cliPath);
+    const cancellation = spawnSync(process.execPath, [cliPath, "cancelled"], {
+      env: { ...process.env, ARTIFACT_DIR: artifactDir },
+      encoding: "utf8",
+    });
+    expect(cancellation.status, cancellation.stderr).toBe(0);
+
+    handlers.get("agent_settled")!({}, ctx);
+
+    const events = readEvents(artifactPath(root, "child"));
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "completion" && event.turnId === lifecycleTurnId,
+      ),
+    ).toEqual([]);
+    const cancellationEvents = events.filter(
+      (event) =>
+        event.type === "completion" && event.turnId === cancelledTurnId,
+    );
+    expect(cancellationEvents).toHaveLength(1);
+    expect(cancellationEvents[0]).toMatchObject({
+      outcome: "cancelled",
+      source: "parent",
     });
   });
 

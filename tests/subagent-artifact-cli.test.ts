@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -332,12 +333,27 @@ describe("subagent-artifact CLI", () => {
       expect(completion).toMatchObject({
         source: "prompt_error",
         exitCode: 1,
-        message: longMessage.slice(0, MAX_EVENT_TEXT_LENGTH),
-        errorMessage: longMessage.slice(0, MAX_EVENT_TEXT_LENGTH),
+        message: longMessage,
+        errorMessage: longMessage,
         output: { bytes: 0 },
       });
       expect(completion).not.toHaveProperty("outputError");
       expect(readFileSync(completion.output.path)).toEqual(Buffer.alloc(0));
+      const parsedOversizedCompletion = readEvents({
+        id: oversizedTurnId,
+        dir: tmp,
+        statusFile: join(tmp, "events.ndjson"),
+        outputFile: outputPath,
+      }).find(
+        (event) =>
+          event.type === "completion" && event.turnId === oversizedTurnId,
+      );
+      expect(parsedOversizedCompletion).toMatchObject({
+        source: "prompt_error",
+        outcome: "error",
+        message: longMessage,
+        errorMessage: longMessage,
+      });
       expect(readFileSync(outputPath)).toEqual(oversizedOutput);
 
       rmSync(outputPath);
@@ -489,16 +505,13 @@ describe("subagent-artifact CLI", () => {
           observerPath,
           `import fs from "node:fs";
            import { syncBuiltinESMExports } from "node:module";
-           const mkdir = fs.mkdirSync.bind(fs);
-           fs.mkdirSync = (path, ...args) => {
-             try { return mkdir(path, ...args); }
-             catch (error) {
-               if (error?.code === "EEXIST" && String(path).endsWith(".active-turn.lock")) {
-                 fs.writeFileSync(${JSON.stringify(waitingPath)}, "");
-               }
-               throw error;
-             }
-           };
+           const rename = fs.renameSync.bind(fs);
+          fs.renameSync = (source, destination, ...args) => {
+            if (String(destination).endsWith(".active-turn.lock")) {
+              fs.writeFileSync(${JSON.stringify(waitingPath)}, "");
+            }
+            return rename(source, destination, ...args);
+          };
            syncBuiltinESMExports();`,
         );
         const state = {
@@ -621,6 +634,557 @@ describe("subagent-artifact CLI", () => {
         expect(existsSync(join(tmp, ".cancelled"))).toBe(true);
       },
     );
+  });
+  describe("terminal publication", () => {
+    it.each(["done", "error"])(
+      "does not publish a late CLI %s completion after cancellation seals the active turn",
+      async (command) => {
+        const cliPath = join(tmp, "cli.mjs");
+        writeCliScript(cliPath);
+        const eventsPath = join(tmp, "events.ndjson");
+        const pausedPath = join(tmp, "terminal-writer-paused");
+        const releasePath = join(tmp, "release-terminal-writer");
+        const preloadPath = join(tmp, "pause-terminal-writer.mjs");
+        const oldTurnId = "previous-turn";
+        const activeTurnId = "active-turn";
+        const history = {
+          version: 2,
+          eventId: "historical-event",
+          turnId: "historical-turn",
+          ts: 1,
+          type: "completion",
+          status: "done",
+          outcome: "done",
+          source: "explicit",
+          exitCode: 0,
+        };
+        const commandArgs =
+          command === "done" ? ["done", "0"] : ["error", "raw terminal error"];
+        writeFileSync(eventsPath, JSON.stringify(history) + "\n");
+        writeFileSync(
+          join(tmp, "active-turn.json"),
+          JSON.stringify({ turnId: oldTurnId, started: true }),
+        );
+        writeFileSync(
+          preloadPath,
+          `
+            import fs from "node:fs";
+            import { syncBuiltinESMExports } from "node:module";
+            const activeTurnFile = ${JSON.stringify(join(tmp, "active-turn.json"))};
+            const open = fs.openSync.bind(fs);
+            const read = fs.readSync.bind(fs);
+            const close = fs.closeSync.bind(fs);
+            const activeTurnDescriptors = new Set();
+            let paused = false;
+            fs.openSync = (path, ...args) => {
+              const fd = open(path, ...args);
+              if (String(path) === activeTurnFile) activeTurnDescriptors.add(fd);
+              return fd;
+            };
+            fs.readSync = (fd, ...args) => {
+              const bytesRead = read(fd, ...args);
+              if (activeTurnDescriptors.has(fd) && !paused) {
+                paused = true;
+                fs.writeFileSync(${JSON.stringify(pausedPath)}, "");
+                const waiter = new Int32Array(new SharedArrayBuffer(4));
+                while (!fs.existsSync(${JSON.stringify(releasePath)})) {
+                  Atomics.wait(waiter, 0, 0, 10);
+                }
+              }
+              return bytesRead;
+            };
+            fs.closeSync = (fd, ...args) => {
+              activeTurnDescriptors.delete(fd);
+              return close(fd, ...args);
+            };
+            syncBuiltinESMExports();
+          `,
+        );
+
+        const terminalWriter = spawn(
+          process.execPath,
+          ["--import", preloadPath, cliPath, ...commandArgs],
+          {
+            env: { ...process.env, ARTIFACT_DIR: tmp },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        spawnedChildren.push(terminalWriter);
+        const terminalWriterResult = waitForChild(terminalWriter);
+        await vi.waitFor(() => expect(existsSync(pausedPath)).toBe(true), {
+          timeout: 5_000,
+          interval: 10,
+        });
+
+        writeFileSync(
+          join(tmp, "active-turn.json"),
+          JSON.stringify({ turnId: activeTurnId, started: true }),
+        );
+        const cancellation = spawnSync(
+          process.execPath,
+          [cliPath, "cancelled"],
+          {
+            env: { ...process.env, ARTIFACT_DIR: tmp },
+            encoding: "utf8",
+          },
+        );
+        expect(cancellation.status, cancellation.stderr).toBe(0);
+        writeFileSync(releasePath, "");
+
+        const terminalResult = await terminalWriterResult;
+        expect(terminalResult.status, terminalResult.stderr).toBe(0);
+        const events = readFileSync(eventsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(events[0]).toEqual(history);
+        expect(
+          events.filter(
+            (event) =>
+              event.type === "completion" && event.turnId === oldTurnId,
+          ),
+        ).toEqual([]);
+        const cancellationEvents = events.filter(
+          (event) =>
+            event.type === "completion" && event.turnId === activeTurnId,
+        );
+        expect(cancellationEvents).toHaveLength(1);
+        expect(cancellationEvents[0]).toMatchObject({
+          outcome: "cancelled",
+          source: "parent",
+        });
+        expect(existsSync(join(tmp, ".cancelled"))).toBe(true);
+      },
+    );
+
+    it("does not let a delayed stale-lock waiter unlink a fresh active-turn owner", async () => {
+      const cliPath = join(tmp, "cli.mjs");
+      writeCliScript(cliPath);
+      const lockPath = join(tmp, ".active-turn.lock");
+      const firstHoldsPath = join(tmp, "first-owner-holds-lock");
+      const releaseFirstPath = join(tmp, "release-first-owner");
+      const secondObservedPath = join(tmp, "second-observed-stale-lock");
+      const releaseSecondStatPath = join(tmp, "release-second-stale-stat");
+      const secondAttemptedPath = join(tmp, "second-retried-active-lock");
+      const secondAcquiredPath = join(tmp, "second-acquired-active-lock");
+      const firstPreloadPath = join(tmp, "first-lock-owner.mjs");
+      const secondPreloadPath = join(tmp, "second-lock-waiter.mjs");
+      mkdirSync(lockPath, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(lockPath, "owner.json"),
+        JSON.stringify({
+          pid: 999_999_999,
+          token: "11111111-1111-4111-8111-111111111111",
+          createdAt: Date.now() - 120_000,
+        }),
+      );
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId: "stale-lock-turn", started: true }),
+      );
+      writeFileSync(
+        firstPreloadPath,
+        `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const remove = fs.rmSync.bind(fs);
+          const rename = fs.renameSync.bind(fs);
+          const append = fs.appendFileSync.bind(fs);
+          const waitForSecond = () => {
+            const waiter = new Int32Array(new SharedArrayBuffer(4));
+            while (!fs.existsSync(${JSON.stringify(secondObservedPath)})) {
+              Atomics.wait(waiter, 0, 0, 10);
+            }
+          };
+          fs.rmSync = (path, ...args) => {
+            if (String(path) === ${JSON.stringify(lockPath)}) waitForSecond();
+            return remove(path, ...args);
+          };
+          fs.renameSync = (from, to, ...args) => {
+            if (
+              String(from) === ${JSON.stringify(lockPath)} &&
+              String(to).startsWith(${JSON.stringify(lockPath + ".reclaimed-")})
+            ) {
+              waitForSecond();
+            }
+            return rename(from, to, ...args);
+          };
+          fs.appendFileSync = (path, data, ...args) => {
+            if (String(path) === ${JSON.stringify(join(tmp, "events.ndjson"))}) {
+              const event = JSON.parse(String(data));
+              if (event.type === "completion" && event.source === "parent") {
+                fs.writeFileSync(${JSON.stringify(firstHoldsPath)}, "");
+                const waiter = new Int32Array(new SharedArrayBuffer(4));
+                while (!fs.existsSync(${JSON.stringify(releaseFirstPath)})) {
+                  Atomics.wait(waiter, 0, 0, 10);
+                }
+              }
+            }
+            return append(path, data, ...args);
+          };
+          syncBuiltinESMExports();
+        `,
+      );
+      writeFileSync(
+        secondPreloadPath,
+        `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const stat = fs.statSync.bind(fs);
+          const open = fs.openSync.bind(fs);
+          const read = fs.readSync.bind(fs);
+          const close = fs.closeSync.bind(fs);
+          const mkdir = fs.mkdirSync.bind(fs);
+          const rename = fs.renameSync.bind(fs);
+          const ownerPath = ${JSON.stringify(join(lockPath, "owner.json"))};
+          const ownerDescriptors = new Set();
+          let observed = false;
+          let lockMkdirAttempts = 0;
+          const markSecondAttempt = () => {
+            if (fs.existsSync(${JSON.stringify(releaseSecondStatPath)})) {
+              fs.writeFileSync(${JSON.stringify(secondAttemptedPath)}, "");
+            }
+          };
+          const markSecondAcquired = () => {
+            fs.writeFileSync(${JSON.stringify(secondAcquiredPath)}, "");
+            markSecondAttempt();
+          };
+          const observeSecond = () => {
+            if (observed) return;
+            observed = true;
+            fs.writeFileSync(${JSON.stringify(secondObservedPath)}, "");
+            const waiter = new Int32Array(new SharedArrayBuffer(4));
+            while (!fs.existsSync(${JSON.stringify(releaseSecondStatPath)})) {
+              Atomics.wait(waiter, 0, 0, 10);
+            }
+          };
+          fs.statSync = (path, ...args) => {
+            const result = stat(path, ...args);
+            if (String(path) === ${JSON.stringify(lockPath)}) observeSecond();
+            return result;
+          };
+          fs.openSync = (path, ...args) => {
+            const fd = open(path, ...args);
+            if (String(path) === ownerPath) ownerDescriptors.add(fd);
+            return fd;
+          };
+          fs.readSync = (fd, ...args) => {
+            const bytesRead = read(fd, ...args);
+            if (ownerDescriptors.has(fd)) observeSecond();
+            return bytesRead;
+          };
+          fs.closeSync = (fd, ...args) => {
+            ownerDescriptors.delete(fd);
+            return close(fd, ...args);
+          };
+          fs.mkdirSync = (path, ...args) => {
+            if (String(path) !== ${JSON.stringify(lockPath)}) {
+              return mkdir(path, ...args);
+            }
+            lockMkdirAttempts += 1;
+            try {
+              const result = mkdir(path, ...args);
+              if (lockMkdirAttempts > 1) markSecondAcquired();
+              return result;
+            } catch (error) {
+              if (lockMkdirAttempts > 1) markSecondAttempt();
+              throw error;
+            }
+          };
+          fs.renameSync = (from, to, ...args) => {
+            try {
+              const result = rename(from, to, ...args);
+              if (String(to) === ${JSON.stringify(lockPath)}) {
+                markSecondAcquired();
+              } else if (String(from) === ${JSON.stringify(lockPath)}) {
+                markSecondAttempt();
+              }
+              return result;
+            } catch (error) {
+              if (
+                String(to) === ${JSON.stringify(lockPath)} ||
+                String(from) === ${JSON.stringify(lockPath)}
+              ) {
+                markSecondAttempt();
+              }
+              throw error;
+            }
+          };
+          syncBuiltinESMExports();
+        `,
+      );
+
+      const first = spawn(
+        process.execPath,
+        ["--import", firstPreloadPath, cliPath, "cancelled"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: tmp },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      spawnedChildren.push(first);
+      const firstResult = waitForChild(first);
+      const second = spawn(
+        process.execPath,
+        ["--import", secondPreloadPath, cliPath, "cancelled"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: tmp },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      spawnedChildren.push(second);
+      const secondResult = waitForChild(second);
+      await vi.waitFor(() => expect(existsSync(firstHoldsPath)).toBe(true), {
+        timeout: 5_000,
+        interval: 10,
+      });
+      writeFileSync(releaseSecondStatPath, "");
+      await vi.waitFor(
+        () => expect(existsSync(secondAttemptedPath)).toBe(true),
+        { timeout: 5_000, interval: 10 },
+      );
+      expect(existsSync(secondAcquiredPath)).toBe(false);
+
+      writeFileSync(releaseFirstPath, "");
+      const [firstExit, secondExit] = await Promise.all([
+        firstResult,
+        secondResult,
+      ]);
+      expect(firstExit.status, firstExit.stderr).toBe(0);
+      expect(secondExit.status, secondExit.stderr).toBe(0);
+    });
+    it("protects a fresh owner from a delayed waiter that observed an aged live owner", async () => {
+      const cliPath = join(tmp, "cli.mjs");
+      writeCliScript(cliPath);
+      const lockPath = join(tmp, ".active-turn.lock");
+      const ownerPath = join(lockPath, "owner.json");
+      const eventsPath = join(tmp, "events.ndjson");
+      const turnId = "delayed-live-owner-turn";
+      const firstPreloadPath = join(tmp, "aged-live-owner.mjs");
+      const secondPreloadPath = join(tmp, "delayed-reclaimer.mjs");
+      const thirdPreloadPath = join(tmp, "fresh-owner.mjs");
+      const firstHoldsPath = join(tmp, "first-owner-holds-lock");
+      const releaseFirstPath = join(tmp, "release-first-owner");
+      const secondKillWaitingPath = join(tmp, "second-waits-on-live-owner");
+      const releaseSecondKillPath = join(tmp, "release-second-liveness-check");
+      const secondRenameWaitingPath = join(
+        tmp,
+        "second-waits-before-stale-rename",
+      );
+      const releaseSecondRenamePath = join(tmp, "release-second-stale-rename");
+      const secondRenameAttemptedPath = join(
+        tmp,
+        "second-stale-rename-attempted",
+      );
+      const secondAcquiredPath = join(tmp, "second-acquired-fresh-slot");
+      const thirdHoldsPath = join(tmp, "third-owner-holds-lock");
+      const releaseThirdPath = join(tmp, "release-third-owner");
+      const thirdOwnerTokenPath = join(tmp, "third-owner-token");
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, started: true }),
+      );
+      writeFileSync(
+        firstPreloadPath,
+        `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const append = fs.appendFileSync.bind(fs);
+          const rename = fs.renameSync.bind(fs);
+          fs.renameSync = (from, to, ...args) => {
+            const result = rename(from, to, ...args);
+            if (String(to) === ${JSON.stringify(lockPath)}) {
+              const owner = JSON.parse(fs.readFileSync(${JSON.stringify(ownerPath)}, "utf8"));
+              owner.createdAt = Date.now() - 120_000;
+              fs.writeFileSync(${JSON.stringify(ownerPath)}, JSON.stringify(owner));
+            }
+            return result;
+          };
+          fs.appendFileSync = (path, data, ...args) => {
+            if (String(path) === ${JSON.stringify(eventsPath)}) {
+              const event = JSON.parse(String(data));
+              if (event.type === "completion" && event.turnId === ${JSON.stringify(turnId)}) {
+                fs.writeFileSync(${JSON.stringify(firstHoldsPath)}, "");
+                const waiter = new Int32Array(new SharedArrayBuffer(4));
+                while (!fs.existsSync(${JSON.stringify(releaseFirstPath)})) {
+                  Atomics.wait(waiter, 0, 0, 10);
+                }
+              }
+            }
+            return append(path, data, ...args);
+          };
+          syncBuiltinESMExports();
+        `,
+      );
+      const first = spawn(
+        process.execPath,
+        ["--import", firstPreloadPath, cliPath, "done", "0"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: tmp },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      spawnedChildren.push(first);
+      const firstResult = waitForChild(first);
+      const firstPid = first.pid;
+      if (firstPid === undefined) throw new Error("first child has no PID");
+      await vi.waitFor(() => expect(existsSync(firstHoldsPath)).toBe(true), {
+        timeout: 5_000,
+        interval: 10,
+      });
+      writeFileSync(
+        secondPreloadPath,
+        `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const kill = process.kill.bind(process);
+          const rename = fs.renameSync.bind(fs);
+          let delayedLivenessCheck = false;
+          let delayedRename = false;
+          const waitFor = (path) => {
+            const waiter = new Int32Array(new SharedArrayBuffer(4));
+            while (!fs.existsSync(path)) Atomics.wait(waiter, 0, 0, 10);
+          };
+          process.kill = (pid, signal) => {
+            if (pid === ${firstPid} && signal === 0 && !delayedLivenessCheck) {
+              delayedLivenessCheck = true;
+              fs.writeFileSync(${JSON.stringify(secondKillWaitingPath)}, "");
+              waitFor(${JSON.stringify(releaseSecondKillPath)});
+            }
+            return kill(pid, signal);
+          };
+          fs.renameSync = (from, to, ...args) => {
+            const staleRename =
+              String(from) === ${JSON.stringify(lockPath)} &&
+              String(to).startsWith(${JSON.stringify(lockPath + ".reclaimed-")});
+            if (staleRename && !delayedRename) {
+              delayedRename = true;
+              fs.writeFileSync(${JSON.stringify(secondRenameWaitingPath)}, "");
+              waitFor(${JSON.stringify(releaseSecondRenamePath)});
+            }
+            try {
+              const result = rename(from, to, ...args);
+              if (staleRename) fs.writeFileSync(${JSON.stringify(secondRenameAttemptedPath)}, "");
+              if (String(to) === ${JSON.stringify(lockPath)}) {
+                fs.writeFileSync(${JSON.stringify(secondAcquiredPath)}, "");
+              }
+              return result;
+            } catch (error) {
+              if (staleRename) fs.writeFileSync(${JSON.stringify(secondRenameAttemptedPath)}, "");
+              throw error;
+            }
+          };
+          syncBuiltinESMExports();
+        `,
+      );
+      const second = spawn(
+        process.execPath,
+        ["--import", secondPreloadPath, cliPath, "error", "delayed duplicate"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: tmp },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      spawnedChildren.push(second);
+      const secondResult = waitForChild(second);
+      await vi.waitFor(
+        () => expect(existsSync(secondKillWaitingPath)).toBe(true),
+        { timeout: 5_000, interval: 10 },
+      );
+
+      writeFileSync(releaseFirstPath, "");
+      const firstExit = await firstResult;
+      expect(firstExit.status, firstExit.stderr).toBe(0);
+      writeFileSync(releaseSecondKillPath, "");
+      await vi.waitFor(
+        () => expect(existsSync(secondRenameWaitingPath)).toBe(true),
+        { timeout: 5_000, interval: 10 },
+      );
+      writeFileSync(
+        thirdPreloadPath,
+        `
+          import fs from "node:fs";
+          import { syncBuiltinESMExports } from "node:module";
+          const append = fs.appendFileSync.bind(fs);
+          const rename = fs.renameSync.bind(fs);
+          fs.renameSync = (from, to, ...args) => {
+            const result = rename(from, to, ...args);
+            if (String(to) === ${JSON.stringify(lockPath)}) {
+              const owner = JSON.parse(fs.readFileSync(${JSON.stringify(ownerPath)}, "utf8"));
+              fs.writeFileSync(${JSON.stringify(thirdOwnerTokenPath)}, owner.token);
+            }
+            return result;
+          };
+          fs.appendFileSync = (path, data, ...args) => {
+            if (String(path) === ${JSON.stringify(eventsPath)}) {
+              const event = JSON.parse(String(data));
+              if (event.type === "process_exited") {
+                fs.writeFileSync(${JSON.stringify(thirdHoldsPath)}, "");
+                const waiter = new Int32Array(new SharedArrayBuffer(4));
+                while (!fs.existsSync(${JSON.stringify(releaseThirdPath)})) {
+                  Atomics.wait(waiter, 0, 0, 10);
+                }
+              }
+            }
+            return append(path, data, ...args);
+          };
+          syncBuiltinESMExports();
+        `,
+      );
+      const third = spawn(
+        process.execPath,
+        ["--import", thirdPreloadPath, cliPath, "process-exit", "1"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: tmp },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      spawnedChildren.push(third);
+      const thirdResult = waitForChild(third);
+      await vi.waitFor(() => expect(existsSync(thirdHoldsPath)).toBe(true), {
+        timeout: 5_000,
+        interval: 10,
+      });
+      const thirdOwnerToken = readFileSync(thirdOwnerTokenPath, "utf8");
+      expect(JSON.parse(readFileSync(ownerPath, "utf8")).token).toBe(
+        thirdOwnerToken,
+      );
+
+      writeFileSync(releaseSecondRenamePath, "");
+      await vi.waitFor(
+        () => expect(existsSync(secondRenameAttemptedPath)).toBe(true),
+        { timeout: 5_000, interval: 10 },
+      );
+      const acquiredWhileThirdHeld = existsSync(secondAcquiredPath);
+      const thirdStillOwnsLock =
+        existsSync(ownerPath) &&
+        JSON.parse(readFileSync(ownerPath, "utf8")).token === thirdOwnerToken;
+      writeFileSync(releaseThirdPath, "");
+      const [secondExit, thirdExit] = await Promise.all([
+        secondResult,
+        thirdResult,
+      ]);
+      expect(secondExit.status, secondExit.stderr).toBe(0);
+      expect(thirdExit.status, thirdExit.stderr).toBe(0);
+      expect(acquiredWhileThirdHeld).toBe(false);
+      expect(thirdStillOwnsLock).toBe(true);
+      const events = readEvents({
+        id: "delayed-live-owner",
+        dir: tmp,
+        statusFile: eventsPath,
+        outputFile: join(tmp, "output.md"),
+      });
+      expect(
+        events.filter(
+          (event) => event.type === "completion" && event.turnId === turnId,
+        ),
+      ).toHaveLength(1);
+      expect(
+        events.some(
+          (event) => event.type === "process_exited" && event.turnId === turnId,
+        ),
+      ).toBe(true);
+    });
   });
 
   describe("done", () => {

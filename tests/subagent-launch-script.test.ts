@@ -29,6 +29,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildPiInteractiveCommand,
+  cancelInteractiveSubagent,
   writeLaunchScript,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
@@ -224,22 +225,86 @@ describe("launch script EXIT trap (idempotency)", () => {
     });
   });
 
-  it("writes exactly one `cancelled` event when the .cancelled flag is present and the child did not call done", () => {
+  it("writes one parent-cancelled completion for the current turn when only the .cancelled marker exists", () => {
     const artDir = join(tmp, "artifacts", "abc12347");
     const launchScript = join(artDir, "launch.sh");
+    const turnId = "cancelled-current-turn";
 
-    // Parent called cancel_interactive_subagent, which writes the .cancelled flag.
-    // The child then exits the REPL. Trap should write exactly one `cancelled` event.
+    // The parent marker is present without a completion; process exit must
+    // publish the current turn's cancellation before recording its exit.
     mkdirSync(artDir, { recursive: true });
+    writeFileSync(
+      join(artDir, "active-turn.json"),
+      JSON.stringify({ turnId, started: true }),
+    );
     writeFileSync(join(artDir, ".cancelled"), "", { mode: 0o600 });
-    const childBody = `exit 0`;
-    runLaunchScript(artDir, launchScript, childBody);
+    expect(runLaunchScript(artDir, launchScript, "exit 0")).toBe(0);
 
-    expect(countCompletions(artDir, "cancelled")).toHaveLength(1);
+    expect(countEvents(artDir, "completion")).toEqual([
+      expect.objectContaining({
+        type: "completion",
+        turnId,
+        status: "cancelled",
+        outcome: "cancelled",
+        source: "parent",
+      }),
+    ]);
     expect(countEvents(artDir, "process_exited")).toEqual([
       expect.objectContaining({
+        turnId,
         status: "cancelled",
         exitCode: 0,
+        terminationReason: "cancelled",
+      }),
+    ]);
+  });
+
+  it("deduplicates a runtime parent-cancellation completion when recording process exit", () => {
+    const artDir = join(tmp, "artifacts", "abc12351");
+    const launchScript = join(artDir, "launch.sh");
+    const turnId = "runtime-cancelled-turn";
+    mkdirSync(artDir, { recursive: true });
+    writeFileSync(
+      join(artDir, "active-turn.json"),
+      JSON.stringify({ turnId, started: true }),
+    );
+
+    const state = {
+      id: "abc12351",
+      name: "Runtime cancellation",
+      task: "exercise cancellation publication",
+      paneId: "%99",
+      mux: "tmux",
+      sessionFile: join(tmp, "session.jsonl"),
+      cwd: tmp,
+      startedAt: Date.now(),
+      status: "running",
+      attachCommand: "",
+      selectPaneCommand: "",
+      launchScriptFile: launchScript,
+      artifactDir: artDir,
+    } satisfies InteractiveSubagentState;
+    __setTmuxMultiplexer({ getPaneLiveness: () => "dead" } as never);
+    cancelInteractiveSubagent(state.id, "cancel_interactive_subagent", state);
+
+    expect(runLaunchScript(artDir, launchScript, "exit 0")).toBe(0);
+
+    expect(countEvents(artDir, "completion")).toEqual([
+      expect.objectContaining({
+        type: "completion",
+        turnId,
+        status: "cancelled",
+        outcome: "cancelled",
+        source: "parent",
+        cancellationOrigin: "cancel_interactive_subagent",
+      }),
+    ]);
+    expect(countEvents(artDir, "process_exited")).toEqual([
+      expect.objectContaining({
+        turnId,
+        status: "cancelled",
+        exitCode: 0,
+        terminationReason: "normal_exit",
       }),
     ]);
   });
