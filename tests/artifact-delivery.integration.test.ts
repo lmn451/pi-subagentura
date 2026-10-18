@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,7 +15,10 @@ import type {
   ExtensionAPI,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import type { InteractiveSubagentState } from "../src/interactive-tmux";
+import {
+  registerInteractiveSubagentState,
+  type InteractiveSubagentState,
+} from "../src/interactive-tmux";
 import { __setTmuxMultiplexer, type Multiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import {
@@ -22,11 +26,36 @@ import {
   registerSessionScope,
   sessionOwner,
 } from "../src/session-scope";
-import { registerCompletionCoordinator } from "../src/completion-coordinator";
+import {
+  flushCompletionManifests,
+  prepareCompletionManifest,
+  registerCompletionCoordinator,
+  registerCompletionMember,
+  settleCompletionParentTurn,
+} from "../src/completion-coordinator";
+import {
+  createPiSessionHarness,
+  type PiSessionHarness,
+} from "./helpers/pi-session-harness";
+
+const repoRoot = new URL("..", import.meta.url).pathname;
+const childHarnesses: PiSessionHarness[] = [];
+const providerServers: Server[] = [];
 
 const roots: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+  for (const harness of childHarnesses.splice(0)) harness.dispose();
+  await Promise.all(
+    providerServers
+      .splice(0)
+      .map(
+        (server) =>
+          new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          ),
+      ),
+  );
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
   clearSessionScopes();
   __setTmuxMultiplexer(undefined);
@@ -140,7 +169,7 @@ describe("protocol-v2 artifact delivery", () => {
       },
     });
     const state = makeState(art.dir);
-    scope.interactiveStates.set(state.id, state);
+    registerInteractiveSubagentState(state, scope);
     const mux = {
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
@@ -167,7 +196,7 @@ describe("protocol-v2 artifact delivery", () => {
       source: "agent_settled",
       eventId: "event-completion",
     })!;
-    const entries: Array<{ customType: string; data: any }> = [];
+    const entries: Array<{ customType: string; data: unknown }> = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
         entries.push({ customType, data });
@@ -179,7 +208,7 @@ describe("protocol-v2 artifact delivery", () => {
       id: 501,
       generation: 1,
       lifecycle: "started",
-      pi: pi as any,
+      pi: pi as unknown as ExtensionAPI,
       sessionManager: {
         getSessionId: () => "parent-session",
         getEntries: () =>
@@ -191,12 +220,12 @@ describe("protocol-v2 artifact delivery", () => {
       },
     });
     const state = makeState(art.dir);
-    scope.interactiveStates.set(state.id, state);
-    registerCompletionCoordinator(pi as any, scope);
+    registerInteractiveSubagentState(state, scope);
+    registerCompletionCoordinator(pi as unknown as ExtensionAPI, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
-    } as any);
+    } as unknown as Multiplexer);
 
     await pollArtifactChanges(scope.pi, sessionOwner(scope));
 
@@ -224,6 +253,195 @@ describe("protocol-v2 artifact delivery", () => {
     expect(state.eventByteCursor).toBeGreaterThan(0);
   });
 
+  it.each(["each", "group"] as const)(
+    "publishes settled HTTP 402 provider errors before group completion with %s policy",
+    async (policy) => {
+      const art = makeArtifact();
+      const siblingArt = policy === "group" ? makeArtifact() : undefined;
+      let providerRequests = 0;
+      const providerServer = createServer((_request, response) => {
+        providerRequests += 1;
+        response.writeHead(402, { "content-type": "text/plain" });
+        response.end("insufficient credits");
+      });
+      providerServers.push(providerServer);
+      await new Promise<void>((resolve) =>
+        providerServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = providerServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("local provider server did not bind a TCP port");
+      }
+      const harness = await createPiSessionHarness(repoRoot, {
+        bindExtensionLifecycle: true,
+        childArtifactDir: art.dir,
+        providerErrorUrl: `http://127.0.0.1:${address.port}/chat`,
+        retrySettings: {
+          enabled: false,
+          maxRetries: 0,
+          baseDelayMs: 0,
+          maxAgentDelayMs: 0,
+        },
+      });
+      childHarnesses.push(harness);
+      const prompt = harness.session.prompt("exercise provider failure");
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      await prompt;
+      await harness.session.waitForIdle();
+
+      expect(providerRequests).toBe(1);
+      const childCompletion = readEventRecords(art)
+        .map(({ event }) => event)
+        .find((event) => event.type === "completion");
+      expect(childCompletion).toMatchObject({
+        type: "completion",
+        outcome: "error",
+        source: "agent_settled",
+        errorMessage: "HTTP 402: insufficient credits",
+        agentStopReason: "error",
+      });
+      const entries: Array<{ customType: string; data: unknown }> = [];
+      const pi = {
+        appendEntry: vi.fn((customType: string, data: unknown) => {
+          entries.push({ customType, data });
+        }),
+        registerEntryRenderer: vi.fn(),
+        sendMessage: vi.fn(
+          (message: { customType: string; content: string }) => {
+            entries.push({ customType: message.customType, data: message });
+          },
+        ),
+      };
+      const scope = registerSessionScope({
+        id: 504,
+        generation: 1,
+        lifecycle: "started",
+        pi: pi as unknown as ExtensionAPI,
+        sessionManager: {
+          getSessionId: () => "parent-session",
+          getEntries: () =>
+            entries.map(({ customType, data }) => ({
+              type: "custom",
+              customType,
+              data,
+            })),
+        },
+      });
+      const groupId = "provider-error-group";
+      const state = {
+        ...makeState(art.dir),
+        completionPolicy: policy,
+        ...(policy === "group" ? { completionGroupId: groupId } : {}),
+      };
+      const siblingState = siblingArt
+        ? {
+            ...makeState(siblingArt.dir),
+            id: "sibling",
+            completionPolicy: "group" as const,
+            completionGroupId: groupId,
+          }
+        : undefined;
+      const owner = sessionOwner(scope);
+      registerInteractiveSubagentState(state, scope);
+      if (siblingState) registerInteractiveSubagentState(siblingState, scope);
+      registerCompletionCoordinator(pi as unknown as ExtensionAPI, scope);
+      if (policy === "group") {
+        registerCompletionMember(
+          "interactive",
+          state.id,
+          "group",
+          groupId,
+          owner,
+        );
+        registerCompletionMember(
+          "interactive",
+          "sibling",
+          "group",
+          groupId,
+          owner,
+        );
+      }
+      __setTmuxMultiplexer({
+        getPaneLiveness: () => "alive",
+        getPaneLivenessAsync: async () => "alive",
+      } as unknown as Multiplexer);
+
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+      expect(state.status).toBe("idle");
+
+      const errorEntry = entries.find(
+        ({ customType }) => customType === "subagentura-completion",
+      );
+      expect(errorEntry?.data).toMatchObject({
+        turnId: childCompletion?.turnId,
+        status: "error",
+        policy,
+      });
+      if (policy === "group") {
+        expect(errorEntry?.data).toMatchObject({ groupRemaining: 1 });
+      } else {
+        expect(errorEntry?.data).not.toHaveProperty("groupRemaining");
+      }
+      expect(pi.sendMessage).toHaveBeenCalledOnce();
+      expect(pi.sendMessage.mock.calls[0][0].content).toContain(
+        '"status":"error"',
+      );
+
+      if (siblingArt && siblingState) {
+        expect(
+          entries.filter(
+            ({ customType }) => customType === "subagentura-completion",
+          ),
+        ).toHaveLength(1);
+        expect(pi.sendMessage).toHaveBeenCalledOnce();
+
+        writeOutput(siblingArt, "sibling success");
+        appendCompletionEvent(siblingArt, {
+          turnId: "sibling-turn",
+          outcome: "done",
+          source: "agent_settled",
+          eventId: "sibling-completion",
+        });
+        await pollArtifactChanges(scope.pi, owner);
+        expect(prepareCompletionManifest(owner)).toBeUndefined();
+        expect(
+          entries.filter(
+            ({ customType }) => customType === "subagentura-completion",
+          ),
+        ).toHaveLength(2);
+        expect(
+          entries.findLast(
+            ({ customType }) => customType === "subagentura-completion",
+          )?.data,
+        ).toMatchObject({
+          sourceId: "sibling",
+          policy: "group",
+          groupId,
+          groupRemaining: 0,
+        });
+        expect(pi.sendMessage).toHaveBeenCalledOnce();
+
+        settleCompletionParentTurn(owner);
+        flushCompletionManifests(owner);
+        expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+        expect(pi.sendMessage.mock.calls[1][0]).toMatchObject({
+          details: { groups: [groupId] },
+        });
+        expect(pi.sendMessage.mock.calls[1][0].content).toContain(
+          '"sourceId":"sibling"',
+        );
+        expect(pi.sendMessage.mock.calls[1][0].content).not.toContain(
+          '"sourceId":"child0001"',
+        );
+      }
+
+      settleCompletionParentTurn(owner);
+      await pollArtifactChanges(scope.pi, owner);
+      flushCompletionManifests(owner);
+      expect(pi.sendMessage).toHaveBeenCalledTimes(policy === "group" ? 2 : 1);
+    },
+  );
   it("does not publish workflow-owned child completions independently", async () => {
     const art = makeArtifact();
     appendEvent(art, {
@@ -252,7 +470,7 @@ describe("protocol-v2 artifact delivery", () => {
       id: 502,
       generation: 1,
       lifecycle: "started",
-      pi: pi as any,
+      pi: pi as unknown as ExtensionAPI,
       sessionManager: {
         getSessionId: () => "parent-session",
         getEntries: () => [],
@@ -262,11 +480,11 @@ describe("protocol-v2 artifact delivery", () => {
       ...makeState(art.dir),
       completionOwner: "workflow" as const,
     };
-    scope.interactiveStates.set(state.id, state);
+    registerInteractiveSubagentState(state, scope);
     __setTmuxMultiplexer({
       getPaneLiveness: () => "alive",
       getPaneLivenessAsync: async () => "alive",
-    } as any);
+    } as unknown as Multiplexer);
 
     await pollArtifactChanges(scope.pi, sessionOwner(scope));
 

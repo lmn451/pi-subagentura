@@ -30,6 +30,7 @@ export class TerminalHarness {
   readonly version: TmuxVersion;
   readonly env: Record<string, string>;
   readonly keep: boolean;
+  omitChildApiKey: boolean;
   readonly started: boolean;
   setupFiles(): void;
   assertChildCanExecNode(safePath: string): void;

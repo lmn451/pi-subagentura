@@ -1,6 +1,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -19,6 +20,7 @@ import {
   appendCompletionEvent,
   appendEvent,
   artifactPath,
+  withActiveTurnLock,
   newEventId,
   writeOutput,
   type SubagentEventV2,
@@ -372,36 +374,39 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     latestAgentMessages = [...event.messages];
   });
   pi.on("agent_settled", (_event, ctx) => {
-    const active = bindPersistedTurn(ctx, Date.now());
-    if (!active) return;
-    const assistant = [...latestAgentMessages]
-      .reverse()
-      .find((message: any) => message?.role === "assistant") as any;
-    const stopReason = assistant?.stopReason;
-    const errorMessage =
-      typeof assistant?.errorMessage === "string"
-        ? assistant.errorMessage
-        : undefined;
-    const failed =
-      Boolean(errorMessage) ||
-      assistant?.stopReason === "error" ||
-      assistant?.stopReason === "aborted";
-    appendCompletionEvent(art, {
-      turnId: active.turnId,
-      outcome: failed ? "error" : "done",
-      source: "agent_settled",
-      exitCode: failed ? 1 : 0,
-      errorMessage,
-      message: errorMessage,
-      agentStopReason:
-        stopReason === "error" || stopReason === "aborted"
-          ? stopReason
-          : undefined,
+    withActiveTurnLock(art, () => {
+      if (existsSync(join(art.dir, ".cancelled"))) return;
+      const active = bindPersistedTurn(ctx, Date.now());
+      if (!active) return;
+      const assistant = [...latestAgentMessages]
+        .reverse()
+        .find((message: any) => message?.role === "assistant") as any;
+      const stopReason = assistant?.stopReason;
+      const errorMessage =
+        typeof assistant?.errorMessage === "string"
+          ? assistant.errorMessage
+          : undefined;
+      const failed =
+        Boolean(errorMessage) ||
+        assistant?.stopReason === "error" ||
+        assistant?.stopReason === "aborted";
+      appendCompletionEvent(art, {
+        turnId: active.turnId,
+        outcome: failed ? "error" : "done",
+        source: "agent_settled",
+        exitCode: failed ? 1 : 0,
+        errorMessage,
+        message: errorMessage,
+        agentStopReason:
+          stopReason === "error" || stopReason === "aborted"
+            ? stopReason
+            : undefined,
+      });
+      const settled = readActiveTurn(art);
+      if (settled?.turnId === active.turnId) {
+        settled.activeTools = [];
+        writeActiveTurn(settled, art);
+      }
     });
-    const settled = readActiveTurn(art);
-    if (settled?.turnId === active.turnId) {
-      settled.activeTools = [];
-      writeActiveTurn(settled, art);
-    }
   });
 }

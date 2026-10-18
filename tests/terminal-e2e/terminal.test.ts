@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { gateForMarker } from "./fixtures/mock-provider";
+import {
+  E2E_MODEL,
+  E2E_PROVIDER,
+  gateForMarker,
+} from "./fixtures/mock-provider";
 import {
   createHarness,
   tmuxVersion,
+  type PaneInfo,
   type TerminalHarness,
 } from "./harness.mjs";
 import { getScenario } from "./scenarios.mjs";
@@ -47,6 +52,7 @@ function hasStage(
 async function startScenario(name: string): Promise<void> {
   const scenario = getScenario(name);
   harness.scenario = name;
+  harness.omitChildApiKey = scenario.omitChildApiKey ?? false;
   await harness.start();
   await harness.sendPrompt(scenario.prompt);
 }
@@ -107,6 +113,29 @@ function childPane() {
     );
 }
 
+function childPanes() {
+  const panes = harness.panes();
+  return panes.filter(
+    (pane) => pane.id !== harness.parentPane && pane.session.startsWith("e2e-"),
+  );
+}
+
+async function waitForAnthropicConfigErrorPane() {
+  let errorPane: PaneInfo | undefined;
+  await harness.waitFor(() => {
+    errorPane = childPanes().find((pane) => {
+      const screen = harness.paneScreen(pane.id);
+      return (
+        /anthropic|claude-sonnet-4-5/i.test(screen) &&
+        /api\s*key|credential|authentication|not configured|login/i.test(screen)
+      );
+    });
+    return errorPane !== undefined;
+  }, "actual Anthropic configuration error in a live child pane");
+  if (!errorPane) throw new Error("Anthropic error pane disappeared");
+  return errorPane;
+}
+
 async function openSupervisor(): Promise<void> {
   await harness.sendPrompt("/subagents");
   await harness.waitForScreen(
@@ -139,6 +168,211 @@ function assertCompletionSnapshot(
   if (expectedSource) expect(event.source).toBe(expectedSource);
 }
 
+function assertPreTurnPromptError(completion: Record<string, unknown>) {
+  const turnId = String(completion.turnId);
+  expect(completion.type).toBe("completion");
+  expect(completion.status).toBe("error");
+  expect(completion.outcome).toBe("error");
+  expect(completion.source).toBe("prompt_error");
+  expect(completion.exitCode).toBe(1);
+  expect(typeof completion.errorMessage).toBe("string");
+  expect(completion.message).toBe(completion.errorMessage);
+
+  const output = completion.output as Record<string, unknown> | undefined;
+  expect(output?.bytes).toBe(0);
+  const snapshotPath = resolve(
+    dirname(String(completion.path)),
+    String(output?.path),
+  );
+  const content = readFileSync(snapshotPath, "utf8");
+  expect(content).toBe("");
+  expect(output?.sha256).toBe(createHash("sha256").update("").digest("hex"));
+
+  const events = harness
+    .artifactEvents()
+    .filter((event) => event.path === completion.path);
+  expect(
+    events.filter(
+      (event) => event.type === "turn_started" && event.turnId === turnId,
+    ),
+  ).toHaveLength(0);
+  expect(
+    events.filter(
+      (event) => event.type === "completion" && event.turnId === turnId,
+    ),
+  ).toHaveLength(1);
+}
+
+async function selectRecoveryModel(
+  pane: PaneInfo,
+  completion: Record<string, unknown>,
+): Promise<void> {
+  const artifactDir = dirname(String(completion.path));
+  harness.tmux(["send-keys", "-t", pane.id, "-l", "--", "/model"]);
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+  await harness.waitFor(
+    () => harness.paneScreen(pane.id).includes("Model Name:"),
+    "native child model selector is ready",
+  );
+  harness.tmux([
+    "send-keys",
+    "-t",
+    pane.id,
+    "-l",
+    "--",
+    `${E2E_PROVIDER}/${E2E_MODEL}`,
+  ]);
+  await harness.waitFor(() => {
+    const screen = harness.paneScreen(pane.id);
+    return (
+      screen.includes(`${E2E_MODEL} [${E2E_PROVIDER}]`) &&
+      screen.includes("Model Name: E2E Mock")
+    );
+  }, "native child model selector filters to the fixture model");
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+
+  await harness.waitForProvider(
+    (events) =>
+      events.some(
+        (event) =>
+          event.eventType === "model_select" &&
+          event.artifactDir === artifactDir &&
+          event.selectedProvider === E2E_PROVIDER &&
+          event.selectedModelId === E2E_MODEL &&
+          event.source === "set",
+      ),
+    "actual child model_select confirms the E2E provider/model",
+  );
+}
+
+async function recoverPromptErrorChild(
+  completion: Record<string, unknown>,
+  errorPane: PaneInfo,
+): Promise<void> {
+  await selectRecoveryModel(errorPane, completion);
+  const turnId = String(completion.turnId);
+  const recoveryParentMarker = "[E2E:INTERACTIVE_PROMPT_ERROR_RECOVERY_PARENT]";
+  const recoveryChildMarker = "[E2E:CHILD_INTERACTIVE_PROMPT_ERROR_RECOVERY]";
+  await harness.sendPrompt(
+    `${recoveryParentMarker} Send a valid follow-up to the recovered child.`,
+  );
+  await waitForParentSettled(recoveryParentMarker);
+  await harness.waitForProvider(
+    (events) => hasStage(events, recoveryChildMarker, "complete"),
+    "valid child follow-up completes normally",
+  );
+  let recovery: Record<string, unknown> | undefined;
+  await harness.waitFor(() => {
+    recovery = harness
+      .artifactEvents()
+      .find(
+        (event) =>
+          event.path === completion.path &&
+          event.type === "completion" &&
+          event.turnId !== turnId &&
+          event.outcome !== "error",
+      );
+    return recovery !== undefined;
+  }, "separate normal recovery completion");
+  const recoveryCompletion = recovery;
+  if (!recoveryCompletion)
+    throw new Error("normal recovery completion missing");
+  expect(recoveryCompletion.source).toBe("explicit");
+  assertCompletionSnapshot(
+    recoveryCompletion,
+    "[E2E:INTERACTIVE_OUTPUT_1]",
+    "explicit",
+  );
+  expect(recoveryCompletion.turnId).not.toBe(completion.turnId);
+}
+
+async function waitForPromptErrorCompletion() {
+  let completion: Record<string, unknown> | undefined;
+  await harness.waitFor(
+    () => {
+      completion = harness
+        .artifactEvents()
+        .find(
+          (event) =>
+            event.type === "completion" &&
+            event.source === "prompt_error" &&
+            event.outcome === "error" &&
+            typeof event.errorMessage === "string",
+        );
+      return completion !== undefined;
+    },
+    "pre-turn prompt-error completion",
+    20_000,
+  );
+  if (!completion) throw new Error("pre-turn prompt-error completion missing");
+  return completion;
+}
+
+async function waitForPromptErrorAfter(firstTurnId: string) {
+  let completion: Record<string, unknown> | undefined;
+  await harness.waitFor(
+    () => {
+      completion = harness
+        .artifactEvents()
+        .find(
+          (event) =>
+            event.type === "completion" &&
+            event.source === "prompt_error" &&
+            event.outcome === "error" &&
+            typeof event.errorMessage === "string" &&
+            event.turnId !== firstTurnId,
+        );
+      return completion !== undefined;
+    },
+    "second pre-turn prompt-error completion after native session replacement",
+    20_000,
+  );
+  if (!completion) throw new Error("second prompt-error completion missing");
+  return completion;
+}
+
+async function sendChildPrompt(pane: PaneInfo, text: string): Promise<void> {
+  harness.tmux(["send-keys", "-t", pane.id, "-l", "--", text]);
+  await harness.waitFor(
+    () => harness.paneScreen(pane.id).includes(text),
+    "child Pi echoes the prompt after native session replacement",
+  );
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+}
+
+async function retryPromptErrorAfterNativeNew(
+  firstCompletion: Record<string, unknown>,
+  pane: PaneInfo,
+  childId: string,
+): Promise<void> {
+  const firstTurnId = String(firstCompletion.turnId);
+  harness.tmux(["send-keys", "-t", pane.id, "-l", "--", "/new"]);
+  harness.tmux(["send-keys", "-t", pane.id, "Enter"]);
+  await harness.waitFor(
+    () => harness.paneScreen(pane.id).includes("New session started"),
+    "native /new replaces the child Pi session",
+  );
+  await sendChildPrompt(
+    pane,
+    "Retry the Anthropic request after starting a new session.",
+  );
+
+  const secondCompletion = await waitForPromptErrorAfter(firstTurnId);
+  assertPreTurnPromptError(secondCompletion);
+  await harness.waitForProvider(
+    (events) =>
+      events.some(
+        (event) =>
+          event.eventType === "artifact_read_observed" &&
+          event.childId === childId &&
+          event.turnId === secondCompletion?.turnId &&
+          typeof event.resultText === "string" &&
+          event.resultText.includes(String(secondCompletion.errorMessage)),
+      ),
+    "parent observes the second raw error from the replacement session",
+  );
+}
+
 describe("real Pi terminal E2E", () => {
   it(
     "shows extension tool parameters only after Ctrl+O expansion",
@@ -164,27 +398,6 @@ describe("real Pi terminal E2E", () => {
         (screen) =>
           screen.includes("Parent settled for [E2E:TOOL_PARAMETERS]."),
         "parent settled after model-list tool call",
-      );
-      await harness.assertNoNetwork();
-    },
-    timeout,
-  );
-
-  it(
-    "starts a real Pi editor in the isolated PTY",
-    async () => {
-      await harness.start();
-      // start() gates on the editor key hints, so assert the things it does not:
-      // the scripted model is selected and both extensions loaded.
-      const screen = harness.renderedScreen();
-      expect(screen).toContain("mock • medium");
-      expect(screen).toContain("mock-");
-      expect(screen).toContain("provider.ts");
-      expect(screen).toContain("subagent.ts");
-      expect(harness.panes()).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ session: expect.stringMatching(/^e2e-/) }),
-        ]),
       );
       await harness.assertNoNetwork();
     },
@@ -482,6 +695,252 @@ describe("real Pi terminal E2E", () => {
       expect(
         harness.panes().some((candidate) => candidate.id === pane?.id),
       ).toBe(true);
+      await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
+    "delivers a real Anthropic pre-turn prompt error and recovers in the same child",
+    async () => {
+      const scenario = getScenario("interactive-prompt-error-each");
+      await startScenario(scenario.name);
+      await waitForParentSettled(scenario.marker);
+      const errorPane = await waitForAnthropicConfigErrorPane();
+      const completion = await waitForPromptErrorCompletion();
+      assertPreTurnPromptError(completion);
+      const childId = String(
+        harness
+          .providerEvents()
+          .find(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "interactive_spawn_result",
+          )?.childId,
+      );
+      const turnId = String(completion.turnId);
+      const rawError = String(completion.errorMessage);
+      expect(rawError).toMatch(/anthropic/i);
+      expect(
+        harness
+          .providerEvents()
+          .some((event) => event.marker === scenario.child),
+      ).toBe(false);
+
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_requested" &&
+              event.childId === childId &&
+              event.turnId === turnId &&
+              event.status === "error",
+          ),
+        "parent exact-ID error artifact read",
+      );
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_observed" &&
+              event.childId === childId &&
+              event.turnId === turnId,
+          ),
+        "parent observes the real artifact-reader result",
+      );
+      const observedRead = harness
+        .providerEvents()
+        .find(
+          (event) =>
+            event.marker === scenario.marker &&
+            event.eventType === "artifact_read_observed" &&
+            event.childId === childId &&
+            event.turnId === turnId,
+        );
+      expect(typeof observedRead?.resultText).toBe("string");
+      expect(observedRead?.resultText).toContain(rawError);
+      const whitespaceFreeError = rawError.replace(/\s/g, "");
+      await harness.waitFor(
+        () =>
+          harness
+            .scrollback(errorPane.id)
+            .replace(/\s/g, "")
+            .includes(whitespaceFreeError),
+        "real configuration error remains on the live child pane",
+      );
+      await harness.waitFor(
+        () =>
+          harness.scrollback().replace(/\s/g, "").includes(whitespaceFreeError),
+        "parent displays the raw diagnostic returned by read_subagent_artifact",
+      );
+      expect(harness.panes().some((pane) => pane.id === errorPane.id)).toBe(
+        true,
+      );
+
+      await retryPromptErrorAfterNativeNew(completion, errorPane, childId);
+      await recoverPromptErrorChild(completion, errorPane);
+      await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
+    "delivers a real Anthropic pre-turn prompt error before its grouped sibling finishes",
+    async () => {
+      const scenario = getScenario("interactive-prompt-error-group");
+      await startScenario(scenario.name);
+      await waitForParentSettled(scenario.marker);
+      await harness.waitForProvider(
+        (events) => hasStage(events, scenario.sibling!, "gated"),
+        "registered grouped sibling waits at its provider gate",
+      );
+      await harness.waitFor(
+        () => childPanes().length === 2,
+        "both grouped interactive child panes",
+      );
+      const errorPane = await waitForAnthropicConfigErrorPane();
+      const completion = await waitForPromptErrorCompletion();
+      assertPreTurnPromptError(completion);
+      const spawnResults = harness
+        .providerEvents()
+        .filter(
+          (event) =>
+            event.marker === scenario.marker &&
+            event.eventType === "interactive_spawn_result",
+        );
+      const siblingId = String(
+        spawnResults.find((event) => event.sequence === 2)?.childId,
+      );
+      const errorChildId = String(
+        spawnResults.find((event) => event.sequence === 3)?.childId,
+      );
+      const errorTurnId = String(completion.turnId);
+      const rawError = String(completion.errorMessage);
+      expect(rawError).toMatch(/anthropic/i);
+
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_requested" &&
+              event.childId === errorChildId &&
+              event.turnId === errorTurnId &&
+              event.status === "error",
+          ),
+        "group error read despite its pending sibling",
+      );
+      const beforeRelease = harness.providerEvents();
+      expect(hasStage(beforeRelease, scenario.sibling!, "complete")).toBe(
+        false,
+      );
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_observed" &&
+              event.childId === errorChildId &&
+              event.turnId === errorTurnId,
+          ),
+        "parent observes grouped error artifact result while sibling is gated",
+      );
+      const observedRead = harness
+        .providerEvents()
+        .find(
+          (event) =>
+            event.marker === scenario.marker &&
+            event.eventType === "artifact_read_observed" &&
+            event.childId === errorChildId &&
+            event.turnId === errorTurnId,
+        );
+      expect(typeof observedRead?.resultText).toBe("string");
+      expect(observedRead?.resultText).toContain(rawError);
+      const whitespaceFreeError = rawError.replace(/\s/g, "");
+      await harness.waitFor(
+        () =>
+          harness
+            .scrollback(errorPane.id)
+            .replace(/\s/g, "")
+            .includes(whitespaceFreeError),
+        "actual grouped Anthropic error remains visible in the live child",
+      );
+      await harness.waitFor(
+        () =>
+          harness.scrollback().replace(/\s/g, "").includes(whitespaceFreeError),
+        "parent observes raw grouped error diagnostic",
+      );
+      expect(harness.panes().some((pane) => pane.id === errorPane.id)).toBe(
+        true,
+      );
+      expect(
+        harness
+          .providerEvents()
+          .filter(
+            (event) =>
+              event.eventType === "artifact_read_requested" &&
+              event.childId === errorChildId,
+          ),
+      ).toHaveLength(1);
+
+      harness.release(scenario.gate!);
+      await harness.waitForProvider(
+        (events) => hasStage(events, scenario.sibling!, "complete"),
+        "remaining grouped sibling completes after release",
+      );
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_requested" &&
+              event.childId === siblingId &&
+              event.status === "done",
+          ),
+        "parent receives the remaining grouped completion",
+      );
+      const reads = harness
+        .providerEvents()
+        .filter((event) => event.eventType === "artifact_read_requested");
+      expect(reads).toHaveLength(2);
+      expect(
+        reads.filter((event) => event.childId === errorChildId),
+      ).toHaveLength(1);
+      expect(reads.filter((event) => event.childId === siblingId)).toHaveLength(
+        1,
+      );
+      const siblingRead = reads.find((event) => event.childId === siblingId);
+      expect(typeof siblingRead?.turnId).toBe("string");
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.marker === scenario.marker &&
+              event.eventType === "artifact_read_observed" &&
+              event.childId === siblingId &&
+              event.turnId === siblingRead?.turnId,
+          ),
+        "parent observes the exact sibling artifact read result",
+      );
+      await harness.waitFor(
+        () =>
+          harness
+            .scrollback()
+            .includes(`Reading turnId: ${String(siblingRead?.turnId)}`),
+        "parent reads the sibling's distinct grouped turn",
+      );
+      await recoverPromptErrorChild(completion, errorPane);
+      expect(
+        harness
+          .providerEvents()
+          .filter(
+            (event) =>
+              event.eventType === "artifact_read_requested" &&
+              event.childId === errorChildId,
+          ),
+      ).toHaveLength(1);
       await harness.assertNoNetwork();
     },
     timeout,

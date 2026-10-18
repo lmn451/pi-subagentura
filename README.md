@@ -460,7 +460,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -482,7 +482,7 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
@@ -584,7 +584,7 @@ Parameters:
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux` — optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, or `"herdr"`. Auto prefers a Herdr-managed pane (`HERDR_ENV=1`), then the attached Zellij/tmux environment, and finally an installed tmux or Zellij detached-session backend. Explicit choice forces that backend. Herdr mode requires Pi to be running inside a Herdr pane and preserves its exact socket path for reload/rehydration.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
-- `completionPolicy` — `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for a caller-declared named barrier
+- `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
 
 The spawn result describes the selected coordinated behavior.
@@ -715,7 +715,20 @@ after retries, compaction, and queued continuations. When Pi accepts Enter while
 streaming, it treats the message as steering inside the current agent run and
 does not emit another `before_agent_start`. The child protocol therefore detects
 the newly persisted steering user entry before its provider request and starts a
-distinct artifact turn for it. The explicit CLI remains supported:
+distinct artifact turn for it.
+
+A private child-only `--import` companion wraps the actual installed Pi SDK's
+public `AgentSession.prompt` and runs that installation's public root `main`.
+If a prompt rejects before Pi persists a new user entry, it records a
+`prompt_error` completion keyed by the ID Pi returns for the
+`subagentura-prompt-error` custom entry (`schemaVersion: 1`). It does not invent
+a user turn or `turn_started`. Pi may buffer custom entries before a real
+conversation message; the protocol-v2 completion and empty immutable snapshot
+persist independently. This reports Pi's actual rejection, not a credential
+probe or synthesized authentication error. The preloader is attached at child
+launch: reload the extension and spawn a fresh child to obtain it. Already
+running panes cannot gain the hook or recover missed prompt errors retroactively.
+The explicit CLI remains supported:
 
 ```bash
 "${ARTIFACT_DIR}/cli.mjs" done 0       # success — parent reads the literal output.md path baked into the child prompt
@@ -753,6 +766,27 @@ coordinated manifest therefore has no snapshot reference. No completion path
 injects mutable output into the parent context. The staging file remains available
 for manual inspection in the artifact directory.
 
+Child terminal completion writers—including explicit `done`/`error`,
+`prompt_error`, process-exit fallback, and lifecycle completion—serialize with
+parent cancellation under `.active-turn.lock`. Cancellation publishes its marker
+and parent completion before releasing the synchronous lock, then tears down the
+mux. A later child completion is suppressed before snapshotting; already
+committed history is retained.
+
+The wrapper's exit command fills in a missing parent-source cancellation
+completion for the current turn when `.cancelled` is present, then records
+`process_exited`.
+
+Stale locks are reclaimed only when their
+recorded owner is old and its PID is dead, by atomically moving the nonempty lock
+to a retained owner-specific quarantine.
+Normal release uses the same tombstone; deleting it could let a delayed waiter
+rename a newly acquired owner's lock into the now-vacant quarantine. Retain
+tombstones until artifact retirement.
+
+Artifact readers preserve recorded terminal `message` and `errorMessage`
+diagnostics verbatim within the existing 1 MiB event-record limit.
+
 #### Coordinated completion delivery
 
 Coordinated delivery is the default for asynchronous in-process jobs,
@@ -777,7 +811,16 @@ from the parent-model channel:
 `completionPolicy` controls readiness:
 
 - `"each"` (default) makes every independent result eligible immediately. Results that finish while the parent is busy are coalesced into one manifest at the next safe-idle dispatch; this is the default independent-delivery behavior.
-- `"group"` requires the caller to provide one shared, explicit `completionGroupId`. Same-turn launch and task text do not infer relatedness. Register all members in the intended group before the spawning parent turn settles; settlement seals the group, rejects late members, and blocks model delivery until every registered member is `done`, `error`, or `cancelled`. Per-member TUI notices still appear immediately, and an entirely consumed group does not trigger an empty turn.
+- `"group"` requires the caller to provide one shared, explicit
+  `completionGroupId`. Same-turn launch and task text do not infer relatedness.
+  Register all members before the spawning parent turn settles; settlement seals
+  the group and rejects late members. Error records bypass the group barrier and
+  become eligible for model delivery before the group completes; this does not
+  complete the group.
+  Successful and cancelled results remain gated until every registered member is
+  terminal. Per-member TUI notices still appear immediately, while busy-parent
+  manifests wait for a safe-idle dispatch. An entirely consumed group does not
+  trigger an empty turn.
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
@@ -899,6 +942,24 @@ the latest turn in physical event order. A completed turn returns its immutable
 snapshot; a running turn returns its current staging `output.md`, even when an
 earlier turn has completed. Empty or missing current staging never falls back to
 an earlier snapshot.
+
+For a selected terminal `error`, the response includes the recorded
+`errorMessage`, falling back to `message`, even when its output snapshot is empty.
+Diagnostic text is untrusted and returned verbatim: no parsing, sanitization,
+redaction, escaping, normalization, or additional truncation. The existing
+1 MiB whole-event record limit still applies. No code probes credential
+availability or synthesizes authentication errors; the bridge records only an
+actual Pi prompt rejection.
+
+A pre-user `prompt_error` uses its Pi-issued custom-entry ID as `turnId` and
+stores an empty immutable snapshot without reading, copying, or clearing
+`output.md`. Pi may buffer that custom entry before a real conversation message,
+but the artifact event and snapshot persist independently.
+
+If failed prompt attempt B follows completed turn A, B is selected as the latest
+attempt; a late normal completion for A cannot replace it. A later real user
+entry starts a separate turn; pass the error's exact `turnId` to select it after
+recovery.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated

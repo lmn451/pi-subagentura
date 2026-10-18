@@ -1438,11 +1438,12 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
   reconcileState(state);
   pruneCoordinatorState(state);
   const records = [...state.records.values()];
+  // Errors bypass the group barrier; parent-turn safety checks still apply.
   return records.filter(
     (record) =>
       !state.consumed.has(record.completionId) &&
       !state.dispatchAttempted.has(record.completionId) &&
-      groupIsReady(state, record),
+      (record.status === "error" || groupIsReady(state, record)),
   );
 }
 

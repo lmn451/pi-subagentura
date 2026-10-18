@@ -163,7 +163,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - Asynchronous in-process completions publish a reference to `get_subagent_result`.
 - Interactive artifact intents publish immutable snapshot and activity references.
 - Background workflows publish a reference to `get_workflow_result`; their owned children never publish directly.
-- `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId` and waits for a sealed all-terminal group.
+- `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId`; see [coordinated readiness](#84-coordinated-readiness-consumption-and-dispatch) for its error bypass and terminal barrier.
 - The coordinator attaches one ready manifest to pending human input or prepares one follow-up only after safe idleness. It passes that idle manifest to `sendCompletionTurn` with the actual parent streaming state; non-v2 falls through to native `sendMessage`, while idle Orchestratorv2 uses the synthetic user-wake transport.
 - Full output is not automatic by default, and successful manual retrieval consumes the matching record. Related group membership is explicit: same-turn launch and task text do not infer relatedness.
 - Parent session ownership and generation fencing prevent delivery across session replacement.
@@ -420,7 +420,7 @@ There is no autonomous in-process poller.
 A requested result wait races the existing promise against caller abort and a bounded timeout; cancelling the wait does not cancel the job.
 Successful terminal retrieval appends a consumption receipt before returning and suppresses later automatic delivery.
 
-`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership and for every member—including errors and cancellations—to become terminal; same-turn launch or task text never infers a group.
+`attachAsyncJobSettlement` prevents a cancelled record from being changed by late settlement. The coordinated default publishes one TUI-only terminal entry and one bounded job-result reference for each terminal record. Independent `completionPolicy="each"` records are eligible immediately and coalesce while the parent is busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` waits for parent settlement to seal membership. Errors are eligible for parent delivery before the group barrier; success and cancellation remain gated until every registered member is terminal. Early error delivery leaves the member's terminal accounting intact and does not release the remaining group records. Same-turn launch or task text never infers a group.
 
 ### 5.5 Cancellation and retention
 
@@ -467,7 +467,7 @@ sequenceDiagram
   O->>M: createPane
   M-->>O: stable pane/session identity
   O->>F: persist recovery state and lineage
-  O->>F: write cli.mjs and launch.sh
+  O->>F: write cli.mjs, launch.sh, and configure child-only prompt preload
   O->>M: send literal exec command
   O->>M: send Enter separately
   O->>O: publish live registry state
@@ -489,18 +489,32 @@ If persistence fails, the pane is killed.
 If command construction or mux input fails, persisted state and lineage are removed best-effort and the orphan pane is killed.
 This prevents a running child with no recoverable identity and prevents registry exposure of a launch that was never dispatched.
 
-The wrapper exports `ARTIFACT_DIR`, `PI_SUBAGENTURA_CHILD=1`, and lineage environment.
-It installs an `EXIT` trap that runs `cli.mjs process-exit`, then executes:
+The wrapper exports `ARTIFACT_DIR`, `PI_SUBAGENTURA_CHILD=1`, and lineage
+environment. It preserves inherited `NODE_OPTIONS` while appending the private
+package-local `--import` preloader, then installs an `EXIT` trap that runs
+`cli.mjs process-exit` before executing:
 
 ```text
 pi --session <child-session.jsonl> --name <name> [model/thinking flags]
    --append-system-prompt <system.md> @<prompt.md>
 ```
 
-Agent turn starts come from child Pi lifecycle hooks, not the shell wrapper.
+The child-only `src/child-prompt-errors.mjs` resolves the package for the actual
+Pi executable and loads its public root `main` and `AgentSession` APIs. It wraps
+that installed `AgentSession.prompt` and calls the same public `main`; it does
+not use a copied SDK bundle. Before running Pi tools, it removes only its own
+preload option from `NODE_OPTIONS`, leaving other inherited options in place.
+Reloading the parent extension and spawning a fresh child is required to install
+the preloader; an already-running pane cannot gain it or recover missed prompt
+errors retroactively. Agent turn starts otherwise come from child Pi lifecycle
+hooks, not the shell wrapper.
 
-The mandatory child system protocol tells the agent to write `output.md`, invoke `cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
-`src/child-protocol.ts` supplies Pi callback-driven activity and an `agent_settled` completion fallback.
+The mandatory child system protocol tells the agent to write `output.md`, invoke
+`cli.mjs done 0` as its final tool call, wait for success, and keep the REPL open.
+`src/child-protocol.ts` supplies Pi callback-driven activity and an
+`agent_settled` completion fallback. No credential availability check is added;
+Pi owns authentication, and the preload reports only an actual prompt rejection
+that occurs before a new user entry is persisted.
 
 ### 6.3 Mux boundary
 
@@ -539,7 +553,45 @@ A successful completion while the pane remains alive folds to `idle`, not `exite
 The REPL can queue mid-turn input.
 A new persisted user entry establishes the next turn.
 
+When the actual SDK rejects `prompt()` before persisting a new user entry, the
+preloader records an error completion with source `prompt_error`, using the ID
+Pi returns for custom entry `subagentura-prompt-error` (`schemaVersion: 1`).
+This is an authoritative terminal artifact for that physical attempt, not a
+fabricated user entry or `turn_started`. It records an empty immutable snapshot
+without reading, copying, or clearing `output.md`. Pi may buffer the custom
+entry before a real conversation message, while the artifact event and snapshot
+persist independently. If failed prompt attempt B follows completed turn A, B
+is selected as the latest attempt and a late normal completion for A cannot
+displace it. A later real user entry has its own Pi-derived turn ID. The pane
+stays live and can be retasked. The initial selected session establishes
+primary-session affinity; Pi's public `AgentSessionRuntime.apply()` replacement
+path carries that affinity through `/new`, `/resume`, and `/fork` without
+claiming unrelated sessions.
+
+If Pi's public `main()` rejects outside a tracked primary prompt, the preloader
+records the actual rejection with the reserved `process` turn identity. It does
+not probe credentials or synthesize a provider failure.
+
 ### 6.5 Interactive cancellation
+
+Child terminal completion writers—the explicit CLI `done`/`error`, pre-turn
+`prompt_error`, process-exit fallback, and lifecycle `agent_settled`—share
+`.active-turn.lock` with parent cancellation. The critical sections contain
+only synchronous artifact publication. A child checks the cancellation marker
+or parent cancellation receipt before snapshotting or appending; cancellation
+writes its marker, reads the active turn, and appends its parent completion in
+the same section. Whichever section commits first wins, preserving all earlier
+records; a later child completion is suppressed before snapshotting.
+`process_exited` remains a provenance record after cancellation.
+
+Lock candidates are fully populated, nonempty directories containing owner PID,
+nonce, and creation time before atomic installation. Reclaim only when the owner
+record is old and its PID is proven dead, moving the lock into a deterministic
+owner-token quarantine that remains until artifact retirement.
+Normal release also renames its lock into that same tombstone. Deleting it
+would let a delayed waiter holding the old owner record rename a fresh lock
+into the now-vacant path.
+Cancellation releases the lock before lineage cleanup and mux teardown.
 
 Cancellation first preserves authority on disk, then tears down the process:
 
@@ -548,7 +600,9 @@ Cancellation first preserves authority on disk, then tears down the process:
 3. append a parent-source cancelled completion;
 4. mark live state cancelled;
 5. kill the recorded mux pane best-effort;
-6. let the wrapper's `EXIT` trap append `process_exited`.
+6. let the wrapper's `EXIT` trap append a parent-source cancelled completion
+   for the current turn when `.cancelled` is set and no completion exists, then
+   append `process_exited`.
 
 The filesystem action precedes pane kill so a crash between those operations still leaves cancellation truth.
 
@@ -604,12 +658,11 @@ Every v2 record contains:
 
 V2 variants:
 
-| Event            | Required semantics                                                                                                                                                 |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `turn_started`   | Status `running`; establishes active turn                                                                                                                          |
-| `tool_activity`  | Status `running`; phase `start` or `end`; bounded optional tool/summary/message                                                                                    |
-| `completion`     | Outcome/status `done`, `error`, or `cancelled`; source `agent_settled`, `agent_end`, `explicit`, `process_exit`, or `parent`; optional immutable output descriptor |
-| `process_exited` | Process terminal record with integer exit code; not itself a completion notification                                                                               |
+| Event            | Required semantics                                                                                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `turn_started`   | Status `running`; establishes active turn                                                                                                                                          |
+| `completion`     | Outcome/status `done`, `error`, or `cancelled`; source `agent_settled`, `agent_end`, `explicit`, `process_exit`, `parent`, or `prompt_error`; optional immutable output descriptor |
+| `process_exited` | Process terminal record with integer exit code; not itself a completion notification                                                                                               |
 
 ### 7.3 Completion and immutable output contract
 
@@ -625,6 +678,17 @@ Both the in-package writer and generated `cli.mjs`:
 When snapshot capture succeeds, it writes `outputs/<eventId>.md` and the completion records path, byte length, and SHA-256.
 A completion may instead carry `outputError`, or no output descriptor when staging output is absent.
 A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes.
+
+Artifact reads include the selected terminal error's recorded `errorMessage`,
+falling back to `message`, verbatim as untrusted diagnostic text. They do not
+parse, sanitize, redact, escape, normalize, or additionally truncate it. These
+completion fields are governed by the existing 1 MiB whole-record byte limit;
+the unrelated bounded display and metadata fields retain their own limits.
+
+A `prompt_error` uses an empty immutable snapshot instead of reading or copying
+mutable staging; it never clears `output.md`. Pi may buffer its custom entry
+before a real conversation message, so artifact persistence is independent of
+immediate Pi session-JSONL persistence.
 
 `output.md` is mutable staging and is never historical proof.
 For a completion with captured output, `eventId` names the physical snapshot; `turnId` selects the logical turn.
@@ -708,7 +772,7 @@ For every parent-visible standalone terminal record and every background workflo
 
 `completionPolicy="each"` is the default. Records become independently eligible as soon as they are terminal; records that finish while the parent is busy coalesce into one manifest at the next safe dispatch. A related group is formed only when the caller explicitly selects `completionPolicy="group"` and provides a shared `completionGroupId`; same-turn launch and task text never infer relatedness.
 
-For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group, late members are rejected, and parent delivery waits for every registered member to be `done`, `error`, or `cancelled`. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
+For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group and late members are rejected. Errors are eligible for parent delivery before the group barrier; success and cancellation wait until every registered member is terminal. Early error delivery leaves the group member registered and its terminal accounting intact, so remaining successful or cancelled members stay gated until the group is ready. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
 
 The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
 
@@ -908,7 +972,7 @@ At capacity, only an eligible terminal job belonging to the requesting owner may
 `cancel_workflow` aborts the job, normalizes state immediately, briefly waits for active runner cancellation receipts, posts worker abort, and terminates the worker.
 When execution rejects, `WorkflowExecutionError.usage` is copied into the job snapshot before cancellation normalization and completion callbacks, so status, result, notification, and tree consumers observe the same terminal accounting.
 
-On completion, `notifyWorkflowCompletion` publishes one coordinated workflow record by default. The aggregate produces a TUI-only terminal entry, and the compact manifest points to `get_workflow_result` when the parent is safely idle; successful terminal retrieval consumes pending automatic delivery. Independent `completionPolicy="each"` records become eligible immediately and coalesce while busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` shares the parent-settlement seal and all-terminal barrier; same-turn launch and task text never infer a group. Workflow-owned process and in-process children are suppressed, so internal fan-out never wakes the parent per child. Publication is owner-fenced and suppressed by owner cleanup.
+On completion, `notifyWorkflowCompletion` publishes one coordinated workflow record by default. The aggregate produces a TUI-only terminal entry, and the compact manifest points to `get_workflow_result` when the parent is safely idle; successful terminal retrieval consumes pending automatic delivery. Independent `completionPolicy="each"` records become eligible immediately and coalesce while busy. Explicit `completionPolicy="group"` with a caller-declared `completionGroupId` shares the parent-settlement seal and readiness rules described in [coordinated readiness](#84-coordinated-readiness-consumption-and-dispatch). Same-turn launch and task text never infer a group. Workflow-owned process and in-process children are suppressed, so internal fan-out never wakes the parent per child. Publication is owner-fenced and suppressed by owner cleanup.
 
 ### 9.7 Usage accounting, pricing provenance, and live projection
 
@@ -1033,7 +1097,7 @@ The following table inventories the tracked runtime source modules and companion
 |  10 | `src/interactive-lineage.ts`                 | Bounded durable lineage manifests, projection, and leaf-first subtree cancellation                                              | None                                                                                                                                                                                                                                                                                                          |
 |  11 | `src/interactive-supervisor-registration.ts` | Registers supervisor shortcut/command and routes focus, capture, and cancel actions                                             | `interactive-supervisor-ui`, `interactive-tmux`, `interactive-lineage`, `multiplexer`, `helpers`, `cancellation-snapshots`, `artifact-poller`, `workflow-jobs`, `session-scope`                                                                                                                               |
 |  12 | `src/interactive-supervisor-ui.ts`           | TUI for async jobs, details, navigation, and active overlay close hook                                                          | `interactive-tmux`; type-only `helpers`, `workflow-jobs`                                                                                                                                                                                                                                                      |
-|  13 | `src/interactive-tmux.ts`                    | Backend-neutral interactive launch, registry, lifecycle, follow-up, focus/capture, cancellation and persisted-state bridge      | `subagent-artifact-cli`, `artifact`, `delivery`, `multiplexer`, `cancellation-snapshots`, `interactive-lineage`, `multiplexer-tmux`, `identifier-types`                                                                                                                                                       |
+|  13 | `src/interactive-tmux.ts`                    | Backend-neutral interactive launch, registry, lifecycle, follow-up, focus/capture, cancellation and persisted-state bridge      | `subagent-artifact-cli`, `child-prompt-errors.mjs` (file-URL companion), `artifact`, `delivery`, `multiplexer`, `cancellation-snapshots`, `interactive-lineage`, `multiplexer-tmux`, `identifier-types`                                                                                                       |
 |  14 | `src/multiplexer-tmux.ts`                    | tmux implementation of pane/session creation, input, liveness, capture, focus and kill                                          | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
 |  15 | `src/multiplexer-zellij.ts`                  | Zellij implementation of pane/tab creation, normalized identity, input, liveness, capture, focus and kill                       | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
 |  16 | `src/multiplexer.ts`                         | Multiplexer backend resolver/cache and registry API                                                                             | `multiplexer-contracts`, `multiplexer-tmux`, `multiplexer-zellij`, `multiplexer-herdr`                                                                                                                                                                                                                        |
@@ -1079,6 +1143,7 @@ The following table inventories the tracked runtime source modules and companion
 |  57 | `src/identifier-types.ts`                    | Compile-time branded taxonomy for generated identifier domains and trusted-boundary casts                                       | None                                                                                                                                                                                                                                                                                                          |
 |  58 | `src/telemetry-launch.ts`                    | One-shot logical child-launch resolution without persistent request identity                                                    | `telemetry`                                                                                                                                                                                                                                                                                                   |
 |  59 | `src/telemetry-runtime.ts`                   | Shared artifact/failure-kind outage episode claims and process-local dedupe tokens                                              | Type-only `telemetry`                                                                                                                                                                                                                                                                                         |
+|  60 | `src/child-prompt-errors.mjs`                | Private child-only preload for actual Pi pre-user prompt rejections and artifact reporting                                      | Artifact-local generated `cli.mjs` reporter (dynamic import); installed Pi package public root (external)                                                                                                                                                                                                     |
 
 ---
 
@@ -1095,15 +1160,21 @@ The internal `src/workflow.ts` barrel must not be described as a supported runti
 
 Runtime companions have distinct loading/materialization rules:
 
-| Companion                          | Boundary                                                                                                     |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `workflow-worker-thread.mjs`       | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
-| `workflow-script.mjs`              | Imported by the worker companion and re-exported by the typed TS bridge                                      |
-| `workflow-script.d.mts`            | Declaration-only surface for the ESM parser companion                                                        |
-| generated artifact `cli.mjs`       | Source string comes from the installed package but is written into each artifact directory and invoked there |
-| `ORCHESTRATOR_SYSTEM_PROMPT.md`    | Loaded as a package asset by file URL, not a code module                                                     |
-| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md` | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
-| child Pi session JSONL             | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
+| Companion                          | Boundary                                                                                                                                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflow-worker-thread.mjs`       | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages                                                                                         |
+| `workflow-script.mjs`              | Imported by the worker companion and re-exported by the typed TS bridge                                                                                                                  |
+| `workflow-script.d.mts`            | Declaration-only surface for the ESM parser companion                                                                                                                                    |
+| generated artifact `cli.mjs`       | Source string comes from the installed package but is written into each artifact directory and invoked there                                                                             |
+| `src/child-prompt-errors.mjs`      | Private Node `--import` companion loaded by interactive child launch; hooks the installed Pi public `AgentSession.prompt` and calls its public root `main`; not a public package subpath |
+| `ORCHESTRATOR_SYSTEM_PROMPT.md`    | Loaded as a package asset by file URL, not a code module                                                                                                                                 |
+| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md` | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                                                                                             |
+| child Pi session JSONL             | Runtime data reopened by Pi and used for usage accounting; not an import dependency                                                                                                      |
+
+The generated child wrapper appends this companion's file URL to inherited
+`NODE_OPTIONS`; after startup the companion removes only its own option before
+Pi runs tools, so other inherited options remain available without recursively
+loading the bridge.
 
 The restrictive exports map matters: shipping all source files in `package.json#files` does not make every source path a supported public subpath.
 
@@ -1130,7 +1201,7 @@ The restrictive exports map matters: shipping all source files in `package.json#
 
 - [ ] Every terminal record appends one deterministic TUI completion entry excluded from LLM context.
 - [ ] Default `completionPolicy="each"` records become eligible independently and coalesce while the parent is busy.
-- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and waits for all `done`/`error`/`cancelled` members; same-turn launch and task text do not infer a group.
+- [ ] Explicit `completionPolicy="group"` requires caller-declared membership, seals at parent settlement, rejects late members, and retains all members in terminal accounting; errors are eligible before the barrier, while success and cancellation wait for every member to become terminal. Same-turn launch and task text do not infer a group.
 - [ ] Every idle coordinated manifest passes through `sendCompletionTurn` with
       the actual parent streaming state.
 - [ ] Non-v2 delivery falls through to native `sendMessage`; idle Orchestratorv2

@@ -187,9 +187,6 @@ describe("extension registration", () => {
     );
     expect(result.systemPrompt).toContain("`workflow`");
     expect(result.systemPrompt).toContain(
-      "yield the parent turn so the group seals",
-    );
-    expect(result.systemPrompt).toContain(
       "label findings as provisional and report pending jobIds",
     );
     expect(result.systemPrompt).toContain(

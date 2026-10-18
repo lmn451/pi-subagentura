@@ -468,7 +468,7 @@ function formatResolvedCompletionBehavior(
   completion: ResolvedCompletionPolicy,
 ): string {
   return completion.policy === "group"
-    ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
+    ? `Error notices are immediate; after parent settlement seals membership, they become eligible for parent delivery before the remaining members finish. Safe-idle and human-input fences still apply. Successful and cancelled results wait until every registered member is terminal; group ${completion.groupId} remains incomplete until then.`
     : "Completion will notify the user immediately and resume the parent with a compact result reference when safely idle.";
 }
 
@@ -693,7 +693,7 @@ function registerSubagentWithContextTool(
       "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
       "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
-      "After spawning grouped reviewers, yield the parent turn so the group seals; coordinated completion resumes the parent when all members are terminal.",
+      "After spawning grouped reviewers, yield the parent turn to seal membership; errors may become eligible before the remaining members finish, subject to safe-idle and human-input priority. Wait for every member to become terminal before finalizing.",
       "While reviewers are pending, label findings as provisional and report pending jobIds. Collect terminal results before final synthesis and disclose any failed or cancelled reviewers as coverage gaps.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
       "Do not cancel a running job merely because it is unfinished or to reclaim context.",
@@ -1119,7 +1119,7 @@ function registerSubagentIsolatedTool(
       "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
       "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
-      "After spawning grouped reviewers, yield the parent turn so the group seals; coordinated completion resumes the parent when all members are terminal.",
+      "After spawning grouped reviewers, yield the parent turn to seal membership; errors may become eligible before the remaining members finish, subject to safe-idle and human-input priority. Wait for every member to become terminal before finalizing.",
       "While reviewers are pending, label findings as provisional and report pending jobIds. Collect terminal results before final synthesis and disclose any failed or cancelled reviewers as coverage gaps.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
       "Do not cancel a running job merely because it is unfinished or to reclaim context.",

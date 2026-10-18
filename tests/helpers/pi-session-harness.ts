@@ -65,6 +65,7 @@ export async function createPiSessionHarness(
       baseDelayMs: number;
       maxAgentDelayMs: number;
     };
+    providerErrorUrl?: string;
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
@@ -101,7 +102,22 @@ export async function createPiSessionHarness(
     streamSimple: (_model: unknown, context: Context) => {
       contexts.push(context);
       const stream = createAssistantMessageEventStream();
-      pending.push(stream);
+      if (options.providerErrorUrl) {
+        void fetch(options.providerErrorUrl).then(async (response) => {
+          const errorMessage = `HTTP ${response.status}: ${await response.text()}`;
+          const message: AssistantMessage = {
+            ...assistant(""),
+            content: [],
+            stopReason: "error",
+            errorMessage,
+          };
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "error", reason: "error", error: message });
+          stream.end(message);
+        });
+      } else {
+        pending.push(stream);
+      }
       return stream;
     },
   };

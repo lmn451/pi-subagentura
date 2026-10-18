@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
@@ -15,6 +15,13 @@ import { normalizeProviderContext } from "../../../src/pi-sdk-compat";
 export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
 export const E2E_API = "subagentura-e2e";
+const PROMPT_ERROR_EACH = "[E2E:INTERACTIVE_PROMPT_ERROR_EACH]";
+const PROMPT_ERROR_GROUP = "[E2E:INTERACTIVE_PROMPT_ERROR_GROUP]";
+const PROMPT_ERROR_GROUP_SIBLING = "[E2E:CHILD_PROMPT_ERROR_GROUP_SIBLING]";
+const PROMPT_ERROR_RECOVERY_PARENT =
+  "[E2E:INTERACTIVE_PROMPT_ERROR_RECOVERY_PARENT]";
+const PROMPT_ERROR_RECOVERY_CHILD =
+  "[E2E:CHILD_INTERACTIVE_PROMPT_ERROR_RECOVERY]";
 const FIXED_TIMESTAMP = 1_700_000_000_000;
 const GATE_TIMEOUT_MS = 30_000;
 
@@ -65,6 +72,63 @@ function toolResultText(context: Context, toolName: string): string {
     return JSON.stringify([current.content, current.details]);
   }
   throw new Error(`mock provider could not find result for ${toolName}`);
+}
+
+function toolResultContentText(context: Context, toolName: string): string {
+  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+    const current = context.messages[index];
+    if (current.role !== "toolResult" || current.toolName !== toolName)
+      continue;
+    return current.content
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("\n");
+  }
+  throw new Error(`mock provider could not find result for ${toolName}`);
+}
+
+function stringsIn(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringsIn);
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).flatMap(stringsIn);
+  }
+  return [];
+}
+
+function completionManifestRecords(
+  context: Context,
+): Array<Record<string, unknown>> {
+  const records: Array<Record<string, unknown>> = [];
+  for (const value of stringsIn(context.messages)) {
+    for (const match of value.matchAll(
+      /<completion-manifest>([\s\S]*?)<\/completion-manifest>/g,
+    )) {
+      for (const line of match[1].split("\n")) {
+        try {
+          const record: unknown = JSON.parse(line);
+          if (record && typeof record === "object" && !Array.isArray(record)) {
+            records.push(record as Record<string, unknown>);
+          }
+        } catch {
+          /* non-record manifest lines are descriptive prose */
+        }
+      }
+    }
+  }
+  return records;
+}
+
+function latestInteractiveCompletionRecord(
+  context: Context,
+): Record<string, unknown> | undefined {
+  return completionManifestRecords(context)
+    .filter(
+      (record) =>
+        record.source === "interactive" &&
+        typeof record.sourceId === "string" &&
+        typeof record.turnId === "string",
+    )
+    .at(-1);
 }
 
 function resultId(context: Context, toolName: string, pattern: RegExp): string {
@@ -158,6 +222,11 @@ const KNOWN_MARKERS = new Set([
   "[E2E:INTERACTIVE]",
   "[E2E:INTERACTIVE_FOLLOWUP_PARENT]",
   "[E2E:INTERACTIVE_CANCEL_PARENT]",
+  PROMPT_ERROR_EACH,
+  PROMPT_ERROR_GROUP,
+  PROMPT_ERROR_RECOVERY_PARENT,
+  PROMPT_ERROR_RECOVERY_CHILD,
+  PROMPT_ERROR_GROUP_SIBLING,
   "[E2E:INTERACTIVE_ERROR_PARENT]",
   "[E2E:CANCEL]",
   "[E2E:ERROR]",
@@ -185,6 +254,7 @@ const GATES = new Map<string, string>([
   ["[E2E:CHILD_INTERACTIVE_FOLLOWUP]", "release-interactive-followup"],
   ["[E2E:CHILD_INTERACTIVE]", "release-interactive"],
   ["[E2E:CHILD_CANCEL]", "release-cancel"],
+  [PROMPT_ERROR_GROUP_SIBLING, "release-prompt-error-group-sibling"],
 ]);
 
 function gateFor(marker: string): string | undefined {
@@ -247,6 +317,37 @@ export async function waitForGate(
     if (existsSync(path)) return;
   }
   throw new Error(`timed out waiting for scripted provider gate ${gateName}`);
+}
+
+async function waitForLoggedStage(
+  marker: string,
+  stage: string,
+  signal?: AbortSignal,
+  timeoutMs = GATE_TIMEOUT_MS,
+): Promise<void> {
+  const path = process.env.SUBAGENTURA_E2E_LOG;
+  if (!path) throw new Error("mock provider requires SUBAGENTURA_E2E_LOG");
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted) throw new AbortError();
+    if (existsSync(path)) {
+      const found = readFileSync(path, "utf8")
+        .split("\n")
+        .some((line) => {
+          try {
+            const event = JSON.parse(line) as Record<string, unknown>;
+            return event.marker === marker && event.afterStage === stage;
+          } catch {
+            return false;
+          }
+        });
+      if (found) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `timed out waiting for provider stage ${stage} for ${marker}`,
+  );
 }
 
 function emit(
@@ -465,6 +566,126 @@ async function runRequest(
 
   const isChild = marker.includes("CHILD_");
   let state: State = previous ?? { stage: "initial", requestSeq: 0 };
+  const promptErrorParent =
+    marker === PROMPT_ERROR_EACH ||
+    marker === PROMPT_ERROR_GROUP ||
+    marker === PROMPT_ERROR_RECOVERY_PARENT;
+  const latestMessage = context.messages.at(-1);
+  if (
+    promptErrorParent &&
+    latestMessage?.role === "toolResult" &&
+    latestMessage.toolName === "subagent_interactive"
+  ) {
+    diagnostic({
+      marker,
+      eventType: "interactive_spawn_result",
+      sequence: requestSeq,
+      childId: interactiveResultId(context),
+    });
+  }
+
+  if (
+    marker === PROMPT_ERROR_GROUP &&
+    requestSeq === 2 &&
+    state.stage === "toolIssued" &&
+    toolResultId === state.toolCallId
+  ) {
+    await waitForLoggedStage(
+      PROMPT_ERROR_GROUP_SIBLING,
+      "gated",
+      options?.signal,
+    );
+    const call = toolCall(
+      "e2e-prompt-error-group-error-1",
+      "subagent_interactive",
+      {
+        name: "E2E Anthropic preflight error child",
+        task: "[E2E:CHILD_PROMPT_ERROR_GROUP] Trigger the real Anthropic preflight error.",
+        model: "anthropic/claude-sonnet-4-5",
+        background: true,
+        completionPolicy: "group",
+        completionGroupId: "e2e-prompt-error-group",
+      },
+    );
+    const final = message([call], "toolUse");
+    states.set(marker, {
+      stage: "toolIssued",
+      requestSeq,
+      toolCallId: call.id,
+    });
+    emit(stream, toolEvents(final), final);
+    return;
+  }
+
+  if (promptErrorParent && state.stage === "complete") {
+    const record = latestInteractiveCompletionRecord(context);
+    if (record) {
+      const call = toolCall(
+        `e2e-prompt-error-read-${requestSeq}`,
+        "read_subagent_artifact",
+        {
+          id: record.sourceId as string,
+          turnId: record.turnId as string,
+        },
+      );
+      diagnostic({
+        marker,
+        eventType: "artifact_read_requested",
+        childId: record.sourceId,
+        turnId: record.turnId,
+        status: record.status,
+        completionId: record.completionId,
+      });
+      const final = message([call], "toolUse");
+      states.set(marker, {
+        stage: "toolIssued",
+        requestSeq,
+        toolCallId: call.id,
+      });
+      emit(stream, toolEvents(final), final);
+      return;
+    }
+  }
+
+  if (
+    promptErrorParent &&
+    state.stage === "toolIssued" &&
+    toolResultId === state.toolCallId &&
+    state.toolCallId?.startsWith("e2e-prompt-error-read-")
+  ) {
+    const result = toolResultContentText(context, "read_subagent_artifact");
+    if (!result.startsWith("Artifact for ")) {
+      throw new Error(
+        "mock provider could not observe an artifact reader result",
+      );
+    }
+    const childId = result.match(/^Artifact for ([^ ]+)/m)?.[1];
+    const turnId = result.match(/^Reading turnId: (.+)$/m)?.[1];
+    if (!childId || !turnId) {
+      throw new Error(
+        "artifact reader result omitted its exact child/turn selector",
+      );
+    }
+    const final = message([
+      {
+        type: "text",
+        text: `Parent observed read_subagent_artifact:\n${result}`,
+      },
+    ]);
+    states.set(marker, { stage: "complete", requestSeq });
+    emit(stream, textEvents(final), final);
+    diagnostic({
+      marker,
+      eventType: "artifact_read_observed",
+      requestSeq,
+      childId,
+      turnId,
+      resultText: result,
+      afterStage: "complete",
+    });
+    return;
+  }
+
   if (state.stage === "complete" && marker !== followupMarker) {
     throw new Error(`duplicate request for completed marker ${marker}`);
   }
@@ -691,6 +912,39 @@ function parentTool(marker: string, context: Context): ToolCall {
       workflowId: resultId(context, "workflow", /\bwf_[a-f0-9]{10}\b/),
     });
   }
+  if (marker === PROMPT_ERROR_EACH) {
+    return toolCall("e2e-prompt-error-each-spawn-1", "subagent_interactive", {
+      name: "E2E Anthropic preflight error child",
+      task: "[E2E:CHILD_PROMPT_ERROR_EACH] Trigger the real Anthropic preflight error.",
+      model: "anthropic/claude-sonnet-4-5",
+      background: true,
+      completionPolicy: "each",
+    });
+  }
+  if (marker === PROMPT_ERROR_GROUP) {
+    return toolCall(
+      "e2e-prompt-error-group-sibling-1",
+      "subagent_interactive",
+      {
+        name: "E2E pending grouped sibling",
+        task: `${PROMPT_ERROR_GROUP_SIBLING} Wait for the group release.`,
+        model: "subagentura-e2e/mock",
+        background: true,
+        completionPolicy: "group",
+        completionGroupId: "e2e-prompt-error-group",
+      },
+    );
+  }
+  if (marker === PROMPT_ERROR_RECOVERY_PARENT) {
+    return toolCall(
+      "e2e-prompt-error-recovery-1",
+      "send_interactive_subagent_message",
+      {
+        id: interactiveResultId(context),
+        message: `${PROMPT_ERROR_RECOVERY_CHILD} Write the recovery artifact and finish.`,
+      },
+    );
+  }
   if (marker.includes("INTERACTIVE_FOLLOWUP_PARENT")) {
     return toolCall(
       "e2e-interactive-followup-parent-1",
@@ -814,6 +1068,17 @@ export function createMockProviderConfig() {
 
 export default function registerMockProvider(pi: ExtensionAPI): void {
   pi.registerProvider(E2E_PROVIDER, createMockProviderConfig() as any);
+  pi.on("model_select", (event, ctx) => {
+    diagnostic({
+      eventType: "model_select",
+      artifactDir: process.env.ARTIFACT_DIR,
+      sessionId: ctx.sessionManager.getSessionId(),
+      sessionFile: ctx.sessionManager.getSessionFile(),
+      source: event.source,
+      selectedProvider: event.model.provider,
+      selectedModelId: event.model.id,
+    });
+  });
   pi.on("session_start", (_event, ctx) => {
     const ui = ctx.ui as typeof ctx.ui & {
       setWorkingIndicator?: (value?: unknown) => void;

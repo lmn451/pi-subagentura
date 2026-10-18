@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
+- Return recorded terminal error diagnostics verbatim in interactive artifact
+  reads, including for empty snapshots, without parsing or sanitization; existing
+  protocol storage limits still apply.
+- Record actual interactive Pi prompt rejections before a persisted user entry
+  as `prompt_error` completions keyed by Pi-issued custom-entry IDs, with empty
+  immutable snapshots and no credential probe or fabricated user turn.
+- Preserve primary prompt-error attribution through Pi runtime session
+  replacements, and report actual public-main rejections with the reserved
+  `process` identity.
+- Serialize prompt-error publication with all parent cancellation writers so
+  cancellation prevents later errors while earlier committed errors remain.
+
 ## [4.0.0] - 2026-10-16
 
 ### Added
@@ -63,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that earlier completion.
 - Restore interactive activity rows from protocol-v2 tool events in physical
   byte order, including tool-name fallback for missing or non-visible summaries.
+- Serialize child terminal completions with parent cancellation, preventing
+  late output snapshots while preserving already committed artifact history.
+- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
+  for an uncompleted current turn when `.cancelled` exists, then record
+  `process_exited`.
+- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
+  also retains a nonempty owner-token tombstone until artifact retirement so
+  delayed waiters cannot rename a fresh owner into a vacant path.
+- Preserve terminal `message` and `errorMessage` diagnostics verbatim through
+  event normalization within the existing 1 MiB event-record limit.
 
 ## [3.6.5] - 2026-10-14
 
@@ -81,6 +107,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
+
+### Changed
+
+- Breaking: make the interactive runtime protocol-v2-only. Remove v1 event/state
+  migration, synthetic identities, numeric snapshot readers, and child session-log
+  tailing. Existing legacy files are not deleted or rewritten, but this runtime no
+  longer reads them and does not provide migration tooling.
+- Breaking: remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
+  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
+  now uses the coordinated each/group protocol only.
+- Remove the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 
