@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-10-18
+
+### Fixed
+
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
+
 ## [4.0.0] - 2026-10-16
 
 ### Added
@@ -398,7 +405,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...HEAD
+[4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
 [3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
