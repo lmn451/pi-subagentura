@@ -606,23 +606,25 @@ protocol-v1 artifacts are left untouched but are not readable by this runtime.
 The standalone interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
-The state file and subagent panes are preserved across these actions:
+Standalone interactive registry state and panes behave across these lifecycle actions as follows:
 
-| Action                                            | State file                   | Panes      | Rehydrated next start?                       |
-| ------------------------------------------------- | ---------------------------- | ---------- | -------------------------------------------- |
-| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved  | ✅ Same session, parentSessionId matches     |
-| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved  | ❌ Different session, no match               |
-| **`/reload`**                                     | Kept                         | Preserved  | ✅ Same session                              |
-| **`/resume`** (switch to another session)         | Kept                         | Preserved  | ✅ If parentSessionId matches                |
-| **`/new`**                                        | **Deleted**                  | **Killed** | ❌ Clean slate                               |
-| **`/fork`**                                       | Kept (owned entries removed) | **Killed** | ❌ Fresh fork does not rehydrate prior state |
+| Action                                            | State file                   | Panes                   | Rehydrated next start?                       |
+| ------------------------------------------------- | ---------------------------- | ----------------------- | -------------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved               | ✅ Same session, parentSessionId matches     |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved               | ❌ Different session, no match               |
+| **`/reload`**                                     | Kept                         | Preserved               | ✅ Same session                              |
+| **`/resume`** (switch to another session)         | Kept                         | Preserved               | ✅ If parentSessionId matches                |
+| **`/new`**                                        | **Deleted***                 | Tracked panes targeted* | ❌ Clean slate                               |
+| **`/fork`**                                       | Kept (owned entries removed) | Tracked panes targeted  | ❌ Fresh fork does not rehydrate prior state |
 
-> **Note:** `/new` deletes the whole state file. `/fork` removes entries owned
-> by the old parent while preserving any unrelated entries in that file; a
-> fresh fork does not rehydrate prior state. If you do `/new` and then
-> `/resume` back to the session where subagents were spawned, they **will not
-> reappear** because the state file was already deleted. Only `/reload` or a
-> restart with the same session (`--session`/`-r`) preserves the registry.
+> **Note:** `/new` deletes the whole state file when no other started session
+> scope remains. `/fork` removes entries owned by the old parent while preserving
+> unrelated entries. Both transitions can only stop panes known to active
+> in-memory registries; children hidden by an unreadable or unsupported state file
+> may remain alive. These are destructive transitions, not recovery steps. If you
+> do `/new` and then `/resume` the old session, its deleted records will not
+> reappear. `/reload` or restarting with the same session can preserve and
+> rehydrate only state supported by the loaded version.
 
 On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
@@ -1157,14 +1159,18 @@ arguments as JSON.
 This displays the call arguments, not a list of every schema parameter or
 omitted default. It does not require debug logging.
 
-The bundled [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md)
-covers launch, working-directory, mux, and artifact diagnostics. It is included
-under `skills/pi-subagentura-debug/` in the package tarball for this branch.
-The current `pi` manifest declares only the extension, so a plain package source
-does not automatically expose the skill. Load it explicitly (for example,
-`pi --skill ./skills/pi-subagentura-debug` from this checkout), then invoke
-`/skill:pi-subagentura-debug`. These additions are unreleased, not features shipped
-in npm version 3.6.4.
+The [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md) covers
+launch, working-directory, multiplexer, state-persistence, and artifact
+troubleshooting. It is included in the package tarball and registered under
+`pi.skills`, so Pi discovers it for agent selection and the `/skill:` command
+when the package is loaded as a Pi package. Discovery is agent guidance, not a
+guaranteed invocation or runtime error hook. For unsupported state/schema or
+persistence errors, interactive spawn failures (including before pane creation),
+or mux/artifact/completion symptoms, explicitly ask the agent to load
+`/skill:pi-subagentura-debug` when exposed. Loading the checkout's extension file
+alone does not load package skills; pass `--skill ./skills/pi-subagentura-debug`
+when running that extension directly. Use `pi list` and `pi config` to confirm
+the package and version Pi actually loaded.
 
 Interactive spawning also validates that the resolved `cwd` exists and is a
 directory before creating a pane; create a requested worktree before spawning.
