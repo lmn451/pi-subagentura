@@ -23,14 +23,14 @@ random-order and mutation checks.
 
 The `Protect master` repository ruleset must require these stable CI check names:
 
-- `Minimum Node 22.23.2`
+- `Minimum Node 24.12.0`
 - `Test (Pi 0.80.6)`
 - `Test (Pi latest)`
 
 The separate minimum-Node check makes runtime support visible rather than hiding
 it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
-coordinated ruleset update by a repository administrator.
-The historical `Minimum Node 22.23.2` check name now runs Node.js 24.12.0.
+coordinated ruleset update by a repository administrator. The minimum-Node job
+runs Node.js 24.12.0, matching the package's declared `>=24.12.0` requirement.
 
 ### Real Herdr integration coverage
 
