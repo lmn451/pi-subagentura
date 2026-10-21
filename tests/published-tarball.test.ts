@@ -41,6 +41,7 @@ const PKG = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
   exports: Record<string, unknown>;
   dependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  pi?: { skills?: string[] };
 };
 const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs", ".js"];
 const APPROVED_PI_PEERS = new Set([
@@ -320,6 +321,32 @@ describe("published tarball", () => {
       runtime: true,
     });
     expect(entries).toContain("src/workflow-worker-thread.mjs");
+  });
+
+  it("registers and publishes the debug skill with recovery guidance", () => {
+    const skillPath = "./skills/pi-subagentura-debug";
+    expect(PKG.pi?.skills).toContain(skillPath);
+    expect(entries).toContain(`${skillPath.slice(2)}/SKILL.md`);
+
+    const packedPackage = JSON.parse(
+      readFileSync(join(pkgDir, "package.json"), "utf8"),
+    );
+    expect(packedPackage.pi.skills).toContain(skillPath);
+
+    const skill = readFileSync(
+      join(pkgDir, "skills/pi-subagentura-debug/SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toMatch(/^---\nname: pi-subagentura-debug\n/);
+    expect(skill).toMatch(
+      /^description:.*unsupported.*state.*schema.*persistence error/im,
+    );
+    expect(skill).toContain(
+      "## Unsupported interactive state or persistence errors",
+    );
+    expect(skill).toContain("private backup");
+    expect(skill).toContain("explicit user confirmation");
+    expect(skill).toContain("does not stop existing panes or processes");
   });
 
   it("declares every bare runtime source import", () => {

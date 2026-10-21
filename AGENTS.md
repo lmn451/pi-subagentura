@@ -261,6 +261,10 @@ remain process/session scoped and are retired rather than rehydrated.
   state is preserved, not migrated or rewritten; runtime operations requiring
   unsupported state fail closed.
 
+### Debug-skill trigger
+
+When Pi exposes the repository's `pi-subagentura-debug` skill, explicitly load it (`/skill:pi-subagentura-debug`) before diagnosing relevant errors. This includes unsupported schema or removed-field errors and read/write/rehydration failures for `.pi/subagentura-state.json`, `subagent_interactive` launch failures even when no pane was created, multiplexer failures, and missing artifacts or completion. This is prompt guidance for the agent, not runtime error interception; if the host does not expose the skill, use the repository documentation and do not claim it was automatically invoked.
+
 ## Git
 
 - **Conventional Commits**: `feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:` / `perf:`. Scopes are welcome but not required.
