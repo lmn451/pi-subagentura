@@ -276,6 +276,37 @@ describe("bundled workflow examples", () => {
     });
   });
 
+  it("bounds oversized agent failures before persisting map results", async () => {
+    const responses = passingSourceReviewResponses();
+    const oversizedMessage = "provider error ".repeat(50_000);
+    responses["Compatibility"] = new Error(oversizedMessage);
+
+    const run = await runSourceReview(responses);
+
+    const report = run.result as {
+      status: string;
+      reviews: Array<{
+        aspect: string;
+        outcome?: string;
+        verdict?: string;
+        failure?: { name?: string; message: string };
+      }>;
+    };
+    expect(report.status).toBe("uncertain");
+    const failedReview = report.reviews.find(
+      (review) => review.aspect === "compatibility",
+    );
+    expect(failedReview).toMatchObject({
+      outcome: "failed",
+      verdict: "uncertain",
+      failure: { name: "Error" },
+    });
+    const failureMessage = failedReview?.failure?.message;
+    expect(failureMessage).toHaveLength(1_200);
+    expect(failureMessage).toMatch(/^ReviewError: Error: provider error /);
+    expect(failureMessage).toContain(oversizedMessage.slice(0, 100));
+  });
+
   it("lets blocking findings take precedence over failed reviews", async () => {
     const responses = passingSourceReviewResponses();
     responses["Compatibility"] = new Error("Compatibility review failed.");

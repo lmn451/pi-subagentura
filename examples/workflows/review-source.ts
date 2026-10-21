@@ -157,6 +157,14 @@ function requireBoundedText(
   }
 }
 
+function boundedReviewError(error: unknown): Error {
+  const name = error instanceof Error ? error.name : "ReviewError";
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = new Error(message.slice(0, 1_200));
+  bounded.name = name.slice(0, 128);
+  return bounded;
+}
+
 function validateInput(args: {
   files: readonly string[];
   intendedChange: string;
@@ -290,16 +298,21 @@ ${args.intendedChange}`;
     const collected = await ctx.map(
       ASPECTS,
       async (aspect) => {
-        const review = await ctx.agent(`review-${aspect.id}`, {
-          title: aspect.title,
-          prompt:
-            `${reviewContext}\n\n` +
-            `# Target\n${aspect.target}\n\n` +
-            `# Change\n${aspect.change}\n\n` +
-            `# Acceptance\n${aspect.acceptance}`,
-          output: AspectReview,
-          readOnly: true,
-        });
+        let review: AspectReviewValue;
+        try {
+          review = await ctx.agent(`review-${aspect.id}`, {
+            title: aspect.title,
+            prompt:
+              `${reviewContext}\n\n` +
+              `# Target\n${aspect.target}\n\n` +
+              `# Change\n${aspect.change}\n\n` +
+              `# Acceptance\n${aspect.acceptance}`,
+            output: AspectReview,
+            readOnly: true,
+          });
+        } catch (error) {
+          throw boundedReviewError(error);
+        }
         for (const finding of review.findings) {
           requireBoundedText(finding.location, "finding location", 512);
           requireBoundedText(finding.evidence, "finding evidence", 1_200);
