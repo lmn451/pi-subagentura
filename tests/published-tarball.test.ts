@@ -274,7 +274,7 @@ describe("published tarball", () => {
     });
   });
 
-  it("contains the workflow guide, examples, and bundled RALPLAN skill", () => {
+  it("contains workflow examples without the removed bundled RALPLAN skill", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         "docs/workflows.md",
@@ -284,8 +284,10 @@ describe("published tarball", () => {
         "examples/workflows/ralplan-from-skill.mjs",
         "examples/workflows/ralplan-occ.mjs",
         "examples/workflows/skill-to-workflow.mjs",
-        "skills/ralplan/SKILL.md",
       ]),
+    );
+    expect(entries.some((entry) => entry.startsWith("skills/ralplan/"))).toBe(
+      false,
     );
   });
 

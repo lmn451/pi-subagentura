@@ -121,7 +121,7 @@ the resulting plan.
 
 ### `ralplan-from-skill.mjs`
 
-A generated, self-contained RALPLAN example derived from the bundled skill.
+A self-contained RALPLAN workflow example with role prompts inlined from the upstream skill.
 
 | Argument        | Required | Meaning                                        |
 | --------------- | -------- | ---------------------------------------------- |

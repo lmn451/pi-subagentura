@@ -46,7 +46,6 @@
     "docs/protocol-v1-compatibility.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
-    "skills/ralplan",
     "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
     "src/notifications.ts",
