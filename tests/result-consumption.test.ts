@@ -3,9 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import {
   appendCompletionEvent,
+  appendEvent,
   artifactPath,
+  newEventId,
   writeOutput,
 } from "../src/artifact";
 import {
@@ -35,6 +39,24 @@ import {
   type WorkflowJobState,
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
+function expectStructuredOutput(
+  toolDef: { outputSchema?: TSchema },
+  result: unknown,
+): Record<string, unknown> {
+  const outputSchema = toolDef.outputSchema;
+  expect(outputSchema).toBeDefined();
+  if (!outputSchema) throw new Error("tool outputSchema is missing");
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("structuredContent" in result)
+  ) {
+    throw new Error("tool result has no structuredContent");
+  }
+  const structuredContent = result.structuredContent;
+  expect(Value.Check(outputSchema, structuredContent)).toBe(true);
+  return structuredContent as Record<string, unknown>;
+}
 
 describe("result collection during receipt storage failure", () => {
   let root: string;
@@ -42,7 +64,10 @@ describe("result collection during receipt storage failure", () => {
   let receiptPath: string;
   let unavailable: boolean;
   let entries: Array<{ type: string; customType: string; data: unknown }>;
-  let tools: Map<string, { execute: (...args: any[]) => Promise<any> }>;
+  let tools: Map<
+    string,
+    { outputSchema?: TSchema; execute: (...args: any[]) => Promise<any> }
+  >;
 
   beforeEach(() => {
     clearSessionScopes();
@@ -161,7 +186,15 @@ describe("result collection during receipt storage failure", () => {
     expect(job.cleanupAfterCollection).toBe(true);
     expect(scope.inProcessJobs.get(job.id)).toBe(job);
     restoreStorage();
-    expect((await read()).content[0].text).toBe(result.output);
+    const collected = await read();
+    expect(collected.content[0].text).toBe(result.output);
+    expect(
+      expectStructuredOutput(tools.get("get_subagent_result")!, collected),
+    ).toMatchObject({
+      jobId: job.id,
+      status: "done",
+      output: result.output,
+    });
     expect(job.resultRetrieved).toBe(true);
     expectDurableConsumption();
   });
@@ -194,13 +227,82 @@ describe("result collection during receipt storage failure", () => {
       expect(job.resultRetrieved).not.toBe(true);
       expect(workflowJobRegistry.get(job.id)).toBe(job);
       restoreStorage();
-      expect((await read()).content[0].text).toContain(
+      const collected = await read();
+      expect(collected.content[0].text).toContain(
         failed ? "workflow failure" : "retained result",
       );
+      expect(
+        expectStructuredOutput(tools.get("get_workflow_result")!, collected),
+      ).toMatchObject({
+        workflowId: job.id,
+        status: failed ? "error" : "done",
+        ...(failed
+          ? { error: expect.stringContaining("workflow failure") }
+          : {}),
+        ...(!failed ? { result: "retained result" } : {}),
+      });
       expect(job.resultRetrieved).toBe(true);
       expectDurableConsumption();
     },
   );
+
+  it("returns a typed empty artifact list and missing-read result", async () => {
+    const context = { cwd: root, ui: { setStatus: vi.fn() } };
+    const statusTool = tools.get("get_interactive_subagent_status")!;
+    const emptyStatus = await statusTool.execute(
+      "status-empty",
+      {},
+      undefined,
+      undefined,
+      context,
+    );
+    expect(expectStructuredOutput(statusTool, emptyStatus)).toMatchObject({
+      status: "not_found",
+      count: 0,
+      subagents: [],
+    });
+    const missingStatus = await statusTool.execute(
+      "status-missing",
+      { jobId: "00000000" },
+      undefined,
+      undefined,
+      context,
+    );
+    expect(expectStructuredOutput(statusTool, missingStatus)).toMatchObject({
+      status: "not_found",
+      jobId: "00000000",
+      count: 0,
+      subagents: [],
+    });
+    expect(missingStatus.isError).toBe(true);
+    const listTool = tools.get("list_subagent_artifacts")!;
+    const listed = await listTool.execute(
+      "list-empty",
+      {},
+      undefined,
+      undefined,
+      context,
+    );
+    expect(expectStructuredOutput(listTool, listed)).toMatchObject({
+      status: "ok",
+      count: 0,
+      artifacts: [],
+    });
+
+    const readTool = tools.get("read_subagent_artifact")!;
+    const missing = await readTool.execute(
+      "read-missing",
+      { id: "00000000" },
+      undefined,
+      undefined,
+      context,
+    );
+    expect(expectStructuredOutput(readTool, missing)).toMatchObject({
+      id: "00000000",
+      status: "not_found",
+    });
+    expect(missing.isError).toBe(true);
+  });
 
   it("preserves an interactive snapshot for retry", async () => {
     const id = "abcd123400000001";
@@ -226,6 +328,47 @@ describe("result collection during receipt storage failure", () => {
       attachCommand: "",
       selectPaneCommand: "",
     } satisfies InteractiveSubagentState);
+    const statusTool = tools.get("get_interactive_subagent_status")!;
+    const status = await statusTool.execute(
+      "status-populated",
+      {},
+      undefined,
+      undefined,
+      { cwd: root, ui: { setStatus: vi.fn() } },
+    );
+    expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+      status: "ok",
+      count: 1,
+      subagents: [
+        expect.objectContaining({
+          id,
+          name: "Result",
+          status: "exited",
+        }),
+      ],
+    });
+    const listTool = tools.get("list_subagent_artifacts")!;
+    const listed = await listTool.execute(
+      "list-populated",
+      {},
+      undefined,
+      undefined,
+      { cwd: root, ui: { setStatus: vi.fn() } },
+    );
+    const listedData = expectStructuredOutput(listTool, listed);
+    expect(listedData).toMatchObject({
+      status: "ok",
+      count: 1,
+      artifacts: [
+        expect.objectContaining({
+          id,
+          name: "Result",
+          status: "exited",
+        }),
+      ],
+    });
+    expect(JSON.stringify(listedData)).not.toContain(art.dir);
+    expect(JSON.stringify(listedData)).not.toContain("task");
     publish("interactive", id);
     const read = () =>
       tools
@@ -236,8 +379,81 @@ describe("result collection during receipt storage failure", () => {
 
     await expect(read()).rejects.toThrow(/receipt.*persist|persist.*receipt/i);
     restoreStorage();
-    expect((await read()).details.output).toBe("retained snapshot");
+    const collected = await read();
+    expect(collected.details.output).toBe("retained snapshot");
+    expect(
+      expectStructuredOutput(tools.get("read_subagent_artifact")!, collected),
+    ).toMatchObject({
+      id,
+      status: "done",
+      outputState: "available",
+      output: "retained snapshot",
+    });
     expectDurableConsumption();
+  });
+
+  it("does not treat an unmatched turn as pending after process exit", async () => {
+    const id = "abcd123400000003";
+    const art = artifactPath(root, id);
+    writeOutput(art, "retained output for completed turn");
+    appendCompletionEvent(art, {
+      turnId: "turn-result",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: newEventId(),
+      turnId: "turn-result",
+      ts: Date.now(),
+      type: "process_exited",
+      status: "done",
+      exitCode: 0,
+    });
+    scope.interactiveStates.set(id, {
+      id,
+      name: "Closed",
+      task: "task",
+      cwd: root,
+      artifactDir: art.dir,
+      status: "exited",
+      mux: "tmux",
+      paneId: "%101",
+      startedAt: Date.now(),
+      sessionFile: join(root, "session.jsonl"),
+      launchScriptFile: join(root, "launch.sh"),
+      attachCommand: "",
+      selectPaneCommand: "",
+    } satisfies InteractiveSubagentState);
+    publish("interactive", id);
+
+    const readTool = tools.get("read_subagent_artifact")!;
+    const result = await readTool.execute(
+      "read-unmatched-turn",
+      { id, turnId: "turn-missing" },
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+    const structured = expectStructuredOutput(readTool, result);
+
+    expect(structured).toMatchObject({
+      id,
+      status: "not_found",
+      outputState: "unavailable",
+      output: null,
+      turnId: "turn-missing",
+    });
+    expect(result.details.output).toBeNull();
+    expect(result.content[0].text).not.toContain(
+      "retained output for completed turn",
+    );
+    expect(
+      entries.some(
+        (entry) => entry.customType === "subagentura-completion-consumed",
+      ),
+    ).toBe(false);
+    expect(prepareCompletionManifest(sessionOwner(scope))).toBeDefined();
   });
 
   it("does not return mutable output without a protocol-v2 completion", async () => {

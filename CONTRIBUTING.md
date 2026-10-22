@@ -24,12 +24,14 @@ random-order and mutation checks.
 The `Protect master` repository ruleset must require these stable CI check names:
 
 - `Minimum Node 22.23.2`
-- `Test (Pi 0.80.6)`
+- `Test (Pi 1.2.0)`
 - `Test (Pi latest)`
 
 The separate minimum-Node check makes runtime support visible rather than hiding
-it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
-coordinated ruleset update by a repository administrator.
+it inside the Pi SDK matrix. `Test (Pi 1.2.0)` tests the minimum supported Pi
+SDK, 1.2.0; development dependencies pin Pi SDK 1.4.0, and `Test (Pi latest)`
+tests the latest published SDK. Keep all three check names synchronized with
+the repository ruleset.
 
 ### Real Herdr integration coverage
 

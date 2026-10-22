@@ -8,7 +8,11 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  getBuiltinModel,
+  getBuiltinProviders,
+  type BuiltinProvider,
+} from "@earendil-works/pi-ai/providers/all";
 import type { Model } from "@earendil-works/pi-ai";
 
 import type {
@@ -16,21 +20,18 @@ import type {
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 
+import * as CodingAgent from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
-  type ModelRegistry,
   type ExtensionAPI,
   type ExtensionUIContext,
+  type ModelRegistry,
+  type ModelRuntime,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  copyProviderConfig,
-  createCompatibleSessionRuntime,
-  type CompatibleSessionRuntime,
-} from "./pi-sdk-compat";
 import {
   createWorkflowStructuredOutputTool,
   type WorkflowStructuredOutputCapture,
@@ -729,8 +730,8 @@ export function generateJobId(): InProcessJobId {
  * This function does NOT guess — it only does exact lookups:
  *   1. undefined → defaultModel
  *   2. Use parent modelRegistry (has extension-added models like minimax)
- *   3. "provider/id" format → exact getModel lookup (global static registry)
- *   4. Bare id → exact getModel scan across all providers (global static registry)
+ *   3. "provider/id" format → exact lookup in the built-in catalog
+ *   4. Bare id → exact scan across built-in providers
  *   5. Falls back to defaultModel when nothing matches
  */
 export function resolveModel(
@@ -755,20 +756,39 @@ export function resolveModel(
     }
   }
 
-  // Fall back to global static registry (built-in models only)
+  // Fall back to the generated built-in catalog (built-in models only)
   if (modelId.includes("/")) {
     const [provider, id] = modelId.split("/", 2);
-    return getModel(provider as any, id) ?? defaultModel;
+    return (
+      getBuiltinModel(provider as BuiltinProvider, id as never) ?? defaultModel
+    );
   }
 
   // Bare id — exact match across all providers
-  for (const provider of getProviders()) {
-    const found = getModel(provider as any, modelId);
+  for (const provider of getBuiltinProviders()) {
+    const found = getBuiltinModel(provider, modelId as never);
     if (found) return found;
   }
 
   return defaultModel;
 }
+
+function copyProviderConfig(
+  modelRuntime: ModelRuntime,
+  parentModelRegistry: ModelRegistry | undefined,
+  provider: string,
+): void {
+  if (!parentModelRegistry) return;
+  const nativeProvider =
+    parentModelRegistry.getRegisteredNativeProvider(provider);
+  if (nativeProvider) {
+    modelRuntime.registerNativeProvider(nativeProvider);
+    return;
+  }
+  const config = parentModelRegistry.getRegisteredProviderConfig(provider);
+  if (config) modelRuntime.registerProvider(provider, config);
+}
+
 export function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -897,9 +917,15 @@ export async function startSubagentJob(
   }
 
   const jobId = generateJobId();
-  let sessionRuntime: CompatibleSessionRuntime;
+  let sessionRuntime: ModelRuntime;
   try {
-    sessionRuntime = await createCompatibleSessionRuntime();
+    const modelRuntimeFactory = CodingAgent.ModelRuntime;
+    if (typeof modelRuntimeFactory?.create !== "function") {
+      throw new Error(
+        "Pi SDK >=1.2.0 is required for child ModelRuntime sessions.",
+      );
+    }
+    sessionRuntime = await modelRuntimeFactory.create();
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
   }
@@ -1012,24 +1038,17 @@ export async function startSubagentJob(
 
   let session: AgentSession;
   try {
-    const sessionOptions = buildSessionOptions(sessionRuntime, {
-      sessionManager: SessionManager.inMemory(),
-      model: targetModel,
-      cwd,
-      ...(thinkingLevel ? { thinkingLevel } : {}),
-      ...(workflowStructuredOutputTool
-        ? { customTools: [workflowStructuredOutputTool] }
-        : {}),
-    });
-    if (!resolveLiveSessionScope(owner)) {
-      throw new Error(
-        "Sub-agent owner session shut down before session creation.",
-      );
-    }
     session = (
-      await createAgentSession(
-        sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-      )
+      await createAgentSession({
+        sessionManager: SessionManager.inMemory(),
+        model: targetModel,
+        cwd,
+        modelRuntime: sessionRuntime,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+        ...(workflowStructuredOutputTool
+          ? { customTools: [workflowStructuredOutputTool as ToolDefinition] }
+          : {}),
+      })
     ).session;
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
@@ -1250,7 +1269,7 @@ export async function startSubagentJob(
   };
   let result: SubagentResult = {
     isError: true,
-    output: "(no output)",
+    output: "",
     usage: {
       input: 0,
       output: 0,
@@ -1366,7 +1385,7 @@ export async function startSubagentJob(
       if (session.agent.state.errorMessage) {
         result = attachWorkflowStructuredOutput({
           isError: true,
-          output: finalOutput || "(no output)",
+          output: finalOutput,
           usage,
           model: undefined,
           thinkingLevel: effectiveThinkingLevel,
@@ -1375,7 +1394,7 @@ export async function startSubagentJob(
       } else {
         result = attachWorkflowStructuredOutput({
           isError: false,
-          output: finalOutput || "(no output)",
+          output: finalOutput,
           usage,
           model: session.model
             ? `${session.model.provider}/${session.model.id}`

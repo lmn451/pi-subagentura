@@ -16,6 +16,7 @@ import { writeCliScript } from "../src/subagent-artifact-cli";
 import {
   createPiSessionHarness,
   type PiSessionHarness,
+  withIsolatedPiRuntime,
 } from "./helpers/pi-session-harness";
 import {
   mkdirSync,
@@ -27,10 +28,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   registerInProcessJob,
   removeInProcessJob,
+  startSubagentJob,
   type JobState,
   type SubagentResult,
 } from "../src/helpers";
@@ -377,6 +379,68 @@ describe("coordinated completion delivery", () => {
 });
 
 describe("child protocol lifecycle integration", () => {
+  it("copies a registered provider into a child ModelRuntime", async () => {
+    const { harness, scope } = await setupCoordinatorHarness();
+    await withIsolatedPiRuntime(async ({ cwd }) => {
+      const prepared = await startSubagentJob({
+        task: "child provider request",
+        persona: undefined,
+        modelOverride: "subagentura-faux/faux-model",
+        cwd,
+        contextText: "inherited-parent-context",
+        signal: undefined,
+        onUpdate: undefined,
+        defaultModel: harness.session.model,
+        parentModelRegistry: new ModelRegistry(harness.session.modelRuntime),
+        owner: sessionOwner(scope),
+      });
+
+      expect(prepared.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      const childContext = JSON.stringify(harness.contexts[0]?.messages);
+      expect(childContext).toContain("inherited-parent-context");
+      expect(childContext).toContain("child provider request");
+      harness.completeNext("child provider response");
+      await expect(prepared.jobPromise).resolves.toMatchObject({
+        output: "child provider response",
+        isError: false,
+      });
+    });
+  });
+
+  it("preserves empty child output separately from literal '(no output)'", async () => {
+    const { harness, scope } = await setupCoordinatorHarness();
+    await withIsolatedPiRuntime(async ({ cwd }) => {
+      const start = (task: string) =>
+        startSubagentJob({
+          task,
+          persona: undefined,
+          modelOverride: "subagentura-faux/faux-model",
+          cwd,
+          contextText: null,
+          signal: undefined,
+          onUpdate: undefined,
+          defaultModel: harness.session.model,
+          parentModelRegistry: new ModelRegistry(harness.session.modelRuntime),
+          owner: sessionOwner(scope),
+        });
+
+      const empty = await start("produce no text");
+      expect(empty.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.completeNext("");
+      await expect(empty.jobPromise).resolves.toMatchObject({ output: "" });
+
+      const literal = await start("produce the literal sentinel text");
+      expect(literal.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(2));
+      harness.completeNext("(no output)");
+      await expect(literal.jobPromise).resolves.toMatchObject({
+        output: "(no output)",
+      });
+    });
+  });
+
   it("uses persisted user entry ids for first and second turns", async () => {
     const art = childArtifact();
     const harness = await createPiSessionHarness(repoRoot, {

@@ -445,11 +445,11 @@ export function registerSessionHandlers(
       flushCompletionManifests(owner);
     });
   };
-  (pi as any).on?.("ui_prompt_start", () => {
+  pi.on("ui_prompt_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = true;
   });
-  (pi as any).on?.("ui_prompt_end", () => {
+  pi.on("ui_prompt_end", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = false;
     flushAfterUiPrompt();
@@ -463,8 +463,8 @@ export function registerSessionHandlers(
   pi.on("before_agent_start", (event) => {
     if (scope.lifecycle !== "started") return;
     const owner = sessionOwner(scope);
-    if ("prompt" in event) {
-      markCompletionTurnWakeStarted(pi, event.prompt);
+    if (event.messageType === "custom") {
+      markCompletionTurnWakeStarted(pi, event.message);
     }
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
@@ -710,56 +710,50 @@ export function registerSessionHandlers(
     scope.workflowAdmissionClosed = false;
   });
 
-  (pi as any).on?.(
-    "session_shutdown",
-    (
-      event?: { reason?: string },
-      ctx?: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
-    ) => {
-      if (scope.lifecycle !== "started") return;
-      scope.workflowAdmissionClosed = true;
+  pi.on("session_shutdown", (event, ctx) => {
+    if (scope.lifecycle !== "started") return;
+    scope.workflowAdmissionClosed = true;
 
-      const owner = sessionOwner(scope);
-      retireTelemetrySession(scope.telemetry);
-      closeActiveInteractiveSupervisor(owner);
-      cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
-      clearFreshChildLineage(scope, event?.reason);
-      retireSessionScopedCompletions(
-        owner,
-        event?.reason === "new" || event?.reason === "fork",
-      );
-      clearCompletionCoordinator(owner);
-      scope.parentStreaming = false;
-      scope.uiPromptActive = false;
-      scope.isParentIdle = undefined;
-      clearCompletionTurnWake(pi);
-      scope.lifecycle = "shutdown";
-      advanceSessionScopeGeneration(scope.id);
-      removeSessionScope(scope.id);
+    const owner = sessionOwner(scope);
+    retireTelemetrySession(scope.telemetry);
+    closeActiveInteractiveSupervisor(owner);
+    cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
+    clearFreshChildLineage(scope, event?.reason);
+    retireSessionScopedCompletions(
+      owner,
+      event?.reason === "new" || event?.reason === "fork",
+    );
+    clearCompletionCoordinator(owner);
+    scope.parentStreaming = false;
+    scope.uiPromptActive = false;
+    scope.isParentIdle = undefined;
+    clearCompletionTurnWake(pi);
+    scope.lifecycle = "shutdown";
+    advanceSessionScopeGeneration(scope.id);
+    removeSessionScope(scope.id);
 
-      const remainingScopes = getStartedSessionScopes();
-      if (remainingScopes.length > 0) return;
+    const remainingScopes = getStartedSessionScopes();
+    if (remainingScopes.length > 0) return;
 
-      const handle = globalState.__piSubagenturaInteractivePollerHandle;
-      if (handle) {
-        try {
-          clearInterval(handle);
-        } catch {
-          /* defensive */
-        }
-        globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    const handle = globalState.__piSubagenturaInteractivePollerHandle;
+    if (handle) {
+      try {
+        clearInterval(handle);
+      } catch {
+        /* defensive */
       }
+      globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    }
 
-      if (event?.reason === "new" && ctx?.cwd) {
-        try {
-          deleteInteractiveStatesFile(ctx.cwd);
-          deleteOrchestratorRoutingFile(ctx.cwd);
-        } catch {
-          /* best effort */
-        }
+    if (event?.reason === "new" && ctx?.cwd) {
+      try {
+        deleteInteractiveStatesFile(ctx.cwd);
+        deleteOrchestratorRoutingFile(ctx.cwd);
+      } catch {
+        /* best effort */
       }
-    },
-  );
+    }
+  });
 
   return scope;
 }

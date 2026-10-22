@@ -425,8 +425,8 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
     deferredBind.unref();
   });
-  // In createAgentSession 0.80.6, the first turn_start can precede persistence
-  // of the user message. This is the earliest guaranteed pre-model fallback.
+  // The first turn_start can precede persistence of the user message.
+  // before_provider_request is the earliest guaranteed pre-model fallback.
   pi.on("before_provider_request", (_event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
   });

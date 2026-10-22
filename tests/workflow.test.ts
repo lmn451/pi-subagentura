@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -149,6 +151,24 @@ function echoRunner(): WorkflowAgentRunner {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+function expectStructuredOutput(
+  toolDef: { outputSchema?: TSchema },
+  result: unknown,
+): Record<string, unknown> {
+  const outputSchema = toolDef.outputSchema;
+  expect(outputSchema).toBeDefined();
+  if (!outputSchema) throw new Error("tool outputSchema is missing");
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("structuredContent" in result)
+  ) {
+    throw new Error("tool result has no structuredContent");
+  }
+  const structuredContent = result.structuredContent;
+  expect(Value.Check(outputSchema, structuredContent)).toBe(true);
+  return structuredContent as Record<string, unknown>;
+}
 
 function fakeState(dir: string) {
   return { id: "abcd1234", artifactDir: dir, model: "test/model" } as any;
@@ -2971,7 +2991,11 @@ describe("registerWorkflowTool", () => {
   });
 
   it("lists workflows and rejects an invalid delete name", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerFlag: vi.fn(),
@@ -2984,6 +3008,10 @@ describe("registerWorkflowTool", () => {
     const listed = await list.execute();
     expect(listed.details.status).toBe("ok");
     expect(Array.isArray(listed.details.workflows)).toBe(true);
+    expect(expectStructuredOutput(list, listed)).toMatchObject({
+      status: "ok",
+      workflows: expect.any(Array),
+    });
 
     const remove = tools.find((tool) => tool.name === "delete_workflow")!;
     const deleted = await remove.execute("", { name: "../invalid" });
@@ -2995,7 +3023,11 @@ describe("registerWorkflowTool", () => {
   });
 
   it("derives completed-with-errors presentation while keeping raw done status", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const sendUserMessage = vi.fn();
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -3022,6 +3054,12 @@ describe("registerWorkflowTool", () => {
     )!;
     const status = await statusTool.execute("", { workflowId: job.id });
     expect(status.details.status).toBe("done");
+    expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+      workflowId: job.id,
+      status: "done",
+      name: "errors",
+      errorCount: 2,
+    });
     expect(status.content[0].text).toContain("⚠");
     expect(status.content[0].text).toContain("completed with errors");
 
@@ -3030,6 +3068,13 @@ describe("registerWorkflowTool", () => {
     )!;
     const result = await resultTool.execute("", { workflowId: job.id });
     expect(result.details.status).toBe("done");
+    expect(expectStructuredOutput(resultTool, result)).toMatchObject({
+      workflowId: job.id,
+      status: "done",
+      name: "errors",
+      result: "ok",
+      errorCount: 2,
+    });
     expect(result.content[0].text).toContain("⚠");
     expect(result.content[0].text).toContain("completed with errors");
 
@@ -3045,7 +3090,11 @@ describe("registerWorkflowTool", () => {
   });
 
   it("explains current-session scope in async start and not-found messages", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerFlag: vi.fn(),
@@ -3073,6 +3122,20 @@ describe("registerWorkflowTool", () => {
     )!;
     const missing = await statusTool.execute("", { workflowId: "wf_missing" });
     expect(missing.content[0].text).toContain("current parent session");
+    expect(expectStructuredOutput(statusTool, missing)).toMatchObject({
+      workflowId: "wf_missing",
+      status: "not_found",
+    });
+    const resultTool = tools.find(
+      (tool) => tool.name === "get_workflow_result",
+    )!;
+    const missingResult = await resultTool.execute("", {
+      workflowId: "wf_missing",
+    });
+    expect(expectStructuredOutput(resultTool, missingResult)).toMatchObject({
+      workflowId: "wf_missing",
+      status: "not_found",
+    });
     expect(missing.content[0].text).toContain("reload/resume/new/quit");
     workflowJobRegistry.delete(started.details.workflowId);
   });

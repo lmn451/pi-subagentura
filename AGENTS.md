@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 0.80.6. CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `is-path-inside`, and `ndjson`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 1.2.0 (development pin 1.4.0). CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, and `is-path-inside`. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 

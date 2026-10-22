@@ -1,25 +1,19 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import * as CodingAgent from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  createCompatibleSessionRuntime,
-  findModel,
-  registerProvider,
-} from "../../src/pi-sdk-compat";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
+  type TranscriptContext,
   type Model,
 } from "@earendil-works/pi-ai";
 
@@ -46,7 +40,7 @@ function assistant(text: string): AssistantMessage {
 export interface PiSessionHarness {
   session: AgentSession;
   sessionManager: SessionManager;
-  contexts: Context[];
+  contexts: TranscriptContext[];
   completeNext(text?: string): void;
   configureTestAuth(): void;
   failNext(errorMessage?: string): void;
@@ -54,13 +48,70 @@ export interface PiSessionHarness {
   dispose(): void;
 }
 
-export function supportsNativeProviderRegistration(): boolean {
-  const modelRuntime = (
-    CodingAgent as unknown as {
-      ModelRuntime?: unknown;
+export async function withIsolatedPiRuntime<T>(
+  run: (paths: { agentDir: string; cwd: string }) => Promise<T>,
+): Promise<T> {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-config-"));
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-cwd-"));
+  const home = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-home-"));
+  mkdirSync(join(agentDir, "sessions"));
+  mkdirSync(join(home, ".config"));
+  const scopedNames = new Set([
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
+    "HOME",
+    "USERPROFILE",
+    "XDG_CONFIG_HOME",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_CONFIG_FILE",
+    "CLOUDSDK_CONFIG",
+    "AZURE_CONFIG_DIR",
+  ]);
+  for (const name of Object.keys(process.env)) {
+    if (
+      /(?:^|_)(?:API_KEY|API_TOKEN|ACCESS_KEY|ACCESS_KEY_ID|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|SECRET|SECRET_ACCESS_KEY|SESSION_TOKEN|TOKEN|CREDENTIALS)$/i.test(
+        name,
+      ) ||
+      name === "GOOGLE_APPLICATION_CREDENTIALS" ||
+      name === "AWS_SHARED_CREDENTIALS_FILE"
+    ) {
+      scopedNames.add(name);
     }
-  ).ModelRuntime;
-  return typeof modelRuntime === "function";
+  }
+  const previous = new Map<string, string | undefined>();
+  for (const name of scopedNames) {
+    previous.set(name, process.env[name]);
+  }
+
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_SESSION_DIR = join(agentDir, "sessions");
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.XDG_CONFIG_HOME = join(home, ".config");
+  for (const name of scopedNames) {
+    if (
+      name !== "PI_CODING_AGENT_DIR" &&
+      name !== "PI_CODING_AGENT_SESSION_DIR" &&
+      name !== "HOME" &&
+      name !== "USERPROFILE" &&
+      name !== "XDG_CONFIG_HOME"
+    ) {
+      delete process.env[name];
+    }
+  }
+
+  try {
+    return await run({ agentDir, cwd });
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 export async function createPiSessionHarness(
@@ -87,15 +138,11 @@ export async function createPiSessionHarness(
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
   const missingAuthEnvVar = `PI_SUBAGENTURA_TEST_MISSING_AUTH_${randomUUID().replaceAll("-", "")}`;
-  const sessionRuntime = await createCompatibleSessionRuntime({
-    agentDir,
-    authStorageData: options.missingAuth
-      ? {}
-      : {
-          "subagentura-faux": { type: "api_key", key: "test" },
-        },
+  const sessionRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: null,
   });
-  const contexts: Context[] = [];
+  const contexts: TranscriptContext[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   const fauxProvider = {
@@ -108,7 +155,7 @@ export async function createPiSessionHarness(
         name: "Faux Model",
         api: "subagentura-faux",
         reasoning: false,
-        input: ["text"],
+        input: ["text" as const],
         cost: {
           input: 0,
           output: 0,
@@ -119,7 +166,7 @@ export async function createPiSessionHarness(
         maxTokens: 4_096,
       },
     ],
-    streamSimple: (_model: unknown, context: Context) => {
+    streamSimple: (_model: unknown, context: TranscriptContext) => {
       contexts.push(context);
       const stream = createAssistantMessageEventStream();
       if (options.providerErrorUrl) {
@@ -142,7 +189,7 @@ export async function createPiSessionHarness(
     },
   };
   const registerFauxProvider = () =>
-    registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
+    sessionRuntime.registerProvider("subagentura-faux", fauxProvider);
   registerFauxProvider();
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -197,20 +244,19 @@ export async function createPiSessionHarness(
   }
   const model =
     options.nativeModel ??
-    findModel(sessionRuntime, "subagentura-faux", "faux-model");
+    sessionRuntime.getModel("subagentura-faux", "faux-model");
   if (!model) throw new Error("test model registration failed");
-  const sessionOptions = buildSessionOptions(sessionRuntime, {
+  const sessionOptions: Parameters<typeof createAgentSession>[0] = {
     cwd,
     agentDir,
     model,
+    modelRuntime: sessionRuntime,
     sessionManager,
     settingsManager,
     resourceLoader,
     noTools: options.includeTools ? undefined : "all",
-  });
-  const { session } = await createAgentSession(
-    sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-  );
+  };
+  const { session } = await createAgentSession(sessionOptions);
   if (options.bindExtensionLifecycle) {
     await session.bindExtensions({ shutdownHandler: async () => {} });
   }
@@ -219,7 +265,7 @@ export async function createPiSessionHarness(
     sessionManager,
     contexts,
     configureTestAuth() {
-      registerProvider(sessionRuntime, "subagentura-faux", {
+      sessionRuntime.registerProvider("subagentura-faux", {
         ...fauxProvider,
         apiKey: "test",
       });

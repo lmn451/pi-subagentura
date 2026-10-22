@@ -96,6 +96,77 @@ import { createLaunchResolutionReporter } from "./telemetry-launch";
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
 
+const WorkflowUsageOutputSchema = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  totalTokens: Type.Number(),
+  costUsd: Type.Number(),
+  turns: Type.Number(),
+  costSource: Type.Optional(
+    Type.Union([
+      Type.Literal("provider"),
+      Type.Literal("estimated"),
+      Type.Literal("unavailable"),
+      Type.Literal("mixed"),
+    ]),
+  ),
+});
+const WorkflowStatusOutputSchema = Type.Union([
+  Type.Object({
+    status: Type.Union([
+      Type.Literal("running"),
+      Type.Literal("done"),
+      Type.Literal("error"),
+      Type.Literal("cancelled"),
+    ]),
+    workflowId: Type.String(),
+    name: Type.String(),
+    presentationStatus: Type.String(),
+    elapsedMs: Type.Number(),
+    agentsSpawned: Type.Number(),
+    runningCount: Type.Optional(Type.Number()),
+    errorCount: Type.Number(),
+    usage: Type.Optional(WorkflowUsageOutputSchema),
+    liveUsage: Type.Optional(WorkflowUsageOutputSchema),
+    budgetTotal: Type.Optional(Type.Number()),
+    currentPhase: Type.Optional(Type.String()),
+    error: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    status: Type.Literal("not_found"),
+    workflowId: Type.String(),
+  }),
+]);
+const WorkflowResultOutputSchema = Type.Object({
+  status: Type.Union([
+    Type.Literal("not_found"),
+    Type.Literal("wait_cancelled"),
+    Type.Literal("running"),
+    Type.Literal("done"),
+    Type.Literal("error"),
+    Type.Literal("cancelled"),
+  ]),
+  workflowId: Type.String(),
+  name: Type.Optional(Type.String()),
+  presentationStatus: Type.Optional(Type.String()),
+  result: Type.Optional(Type.String()),
+  agentsSpawned: Type.Optional(Type.Number()),
+  errorCount: Type.Optional(Type.Number()),
+  usage: Type.Optional(WorkflowUsageOutputSchema),
+  budgetTotal: Type.Optional(Type.Number()),
+  error: Type.Optional(Type.String()),
+});
+const WorkflowListOutputSchema = Type.Object({
+  status: Type.Literal("ok"),
+  workflows: Type.Array(
+    Type.Object({
+      name: Type.String(),
+      description: Type.String(),
+    }),
+  ),
+});
 /**
  * One derivation of the reported completion-policy dimension for every workflow
  * entry point. Each caller already knows the coordination settings it is about
@@ -1079,6 +1150,7 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
+    outputSchema: WorkflowStatusOutputSchema,
     async execute(_id: string, params: any): Promise<any> {
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
@@ -1088,6 +1160,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "not_found", workflowId: params.workflowId },
           isError: true,
+          structuredContent: {
+            status: "not_found",
+            workflowId: params.workflowId,
+          },
         };
       }
       const errorCount = st.result?.errorCount ?? st.snapshot.errorCount;
@@ -1126,6 +1202,27 @@ export function registerWorkflowTool(
           elapsedMs: Date.now() - st.startedAt,
           ...st.snapshot,
         },
+        structuredContent: {
+          status: st.status,
+          workflowId: st.id,
+          name: st.name,
+          presentationStatus: presentation.label,
+          elapsedMs: Date.now() - st.startedAt,
+          agentsSpawned: st.snapshot.agentsSpawned,
+          ...(st.snapshot.runningCount === undefined
+            ? {}
+            : { runningCount: st.snapshot.runningCount }),
+          errorCount,
+          ...(usage === undefined ? {} : { usage }),
+          ...(liveUsage === undefined ? {} : { liveUsage }),
+          ...(st.snapshot.budgetTotal == null
+            ? {}
+            : { budgetTotal: st.snapshot.budgetTotal }),
+          ...(st.snapshot.currentPhase === undefined
+            ? {}
+            : { currentPhase: st.snapshot.currentPhase }),
+          ...(st.error === undefined ? {} : { error: st.error }),
+        },
       };
     },
   });
@@ -1141,6 +1238,7 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
+    outputSchema: WorkflowResultOutputSchema,
     async execute(
       _id: string,
       params: any,
@@ -1160,6 +1258,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "not_found", workflowId: params.workflowId },
           isError: true,
+          structuredContent: {
+            status: "not_found",
+            workflowId: params.workflowId,
+          },
         };
       }
 
@@ -1175,6 +1277,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "wait_cancelled", workflowId: st.id },
           isError: true,
+          structuredContent: {
+            status: "wait_cancelled",
+            workflowId: st.id,
+          },
         };
       }
 
@@ -1193,6 +1299,10 @@ export function registerWorkflowTool(
             ],
             details: { status: "wait_cancelled", workflowId: st.id },
             isError: true,
+            structuredContent: {
+              status: "wait_cancelled",
+              workflowId: st.id,
+            },
           };
         }
         run = waitResult.value!;
@@ -1234,6 +1344,13 @@ export function registerWorkflowTool(
             ...usageDetails,
           },
           isError: true,
+          structuredContent: {
+            status: st.status,
+            workflowId: st.id,
+            error: msg,
+            ...(outputBudget == null ? {} : { budgetTotal: outputBudget }),
+            ...(usage === undefined ? {} : { usage }),
+          },
         };
       }
 
@@ -1293,6 +1410,19 @@ export function registerWorkflowTool(
           usage: run.usage,
           budgetTotal: st.snapshot.budgetTotal,
           phases: run.phases,
+        },
+        structuredContent: {
+          status: "done",
+          workflowId: st.id,
+          name: run.meta.name,
+          presentationStatus: presentation.label,
+          result: resultText,
+          agentsSpawned: run.agentsSpawned,
+          errorCount: run.errorCount,
+          ...(run.usage === undefined ? {} : { usage: run.usage }),
+          ...(st.snapshot.budgetTotal == null
+            ? {}
+            : { budgetTotal: st.snapshot.budgetTotal }),
         },
       };
     },
@@ -1412,6 +1542,7 @@ export function registerWorkflowTool(
     label: "List Workflows",
     description: "List saved workflows (name + description).",
     parameters: Type.Object({}),
+    outputSchema: WorkflowListOutputSchema,
     async execute(): Promise<any> {
       const items = listSavedWorkflows();
       const text = items.length
@@ -1420,6 +1551,13 @@ export function registerWorkflowTool(
       return {
         content: [{ type: "text", text }],
         details: { status: "ok", workflows: items },
+        structuredContent: {
+          status: "ok",
+          workflows: items.map(({ name, description }) => ({
+            name,
+            description,
+          })),
+        },
       };
     },
   });

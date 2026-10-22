@@ -153,7 +153,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - `src/session-scope.ts` owns the live parent session-scope registry and generation fences.
 - `src/orchestrator-routing.ts` owns parent-branch authority records, untrusted project-cache projection, and confirmation-bound routing metadata.
 - `src/completion-coordinator.ts` owns per-session completion records, consumption receipts, `each`/named-group readiness, and compact manifest claims.
-- `src/completion-turn.ts` owns lower-level idle Orchestratorv2 wake transport, process-global run-bound wake state, bounded retries, and recovery.
+- `src/completion-turn.ts` owns lower-level idle Orchestratorv2 native custom wake transport, process-global wake state, bounded retries, and recovery.
 - `src/notifications.ts` owns shared output sanitization and v2 completion classification; it is not a delivery broker.
 - `src/session-handlers.ts` owns the one global poller handle and parent input/settlement integration.
 
@@ -164,7 +164,7 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 - Interactive artifact intents publish immutable snapshot and activity references.
 - Background workflows publish a reference to `get_workflow_result`; their owned children never publish directly.
 - `completionPolicy="each"` (default) makes records independently ready and coalescible. `completionPolicy="group"` requires a caller-declared `completionGroupId`; see [coordinated readiness](#84-coordinated-readiness-consumption-and-dispatch) for its error bypass and terminal barrier.
-- The coordinator attaches one ready manifest to pending human input or prepares one follow-up only after safe idleness. It passes that idle manifest to `sendCompletionTurn` with the actual parent streaming state; non-v2 falls through to native `sendMessage`, while idle Orchestratorv2 uses the synthetic user-wake transport.
+- The coordinator attaches one ready manifest to pending human input or prepares one follow-up only after safe idleness. It passes that idle manifest to `sendCompletionTurn` with the actual parent streaming state; non-v2 falls through to native `sendMessage`, while idle Orchestratorv2 uses the native custom wake transport.
 - Full output is not automatic by default, and successful manual retrieval consumes the matching record. Related group membership is explicit: same-turn launch and task text do not infer relatedness.
 - Parent session ownership and generation fencing prevent delivery across session replacement.
 
@@ -175,23 +175,32 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 `src/subagent.ts` is the composition root and supported runtime entry.
 Registration is mode-gated so a child process does not recursively expose the full parent orchestration surface.
 
-| Condition                           | Registration / behavior                                                                                                                                                             | Owner                                                                        |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Every activation                    | Register coordinated completion entry renderers                                                                                                                                     | `src/subagent.ts`, `registerCompletionCoordinator`                           |
-| Every parent activation             | Register Pi session lifecycle callbacks                                                                                                                                             | `registerSessionHandlers`                                                    |
-| Normal parent with `--orchestrator` | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                      | `src/subagent.ts:default`                                                    |
-| Normal parent                       | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                  | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
-| Normal parent                       | Register interactive spawn/status/cancel/send/read/list tools                                                                                                                       | `registerInteractiveSubagentTools`                                           |
-| Normal parent                       | Register workflow tools and commands                                                                                                                                                | `registerWorkflowTool` through internal `workflow.ts` barrel                 |
-| Normal parent                       | Register cross-mode cancel command/shortcut                                                                                                                                         | `registerCancelAllFlows`                                                     |
-| Normal parent                       | Register supervisor command/shortcut/UI routes                                                                                                                                      | `registerInteractiveSupervisor`                                              |
-| `PI_SUBAGENTURA_CHILD=1`            | Register child artifact protocol and the restricted child-facing surface, then return                                                                                               | `registerChildProtocol` path in `src/subagent.ts`                            |
-| `session_start`                     | Create/replace scope; clear stale wake; rehydrate matching state; seal recovered groups; recover delivered unacknowledged wakes; then ensure the global interval                    | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| human `input`                       | Mark the coordinator's human-priority fence before the next turn                                                                                                                    | `src/session-handlers.ts`, `completion-coordinator.ts`                       |
-| `before_agent_start`                | Mark the exact wake prompt, set the coordinator turn-start fence, and attach a ready manifest to the natural turn                                                                   | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| `agent_start`                       | Mark this parent as streaming                                                                                                                                                       | `src/session-handlers.ts`                                                    |
-| `agent_settled`                     | Settle the exact wake first; clear streaming; then settle coordinator readiness and dispatch remaining work                                                                         | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| `session_shutdown`                  | Clean owner state and retire scoped completions; clear coordinator and wake state; then fence generation, preserve or kill panes by reason, stop interval only after the last scope | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| Condition                           | Registration / behavior                                                                                                                                                                                        | Owner                                                                        |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Every activation                    | Register coordinated completion entry renderers                                                                                                                                                                | `src/subagent.ts`, `registerCompletionCoordinator`                           |
+| Every parent activation             | Register Pi session lifecycle callbacks                                                                                                                                                                        | `registerSessionHandlers`                                                    |
+| Normal parent with `--orchestrator` | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                                                 | `src/subagent.ts:default`                                                    |
+| Normal parent                       | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                                             | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
+| Normal parent                       | Register interactive spawn/status/cancel/send/read/list tools                                                                                                                                                  | `registerInteractiveSubagentTools`                                           |
+| Normal parent                       | Register workflow tools and commands                                                                                                                                                                           | `registerWorkflowTool` through internal `workflow.ts` barrel                 |
+| Normal parent                       | Register cross-mode cancel command/shortcut                                                                                                                                                                    | `registerCancelAllFlows`                                                     |
+| Normal parent                       | Register supervisor command/shortcut/UI routes                                                                                                                                                                 | `registerInteractiveSupervisor`                                              |
+| `PI_SUBAGENTURA_CHILD=1`            | Register child artifact protocol and the restricted child-facing surface, then return                                                                                                                          | `registerChildProtocol` path in `src/subagent.ts`                            |
+| `session_start`                     | Create/replace scope; clear stale wake; rehydrate matching state; seal recovered groups; recover delivered unacknowledged wakes; then ensure the global interval                                               | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| human `input`                       | Mark the coordinator's human-priority fence before the next turn                                                                                                                                               | `src/session-handlers.ts`, `completion-coordinator.ts`                       |
+| `before_agent_start`                | Match only `messageType:"custom"` with type `orchestratorv2-completion-wakeup` and active `details.orchestratorV2WakeId`; set the coordinator turn-start fence and attach a ready manifest to the natural turn | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| `agent_start`                       | Mark this parent as streaming                                                                                                                                                                                  | `src/session-handlers.ts`                                                    |
+| `agent_settled`                     | Settle the exact wake first; clear streaming; then settle coordinator readiness and dispatch remaining work                                                                                                    | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| `session_shutdown`                  | Clean owner state and retire scoped completions; clear coordinator and wake state; then fence generation, preserve or kill panes by reason, stop interval only after the last scope                            | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+
+The 11 read-only result tools declare `outputSchema` and return typed
+`structuredContent` alongside existing human-readable content/details. Structured
+status, error, pending, and wait states are explicit; terminal output is exact
+raw output, with an empty string distinct from the human-only `"(no output)"`
+sentinel. Artifact output is sanitized and capped at 64 KiB, metadata is
+allowlisted, and artifact listings omit task text, paths, and raw events.
+Successful terminal retrieval persists its consumption receipt before return;
+receipt-storage failure blocks collection.
 
 The child launch wrapper exports both `PI_SUBAGENTURA_CHILD=1` and `ARTIFACT_DIR`.
 The child protocol requires the artifact directory; the root mode gate prevents the launched child from recursively behaving like a normal parent extension.
@@ -244,7 +253,7 @@ Type-only edges sometimes point upward to describe state without creating emitte
 flowchart TB
   L0[Leaf contracts and primitives
 abortable-wait, schemas, session-scope,
-orchestration-context, pi-sdk-compat,
+orchestration-context,
 cancellation-snapshots, interactive-lineage,
 multiplexer-contracts, usage,
 workflow parser and structured output]
@@ -337,17 +346,20 @@ recovery layer; it preserves native non-v2 delivery.
 
 ### 5.2 Context and model selection
 
-`subagent_with_context` reads the current branch from `ctx.sessionManager.getBranch()`, converts message entries with Pi's `convertToLlm`, and serializes them.
+`subagent_with_context` inherits the canonical Pi session projection from
+`buildSessionProjection().messages` and passes those projected messages
+directly, rather than serializing raw branch entries.
 The conversation is context-only material prepended to the delegated task.
-It is a direct in-memory conversion; it does not tail the parent's session file.
-An empty branch is rejected.
+An empty projection is rejected.
 
 `subagent_isolated` supplies no branch context.
 Both tools inherit orchestration lineage from `resolveSpawnDepth` and reject depth beyond `SUBAGENTURA_MAX_ORCHESTRATION_DEPTH`, default three.
 
 `resolveModel` uses exact model lookup.
 It tries the parent registry, including extension-added models, then the global provider/model registry, and falls back to the parent default when an override cannot be resolved.
-`src/pi-sdk-compat.ts` isolates modern `ModelRuntime` versus legacy auth/model-registry APIs.
+Child sessions use Pi SDK's `ModelRuntime` directly, and helpers copy the
+parent's extension-added custom and native provider registrations. The legacy
+auth/model-registry compatibility path has been removed.
 The returned details expose the session's effective thinking level, including Pi capability clamping.
 
 ### 5.3 Synchronous path
@@ -726,20 +738,27 @@ Successful terminal retrieval through `read_subagent_artifact`, `get_subagent_re
 
 At an idle dispatch the coordinator passes the selected manifest to
 `sendCompletionTurn` with the actual parent streaming state. Non-v2 delivery
-falls through to native `sendMessage`; idle Orchestratorv2 first records a
-process-global wake request, publishes the manifest with its wake identity,
-and requests a synthetic user follow-up so the thin-router prompt is installed.
-The transport is lower-level than coordinator readiness and does not choose
-groups or manifest contents.
+falls through to native `sendMessage`; idle Orchestratorv2 first records the
+process-global wake request, sends the hidden `subagent-manifest` with
+`triggerTurn:false`, then sends a separate hidden custom wake of type
+`orchestratorv2-completion-wakeup` with `triggerTurn:true` and
+`details.orchestratorV2WakeId`. This native follow-up is not a synthetic user
+message. The transport is lower-level than coordinator readiness and does not
+choose groups or manifest contents.
 
 Wake state is process-global because delivery and lifecycle paths may load
-separate module instances. `before_agent_start` marks only the exact synthetic
-prompt, and that marked run's `agent_settled` acknowledges the wake. A missing
-run start is retried at most three times with a 30-second watchdog; durable
+separate module instances. `before_agent_start` acknowledges only a message
+with `messageType:"custom"`, custom type `orchestratorv2-completion-wakeup`,
+and `details.orchestratorV2WakeId` matching the active wake ID. Natural user
+messages and unrelated custom messages cannot acknowledge it. The existing
+request/acknowledgement ledger types and schema are unchanged. A missing run
+start is retried at most three times with a 30-second watchdog; durable
 acknowledgement is retried at most three times with a one-second delay.
-Exhaustion is bounded and stops further retries.
+Session replacement and shutdown clear both timers; reload/resume recover only
+delivered, unacknowledged wakes from the active parent branch. Wake coalescing
+and human-input priority are unchanged.
 
-Interactive delivery queues and in-memory receipt indexes remain bounded and persisted. Consumption-ledger readers take a fixed snapshot of the current file size and process it in bounded chunks and line buffers; reconciliation advances through later snapshots so late-published receipts are not lost without repeatedly loading or scanning the whole file. The append-only ledger has no fixed disk-size bound during a prolonged parent-session-entry outage. This is intentional: truncating it could resurrect results already collected when parent entries become available again. Parent delivery is fail-closed behind durable notice storage: failed notice appends remain pending, block manifest preparation, and retry on later coordinator activity without a tight loop. Reconciliation handles append-then-throw without routine duplication. A successful `sendMessage` proves synchronous dispatch, not durable parent-session commit; a crash in that separate window can still duplicate a manifest or legacy message. Parent-model delivery is therefore at-least-once across that crash window, not exactly once.
+Interactive delivery queues and in-memory receipt indexes remain bounded and persisted. Consumption-ledger readers take a fixed snapshot of the current file size and process it in bounded chunks and line buffers; reconciliation advances through later snapshots so late-published receipts are not lost without repeatedly loading or scanning the whole file. The append-only ledger has no fixed disk-size bound during a prolonged parent-session-entry outage. This is intentional: truncating it could resurrect results already collected when parent entries become available again. Parent delivery is fail-closed behind durable notice storage: failed notice appends remain pending, block manifest preparation, and retry on later coordinator activity without a tight loop. Reconciliation handles append-then-throw without routine duplication. A successful `sendMessage` proves synchronous dispatch, not durable parent-session commit; a crash in that separate window can still duplicate a manifest or custom wake message. Parent-model delivery is therefore at-least-once across that crash window, not exactly once.
 
 ### 8.5 Rehydration
 
@@ -1039,7 +1058,7 @@ The following table inventories the tracked runtime source modules and companion
 |   6 | `src/cancellation-snapshots.ts`              | Optional bounded atomic deduplicated cancellation diagnostics                                                                   | None                                                                                                                                                                                                                                                                                                          |
 |   7 | `src/child-protocol.ts`                      | Converts child Pi lifecycle callbacks to active-turn and artifact events                                                        | `artifact`                                                                                                                                                                                                                                                                                                    |
 |   8 | `src/delivery.ts`                            | Durable interactive intent queue, coordinated publication, and receipt reconciliation                                           | `artifact`, `completion-coordinator`, `completion-turn`, `session-scope`, `helpers`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                                                         |
-|   9 | `src/helpers.ts`                             | In-process execution kernel, model/session compatibility use, job registry, live status, cancellation trees                     | `pi-sdk-compat`, `workflow-structured-output`, `cancellation-snapshots`, `orchestration-context`, `usage`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                                   |
+|   9 | `src/helpers.ts`                             | In-process execution kernel, direct `ModelRuntime` child sessions, job registry, live status, cancellation trees                | `workflow-structured-output`, `cancellation-snapshots`, `orchestration-context`, `usage`, `identifier-types`; type-only `interactive-tmux`                                                                                                                                                                    |
 |  10 | `src/interactive-lineage.ts`                 | Bounded durable lineage manifests, projection, and leaf-first subtree cancellation                                              | None                                                                                                                                                                                                                                                                                                          |
 |  11 | `src/interactive-supervisor-registration.ts` | Registers supervisor shortcut/command and routes focus, capture, and cancel actions                                             | `interactive-supervisor-ui`, `interactive-tmux`, `interactive-lineage`, `multiplexer`, `helpers`, `cancellation-snapshots`, `artifact-poller`, `workflow-jobs`, `session-scope`                                                                                                                               |
 |  12 | `src/interactive-supervisor-ui.ts`           | TUI for async jobs, details, navigation, and active overlay close hook                                                          | `interactive-tmux`; type-only `helpers`, `workflow-jobs`                                                                                                                                                                                                                                                      |
@@ -1049,7 +1068,6 @@ The following table inventories the tracked runtime source modules and companion
 |  16 | `src/multiplexer.ts`                         | Multiplexer backend resolver/cache and registry API                                                                             | `multiplexer-contracts`, `multiplexer-tmux`, `multiplexer-zellij`, `multiplexer-herdr`                                                                                                                                                                                                                        |
 |  17 | `src/notifications.ts`                       | Shared output sanitization and v2 completion classification                                                                     | `artifact`; type-only `interactive-tmux`                                                                                                                                                                                                                                                                      |
 |  19 | `src/orchestration-context.ts`               | Reload-stable `AsyncLocalStorage` lineage/depth propagation and spawn limit                                                     | None                                                                                                                                                                                                                                                                                                          |
-|  20 | `src/pi-sdk-compat.ts`                       | Pi SDK boundary for modern runtime versus legacy auth/model-registry APIs                                                       | None project-internal                                                                                                                                                                                                                                                                                         |
 |  21 | `src/rehydrate.ts`                           | Reconstructs interactive state, coordinated group membership, physical cursors, queues, and receipts                            | `artifact`, `completion-coordinator`, `delivery`, `interactive-tmux`                                                                                                                                                                                                                                          |
 |  22 | `src/rendering.ts`                           | Pure/shared tool, async spawn, notification and activity-row renderers                                                          | `helpers`, `notifications`; type-only `subagent`, `interactive-tmux`                                                                                                                                                                                                                                          |
 |  23 | `src/schemas.ts`                             | Shared TypeBox schemas for in-process and interactive tools                                                                     | None project-internal                                                                                                                                                                                                                                                                                         |
@@ -1144,9 +1162,12 @@ The restrictive exports map matters: shipping all source files in `package.json#
 - [ ] Every idle coordinated manifest passes through `sendCompletionTurn` with
       the actual parent streaming state.
 - [ ] Non-v2 delivery falls through to native `sendMessage`; idle Orchestratorv2
-      uses the synthetic user-wake transport.
-- [ ] The exact synthetic wake is marked at `before_agent_start` and only that
-      run's settlement can acknowledge it.
+      sends the hidden manifest with `triggerTurn:false`, then a separate hidden
+      custom `orchestratorv2-completion-wakeup` with `triggerTurn:true` and
+      the matching `details.orchestratorV2WakeId`.
+- [ ] `before_agent_start` acknowledges only a custom wake whose dedicated type
+      and `details.orchestratorV2WakeId` match the active wake ID; natural user
+      messages and unrelated custom messages cannot acknowledge it.
 - [ ] Wake and acknowledgement retries are bounded to three attempts each.
 - [ ] Human input wins; a ready manifest attaches to the natural turn before automatic continuation.
 - [ ] Manifests contain bounded references and completion IDs, never default full output.

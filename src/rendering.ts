@@ -216,8 +216,11 @@ export function renderSubagentNotify(
   if (!options.expanded) {
     line = isError ? theme.fg("error", text) : theme.fg("accent", text);
   } else {
+    const resultOutput = details?.result?.output;
     const output = sanitizeOutput(
-      (details?.result?.output ?? "").slice(0, 500).replace(/\s+/g, " "),
+      (resultOutput === "" ? "(no output)" : (resultOutput ?? ""))
+        .slice(0, 500)
+        .replace(/\s+/g, " "),
     );
     const header = isError
       ? theme.fg("error", "❌ Sub-agent Failed")

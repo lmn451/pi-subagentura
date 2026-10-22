@@ -39,7 +39,6 @@ import {
   type SubagentResult,
   type Usage,
 } from "../helpers";
-import { getParentContextMessages } from "../pi-sdk-compat";
 import { resolveSpawnDepth } from "../orchestration-context";
 import {
   getStartedSessionScopes,
@@ -84,6 +83,62 @@ import {
   createLaunchResolutionReporter,
   type TelemetryLaunchResolutionReporter,
 } from "../telemetry-launch";
+const IN_PROCESS_OUTPUT_PREVIEW_CHARS = 500;
+const InProcessUsageOutputSchema = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  cost: Type.Number(),
+  costSource: Type.Optional(
+    Type.Union([
+      Type.Literal("provider"),
+      Type.Literal("estimated"),
+      Type.Literal("unavailable"),
+      Type.Literal("mixed"),
+    ]),
+  ),
+  turns: Type.Number(),
+});
+const InProcessReadOutputSchema = Type.Object({
+  status: Type.Union([
+    Type.Literal("running"),
+    Type.Literal("done"),
+    Type.Literal("error"),
+    Type.Literal("cancelled"),
+    Type.Literal("not_found"),
+    Type.Literal("session_unavailable"),
+    Type.Literal("wait_cancelled"),
+    Type.Literal("wait_timeout"),
+  ]),
+  jobId: Type.Optional(Type.String()),
+  output: Type.Optional(Type.String()),
+  outputPreview: Type.Optional(
+    Type.String({ maxLength: IN_PROCESS_OUTPUT_PREVIEW_CHARS }),
+  ),
+  usage: Type.Optional(InProcessUsageOutputSchema),
+  model: Type.Optional(Type.String()),
+  usageSummary: Type.Optional(Type.String()),
+  thinkingLevel: Type.Optional(Type.String()),
+  error: Type.Optional(Type.String()),
+  timeoutMs: Type.Optional(Type.Number()),
+});
+
+function structuredInProcessUsage(
+  usage: Usage,
+): Record<string, number | string> {
+  const output: Record<string, number | string> = {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    cost: usage.cost,
+    turns: usage.turns,
+  };
+  if (usage.costSource !== undefined) output.costSource = usage.costSource;
+  return output;
+}
+
 interface RunningFooterContext {
   cwd?: string;
   ui: {
@@ -288,8 +343,12 @@ function resultReadOutcome(
   if (result.cancelled) return "cancelled";
   if (result.isError) return "error";
   if (!firstResultRead) return "already_consumed";
-  if (!result.output || result.output === "(no output)") return "empty";
+  if (result.output === "") return "empty";
   return "consumed";
+}
+
+function displaySubagentOutput(output: string): string {
+  return output === "" ? "(no output)" : output;
 }
 
 /**
@@ -810,7 +869,7 @@ function registerSubagentWithContextTool(
         try {
           return {
             ok: true as const,
-            value: getParentContextMessages(ctx.sessionManager),
+            value: ctx.sessionManager.buildSessionProjection().messages,
           };
         } catch (error) {
           return { ok: false as const, error };
@@ -1053,7 +1112,9 @@ function registerSubagentWithContextTool(
       captureSyncResultRead(telemetry, result);
       if (result.cancelled) {
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            { type: "text", text: displaySubagentOutput(result.output) },
+          ],
           details: { status: "cancelled" },
         };
       }
@@ -1073,8 +1134,8 @@ function registerSubagentWithContextTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
@@ -1419,7 +1480,9 @@ function registerSubagentIsolatedTool(
       captureSyncResultRead(telemetry, result);
       if (result.cancelled) {
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            { type: "text", text: displaySubagentOutput(result.output) },
+          ],
           details: { status: "cancelled" },
         };
       }
@@ -1439,8 +1502,8 @@ function registerSubagentIsolatedTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
@@ -1468,10 +1531,25 @@ function registerGetSubagentStatusTool(
     description:
       "Poll an async subagent job by jobId. Returns live preview of the subagent's current turn, active tool, and output. Polling is non-destructive; a running job is normal and is not evidence of a hang.",
     parameters: StatusParams,
+    outputSchema: InProcessReadOutputSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      _signal,
+      _onUpdate,
+      _ctx,
+    ): Promise<AgentToolResult<unknown>> {
       const execution = resolveExecutionOwner(toolToken);
-      if (!execution) return unavailableSessionResult();
+      if (!execution) {
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
+      }
       debugLog("info", "tool_call", {
         toolName: "get_subagent_status",
         toolCallId: _toolCallId,
@@ -1490,6 +1568,7 @@ function registerGetSubagentStatusTool(
           ],
           details: { jobId: params.jobId, status: "not_found" },
           isError: true,
+          structuredContent: { status: "not_found", jobId: params.jobId },
         };
       }
 
@@ -1497,7 +1576,12 @@ function registerGetSubagentStatusTool(
         const result = job.result!;
         const usageStr = formatUsage(result.usage, result.model);
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            {
+              type: "text",
+              text: displaySubagentOutput(result.output),
+            },
+          ],
           details: {
             status: job.status,
             usage: result.usage,
@@ -1506,6 +1590,20 @@ function registerGetSubagentStatusTool(
             thinkingLevel: result.thinkingLevel,
           },
           isError: result.isError,
+          structuredContent: {
+            status: job.status,
+            jobId: job.id,
+            output: result.output,
+            usage: structuredInProcessUsage(result.usage),
+            ...(result.model === undefined ? {} : { model: result.model }),
+            usageSummary: usageStr,
+            ...(result.thinkingLevel === undefined
+              ? {}
+              : { thinkingLevel: result.thinkingLevel }),
+            ...(result.isError && result.errorMessage !== undefined
+              ? { error: result.errorMessage }
+              : {}),
+          },
         };
       }
 
@@ -1516,10 +1614,23 @@ function registerGetSubagentStatusTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
 
-      return buildLiveUpdate(job.liveStatus, job.modelLabel);
+      const live = buildLiveUpdate(job.liveStatus, job.modelLabel);
+      return {
+        ...live,
+        structuredContent: {
+          status: "running",
+          jobId: job.id,
+          outputPreview: job.liveStatus.output.slice(
+            0,
+            IN_PROCESS_OUTPUT_PREVIEW_CHARS,
+          ),
+          ...(job.modelLabel === undefined ? {} : { model: job.modelLabel }),
+        },
+      };
     },
 
     renderCall(args, theme) {
@@ -1561,10 +1672,25 @@ function registerGetSubagentResultTool(
       "If a bounded wait times out, report the pending jobId and yield; do not cancel the job merely to finish a review.",
     ].join("\n"),
     parameters: ResultParams,
+    outputSchema: InProcessReadOutputSchema,
 
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      _onUpdate,
+      _ctx,
+    ): Promise<AgentToolResult<unknown>> {
       const execution = resolveExecutionOwner(toolToken);
-      if (!execution) return unavailableSessionResult();
+      if (!execution) {
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
+      }
       const job = getInProcessJob(params.jobId, execution.owner);
       debugLog("info", "tool_call", {
         toolName: "get_subagent_result",
@@ -1583,6 +1709,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId },
           isError: true,
+          structuredContent: { status: "not_found", jobId: params.jobId },
         };
       }
 
@@ -1602,6 +1729,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
 
@@ -1617,6 +1745,10 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "wait_cancelled" },
           isError: true,
+          structuredContent: {
+            status: "wait_cancelled",
+            jobId: params.jobId,
+          },
         };
       }
 
@@ -1637,6 +1769,14 @@ function registerGetSubagentResultTool(
           details: {
             ...(live.details as Record<string, unknown>),
             jobId: params.jobId,
+          },
+          structuredContent: {
+            status: "running",
+            jobId: params.jobId,
+            outputPreview: currentText.slice(
+              0,
+              IN_PROCESS_OUTPUT_PREVIEW_CHARS,
+            ),
           },
         };
       }
@@ -1701,6 +1841,11 @@ function registerGetSubagentResultTool(
               timeoutMs: waitTimeoutMs,
             },
             isError: true,
+            structuredContent: {
+              status: "wait_timeout",
+              jobId: params.jobId,
+              timeoutMs: waitTimeoutMs,
+            },
           };
         }
         captureInProcessResultRead(job, execution.owner, "wait_cancelled");
@@ -1709,12 +1854,22 @@ function registerGetSubagentResultTool(
             { type: "text", text: `Wait for job ${params.jobId} cancelled.` },
           ],
           details: { jobId: params.jobId, status: "wait_cancelled" },
+          structuredContent: {
+            status: "wait_cancelled",
+            jobId: params.jobId,
+          },
           isError: true,
         };
       }
       if (execution.owner && !resolveLiveSessionScope(execution.owner)) {
         captureInProcessResultRead(job, execution.owner, "unavailable");
-        return unavailableSessionResult();
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
       }
       const result = waitResult.value!;
       consumeCompletionSource(
@@ -1745,6 +1900,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
       const usageStr = formatUsage(result.usage, result.model);
@@ -1760,12 +1916,26 @@ function registerGetSubagentResultTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
         isError: result.isError,
+        structuredContent: {
+          status: result.isError ? "error" : "done",
+          jobId: job.id,
+          output: result.output,
+          usage: structuredInProcessUsage(result.usage),
+          ...(result.model === undefined ? {} : { model: result.model }),
+          usageSummary: usageStr,
+          ...(result.thinkingLevel === undefined
+            ? {}
+            : { thinkingLevel: result.thinkingLevel }),
+          ...(result.isError && result.errorMessage !== undefined
+            ? { error: result.errorMessage }
+            : {}),
+        },
       };
     },
 
@@ -1948,6 +2118,16 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    outputSchema: Type.Object({
+      count: Type.Number(),
+      models: Type.Array(
+        Type.Object({
+          provider: Type.String(),
+          id: Type.String(),
+          name: Type.Optional(Type.String()),
+        }),
+      ),
+    }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const modelRegistry = ctx.modelRegistry;
@@ -2005,6 +2185,14 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
             provider: m.provider,
             id: m.id,
             name: m.name,
+          })),
+        },
+        structuredContent: {
+          count: filtered.length,
+          models: filtered.map((model) => ({
+            provider: model.provider,
+            id: model.id,
+            ...(model.name === undefined ? {} : { name: model.name }),
           })),
         },
       };

@@ -104,9 +104,7 @@ export default function (pi: ExtensionAPI) {
     : undefined;
   if (isChild) {
     registerChildProtocol(pi);
-    if (typeof pi.registerMessageRenderer === "function") {
-      pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
-    }
+    pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
     const sessionScope = registerSessionHandlers(
       pi,
       initialSpawnTreeContext,
@@ -120,7 +118,7 @@ export default function (pi: ExtensionAPI) {
   }
   if (typeof pi.registerMessageRenderer !== "function") {
     throw new Error(
-      "pi-subagentura requires Pi >= 0.80.6 with agent_settled and custom message renderer support",
+      "pi-subagentura requires Pi >= 1.2.0 with agent_settled and custom message renderer support",
     );
   }
   registerExtensionSettings(pi);

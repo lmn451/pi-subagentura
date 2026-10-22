@@ -37,7 +37,7 @@ plays in 8:06, with quiet stretches accelerated and English translations include
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.
 
-Node.js 22.23.2 or newer is required.
+Pi SDK 1.2.0 or newer and Node.js 22.23.2 or newer are required.
 
 Install globally:
 
@@ -190,6 +190,30 @@ The extension registers these public tools for parent agents.
 | `list_subagent_artifacts`               | List durable interactive-agent artifacts                          |
 | `read_subagent_artifact`                | Read lifecycle events and output snapshots                        |
 | `cleanup_subagent_artifacts`            | Remove expired artifact directories and stale registry entries    |
+
+### Structured results
+
+All 11 read-only tools declare an `outputSchema` and return typed
+`structuredContent` while retaining their existing human-readable
+content/details:
+
+- **Jobs and workflows:** `get_subagent_status`, `get_subagent_result`,
+  `get_workflow_status`, `get_workflow_result`.
+- **Interactive artifacts:** `get_interactive_subagent_status`,
+  `list_subagent_artifacts`, `read_subagent_artifact`.
+- **Discovery and activity:** `list_available_models`,
+  `get_current_pane_activity`, `list_workflows`,
+  `list_orchestrator_agents`.
+
+Structured status, error, pending, and wait states are explicit. Terminal
+results preserve exact raw output: an empty string stays distinct from the
+literal `"(no output)"`, which is only a human-presentation sentinel. Artifact
+output remains sanitized and capped at 64 KiB with allowlisted metadata;
+artifact listings omit task text, paths, and raw events.
+
+Successful terminal reads through `get_subagent_result`,
+`get_workflow_result`, or output-bearing `read_subagent_artifact` persist a
+consumption receipt before returning. Receipt-storage failure blocks collection.
 
 ## How it compares with other Pi sub-agent extensions
 
@@ -448,10 +472,9 @@ Snapshots use schema version 1, temp-file + rename writes, deterministic per-ses
 
 ### `subagent_with_context`
 
-Starts a sub-agent with the parent conversation included in its prompt. When the
-installed Pi SDK exposes the canonical session projection, that projection is
-used (including omission and replacement edits); older supported SDKs fall back
-to their message entries.
+Starts a sub-agent with the parent's canonical projected conversation included
+in its prompt. The extension passes `buildSessionProjection().messages`
+directly rather than serializing raw branch entries.
 
 Parameters:
 
@@ -710,7 +733,7 @@ session, and cancellation preserves its artifact directory for later inspection.
 #### Sub-agent completion protocol
 
 Every interactive child runs protocol-only Pi lifecycle hooks and therefore
-requires Pi SDK `>=0.80.6`. `before_agent_start` creates a provisional
+requires Pi SDK `>=1.2.0`. `before_agent_start` creates a provisional
 turn, the first `turn_start` binds it to the persisted Pi user-entry id, tool
 hooks record activity, and `agent_settled` records the authoritative completion
 after retries, compaction, and queued continuations. When Pi accepts Enter while
@@ -792,9 +815,9 @@ from the parent-model channel:
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
-The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 uses the lower-level transport to persist a wake request, publish the manifest with its wake identity, and send a synthetic user follow-up so `before_agent_start` installs the thin-router prompt. A streaming parent keeps Pi's native follow-up behavior.
+The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 records its wake request, sends the hidden `subagent-manifest` with `triggerTurn:false`, then sends a separate hidden custom message of type `orchestratorv2-completion-wakeup` with `triggerTurn:true` and `details.orchestratorV2WakeId`. This native custom wake is not a synthetic user message. A streaming parent keeps Pi's native follow-up behavior.
 
-Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. The exact synthetic prompt is marked in `before_agent_start`, and only that marked run's `agent_settled` acknowledges the wake; unrelated turns cannot consume it. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
+Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. `before_agent_start` acknowledges only a message with `messageType:"custom"`, custom type `orchestratorv2-completion-wakeup`, and `details.orchestratorV2WakeId` matching the active wake ID; natural user messages and unrelated custom messages cannot acknowledge it. The request/acknowledgement ledger types and schema are unchanged. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch. Coalescing and human-input priority are unchanged.
 
 Successful terminal retrieval through `get_subagent_result`,
 `get_workflow_result`, or `read_subagent_artifact` with output consumes the
