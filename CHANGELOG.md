@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A reusable four-aspect source-review example with schema-validated findings,
   deterministic severity counts and verdict precedence, and explicit failed or
   uncertain review outcomes.
+- V4 workflow agent calls may opt into per-call `readOnly: true`, restricting
+  model-facing dispatch to Pi `read`, `grep`, `find`, and `ls` while preserving
+  the existing default tool set when omitted. In-process schema capture retains
+  the internal `structured_output` return channel; process-selected schema
+  results remain final text JSON captured by the host and validated by the
+  parent. The capability is recorded for retry/recovery compatibility and is
+  not an OS or path sandbox.
+- Explicitly exclude MCP function and resource tools on newer Pi SDKs that
+  retain MCP tools despite a positive tool allowlist.
 
 ### Changed
 
@@ -48,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A failed durable completion-group recovery no longer suppresses independent
   completion manifests. Grouped delivery stays blocked until recovery succeeds.
+- Handle promptless Pi custom agent-start events in completion coordination.
+- Retain terminal fixture gate routing for async children and workflow agents
+  under strict known-marker validation.
 
 ## [3.6.4] - 2026-10-03
 

@@ -238,6 +238,56 @@ describe("interactive-tmux", () => {
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
+  it("passes read-only tool restrictions through the interactive launch", async () => {
+    const tmp = makeTmp();
+    process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+    process.env.TMUX = makeArgs().TMUX;
+    process.env.TMUX_PANE = "%9";
+    installMockExec((_file, args) => {
+      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+      if (args[0] === "display-message") return MOCK_LOCATION;
+      if (args[0] === "show-options") return "0\n";
+      return "";
+    });
+
+    const mod = await importFresh<typeof InteractiveTmux>(
+      "../src/interactive-tmux",
+    );
+    const state = mod.launchInteractiveSubagent({
+      name: "Read only",
+      task: "Inspect source",
+      cwd: tmp,
+      readOnly: true,
+    });
+    const launchScript = readFileSync(state.launchScriptFile, "utf8");
+
+    expect(launchScript).toContain("--tools 'read,grep,find,ls'");
+    expect(launchScript).toContain(
+      "--exclude-tools 'mcp__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource'",
+    );
+    expect(launchScript).toContain("--subagentura-workflow-read-only");
+  });
+  it("rejects malformed read-only launch policy before spawning", async () => {
+    const mod = await importFresh<typeof InteractiveTmux>(
+      "../src/interactive-tmux",
+    );
+    const launchWithMalformedReadOnly =
+      mod.launchInteractiveSubagent as unknown as (params: {
+        name: string;
+        task: string;
+        cwd: string;
+        readOnly: unknown;
+      }) => unknown;
+
+    expect(() =>
+      launchWithMalformedReadOnly({
+        name: "Invalid",
+        task: "Inspect source",
+        cwd: "/repo",
+        readOnly: "true",
+      }),
+    ).toThrow("readOnly must be a boolean");
+  });
   it("keeps the parent state cwd separate from the child working cwd", async () => {
     const parentCwd = makeTmp();
     const childCwd = join(parentCwd, "child");
@@ -1456,6 +1506,28 @@ describe("interactive-tmux", () => {
       expect(cmd).toContain("--name 'n'");
       // The prompt file is invoked via "@<file>" — verify the path appears in that form.
       expect(cmd).toMatch(/'\@\/p\.md'$/);
+    });
+    it("adds the restrictive allowlist only for read-only process launches", async () => {
+      const { buildPiInteractiveCommand } = await importFresh<
+        typeof InteractiveTmux
+      >("../src/interactive-tmux");
+      const params = {
+        sessionFile: "/s.jsonl",
+        name: "n",
+        promptFile: "/p.md",
+        cwd: "/c",
+      };
+      const standard = buildPiInteractiveCommand(params);
+      const readOnly = buildPiInteractiveCommand({ ...params, readOnly: true });
+
+      expect(standard).not.toContain("--tools");
+      expect(standard).not.toContain("--exclude-tools");
+      expect(standard).not.toContain("--subagentura-workflow-read-only");
+      expect(readOnly).toContain("--tools 'read,grep,find,ls'");
+      expect(readOnly).toContain(
+        "--exclude-tools 'mcp__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource'",
+      );
+      expect(readOnly).toContain("--subagentura-workflow-read-only");
     });
 
     it("omits --model when undefined", async () => {

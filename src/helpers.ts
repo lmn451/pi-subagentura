@@ -36,6 +36,10 @@ import {
   type WorkflowStructuredOutputCapture,
 } from "./workflow-structured-output";
 import {
+  READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES,
+  READ_ONLY_AGENT_TOOL_NAMES,
+} from "./agent-capabilities";
+import {
   snapshotInProcessSession,
   type CancellationSnapshotReceipt,
   type CancellationSnapshotSource,
@@ -886,6 +890,8 @@ export interface StartSubagentJobParams {
   parentModelRegistry?: ModelRegistry;
   /** Optional JSON Schema delivered via a workflow structured-output tool in in-process mode. */
   workflowStructuredOutputSchema?: unknown;
+  /** Restrict this model to inspection tools; not an OS or path sandbox. */
+  readOnly?: boolean;
   onCancellationSnapshot?: (receipt: CancellationSnapshotReceipt) => void;
   cancellationSource?: CancellationSnapshotSource;
   /** Thinking/reasoning level. Pass through to createAgentSession. */
@@ -944,6 +950,7 @@ export async function startSubagentJob(
     defaultModel,
     parentModelRegistry,
     workflowStructuredOutputSchema,
+    readOnly,
     onCancellationSnapshot,
     cancellationSource,
     thinkingLevel,
@@ -953,6 +960,8 @@ export async function startSubagentJob(
     telemetry,
     spawnRequestedAt,
   } = params;
+  if (readOnly !== undefined && typeof readOnly !== "boolean")
+    throw new Error("readOnly must be a boolean.");
 
   // Enforce the cap within this exact scope; peer sessions never evict each other.
   while (inProcessJobsForOwner(owner).size >= MAX_REGISTRY_SIZE) {
@@ -1077,6 +1086,17 @@ export async function startSubagentJob(
       ...(thinkingLevel ? { thinkingLevel } : {}),
       ...(workflowStructuredOutputTool
         ? { customTools: [workflowStructuredOutputTool] }
+        : {}),
+      ...(readOnly === true
+        ? {
+            tools: [
+              ...READ_ONLY_AGENT_TOOL_NAMES,
+              ...(workflowStructuredOutputTool
+                ? [workflowStructuredOutputTool.name]
+                : []),
+            ],
+            excludeTools: [...READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES],
+          }
         : {}),
     });
     session = (

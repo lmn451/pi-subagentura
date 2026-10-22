@@ -195,6 +195,8 @@ export interface WorkflowAgentOptions<
   readonly model?: string;
   readonly persona?: string;
   readonly isolation?: "process" | "in-process";
+  /** Restricts model-facing tools; this is not an OS or path sandbox. */
+  readonly readOnly?: boolean;
   readonly thinkingLevel?:
     | "off"
     | "minimal"

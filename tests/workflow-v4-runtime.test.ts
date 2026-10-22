@@ -687,6 +687,69 @@ describe("v4 workflow runtime", () => {
     );
     expect(bridge.validate).toHaveBeenCalledWith(result, { type: "object" });
   });
+  it("keeps read-only and default agent results in distinct cached steps", async () => {
+    const state = new WorkflowV4Store("read-only-agent-runtime");
+    const agent = vi.fn(async (_prompt: string, options: unknown) =>
+      options &&
+      typeof options === "object" &&
+      "readOnly" in options &&
+      options.readOnly === true
+        ? "restricted result"
+        : "default result",
+    );
+    const bridge = makeBridge({
+      request: (action: string, payload: unknown, signal?: AbortSignal) =>
+        state.request(action, payload, signal),
+      agent,
+    });
+    const review = definition((ctx, args: unknown) =>
+      ctx.agent("review", {
+        prompt: "Review the current source",
+        ...(args === null ? {} : { readOnly: args === true }),
+      }),
+    );
+    const run = (readOnly: boolean | null) =>
+      runWorkflowDefinition(review, readOnly, bridge);
+
+    try {
+      await expect(run(true)).resolves.toBe("restricted result");
+      await expect(run(true)).resolves.toBe("restricted result");
+      await expect(run(false)).resolves.toBe("default result");
+      await expect(run(null)).resolves.toBe("default result");
+      expect(agent).toHaveBeenCalledTimes(2);
+    } finally {
+      state.close();
+    }
+  });
+
+  it("rejects malformed read-only policy before entering or spawning an agent", async () => {
+    const state = new WorkflowV4Store("invalid-read-only-agent-runtime");
+    const agent = vi.fn(async () => "must not run");
+    const bridge = makeBridge({
+      request: (action: string, payload: any, signal?: AbortSignal) =>
+        state.request(action, payload, signal),
+      agent,
+    });
+
+    try {
+      await expect(
+        runWorkflowDefinition(
+          definition((ctx) =>
+            ctx.agent("review", {
+              prompt: "Review the current source",
+              readOnly: "yes",
+            }),
+          ),
+          {},
+          bridge,
+        ),
+      ).rejects.toThrow("readOnly must be a boolean");
+      expect(agent).not.toHaveBeenCalled();
+      expect(state.snapshot()).toEqual([]);
+    } finally {
+      state.close();
+    }
+  });
 
   it("records timeout/cancellation outcomes and does not retry cancellation", async () => {
     const bridge = makeBridge();

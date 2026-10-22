@@ -43,6 +43,40 @@ milliseconds or strings such as `"10 minutes"`; retry attempts are bounded from
 `"collect"` returns structured task results for failed branches. Step budgets
 are output-token limits checked after the step settles.
 
+### Read-only agent tool policy
+
+V4 `ctx.agent()` options may set `readOnly: true`. The effective capability is
+snapshotted per agent call; omitted or false preserves the existing default
+model-facing tool set. This restricts model-facing tool dispatch to exactly Pi
+`read`, `grep`, `find`, and `ls`; `edit`, `write`, `bash`, `powershell`,
+recursive subagent/workflow tools, and arbitrary extension tools including
+`mcp__*`, `list_mcp_resources`, `list_mcp_resource_templates`, and
+`read_mcp_resource` are unavailable. In-process native schema capture
+additionally permits the internal `structured_output` return tool.
+
+This is not an OS sandbox or path-confinement mechanism. Allowed file tools are
+not restricted to paths named in the prompt, and host/extension code continues
+to run with the same OS-user access. Prompt organization such as shared
+`# Goal` / `# Contract` and per-agent `# Target` / `# Change` / `# Acceptance`
+does not enforce semantic scope. The workflow's existing step records remain
+the progress source; this adds no separate ledger or scheduler.
+
+Process-backed read-only children return final assistant prose/JSON directly;
+they cannot use the ordinary `write`/shell output handoff. The trusted host
+captures their final output into the existing artifact before authoritative
+settlement. The process-selected SDK schema fallback deliberately remains text
+JSON; the parent workflow extracts and validates the captured result against
+the schema. This host-owned capture is separate from model-facing tool access.
+
+`readOnly` does not change the existing isolation default. If a non-durable
+process launch is unavailable, in-process fallback retains the restriction;
+durable process launch fails closed rather than falling back to an unrestricted
+child. Schema-repair retries, outer retries, durable attempts, and recovery
+preserve the effective policy. Durable step/cache compatibility and attempt
+manifests include that policy, so a stored result with a different capability
+is incompatible and a mismatched process attempt cannot be adopted as a
+restricted agent.
+
 `ctx.budget` reports the completed output-token total and remaining soft
 budget. `ctx.budget.assertAvailable(amount)` checks a non-negative finite token
 amount against the current remaining budget and throws if it is insufficient.

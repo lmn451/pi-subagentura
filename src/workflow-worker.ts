@@ -383,6 +383,18 @@ async function executeScript(
 
     const prompt = payload.prompt;
     const agentOpts = payload.opts ?? {};
+    if (
+      agentOpts.readOnly !== undefined &&
+      typeof agentOpts.readOnly !== "boolean"
+    ) {
+      throw new WorkflowFailureError(
+        "agent(prompt): readOnly must be a boolean.",
+        {
+          errorCategory: "schema",
+          errorStage: "schema_validation",
+        },
+      );
+    }
     const localAbort = engine.rpcAborts.get(requestId);
     const agentSignal = localAbort
       ? AbortSignal.any([engine.signal, localAbort.signal])
@@ -445,6 +457,7 @@ async function executeScript(
                   agentOpts.schema,
                   attempt,
                   lastErr,
+                  agentOpts.readOnly === true,
                 )
               : buildInProcessSchemaPrompt(prompt, attempt, lastErr)
             : prompt;
@@ -470,6 +483,7 @@ async function executeScript(
               model: agentOpts.model,
               signal: agentSignal,
               isolation,
+              ...(agentOpts.readOnly === true ? { readOnly: true } : {}),
               label: agentOpts.label,
               ...(hasSchema && !isProcess ? { schema: agentOpts.schema } : {}),
               onCancellationSnapshot: engine.onCancellationSnapshot,
@@ -981,14 +995,19 @@ function buildProcessSchemaPrompt(
   schema: unknown,
   attempt: number,
   lastErr: string,
+  readOnly: boolean,
 ): string {
   const schemaText = JSON.stringify(schema, null, 2);
   const retry =
     attempt > 0
       ? `\n\nYour previous response did not satisfy the schema (${lastErr}). Return corrected JSON only.`
       : "";
+  const capabilityNotice = readOnly
+    ? "As a read-only process agent, return final JSON directly in your response. Do not write an output file or invoke a CLI."
+    : "";
   return (
     `${prompt}\n\n` +
+    (capabilityNotice ? `${capabilityNotice}\n\n` : "") +
     `Respond with ONLY a single JSON value that conforms to this JSON Schema. ` +
     `No prose, no markdown fences, no commentary.\n\nJSON Schema:\n${schemaText}${retry}`
   );
