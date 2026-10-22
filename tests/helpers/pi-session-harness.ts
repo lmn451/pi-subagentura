@@ -171,10 +171,10 @@ export async function createPiSessionHarness(
     streamSimple: (
       _model: unknown,
       context: TranscriptContext,
-      requestOptions: { reasoning?: string },
+      requestOptions?: { reasoning?: string },
     ) => {
       contexts.push(context);
-      thinkingLevels.push(requestOptions.reasoning);
+      thinkingLevels.push(requestOptions?.reasoning);
       const stream = createAssistantMessageEventStream();
       if (options.providerErrorUrl) {
         void fetch(options.providerErrorUrl).then(async (response) => {
