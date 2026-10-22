@@ -101,6 +101,7 @@
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",
     "src/workflow-core.ts",
+    "src/workflow-disclosure.ts",
     "src/workflow-script.ts",
     "src/workflow-script.mjs",
     "src/workflow-script.d.mts",

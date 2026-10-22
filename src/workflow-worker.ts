@@ -51,6 +51,7 @@ import {
   type WorkflowProgressUpdate,
   type WorkflowRunResultWithUsage,
   WorkflowExecutionError,
+  WorkflowPrivateDiagnosticError,
   WorkflowFailureError,
   WorkflowWallTimeoutError,
   type WorkflowUsage,
@@ -276,12 +277,19 @@ export async function runWorkflow(
     if (!abort.signal.aborted) abort.abort(error);
     await drainActiveAgentRuns(engine);
     if (error instanceof WorkflowExecutionError && error.usage) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    const executionError = new WorkflowExecutionError(
-      message,
-      usageIfPresent(engine.usage),
-      cause,
-    );
+    const message = localFailureMessage(error);
+    const executionError =
+      error instanceof WorkerTerminalFailure
+        ? new WorkflowPrivateDiagnosticError(
+            message,
+            usageIfPresent(engine.usage),
+            cause,
+          )
+        : new WorkflowExecutionError(
+            message,
+            usageIfPresent(engine.usage),
+            cause,
+          );
     if ((error as { cancelled?: unknown } | null)?.cancelled === true) {
       Object.assign(executionError, {
         cancelled: true,
@@ -345,6 +353,15 @@ class WorkerTerminalFailure extends Error {
     this.name = "WorkerTerminalFailure";
     this.originalCause = originalCause;
   }
+}
+
+function localFailureMessage(error: unknown): string {
+  if (error instanceof WorkerTerminalFailure) {
+    const cause = error.originalCause;
+    if (cause instanceof Error) return cause.message;
+    if (cause !== undefined) return String(cause);
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function executeScript(
@@ -461,10 +478,10 @@ async function executeScript(
                   prompt,
                   agentOpts.schema,
                   attempt,
-                  lastErr,
+                  lastErr !== "",
                   agentOpts.readOnly === true,
                 )
-              : buildInProcessSchemaPrompt(prompt, attempt, lastErr)
+              : buildInProcessSchemaPrompt(prompt, attempt, lastErr !== "")
             : prompt;
           let res: SubagentResult;
           const activeRun: ActiveAgentRun = {
@@ -666,7 +683,7 @@ async function executeScript(
       engine.counters.errorCount++;
       emit({
         kind: "log",
-        message: `agent(schema) failed after ${attempts} attempts: ${lastErr}`,
+        message: `agent(schema) failed after ${attempts} attempts; response did not satisfy the schema.`,
       });
       callFailure ??= {
         errorCategory: "schema",
@@ -848,7 +865,12 @@ function runWorkflowWorker(
           } else if (workflowFailureClassification(err)) {
             runnerFailures.set(msg.id, err);
           }
-          const error = err instanceof Error ? err.message : String(err);
+          const error =
+            err instanceof WorkerRpcFailure
+              ? "Workflow agent failed."
+              : err instanceof Error
+                ? err.message
+                : String(err);
           const tokensDelta =
             err instanceof WorkerRpcFailure ? err.tokensDelta : 0;
           return {
@@ -999,13 +1021,13 @@ function buildProcessSchemaPrompt(
   prompt: string,
   schema: unknown,
   attempt: number,
-  lastErr: string,
+  hasPreviousError: boolean,
   readOnly: boolean,
 ): string {
   const schemaText = JSON.stringify(schema, null, 2);
   const retry =
-    attempt > 0
-      ? `\n\nYour previous response did not satisfy the schema (${lastErr}). Return corrected JSON only.`
+    attempt > 0 && hasPreviousError
+      ? `\n\nThe previous response was not valid JSON or did not satisfy the JSON Schema. Return corrected JSON only.`
       : "";
   const capabilityNotice = readOnly
     ? "As a read-only process agent, return final JSON directly in your response. Do not write an output file or invoke a CLI."
@@ -1017,19 +1039,17 @@ function buildProcessSchemaPrompt(
     `No prose, no markdown fences, no commentary.\n\nJSON Schema:\n${schemaText}${retry}`
   );
 }
+
 function buildInProcessSchemaPrompt(
   prompt: string,
   attempt: number,
-  lastErr: string,
+  hasPreviousError: boolean,
 ): string {
   const retry =
-    attempt > 0
-      ? `\n\nYour previous response did not include a valid structured_output call (${lastErr}). Retry using a single tool call.`
+    attempt > 0 && hasPreviousError
+      ? `\n\nThe previous response was not valid JSON or did not satisfy the JSON Schema. Retry using a single structured_output call.`
       : "";
-  return (
-    `${prompt}${retry}` +
-    `\n\nUse the structured_output tool as your ONLY final action.`
-  );
+  return `${prompt}${retry}\n\nUse the structured_output tool as your ONLY final action.`;
 }
 
 // ── multiplexer process-backed agents ────────────────────────────────

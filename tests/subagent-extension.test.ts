@@ -120,6 +120,68 @@ describe("extension registration", () => {
     );
   });
 
+  it("redacts historical workflow failures before provider context is built", () => {
+    const api = mockApi();
+    registerExtension(api as any);
+    const contextHandler = api.on.mock.calls.find(
+      ([event]: any[]) => event === "context",
+    )?.[1];
+    expect(contextHandler).toBeTypeOf("function");
+    const marker = "PRIVATE_HISTORICAL_WORKFLOW_ERROR_CANARY";
+    const failure = {
+      role: "toolResult",
+      toolCallId: "call-private",
+      toolName: "get_workflow_result",
+      content: [{ type: "text", text: `Workflow failed: ${marker}` }],
+      details: { status: "error", error: marker },
+      isError: true,
+      timestamp: 1,
+    };
+    const legacyNotification = {
+      role: "custom",
+      customType: "workflow-notify",
+      content: `Workflow failed: ${marker}`,
+      details: { status: "error", workflowId: "wf_private" },
+      display: true,
+      timestamp: 2,
+    };
+    const listFailure = {
+      role: "toolResult",
+      toolCallId: "call-list",
+      toolName: "list_workflow_runs",
+      content: [
+        { type: "text", text: "wfd_private private-diagnostic: error" },
+      ],
+      details: {
+        runs: [{ workflowId: "wfd_private", status: "error", error: marker }],
+      },
+      isError: false,
+      timestamp: 3,
+    };
+    const success = {
+      role: "toolResult",
+      toolCallId: "call-success",
+      toolName: "get_workflow_result",
+      content: [{ type: "text", text: "safe result" }],
+      details: { status: "done", result: "safe result" },
+      isError: false,
+      timestamp: 2,
+    };
+    const result = contextHandler(
+      {
+        type: "context",
+        messages: [failure, legacyNotification, listFailure, success],
+      },
+      {},
+    );
+    expect(JSON.stringify(result)).not.toContain(marker);
+    expect(result.messages[0].details.status).toBe("error");
+    expect(result.messages[0].content[0].text).toContain("diagnostic");
+    expect(result.messages[1].content).toContain("diagnostic");
+    expect(result.messages[2].details.runs[0].error).toContain("diagnostic");
+    expect(result.messages[3]).toEqual(success);
+  });
+
   it("adds default-preservation guidance to every tool", () => {
     const api = mockApi();
 

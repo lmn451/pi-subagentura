@@ -76,8 +76,29 @@ the progress source; this adds no separate ledger or scheduler.
 V4 definitions use project-scoped durable storage by default. Pass
 `durable: false` for a non-durable run. Completed durable steps are reused only
 when source definition, stable path, inputs, and policy remain compatible. A
-changed source hash causes the step to run again. `persist: false` avoids
-storing a step output; `cache: false` and `resume: false` disable reuse.
+changed source hash causes the step to run again. `persist: false` omits a step
+output from durable storage; `cache: false` and `resume: false` disable reuse.
+This is a storage setting, not permission to disclose data to a model or
+provider. In particular, `persist: false` does not authorize sharing validation
+diagnostics or agent-thrown errors.
+
+Schema retries use generic feedback and do not include unexpected property
+names/paths, parser details, or other raw diagnostics. Failed workflow status,
+result, run-list, and automatic notification surfaces likewise return generic
+summaries. Historical failed workflow tool results and tagged legacy workflow
+error notifications are redacted again when Pi builds later model context. Raw
+agent failure text may remain in the local durable journal, but is not copied
+into retry configuration or telemetry.
+
+Optional diagnostic sharing is currently unavailable and fails closed. In the
+Pi SDK version tested for this patch, `before_provider_request` exposes only
+an unknown payload, not the concrete physical provider/model/endpoint selected
+before dispatch. The session model can also be a virtual selection. A pre-send
+grant therefore cannot be bound to the actual destination. This implementation
+does not prompt for consent or send raw diagnostics; workflow invocation,
+`ctx.ask()`, and `ctx.gate()` are not disclosure consent. Generic retries
+continue normally.
+
 `checkpoint` values and artifact references persist; artifact content is kept
 in a separate bounded private file. V4 status snapshots omit step inputs,
 policies, outputs, and human answers.

@@ -79,6 +79,98 @@ describe("private V4 agent results", () => {
     }
   });
 
+  it.each([
+    {
+      name: "undeclared property in-process",
+      isolation: "in-process",
+      output:
+        '{"answer":"ok","PRIVATE_DIAGNOSTIC_PROPERTY":"PRIVATE_DIAGNOSTIC_VALUE"}',
+      marker: "PRIVATE_DIAGNOSTIC_PROPERTY",
+      feedback: "did not satisfy the JSON Schema",
+    },
+    {
+      name: "undeclared property process",
+      isolation: "process",
+      output:
+        '{"answer":"ok","PRIVATE_DIAGNOSTIC_PROPERTY":"PRIVATE_DIAGNOSTIC_VALUE"}',
+      marker: "PRIVATE_DIAGNOSTIC_PROPERTY",
+      feedback: "did not satisfy the JSON Schema",
+    },
+    {
+      name: "malformed JSON in-process",
+      isolation: "in-process",
+      output: '{"answer":"PRIVATE_JSON_PARSER_VALUE"',
+      marker: "PRIVATE_JSON_PARSER_VALUE",
+      feedback: "not valid JSON",
+    },
+    {
+      name: "malformed JSON process",
+      isolation: "process",
+      output: '{"answer":"PRIVATE_JSON_PARSER_VALUE"',
+      marker: "PRIVATE_JSON_PARSER_VALUE",
+      feedback: "not valid JSON",
+    },
+  ])(
+    "retries $name with generic feedback instead of diagnostic details",
+    async ({ isolation, output, marker, feedback }) => {
+      const script = `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+        export default defineWorkflow({ name: "generic-schema", version: 1,
+          async run(ctx) {
+            const outcome = await ctx.agent("private", {
+              prompt: "private work", isolation: "${isolation}",
+              persist: false, failure: "collect",
+              output: schema.object({ answer: schema.string() })
+            });
+            return outcome.ok;
+          }
+        });`;
+      const { store, scope } = await fixture(script);
+      const durable = new DurableWorkflow(store);
+      const prompts: string[] = [];
+      const progress: unknown[] = [];
+      await runWorkflow(script, {
+        cwd: scope.cwd,
+        budgetTotal: 1000,
+        durable,
+        onProgress: (event) => progress.push(event),
+        runAgent: async ({ prompt }) => {
+          prompts.push(prompt);
+          return { ...ok(), output };
+        },
+      });
+      durable.stop();
+      await durable.drain();
+      expect(prompts).toHaveLength(3);
+      expect(prompts.join("\n")).not.toContain(marker);
+      expect(prompts.slice(1).join("\n")).toContain(feedback);
+      expect(JSON.stringify(progress)).not.toContain(marker);
+      expect(JSON.stringify(progress)).not.toContain(
+        "PRIVATE_DIAGNOSTIC_VALUE",
+      );
+      await store.close();
+      const reopened = await WorkflowRunStore.resume(scope, store.id);
+      stores.push(reopened);
+      const attempts = reopened.events.filter(
+        (event) => event.kind === "attempt",
+      );
+      expect(attempts).toHaveLength(3);
+      expect(JSON.stringify(attempts)).not.toContain(marker);
+    },
+  );
+
+  it("does not expose thrown agent error details to workflow scripts", async () => {
+    const marker = "PRIVATE_UNCAUGHT_AGENT_ERROR_CANARY";
+    const script = `export const meta = { name: "private-agent-error", description: "d" };
+      try { await agent("private"); } catch (error) { return error.message; }`;
+    const result = await runWorkflow(script, {
+      runAgent: async () => {
+        throw new Error(marker);
+      },
+    });
+    expect(result.result).toBe("Workflow agent failed.");
+    expect(JSON.stringify(result)).not.toContain(marker);
+  });
+
   it("keeps collected agent failure content out of persisted receipts", async () => {
     const script = `import { defineWorkflow } from "pi-subagentura/workflow";
       export default defineWorkflow({ name: "private-failure", version: 1,

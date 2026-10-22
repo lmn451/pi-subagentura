@@ -52,7 +52,16 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
-import { completionDisplayLabel } from "./completion-presentation";
+import { sanitizeOutput } from "./notifications";
+import {
+  modelSafeWorkflowErrorMessage,
+  safeWorkflowDiagnosticMessage,
+  sanitizeWorkflowDiagnosticDetails,
+} from "./workflow-disclosure";
+import {
+  completionDisplayLabel,
+  formatCompletionMessage,
+} from "./completion-presentation";
 import { showWorkflowTree } from "./workflow-tree-ui";
 import {
   WorkflowPickerComponent,
@@ -271,6 +280,28 @@ function workflowErrorUsage(error: unknown): WorkflowUsage | undefined {
     : undefined;
 }
 
+export function formatWorkflowNotificationSummary(
+  job: WorkflowJobState,
+): string {
+  const run = job.result;
+  if (run) {
+    const usage = presentWorkflowUsage(run.usage);
+    const usageSummary = usage
+      ? `, ${formatWorkflowUsage(usage, {
+          outputBudget: job.snapshot.budgetTotal,
+        })}`
+      : "";
+    return `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${usageSummary}.`;
+  }
+  const usage = presentWorkflowUsage(job.snapshot.usage);
+  return `${safeWorkflowDiagnosticMessage()}${
+    usage
+      ? ` (${formatWorkflowUsage(usage, {
+          outputBudget: job.snapshot.budgetTotal,
+        })})`
+      : ""
+  }`;
+}
 function workflowReadLatencyMs(job: WorkflowJobState): number | undefined {
   if (job.completedAt === undefined) return undefined;
   try {
@@ -1286,7 +1317,7 @@ export function registerWorkflowTool(
           },
         };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         emitWorkflowResultReadTelemetry(
           job,
           workflowOwner,
@@ -1386,7 +1417,7 @@ export function registerWorkflowTool(
               (st.snapshot.currentPhase
                 ? `, phase: ${st.snapshot.currentPhase}`
                 : "") +
-              (st.error ? `\nerror: ${st.error}` : ""),
+              (st.error ? `\n${safeWorkflowDiagnosticMessage()}` : ""),
           },
         ],
         details: {
@@ -1399,7 +1430,7 @@ export function registerWorkflowTool(
           workflowId: st.id,
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
-          ...st.snapshot,
+          ...sanitizeWorkflowDiagnosticDetails(st.snapshot),
         },
         structuredContent: {
           status: st.status,
@@ -1515,7 +1546,7 @@ export function registerWorkflowTool(
         run = waitResult.value!;
       } catch (err) {
         // Non-abort errors preserve the original structured handling
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};
