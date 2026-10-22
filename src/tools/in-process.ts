@@ -2,13 +2,13 @@ import {
   convertToLlm,
   serializeConversation,
   type ExtensionAPI,
+  type ExtensionToolContext,
   type ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { homedir } from "node:os";
@@ -35,10 +35,11 @@ import {
   type JobDeliveryOwner,
   type JobState,
   type JobStatus,
-  type SubagentLiveStatus,
+  type StartSubagentJobParams,
   type SubagentResult,
   type Usage,
 } from "../helpers";
+import type { SubagentDetails } from "../subagent";
 import { resolveSpawnDepth } from "../orchestration-context";
 import {
   getStartedSessionScopes,
@@ -139,30 +140,15 @@ function structuredInProcessUsage(
   return output;
 }
 
-interface RunningFooterContext {
-  cwd?: string;
-  ui: {
-    setStatus(key: string, value?: string): void;
-  };
-}
+type RunningFooterContext = Partial<Pick<ExtensionToolContext, "cwd">> & {
+  ui: Pick<ExtensionToolContext["ui"], "setStatus">;
+};
 
 type InProcessSubagentDetails =
-  | { status: "started"; jobId: string; contextMessages: number }
-  | {
-      status: "running";
-      subagentStatus: SubagentLiveStatus;
-      model?: string;
-      thinkingLevel?: ThinkingLevel;
-    }
-  | {
-      status: "done" | "error";
-      usage: Usage;
-      model?: string;
-      usageSummary?: string;
-      thinkingLevel?: ThinkingLevel;
-      contextMessages?: number;
-    }
-  | { status: "cancelled" | "not_found"; jobId?: string };
+  | (SubagentDetails & { jobId?: string })
+  | { status: "wait_cancelled"; jobId: string }
+  | { status: "wait_timeout"; jobId: string; timeoutMs: number }
+  | { status?: undefined; jobId: string };
 
 function updateRunningFooter(
   ctx: RunningFooterContext,
@@ -180,12 +166,8 @@ const ZERO_USAGE: Usage = {
   turns: 0,
 };
 
-interface SpawnContext {
-  sessionManager?: { getSessionId?: () => string };
-}
-
 /** Resolve depth/ownership for a new spawn, plus the root session id for logs. */
-function resolveSpawn(ctx: SpawnContext) {
+function resolveSpawn(ctx: ExtensionToolContext) {
   const spawn = resolveSpawnDepth();
   let rootSessionId = spawn.rootSessionId;
   if (!rootSessionId) {
@@ -372,7 +354,7 @@ function captureSyncResultRead(
 
 function captureDeliveryOwner(
   pi: ExtensionAPI,
-  ctx: SpawnContext,
+  ctx: ExtensionToolContext,
   owner: SessionOwnerToken | undefined,
 ): JobDeliveryOwner {
   let sessionId: string | undefined;
@@ -637,8 +619,8 @@ async function runSubagent(
   cwd: string,
   contextText: string | null,
   signal: AbortSignal | undefined,
-  onUpdate: ((partial: AgentToolResult<any>) => void) | undefined,
-  defaultModel: Model<any> | undefined,
+  onUpdate: StartSubagentJobParams["onUpdate"],
+  defaultModel: StartSubagentJobParams["defaultModel"],
   parentModelRegistry: ModelRegistry | undefined,
   thinkingLevel: ThinkingLevel | undefined,
   depth: number | undefined,
@@ -763,7 +745,13 @@ function registerSubagentWithContextTool(
     ].join("\n"),
     parameters: BaseParams,
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const spawnRequestedAt = Date.now();
       const runAsync = params.async ?? true;
       const preflightTelemetry = telemetryForSpawnFailure(
@@ -1191,7 +1179,13 @@ function registerSubagentIsolatedTool(
     ].join("\n"),
     parameters: BaseParams,
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const spawnRequestedAt = Date.now();
       const runAsync = params.async ?? true;
       const preflightTelemetry = telemetryForSpawnFailure(
@@ -1539,7 +1533,7 @@ function registerGetSubagentStatusTool(
       _signal,
       _onUpdate,
       _ctx,
-    ): Promise<AgentToolResult<unknown>> {
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const execution = resolveExecutionOwner(toolToken);
       if (!execution) {
         return {
@@ -1642,7 +1636,7 @@ function registerGetSubagentStatusTool(
     },
 
     renderResult(result, options, theme, context) {
-      const details = result.details as InProcessSubagentDetails | undefined;
+      const details = result.details;
       if (details?.status === "running") {
         return renderSubagentResult(
           result,
@@ -1680,7 +1674,7 @@ function registerGetSubagentResultTool(
       signal,
       _onUpdate,
       _ctx,
-    ): Promise<AgentToolResult<unknown>> {
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const execution = resolveExecutionOwner(toolToken);
       if (!execution) {
         return {
@@ -1766,10 +1760,9 @@ function registerGetSubagentResultTool(
                 : `Job ${params.jobId} continues in the background.`,
             },
           ],
-          details: {
-            ...(live.details as Record<string, unknown>),
-            jobId: params.jobId,
-          },
+          details: live.details
+            ? { ...live.details, jobId: params.jobId }
+            : { jobId: params.jobId },
           structuredContent: {
             status: "running",
             jobId: params.jobId,
@@ -2013,9 +2006,7 @@ function registerCancelSubagentTool(
 
       let initiator: string | undefined;
       try {
-        initiator = (
-          ctx as { sessionManager?: { getSessionId?: () => string } }
-        ).sessionManager?.getSessionId?.();
+        initiator = ctx.sessionManager?.getSessionId?.();
       } catch {
         initiator = undefined;
       }

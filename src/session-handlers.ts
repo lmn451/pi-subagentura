@@ -4,7 +4,10 @@
  * on registration and public exports.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
   hasPersistedTelemetryField,
@@ -147,7 +150,7 @@ function ensureInteractivePoller(globalState: any): void {
 
 function sessionIdForScope(
   scope: SessionScope,
-  fallbackManager?: { getSessionId?: () => string },
+  fallbackManager?: ExtensionContext["sessionManager"],
 ): string | undefined {
   try {
     return (scope.sessionManager ?? fallbackManager)?.getSessionId?.();
@@ -342,10 +345,7 @@ function cleanupScopeGeneration(
   owner: SessionOwnerToken,
   event: { reason?: string } | undefined,
   lifecycleOrigin: "session_start" | "session_shutdown",
-  ctx?: {
-    cwd?: string;
-    sessionManager?: { getSessionId?: () => string };
-  },
+  ctx?: ExtensionContext,
 ): void {
   const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;

@@ -13,10 +13,11 @@ import {
   getBuiltinProviders,
   type BuiltinProvider,
 } from "@earendil-works/pi-ai/providers/all";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 import type {
   AgentToolResult,
+  AgentToolUpdateCallback,
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 
@@ -30,12 +31,12 @@ import {
   type ExtensionUIContext,
   type ModelRegistry,
   type ModelRuntime,
-  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
   createWorkflowStructuredOutputTool,
   type WorkflowStructuredOutputCapture,
 } from "./workflow-structured-output";
+import type { SubagentDetails } from "./subagent";
 import {
   snapshotInProcessSession,
   type CancellationSnapshotReceipt,
@@ -736,9 +737,9 @@ export function generateJobId(): InProcessJobId {
  */
 export function resolveModel(
   modelId: string | undefined,
-  defaultModel: Model<any> | undefined,
+  defaultModel: Model<Api> | undefined,
   parentModelRegistry?: ModelRegistry,
-) {
+): Model<Api> | undefined {
   if (!modelId) return defaultModel;
 
   // Only exact matching — no fuzzy/substring guessing.
@@ -747,11 +748,11 @@ export function resolveModel(
     if (modelId.includes("/")) {
       const [provider, id] = modelId.split("/", 2);
       const exact = parentModelRegistry.find(provider, id);
-      if (exact) return exact as any;
+      if (exact) return exact;
     } else {
       // Bare id — search all models in parent registry
       for (const m of parentModelRegistry.getAll()) {
-        if (m.id === modelId) return m as any;
+        if (m.id === modelId) return m;
       }
     }
   }
@@ -811,7 +812,7 @@ export function formatUsage(u: Usage, model?: string): string {
 export function buildLiveUpdate(
   status: SubagentLiveStatus,
   model?: string,
-): AgentToolResult<any> {
+): AgentToolResult<Extract<SubagentDetails, { status: "running" }>> {
   return {
     content: [{ type: "text", text: status.output }],
     details: {
@@ -832,8 +833,10 @@ export interface StartSubagentJobParams {
   cwd: string;
   contextText: string | null;
   signal: AbortSignal | undefined;
-  onUpdate: ((partial: AgentToolResult<any>) => void) | undefined;
-  defaultModel: Model<any> | undefined;
+  onUpdate:
+    | AgentToolUpdateCallback<Extract<SubagentDetails, { status: "running" }>>
+    | undefined;
+  defaultModel: Model<Api> | undefined;
   maxAge?: number;
   /** Parent session's model registry for resolving extension-added models (e.g. minimax) */
   parentModelRegistry?: ModelRegistry;
@@ -937,7 +940,7 @@ export async function startSubagentJob(
 
   // Resolve model: exact match only, fallback to default
   // Uses parent's modelRegistry to find extension-added models (e.g. minimax)
-  let targetModel: Model<any> | undefined;
+  let targetModel: Model<Api> | undefined;
   try {
     targetModel = resolveModel(
       modelOverride,
@@ -1046,7 +1049,7 @@ export async function startSubagentJob(
         modelRuntime: sessionRuntime,
         ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(workflowStructuredOutputTool
-          ? { customTools: [workflowStructuredOutputTool as ToolDefinition] }
+          ? { customTools: [workflowStructuredOutputTool] }
           : {}),
       })
     ).session;

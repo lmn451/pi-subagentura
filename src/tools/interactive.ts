@@ -1186,7 +1186,7 @@ export function registerInteractiveSubagentTools(
       const thinking = details?.thinkingLevel
         ? ` · thinking: ${details.thinkingLevel}`
         : "";
-      if ((result as any).isError) {
+      if (result.isError) {
         const first = result.content?.[0];
         const text =
           first?.type === "text"

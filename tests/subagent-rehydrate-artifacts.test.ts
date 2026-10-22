@@ -1,6 +1,7 @@
 /**
  * Tests protocol-v2 artifact-derived rehydration and owner-scoped delivery queues.
  */
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -226,10 +227,17 @@ describe("rehydrateInteractiveSubagents", () => {
     const id = "pending-group-membership";
     const artDir = join(cwd, id);
     mkdirSync(artDir, { recursive: true });
-    const entries: unknown[] = [];
+    const entries: SessionEntry[] = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       }),
       sendMessage: vi.fn(),
     };
@@ -279,12 +287,10 @@ describe("rehydrateInteractiveSubagents", () => {
     flushDeliveries(pi as never, undefined, sessionOwner(completionScope));
 
     const completion = entries.find(
-      (entry) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        (entry as { customType?: unknown }).customType ===
-          "subagentura-completion",
-    ) as { data?: unknown } | undefined;
+      (entry): entry is Extract<SessionEntry, { type: "custom" }> =>
+        entry.type === "custom" &&
+        entry.customType === "subagentura-completion",
+    );
     expect(completion?.data).toMatchObject({
       source: "interactive",
       sourceId: id,
@@ -306,10 +312,17 @@ describe("rehydrateInteractiveSubagents", () => {
     const id = "pending-each-stale-group";
     const artDir = join(cwd, id);
     mkdirSync(artDir, { recursive: true });
-    const entries: unknown[] = [];
+    const entries: SessionEntry[] = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       }),
       sendMessage: vi.fn(),
     };
@@ -385,10 +398,12 @@ describe("rehydrateInteractiveSubagents", () => {
 
     const completions = entries
       .filter(
-        (entry): entry is { customType: string; data: unknown } =>
-          typeof entry === "object" &&
-          entry !== null &&
-          "customType" in entry &&
+        (
+          entry,
+        ): entry is Extract<SessionEntry, { type: "custom" }> & {
+          data: unknown;
+        } =>
+          entry.type === "custom" &&
           entry.customType === "subagentura-completion" &&
           "data" in entry,
       )
@@ -418,10 +433,17 @@ describe("rehydrateInteractiveSubagents", () => {
     const artDir = join(cwd, id);
     mkdirSync(artDir, { recursive: true });
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    const entries: unknown[] = [];
+    const entries: SessionEntry[] = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       }),
       sendMessage: vi.fn(),
     };
@@ -497,10 +519,8 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(
       entries.filter(
         (entry) =>
-          typeof entry === "object" &&
-          entry !== null &&
-          (entry as { customType?: unknown }).customType ===
-            "subagentura-completion",
+          entry.type === "custom" &&
+          entry.customType === "subagentura-completion",
       ),
     ).toHaveLength(1);
     expect(

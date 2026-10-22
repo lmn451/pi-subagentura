@@ -47,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wake; preserve the existing request/acknowledgement ledger schema.
 - Rename the minimum SDK CI check to `Test (Pi 1.2.0)` and keep required check
   names synchronized with the repository ruleset.
+- Check tool definitions, session/context projections, model resolution, and
+  result callbacks against public Pi SDK types instead of local SDK-shaped
+  interfaces and broad casts; retain extension-owned state and result protocols.
 
 ## [4.0.1] - 2026-10-18
 

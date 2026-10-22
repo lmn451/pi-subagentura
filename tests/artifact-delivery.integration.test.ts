@@ -16,6 +16,7 @@ import { readActiveTurn } from "../src/child-protocol";
 import {
   ModelRegistry,
   type ExtensionAPI,
+  type SessionEntry,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -441,9 +442,12 @@ describe("protocol-v2 artifact delivery", () => {
       pi: pi as any,
       sessionManager: {
         getSessionId: () => "parent-session",
-        getEntries: () =>
-          entries.map(({ customType, data }) => ({
+        getEntries: (): SessionEntry[] =>
+          entries.map<SessionEntry>(({ customType, data }, index) => ({
             type: "custom",
+            id: `test-entry-${index}`,
+            parentId: index === 0 ? null : `test-entry-${index - 1}`,
+            timestamp: "1970-01-01T00:00:00.000Z",
             customType,
             data,
           })),
@@ -547,9 +551,12 @@ describe("protocol-v2 artifact delivery", () => {
         pi: pi as any,
         sessionManager: {
           getSessionId: () => "parent-session",
-          getEntries: () =>
-            entries.map(({ customType, data }) => ({
+          getEntries: (): SessionEntry[] =>
+            entries.map<SessionEntry>(({ customType, data }, index) => ({
               type: "custom",
+              id: `test-entry-${index}`,
+              parentId: index === 0 ? null : `test-entry-${index - 1}`,
+              timestamp: "1970-01-01T00:00:00.000Z",
               customType,
               data,
             })),
@@ -705,9 +712,12 @@ describe("protocol-v2 artifact delivery", () => {
         pi: pi as any,
         sessionManager: {
           getSessionId: () => "parent-session",
-          getEntries: () =>
-            entries.map(({ customType, data }) => ({
+          getEntries: (): SessionEntry[] =>
+            entries.map<SessionEntry>(({ customType, data }, index) => ({
               type: "custom",
+              id: `test-entry-${index}`,
+              parentId: index === 0 ? null : `test-entry-${index - 1}`,
+              timestamp: "1970-01-01T00:00:00.000Z",
               customType,
               data,
             })),

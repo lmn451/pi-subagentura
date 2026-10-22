@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -63,7 +66,7 @@ describe("result collection during receipt storage failure", () => {
   let scope: SessionScope;
   let receiptPath: string;
   let unavailable: boolean;
-  let entries: Array<{ type: string; customType: string; data: unknown }>;
+  let entries: SessionEntry[];
   let tools: Map<
     string,
     { outputSchema?: TSchema; execute: (...args: any[]) => Promise<any> }
@@ -84,7 +87,14 @@ describe("result collection during receipt storage failure", () => {
         if (unavailable && customType === "subagentura-completion-consumed") {
           throw new Error("receipt storage unavailable");
         }
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       },
     } as unknown as ExtensionAPI;
     scope = registerSessionScope({
@@ -145,7 +155,9 @@ describe("result collection during receipt storage failure", () => {
   function expectDurableConsumption(): void {
     expect(
       entries.some(
-        (entry) => entry.customType === "subagentura-completion-consumed",
+        (entry) =>
+          entry.type === "custom" &&
+          entry.customType === "subagentura-completion-consumed",
       ),
     ).toBe(true);
     clearCompletionCoordinator(sessionOwner(scope));
@@ -450,7 +462,9 @@ describe("result collection during receipt storage failure", () => {
     );
     expect(
       entries.some(
-        (entry) => entry.customType === "subagentura-completion-consumed",
+        (entry) =>
+          entry.type === "custom" &&
+          entry.customType === "subagentura-completion-consumed",
       ),
     ).toBe(false);
     expect(prepareCompletionManifest(sessionOwner(scope))).toBeDefined();

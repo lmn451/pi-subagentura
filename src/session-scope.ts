@@ -1,5 +1,6 @@
 import type {
   ExtensionAPI,
+  ExtensionContext,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import type { JobState } from "./helpers";
@@ -12,11 +13,12 @@ const SESSION_SCOPE_ID_COUNTER_KEY = "__piSubagenturaSessionScopeIdCounter";
 
 export type SessionScopeLifecycle = "registered" | "started" | "shutdown";
 
-export interface SessionScopeManager {
-  getEntries?: () => unknown[];
-  getSessionId?: () => string;
-  getSessionDir?: () => string;
-}
+export interface SessionScopeManager extends Partial<
+  Pick<
+    ExtensionContext["sessionManager"],
+    "getEntries" | "getSessionId" | "getSessionDir"
+  >
+> {}
 
 /** Mutable state owned by one extension registration and lifecycle generation. */
 export interface SessionScope {
