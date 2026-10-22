@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Keep transient mux-liveness uncertainty in local debug logs; anonymous
+  `mux_probe` runtime failures now report only when a workflow waiter exhausts
+  its grace and is blocked, with `impact=blocked`. Shared pane-episode dedupe
+  remains; other runtime failures and liveness/artifact handling are unchanged.
+
 ## [4.0.1] - 2026-10-18
 
 ### Fixed

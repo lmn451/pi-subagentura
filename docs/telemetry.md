@@ -8,19 +8,19 @@ facts for historical schema-v5 events.
 
 ## Measurement contract
 
-| Measurement                                 | Unit                                                     | Meaning                                                           |
-| ------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------- |
-| `session_started`                           | Fresh root logical session/tree                          | Not a person, installation, process, reload, or resume            |
-| `operation_completed`                       | Entered tool/command/shortcut handler                    | Handler result, not proof the requested objective succeeded       |
-| `agent_spawn_failed`                        | Rejected technical launch attempt                        | May precede an accepted automatic fallback                        |
-| `agent_created`                             | Accepted in-process agent or registered interactive pane | Actual execution/backend volume                                   |
-| `agent_launch_resolved`                     | Requested child launch                                   | Exactly one observed resolution, including its automatic fallback |
-| `task_completed`, `unit=job`                | In-process job                                           | Terminal execution outcome                                        |
-| `task_completed`, `unit=turn`               | Interactive turn                                         | One pane can execute multiple turns                               |
-| `workflow_completed`                        | Whole workflow invocation                                | Aggregate, not another child task                                 |
-| `runtime_failure`, `failure_kind=mux_probe` | Observed pane-level unknown-liveness episode             | Not a confirmed process death or independent backend outage       |
-| `completion_delivered`                      | Manifest/notification dispatch batch                     | `count` is the bounded number of included completion records      |
-| `result_read`                               | Result read                                              | Not the same unit as dispatch batches or completion records       |
+| Measurement                                 | Unit                                                     | Meaning                                                                                                   |
+| ------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `session_started`                           | Fresh root logical session/tree                          | Not a person, installation, process, reload, or resume                                                    |
+| `operation_completed`                       | Entered tool/command/shortcut handler                    | Handler result, not proof the requested objective succeeded                                               |
+| `agent_spawn_failed`                        | Rejected technical launch attempt                        | May precede an accepted automatic fallback                                                                |
+| `agent_created`                             | Accepted in-process agent or registered interactive pane | Actual execution/backend volume                                                                           |
+| `agent_launch_resolved`                     | Requested child launch                                   | Exactly one observed resolution, including its automatic fallback                                         |
+| `task_completed`, `unit=job`                | In-process job                                           | Terminal execution outcome                                                                                |
+| `task_completed`, `unit=turn`               | Interactive turn                                         | One pane can execute multiple turns                                                                       |
+| `workflow_completed`                        | Whole workflow invocation                                | Aggregate, not another child task                                                                         |
+| `runtime_failure`, `failure_kind=mux_probe` | One sustained workflow-waiter pane episode               | A waiter blocked after liveness grace; not a task count, confirmed process death, or backend-outage count |
+| `completion_delivered`                      | Manifest/notification dispatch batch                     | `count` is the bounded number of included completion records                                              |
+| `result_read`                               | Result read                                              | Not the same unit as dispatch batches or completion records                                               |
 
 Do not add these units together. A workflow tool call can request several child
 launches, and schema retries can request further child work. Rejected pre-start
@@ -65,19 +65,29 @@ records that bounded status without inspecting the warning text.
 
 ### Runtime observations
 
-Poller and workflow waiter share mux-probe episode authority for an artifact and
-failure kind. Repeated unknown probes in one active episode emit once; known
-liveness resets it; a later unknown may emit again. Separate panes are separate
-observations even if they share one backend outage. The workflow aggregate does
-not add another mux-probe incident for the same waiter failure.
+Transient unknown-liveness probes in the artifact poller remain local debug
+observations, logged once per pane episode with the selected mux and closed
+failure reason; they do not produce anonymous `runtime_failure` events. The
+poller keeps reading artifacts while liveness is uncertain, so terminal
+completions observed during the existing grace are still collected.
+
+A `workflow_waiter` emits `runtime_failure`, `failure_kind=mux_probe`, only after
+unknown-liveness probes exhaust the existing grace and the waiter must return
+blocked. Its measurement unit is one waiter-blocking pane episode, not a task or
+unique backend-failure count. Repeated waiter failures within the same unrecovered
+artifact episode dedupe; known liveness or full artifact retirement clears it.
+Separate panes remain separate observations, and the workflow aggregate does not
+add another event for the same waiter failure.
 
 These records include selected `execution`/`mux`, closed `reporter`
 (`artifact_poller`, `workflow_waiter`, or `workflow_runner`), and closed `impact`
-(`degraded`, `blocked`, or `unknown`) when applicable. Initial unknown liveness
-has `impact=unknown`: it is not evidence of a failed task. Keep the existing
-bounded sustained-probe-failure policy separate from telemetry; it remains a
-mux-probe failure, not a fabricated dead/process-exit result. Artifact completions
-observed during its grace are still collected.
+(`degraded`, `blocked`, or `unknown`) when applicable. New mux-probe events use
+`impact=blocked` to show that the waiter could not continue; this does not prove
+the pane process is dead. Historical mux-probe events with `impact=unknown`
+describe liveness uncertainty and must not be reinterpreted as a blocked waiter.
+Keep the existing bounded sustained-probe-failure policy separate from telemetry:
+it remains a mux-probe failure, not a fabricated dead/process-exit result. Other
+runtime failure kinds retain their existing reporting behavior.
 
 Provider task errors remain a broad category when the runtime has no trustworthy
 structured subtype. Do not infer authentication, rate limiting, or billing from
@@ -224,13 +234,15 @@ Suggested measures, after choosing one comparable population:
 
 Companion diagnostic panels should count `agent_spawn_failed` by stage/operation,
 `operation_completed` by operation/outcome/result status, and `runtime_failure`
-by kind/mux/reporter/impact. Surface `degraded`, explicit returned errors, thrown
-errors, and rejected inputs separately; an invalid caller input is not
-automatically an unexpected product defect. Workflow parsing, admission, or
-capacity rejection may occur before `workflow_started`, so these handler and
-runtime panels are necessary even when there is no workflow terminal record.
-Label attempts, handler outcomes, and pane observations separately; none is
-another failed task.
+by kind/mux/reporter/impact. Keep impacts distinct: a new mux-probe event with
+`blocked` means the workflow waiter exhausted its liveness grace, while
+historical `unknown` means only that liveness was unavailable. Surface `degraded`,
+explicit returned errors, thrown errors, and rejected inputs separately; an
+invalid caller input is not automatically an unexpected product defect. Workflow
+parsing, admission, or capacity rejection may occur before `workflow_started`,
+so these handler and runtime panels are necessary even when there is no workflow
+terminal record. Label attempts, handler outcomes, and pane observations
+separately; none is another failed task.
 
 ### 2. Adoption: volume versus logical-session reach
 
