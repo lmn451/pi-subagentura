@@ -149,39 +149,50 @@ traffic. Terminal E2E children retain their separate network guard.
 
 ## Report setup
 
-Create three SQL insights using the queries below. PostHog's
+Create five SQL insights using the queries below. PostHog's
 [`{filters}` placeholder](https://posthog.com/docs/sql) supplies the saved insight's
-date/property filters. Select UTC for the reporting date range. Keep schema,
-release, mode, and traffic-origin populations explicit; never silently relabel
+date/property filters. Select UTC for the reporting date range. Keep release,
+schema, mode, and traffic-origin populations explicit; never silently relabel
 unknown or historical traffic as production.
 
-For the adoption query, shared filters may constrain the date range and common
-release/origin/mode fields, but must not constrain `event`, `invocation_source`,
-`execution`, or `mux`: doing so would also filter its active-session denominator.
-Filter the final feature rows instead. Each query's release/origin groups are
-separate populations; a session/tree can appear under multiple releases after an
-upgrade. Session reach across features overlaps and need not sum to 100%.
+Use shared saved filters only for UTC date, release, traffic origin, and mode.
+Do not filter on schema when viewing data quality, which must retain older
+schemas. For adoption, filters must not constrain `event`, `invocation_source`,
+`execution`, or `mux`: those would shrink its active-tree denominator. The query
+applies feature dimensions only after collecting all observed package events.
+Each release/schema/origin/mode group is a separate population; a tree can appear
+under multiple releases after an upgrade. Tree identifiers are used only inside
+aggregations and are never returned.
 
-### 1. Reliability: resolved launches and terminal execution
+These are counts of observed events, not a complete census. Capture is
+best-effort, and date windows can split lifecycles. Distinct-tree counts across
+rows overlap and must not be summed to make a global tree count.
 
-Show each `measurement` separately. Do not calculate a combined error rate.
-The stage/operation columns distinguish a recovered launch's initial problem
-from a final launch rejection or execution-stage failure.
+### 1. Reliability: logical launch, task, and workflow outcomes
+
+This report keeps four measurement units separate: one logical launch
+resolution, one `task_job` terminal, one `task_turn` terminal, and one workflow
+terminal. `started` is accepted without fallback; `recovered` is accepted after
+fallback and records friction, not a failed task; `rejected` was not accepted;
+`cancelled` is separate from rejection. Task/workflow `success`, `error`,
+`partial`, and `cancelled` are not combined. `unknown` means an outcome or
+diagnostic value could not be classified, not a confirmed failure.
+
+For launch resolutions, requested execution/mux are compared with actual
+execution/mux only for accepted launches. Rejected or cancelled launches have
+`not_accepted` actual values; `launch_resolution_mux` preserves the selected or
+last-known mux without implying acceptance. Initial and final failure
+attribution remain separate. `workflow_invocation` is `tool` or
+`saved_command`; it is distinct from an agent's `invocation_source`.
 
 ```sql
-WITH observed AS (
+WITH base AS (
   SELECT
+    coalesce(properties.schema_version, 0) AS schema_version,
     coalesce(properties.$lib_version, 'unknown') AS release,
+    coalesce(properties.mode, 'unknown') AS mode,
     coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
-    properties.telemetry_session_id AS session_id,
-    CASE WHEN event = 'pi_subagentura_workflow_completed'
-      THEN 'workflow' ELSE properties.invocation_source END AS invocation_source,
-    coalesce(properties.error_category, 'not_applicable') AS error_category,
-    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
-      THEN coalesce(properties.final_failure_stage, properties.initial_failure_stage, 'none')
-      ELSE coalesce(properties.error_stage, 'none') END AS diagnostic_stage,
-    coalesce(properties.final_failure_operation, properties.initial_failure_operation, 'none')
-      AS diagnostic_operation,
+    properties.telemetry_session_id AS tree_id,
     CASE
       WHEN event = 'pi_subagentura_agent_launch_resolved' THEN 'launch'
       WHEN event = 'pi_subagentura_workflow_completed' THEN 'workflow'
@@ -189,16 +200,73 @@ WITH observed AS (
       WHEN properties.unit = 'turn' THEN 'task_turn'
       ELSE 'unknown_task_unit'
     END AS measurement,
-    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
-      THEN properties.outcome ELSE properties.status END AS outcome,
-    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
-      THEN properties.requested_execution ELSE 'not_applicable' END AS requested_execution,
-    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
-      THEN properties.requested_mux ELSE 'not_applicable' END AS requested_mux,
+    CASE
+      WHEN event = 'pi_subagentura_agent_launch_resolved'
+        THEN coalesce(properties.outcome, 'unknown')
+      ELSE coalesce(properties.status, 'unknown')
+    END AS outcome,
     CASE WHEN event = 'pi_subagentura_workflow_completed'
-      THEN 'not_applicable' ELSE coalesce(properties.execution, 'unknown') END AS execution,
+      THEN coalesce(properties.invocation, 'unknown')
+      ELSE 'not_applicable' END AS workflow_invocation,
     CASE WHEN event = 'pi_subagentura_workflow_completed'
-      THEN 'not_applicable' ELSE coalesce(properties.mux, 'unknown') END AS mux
+      THEN 'not_applicable'
+      ELSE coalesce(properties.invocation_source, 'unknown')
+    END AS invocation_source,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.requested_execution, 'unknown')
+      ELSE 'not_applicable' END AS requested_execution,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.requested_mux, 'unknown')
+      ELSE 'not_applicable' END AS requested_mux,
+    CASE
+      WHEN event = 'pi_subagentura_agent_launch_resolved'
+        AND properties.outcome IN ('started', 'recovered')
+        THEN coalesce(properties.execution, 'unknown')
+      WHEN event = 'pi_subagentura_agent_launch_resolved' THEN 'not_accepted'
+      WHEN event = 'pi_subagentura_workflow_completed' THEN 'not_applicable'
+      ELSE coalesce(properties.execution, 'unknown')
+    END AS actual_execution,
+    CASE
+      WHEN event = 'pi_subagentura_agent_launch_resolved'
+        AND properties.outcome IN ('started', 'recovered')
+        THEN coalesce(properties.mux, 'unknown')
+      WHEN event = 'pi_subagentura_agent_launch_resolved' THEN 'not_accepted'
+      WHEN event = 'pi_subagentura_workflow_completed' THEN 'not_applicable'
+      ELSE coalesce(properties.mux, 'unknown')
+    END AS actual_mux,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.mux, 'unknown')
+      ELSE 'not_applicable' END AS launch_resolution_mux,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.initial_failure_stage, 'none')
+      ELSE 'not_applicable' END AS initial_failure_stage,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.initial_failure_operation, 'none')
+      ELSE 'not_applicable' END AS initial_failure_operation,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.final_failure_stage, 'none')
+      ELSE 'not_applicable' END AS final_failure_stage,
+    CASE WHEN event = 'pi_subagentura_agent_launch_resolved'
+      THEN coalesce(properties.final_failure_operation, 'none')
+      ELSE 'not_applicable' END AS final_failure_operation,
+    CASE
+      WHEN event = 'pi_subagentura_task_completed'
+        AND properties.status = 'error'
+        THEN coalesce(properties.error_category, 'unknown')
+      WHEN event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial')
+        THEN coalesce(properties.error_category, 'unknown')
+      ELSE 'not_applicable'
+    END AS error_category,
+    CASE
+      WHEN event = 'pi_subagentura_task_completed'
+        AND properties.status = 'error'
+        THEN coalesce(properties.error_stage, 'unknown')
+      WHEN event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial')
+        THEN coalesce(properties.error_stage, 'unknown')
+      ELSE 'not_applicable'
+    END AS error_stage
   FROM events
   WHERE {filters}
     AND properties.schema_version = 6
@@ -207,125 +275,464 @@ WITH observed AS (
       'pi_subagentura_task_completed',
       'pi_subagentura_workflow_completed'
     )
+), classified AS (
+  SELECT *,
+    CASE
+      WHEN measurement = 'launch' AND outcome = 'started'
+        THEN 'launch_accepted_no_fallback'
+      WHEN measurement = 'launch' AND outcome = 'recovered'
+        THEN 'launch_recovered_friction'
+      WHEN measurement = 'launch' AND outcome = 'rejected'
+        THEN 'launch_rejected'
+      WHEN measurement = 'launch' AND outcome = 'cancelled'
+        THEN 'launch_cancelled'
+      WHEN measurement != 'launch' AND outcome = 'success' THEN 'success'
+      WHEN measurement != 'launch' AND outcome = 'error' THEN 'execution_error'
+      WHEN measurement != 'launch' AND outcome = 'partial' THEN 'partial'
+      WHEN measurement != 'launch' AND outcome = 'cancelled' THEN 'cancelled'
+      ELSE 'unknown'
+    END AS classification
+  FROM base
 )
-SELECT measurement, release, traffic_origin, invocation_source, error_category,
-  diagnostic_stage, diagnostic_operation, requested_execution,
-  requested_mux, execution, mux, outcome,
+SELECT
+  schema_version, release, mode, traffic_origin, measurement, classification,
+  workflow_invocation, invocation_source, requested_execution, requested_mux,
+  actual_execution, actual_mux, launch_resolution_mux, outcome,
+  initial_failure_stage, initial_failure_operation, final_failure_stage,
+  final_failure_operation, error_category, error_stage,
   count(*) AS records,
-  count(DISTINCT session_id) AS affected_session_trees
-FROM observed
-GROUP BY measurement, release, traffic_origin, invocation_source, error_category,
-  diagnostic_stage, diagnostic_operation, requested_execution,
-  requested_mux, execution, mux, outcome
-ORDER BY measurement, release, traffic_origin, records DESC
+  count(DISTINCT tree_id) AS affected_trees
+FROM classified
+GROUP BY schema_version, release, mode, traffic_origin, measurement,
+  classification, workflow_invocation, invocation_source, requested_execution,
+  requested_mux, actual_execution, actual_mux, launch_resolution_mux, outcome,
+  initial_failure_stage, initial_failure_operation, final_failure_stage,
+  final_failure_operation, error_category, error_stage
+ORDER BY schema_version, release, mode, traffic_origin, measurement, records DESC
 ```
 
-Suggested measures, after choosing one comparable population:
+Compare accepted-launch recovery (`recovered / (started + recovered)`) and
+rejection (`rejected / (started + recovered + rejected)`) separately, with
+cancellations shown outside both. If calculating task error shares, keep jobs
+and turns separate and use `error / (success + error)`; for workflows retain
+`partial` and `cancelled` as their own outcomes. Do not add unit counts or
+per-row distinct-tree counts, or publish one combined error rate.
 
-- launch rejection share: `rejected / (started + recovered + rejected)`;
-  show cancellations separately;
-- fallback dependence among accepted launches:
-  `recovered / (started + recovered)`;
-- task error share: `error / (success + error)`, separately for jobs and turns;
-- workflow error and partial shares: use terminal non-cancelled workflows,
-  keeping `partial` visible rather than silently merging it into success;
-- affected logical session/trees: distinct IDs matching the chosen adverse
-  outcomes, not a sum of per-row distinct counts.
+### 2. Adoption: accepted-agent volume, reach, and concentration
 
-Companion diagnostic panels should count `agent_spawn_failed` by stage/operation,
-`operation_completed` by operation/outcome/result status, and `runtime_failure`
-by kind/mux/reporter/impact. Keep impacts distinct: a new mux-probe event with
-`blocked` means the workflow waiter exhausted its liveness grace, while
-historical `unknown` means only that liveness was unavailable. Surface `degraded`,
-explicit returned errors, thrown errors, and rejected inputs separately; an
-invalid caller input is not automatically an unexpected product defect. Workflow
-parsing, admission, or capacity rejection may occur before `workflow_started`,
-so these handler and runtime panels are necessary even when there is no workflow
-terminal record. Label attempts, handler outcomes, and pane observations
-separately; none is another failed task.
+`agent_launches` counts accepted `agent_created` records. `using_trees` counts
+trees with at least one accepted launch for that feature row. `active_trees`
+counts every tree with any observed package event in the selected
+release/schema/mode/origin/date population, including continuing sessions with
+no new `session_started` event in that window. The busiest-tree columns show
+concentration without returning tree IDs. This is not a unique-user percentage.
 
-### 2. Adoption: volume versus logical-session reach
-
-`agent_launches` measures accepted-agent volume. `using_session_trees` counts
-one logical tree once per feature/backend row. Its denominator includes all
-observed active trees in the selected window, including continued sessions with
-no new `session_started` event that day. It is not a unique-user percentage.
-Backend mix should be compared within interactive execution; invocation source
-and execution are different axes. `straight` mode does not mean no workflow was
-used. The launch-resolution event can separately compare requested preference
-with actual execution/backend; agent-created events show actual use.
+`invocation_source='workflow'` means an agent child launched by a workflow; it
+does not count a workflow invocation. Workflow invocation volume belongs in the
+lifecycle report. Invocation source and execution are different axes, and
+`straight` mode does not mean no workflow was used.
 
 ```sql
 WITH observed AS (
-  SELECT event,
+  SELECT
+    event,
+    coalesce(properties.schema_version, 0) AS schema_version,
     coalesce(properties.$lib_version, 'unknown') AS release,
+    coalesce(properties.mode, 'unknown') AS mode,
     coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
-    properties.telemetry_session_id AS session_id,
-    properties.invocation_source AS invocation_source,
-    properties.execution AS execution,
-    properties.mux AS mux
+    properties.telemetry_session_id AS tree_id,
+    coalesce(properties.invocation_source, 'unknown') AS invocation_source,
+    coalesce(properties.execution, 'unknown') AS execution,
+    coalesce(properties.mux, 'unknown') AS mux
   FROM events
   WHERE {filters}
-    AND properties.schema_version = 6
     AND startsWith(event, 'pi_subagentura_')
 ), active AS (
-  SELECT release, traffic_origin,
-    count(DISTINCT session_id) AS active_session_trees
+  SELECT schema_version, release, mode, traffic_origin,
+    count(DISTINCT tree_id) AS active_trees
   FROM observed
-  GROUP BY release, traffic_origin
-), accepted AS (
-  SELECT release, traffic_origin, invocation_source, execution, mux,
-    count(*) AS agent_launches,
-    count(DISTINCT session_id) AS using_session_trees
+  GROUP BY schema_version, release, mode, traffic_origin
+), agent_tree_volume AS (
+  SELECT schema_version, release, mode, traffic_origin,
+    invocation_source, execution, mux, tree_id,
+    count(*) AS tree_agent_launches
   FROM observed
   WHERE event = 'pi_subagentura_agent_created'
-  GROUP BY release, traffic_origin, invocation_source, execution, mux
+  GROUP BY schema_version, release, mode, traffic_origin,
+    invocation_source, execution, mux, tree_id
+), feature_volume AS (
+  SELECT schema_version, release, mode, traffic_origin,
+    invocation_source, execution, mux,
+    sum(tree_agent_launches) AS agent_launches,
+    count(DISTINCT tree_id) AS using_trees,
+    max(tree_agent_launches) AS busiest_tree_agent_launches,
+    round(100.0 * max(tree_agent_launches) /
+      nullIf(sum(tree_agent_launches), 0), 1) AS busiest_tree_share_percent
+  FROM agent_tree_volume
+  GROUP BY schema_version, release, mode, traffic_origin,
+    invocation_source, execution, mux
 )
-SELECT a.release, a.traffic_origin, a.invocation_source, a.execution, a.mux,
-  a.agent_launches, a.using_session_trees, s.active_session_trees,
-  round(100.0 * a.using_session_trees / nullIf(s.active_session_trees, 0), 1)
-    AS session_reach_percent
-FROM accepted a
-JOIN active s ON a.release = s.release AND a.traffic_origin = s.traffic_origin
-ORDER BY a.release, a.traffic_origin, a.agent_launches DESC
+SELECT
+  f.schema_version, f.release, f.mode, f.traffic_origin,
+  f.invocation_source, f.execution, f.mux, f.agent_launches, f.using_trees,
+  a.active_trees,
+  round(100.0 * f.using_trees / nullIf(a.active_trees, 0), 1)
+    AS session_reach_percent,
+  f.busiest_tree_agent_launches, f.busiest_tree_share_percent
+FROM feature_volume f
+JOIN active a ON f.schema_version = a.schema_version
+  AND f.release = a.release AND f.mode = a.mode
+  AND f.traffic_origin = a.traffic_origin
+ORDER BY f.schema_version, f.release, f.mode, f.traffic_origin,
+  f.agent_launches DESC
 ```
 
-### 3. Data quality: provenance, schema, and unknowns
+The feature filter is deliberately downstream of `active`; keep the shared
+filter free of event, invocation-source, execution, and mux constraints.
+Compare only within matching release/schema/mode/origin populations. The
+`busiest_tree_share_percent` is that row's largest single-tree share of accepted
+agent volume, not a distribution over unique people.
 
-Include older schemas here so missing provenance/backend attribution remains
-visible. A short workflow duration is not evidence that the run was a test.
-Inspect origin coverage before claiming a production error rate. Any observed
-`test` traffic warrants checking its capture source, because normal runtime
-capture is suppressed for that origin.
+### 3. Data quality: provenance, schema coverage, and unknowns
+
+This report includes older schemas. Its schema/origin/mode/release groups show
+coverage directly; an old or missing origin is not evidence of `usage`.
+Unknown diagnostic values are data-quality observations, not additional
+failures. `not_applicable` and absent optional fields are not treated as errors.
+For required error classifications, missing category/stage is counted
+separately from an explicit `unknown`. Runtime impact has distinct columns for
+explicit `unknown` and a missing property. New mux-probe `blocked` and
+historical mux-probe `unknown` remain separate values.
 
 ```sql
 SELECT
-  coalesce(properties.$lib_version, 'unknown') AS release,
   coalesce(properties.schema_version, 0) AS schema_version,
+  coalesce(properties.$lib_version, 'unknown') AS release,
+  coalesce(properties.mode, 'unknown') AS mode,
   coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
   event,
   count(*) AS event_records,
-  count(DISTINCT properties.telemetry_session_id) AS session_trees,
-  sum(CASE WHEN properties.result_status = 'unknown' THEN 1 ELSE 0 END)
-    AS unknown_operation_status_records,
-  sum(CASE WHEN properties.failure_stage = 'unknown'
-    OR properties.initial_failure_stage = 'unknown'
-    OR properties.final_failure_stage = 'unknown'
-    OR properties.error_category = 'unknown' THEN 1 ELSE 0 END)
-    AS unknown_diagnostic_records,
+  count(DISTINCT properties.telemetry_session_id) AS affected_trees,
+  sum(CASE WHEN properties.traffic_origin = 'unknown'
+    OR properties.traffic_origin IS NULL THEN 1 ELSE 0 END)
+    AS unknown_or_missing_origin_records,
+  sum(CASE WHEN event = 'pi_subagentura_operation_completed'
+    AND properties.result_status = 'unknown' THEN 1 ELSE 0 END)
+    AS explicit_unknown_operation_status_records,
+  sum(CASE WHEN event = 'pi_subagentura_operation_completed'
+    AND properties.result_status IS NULL THEN 1 ELSE 0 END)
+    AS missing_operation_status_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_task_completed' AND properties.status = 'error')
+      OR (event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial'))
+      OR event = 'pi_subagentura_runtime_failure'
+    ) AND properties.error_category = 'unknown' THEN 1 ELSE 0 END)
+    AS explicit_unknown_error_category_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_task_completed' AND properties.status = 'error')
+      OR (event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial'))
+      OR event = 'pi_subagentura_runtime_failure'
+    ) AND properties.error_category IS NULL THEN 1 ELSE 0 END)
+    AS missing_error_category_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_agent_launch_resolved'
+        AND (properties.initial_failure_stage = 'unknown'
+          OR properties.final_failure_stage = 'unknown'))
+      OR (event = 'pi_subagentura_agent_spawn_failed'
+        AND properties.failure_stage = 'unknown')
+      OR (event = 'pi_subagentura_session_setup_failed'
+        AND properties.failure_stage = 'unknown')
+      OR (event = 'pi_subagentura_task_completed'
+        AND properties.status = 'error' AND properties.error_stage = 'unknown')
+      OR (event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial')
+        AND properties.error_stage = 'unknown')
+      OR (event = 'pi_subagentura_runtime_failure'
+        AND properties.error_stage = 'unknown')
+    ) THEN 1 ELSE 0 END) AS explicit_unknown_diagnostic_stage_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_task_completed'
+        AND properties.status = 'error' AND properties.error_stage IS NULL)
+      OR (event = 'pi_subagentura_workflow_completed'
+        AND properties.status IN ('error', 'partial')
+        AND properties.error_stage IS NULL)
+      OR (event = 'pi_subagentura_runtime_failure'
+        AND properties.error_stage IS NULL)
+      OR (event IN (
+        'pi_subagentura_agent_spawn_failed',
+        'pi_subagentura_session_setup_failed',
+        'pi_subagentura_completion_delivery_failed'
+      ) AND properties.failure_stage IS NULL)
+    ) THEN 1 ELSE 0 END) AS missing_diagnostic_stage_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_agent_launch_resolved'
+        AND properties.outcome IN ('started', 'recovered')
+        AND properties.execution = 'unknown')
+      OR (event IN (
+        'pi_subagentura_agent_created',
+        'pi_subagentura_agent_spawn_failed',
+        'pi_subagentura_task_completed',
+        'pi_subagentura_runtime_failure'
+      ) AND properties.execution = 'unknown')
+    ) THEN 1 ELSE 0 END) AS explicit_unknown_execution_records,
+  sum(CASE WHEN (
+      (event = 'pi_subagentura_agent_launch_resolved'
+        AND properties.outcome IN ('started', 'recovered')
+        AND properties.mux = 'unknown')
+      OR (event IN (
+        'pi_subagentura_agent_created',
+        'pi_subagentura_agent_spawn_failed',
+        'pi_subagentura_task_completed',
+        'pi_subagentura_runtime_failure'
+      ) AND properties.mux = 'unknown')
+    ) THEN 1 ELSE 0 END) AS explicit_unknown_mux_records,
+  sum(CASE WHEN event = 'pi_subagentura_runtime_failure'
+    AND properties.impact = 'unknown' THEN 1 ELSE 0 END)
+    AS explicit_unknown_runtime_impact_records,
+  sum(CASE WHEN event = 'pi_subagentura_runtime_failure'
+    AND properties.impact IS NULL THEN 1 ELSE 0 END)
+    AS missing_runtime_impact_records,
   sum(CASE WHEN event = 'pi_subagentura_runtime_failure'
     AND properties.failure_kind = 'mux_probe'
-    AND coalesce(properties.mux, 'unknown') = 'unknown' THEN 1 ELSE 0 END)
-    AS unattributed_mux_probe_records
+    AND coalesce(properties.mux, 'unknown') = 'unknown'
+    THEN 1 ELSE 0 END) AS unattributed_mux_probe_records
 FROM events
 WHERE {filters} AND startsWith(event, 'pi_subagentura_')
-GROUP BY release, schema_version, traffic_origin, event
-ORDER BY release, schema_version, traffic_origin, event
+GROUP BY schema_version, release, mode, traffic_origin, event
+ORDER BY schema_version, release, mode, traffic_origin, event
 ```
 
-Track started/completed event volumes by operation as a coverage diagnostic,
-not a matched-call failure count: there are no per-call IDs, active work can cross
-the window, sessions can retire, and best-effort capture can lose either side.
-Never divide result reads by manifest batches to produce a delivery percentage.
-For dispatch latency, a manifest batch's recorded latency is its maximum known
-completion age, not a latency sample for every included completion.
+The unknown counters diagnose missing or weak attribution; they are not
+failure counts. A workflow `partial` status remains distinct from `error`, and
+an absent diagnostic on a success/accepted launch is not classified as an
+unknown failure. Read the runtime observation report for impact partitions.
+
+### 4. Diagnostic outcomes: observations, delivery, and handlers
+
+Each row retains its event measurement and unit: a runtime observation, a
+technical spawn attempt, a delivery failure, a dispatch batch, a setup failure,
+a handler start/result, or a result read. `agent_spawn_failed` is a technical
+attempt that may precede an accepted fallback; it is not a logical rejected
+launch or final task failure. `completion_delivered.count` is included
+completion records per dispatch batch, not another event count. Started and
+completed handlers are separate observations with no per-call linkage.
+
+```sql
+WITH observed AS (
+  SELECT
+    coalesce(properties.schema_version, 0) AS schema_version,
+    coalesce(properties.$lib_version, 'unknown') AS release,
+    coalesce(properties.mode, 'unknown') AS mode,
+    coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
+    properties.telemetry_session_id AS tree_id,
+    event,
+    CASE
+      WHEN event = 'pi_subagentura_runtime_failure' THEN 'runtime_observation'
+      WHEN event = 'pi_subagentura_agent_spawn_failed' THEN 'technical_spawn_attempt'
+      WHEN event = 'pi_subagentura_completion_delivery_failed' THEN 'delivery_failure'
+      WHEN event = 'pi_subagentura_completion_delivered' THEN 'dispatch_batch'
+      WHEN event = 'pi_subagentura_session_setup_failed' THEN 'setup_failure'
+      WHEN event = 'pi_subagentura_operation_started' THEN 'handler_start'
+      WHEN event = 'pi_subagentura_operation_completed' THEN 'handler_result'
+      ELSE 'result_read'
+    END AS measurement,
+    CASE
+      WHEN event = 'pi_subagentura_runtime_failure'
+        THEN 'one runtime observation record'
+      WHEN event = 'pi_subagentura_agent_spawn_failed'
+        THEN 'one technical spawn-attempt record'
+      WHEN event = 'pi_subagentura_completion_delivery_failed'
+        THEN 'one delivery failure record'
+      WHEN event = 'pi_subagentura_completion_delivered'
+        THEN 'one dispatch batch'
+      WHEN event = 'pi_subagentura_session_setup_failed'
+        THEN 'one session setup failure record'
+      WHEN event = 'pi_subagentura_operation_started'
+        THEN 'one handler start event'
+      WHEN event = 'pi_subagentura_operation_completed'
+        THEN 'one handler result event'
+      ELSE 'one result read'
+    END AS event_unit,
+    CASE WHEN event = 'pi_subagentura_runtime_failure'
+      THEN coalesce(properties.failure_kind, 'unknown')
+      ELSE 'not_applicable' END AS failure_kind,
+    CASE WHEN event = 'pi_subagentura_runtime_failure'
+      THEN coalesce(properties.reporter, 'unknown')
+      ELSE 'not_applicable' END AS reporter,
+    CASE WHEN event = 'pi_subagentura_runtime_failure'
+      THEN coalesce(properties.impact, 'unknown')
+      ELSE 'not_applicable' END AS impact,
+    CASE
+      WHEN event IN (
+        'pi_subagentura_runtime_failure',
+        'pi_subagentura_agent_spawn_failed'
+      ) THEN coalesce(properties.execution, 'unknown')
+      ELSE 'not_applicable'
+    END AS execution,
+    CASE
+      WHEN event IN (
+        'pi_subagentura_runtime_failure',
+        'pi_subagentura_agent_spawn_failed'
+      ) THEN coalesce(properties.mux, 'unknown')
+      ELSE 'not_applicable'
+    END AS mux,
+    CASE
+      WHEN event = 'pi_subagentura_runtime_failure'
+        THEN coalesce(properties.error_stage, 'not_applicable')
+      WHEN event = 'pi_subagentura_agent_spawn_failed'
+        OR event = 'pi_subagentura_session_setup_failed'
+        OR event = 'pi_subagentura_completion_delivery_failed'
+        THEN coalesce(properties.failure_stage, 'unknown')
+      ELSE 'not_applicable'
+    END AS diagnostic_stage,
+    CASE WHEN event = 'pi_subagentura_agent_spawn_failed'
+      THEN coalesce(properties.failure_operation, 'not_applicable')
+      ELSE 'not_applicable' END AS diagnostic_operation,
+    CASE WHEN event IN (
+        'pi_subagentura_operation_started',
+        'pi_subagentura_operation_completed'
+      ) THEN coalesce(properties.surface, 'unknown')
+      ELSE 'not_applicable' END AS operation_surface,
+    CASE WHEN event IN (
+        'pi_subagentura_operation_started',
+        'pi_subagentura_operation_completed'
+      ) THEN coalesce(properties.operation, 'unknown')
+      ELSE 'not_applicable' END AS operation,
+    CASE WHEN event = 'pi_subagentura_operation_completed'
+      THEN coalesce(properties.outcome, 'unknown')
+      ELSE 'not_applicable' END AS operation_outcome,
+    CASE WHEN event = 'pi_subagentura_operation_completed'
+      THEN coalesce(properties.result_status, 'unknown')
+      ELSE 'not_applicable' END AS result_status,
+    CASE WHEN event IN (
+        'pi_subagentura_completion_delivery_failed',
+        'pi_subagentura_completion_delivered'
+      ) THEN coalesce(properties.delivery, 'unknown')
+      ELSE 'not_applicable' END AS delivery,
+    CASE WHEN event = 'pi_subagentura_result_read'
+      THEN coalesce(properties.source, 'unknown')
+      ELSE 'not_applicable' END AS result_source,
+    CASE WHEN event = 'pi_subagentura_result_read'
+      THEN coalesce(properties.outcome, 'unknown')
+      ELSE 'not_applicable' END AS result_outcome,
+    CASE WHEN event = 'pi_subagentura_completion_delivered'
+      THEN coalesce(properties.count, 0)
+      ELSE 0 END AS included_completion_records
+  FROM events
+  WHERE {filters}
+    AND event IN (
+      'pi_subagentura_runtime_failure',
+      'pi_subagentura_agent_spawn_failed',
+      'pi_subagentura_completion_delivery_failed',
+      'pi_subagentura_completion_delivered',
+      'pi_subagentura_session_setup_failed',
+      'pi_subagentura_operation_started',
+      'pi_subagentura_operation_completed',
+      'pi_subagentura_result_read'
+    )
+)
+SELECT
+  schema_version, release, mode, traffic_origin, measurement, event_unit,
+  failure_kind, reporter, impact, execution, mux, diagnostic_stage,
+  diagnostic_operation, operation_surface, operation, operation_outcome,
+  result_status, delivery, result_source, result_outcome,
+  count(*) AS event_records,
+  count(DISTINCT tree_id) AS affected_trees,
+  sum(included_completion_records) AS included_completion_records
+FROM observed
+GROUP BY schema_version, release, mode, traffic_origin, measurement, event_unit,
+  failure_kind, reporter, impact, execution, mux, diagnostic_stage,
+  diagnostic_operation, operation_surface, operation, operation_outcome,
+  result_status, delivery, result_source, result_outcome
+ORDER BY schema_version, release, mode, traffic_origin, measurement,
+  event_records DESC
+```
+
+For runtime observations, compare `failure_kind`, `reporter`, `impact`,
+execution, and mux without collapsing `degraded`, `blocked`, and `unknown`.
+Historical mux-probe `impact=unknown` is liveness uncertainty; new
+`impact=blocked` means the workflow waiter exhausted its grace, not that the pane
+process is confirmed dead. `completion_delivery_failed` and
+`session_setup_failed` are failure-event counts; operation result statuses
+`invalid_input`, `confirmation_required`, `degraded`, or `cancelled` are not
+automatically product failures. Never sum counts across event units.
+
+### 5. Workflow lifecycle: start and terminal window coverage
+
+This report partitions by schema, release, mode, origin, workflow invocation
+(`tool`/`saved_command`), async, and completion policy. Start and terminal
+record counts and distinct affected trees are side by side, with terminal
+statuses split into `success`, `partial`, `error`, `cancelled`, and `unknown`.
+`signed_terminal_surplus_records` is only the terminal-minus-start record-count
+difference in this selected window. It is a window-coverage diagnostic, not
+evidence of missing or duplicate jobs.
+
+There is no workflow ID or per-workflow join. A lifecycle can cross the date
+window, pre-start validation/admission rejections may have no
+`workflow_started`, and best-effort capture can lose either event. Distinct
+start/terminal trees are session-tree counts, not unique workflow counts. Do not
+calculate a terminal/start completion rate or infer that records pair.
+
+```sql
+WITH observed AS (
+  SELECT
+    coalesce(properties.schema_version, 0) AS schema_version,
+    coalesce(properties.$lib_version, 'unknown') AS release,
+    coalesce(properties.mode, 'unknown') AS mode,
+    coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
+    properties.telemetry_session_id AS tree_id,
+    coalesce(properties.invocation, 'unknown') AS invocation,
+    CASE
+      WHEN properties.async IS NULL THEN 'unknown'
+      WHEN properties.async THEN 'true'
+      ELSE 'false'
+    END AS async,
+    coalesce(properties.completion_policy, 'unknown') AS completion_policy,
+    event,
+    coalesce(properties.status, 'unknown') AS status
+  FROM events
+  WHERE {filters}
+    AND event IN (
+      'pi_subagentura_workflow_started',
+      'pi_subagentura_workflow_completed'
+    )
+), coverage AS (
+  SELECT
+    schema_version, release, mode, traffic_origin, invocation, async,
+    completion_policy,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_started'
+      THEN 1 ELSE 0 END) AS workflow_start_records,
+    count(DISTINCT CASE WHEN event = 'pi_subagentura_workflow_started'
+      THEN tree_id ELSE NULL END) AS workflow_start_trees,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      THEN 1 ELSE 0 END) AS workflow_terminal_records,
+    count(DISTINCT CASE WHEN event = 'pi_subagentura_workflow_completed'
+      THEN tree_id ELSE NULL END) AS workflow_terminal_trees,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      AND status = 'success' THEN 1 ELSE 0 END) AS success_terminal_records,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      AND status = 'partial' THEN 1 ELSE 0 END) AS partial_terminal_records,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      AND status = 'error' THEN 1 ELSE 0 END) AS error_terminal_records,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      AND status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_terminal_records,
+    sum(CASE WHEN event = 'pi_subagentura_workflow_completed'
+      AND status = 'unknown' THEN 1 ELSE 0 END) AS unknown_terminal_records
+  FROM observed
+  GROUP BY schema_version, release, mode, traffic_origin, invocation, async,
+    completion_policy
+)
+SELECT *,
+  workflow_terminal_records - workflow_start_records
+    AS signed_terminal_surplus_records
+FROM coverage
+ORDER BY schema_version, release, mode, traffic_origin, invocation,
+  completion_policy
+```
+
+Keep workflow lifecycle counts separate from agent launch and task completion
+counts. This report describes observed start/terminal volume in a window only;
+it cannot establish a unique-workflow total or explain historical aggregate
+differences.
