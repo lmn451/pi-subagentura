@@ -412,69 +412,71 @@ describe("child protocol lifecycle integration", () => {
       harness.completeNext("parent ready");
       await parentTurn;
 
-      const context = {
-        cwd: process.cwd(),
-        model: harness.session.model,
-        modelRegistry: new ModelRegistry(harness.session.modelRuntime),
-        sessionManager: harness.sessionManager,
-        ui: harness.session.extensionRunner.getUIContext(),
-      };
-      const priorChildRequests = harness.contexts.length;
-      const launchedPromise = spawn.execute(
-        `thinking-${toolName}-${runAsync}`,
-        {
-          task: "Return the child provider response.",
-          async: runAsync,
-          thinkingLevel: "high",
-          model: "subagentura-faux/faux-model",
-        },
-        undefined,
-        undefined,
-        context as never,
-      );
-
-      const childExecution = async () => {
-        await vi.waitFor(() =>
-          expect(harness.contexts).toHaveLength(priorChildRequests + 1),
-        );
-        harness.completeNext("child completed at high thinking level");
-      };
-
-      if (runAsync) {
-        const launched = await launchedPromise;
-        const jobId = (launched.details as { jobId?: string }).jobId;
-        expect(jobId).toEqual(expect.any(String));
-        const pendingResult = getResult.execute(
-          "thinking-result",
-          { jobId, wait: true },
+      await withIsolatedPiRuntime(async ({ cwd }) => {
+        const context = {
+          cwd,
+          model: harness.session.model,
+          modelRegistry: new ModelRegistry(harness.session.modelRuntime),
+          sessionManager: harness.sessionManager,
+          ui: harness.session.extensionRunner.getUIContext(),
+        };
+        const priorChildRequests = harness.contexts.length;
+        const launchedPromise = spawn.execute(
+          `thinking-${toolName}-${runAsync}`,
+          {
+            task: "Return the child provider response.",
+            async: runAsync,
+            thinkingLevel: "high",
+            model: "subagentura-faux/faux-model",
+          },
           undefined,
           undefined,
           context as never,
         );
-        await childExecution();
-        const result = await pendingResult;
-        expect(result.details).toMatchObject({
-          status: "done",
-          thinkingLevel: "high",
-        });
-        expect(result.content[0]?.text).toContain(
-          "child completed at high thinking level",
+
+        const childExecution = async () => {
+          await vi.waitFor(() =>
+            expect(harness.contexts).toHaveLength(priorChildRequests + 1),
+          );
+          harness.completeNext("child completed at high thinking level");
+        };
+
+        if (runAsync) {
+          const launched = await launchedPromise;
+          const jobId = (launched.details as { jobId?: string }).jobId;
+          expect(jobId).toEqual(expect.any(String));
+          const pendingResult = getResult.execute(
+            "thinking-result",
+            { jobId, wait: true },
+            undefined,
+            undefined,
+            context as never,
+          );
+          await childExecution();
+          const result = await pendingResult;
+          expect(result.details).toMatchObject({
+            status: "done",
+            thinkingLevel: "high",
+          });
+          expect(result.content[0]?.text).toContain(
+            "child completed at high thinking level",
+          );
+        } else {
+          await childExecution();
+          const launched = await launchedPromise;
+          expect(launched.details).toMatchObject({
+            status: "done",
+            thinkingLevel: "high",
+          });
+          expect(launched.content[0]?.text).toContain(
+            "child completed at high thinking level",
+          );
+        }
+        expect(JSON.stringify(harness.contexts.at(-1)?.messages)).toContain(
+          "Return the child provider response.",
         );
-      } else {
-        await childExecution();
-        const launched = await launchedPromise;
-        expect(launched.details).toMatchObject({
-          status: "done",
-          thinkingLevel: "high",
-        });
-        expect(launched.content[0]?.text).toContain(
-          "child completed at high thinking level",
-        );
-      }
-      expect(JSON.stringify(harness.contexts.at(-1)?.messages)).toContain(
-        "Return the child provider response.",
-      );
-      expect(harness.thinkingLevels.at(-1)).toBe("high");
+        expect(harness.thinkingLevels.at(-1)).toBe("high");
+      });
     },
   );
 
