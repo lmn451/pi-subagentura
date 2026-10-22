@@ -26,6 +26,8 @@ export interface SessionScope {
   ui?: ExtensionUIContext;
   cwd?: string;
   lifecycle: SessionScopeLifecycle;
+  /** Closed while the session lifecycle retires or replaces this generation. */
+  workflowAdmissionClosed: boolean;
   sessionManager?: SessionScopeManager;
   spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
@@ -39,7 +41,7 @@ export interface SessionScope {
   telemetry?: TelemetrySession;
 }
 
-/** External registrations may omit runtime-owned collections and streaming state. */
+/** External registrations may omit runtime-owned fields; omitted state uses defaults. */
 export interface SessionScopeRegistration {
   id: number;
   generation: number;
@@ -47,6 +49,7 @@ export interface SessionScopeRegistration {
   ui?: ExtensionUIContext;
   cwd?: string;
   lifecycle?: SessionScopeLifecycle;
+  workflowAdmissionClosed?: boolean;
   sessionManager?: SessionScopeManager;
   spawnTreeContext?: ParsedSpawnTreeContext;
   lineageMode?: "root" | "child";
@@ -110,6 +113,7 @@ export function createSessionScope(
     id: nextSessionScopeId(),
     generation: 0,
     lifecycle: "registered",
+    workflowAdmissionClosed: false,
     pi,
     spawnTreeContext,
     lineageMode,
@@ -128,6 +132,7 @@ function isCompleteSessionScope(
     (registration.lifecycle === "registered" ||
       registration.lifecycle === "started" ||
       registration.lifecycle === "shutdown") &&
+    typeof registration.workflowAdmissionClosed === "boolean" &&
     typeof registration.parentStreaming === "boolean" &&
     registration.inProcessJobs instanceof Map &&
     registration.interactiveStates instanceof Map
@@ -148,6 +153,9 @@ export function registerSessionScope(
     existing.generation = registration.generation;
     existing.pi = registration.pi;
     existing.lifecycle = registration.lifecycle ?? existing.lifecycle;
+    if (registration.workflowAdmissionClosed !== undefined) {
+      existing.workflowAdmissionClosed = registration.workflowAdmissionClosed;
+    }
     existing.parentStreaming =
       registration.parentStreaming ?? existing.parentStreaming;
     if (registration.ui !== undefined) existing.ui = registration.ui;
@@ -188,6 +196,7 @@ export function registerSessionScope(
         ui: registration.ui,
         cwd: registration.cwd,
         lifecycle: registration.lifecycle ?? "started",
+        workflowAdmissionClosed: registration.workflowAdmissionClosed ?? false,
         sessionManager: registration.sessionManager,
         spawnTreeContext: registration.spawnTreeContext,
         lineageMode: registration.lineageMode ?? "root",

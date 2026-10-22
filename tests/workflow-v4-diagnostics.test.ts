@@ -278,8 +278,9 @@ describe("workflow v4 aggregate classifications", () => {
 });
 
 describe("workflow mux probe diagnostics", () => {
-  it("delivers terminal artifact output while liveness is unknown", async () => {
+  it("delivers terminal artifact output without an unknown-liveness failure", async () => {
     const root = mkdtempSync(join(tmpdir(), "workflow-mux-probe-"));
+    const { payloads, telemetry } = telemetryScope(906);
     const art = artifactPath(root, "mux-probe");
     mkdirSync(art.dir, { recursive: true });
     writeFileSync(art.statusFile, "");
@@ -296,10 +297,10 @@ describe("workflow mux probe diagnostics", () => {
       getPaneLiveness: () => "unknown",
       getPaneLivenessAsync,
       getPaneActivityAsync: async () => "unknown",
-      sendKeys: () => {},
-      sendEnter: () => {},
-      killPane: () => {},
-      focusPane: async () => {},
+      sendKeys: () => undefined,
+      sendEnter: () => undefined,
+      killPane: () => undefined,
+      focusPane: async () => undefined,
       capturePane: async () => ({ output: "", truncated: false }),
       showNativeViewer: async () => false,
       buildAttachCommands: () => ({ attachCommand: "", focusCommand: "" }),
@@ -313,11 +314,19 @@ describe("workflow mux probe diagnostics", () => {
       mux: "tmux",
       muxSession: "session",
       model: "test/model",
+      telemetryEligible: true,
+      telemetryCorrelationId: telemetry.correlationId,
     } as unknown as InteractiveSubagentState;
 
     const controller = new AbortController();
     try {
-      const pending = awaitInteractiveResult(state, controller.signal, 1000);
+      const pending = awaitInteractiveResult(
+        state,
+        controller.signal,
+        1000,
+        undefined,
+        telemetry,
+      );
       await vi.waitFor(() => {
         expect(getPaneLivenessAsync.mock.calls.length).toBeGreaterThan(0);
       });
@@ -333,13 +342,18 @@ describe("workflow mux probe diagnostics", () => {
       expect(result.isError).toBe(false);
       expect(result.output).toBe("artifact answer survives unknown liveness");
       expect(getPaneLivenessAsync.mock.calls.length).toBe(1);
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_runtime_failure",
+        ),
+      ).toHaveLength(0);
     } finally {
       controller.abort();
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("shares per-pane outage episodes across waiter and poller", async () => {
+  it("leaves transient unknown probes local until the waiter reports a blocked outage", async () => {
     const root = mkdtempSync(join(tmpdir(), "workflow-mux-shared-"));
     const telemetry = createTelemetrySession(true, "orchestrator_v2");
     const disabledObserver: TelemetrySession = {
@@ -399,16 +413,19 @@ describe("workflow mux probe diagnostics", () => {
     const secondState = makeState("pane-two", secondArtifact.dir);
     scope.interactiveStates.set(firstState.id, firstState);
     scope.interactiveStates.set(secondState.id, secondState);
-    let livenessDiagnostic: PaneLivenessDiagnostic = {
+    const livenessDiagnostic: PaneLivenessDiagnostic = {
       liveness: "unknown",
       failureReason: "timeout",
     };
-    let firstKnownProbes = 0;
+    let releaseFirstProbe!: () => void;
+    const firstProbeGate = new Promise<void>((resolve) => {
+      releaseFirstProbe = resolve;
+    });
     const firstProbe = vi.fn(async () => {
-      if (livenessDiagnostic.liveness === "alive") firstKnownProbes++;
+      if (firstProbe.mock.calls.length === 1) await firstProbeGate;
       return livenessDiagnostic.liveness;
     });
-    const secondProbe = vi.fn(async () => livenessDiagnostic.liveness);
+    const secondProbe = vi.fn(async () => "alive" as const);
     const getPaneLivenessAsync = vi.fn(async (paneId: string) =>
       paneId === "pane-one" ? firstProbe() : secondProbe(),
     );
@@ -423,12 +440,15 @@ describe("workflow mux probe diagnostics", () => {
       createPane: () => ({ paneId: "pane" }),
       getPaneLiveness: () => "unknown",
       getPaneLivenessAsync,
-      getPaneLivenessDiagnosticAsync: async () => livenessDiagnostic,
+      getPaneLivenessDiagnosticAsync: async (paneId: string) =>
+        paneId === "pane-one"
+          ? livenessDiagnostic
+          : { liveness: "alive" as const },
       getPaneActivityAsync: async () => "unknown",
-      sendKeys: () => {},
-      sendEnter: () => {},
-      killPane: () => {},
-      focusPane: async () => {},
+      sendKeys: () => undefined,
+      sendEnter: () => undefined,
+      killPane: () => undefined,
+      focusPane: async () => undefined,
       capturePane: async () => ({ output: "", truncated: false }),
       showNativeViewer: async () => false,
       buildAttachCommands: () => ({ attachCommand: "", focusCommand: "" }),
@@ -440,14 +460,14 @@ describe("workflow mux probe diagnostics", () => {
       const firstWaiting = awaitInteractiveResult(
         firstState,
         firstController.signal,
-        1000,
+        1,
         undefined,
         telemetry,
       );
       const secondWaiting = awaitInteractiveResult(
         secondState,
         secondController.signal,
-        1000,
+        1,
         undefined,
         disabledObserver,
       );
@@ -459,9 +479,33 @@ describe("workflow mux probe diagnostics", () => {
         payloads.filter(
           (payload) => payload.event === "pi_subagentura_runtime_failure",
         );
-      await vi.waitFor(() => {
-        expect(runtimeFailures()).toHaveLength(1);
+
+      await pollArtifactChanges({} as unknown as ExtensionAPI, owner);
+      expect(firstState.status).toBe("unknown");
+      expect(runtimeFailures()).toHaveLength(0);
+
+      writeOutput(secondArtifact, "disabled observer does not block output");
+      appendCompletionEvent(secondArtifact, {
+        turnId: "turn-pane-two",
+        outcome: "done",
+        source: "agent_settled",
       });
+      const secondResult = await secondWaiting;
+      expect(secondResult.isError).toBe(false);
+      expect(secondResult.output).toBe(
+        "disabled observer does not block output",
+      );
+      expect(runtimeFailures()).toHaveLength(0);
+
+      releaseFirstProbe();
+      const firstResult = await firstWaiting;
+      if (!firstResult.isError) {
+        throw new Error("expected a mux-probe failure");
+      }
+      expect(firstResult.errorMessage).toBe(
+        "interactive sub-agent pane liveness unavailable",
+      );
+      expect(runtimeFailures()).toHaveLength(1);
       expect(runtimeFailures()[0]?.properties).toMatchObject({
         error_category: "mux",
         error_stage: "polling",
@@ -469,61 +513,10 @@ describe("workflow mux probe diagnostics", () => {
         execution: "interactive",
         mux: "tmux",
         reporter: "workflow_waiter",
-        impact: "unknown",
+        impact: "blocked",
       });
-
-      await pollArtifactChanges({} as unknown as ExtensionAPI, owner);
-      expect(firstState.status).toBe("unknown");
-      expect(secondState.status).toBe("unknown");
-      expect(runtimeFailures()).toHaveLength(2);
-      expect(
-        runtimeFailures().map((failure) => failure.properties.reporter),
-      ).toEqual(["workflow_waiter", "artifact_poller"]);
-      expect(runtimeFailures()[1]?.properties).toMatchObject({
-        execution: "interactive",
-        mux: "tmux",
-        reporter: "artifact_poller",
-        impact: "unknown",
-      });
-
-      livenessDiagnostic = { liveness: "alive" };
-      await pollArtifactChanges({} as unknown as ExtensionAPI, owner);
-      await vi.waitFor(() => {
-        expect(firstKnownProbes).toBeGreaterThan(0);
-      });
-      expect(runtimeFailures()).toHaveLength(2);
-      livenessDiagnostic = {
-        liveness: "unknown",
-        failureReason: "timeout",
-      };
-      await pollArtifactChanges({} as unknown as ExtensionAPI, owner);
-      await vi.waitFor(() => {
-        expect(runtimeFailures()).toHaveLength(4);
-      });
-
-      writeOutput(firstArtifact, "workflow output survives the outage");
-      appendCompletionEvent(firstArtifact, {
-        turnId: "turn-pane-one",
-        outcome: "done",
-        source: "agent_settled",
-      });
-      writeOutput(secondArtifact, "disabled observer does not block output");
-      appendCompletionEvent(secondArtifact, {
-        turnId: "turn-pane-two",
-        outcome: "done",
-        source: "agent_settled",
-      });
-      const [result, secondResult] = await Promise.all([
-        firstWaiting,
-        secondWaiting,
-      ]);
-      expect(result.isError).toBe(false);
-      expect(result.output).toBe("workflow output survives the outage");
-      expect(secondResult.isError).toBe(false);
-      expect(secondResult.output).toBe(
-        "disabled observer does not block output",
-      );
     } finally {
+      releaseFirstProbe();
       firstController.abort();
       secondController.abort();
       rmSync(root, { recursive: true, force: true });
@@ -548,10 +541,10 @@ describe("workflow mux probe diagnostics", () => {
       getPaneLiveness: () => "unknown",
       getPaneLivenessAsync,
       getPaneActivityAsync: async () => "unknown",
-      sendKeys: () => {},
-      sendEnter: () => {},
-      killPane: () => {},
-      focusPane: async () => {},
+      sendKeys: () => undefined,
+      sendEnter: () => undefined,
+      killPane: () => undefined,
+      focusPane: async () => undefined,
       capturePane: async () => ({ output: "", truncated: false }),
       showNativeViewer: async () => false,
       buildAttachCommands: () => ({ attachCommand: "", focusCommand: "" }),
@@ -606,7 +599,7 @@ describe("workflow mux probe diagnostics", () => {
         execution: "interactive",
         mux: "tmux",
         reporter: "workflow_waiter",
-        impact: "unknown",
+        impact: "blocked",
       });
 
       const job = startWorkflowJob(
@@ -621,6 +614,79 @@ describe("workflow mux probe diagnostics", () => {
       await job.promise;
       expect(runtimeFailures()).toHaveLength(1);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("does not report a sustained probe failure after cancellation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "workflow-mux-cancelled-probe-"));
+    const { owner, payloads, telemetry } = telemetryScope(907);
+    const art = artifactPath(root, "mux-cancelled-probe");
+    mkdirSync(art.dir, { recursive: true });
+    writeFileSync(art.statusFile, "");
+    const controller = new AbortController();
+    let probeCount = 0;
+    const getPaneLivenessAsync = vi.fn(async () => {
+      probeCount++;
+      if (probeCount === INTERACTIVE_DEAD_GRACE_TICKS) {
+        controller.abort();
+      }
+      return "unknown" as const;
+    });
+    __setTmuxMultiplexer({
+      name: "tmux",
+      capabilities: {
+        structuredFocus: true,
+        boundedCapture: true,
+        nativeOverlay: true,
+      },
+      isAvailable: () => true,
+      createPane: () => ({ paneId: "pane" }),
+      getPaneLiveness: () => "unknown",
+      getPaneLivenessAsync,
+      getPaneActivityAsync: async () => "unknown",
+      sendKeys: () => undefined,
+      sendEnter: () => undefined,
+      killPane: () => undefined,
+      focusPane: async () => undefined,
+      capturePane: async () => ({ output: "", truncated: false }),
+      showNativeViewer: async () => false,
+      buildAttachCommands: () => ({ attachCommand: "", focusCommand: "" }),
+    } as unknown as Multiplexer);
+    const state = {
+      id: "mux-cancelled-probe",
+      artifactDir: art.dir,
+      sessionFile: join(root, "session.jsonl"),
+      paneId: "pane",
+      mux: "tmux",
+      muxSession: "session",
+      model: "test/model",
+      status: "running",
+      telemetryEligible: true,
+      telemetryCorrelationId: telemetry.correlationId,
+      sessionOwner: owner,
+    } as unknown as InteractiveSubagentState;
+
+    try {
+      const result = await awaitInteractiveResult(
+        state,
+        controller.signal,
+        1,
+        undefined,
+        telemetry,
+      );
+
+      expect(getPaneLivenessAsync).toHaveBeenCalledTimes(
+        INTERACTIVE_DEAD_GRACE_TICKS,
+      );
+      if (!result.isError) throw new Error("expected an aborted result");
+      expect(result.errorMessage).toBe("aborted");
+      expect(
+        payloads.filter(
+          (payload) => payload.event === "pi_subagentura_runtime_failure",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      controller.abort();
       rmSync(root, { recursive: true, force: true });
     }
   });

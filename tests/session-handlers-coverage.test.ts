@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerInProcessJob, type JobState } from "../src/helpers";
+import {
+  registerInProcessJob,
+  type JobState,
+  type SubagentResult,
+} from "../src/helpers";
 import {
   registerInteractiveSubagentState,
   type InteractiveSubagentState,
@@ -22,7 +26,12 @@ import {
   writeLineageBootstrap,
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
-import { workflowJobRegistry } from "../src/workflow-jobs";
+import {
+  cancelWorkflowJob,
+  startWorkflowJob,
+  workflowJobRegistry,
+  type WorkflowJobState,
+} from "../src/workflow-jobs";
 import {
   appendInteractiveState,
   appendEvent,
@@ -40,12 +49,45 @@ import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
   getSessionScopes,
+  isSessionOwnerLive,
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
 import { publishCompletion } from "../src/completion-coordinator";
-import { createTelemetrySession, TELEMETRY_ORIGIN_ENV } from "../src/telemetry";
+import {
+  createTelemetrySession,
+  TELEMETRY_ORIGIN_ENV,
+  type TelemetryPayload,
+} from "../src/telemetry";
 const originalTelemetryOrigin = process.env[TELEMETRY_ORIGIN_ENV];
+
+function successfulWorkflowAgentResult(output: string): SubagentResult {
+  return {
+    isError: false,
+    output,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
+    },
+  };
+}
+
+async function drainWorkflowJob(
+  job: WorkflowJobState | undefined,
+): Promise<void> {
+  if (!job) return;
+  if (job.status === "running") cancelWorkflowJob(job, "explicit_cancel");
+  try {
+    await job.promise;
+  } catch {
+    /* Expected when draining a canceled job. */
+  }
+  workflowJobRegistry.delete(job.id);
+}
 
 interface HandlerRegistration {
   handlers: Map<string, Function[]>;
@@ -195,6 +237,7 @@ describe("session handler lifecycle callbacks", () => {
   afterEach(() => {
     const handle = (globalThis as any).__piSubagenturaInteractivePollerHandle;
     clearInterval(handle);
+    vi.unstubAllGlobals();
     vi.useRealTimers();
     workflowJobRegistry.clear();
     clearSessionScopes();
@@ -903,6 +946,211 @@ describe("session handler lifecycle callbacks", () => {
     expect(scope.inProcessJobs.size).toBe(0);
     expect(workflowJobRegistry.size).toBe(0);
     expect(getSessionScopes()).toEqual([]);
+  });
+
+  it.each([
+    ["session_shutdown", true],
+    ["replacement session_start", false],
+  ] as const)(
+    "closes workflow admission during %s independently of telemetry=%s",
+    async (lifecycle, telemetryEnabled) => {
+      const captured: TelemetryPayload[] = [];
+      process.env[TELEMETRY_ORIGIN_ENV] = "development";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        telemetryEnabled,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      const { sessionScope: scope, handlers } = registration;
+      const oldOwner = sessionOwner(scope);
+      const oldCorrelationId = scope.telemetry?.correlationId;
+      let ownerLiveDuringAbort = false;
+      let originalJob: WorkflowJobState | undefined;
+      let nestedJob: WorkflowJobState | undefined;
+      let newGenerationJob: WorkflowJobState | undefined;
+      try {
+        const original = startWorkflowJob(
+          "teardown-reentrancy",
+          'export const meta = { name: "teardown-reentrancy", description: "d" }; return await agent("blocked");',
+          {
+            runAgent: ({ signal }) => {
+              const { promise, reject } =
+                Promise.withResolvers<SubagentResult>();
+              const rejectAbort = () =>
+                reject(signal?.reason ?? new Error("aborted"));
+              if (signal?.aborted) rejectAbort();
+              else
+                signal?.addEventListener("abort", rejectAbort, { once: true });
+              return promise;
+            },
+          },
+          undefined,
+          undefined,
+          oldOwner,
+        );
+        originalJob = original;
+        const nestedBuilder = vi.fn(() => ({
+          runAgent: async () => successfulWorkflowAgentResult("orphan"),
+        }));
+        let nestedError: unknown;
+        const reentrantAttempt = vi.fn(() => {
+          ownerLiveDuringAbort = isSessionOwnerLive(oldOwner);
+          try {
+            nestedJob = startWorkflowJob(
+              "nested-teardown-workflow",
+              'export const meta = { name: "nested", description: "d" }; return "orphan";',
+              nestedBuilder,
+              undefined,
+              undefined,
+              oldOwner,
+            );
+          } catch (error) {
+            nestedError = error;
+          }
+        });
+        original.abort.signal.addEventListener("abort", reentrantAttempt, {
+          once: true,
+        });
+
+        if (lifecycle === "session_shutdown") {
+          handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+        } else {
+          handlers.get("session_start")![0]({ reason: "new" }, ctx);
+        }
+
+        expect(reentrantAttempt).toHaveBeenCalledOnce();
+        expect(ownerLiveDuringAbort).toBe(true);
+        expect(nestedError).toBeInstanceOf(Error);
+        expect(nestedBuilder).not.toHaveBeenCalled();
+        expect(workflowJobRegistry.size).toBe(0);
+        await expect(original.promise).rejects.toBeDefined();
+
+        const workflowEvents = captured.filter(({ event }) =>
+          [
+            "pi_subagentura_workflow_started",
+            "pi_subagentura_workflow_completed",
+          ].includes(event),
+        );
+        if (telemetryEnabled) {
+          expect(workflowEvents).toHaveLength(2);
+          expect(workflowEvents).toEqual([
+            expect.objectContaining({
+              event: "pi_subagentura_workflow_started",
+              distinct_id: oldCorrelationId,
+            }),
+            expect.objectContaining({
+              event: "pi_subagentura_workflow_completed",
+              distinct_id: oldCorrelationId,
+              properties: expect.objectContaining({
+                status: "cancelled",
+              }),
+            }),
+          ]);
+        } else {
+          expect(workflowEvents).toEqual([]);
+        }
+
+        if (lifecycle === "replacement session_start") {
+          const newOwner = sessionOwner(scope);
+          expect(newOwner.generation).not.toBe(oldOwner.generation);
+          const newGeneration = startWorkflowJob(
+            "new-generation",
+            'export const meta = { name: "new-generation", description: "d" }; return "ok";',
+            {
+              runAgent: async () => successfulWorkflowAgentResult("ok"),
+            },
+            undefined,
+            undefined,
+            newOwner,
+          );
+          newGenerationJob = newGeneration;
+          await newGeneration.promise;
+        } else {
+          const afterShutdownBuilder = vi.fn(() => ({
+            runAgent: async () => successfulWorkflowAgentResult("orphan"),
+          }));
+          expect(() =>
+            startWorkflowJob(
+              "after-shutdown",
+              'export const meta = { name: "after-shutdown", description: "d" }; return "orphan";',
+              afterShutdownBuilder,
+              undefined,
+              undefined,
+              oldOwner,
+            ),
+          ).toThrow(Error);
+          expect(afterShutdownBuilder).not.toHaveBeenCalled();
+        }
+      } finally {
+        await drainWorkflowJob(originalJob);
+        await drainWorkflowJob(nestedJob);
+        await drainWorkflowJob(newGenerationJob);
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("revalidates workflow admission after an options builder runs lifecycle handling", async () => {
+    let builderJob: WorkflowJobState | undefined;
+    try {
+      const captured: TelemetryPayload[] = [];
+      process.env[TELEMETRY_ORIGIN_ENV] = "development";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      const oldOwner = sessionOwner(registration.sessionScope);
+      const runner = vi.fn(async () => successfulWorkflowAgentResult("orphan"));
+      const builder = vi.fn(() => {
+        registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
+        return { runAgent: runner };
+      });
+
+      expect(() => {
+        builderJob = startWorkflowJob(
+          "builder-reentrancy",
+          'export const meta = { name: "builder-reentrancy", description: "d" }; return "orphan";',
+          builder,
+          undefined,
+          undefined,
+          oldOwner,
+        );
+      }).toThrow(Error);
+
+      expect(builder).toHaveBeenCalledOnce();
+      expect(runner).not.toHaveBeenCalled();
+      expect(workflowJobRegistry.size).toBe(0);
+      expect(
+        captured.filter(({ event }) =>
+          [
+            "pi_subagentura_workflow_started",
+            "pi_subagentura_workflow_completed",
+          ].includes(event),
+        ),
+      ).toEqual([]);
+    } finally {
+      await drainWorkflowJob(builderJob);
+      vi.unstubAllGlobals();
+    }
   });
   it.each(["new", "fork"] as const)(
     "classifies workflow cleanup as fresh_session for %s",

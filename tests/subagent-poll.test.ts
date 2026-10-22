@@ -1488,11 +1488,12 @@ describe("pollArtifactChanges", () => {
     expect(fixtureScope.interactiveStates.get(item.id)).toBe(item.state);
     expect(item.state.eventByteCursor).toBeGreaterThan(0);
   });
-  it("reports one mux probe runtime failure per outage episode", async () => {
+  it("keeps flapping mux-probe telemetry local to the poller", async () => {
     vi.resetModules();
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const multiplexer = await import("../src/multiplexer");
+    const debugLog = vi.spyOn(await import("../src/helpers"), "debugLog");
     const { state } = makeState();
     const telemetry = createTelemetrySession(true, "orchestrator_v2");
     const owner = { id: 908, generation: 1 };
@@ -1517,8 +1518,12 @@ describe("pollArtifactChanges", () => {
     state.telemetryDepthBucket = "1";
     state.telemetryModel = "default";
     scope.interactiveStates.set(state.id, state);
+    let diagnostic: PaneLivenessDiagnostic = {
+      liveness: "unknown",
+      failureReason: "timeout",
+    };
     multiplexer.__setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "unknown",
+      getPaneLivenessDiagnosticAsync: async () => diagnostic,
     } as never);
     const payloads: Array<{
       event?: string;
@@ -1530,41 +1535,31 @@ describe("pollArtifactChanges", () => {
     });
     installDeliverySpies();
 
+    diagnostic = { liveness: "alive" };
     await mod.pollArtifactChanges({} as any, owner);
-    await mod.pollArtifactChanges({} as any, owner);
-    let runtimeFailures = payloads.filter(
-      (payload) => payload.event === "pi_subagentura_runtime_failure",
-    );
-    expect(runtimeFailures).toHaveLength(1);
-    expect(runtimeFailures[0]?.properties).toMatchObject({
-      error_category: "mux",
-      error_stage: "polling",
-      failure_kind: "mux_probe",
-      execution: "interactive",
-      mux: "tmux",
-      reporter: "artifact_poller",
-      impact: "unknown",
-    });
-    expect(state.status).toBe("unknown");
+    for (let cycle = 0; cycle < 200; cycle++) {
+      diagnostic = { liveness: "unknown", failureReason: "timeout" };
+      await mod.pollArtifactChanges({} as any, owner);
+      diagnostic = { liveness: "alive" };
+      await mod.pollArtifactChanges({} as any, owner);
+    }
 
-    multiplexer.__setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "alive",
-    } as never);
-    await mod.pollArtifactChanges({} as any, owner);
-    multiplexer.__setTmuxMultiplexer({
-      getPaneLivenessAsync: async () => "unknown",
-    } as never);
-    await mod.pollArtifactChanges({} as any, owner);
-
-    runtimeFailures = payloads.filter(
-      (payload) => payload.event === "pi_subagentura_runtime_failure",
-    );
-    expect(runtimeFailures).toHaveLength(2);
+    expect(scope.interactiveStates.get(state.id)).toBe(state);
+    expect(
+      payloads.filter(
+        (payload) => payload.event === "pi_subagentura_runtime_failure",
+      ),
+    ).toHaveLength(0);
     expect(
       payloads.some(
         (payload) => payload.event === "pi_subagentura_task_completed",
       ),
     ).toBe(false);
+    expect(
+      debugLog.mock.calls.filter(
+        ([, event]) => event === "interactive_mux_probe_unknown",
+      ),
+    ).toHaveLength(200);
   });
 
   it.each([
@@ -1581,7 +1576,7 @@ describe("pollArtifactChanges", () => {
       },
     ],
   ] as const)(
-    "does not repeat mux probe failures for retained %s states",
+    "never emits mux-probe telemetry for retained terminal states",
     async (_label, terminalEvent) => {
       vi.resetModules();
       const mod =
@@ -1639,7 +1634,7 @@ describe("pollArtifactChanges", () => {
         payloads.filter(
           (payload) => payload.event === "pi_subagentura_runtime_failure",
         );
-      expect(runtimeFailures()).toHaveLength(1);
+      expect(runtimeFailures()).toHaveLength(0);
       expect(item.state.status).toBe("exited");
       expect(item.state.eventByteCursor).toBeGreaterThan(0);
       const muxProbeLogs = () =>
@@ -1652,16 +1647,13 @@ describe("pollArtifactChanges", () => {
         "interactive_mux_probe_unknown",
         { mux: "tmux", failureReason: "timeout" },
       ]);
-      expect(runtimeFailures()[0]?.properties).not.toHaveProperty(
-        "failureReason",
-      );
 
       diagnostic = { liveness: "alive" };
       await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
       diagnostic = { liveness: "unknown", failureReason: "timeout" };
       await mod.pollArtifactChanges({ sendMessage: vi.fn() } as any, owner);
 
-      expect(runtimeFailures()).toHaveLength(2);
+      expect(runtimeFailures()).toHaveLength(0);
       expect(muxProbeLogs()).toHaveLength(2);
       expect(getPaneLivenessDiagnosticAsync).toHaveBeenCalledTimes(4);
     },

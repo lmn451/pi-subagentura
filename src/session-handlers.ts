@@ -485,6 +485,7 @@ export function registerSessionHandlers(
   });
 
   pi.on("session_start", (event, ctx) => {
+    scope.workflowAdmissionClosed = true;
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
@@ -706,6 +707,7 @@ export function registerSessionHandlers(
       }
     }
     ensureInteractivePoller(globalState);
+    scope.workflowAdmissionClosed = false;
   });
 
   (pi as any).on?.(
@@ -715,6 +717,7 @@ export function registerSessionHandlers(
       ctx?: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
     ) => {
       if (scope.lifecycle !== "started") return;
+      scope.workflowAdmissionClosed = true;
 
       const owner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
