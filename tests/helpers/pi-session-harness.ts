@@ -41,6 +41,7 @@ export interface PiSessionHarness {
   session: AgentSession;
   sessionManager: SessionManager;
   contexts: TranscriptContext[];
+  thinkingLevels: Array<string | undefined>;
   completeNext(text?: string): void;
   configureTestAuth(): void;
   failNext(errorMessage?: string): void;
@@ -143,6 +144,7 @@ export async function createPiSessionHarness(
     modelsPath: null,
   });
   const contexts: TranscriptContext[] = [];
+  const thinkingLevels: Array<string | undefined> = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   const fauxProvider = {
@@ -154,7 +156,7 @@ export async function createPiSessionHarness(
         id: "faux-model",
         name: "Faux Model",
         api: "subagentura-faux",
-        reasoning: false,
+        reasoning: true,
         input: ["text" as const],
         cost: {
           input: 0,
@@ -166,8 +168,13 @@ export async function createPiSessionHarness(
         maxTokens: 4_096,
       },
     ],
-    streamSimple: (_model: unknown, context: TranscriptContext) => {
+    streamSimple: (
+      _model: unknown,
+      context: TranscriptContext,
+      requestOptions: { reasoning?: string },
+    ) => {
       contexts.push(context);
+      thinkingLevels.push(requestOptions.reasoning);
       const stream = createAssistantMessageEventStream();
       if (options.providerErrorUrl) {
         void fetch(options.providerErrorUrl).then(async (response) => {
@@ -264,6 +271,7 @@ export async function createPiSessionHarness(
     session,
     sessionManager,
     contexts,
+    thinkingLevels,
     configureTestAuth() {
       sessionRuntime.registerProvider("subagentura-faux", {
         ...fauxProvider,
