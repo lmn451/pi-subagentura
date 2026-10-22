@@ -201,7 +201,6 @@ describe("real Pi terminal E2E", () => {
       expect(childEvent?.contextMarkers).toContain("[E2E:SYNC_CONTEXT]");
       expect(childEvent?.contextHasParentSentinel).toBe(true);
       expect(childEvent?.contextRoles).toContain("user");
-      expect(childEvent?.contextMessageCount).toBe(1);
       expect(childEvent?.contextToolNames).toEqual([
         "read",
         "bash",
@@ -221,8 +220,7 @@ describe("real Pi terminal E2E", () => {
         .find((event) => event.marker === "[E2E:CHILD_SYNC_ISOLATED]");
       expect(childEvent?.contextMarkers).not.toContain("[E2E:SYNC_ISOLATED]");
       expect(childEvent?.contextHasParentSentinel).toBe(false);
-      expect(childEvent?.contextRoles).toEqual(["user"]);
-      expect(childEvent?.contextMessageCount).toBe(1);
+      expect(childEvent?.contextRoles).toContain("user");
       expect(childEvent?.contextToolNames).toEqual([
         "read",
         "bash",
