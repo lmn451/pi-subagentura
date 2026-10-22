@@ -3980,7 +3980,7 @@ it("formats USD usage without floating-point artifacts", () => {
   expect(formatWorkflowUsage(usage)).toBe("↑0 ↓1 R0 W0 ~$0.3");
 });
 
-it("includes accumulated usage in async workflow error results", async () => {
+it("includes accumulated usage without sharing raw agent errors", async () => {
   const telemetryPayloads: Array<{
     event?: string;
     properties?: Record<string, unknown>;
@@ -3993,6 +3993,7 @@ it("includes accumulated usage in async workflow error results", async () => {
     }),
   );
   clearSessionScopes();
+  const marker = "PRIVATE_UNCAUGHT_AGENT_ERROR_CANARY";
   const tools: Array<{ name: string; execute: Function }> = [];
   const pi = {
     registerTool: vi.fn((def: any) => tools.push(def)),
@@ -4011,24 +4012,33 @@ it("includes accumulated usage in async workflow error results", async () => {
   const job = startWorkflowJob(
     "late-error",
     `export const meta = { name: "late-error", description: "d" };\n` +
-      `await agent("hello"); throw new Error("later failure");`,
-    { runAgent: async ({ prompt }) => richOk(prompt), budgetTotal: 20 },
+      `await agent("hello"); await agent("private");`,
+    {
+      runAgent: async ({ prompt }) => {
+        if (prompt === "private") throw new Error(marker);
+        return richOk(prompt);
+      },
+      budgetTotal: 20,
+    },
     undefined,
     undefined,
     sessionOwner(scope),
   );
   try {
-    await expect(job.promise).rejects.toThrow("later failure");
+    await expect(job.promise).rejects.toThrow(marker);
+    expect(formatWorkflowNotificationSummary(job)).not.toContain(marker);
     const getStatus = tools.find(
       (tool) => tool.name === "get_workflow_status",
     )!;
     const status = await getStatus.execute("", { workflowId: job.id });
+    expect(JSON.stringify(status)).not.toContain(marker);
     expect(status.content[0].text).toContain("↓7/20");
     expect(status.details.budgetTotal).toBe(20);
     const getResult = tools.find(
       (tool) => tool.name === "get_workflow_result",
     )!;
     const result = await getResult.execute("", { workflowId: job.id });
+    expect(JSON.stringify(result)).not.toContain(marker);
     expect(result.isError).toBe(true);
     expect(result.details.usage).toEqual({
       input: 11,
@@ -4047,6 +4057,7 @@ it("includes accumulated usage in async workflow error results", async () => {
     );
     expect(reads).toHaveLength(1);
     expect(reads[0].properties?.outcome).toBe("error");
+    expect(JSON.stringify(telemetryPayloads)).not.toContain(marker);
   } finally {
     vi.unstubAllGlobals();
     workflowJobRegistry.delete(job.id);

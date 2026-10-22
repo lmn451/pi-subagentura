@@ -517,6 +517,14 @@ export class WorkflowExecutionError extends Error {
     this.usage = usage;
   }
 }
+
+/** Thrown only when a private sub-agent error crosses the workflow boundary. */
+export class WorkflowPrivateDiagnosticError extends WorkflowExecutionError {
+  constructor(message: string, usage?: WorkflowUsage, cause?: unknown) {
+    super(message, usage, cause);
+    this.name = "WorkflowPrivateDiagnosticError";
+  }
+}
 /** Typed evidence for the workflow VM's exact wall-clock timeout branch. */
 export class WorkflowWallTimeoutError extends Error {
   readonly timeoutMs: number;

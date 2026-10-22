@@ -48,6 +48,11 @@ import { renderProgress } from "./workflow-ui";
 import { stringify } from "./workflow-worker";
 import { completionDisplayLabel } from "./completion-presentation";
 import {
+  modelSafeWorkflowErrorMessage,
+  safeWorkflowDiagnosticMessage,
+  sanitizeWorkflowDiagnosticDetails,
+} from "./workflow-disclosure";
+import {
   getLiveWorkflowV4Store,
   WorkflowV4Store,
   workflowV4Steps,
@@ -118,7 +123,7 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
   const result = end?.data.result
     ? decodeRunValue<WorkflowRunResult>(end.data.result)
     : undefined;
-  const steps = workflowV4Steps(events);
+  const steps = sanitizeWorkflowDiagnosticDetails(workflowV4Steps(events));
   const waiting = steps.filter((step) => step.status === "waiting_for_input");
   return {
     workflowId: id,
@@ -143,7 +148,10 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
       ? "lower_bound"
       : "recorded",
     currentPhase: progress?.phase,
-    error: end ? end.data.error : interrupted?.data.error,
+    error:
+      (end?.data.error ?? interrupted?.data.error)
+        ? safeWorkflowDiagnosticMessage()
+        : undefined,
     cancellationRequested:
       end?.kind === "cancelled" || end?.data.status === "cancelled",
   };
@@ -265,7 +273,7 @@ export function registerDurableWorkflowTools(
   }
 
   function failure(error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = modelSafeWorkflowErrorMessage(error);
     return {
       content: [{ type: "text", text: `Workflow not run: ${message}` }],
       details: { status: "error", error: message },

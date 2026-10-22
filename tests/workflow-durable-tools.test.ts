@@ -309,6 +309,60 @@ describe("durable public tools", () => {
     ).toBe(true);
   });
 
+  it.each(["in-process", "process"])(
+    "keeps durable agent diagnostics local and returns only generic summaries (%s)",
+    async (isolation) => {
+      const { pi, scope, ctx, tools } = setup();
+      const marker = "PRIVATE_DURABLE_AGENT_ERROR_CANARY";
+      const script = `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "private-diagnostic", version: 1,
+        async run(ctx) {
+          await ctx.agent("private", {
+            prompt: "private work",
+            id: "private", isolation: "${isolation}", persist: false
+          });
+          return "unexpected";
+        }
+      });`;
+      const notify = vi.fn(() => true);
+      const api = registerDurableWorkflowTools(
+        pi,
+        () => sessionOwner(scope),
+        () => async () => {
+          throw new Error(marker);
+        },
+        notify,
+        root,
+      );
+      const started = await api.run({ script }, undefined, undefined, ctx);
+      const id = started.details.workflowId as string;
+      const job = workflowJobRegistry.get(id)!;
+      await expect(job.promise).rejects.toThrow(marker);
+      const inspected = await api.inspect(id, ctx);
+      const collected = await api.inspect(id, ctx, true);
+      const listed = await tools
+        .get("list_workflow_runs")!
+        .execute("", {}, undefined, undefined, ctx);
+      expect(JSON.stringify(inspected)).not.toContain(marker);
+      expect(JSON.stringify(collected)).not.toContain(marker);
+      expect(JSON.stringify(listed)).not.toContain(marker);
+      const synchronous = await api.run(
+        { script, async: false },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(JSON.stringify(synchronous)).not.toContain(marker);
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "workflow-v4", root },
+        id,
+      );
+      expect(
+        events?.findLast((event) => event.kind === "terminal")?.data.error,
+      ).toContain(marker);
+    },
+  );
+
   it("interrupts on lifecycle cleanup, then resumes with the new live runner context", async () => {
     const { pi, scope, ctx } = setup();
     let started!: () => void;

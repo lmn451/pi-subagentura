@@ -276,7 +276,7 @@ describe("bundled workflow examples", () => {
     });
   });
 
-  it("bounds oversized agent failures before persisting map results", async () => {
+  it("keeps thrown agent diagnostics generic before persisting map results", async () => {
     const responses = passingSourceReviewResponses();
     const oversizedMessage = "provider error ".repeat(50_000);
     responses["Compatibility"] = new Error(oversizedMessage);
@@ -302,9 +302,8 @@ describe("bundled workflow examples", () => {
       failure: { name: "Error" },
     });
     const failureMessage = failedReview?.failure?.message;
-    expect(failureMessage).toHaveLength(1_200);
-    expect(failureMessage).toMatch(/^ReviewError: Error: provider error /);
-    expect(failureMessage).toContain(oversizedMessage.slice(0, 100));
+    expect(failureMessage).toBe("ReviewError: Error: Workflow agent failed.");
+    expect(failureMessage).not.toContain(oversizedMessage.slice(0, 100));
   });
 
   it("lets blocking findings take precedence over failed reviews", async () => {

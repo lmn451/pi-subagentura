@@ -58,6 +58,11 @@ import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
 import { sanitizeOutput } from "./notifications";
 import {
+  modelSafeWorkflowErrorMessage,
+  safeWorkflowDiagnosticMessage,
+  sanitizeWorkflowDiagnosticDetails,
+} from "./workflow-disclosure";
+import {
   completionDisplayLabel,
   formatCompletionMessage,
 } from "./completion-presentation";
@@ -220,7 +225,7 @@ export function formatWorkflowNotificationSummary(
     return `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${usageSummary}.`;
   }
   const usage = presentWorkflowUsage(job.snapshot.usage);
-  return `${job.error ?? "Workflow did not produce a result."}${
+  return `${safeWorkflowDiagnosticMessage()}${
     usage
       ? ` (${formatWorkflowUsage(usage, {
           outputBudget: job.snapshot.budgetTotal,
@@ -1220,7 +1225,7 @@ export function registerWorkflowTool(
           },
         };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         emitWorkflowResultReadTelemetry(
           job,
           workflowOwner,
@@ -1315,7 +1320,7 @@ export function registerWorkflowTool(
               (st.snapshot.currentPhase
                 ? `, phase: ${st.snapshot.currentPhase}`
                 : "") +
-              (st.error ? `\nerror: ${st.error}` : ""),
+              (st.error ? `\n${safeWorkflowDiagnosticMessage()}` : ""),
           },
         ],
         details: {
@@ -1328,7 +1333,7 @@ export function registerWorkflowTool(
           workflowId: st.id,
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
-          ...st.snapshot,
+          ...sanitizeWorkflowDiagnosticDetails(st.snapshot),
         },
       };
     },
@@ -1410,7 +1415,7 @@ export function registerWorkflowTool(
         run = waitResult.value!;
       } catch (err) {
         // Non-abort errors preserve the original structured handling
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};

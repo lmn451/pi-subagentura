@@ -174,6 +174,7 @@ export interface WorkflowStepPolicy {
   readonly timeout?: number | string;
   readonly retry?: WorkflowRetryPolicy;
   readonly failure?: "fail" | "continue" | "collect";
+  /** Omit a step output from durable storage; this never authorizes disclosure. */
   readonly persist?: boolean;
   readonly resume?: boolean;
   readonly cache?: boolean;
