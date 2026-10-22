@@ -115,9 +115,7 @@ and manual workflows, with `continue-on-error` on the pinned SDK leg, so mutatio
 results never gate a pull request. Local configuration or test-runner failures
 still return a non-zero exit code.
 
-## Provider list
-
-`resolveModel()` in `helpers.ts` dynamically queries all providers via `getProviders()` from the Pi SDK — no hardcoded list. When Pi adds new providers, bare model IDs resolve automatically without code changes.
+For model resolution behavior, see [architecture §5.2](architecture.md#52-context-and-model-selection).
 
 ## Guidelines
 

@@ -405,7 +405,8 @@ describe("child protocol lifecycle integration", () => {
       const getResult = definitions.find(
         (tool) => tool.name === "get_subagent_result",
       );
-      if (!spawn || !getResult) throw new Error("in-process tools not registered");
+      if (!spawn || !getResult)
+        throw new Error("in-process tools not registered");
 
       const parentTurn = harness.session.prompt("Parent context for child.");
       await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));

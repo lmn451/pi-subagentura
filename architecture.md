@@ -356,7 +356,9 @@ An empty projection is rejected.
 Both tools inherit orchestration lineage from `resolveSpawnDepth` and reject depth beyond `SUBAGENTURA_MAX_ORCHESTRATION_DEPTH`, default three.
 
 `resolveModel` uses exact model lookup.
-It tries the parent registry, including extension-added models, then the global provider/model registry, and falls back to the parent default when an override cannot be resolved.
+It tries the parent registry, including extension-added models, then scans the
+SDK's generated built-in provider catalog. A bare ID resolves only when an
+exact match is found; an unresolved override falls back to the parent default.
 Child sessions use Pi SDK's `ModelRuntime` directly, and helpers copy the
 parent's extension-added custom and native provider registrations. The legacy
 auth/model-registry compatibility path has been removed.
