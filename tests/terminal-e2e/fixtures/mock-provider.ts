@@ -1,17 +1,17 @@
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
-  getCurrentSystemPrompt,
-  getCurrentTools,
   type AssistantMessage,
   type AssistantMessageEvent,
+  type Context,
   type Model,
   type SimpleStreamOptions,
   type ToolCall,
-  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { normalizeProviderContext } from "../../../src/pi-sdk-compat";
 
 export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
@@ -20,10 +20,272 @@ const FIXED_TIMESTAMP = 1_700_000_000_000;
 const GATE_TIMEOUT_MS = 30_000;
 
 type Stage = "initial" | "toolIssued" | "gated" | "complete" | "failed";
-type State = { stage: Stage; requestSeq: number; toolCallId?: string };
+type State = {
+  stage: Stage;
+  requestSeq: number;
+  toolCallId?: string;
+  toolName?: string;
+};
 
 const states = new Map<string, State>();
 
+function observedToolResults(context: Context): Array<Record<string, unknown>> {
+  return context.messages.flatMap((entry) =>
+    entry.role === "toolResult"
+      ? [
+          {
+            toolName: entry.toolName,
+            text: entry.content
+              .map((part) => (part.type === "text" ? part.text : ""))
+              .join("\n"),
+            details: entry.details,
+          },
+        ]
+      : [],
+  );
+}
+
+function issue(
+  marker: string,
+  requestSeq: number,
+  call: ToolCall,
+  stream: ReturnType<typeof createAssistantMessageEventStream>,
+): void {
+  const final = message([call], "toolUse");
+  states.set(marker, {
+    stage: "toolIssued",
+    requestSeq,
+    toolCallId: call.id,
+    toolName: call.name,
+  });
+  emit(stream, toolEvents(final), final);
+  diagnostic({
+    marker,
+    requestSeq,
+    afterStage: "toolIssued",
+    toolCallName: call.name,
+    eventType: "tool_call",
+  });
+}
+
+function readOnlyWorkflowRequest(
+  marker: string,
+  requestSeq: number,
+  state: State,
+  context: Context,
+  stream: ReturnType<typeof createAssistantMessageEventStream>,
+): void {
+  const processMode = marker === "[E2E:CHILD_WORKFLOW_READONLY_PROCESS]";
+  const sourcePath = join(process.cwd(), "readonly-source.ts");
+  const outputPath = processMode
+    ? join(artifactDir(), "output.md")
+    : join(process.cwd(), "readonly-output.md");
+  const previousTool = state.toolName;
+  if (!previousTool) {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-readonly-read", "read", { path: sourcePath }),
+      stream,
+    );
+    return;
+  }
+  if (
+    !latestToolResult(context) ||
+    latestToolResult(context) !== state.toolCallId
+  )
+    throw new Error(`read-only fixture expected result for ${previousTool}`);
+  if (previousTool === "read") {
+    if (!toolResultText(context, "read").includes("READ_ONLY_SOURCE_SENTINEL"))
+      throw new Error("read-only fixture did not read the temporary source");
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-readonly-write", "write", {
+        path: outputPath,
+        content: "FORBIDDEN_OUTPUT_WRITE",
+      }),
+      stream,
+    );
+    return;
+  }
+  if (previousTool === "write") {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-readonly-edit", "edit", {
+        path: sourcePath,
+        edits: [
+          {
+            oldText: "READ_ONLY_SOURCE_SENTINEL",
+            newText: "FORBIDDEN_EDIT",
+          },
+        ],
+      }),
+      stream,
+    );
+    return;
+  }
+  if (previousTool === "edit") {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-readonly-bash", "bash", {
+        command:
+          `printf 'FORBIDDEN_BASH' > ${shellQuote(sourcePath)}` +
+          (processMode
+            ? ` && node ${shellQuote(join(artifactDir(), "cli.mjs"))} done 0`
+            : ""),
+      }),
+      stream,
+    );
+    return;
+  }
+  if (previousTool === "bash") {
+    issue(
+      marker,
+      requestSeq,
+      toolCall(
+        "e2e-readonly-spawn",
+        processMode ? "subagent_interactive" : "subagent_isolated",
+        {
+          name: "E2E read-only forbidden nested spawn",
+          task: "[E2E:CHILD_READONLY_NESTED_SPAWN] Attempt a mutation.",
+          model: E2E_PROVIDER + "/" + E2E_MODEL,
+          background: true,
+          notifyOnComplete: "notify",
+          triggerTurnOnComplete: false,
+        },
+      ),
+      stream,
+    );
+    return;
+  }
+  if (
+    previousTool === "subagent_interactive" ||
+    previousTool === "subagent_isolated"
+  ) {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-readonly-mcp", "mcp__e2e__mutate", {
+        path: join(process.cwd(), "readonly-mcp-created.txt"),
+        content: "FORBIDDEN_MCP_MUTATION",
+      }),
+      stream,
+    );
+    return;
+  }
+  if (previousTool === "mcp__e2e__mutate") {
+    if (marker.includes("_IN_PROCESS")) {
+      issue(
+        marker,
+        requestSeq,
+        toolCall("e2e-readonly-structured", "structured_output", {
+          value: { source: "READ_ONLY_SOURCE_SENTINEL" },
+        }),
+        stream,
+      );
+      diagnostic({
+        marker,
+        requestSeq,
+        afterStage: "complete",
+        eventType: "structured_output",
+      });
+      return;
+    }
+    const final = message([
+      {
+        type: "text",
+        text: JSON.stringify({ source: "READ_ONLY_SOURCE_SENTINEL" }),
+      },
+    ]);
+    states.set(marker, { stage: "complete", requestSeq });
+    emit(stream, textEvents(final), final);
+    diagnostic({
+      marker,
+      requestSeq,
+      afterStage: "complete",
+      eventType: "done",
+    });
+    return;
+  }
+  if (previousTool === "structured_output")
+    throw new Error("structured_output should terminate the SDK child turn");
+  throw new Error(`unexpected read-only fixture tool result: ${previousTool}`);
+}
+
+function processMcpControlRequest(
+  marker: string,
+  requestSeq: number,
+  state: State,
+  context: Context,
+  stream: ReturnType<typeof createAssistantMessageEventStream>,
+): void {
+  const previousTool = state.toolName;
+  const outputPath = join(artifactDir(), "output.md");
+  if (!previousTool) {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-mcp-control", "mcp__e2e__mutate", {
+        path: join(process.cwd(), "readonly-mcp-control.txt"),
+        content: "PROCESS_MCP_CONTROL_SENTINEL",
+      }),
+      stream,
+    );
+    return;
+  }
+  if (
+    latestToolResult(context) !== state.toolCallId ||
+    (previousTool !== "mcp__e2e__mutate" &&
+      previousTool !== "write" &&
+      previousTool !== "bash")
+  )
+    throw new Error(
+      `MCP control fixture expected an allowed result, got ${previousTool}`,
+    );
+  if (previousTool === "mcp__e2e__mutate") {
+    if (
+      !toolResultText(context, previousTool).includes(
+        "E2E fixture file written.",
+      )
+    )
+      throw new Error("MCP control fixture mutator did not execute");
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-mcp-control-output", "write", {
+        path: outputPath,
+        content: JSON.stringify({ written: true }),
+      }),
+      stream,
+    );
+    return;
+  }
+  if (previousTool === "write") {
+    issue(
+      marker,
+      requestSeq,
+      toolCall("e2e-mcp-control-done", "bash", {
+        command: `node ${shellQuote(join(artifactDir(), "cli.mjs"))} done 0`,
+      }),
+      stream,
+    );
+    return;
+  }
+  const final = message([
+    { type: "text", text: JSON.stringify({ written: true }) },
+  ]);
+  states.set(marker, { stage: "complete", requestSeq });
+  emit(stream, textEvents(final), final);
+  diagnostic({
+    marker,
+    requestSeq,
+    afterStage: "complete",
+    eventType: "done",
+  });
+}
 function diagnostic(record: Record<string, unknown>): void {
   const path = process.env.SUBAGENTURA_E2E_LOG;
   if (!path) return;
@@ -40,7 +302,7 @@ function markers(value: unknown): string[] {
   return [...text.matchAll(/\[E2E:[A-Z0-9_:-]+\]/g)].map((match) => match[0]);
 }
 
-function newestMarker(context: TranscriptContext): string | undefined {
+function newestMarker(context: Context): string | undefined {
   const latest = context.messages.at(-1);
   if (!latest) return undefined;
   const values: unknown[] = [];
@@ -53,12 +315,12 @@ function newestMarker(context: TranscriptContext): string | undefined {
   return found.at(-1);
 }
 
-function latestToolResult(context: TranscriptContext): string | undefined {
+function latestToolResult(context: Context): string | undefined {
   const latest = context.messages.at(-1);
   return latest?.role === "toolResult" ? latest.toolCallId : undefined;
 }
 
-function toolResultText(context: TranscriptContext, toolName: string): string {
+function toolResultText(context: Context, toolName: string): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (current.role !== "toolResult" || current.toolName !== toolName)
@@ -68,11 +330,7 @@ function toolResultText(context: TranscriptContext, toolName: string): string {
   throw new Error(`mock provider could not find result for ${toolName}`);
 }
 
-function resultId(
-  context: TranscriptContext,
-  toolName: string,
-  pattern: RegExp,
-): string {
+function resultId(context: Context, toolName: string, pattern: RegExp): string {
   const id = toolResultText(context, toolName).match(pattern)?.[0];
   if (!id) throw new Error(`mock provider could not find ${toolName} id`);
   return id;
@@ -81,7 +339,7 @@ function resultId(
 const INTERACTIVE_ID = /^[a-f0-9]{16}$/;
 const INTERACTIVE_LAUNCH = /^Interactive sub-agent ([a-f0-9]{16}) started \(/;
 
-function interactiveResultId(context: TranscriptContext): string {
+function interactiveResultId(context: Context): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (
@@ -148,7 +406,6 @@ function toolCall(
 
 const KNOWN_MARKERS = new Set([
   "[E2E:SMOKE]",
-  "[E2E:TOOL_PARAMETERS]",
   "[E2E:SYNC_CONTEXT]",
   "[E2E:SYNC_ISOLATED]",
   "[E2E:ASYNC_ISOLATED]",
@@ -172,6 +429,12 @@ const KNOWN_MARKERS = new Set([
   "[E2E:CHILD_ASYNC_ISOLATED]",
   "[E2E:CHILD_WORKFLOW]",
   "[E2E:CHILD_WORKFLOW_PROCESS]",
+  "[E2E:CHILD_WORKFLOW_READONLY_PROCESS]",
+  "[E2E:CHILD_WORKFLOW_MCP_CONTROL_PROCESS]",
+  "[E2E:CHILD_WORKFLOW_READONLY_IN_PROCESS]",
+  "[E2E:CHILD_READONLY_NESTED_SPAWN]",
+  "[E2E:WORKFLOW_READONLY_PROCESS]",
+  "[E2E:WORKFLOW_READONLY_IN_PROCESS]",
   "[E2E:CHILD_WORKFLOW_OK]",
   "[E2E:CHILD_WORKFLOW_ERROR]",
   "[E2E:CHILD_INTERACTIVE]",
@@ -418,7 +681,7 @@ export function streamThinkingForTest(text: string) {
 async function runRequest(
   stream: ReturnType<typeof createAssistantMessageEventStream>,
   model: Model<any>,
-  context: TranscriptContext,
+  context: Context,
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
   const toolResultId = latestToolResult(context);
@@ -451,24 +714,26 @@ async function runRequest(
   ) {
     throw new Error("mock provider received a provider/model/API mismatch");
   }
-  const systemPrompt = getCurrentSystemPrompt(context.messages);
-  const tools = getCurrentTools(context.messages);
+  const normalizedContext = normalizeProviderContext(context);
   diagnostic({
     marker,
     requestSeq,
     beforeStage: previous?.stage ?? "initial",
     route: "scripted",
     toolCallId: toolResultId,
+    toolCallName: previous?.toolName,
     contextMarkers: [...new Set(markers(context.messages))],
     contextMessageCount: context.messages.length,
     contextRoles: context.messages.map((entry) => entry.role),
     contextHasParentSentinel: JSON.stringify([
       context.messages,
-      systemPrompt,
+      normalizedContext.systemPrompt,
     ]).includes("PARENT_CONTEXT_SENTINEL"),
-    contextToolNames: tools.map((tool) => tool.name),
+    contextToolNames: normalizedContext.tools.map((tool) => tool.name),
+    contextWorkingDirectory: process.cwd(),
+    childArtifactDir: process.env.ARTIFACT_DIR,
+    contextToolResults: observedToolResults(context),
   });
-
   const isChild = marker.includes("CHILD_");
   let state: State = previous ?? { stage: "initial", requestSeq: 0 };
   if (state.stage === "complete" && marker !== followupMarker) {
@@ -498,6 +763,14 @@ async function runRequest(
   if (isChild) {
     const isInteractive = marker.includes("CHILD_INTERACTIVE");
     const interactiveTurn = marker.includes("FOLLOWUP") ? "2" : "1";
+    if (marker === "[E2E:CHILD_WORKFLOW_MCP_CONTROL_PROCESS]") {
+      processMcpControlRequest(marker, requestSeq, state, context, stream);
+      return;
+    }
+    if (marker.includes("CHILD_WORKFLOW_READONLY")) {
+      readOnlyWorkflowRequest(marker, requestSeq, state, context, stream);
+      return;
+    }
     if (isInteractive && state.stage === "initial") {
       const call = toolCall(
         `e2e-interactive-write-${interactiveTurn}`,
@@ -532,6 +805,7 @@ async function runRequest(
         stage: "toolIssued",
         requestSeq,
         toolCallId: call.id,
+        toolName: call.name,
       });
       emit(stream, toolEvents(final), final);
       return;
@@ -670,13 +944,7 @@ async function runRequest(
   diagnostic({ marker, requestSeq, afterStage: "complete", eventType: "done" });
 }
 
-function parentTool(marker: string, context: TranscriptContext): ToolCall {
-  if (marker === "[E2E:TOOL_PARAMETERS]") {
-    return toolCall("e2e-tool-parameters-1", "list_available_models", {
-      filter: "subagentura-e2e",
-      authOnly: false,
-    });
-  }
+function parentTool(marker: string, context: Context): ToolCall {
   if (marker.includes("ASYNC_STATUS")) {
     return toolCall("e2e-async-status-1", "get_subagent_status", {
       jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),
@@ -717,6 +985,36 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
       },
     );
   }
+  if (marker.includes("WORKFLOW_READONLY")) {
+    const processMode = marker === "[E2E:WORKFLOW_READONLY_PROCESS]";
+    const childMarker = processMode
+      ? "[E2E:CHILD_WORKFLOW_READONLY_PROCESS]"
+      : "[E2E:CHILD_WORKFLOW_READONLY_IN_PROCESS]";
+    const controlStep = processMode
+      ? `await ctx.agent("mcp-control", {
+           prompt: "[E2E:CHILD_WORKFLOW_MCP_CONTROL_PROCESS] Use the fake mutator."
+         });`
+      : "";
+    const isolation = processMode ? "" : 'isolation: "in-process",';
+    return toolCall("e2e-readonly-workflow", "workflow", {
+      script: `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+     export default defineWorkflow({
+       name: "e2e-readonly-${processMode ? "process" : "in-process"}",
+       version: 1,
+       output: schema.object({ source: schema.string() }),
+       run: async function(ctx) {
+         ${controlStep}
+         return await ctx.agent("inspect-source", {
+           prompt: "${childMarker} Read readonly-source.ts and report its source.",
+           ${isolation}
+           readOnly: true,
+           output: schema.object({ source: schema.string() })
+         });
+       }
+     });`,
+      async: false,
+    });
+  }
   if (marker.includes("WORKFLOW_PARTIAL")) {
     return toolCall("e2e-workflow-partial-1", "workflow", {
       script: `export const meta = { name: "e2e-partial", description: "partial failure fixture", phases: [{ title: "phase" }] }; phase("phase"); return await parallel([() => agent("[E2E:CHILD_WORKFLOW_OK] Return success.", { label: "ok", model: "subagentura-e2e/mock", isolation: "in-process" }), () => agent("[E2E:CHILD_WORKFLOW_ERROR] Fail deterministically.", { label: "error", model: "subagentura-e2e/mock", isolation: "in-process" })]);`,
@@ -738,6 +1036,8 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
       task: "[E2E:CHILD_PROVIDER_ERROR] Fail the provider fixture.",
       model: "subagentura-e2e/mock",
       background: true,
+      notifyOnComplete: "notify",
+      triggerTurnOnComplete: false,
     });
   }
   if (marker.includes("INTERACTIVE")) {
@@ -746,6 +1046,8 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
       task: "[E2E:CHILD_INTERACTIVE] Complete the artifact fixture.",
       model: "subagentura-e2e/mock",
       background: true,
+      notifyOnComplete: "notify",
+      triggerTurnOnComplete: false,
     });
   }
   const isolated = marker.includes("ISOLATED");
@@ -756,6 +1058,9 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
       task: `[E2E:CHILD_${marker.replace("[E2E:", "").replace("]", "")}] Return the deterministic fixture.`,
       model: "subagentura-e2e/mock",
       async: marker.includes("ASYNC"),
+      ...(marker.includes("ASYNC")
+        ? { notifyOnComplete: "notify", triggerTurnOnComplete: false }
+        : {}),
     },
   );
 }
@@ -788,7 +1093,7 @@ export function createMockProviderConfig() {
     ],
     streamSimple(
       model: Model<any>,
-      context: TranscriptContext,
+      context: Context,
       options?: SimpleStreamOptions,
     ) {
       const stream = createAssistantMessageEventStream();
@@ -820,6 +1125,24 @@ export function createMockProviderConfig() {
 
 export default function registerMockProvider(pi: ExtensionAPI): void {
   pi.registerProvider(E2E_PROVIDER, createMockProviderConfig() as any);
+  if (process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL === "1") {
+    pi.registerTool({
+      name: "mcp__e2e__mutate",
+      label: "E2E MCP mutation probe",
+      description: "Writes the requested test fixture file.",
+      parameters: Type.Object({
+        path: Type.String(),
+        content: Type.String(),
+      }),
+      async execute(_toolCallId, params) {
+        writeFileSync(params.path, params.content);
+        return {
+          content: [{ type: "text", text: "E2E fixture file written." }],
+          details: { path: params.path },
+        };
+      },
+    });
+  }
   pi.on("session_start", (_event, ctx) => {
     const ui = ctx.ui as typeof ctx.ui & {
       setWorkingIndicator?: (value?: unknown) => void;

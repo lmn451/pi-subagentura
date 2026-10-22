@@ -12,28 +12,55 @@ const ASPECTS = [
   {
     id: ASPECT_IDS[0],
     title: "Intent and design alignment",
-    focus:
-      "Check whether the implementation matches the stated intent and design, including whether the chosen approach solves the requested problem without drifting from it.",
+    target:
+      "The match between the implementation and the stated intent/design.",
+    change:
+      "Compare the implementation with the request and design. Look for missing requirements, unsuitable choices, or drift from the requested problem.",
+    acceptance:
+      "A finding must identify a concrete mismatch with the intended change, not merely a different reasonable design choice.",
   },
   {
     id: ASPECT_IDS[1],
     title: "Compatibility",
-    focus:
-      "Check public APIs, persisted data, configuration, protocol behavior, and supported runtime compatibility for breaking changes.",
+    target:
+      "Consumer-facing and persisted contracts affected by the implementation.",
+    change:
+      "Check public APIs, persisted data, configuration, protocol behavior, and supported runtime compatibility for breaks to existing consumers.",
+    acceptance:
+      "A finding must identify a concrete incompatibility and the affected consumer or contract.",
   },
   {
     id: ASPECT_IDS[2],
     title: "Unintended behavior changes",
-    focus:
+    target:
+      "Observable behavior outside the stated scope of the intended change.",
+    change:
       "Look for side effects or behavior changes outside the intended scope, including regressions in existing callers and workflows.",
+    acceptance:
+      "A finding must connect an unintended behavior change to a concrete affected path or caller.",
   },
   {
     id: ASPECT_IDS[3],
     title: "Correctness and quality",
-    focus:
+    target: "Correctness and maintainability of the changed implementation.",
+    change:
       "Check correctness, edge cases, error handling, and maintainability in the changed code.",
+    acceptance:
+      "A finding must explain a concrete failure mode or maintainability risk, not a stylistic preference.",
   },
 ] as const;
+
+const REVIEW_CONTEXT = [
+  "# Goal",
+  "Review the supplied source files against the stated intended change/design.",
+  "",
+  "# Contract",
+  "Do not modify files. Ground findings in direct source evidence and do not invent evidence.",
+  "Return a verdict (pass, concern, blocking, or uncertain) and at most 15 concrete findings.",
+  "Each finding must include severity (critical, high, medium, or low), a precise location, direct evidence from the source, and an explanation of the impact.",
+  "Use an empty findings array when no material issue is found; use uncertain when the available evidence is insufficient.",
+  "Return JSON matching the supplied schema.",
+].join("\n");
 
 const Aspect = schema.enum(ASPECT_IDS);
 const Verdict = schema.enum([
@@ -128,6 +155,14 @@ function requireBoundedText(
       `${label} must be non-empty and at most ${maximum} characters.`,
     );
   }
+}
+
+function boundedReviewError(error: unknown): Error {
+  const name = error instanceof Error ? error.name : "ReviewError";
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = new Error(message.slice(0, 1_200));
+  bounded.name = name.slice(0, 128);
+  return bounded;
 }
 
 function validateInput(args: {
@@ -252,23 +287,32 @@ export default defineWorkflow({
       fileList += `${fileList ? "\n" : ""}- ${file}`;
     }
 
+    const reviewContext = `${REVIEW_CONTEXT}
+
+Files:
+${fileList}
+
+Intended change/design:
+${args.intendedChange}`;
+
     const collected = await ctx.map(
       ASPECTS,
       async (aspect) => {
-        const review = await ctx.agent(`review-${aspect.id}`, {
-          title: aspect.title,
-          prompt:
-            `Review the requested files against the intended change/design. Focus on ${aspect.title}.\n\n` +
-            `${aspect.focus}\n\n` +
-            `Files:\n${fileList}\n\n` +
-            `Intended change/design:\n${args.intendedChange}\n\n` +
-            "Do not edit files. Return at most 15 concrete findings. Each finding must include " +
-            "severity (critical, high, medium, or low), a precise location, direct evidence from " +
-            "the source, and an explanation of the impact. Use an empty findings array when no " +
-            "material issue is found. Use uncertain when the available evidence is insufficient; " +
-            "do not invent evidence. Return JSON matching the supplied schema.",
-          output: AspectReview,
-        });
+        let review: AspectReviewValue;
+        try {
+          review = await ctx.agent(`review-${aspect.id}`, {
+            title: aspect.title,
+            prompt:
+              `${reviewContext}\n\n` +
+              `# Target\n${aspect.target}\n\n` +
+              `# Change\n${aspect.change}\n\n` +
+              `# Acceptance\n${aspect.acceptance}`,
+            output: AspectReview,
+            readOnly: true,
+          });
+        } catch (error) {
+          throw boundedReviewError(error);
+        }
         for (const finding of review.findings) {
           requireBoundedText(finding.location, "finding location", 512);
           requireBoundedText(finding.evidence, "finding evidence", 1_200);

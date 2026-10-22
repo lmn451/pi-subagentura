@@ -16,6 +16,8 @@ import {
 import { runWorkflow } from "../src/workflow-worker";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+import { prepareDurableProcess } from "../src/workflow-durable-process";
+import type { InteractiveSubagentState } from "../src/interactive-tmux";
 
 const roots: string[] = [];
 const stores: WorkflowRunStore[] = [];
@@ -122,6 +124,191 @@ describe("durable workflow journal", () => {
       "budget exhausted",
     );
     expect(runner).not.toHaveBeenCalled();
+  });
+  it("binds durable attempts to read-only mode without splitting default identity", async () => {
+    const { store } = await fixture('return "ok";');
+    const durable = new DurableWorkflow(store);
+    const restricted = vi.fn(
+      async (request: Parameters<WorkflowAgentRunner>[0]) => {
+        expect(request.durableAttempt?.readOnly).toBe(true);
+        return ok("restricted");
+      },
+    );
+    const request = {
+      prompt: "same request",
+      isolation: "in-process",
+      readOnly: true,
+    };
+    await expect(
+      durable.runAttempt("capability", 0, request, restricted),
+    ).resolves.toEqual(ok("restricted"));
+    expect(restricted).toHaveBeenCalledTimes(1);
+
+    const forbiddenReuse = vi.fn(async () => ok("unrestricted"));
+    await expect(
+      durable.runAttempt(
+        "capability",
+        0,
+        { ...request, readOnly: false },
+        forbiddenReuse,
+      ),
+    ).rejects.toThrow("configuration changed");
+    expect(forbiddenReuse).not.toHaveBeenCalled();
+
+    const defaults = { prompt: "default", isolation: "in-process" };
+    await durable.runAttempt("default", 0, defaults, async () => ok("default"));
+    const defaultReuse = vi.fn(async () => ok("must not run"));
+    await expect(
+      durable.runAttempt(
+        "default",
+        0,
+        { ...defaults, readOnly: false },
+        defaultReuse,
+      ),
+    ).resolves.toEqual(ok("default"));
+    expect(defaultReuse).not.toHaveBeenCalled();
+  });
+  it("replays durable request identity with false and omitted read-only canonicalized", async () => {
+    const { store } = await fixture('return "ok";');
+    const exchange = (
+      durable: DurableWorkflow,
+      readOnly: boolean | undefined,
+      execute: () => Promise<{
+        id: number;
+        ok: boolean;
+        value: string;
+        tokensDelta: number;
+      }>,
+    ) =>
+      new Promise<unknown>((resolve, reject) => {
+        durable.bind((value) => {
+          if (
+            value &&
+            typeof value === "object" &&
+            "type" in value &&
+            value.type === "response_offer" &&
+            "id" in value &&
+            typeof value.id === "number"
+          ) {
+            durable.acceptResponse(value.id, 1);
+            return;
+          }
+          resolve(value);
+        }, reject);
+        durable.dispatch(
+          {
+            id: 1,
+            method: "agent",
+            payload: {
+              operationPath: ["review"],
+              opts: {
+                prompt: "Review",
+                ...(readOnly === undefined ? {} : { readOnly }),
+              },
+            },
+          },
+          execute,
+        );
+      });
+    const first = new DurableWorkflow(store);
+    const execute = vi.fn(async () => ({
+      id: 1,
+      ok: true,
+      value: "recorded result",
+      tokensDelta: 0,
+    }));
+    await expect(exchange(first, false, execute)).resolves.toEqual({
+      id: 1,
+      ok: true,
+      value: "recorded result",
+      tokensDelta: 0,
+    });
+    const recordedRequest = store.events.find(
+      (event) => event.kind === "request",
+    );
+    expect(
+      recordedRequest?.kind === "request"
+        ? decodeRunValue(recordedRequest.data.payload)
+        : undefined,
+    ).toEqual({
+      operationPath: ["review"],
+      opts: { prompt: "Review" },
+    });
+    first.stop();
+    await first.drain();
+
+    const recovered = new DurableWorkflow(store);
+    const forbiddenRedispatch = vi.fn(async () => ({
+      id: 1,
+      ok: true,
+      value: "must not execute",
+      tokensDelta: 0,
+    }));
+    await expect(
+      exchange(recovered, undefined, forbiddenRedispatch),
+    ).resolves.toEqual({
+      id: 1,
+      ok: true,
+      value: "recorded result",
+      tokensDelta: 0,
+    });
+    expect(forbiddenRedispatch).not.toHaveBeenCalled();
+    recovered.stop();
+    await recovered.drain();
+  });
+  it("runs a durable V4 read-only agent through its hashed process attempt path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "workflow-v4-process-"));
+    roots.push(root);
+    const source = `
+      import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "durable-read-only",
+        version: 1,
+        async run(ctx) {
+          return await ctx.agent("review", {
+            prompt: "Review source",
+            readOnly: true,
+          });
+        },
+      });
+    `;
+    const scope: RunScope = { root, cwd: root, sessionId: "durable-v4" };
+    const store = await WorkflowRunStore.create(scope, {
+      script: source,
+      args: encodeRunValue(undefined),
+      budgetTotal: 1000,
+    });
+    stores.push(store);
+
+    const runAgent: WorkflowAgentRunner = async (request) => {
+      const attemptContext = request.durableAttempt;
+      if (!attemptContext)
+        throw new Error("V4 process agent has no durable attempt identity.");
+      expect(request.readOnly).toBe(true);
+      expect(attemptContext.readOnly).toBe(true);
+      const attempt = await prepareDurableProcess(attemptContext);
+      await attemptContext.recordDispatch?.();
+      attempt.beforeDispatch({
+        id: "durable-v4-review",
+        artifactDir: root,
+        paneId: "durable-v4-pane",
+        mux: "tmux",
+        sessionFile: join(root, "session.jsonl"),
+        task: request.prompt,
+      } as InteractiveSubagentState);
+      const child = spawn("bash", ["-c", attempt.wrapCommand("true")], {
+        stdio: "ignore",
+      });
+      const exitCode = await new Promise<number | null>((resolve) =>
+        child.once("exit", resolve),
+      );
+      if (exitCode !== 0)
+        throw new Error(`Durable process exited with ${exitCode}.`);
+      return ok("reviewed");
+    };
+    const result = await execute(store, runAgent);
+    expect(result.result).toBe("reviewed");
+    expect(result.agentsSpawned).toBe(1);
   });
 
   it("recovers after SIGKILL of a separate controller without rerunning committed work", async () => {

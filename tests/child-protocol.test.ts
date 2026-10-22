@@ -1,16 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPath, readEvents } from "../src/artifact";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { READ_ONLY_WORKFLOW_FLAG } from "../src/agent-capabilities";
+import {
+  MAX_OUTPUT_SNAPSHOT_BYTES,
+  artifactPath,
+  readEvents,
+  readOutput,
+} from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
 
-function registerHandlers() {
-  const handlers = new Map<string, Function>();
+type ChildProtocolHandlers = Map<string, Function> & {
+  registeredFlags: Array<{ name: string; options: Record<string, unknown> }>;
+  setReadOnly(value: boolean): void;
+};
+
+function registerHandlers(readOnly = false): ChildProtocolHandlers {
+  const handlers = new Map<string, Function>() as ChildProtocolHandlers;
+  const registeredFlags: ChildProtocolHandlers["registeredFlags"] = [];
+  let currentReadOnly = readOnly;
   const pi = {
+    registerFlag: vi.fn((name: string, options: Record<string, unknown>) => {
+      registeredFlags.push({ name, options });
+    }),
+    getFlag: vi.fn(() => currentReadOnly),
     on: vi.fn((name: string, handler: Function) => handlers.set(name, handler)),
   };
-  registerChildProtocol(pi as any);
+  handlers.registeredFlags = registeredFlags;
+  handlers.setReadOnly = (value) => {
+    currentReadOnly = value;
+  };
+  registerChildProtocol(pi as unknown as ExtensionAPI);
   return handlers;
 }
 
@@ -408,6 +430,215 @@ describe("child protocol lifecycle", () => {
       agentStopReason: "aborted",
       errorMessage: "Operation aborted",
     });
+  });
+
+  it("captures bounded final text before settled completion and keeps turn snapshots isolated", () => {
+    const handlers = registerHandlers(false);
+    handlers.setReadOnly(true);
+    const entries: Array<{
+      id: string;
+      type: "message";
+      message: { role: "user" };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+    const art = artifactPath(root, "child");
+    const firstResult = 'Findings: inspected files.\n{"count":2}';
+
+    expect(handlers.registeredFlags).toContainEqual({
+      name: READ_ONLY_WORKFLOW_FLAG,
+      options: expect.objectContaining({ type: "boolean", default: false }),
+    });
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "readonly-turn-1",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("agent_end")!(
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Findings: inspected files.\n" },
+              { type: "image", data: "ignored" },
+              {
+                type: "toolCall",
+                name: "read",
+                arguments: { path: "excluded payload" },
+              },
+              { type: "text", text: '{"count":2}' },
+            ],
+            stopReason: "stop",
+          },
+        ],
+      },
+      ctx,
+    );
+
+    expect(readOutput(art)).toBe("");
+    expect(
+      readEvents(art).filter((event) => event.type === "completion"),
+    ).toHaveLength(0);
+    handlers.get("agent_settled")!({}, ctx);
+
+    const firstCompletion = readEvents(art).find(
+      (event) => event.type === "completion",
+    );
+    expect(firstCompletion).toMatchObject({
+      type: "completion",
+      turnId: "readonly-turn-1",
+      outcome: "done",
+      source: "agent_settled",
+    });
+    if (
+      !firstCompletion ||
+      firstCompletion.type !== "completion" ||
+      !firstCompletion.output
+    ) {
+      throw new Error(
+        "read-only completion did not capture its output snapshot",
+      );
+    }
+    expect(readFileSync(firstCompletion.output.path, "utf8")).toBe(firstResult);
+    expect(firstCompletion.output.bytes).toBe(Buffer.byteLength(firstResult));
+
+    handlers.get("agent_settled")!({}, ctx);
+    expect(
+      readEvents(art).filter((event) => event.type === "completion"),
+    ).toHaveLength(1);
+    expect(readFileSync(firstCompletion.output.path, "utf8")).toBe(firstResult);
+
+    entries.push({
+      id: "readonly-turn-2",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    expect(readOutput(art)).toBe("");
+    handlers.get("agent_end")!(
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: "Second-turn result.",
+            stopReason: "stop",
+          },
+        ],
+      },
+      ctx,
+    );
+    handlers.get("agent_settled")!({}, ctx);
+
+    const completions = readEvents(art).filter(
+      (event) => event.type === "completion",
+    );
+    expect(completions).toMatchObject([
+      { turnId: "readonly-turn-1", outcome: "done" },
+      { turnId: "readonly-turn-2", outcome: "done" },
+    ]);
+    const secondCompletion = completions[1];
+    if (
+      !secondCompletion ||
+      secondCompletion.type !== "completion" ||
+      !secondCompletion.output
+    ) {
+      throw new Error(
+        "follow-up completion did not capture its output snapshot",
+      );
+    }
+    expect(readFileSync(firstCompletion.output.path, "utf8")).toBe(firstResult);
+    expect(readFileSync(secondCompletion.output.path, "utf8")).toBe(
+      "Second-turn result.",
+    );
+    expect(readActiveTurn(art)).toMatchObject({
+      turnId: "readonly-turn-2",
+      previousUserEntryId: "readonly-turn-1",
+    });
+  });
+
+  it("fails settled read-only turns when no assistant text is capturable", () => {
+    const handlers = registerHandlers(true);
+    const entries: Array<{
+      id: string;
+      type: "message";
+      message: { role: "user" };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+    const art = artifactPath(root, "child");
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "readonly-empty",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("agent_end")!(
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read" }],
+            stopReason: "stop",
+          },
+        ],
+      },
+      ctx,
+    );
+    handlers.get("agent_settled")!({}, ctx);
+
+    const completion = readEvents(art).at(-1);
+    expect(completion).toMatchObject({
+      type: "completion",
+      turnId: "readonly-empty",
+      outcome: "error",
+      exitCode: 1,
+      errorMessage: "The assistant response contained no text to capture.",
+    });
+    expect(readOutput(art)).toBe("");
+  });
+
+  it("rejects over-limit readonly results instead of silently truncating them", () => {
+    const handlers = registerHandlers(true);
+    const entries: Array<{
+      id: string;
+      type: "message";
+      message: { role: "user" };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+    const art = artifactPath(root, "child");
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "readonly-oversized",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("agent_end")!(
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: "x".repeat(MAX_OUTPUT_SNAPSHOT_BYTES + 1),
+            stopReason: "stop",
+          },
+        ],
+      },
+      ctx,
+    );
+    handlers.get("agent_settled")!({}, ctx);
+
+    expect(readEvents(art).at(-1)).toMatchObject({
+      type: "completion",
+      turnId: "readonly-oversized",
+      outcome: "error",
+      exitCode: 1,
+      errorMessage: `The assistant response exceeded the ${MAX_OUTPUT_SNAPSHOT_BYTES}-byte capture limit.`,
+    });
+    expect(readOutput(art)).toBe("");
   });
 
   it("requires ARTIFACT_DIR when registering", () => {

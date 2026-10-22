@@ -10,11 +10,12 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { debugLog } from "./helpers";
+import { READ_ONLY_WORKFLOW_FLAG } from "./agent-capabilities";
 import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
   MAX_ACTIVE_TURN_BYTES,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
   MAX_TOOL_NAME_LENGTH,
   MAX_TURN_ID_LENGTH,
   appendCompletionEvent,
@@ -40,7 +41,95 @@ interface ActiveTurn {
   lastTool?: string;
 }
 
-let latestAgentMessages: unknown[] = [];
+let latestAgentMessages: readonly unknown[] = [];
+let latestAgentMessagesTurnId: string | undefined;
+
+type ReadOnlyAssistantCapture = { text: string } | { error: string };
+
+function finalAssistantMessage(
+  messages: readonly unknown[],
+): Record<string, unknown> | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (
+      message &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      (message as Record<string, unknown>).role === "assistant"
+    ) {
+      return message as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function assistantTextBlock(block: unknown): string | undefined {
+  if (
+    !block ||
+    typeof block !== "object" ||
+    Array.isArray(block) ||
+    !("type" in block) ||
+    block.type !== "text" ||
+    !("text" in block) ||
+    typeof block.text !== "string"
+  ) {
+    return undefined;
+  }
+  return block.text;
+}
+
+function captureFinalAssistantText(
+  messages: readonly unknown[],
+): ReadOnlyAssistantCapture {
+  const assistant = finalAssistantMessage(messages);
+  if (!assistant) {
+    return { error: "No assistant response was available for this turn." };
+  }
+
+  const content = assistant.content;
+  if (typeof content === "string") {
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > MAX_OUTPUT_SNAPSHOT_BYTES) {
+      return {
+        error: `The assistant response exceeded the ${MAX_OUTPUT_SNAPSHOT_BYTES}-byte capture limit.`,
+      };
+    }
+    return bytes > 0
+      ? { text: content }
+      : { error: "The assistant response contained no text to capture." };
+  }
+  if (!Array.isArray(content)) {
+    return { error: "The assistant response contained no text to capture." };
+  }
+
+  let totalBytes = 0;
+  for (const block of content) {
+    const text = assistantTextBlock(block);
+    if (text === undefined) continue;
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > MAX_OUTPUT_SNAPSHOT_BYTES - totalBytes) {
+      return {
+        error: `The assistant response exceeded the ${MAX_OUTPUT_SNAPSHOT_BYTES}-byte capture limit.`,
+      };
+    }
+    totalBytes += bytes;
+  }
+  if (totalBytes === 0) {
+    return { error: "The assistant response contained no text to capture." };
+  }
+
+  const output = Buffer.allocUnsafe(totalBytes);
+  let offset = 0;
+  for (const block of content) {
+    const text = assistantTextBlock(block);
+    if (text === undefined) continue;
+    offset += output.write(text, offset, totalBytes - offset, "utf8");
+  }
+  if (offset !== totalBytes) {
+    return { error: "The assistant response could not be captured safely." };
+  }
+  return { text: output.toString("utf8") };
+}
 
 function getArtifact() {
   const dir = process.env.ARTIFACT_DIR;
@@ -287,75 +376,10 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
-  let startupAgentStarted = false;
-  pi.on("session_start", (event, ctx) => {
-    const model = ctx.model;
-    if (event.reason !== "startup" || !model) return;
-    void ctx.modelRegistry
-      .getApiKeyAndHeaders(model)
-      .then((auth) => {
-        if (startupAgentStarted) return;
-        const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
-          getRegisteredNativeProvider?: (provider: string) => unknown;
-        };
-        const isNativeProvider = Boolean(
-          registry.getRegisteredNativeProvider?.(model.provider),
-        );
-        // Legacy fallbacks can expose undefined auth fields, so require
-        // actual request config before trusting a stale auth-status snapshot.
-        const requestAuth = auth as typeof auth & {
-          baseUrl?: string;
-        };
-        const hasResolvedRequestConfig =
-          auth.ok &&
-          Boolean(
-            auth.apiKey ||
-            requestAuth.baseUrl ||
-            Object.keys(auth.headers ?? {}).length ||
-            Object.keys(auth.env ?? {}).length,
-          );
-        const missingLegacyAuth =
-          !isNativeProvider &&
-          typeof registry.hasConfiguredAuth === "function" &&
-          !registry.hasConfiguredAuth(model) &&
-          !hasResolvedRequestConfig;
-        if (auth.ok && !missingLegacyAuth) return;
-        if (!auth.ok) {
-          const missingAuthError =
-            missingLegacyAuth ||
-            /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:missing|required)\s+(?:api key|credentials?|authentication|auth)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:api key|credentials?)(?:\s+(?:is|are|was|were))?\s+(?:missing|not found|not configured|not provided|not set|unset|required)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:authentication|auth)(?:\s+(?:is|are|was|were))?\s+(?:missing|not configured|not provided|required)\b/i.test(
-              auth.error,
-            ) ||
-            /\bno\s+(?:authentication|auth)\s+(?:configured|available|provided|set)\b/i.test(
-              auth.error,
-            );
-          if (!missingAuthError) {
-            debugLog("warn", "child_startup_auth_resolution_unavailable");
-            return;
-          }
-        }
-        const message = "Selected model has no configured authentication.";
-        appendCompletionEvent(art, {
-          turnId: "process",
-          outcome: "error",
-          source: "explicit",
-          exitCode: 1,
-          message,
-          errorMessage: message,
-        });
-      })
-      .catch(() => {
-        debugLog("warn", "child_startup_auth_check_failed");
-      });
+  pi.registerFlag(READ_ONLY_WORKFLOW_FLAG, {
+    description: "Capture final text for read-only workflow children",
+    type: "boolean",
+    default: false,
   });
   const startPersistedTurn = (
     turnId: string,
@@ -369,6 +393,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       previousUserEntryId,
     };
     latestAgentMessages = [];
+    latestAgentMessagesTurnId = undefined;
     writeOutput(art, "");
     writeActiveTurn(turn, art);
     appendEvent(art, {
@@ -405,7 +430,6 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
-    startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
       startedAt: Date.now(),
@@ -413,6 +437,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       previousUserEntryId: latestUserEntryId(ctx),
     };
     latestAgentMessages = [];
+    latestAgentMessagesTurnId = undefined;
     writeOutput(art, "");
     writeActiveTurn(turn, art);
   });
@@ -425,8 +450,8 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
     deferredBind.unref();
   });
-  // The first turn_start can precede persistence of the user message.
-  // before_provider_request is the earliest guaranteed pre-model fallback.
+  // In createAgentSession 0.80.6, the first turn_start can precede persistence
+  // of the user message. This is the earliest guaranteed pre-model fallback.
   pi.on("before_provider_request", (_event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
   });
@@ -440,31 +465,54 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     appendActivity(art, "end", event);
   });
   pi.on("agent_end", (event, ctx) => {
-    bindPersistedTurn(ctx, Date.now());
-    latestAgentMessages = [...event.messages];
+    const active = bindPersistedTurn(ctx, Date.now());
+    latestAgentMessages =
+      pi.getFlag(READ_ONLY_WORKFLOW_FLAG) === true
+        ? event.messages
+        : [...event.messages];
+    latestAgentMessagesTurnId = active?.turnId;
   });
   pi.on("agent_settled", (_event, ctx) => {
     const active = bindPersistedTurn(ctx, Date.now());
     if (!active) return;
-    const assistant = [...latestAgentMessages]
-      .reverse()
-      .find((message: any) => message?.role === "assistant") as any;
+    const readOnlyWorkflow = pi.getFlag(READ_ONLY_WORKFLOW_FLAG) === true;
+
+    const messagesForTurn =
+      !readOnlyWorkflow || latestAgentMessagesTurnId === active.turnId
+        ? latestAgentMessages
+        : [];
+    const assistant = finalAssistantMessage(messagesForTurn);
     const stopReason = assistant?.stopReason;
     const errorMessage =
       typeof assistant?.errorMessage === "string"
         ? assistant.errorMessage
         : undefined;
-    const failed =
+    const agentFailed =
       Boolean(errorMessage) ||
-      assistant?.stopReason === "error" ||
-      assistant?.stopReason === "aborted";
+      stopReason === "error" ||
+      stopReason === "aborted";
+    let captureFailure: string | undefined;
+    if (readOnlyWorkflow && !agentFailed) {
+      try {
+        const capture = captureFinalAssistantText(messagesForTurn);
+        if ("error" in capture) {
+          captureFailure = capture.error;
+        } else {
+          writeOutput(art, capture.text);
+        }
+      } catch {
+        captureFailure = "The assistant response could not be captured safely.";
+      }
+    }
+    const failed = agentFailed || captureFailure !== undefined;
+    const settledErrorMessage = errorMessage ?? captureFailure;
     appendCompletionEvent(art, {
       turnId: active.turnId,
       outcome: failed ? "error" : "done",
       source: "agent_settled",
       exitCode: failed ? 1 : 0,
-      errorMessage,
-      message: errorMessage,
+      errorMessage: settledErrorMessage,
+      message: settledErrorMessage,
       agentStopReason:
         stopReason === "error" || stopReason === "aborted"
           ? stopReason

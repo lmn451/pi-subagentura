@@ -13,7 +13,7 @@ const workflow = readFileSync(
 const contributing = readFileSync(resolve(REPO, "CONTRIBUTING.md"), "utf8");
 const packageJson = JSON.parse(
   readFileSync(resolve(REPO, "package.json"), "utf8"),
-) as { scripts: Record<string, string> };
+) as { scripts: Record<string, string>; engines: { node: string } };
 
 function jobBlock(job: string, nextJob?: string): string {
   const start = workflow.indexOf(`\n  ${job}:`);
@@ -57,19 +57,22 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
     const test = jobBlock("test");
 
     expect(jobIds).toEqual(["minimum-node", "test"]);
-    expect(minimumNode).toContain("name: Minimum Node 22.23.2");
+    const minimumNodeVersion = packageJson.engines.node.replace(/^>=/, "");
+    const minimumNodeName = `Minimum Node ${minimumNodeVersion}`;
+
+    expect(minimumNode).toContain(`name: ${minimumNodeName}`);
     expect(
       parse(workflow).jobs["minimum-node"].steps.find((step: any) =>
         step.uses?.startsWith("actions/setup-node@"),
       )?.with["node-version"],
-    ).toBe("24.12.0");
+    ).toBe(minimumNodeVersion);
     expect(minimumNode).toContain("run: npm run typecheck");
     expect(minimumNode).toContain("run: npm run test:property");
     expect(minimumNode).toContain("run: npm run pack:check");
     expect(test).toContain("name: Test (Pi ${{ matrix.pi-version }})");
     expect(test).toContain('pi-version: ["0.80.6", "latest"]');
     for (const check of [
-      "Minimum Node 22.23.2",
+      minimumNodeName,
       "Test (Pi 0.80.6)",
       "Test (Pi latest)",
     ]) {

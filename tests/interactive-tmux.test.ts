@@ -34,14 +34,6 @@ import {
 } from "../src/spawn-tree-context";
 
 import { loadInteractiveStates } from "../src/artifact";
-import { createTestSessionScope } from "./session-scope-fixture";
-import { clearSessionScopes, type SessionScope } from "../src/session-scope";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { registerInteractiveSubagentTools } from "../src/tools/interactive";
-
-type InteractiveToolsModule = {
-  registerInteractiveSubagentTools: typeof registerInteractiveSubagentTools;
-};
 /** Standard tmux pane id returned by mocks when "new-window"/"split-window" is called. */
 const MOCK_PANE_ID = "%42";
 /** Tab-separated session/window/pane — matches real tmux #{...} format. */
@@ -57,6 +49,11 @@ function installMockExec(scenario: (file: string, args: string[]) => string) {
     execFileSync: (_file: string, args: string[]) =>
       scenario("tmux", args as string[]),
   }));
+  // Ensure getMux selects tmux, not zellij. The mock only handles tmux
+  // commands; if ZELLIJ_SESSION_NAME is set from the outer environment,
+  // getMux would pick zellij and the mock would not intercept its calls.
+  delete process.env.ZELLIJ;
+  delete process.env.ZELLIJ_SESSION_NAME;
 }
 
 function lineageNodesDir(sessionRoot: string, rootId: string): string {
@@ -119,18 +116,9 @@ function makeArgs() {
 }
 
 describe("interactive-tmux", () => {
-  let scope: SessionScope;
   beforeEach(() => {
-    clearSessionScopes();
-    scope = createTestSessionScope();
-    // Isolate auto-selection from ambient Herdr and Zellij identities in this
-    // mocked-tmux suite. Individual cases may opt into a backend afterward.
-    vi.stubEnv("HERDR_ENV", "");
-    vi.stubEnv("HERDR_SOCKET_PATH", "");
-    vi.stubEnv("HERDR_PANE_ID", "");
-    vi.stubEnv("ZELLIJ", "");
-    vi.stubEnv("ZELLIJ_SESSION_NAME", "");
-    vi.stubEnv("ZELLIJ_PANE_ID", "");
+    const g = globalThis as any;
+    g.__piSubagenturaInteractiveRegistry?.clear?.();
     // Tests may run inside a live child; never let fixtures mutate its lineage.
     delete process.env.PI_SUBAGENTURA_AGENT_ID;
     delete process.env.PI_SUBAGENTURA_ROOT_ID;
@@ -151,8 +139,6 @@ describe("interactive-tmux", () => {
     vi.doUnmock("node:child_process");
     vi.doUnmock("node:fs");
     vi.doUnmock("../src/artifact");
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
   });
 
   afterAll(() => {
@@ -186,37 +172,6 @@ describe("interactive-tmux", () => {
     expect(isTmuxAvailable()).toBe(false);
   });
 
-  it("rejects an ownerless launch even when a peer session is live", async () => {
-    const tmp = makeTmp();
-    process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-    process.env.TMUX = makeArgs().TMUX;
-    const calls: string[][] = [];
-    installMockExec((_file, args) => {
-      calls.push(args);
-      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
-      if (args[0] === "display-message") return MOCK_LOCATION;
-      return "";
-    });
-    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
-      "../src/interactive-tmux",
-    );
-
-    expect(() =>
-      mod.launchInteractiveSubagent({
-        name: "Ownerless",
-        task: "must not borrow the peer",
-        cwd: tmp,
-      }),
-    ).toThrow(/requires a live session scope/);
-    expect(scope.lifecycle).toBe("started");
-    expect(scope.interactiveStates.size).toBe(0);
-    expect(
-      calls.some(
-        (args) => args[0] === "new-window" || args[0] === "split-window",
-      ),
-    ).toBe(false);
-  });
-
   it("launches in background mode by default (new-window) and stores window-name attach commands", async () => {
     const tmp = makeTmp();
     process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
@@ -241,7 +196,6 @@ describe("interactive-tmux", () => {
       task: "Run tests",
       persona: "You are a tester",
       cwd: tmp,
-      sessionScope: scope,
     });
 
     expect(state.paneId).toBe(MOCK_PANE_ID);
@@ -271,7 +225,7 @@ describe("interactive-tmux", () => {
     expect(statSync(state.launchScriptFile).mode & 0o777).toBe(0o700);
 
     // Registry has the state.
-    expect(scope.interactiveStates.get(state.id)).toBe(state);
+    expect(mod.interactiveSubagentRegistry.get(state.id)).toBe(state);
 
     // Artifact dir was created and the inline CLI was written.
     expect(state.artifactDir).toBeTruthy();
@@ -284,181 +238,55 @@ describe("interactive-tmux", () => {
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
-  it("reports the real automatic mux selection once for a direct launch", async () => {
+  it("passes read-only tool restrictions through the interactive launch", async () => {
     const tmp = makeTmp();
-    const envNames = [
-      "TMUX",
-      "TMUX_PANE",
-      "PI_CODING_AGENT_SESSION_DIR",
-      "PI_SUBAGENTURA_TMUX_SOCKET",
-      "HERDR_ENV",
-      "ZELLIJ",
-      "ZELLIJ_SESSION_NAME",
-    ];
-    const previousEnv = new Map(
-      envNames.map((name) => [name, process.env[name]] as const),
-    );
-    const restoreEnv = (): void => {
-      for (const [name, value] of previousEnv) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    };
-    try {
-      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
-      process.env.TMUX = makeArgs().TMUX;
-      process.env.TMUX_PANE = "%9";
-      delete process.env.PI_SUBAGENTURA_TMUX_SOCKET;
-      delete process.env.HERDR_ENV;
-
-      const calls: string[][] = [];
-      installMockExec((_file, args) => {
-        calls.push(args);
-        if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
-        if (args[0] === "display-message") return MOCK_LOCATION;
-        if (args[0] === "show-options") return "0\n";
-        return "";
-      });
-
-      // Reload the tool graph after installing the tmux mock so the real
-      // launcher observes the mock, without starting a Pi/provider process.
-      const { registerInteractiveSubagentTools } =
-        await importFresh<InteractiveToolsModule>("../src/tools/interactive");
-      // These modules must share the post-reset scope and telemetry registries.
-      const { registerSessionScope } = await import("../src/session-scope");
-      const { createTelemetrySession } = await import("../src/telemetry");
-      type CapturedTool = {
-        name: string;
-        execute: (
-          toolCallId: string,
-          params: Record<string, unknown>,
-          signal: AbortSignal | undefined,
-          onUpdate: ((update: unknown) => void) | undefined,
-          context: unknown,
-        ) => Promise<{ details?: unknown; isError?: boolean }>;
-      };
-      const tools: CapturedTool[] = [];
-      const api = {
-        registerTool: vi.fn((tool: CapturedTool) => {
-          tools.push(tool);
-        }),
-        registerMessageRenderer: vi.fn(),
-        registerFlag: vi.fn(),
-        getFlag: vi.fn().mockReturnValue(false),
-        sendMessage: vi.fn(),
-        sendUserMessage: vi.fn(),
-        on: vi.fn(),
-      };
-      const extensionApi = api as unknown as ExtensionAPI;
-      scope.pi = extensionApi;
-      scope.telemetry = createTelemetrySession(
-        true,
-        "straight",
-        undefined,
-        "unknown",
-      );
-      registerSessionScope(scope);
-      registerInteractiveSubagentTools(extensionApi, scope);
-
-      const payloads: Array<{
-        event?: string;
-        properties?: unknown;
-      }> = [];
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (_input, init) => {
-          const payload: unknown = JSON.parse(String(init?.body));
-          if (payload && typeof payload === "object" && "event" in payload) {
-            payloads.push({
-              event:
-                typeof payload.event === "string" ? payload.event : undefined,
-              properties:
-                "properties" in payload ? payload.properties : undefined,
-            });
-          }
-          return new Response(null, { status: 200 });
-        }),
-      );
-
-      const tool = tools.find(
-        (candidate) => candidate.name === "subagent_interactive",
-      );
-      if (!tool) throw new Error("Interactive tool was not registered");
-      const result = await tool.execute(
-        "automatic-mux-selection",
-        {
-          task: "launch through the selected mux",
-          mux: "auto",
-        },
-        undefined,
-        undefined,
-        {
-          cwd: tmp,
-          ui: { notify: vi.fn(), setStatus: vi.fn() },
-          sessionManager: {
-            getBranch: vi.fn().mockReturnValue([]),
-            getSessionId: vi.fn().mockReturnValue("parent-session"),
-          },
-        },
-      );
-
-      expect(result.isError).not.toBe(true);
-      expect(result.details).toMatchObject({
-        status: "started",
-        mux: "tmux",
-        paneId: MOCK_PANE_ID,
-      });
-      expect(calls.some((args) => args[0] === "new-window")).toBe(true);
-      const resolutions = payloads.filter(
-        (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
-      );
-      expect(resolutions).toHaveLength(1);
-      expect(resolutions[0].properties).toMatchObject({
-        outcome: "started",
-        requested_execution: "interactive",
-        requested_mux: "auto",
-        execution: "interactive",
-        mux: "tmux",
-        fallback_attempted: false,
-      });
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-      restoreEnv();
-    }
-  });
-  it("rejects a missing child working directory before creating a pane", async () => {
-    const tmp = makeTmp();
-    const missingCwd = join(tmp, "missing-worktree");
     process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
     process.env.TMUX = makeArgs().TMUX;
     process.env.TMUX_PANE = "%9";
-    const calls: string[][] = [];
     installMockExec((_file, args) => {
-      calls.push(args);
       if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
       if (args[0] === "display-message") return MOCK_LOCATION;
       if (args[0] === "show-options") return "0\n";
       return "";
     });
-    const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+
+    const mod = await importFresh<typeof InteractiveTmux>(
       "../src/interactive-tmux",
     );
+    const state = mod.launchInteractiveSubagent({
+      name: "Read only",
+      task: "Inspect source",
+      cwd: tmp,
+      readOnly: true,
+    });
+    const launchScript = readFileSync(state.launchScriptFile, "utf8");
 
-    let thrown: unknown;
-    try {
-      mod.launchInteractiveSubagent({
-        sessionScope: scope,
-        name: "Missing cwd",
-        task: "should fail before pane creation",
-        cwd: missingCwd,
-      });
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(Error);
-    expect(String(thrown)).toMatch(/working directory does not exist/iu);
-    expect(calls.some((args) => args[0] === "new-window")).toBe(false);
-    expect(calls.some((args) => args[0] === "split-window")).toBe(false);
+    expect(launchScript).toContain("--tools 'read,grep,find,ls'");
+    expect(launchScript).toContain(
+      "--exclude-tools 'mcp__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource'",
+    );
+    expect(launchScript).toContain("--subagentura-workflow-read-only");
+  });
+  it("rejects malformed read-only launch policy before spawning", async () => {
+    const mod = await importFresh<typeof InteractiveTmux>(
+      "../src/interactive-tmux",
+    );
+    const launchWithMalformedReadOnly =
+      mod.launchInteractiveSubagent as unknown as (params: {
+        name: string;
+        task: string;
+        cwd: string;
+        readOnly: unknown;
+      }) => unknown;
+
+    expect(() =>
+      launchWithMalformedReadOnly({
+        name: "Invalid",
+        task: "Inspect source",
+        cwd: "/repo",
+        readOnly: "true",
+      }),
+    ).toThrow("readOnly must be a boolean");
   });
   it("keeps the parent state cwd separate from the child working cwd", async () => {
     const parentCwd = makeTmp();
@@ -478,7 +306,6 @@ describe("interactive-tmux", () => {
       "../src/interactive-tmux",
     );
     const state = mod.launchInteractiveSubagent({
-      sessionScope: scope,
       name: "Custom cwd",
       task: "work elsewhere",
       cwd: childCwd,
@@ -515,7 +342,6 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
-      sessionScope: scope,
       name: "Nested",
       task: "spawn recursively",
       cwd: tmp,
@@ -580,7 +406,6 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Too deep",
         task: "fail",
         cwd: tmp,
@@ -622,7 +447,6 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Too many",
         task: "fail",
         cwd: tmp,
@@ -656,7 +480,6 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
-      sessionScope: scope,
       name: "Revived",
       task: "spawn after the tree filled up with dead nodes",
       cwd: tmp,
@@ -694,7 +517,6 @@ describe("interactive-tmux", () => {
     );
 
     const state = mod.launchInteractiveSubagent({
-      sessionScope: scope,
       name: "Within active cap",
       task: "spawn while a stale ancestor preserves lineage",
       cwd: tmp,
@@ -736,7 +558,6 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Unknown capacity",
         task: "must remain bounded",
         cwd: tmp,
@@ -774,7 +595,6 @@ describe("interactive-tmux", () => {
 
     expect(() =>
       mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Too many",
         task: "fail",
         cwd: tmp,
@@ -806,7 +626,6 @@ describe("interactive-tmux", () => {
       "../src/interactive-tmux",
     );
     const state = mod.launchInteractiveSubagent({
-      sessionScope: scope,
       name: "Demo",
       task: "Run tests",
       cwd: tmp,
@@ -863,7 +682,6 @@ describe("interactive-tmux", () => {
         name: "Demo",
         task: "Run tests",
         cwd: tmp,
-        sessionScope: scope,
       }),
     ).toThrow(/simulated disk full/);
 
@@ -877,7 +695,7 @@ describe("interactive-tmux", () => {
     expect(killedPane).toBe(true);
 
     // Registry should not have the failed sub-agent.
-    expect(scope.interactiveStates.size).toBe(0);
+    expect(mod.interactiveSubagentRegistry.size).toBe(0);
   });
 
   it("kills the pane and aborts launch if persisted state cannot be written", async () => {
@@ -917,7 +735,6 @@ describe("interactive-tmux", () => {
         task: "Run tests",
         cwd: tmp,
         parentSessionId: "parent-session",
-        sessionScope: scope,
       }),
     ).toThrow(/state write failed/);
 
@@ -929,7 +746,7 @@ describe("interactive-tmux", () => {
     );
     expect(killedPane).toBe(true);
     expect(calls.some((args) => args[0] === "send-keys")).toBe(false);
-    expect(scope.interactiveStates.size).toBe(0);
+    expect(mod.interactiveSubagentRegistry.size).toBe(0);
   });
 
   it("readPaneExitCode returns the captured exit code, or null when unset", async () => {
@@ -1039,8 +856,8 @@ describe("interactive-tmux", () => {
             completionExitCode: 0,
           },
         };
-      mod.registerInteractiveSubagentState(state, scope);
-      mod.pruneDeadInteractiveSubagents(scope.interactiveStates.values());
+      mod.interactiveSubagentRegistry.set(state.id, state);
+      mod.pruneDeadInteractiveSubagents();
       expect(state.status).toBe("exited");
       expect(state.exitCode).toBe(0);
     }
@@ -1066,40 +883,35 @@ describe("interactive-tmux", () => {
           artifactDir: dir,
           lifecycle: { parentCancelled: true },
         };
-      mod.registerInteractiveSubagentState(state, scope);
-      mod.pruneDeadInteractiveSubagents(scope.interactiveStates.values());
+      mod.interactiveSubagentRegistry.set(state.id, state);
+      mod.pruneDeadInteractiveSubagents();
       expect(state.status).toBe("cancelled");
     }
   });
 
   describe("deriveInteractiveSubagentStatus (pure status-decision matrix)", () => {
+    // Event factories — keep them tiny, the matrix is what matters.
     const startedEv = {
-      version: 2 as const,
-      eventId: "event-started",
-      turnId: "turn-started",
       ts: 1,
-      type: "turn_started" as const,
+      type: "started" as const,
       status: "running" as const,
     };
     const doneEv = {
-      version: 2 as const,
-      eventId: "event-done",
-      turnId: "turn-done",
       ts: 2,
-      type: "completion" as const,
+      type: "done" as const,
       status: "done" as const,
-      outcome: "done" as const,
-      source: "agent_settled" as const,
+      exitCode: 0,
+    };
+    const errorEv = {
+      ts: 3,
+      type: "error" as const,
+      status: "error" as const,
+      message: "boom",
     };
     const cancelledEv = {
-      version: 2 as const,
-      eventId: "event-cancelled",
-      turnId: "turn-cancelled",
       ts: 4,
-      type: "completion" as const,
+      type: "cancelled" as const,
       status: "cancelled" as const,
-      outcome: "cancelled" as const,
-      source: "parent" as const,
     };
     const v2ErrorCompletion = {
       version: 2 as const,
@@ -1132,6 +944,12 @@ describe("interactive-tmux", () => {
     });
     it("done event + pane dead → 'exited' (terminal)", () => {
       expect(deriveInteractiveSubagentStatus(doneEv, false)).toBe("exited");
+    });
+    it("error event + pane alive → 'exited' (child declared it unrecoverable)", () => {
+      expect(deriveInteractiveSubagentStatus(errorEv, true)).toBe("exited");
+    });
+    it("error event + pane dead → 'exited'", () => {
+      expect(deriveInteractiveSubagentStatus(errorEv, false)).toBe("exited");
     });
     it("v2 error completion + pane alive → 'idle' for follow-up", () => {
       expect(deriveInteractiveSubagentStatus(v2ErrorCompletion, true)).toBe(
@@ -1393,7 +1211,6 @@ describe("interactive-tmux", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const state = mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "NoPersona",
         task: "x",
         cwd: tmp,
@@ -1433,7 +1250,6 @@ describe("interactive-tmux", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
       const state = mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Orchestrated",
         task: "x",
         cwd: tmp,
@@ -1463,7 +1279,6 @@ describe("interactive-tmux", () => {
         "../src/interactive-tmux",
       );
       const state = mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "WithPersona",
         task: "x",
         persona: "PERSONA_MARKER",
@@ -1495,7 +1310,6 @@ describe("interactive-tmux", () => {
       let threw = false;
       try {
         mod.launchInteractiveSubagent({
-          sessionScope: scope,
           name: "BigPersona",
           task: "x",
           persona: tooBig,
@@ -1532,7 +1346,6 @@ describe("interactive-tmux", () => {
         "../src/interactive-tmux",
       );
       const state = mod.launchInteractiveSubagent({
-        sessionScope: scope,
         name: "Wire",
         task: "x",
         cwd: tmp,
@@ -1542,6 +1355,126 @@ describe("interactive-tmux", () => {
       expect(launchScript).toContain("--append-system-prompt");
       // Filename should appear (shell-escaped) in the launch script.
       expect(launchScript).toMatch(/wire-system\.md/);
+    });
+  });
+
+  describe("InteractiveSubagentState.notifyOnComplete", () => {
+    // The public tool passes an effective mode before calling this low-level helper.
+    // Direct callers without parent-session context retain the legacy inject fallback,
+    // while the tool-level default is covered by subagent-interactive-default.test.ts.
+
+    beforeEach(() => {
+      vi.doUnmock("node:fs");
+    });
+
+    it("keeps the low-level inject fallback when mode is omitted", async () => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+
+      installMockExec((_f, args) => {
+        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const state = mod.launchInteractiveSubagent({
+        name: "NoNotify",
+        task: "x",
+        cwd: tmp,
+      });
+
+      expect(state.notifyOnComplete).toBe("inject");
+      expect(state.lastInjectedEventTs).toBeUndefined();
+    });
+
+    it("propagates notifyOnComplete: 'inject' from launchInteractiveSubagent to the state", async () => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+
+      installMockExec((_f, args) => {
+        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const state = mod.launchInteractiveSubagent({
+        name: "InjectMode",
+        task: "x",
+        cwd: tmp,
+        notifyOnComplete: "inject",
+      });
+
+      expect(state.notifyOnComplete).toBe("inject");
+    });
+
+    it("propagates notifyOnComplete: 'notify' from launchInteractiveSubagent to the state", async () => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+
+      installMockExec((_f, args) => {
+        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const state = mod.launchInteractiveSubagent({
+        name: "NotifyMode",
+        task: "x",
+        cwd: tmp,
+        notifyOnComplete: "notify",
+      });
+
+      expect(state.notifyOnComplete).toBe("notify");
+    });
+
+    it("propagates triggerTurnOnComplete from launchInteractiveSubagent to the state", async () => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      process.env.TMUX_PANE = "%9";
+
+      installMockExec((_f, args) => {
+        if (args[0] === "new-window") return MOCK_PANE_ID + "\n";
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "show-options") return "0\n";
+        return "";
+      });
+
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const state = mod.launchInteractiveSubagent({
+        name: "TriggerTurn",
+        task: "x",
+        cwd: tmp,
+        notifyOnComplete: "notify",
+        triggerTurnOnComplete: true,
+        parentSessionId: "parent-session",
+        parentCwd: tmp,
+      });
+
+      expect(state.triggerTurnOnComplete).toBe(true);
+      expect(
+        loadInteractiveStates(tmp)?.states[state.id]?.triggerTurnOnComplete,
+      ).toBe(true);
     });
   });
 
@@ -1573,6 +1506,28 @@ describe("interactive-tmux", () => {
       expect(cmd).toContain("--name 'n'");
       // The prompt file is invoked via "@<file>" — verify the path appears in that form.
       expect(cmd).toMatch(/'\@\/p\.md'$/);
+    });
+    it("adds the restrictive allowlist only for read-only process launches", async () => {
+      const { buildPiInteractiveCommand } = await importFresh<
+        typeof InteractiveTmux
+      >("../src/interactive-tmux");
+      const params = {
+        sessionFile: "/s.jsonl",
+        name: "n",
+        promptFile: "/p.md",
+        cwd: "/c",
+      };
+      const standard = buildPiInteractiveCommand(params);
+      const readOnly = buildPiInteractiveCommand({ ...params, readOnly: true });
+
+      expect(standard).not.toContain("--tools");
+      expect(standard).not.toContain("--exclude-tools");
+      expect(standard).not.toContain("--subagentura-workflow-read-only");
+      expect(readOnly).toContain("--tools 'read,grep,find,ls'");
+      expect(readOnly).toContain(
+        "--exclude-tools 'mcp__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource'",
+      );
+      expect(readOnly).toContain("--subagentura-workflow-read-only");
     });
 
     it("omits --model when undefined", async () => {

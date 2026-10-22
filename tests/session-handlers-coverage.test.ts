@@ -906,7 +906,6 @@ describe("session handler lifecycle callbacks", () => {
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
-
     handlers.get("before_agent_start")![0]({
       messageType: "custom",
       message: wakeMessage,

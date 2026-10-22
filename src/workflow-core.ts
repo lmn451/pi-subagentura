@@ -265,6 +265,7 @@ export interface WorkflowAgentOpts {
   phase?: string;
   model?: string;
   persona?: string;
+  readOnly?: boolean;
   /** Defaults to "process" (attachable multiplexer); use "in-process" to opt out. */
   isolation?: string;
   /** Accepted for fidelity but a no-op in v2. */
@@ -301,6 +302,7 @@ export type WorkflowAgentRunner = (req: {
   model?: string;
   signal?: AbortSignal;
   isolation?: string;
+  readOnly?: boolean;
   label?: string;
   schema?: unknown;
   /** Thinking/reasoning for the sub-agent. */

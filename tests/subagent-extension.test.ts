@@ -394,7 +394,6 @@ describe("extension registration", () => {
     expect(names).not.toContain("list_orchestrator_agents");
     expect(names).not.toContain("update_orchestrator_agent_description");
 
-    expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",
       expect.any(Function),

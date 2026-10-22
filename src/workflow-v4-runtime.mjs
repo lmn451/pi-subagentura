@@ -522,7 +522,14 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
   };
 
   const agent = (id, options = {}) => {
+    const readOnly = options.readOnly;
     validateId(id, "agent id");
+    if (readOnly !== undefined && typeof readOnly !== "boolean") {
+      throw new WorkflowStepError("ctx.agent readOnly must be a boolean.", {
+        path: childPath(id),
+        category: "schema",
+      });
+    }
     if (typeof bridge.agent !== "function") {
       throw new WorkflowStepError(
         "Workflow host does not support agent calls.",
@@ -537,7 +544,11 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
       {
         ...options,
         kind: "agent",
-        input: { prompt: options.prompt, output: options.output },
+        input: {
+          prompt: options.prompt,
+          output: options.output,
+          ...(readOnly === true ? { readOnly: true } : {}),
+        },
       },
       async (stepSignal, entered) => {
         const counters = currentScope().budgetCounters ?? [];
@@ -547,6 +558,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
           options.prompt,
           {
             ...options,
+            readOnly,
             ...(persist !== undefined ? { persist } : {}),
             id: agentId,
             output: options.output,
