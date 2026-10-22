@@ -73,8 +73,8 @@ Two test-harness adjustments were required for reliable verification:
 - Pull-request mutation results are non-blocking: CI runs the pilot only on the
   pinned SDK leg with `continue-on-error: true`, and Stryker has
   `thresholds.break: null`.
-- CI has a dedicated Node 22.23.2 minimum-runtime smoke job; the existing Pi SDK
-  `0.80.6`/`latest` compatibility matrix remains unchanged on Node 24.
+- Current Node and Pi SDK support floors are defined in `package.json`; the
+  CI matrix is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - Review found no production behavior defect requiring a source change. The
   sole surviving mutant is classified instead of forcing an implementation-coupled
   assertion.

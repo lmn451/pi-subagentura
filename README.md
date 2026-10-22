@@ -601,7 +601,7 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — context mode selector: `true` serializes the canonical parent session projection when available (including omission and replacement edits), with a message-entry fallback on older supported SDKs; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `includeContext` — context mode selector: `true` includes the canonical parent session projection (including omission and replacement edits); `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
