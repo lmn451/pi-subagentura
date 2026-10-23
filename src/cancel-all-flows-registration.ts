@@ -25,6 +25,14 @@ function snapshotSummary(
     .join("\n");
 }
 
+function failureSummary(
+  result: Awaited<ReturnType<typeof cancelAllFlows>>,
+): string {
+  return result.workflowsFailed > 0
+    ? `Failed to cancel ${result.workflowsFailed} workflow(s). Retry with /cancel-all-flows or cancel_workflow.`
+    : "";
+}
+
 export function registerCancelAllFlows(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
@@ -53,11 +61,12 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
 
-        if (parts.length === 0) {
+        if (parts.length === 0 && result.workflowsFailed === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
         } else {
           const message = [
-            `Cancelled: ${parts.join(", ")}`,
+            parts.length > 0 ? `Cancelled: ${parts.join(", ")}` : "",
+            failureSummary(result),
             snapshotSummary(result),
           ]
             .filter(Boolean)
@@ -88,11 +97,12 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
 
-        if (parts.length === 0) {
+        if (parts.length === 0 && result.workflowsFailed === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
         } else {
           const message = [
-            `Cancelled: ${parts.join(", ")}`,
+            parts.length > 0 ? `Cancelled: ${parts.join(", ")}` : "",
+            failureSummary(result),
             snapshotSummary(result),
           ]
             .filter(Boolean)

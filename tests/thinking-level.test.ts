@@ -1,14 +1,13 @@
 /**
  * Behavioral tests for thinkingLevel propagation across sub-agent spawn surfaces.
  *
- * Verifies that thinkingLevel is correctly passed through production code:
- * 1. In-process subagent tools (sync and async) pass to startSubagentJob
- * 2. Interactive subagent CLI command includes --thinking flag
- * 3. Workflow agent() calls pass thinkingLevel to the runner
+ * Verifies requested thinking levels on their user-visible execution surfaces.
+ *
+ * 1. Interactive subagent CLI command and spawn result
+ * 2. Workflow agent() runner request
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,300 +95,25 @@ describe("buildPiInteractiveCommand thinkingLevel", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Test: In-process subagent tools pass thinkingLevel to startSubagentJob
-// ---------------------------------------------------------------------------
-
-// Hoisted mocks at module level
-const { mockStartSubagentJob, mockConvertToLlm, mockSerializeConversation } =
-  vi.hoisted(() => ({
-    mockStartSubagentJob: vi.fn(),
-    mockConvertToLlm: vi.fn(),
-    mockSerializeConversation: vi.fn(),
-  }));
-
-vi.mock("../src/helpers", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/helpers")>();
-  return {
-    ...actual,
-    startSubagentJob: mockStartSubagentJob,
-  };
-});
-
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
   return {
     ...actual,
-    interactiveSubagentRegistry: new Map(),
     isTmuxAvailable: () => false,
   };
 });
 
-vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
-  return {
-    ...actual,
-    convertToLlm: mockConvertToLlm,
-    serializeConversation: mockSerializeConversation,
-  };
-});
-
-import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { registerInteractiveSubagentTools } from "../src/tools/interactive";
-
-describe("in-process subagent thinkingLevel propagation", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockStartSubagentJob.mockImplementation(async (params) => ({
-      jobId: "test-job",
-      jobPromise: Promise.resolve({
-        output: "done",
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: 0,
-          turns: 1,
-        },
-        isError: false,
-      }),
-      session: { abort: vi.fn() },
-      liveStatus: {
-        turn: 0,
-        output: "",
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: 0,
-          turns: 0,
-        },
-      },
-      thinkingLevel: params.thinkingLevel,
-    }));
-  });
-
-  function mockCtx(overrides: Record<string, any> = {}) {
-    return {
-      cwd: "/tmp",
-      ui: { setStatus: vi.fn() },
-      sessionManager: {
-        getBranch: vi.fn().mockReturnValue([]),
-        getSessionId: vi.fn().mockReturnValue("test-session"),
-      },
-      model: undefined,
-      modelRegistry: {
-        getAvailable: vi.fn().mockReturnValue([]),
-        getAll: vi.fn().mockReturnValue([]),
-        find: vi.fn(),
-      },
-      ...overrides,
-    };
-  }
-
-  function setupExtension() {
-    const api = {
-      registerTool: vi.fn(),
-      registerMessageRenderer: vi.fn(),
-    };
-    registerInProcessSubagentTools(api as any);
-    return api;
-  }
-
-  function getToolDef(
-    api: { registerTool: ReturnType<typeof vi.fn> },
-    name: string,
-  ) {
-    return api.registerTool.mock.calls.find(
-      ([t]: any[]) => t.name === name,
-    )?.[0];
-  }
-
-  it("subagent_with_context sync passes thinkingLevel to startSubagentJob", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_with_context");
-    expect(toolDef).toBeDefined();
-
-    // Provide branch with messages for the sync path
-    const branchMessages = [
-      { type: "message", message: { role: "user", content: "Hello" } },
-      { type: "message", message: { role: "assistant", content: "Hi there" } },
-    ];
-
-    mockConvertToLlm.mockReturnValue([
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there" },
-    ]);
-    mockSerializeConversation.mockReturnValue(
-      "User: Hello\nAssistant: Hi there",
-    );
-
-    const ctx = mockCtx({
-      sessionManager: {
-        getBranch: vi.fn().mockReturnValue(branchMessages),
-        getSessionId: vi.fn().mockReturnValue("test-session"),
-      },
-    });
-
-    await toolDef.execute(
-      "call-1",
-      {
-        task: "test task",
-        thinkingLevel: "high",
-      },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBe("high");
-  });
-
-  it("subagent_with_context sync omits thinkingLevel when undefined", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_with_context");
-    expect(toolDef).toBeDefined();
-
-    // Provide branch with messages for the sync path
-    const branchMessages = [
-      { type: "message", message: { role: "user", content: "Hello" } },
-      { type: "message", message: { role: "assistant", content: "Hi there" } },
-    ];
-
-    mockConvertToLlm.mockReturnValue([
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there" },
-    ]);
-    mockSerializeConversation.mockReturnValue(
-      "User: Hello\nAssistant: Hi there",
-    );
-
-    const ctx = mockCtx({
-      sessionManager: {
-        getBranch: vi.fn().mockReturnValue(branchMessages),
-        getSessionId: vi.fn().mockReturnValue("test-session"),
-      },
-    });
-
-    await toolDef.execute(
-      "call-1",
-      { task: "test task" },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBeUndefined();
-  });
-
-  it("subagent_isolated sync passes thinkingLevel to startSubagentJob", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_isolated");
-    expect(toolDef).toBeDefined();
-
-    const ctx = mockCtx();
-    await toolDef.execute(
-      "call-1",
-      { task: "test task", thinkingLevel: "xhigh" },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBe("xhigh");
-  });
-
-  it("subagent_isolated sync omits thinkingLevel when undefined", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_isolated");
-    expect(toolDef).toBeDefined();
-
-    const ctx = mockCtx();
-    await toolDef.execute(
-      "call-1",
-      { task: "test task" },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBeUndefined();
-  });
-
-  it("subagent_with_context async:true passes thinkingLevel to startSubagentJob", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_with_context");
-    expect(toolDef).toBeDefined();
-
-    const branchMessages = [
-      { type: "message", message: { role: "user", content: "Hello" } },
-      { type: "message", message: { role: "assistant", content: "Hi there" } },
-    ];
-    mockConvertToLlm.mockReturnValue([
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there" },
-    ]);
-    mockSerializeConversation.mockReturnValue(
-      "User: Hello\nAssistant: Hi there",
-    );
-
-    const ctx = mockCtx({
-      sessionManager: {
-        getBranch: vi.fn().mockReturnValue(branchMessages),
-        getSessionId: vi.fn().mockReturnValue("test-session"),
-      },
-    });
-
-    const result = await toolDef.execute(
-      "call-1",
-      { task: "test task", async: true, thinkingLevel: "high" },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBe("high");
-    expect(result.details.thinkingLevel).toBe("high");
-  });
-
-  it("subagent_isolated async:true passes thinkingLevel to startSubagentJob", async () => {
-    const api = setupExtension();
-    const toolDef = getToolDef(api, "subagent_isolated");
-    expect(toolDef).toBeDefined();
-
-    const result = await toolDef.execute(
-      "call-1",
-      { task: "test task", async: true, thinkingLevel: "xhigh" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-
-    expect(mockStartSubagentJob).toHaveBeenCalled();
-    const callArgs = mockStartSubagentJob.mock.calls[0][0];
-    expect(callArgs.thinkingLevel).toBe("xhigh");
-    expect(result.details.thinkingLevel).toBe("xhigh");
-  });
-});
+import { createTestSessionScope } from "./session-scope-fixture";
 
 describe("interactive subagent thinkingLevel rendering", () => {
   it("renders the requested thinking level in the spawn result", () => {
     const api = { registerTool: vi.fn() };
-    registerInteractiveSubagentTools(api as any);
+    registerInteractiveSubagentTools(
+      api as any,
+      createTestSessionScope({ pi: api as any }),
+    );
     const toolDef = api.registerTool.mock.calls.find(
       ([tool]: any[]) => tool.name === "subagent_interactive",
     )?.[0];

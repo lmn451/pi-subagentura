@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 interface ExecCall {
   file: string;
@@ -361,6 +362,7 @@ describe("multiplexer-herdr", () => {
         typeof import("../src/interactive-tmux")
       >("../src/interactive-tmux");
 
+      const scope = createTestSessionScope();
       const state = launchInteractiveSubagent({
         name: "persisted",
         task: "keep a stable attach target",
@@ -368,6 +370,7 @@ describe("multiplexer-herdr", () => {
         parentCwd: cwd,
         parentSessionId: "parent",
         muxPreference: "herdr",
+        sessionScope: scope,
       });
 
       expect(state.muxTerminalId).toBe("terminal-w1:p2");
@@ -404,6 +407,7 @@ describe("multiplexer-herdr", () => {
       const mod = await importFresh<typeof import("../src/interactive-tmux")>(
         "../src/interactive-tmux",
       );
+      const scope = createTestSessionScope();
       const state = mod.launchInteractiveSubagent({
         name: "rehydrate",
         task: "keep a stable attach target",
@@ -411,19 +415,20 @@ describe("multiplexer-herdr", () => {
         parentCwd: cwd,
         parentSessionId: "parent",
         muxPreference: "herdr",
+        sessionScope: scope,
       });
       const paneGetsBefore = calls.filter(
         (call) => call.args[0] === "pane" && call.args[1] === "get",
       ).length;
-      mod.interactiveSubagentRegistry.clear();
+      scope.interactiveStates.clear();
 
       const { rehydrateInteractiveSubagents } =
         await importFresh<typeof import("../src/rehydrate")>(
           "../src/rehydrate",
         );
-      rehydrateInteractiveSubagents(cwd, "parent");
+      rehydrateInteractiveSubagents(cwd, "parent", [], scope);
 
-      expect(mod.interactiveSubagentRegistry.get(state.id)).toMatchObject({
+      expect(scope.interactiveStates.get(state.id)).toMatchObject({
         muxTerminalId: "terminal-w1:p2",
         attachCommand: expect.stringContaining(
           "herdr terminal attach 'terminal-w1:p2'",
@@ -599,6 +604,91 @@ describe("multiplexer-herdr", () => {
 
     expect(mux.getPaneLiveness("w1:p2")).toBe("unknown");
     await expect(mux.getPaneLivenessAsync("w1:p2")).resolves.toBe("unknown");
+    await expect(mux.getPaneLivenessDiagnosticAsync("w1:p2")).resolves.toEqual({
+      liveness: "unknown",
+      failureReason: "malformed_response",
+    });
+  });
+
+  it.each([
+    [
+      "callback timeout code",
+      Object.assign(new Error("private timeout"), { code: "ETIMEDOUT" }),
+    ],
+    [
+      "execFile timeout kill metadata",
+      Object.assign(new Error("private timeout"), {
+        code: null,
+        killed: true,
+        signal: "SIGTERM",
+      }),
+    ],
+  ] as const)("classifies %s as a timeout", async (_label, error) => {
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      throw error;
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().getPaneLivenessDiagnosticAsync("w1:p2"),
+    ).resolves.toEqual({ liveness: "unknown", failureReason: "timeout" });
+  });
+
+  it.each([
+    [
+      "missing binary",
+      Object.assign(new Error("private ENOENT"), { code: "ENOENT" }),
+    ],
+    [
+      "output limit",
+      Object.assign(new Error("private maxBuffer"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        killed: true,
+        signal: "SIGTERM",
+      }),
+    ],
+  ] as const)("classifies %s as a command failure", async (_label, error) => {
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      throw error;
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().getPaneLivenessDiagnosticAsync("w1:p2"),
+    ).resolves.toEqual({ liveness: "unknown", failureReason: "command_error" });
+  });
+
+  it("keeps pane_not_found as dead without a failure reason", async () => {
+    installMockExec((call) => {
+      if (isCommandProbe(call.file, call.args)) return "";
+      throw Object.assign(new Error("pane not found"), {
+        code: "pane_not_found",
+      });
+    });
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().getPaneLivenessDiagnosticAsync("w1:p2"),
+    ).resolves.toEqual({ liveness: "dead" });
+  });
+
+  it("does not classify invalid pane ids", async () => {
+    installMockExec(() => "");
+    const { HerdrMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-herdr")
+    >("../src/multiplexer-herdr");
+
+    await expect(
+      new HerdrMultiplexer().getPaneLivenessDiagnosticAsync("--invalid"),
+    ).resolves.toEqual({ liveness: "unknown" });
   });
 
   it("does not treat server-global focus as user activity", async () => {

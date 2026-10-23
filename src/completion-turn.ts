@@ -5,17 +5,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type CompletionMessage = Parameters<ExtensionAPI["sendMessage"]>[0];
 
-type SendUserMessage = (
-  content: string,
-  options: { deliverAs: "followUp" },
-) => unknown;
-
 interface CompletionTurnOptions {
   deliverAs: "followUp";
   triggerTurn: boolean;
   parentStreaming: boolean;
   /**
-   * Called once when an idle synthetic wake reaches its bounded retry cap
+   * Called once when native custom-message wake attempts reach their bounded retry cap
    * without entering before_agent_start. The caller may release any
    * turn-fence state that would otherwise block subsequent completions.
    */
@@ -26,8 +21,8 @@ interface WakeState {
   activeWakeId: string;
   wakeIds: Set<string>;
   inFlight: boolean;
-  wakePromptStarted: boolean;
-  wakePromptSettled: boolean;
+  wakeTurnStarted: boolean;
+  wakeTurnSettled: boolean;
   wakeAttempts: number;
   ackAttempts: number;
   wakeExhaustedCallbacks: Set<() => void>;
@@ -57,12 +52,11 @@ interface WakeAcknowledgementEntry {
 
 export const ORCHESTRATOR_V2_WAKE_ENTRY_TYPE = "orchestratorv2-completion-wake";
 export const ORCHESTRATOR_V2_WAKE_DETAIL_KEY = "orchestratorV2WakeId";
-export const ORCHESTRATOR_V2_WAKEUP_MESSAGE =
-  "[Orchestratorv2 coordinator wakeup] One or more completion events were " +
-  "delivered immediately before this extension-generated message. Apply the " +
-  "active thin-router policy: route or surface them without performing " +
+const ORCHESTRATOR_V2_WAKE_MESSAGE_TYPE = "orchestratorv2-completion-wakeup";
+const ORCHESTRATOR_V2_WAKE_MESSAGE_CONTENT =
+  "Completion events are ready for the Orchestratorv2 coordinator. Apply " +
+  "the active thin-router policy: route or surface them without performing " +
   "specialist work.";
-const ORCHESTRATOR_V2_WAKE_ID_TAG = "orchestratorv2-wake-id";
 
 /** Delay between a wake request and a retry when no matching run starts. */
 export const ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS = 30_000;
@@ -94,8 +88,8 @@ function clearWakeAcknowledgementRetry(state: WakeState): void {
 function notifyWakeExhausted(pi: ExtensionAPI, state: WakeState): void {
   if (
     wakeStates.get(pi) !== state ||
-    state.wakePromptStarted ||
-    state.wakePromptSettled ||
+    state.wakeTurnStarted ||
+    state.wakeTurnSettled ||
     state.wakeAttempts < ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS
   ) {
     return;
@@ -157,7 +151,7 @@ function attemptWakeAcknowledgement(
   } catch (error) {
     if (wakeStates.get(pi) === state) {
       state.inFlight = false;
-      if (state.wakePromptSettled) {
+      if (state.wakeTurnSettled) {
         scheduleWakeAcknowledgementRetry(pi, state);
       }
     }
@@ -177,7 +171,7 @@ function scheduleWakeAcknowledgementRetry(
   if (state.ackAttempts >= ORCHESTRATOR_V2_WAKE_ACK_MAX_ATTEMPTS) return;
   const timer = setTimeout(() => {
     state.ackRetryTimer = undefined;
-    if (wakeStates.get(pi) !== state || !state.wakePromptSettled) return;
+    if (wakeStates.get(pi) !== state || !state.wakeTurnSettled) return;
     attemptWakeAcknowledgement(pi, state);
   }, ORCHESTRATOR_V2_WAKE_ACK_RETRY_DELAY_MS);
   state.ackRetryTimer = timer;
@@ -185,20 +179,24 @@ function scheduleWakeAcknowledgementRetry(
 }
 
 /**
- * Mark the exact synthetic user prompt that belongs to the active wake. Pi
- * does not include a run id in lifecycle events, so the prompt observed by
- * before_agent_start is the run identity we can safely carry to settlement.
+ * Mark only a custom message with the closed wake type and active wake id.
+ * Natural prompts and unrelated custom messages never identify a wake.
  */
 export function markCompletionTurnWakeStarted(
   pi: ExtensionAPI,
-  prompt: string,
+  message: CompletionMessage,
 ): boolean {
   const state = wakeStates.get(pi);
-  if (!state || prompt !== orchestratorV2WakeupMessage(state.activeWakeId)) {
+  const details = isRecord(message.details) ? message.details : undefined;
+  if (
+    !state ||
+    message.customType !== ORCHESTRATOR_V2_WAKE_MESSAGE_TYPE ||
+    details?.[ORCHESTRATOR_V2_WAKE_DETAIL_KEY] !== state.activeWakeId
+  ) {
     return false;
   }
-  state.wakePromptStarted = true;
-  state.wakePromptSettled = false;
+  state.wakeTurnStarted = true;
+  state.wakeTurnSettled = false;
   state.inFlight = false;
   state.wakeExhaustedCallbacks.clear();
   clearWakeWatchdog(state);
@@ -208,10 +206,10 @@ export function markCompletionTurnWakeStarted(
 /** Acknowledge only the run previously marked by markCompletionTurnWakeStarted. */
 export function settleCompletionTurnWake(pi: ExtensionAPI): boolean {
   const state = wakeStates.get(pi);
-  if (!state || !state.wakePromptStarted || state.wakePromptSettled) {
+  if (!state || !state.wakeTurnStarted || state.wakeTurnSettled) {
     return false;
   }
-  state.wakePromptSettled = true;
+  state.wakeTurnSettled = true;
   return acknowledgeCompletionTurnWake(pi);
 }
 
@@ -239,7 +237,7 @@ export function isOrchestratorMode(pi: ExtensionAPI): boolean {
 /**
  * Restore an unacknowledged wake only after its custom completion message is
  * durable. This closes the crash window between pointer delivery and the
- * synthetic turn that installs the per-turn Orchestratorv2 prompt.
+ * native custom turn that installs the per-turn Orchestratorv2 prompt.
  */
 export function recoverCompletionTurnWakes(
   pi: ExtensionAPI,
@@ -278,32 +276,31 @@ export function recoverCompletionTurnWakes(
     activeWakeId: recoverable[0],
     wakeIds: new Set(recoverable),
     inFlight: false,
-    wakePromptStarted: false,
-    wakePromptSettled: false,
+    wakeTurnStarted: false,
+    wakeTurnSettled: false,
     wakeAttempts: 0,
     ackAttempts: 0,
     wakeExhaustedCallbacks: new Set(),
   };
   wakeStates.set(pi, state);
-  requestPromptWake(pi, state);
+  requestNativeWake(pi, state);
   return true;
 }
 
 /**
- * Pi custom-message turns bypass before_agent_start while idle. Wake an idle
- * Orchestratorv2 session through the user-message path so its prompt policy is
- * installed; a streaming turn already has that policy for its queued follow-up.
+ * Trigger idle Orchestratorv2 completion turns with a native custom message.
+ * Coalesced messages are delivered without starting another turn.
  */
 export function sendCompletionTurn(
   pi: ExtensionAPI,
   message: CompletionMessage,
   options: CompletionTurnOptions,
 ): void {
-  const wakeThroughPrompt =
+  const wakeThroughCustomMessage =
     options.triggerTurn &&
     !options.parentStreaming &&
     isOrchestratorV2Enabled(pi);
-  if (!wakeThroughPrompt) {
+  if (!wakeThroughCustomMessage) {
     pi.sendMessage(message, {
       deliverAs: options.deliverAs,
       triggerTurn: options.triggerTurn,
@@ -324,8 +321,8 @@ export function sendCompletionTurn(
       activeWakeId: wakeId,
       wakeIds: new Set([wakeId]),
       inFlight: false,
-      wakePromptStarted: false,
-      wakePromptSettled: false,
+      wakeTurnStarted: false,
+      wakeTurnSettled: false,
       wakeAttempts: 0,
       ackAttempts: 0,
       wakeExhaustedCallbacks: new Set(),
@@ -333,10 +330,10 @@ export function sendCompletionTurn(
     wakeStates.set(pi, state);
   }
 
-  if (!state.inFlight && state.wakePromptSettled) {
+  if (!state.inFlight && state.wakeTurnSettled) {
     clearWakeAcknowledgementRetry(state);
-    state.wakePromptStarted = false;
-    state.wakePromptSettled = false;
+    state.wakeTurnStarted = false;
+    state.wakeTurnSettled = false;
     state.wakeAttempts = 0;
     state.ackAttempts = 0;
     state.wakeExhaustedCallbacks.clear();
@@ -344,8 +341,8 @@ export function sendCompletionTurn(
 
   if (
     !state.inFlight &&
-    !state.wakePromptStarted &&
-    !state.wakePromptSettled &&
+    !state.wakeTurnStarted &&
+    !state.wakeTurnSettled &&
     state.ackRetryTimer === undefined &&
     state.ackAttempts >= ORCHESTRATOR_V2_WAKE_ACK_MAX_ATTEMPTS
   ) {
@@ -354,8 +351,8 @@ export function sendCompletionTurn(
 
   if (
     !state.inFlight &&
-    !state.wakePromptStarted &&
-    !state.wakePromptSettled &&
+    !state.wakeTurnStarted &&
+    !state.wakeTurnSettled &&
     state.wakeAttempts >= ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS
   ) {
     state.wakeAttempts = 0;
@@ -363,49 +360,47 @@ export function sendCompletionTurn(
 
   if (
     !state.inFlight &&
-    !state.wakePromptStarted &&
-    !state.wakePromptSettled &&
+    !state.wakeTurnStarted &&
+    !state.wakeTurnSettled &&
     options.onWakeExhausted
   ) {
     state.wakeExhaustedCallbacks.add(options.onWakeExhausted);
   }
 
-  pi.sendMessage(withWakeId(message, state.activeWakeId), {
+  const completionMessage = withWakeId(message, state.activeWakeId);
+  pi.sendMessage(completionMessage, {
     deliverAs: options.deliverAs,
     triggerTurn: false,
   });
-  requestPromptWake(pi, state);
+  requestNativeWake(pi, state);
 }
 
-function requestPromptWake(pi: ExtensionAPI, state: WakeState): void {
+function requestNativeWake(pi: ExtensionAPI, state: WakeState): void {
   if (
     state.inFlight ||
-    state.wakePromptStarted ||
-    state.wakePromptSettled ||
+    state.wakeTurnStarted ||
+    state.wakeTurnSettled ||
     state.ackRetryTimer !== undefined ||
     state.wakeAttempts >= ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS
   ) {
     return;
   }
+  clearWakeWatchdog(state);
   state.inFlight = true;
   state.wakeAttempts += 1;
   try {
-    const sendUserMessage = pi.sendUserMessage as unknown as SendUserMessage;
-    const result = sendUserMessage(
-      orchestratorV2WakeupMessage(state.activeWakeId),
-      {
-        deliverAs: "followUp",
-      },
-    );
-    if (isPromiseLike(result)) void Promise.resolve(result).catch(() => {});
+    pi.sendMessage(nativeWakeMessage(state.activeWakeId), {
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
   } catch (error) {
     state.inFlight = false;
-    if (wakeStates.get(pi) === state && !state.wakePromptStarted) {
+    if (wakeStates.get(pi) === state && !state.wakeTurnStarted) {
       scheduleWakeWatchdog(pi, state);
     }
     throw error;
   }
-  if (wakeStates.get(pi) !== state || state.wakePromptStarted) return;
+  if (wakeStates.get(pi) !== state || state.wakeTurnStarted) return;
   scheduleWakeWatchdog(pi, state);
 }
 
@@ -413,14 +408,14 @@ function scheduleWakeWatchdog(pi: ExtensionAPI, state: WakeState): void {
   clearWakeWatchdog(state);
   const timer = setTimeout(() => {
     state.watchdogTimer = undefined;
-    if (wakeStates.get(pi) !== state || state.wakePromptStarted) return;
+    if (wakeStates.get(pi) !== state || state.wakeTurnStarted) return;
     state.inFlight = false;
     if (state.wakeAttempts >= ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS) {
       notifyWakeExhausted(pi, state);
       return;
     }
     try {
-      requestPromptWake(pi, state);
+      requestNativeWake(pi, state);
     } catch (error) {
       debugLog("error", "orchestratorv2_wake_send_failed", {
         error:
@@ -434,28 +429,13 @@ function scheduleWakeWatchdog(pi: ExtensionAPI, state: WakeState): void {
   timer.unref?.();
 }
 
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  if (
-    value === null ||
-    (typeof value !== "object" && typeof value !== "function") ||
-    !("then" in value)
-  ) {
-    return false;
-  }
-  return typeof value.then === "function";
-}
-
-export function orchestratorV2WakeupMessage(wakeId: string): string {
-  if (!isWakeId(wakeId)) throw new Error("invalid Orchestratorv2 wake id");
-  return `${ORCHESTRATOR_V2_WAKEUP_MESSAGE}\n[${ORCHESTRATOR_V2_WAKE_ID_TAG}:${wakeId}]`;
-}
-
-export function isOrchestratorV2WakeupMessage(value: string): boolean {
-  if (!value.includes(ORCHESTRATOR_V2_WAKEUP_MESSAGE)) return false;
-  const match = value.match(
-    new RegExp(`\\[${ORCHESTRATOR_V2_WAKE_ID_TAG}:([^\\]]+)\\]`),
-  );
-  return match !== null && isWakeId(match[1]);
+function nativeWakeMessage(wakeId: string): CompletionMessage {
+  return {
+    customType: ORCHESTRATOR_V2_WAKE_MESSAGE_TYPE,
+    content: ORCHESTRATOR_V2_WAKE_MESSAGE_CONTENT,
+    display: false,
+    details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+  };
 }
 
 function withWakeId(

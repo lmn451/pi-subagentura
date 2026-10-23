@@ -8,7 +8,6 @@ import {
   type RunScope,
   type RunEvent,
 } from "./workflow-run-store";
-import { stopDurableProcessAttempts } from "./workflow-durable-process";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   WORKFLOW_WALL_TIMEOUT_MS,
@@ -23,6 +22,7 @@ import {
   startWorkflowJob,
   type WorkflowJobState,
   getWorkflowJobForOwner,
+  requestDurableWorkflowCancellation,
 } from "./workflow-jobs";
 import {
   resolveLiveSessionScope,
@@ -76,6 +76,7 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
         events.filter((e) => e.kind === "dispatch").length,
         events.filter((e) => e.kind === "attempt").length,
       ),
+    ...(result ? { errorCount: result.errorCount } : {}),
     usage: result?.usage ?? end?.data.usage ?? interrupted?.data.usage,
     usageAccuracy: events.some((e) => e.kind === "interrupted")
       ? "lower_bound"
@@ -96,12 +97,15 @@ export function registerDurableWorkflowTools(
     runAsync: boolean,
     completion: ResolvedCompletionPolicy,
   ) => WorkflowAgentRunner,
-  notify: (job: WorkflowJobState) => boolean,
+  notify: (job: WorkflowJobState) => void,
   /** Private fixture root; production callers use the user-owned run store. */
   storeRoot?: string,
 ) {
-  function scope(ctx?: any): RunScope {
-    const live = resolveLiveSessionScope(owner());
+  function scope(
+    ctx: any | undefined,
+    sessionOwner: SessionOwnerToken | undefined,
+  ): RunScope {
+    const live = resolveLiveSessionScope(sessionOwner);
     const cwd = ctx?.cwd ?? live?.cwd;
     const sessionId =
       ctx?.sessionManager?.getSessionId?.() ??
@@ -120,7 +124,11 @@ export function registerDurableWorkflowTools(
   ): Promise<any | undefined> {
     if (!id.startsWith("wfd_")) return undefined;
     try {
-      const events = await WorkflowRunStore.inspect(scope(ctx), id);
+      const inspectionOwner = owner();
+      const events = await WorkflowRunStore.inspect(
+        scope(ctx, inspectionOwner),
+        id,
+      );
       if (!events) return undefined;
       const details = durableRunSummary(id, events);
       const end = terminal(events);
@@ -128,13 +136,70 @@ export function registerDurableWorkflowTools(
         consumeCompletionSource(
           pi,
           { source: "workflow", sourceId: id },
-          owner(),
+          inspectionOwner,
         );
       }
       const run =
         result && end?.data.result
           ? decodeRunValue<WorkflowRunResult>(end.data.result)
           : undefined;
+      const elapsedAt = details.completedAt ?? Date.now();
+      const elapsedMs =
+        Number.isFinite(details.createdAt) &&
+        details.createdAt >= 0 &&
+        Number.isFinite(elapsedAt) &&
+        elapsedAt >= details.createdAt
+          ? elapsedAt - details.createdAt
+          : undefined;
+      const structuredContent = result
+        ? {
+            status: details.status,
+            workflowId: id,
+            durable: true,
+            name: details.name,
+            presentationStatus: details.status,
+            ...(run
+              ? {
+                  result:
+                    typeof run.result === "string"
+                      ? run.result
+                      : stringify(run.result),
+                  agentsSpawned: run.agentsSpawned,
+                  errorCount: run.errorCount,
+                }
+              : {}),
+            ...(details.agentsSpawned === undefined
+              ? {}
+              : { agentsSpawned: details.agentsSpawned }),
+            ...(details.errorCount === undefined
+              ? {}
+              : { errorCount: details.errorCount }),
+            ...(details.usage === undefined ? {} : { usage: details.usage }),
+            ...(typeof events[0].data.budgetTotal === "number"
+              ? { budgetTotal: events[0].data.budgetTotal }
+              : {}),
+            ...(details.error === undefined ? {} : { error: details.error }),
+          }
+        : {
+            status: details.status,
+            workflowId: id,
+            durable: true,
+            name: details.name,
+            presentationStatus: details.status,
+            ...(elapsedMs === undefined ? {} : { elapsedMs }),
+            agentsSpawned: details.agentsSpawned,
+            ...(details.errorCount === undefined
+              ? {}
+              : { errorCount: details.errorCount }),
+            ...(details.usage === undefined ? {} : { usage: details.usage }),
+            ...(typeof events[0].data.budgetTotal === "number"
+              ? { budgetTotal: events[0].data.budgetTotal }
+              : {}),
+            ...(details.currentPhase === undefined
+              ? {}
+              : { currentPhase: details.currentPhase }),
+            ...(details.error === undefined ? {} : { error: details.error }),
+          };
       return {
         content: [
           {
@@ -146,9 +211,19 @@ export function registerDurableWorkflowTools(
         ],
         details,
         ...(result && details.status !== "done" ? { isError: true } : {}),
+        structuredContent,
       };
     } catch (error) {
-      return failure(error);
+      const failed = failure(error);
+      return {
+        ...failed,
+        structuredContent: {
+          status: "error",
+          workflowId: id,
+          durable: true,
+          error: failed.details.error,
+        },
+      };
     }
   }
 
@@ -176,11 +251,11 @@ export function registerDurableWorkflowTools(
         throw new Error(
           "Durable workflows cannot run inside an in-process sub-agent.",
         );
-      const runScope = scope(ctx);
       const workflowOwner = owner();
+      const runScope = scope(ctx, workflowOwner);
       if (signal?.aborted) throw new Error("Workflow start was cancelled.");
       const runAsync = params.async !== false;
-      let completion: ResolvedCompletionPolicy;
+      let completion: Partial<ResolvedCompletionPolicy>;
       if (params.workflowId) {
         if (
           getWorkflowJobForOwner(params.workflowId, workflowOwner)?.status ===
@@ -198,9 +273,10 @@ export function registerDurableWorkflowTools(
           );
         completion =
           store.events.findLast((event) => event.kind === "delivery")?.data
-            .completion ?? store.events[0].data.completion;
-        if (runAsync && !completion.policy)
-          completion = { legacy: false, policy: "each" };
+            .completion ??
+          store.events[0].data.completion ??
+          {};
+        if (runAsync && !completion.policy) completion = { policy: "each" };
       } else {
         if (
           !runAsync &&
@@ -210,9 +286,7 @@ export function registerDurableWorkflowTools(
           throw new Error(
             "Completion groups apply only to background workflows.",
           );
-        completion = runAsync
-          ? resolveCompletionPolicy(params)
-          : { legacy: false };
+        completion = runAsync ? resolveCompletionPolicy(params) : {};
         const script =
           params.script ??
           (params.name ? loadWorkflowScript(params.name) : null);
@@ -248,14 +322,16 @@ export function registerDurableWorkflowTools(
             completion.groupId,
             workflowOwner,
           );
-      registerCompletionMember(
-        "workflow",
-        store.id,
-        completion.policy ?? "each",
-        completion.groupId,
-        workflowOwner,
-        reservation,
-      );
+      if (completion.policy) {
+        registerCompletionMember(
+          "workflow",
+          store.id,
+          completion.policy,
+          completion.groupId,
+          workflowOwner,
+          reservation,
+        );
+      }
       if (!params.workflowId) await store.append("accepted", {});
       else
         await store.append("interrupted", {
@@ -263,7 +339,12 @@ export function registerDurableWorkflowTools(
           resumedAt: Date.now(),
         });
       await store.append("delivery", { completion });
-      const baseRunner = makeRunAgent(ctx, store.id, runAsync, completion);
+      const baseRunner = makeRunAgent(ctx, store.id, runAsync, {
+        policy: completion.policy ?? "each",
+        ...(completion.groupId === undefined
+          ? {}
+          : { groupId: completion.groupId }),
+      });
       const job = startWorkflowJob(
         parseWorkflow(definition.script).meta.name,
         definition.script,
@@ -363,15 +444,16 @@ export function registerDurableWorkflowTools(
     if (!id.startsWith("wfd_")) return undefined;
     let store;
     try {
-      store = await WorkflowRunStore.resume(scope(ctx), id);
-      if (terminal(store.events)) return await inspect(id, ctx);
-      await store.append("cancelled", {
-        status: "cancelled",
-        completedAt: Date.now(),
-      });
-      // A persistent cancel request is consumed by each exact attempt supervisor;
-      // never kill a potentially recycled mux pane ID recovered from old disk state.
-      await stopDurableProcessAttempts(store.directory);
+      const cancellationOwner = owner();
+      store = await WorkflowRunStore.resume(scope(ctx, cancellationOwner), id);
+      const terminalEvent = terminal(store.events);
+      if (terminalEvent && terminalEvent.data.status !== "cancelled")
+        return await inspect(id, ctx);
+      await requestDurableWorkflowCancellation(
+        store,
+        getWorkflowJobForOwner(id, cancellationOwner),
+      );
+      if (terminalEvent) return await inspect(id, ctx);
       return {
         content: [
           {
@@ -423,7 +505,8 @@ export function registerDurableWorkflowTools(
       ctx: any,
     ): Promise<any> {
       try {
-        const runScope = scope(ctx);
+        const listOwner = owner();
+        const runScope = scope(ctx, listOwner);
         const ids = await WorkflowRunStore.list(runScope);
         const runs = [];
         for (const id of ids) {
@@ -431,7 +514,7 @@ export function registerDurableWorkflowTools(
           if (events)
             runs.push({
               ...durableRunSummary(id, events),
-              ...(getWorkflowJobForOwner(id, owner())?.status === "running"
+              ...(getWorkflowJobForOwner(id, listOwner)?.status === "running"
                 ? { status: "running" }
                 : {}),
             });

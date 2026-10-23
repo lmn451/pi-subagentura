@@ -66,6 +66,41 @@ file can forge parent entries; the design does not claim to defend against that
 threat. Routing metadata never becomes a lifecycle registry or semantic
 resolver.
 
+## Implementation handoff completeness gate
+
+When implementation follows completed scout/planner work, do not spawn an
+implementer until this gate passes:
+
+1. Retrieve every completed scout/planner report from this request before
+   deciding which findings are relevant. Use the exact child ID and `turnId`
+   with `read_subagent_artifact`. Read the artifact output, not the transcript.
+   A manifest, completion summary, task preview, remembered context, or presumed
+   sibling-session visibility is only a pointer, not a substitute for the report.
+   If an expected report is unavailable or ambiguous, do not guess or spawn;
+   obtain the exact result or surface the coverage gap.
+2. Draft one self-contained handoff for the implementer's initial spawn. Put the
+   approved implementation scope in `task` and the consolidated findings in an
+   explicit `context` string using `includeContext: false`. Include all relevant,
+   verified findings; a repo-specific implementation map (exact files, symbols,
+   tests, and conventions); settled decisions, constraints, and non-goals; open
+   questions and version uncertainties clearly labeled as unresolved; acceptance
+   criteria and expected tests/commands; and source references (report child ID
+   plus `turnId`, and file paths/line ranges where available).
+3. Before spawning, compare the handoff against every retrieved report, one by
+   one. Carry forward every relevant finding, constraint, risk, open question,
+   and test expectation, or explicitly mark it out of scope with a reason. Do
+   not omit information merely because it seems duplicative in the combined
+   summary.
+4. Tell the implementer not to repeat broad scouting or planning, and not to ask
+   the user to restate settled information. They may inspect the named target
+   files and relevant tests to implement and validate the approved change; do
+   broader investigation only to resolve a concrete contradiction or blocker.
+   If that requires a new scope or decision, pause and report the exact blocker.
+
+Never rely on implicit sibling transcript visibility: pass the complete handoff
+explicitly in the initial task/context. This gate is parent-side coordination,
+not permission for Orchestratorv2 to inspect or implement repository changes.
+
 ## Context contract
 
 Use the `subagent_interactive` `includeContext`/`context` schema contract exactly:
@@ -81,16 +116,12 @@ Prefer a small explicit handoff for a new specialist. Include the full parent br
 ## Completion coordination
 
 - Asynchronous completion uses `completionPolicy: "each"` by default. Each terminal `done`, `error`, or `cancelled` result is independently eligible; results that finish while the parent is busy coalesce into one compact manifest at the next safe-idle dispatch.
-- Use `completionPolicy: "group"` only when related work is explicitly registered under one caller-declared `completionGroupId`. Register members before the spawning turn settles; settlement seals the group, late members are rejected, and delivery waits for every registered member to become terminal. Same-turn launch and task text never infer relatedness.
+- Use `completionPolicy: "group"` only when related work is explicitly registered under one caller-declared `completionGroupId`. Register members before the spawning turn settles; settlement seals the group and rejects late members. Follow the [documented group behavior](README.md#coordinated-completion-delivery). Same-turn launch and task text never infer relatedness.
 - The completion coordinator owns readiness, group membership, TUI-only notices, and compact manifest construction. Follow manifest references with `read_subagent_artifact` and the matching `turnId` when an interactive result needs inspection; use the referenced `get_subagent_result` or `get_workflow_result` call for in-process or workflow results. Do not read full transcripts merely to route.
 - For an interactive completion, the exact selector is child ID plus turn ID: use the manifest's `sourceId` as the child ID and the exact `turnId` in `read_subagent_artifact`. Never substitute the latest turn or select a result by display name, alias, task preview, footer or mux label, timestamp, artifact path, or completion prose. Ask the user when an older completion reference is ambiguous.
 - Human prompts and steering take priority. Never inject a manifest into a streaming parent turn; attach one ready manifest to the natural human turn through `before_agent_start`, or allow one follow-up only after safe idleness.
-- At an idle dispatch, the coordinator passes the manifest through the lower-level `sendCompletionTurn` transport with the actual parent streaming state. Non-v2 modes fall through to native `sendMessage`; idle Orchestratorv2 uses a durable wake request and a synthetic user follow-up so this prompt is installed for the consuming run.
-- Wake state is process-global and run-bound. `before_agent_start` marks only the exact synthetic wake prompt, and that marked run's `agent_settled` performs acknowledgement. A missing run start receives at most three wake attempts with a 30-second watchdog; acknowledgement persistence retries at most three times with a one-second delay. Session replacement and shutdown clear timers, while reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
-
-Deprecated `notifyOnComplete` and `triggerTurnOnComplete` inputs remain accepted
-for compatibility but map to coordinated `each`; they cannot request full-output
-injection or override completion policy, group barriers, or human-input priority.
+- At an idle dispatch, the coordinator sends the hidden manifest with `triggerTurn:false`, then a separate hidden native custom message of type `orchestratorv2-completion-wakeup` with `triggerTurn:true` and `details.orchestratorV2WakeId`. The custom wake starts the consuming run; it is not a synthetic user message.
+- Wake state is process-global and run-bound. `before_agent_start` acknowledges only a `messageType:"custom"` message of type `orchestratorv2-completion-wakeup` with a matching `details.orchestratorV2WakeId`; natural user messages and unrelated custom messages cannot acknowledge it. The request/acknowledgement ledger types and schema are unchanged. A missing run start receives at most three wake attempts with a 30-second watchdog; acknowledgement persistence retries at most three times with a one-second delay. Session replacement and shutdown clear timers, while reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
 
 ## Control boundary and legacy mode
 

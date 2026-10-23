@@ -17,10 +17,10 @@ for clarification when a request is ambiguous or a narrow request has no matchin
 child, and leave specialist repository work to those children. Compatibility
 workflow and in-process tools remain registered.
 
-For reusable workflows, start Pi with the bundled orchestration guidance and
-describe the outcome you want. The parent can turn that request into a saved
-workflow, run its agents in the background, and keep their intermediate results
-out of the parent context.
+To opt into reusable workflow orchestration, start Pi with the workflow-oriented
+`--orchestrator` mode or explicitly ask for a workflow (for example, with
+`/workflow`). General tasks are not routed to the workflow tool automatically
+when no workflow mode is selected and the user has not asked for one.
 
 ## Demo
 
@@ -37,7 +37,7 @@ plays in 8:06, with quiet stretches accelerated and English translations include
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.
 
-Node.js 22.23.2 or newer is required.
+Pi SDK 1.2.0 or newer and Node.js 22.23.2 or newer are required.
 
 Install globally:
 
@@ -219,6 +219,30 @@ The extension registers these public tools for parent agents.
 | `list_subagent_artifacts`               | List durable interactive-agent artifacts                          |
 | `read_subagent_artifact`                | Read lifecycle events and output snapshots                        |
 | `cleanup_subagent_artifacts`            | Remove expired artifact directories and stale registry entries    |
+
+### Structured results
+
+All 11 read-only tools declare an `outputSchema` and return typed
+`structuredContent` while retaining their existing human-readable
+content/details:
+
+- **Jobs and workflows:** `get_subagent_status`, `get_subagent_result`,
+  `get_workflow_status`, `get_workflow_result`.
+- **Interactive artifacts:** `get_interactive_subagent_status`,
+  `list_subagent_artifacts`, `read_subagent_artifact`.
+- **Discovery and activity:** `list_available_models`,
+  `get_current_pane_activity`, `list_workflows`,
+  `list_orchestrator_agents`.
+
+Structured status, error, pending, and wait states are explicit. Terminal
+results preserve exact raw output: an empty string stays distinct from the
+literal `"(no output)"`, which is only a human-presentation sentinel. Artifact
+output remains sanitized and capped at 64 KiB with allowlisted metadata;
+artifact listings omit task text, paths, and raw events.
+
+Successful terminal reads through `get_subagent_result`,
+`get_workflow_result`, or output-bearing `read_subagent_artifact` persist a
+consumption receipt before returning. Receipt-storage failure blocks collection.
 
 ## How it compares with other Pi sub-agent extensions
 
@@ -478,7 +502,9 @@ Snapshots use schema version 1, temp-file + rename writes, deterministic per-ses
 
 ### `subagent_with_context`
 
-Starts a sub-agent with the current conversation history included in its prompt.
+Starts a sub-agent with the parent's canonical projected conversation included
+in its prompt. The extension passes `buildSessionProjection().messages`
+directly rather than serializing raw branch entries.
 
 Parameters:
 
@@ -487,14 +513,9 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
-
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.
 
 Best for:
 
@@ -514,14 +535,10 @@ Parameters:
 - `model` — optional model override like `anthropic/claude-sonnet-4-5`
 - `cwd` — optional working directory override
 - `async` — run in background; returns a jobId immediately instead of blocking
-- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for an explicit barrier
+- `completionPolicy` — async completion coordination: `"each"` (default) or `"group"`; group errors are eligible before the barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related jobs (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 - `maxAge` — optional integer TTL in milliseconds for async completed-job retention (0–2,147,483,647). Omitted or `0` retains results indefinitely; a positive TTL removes ordinary terminal results when it elapses, while an uncollected coordinated result stays protected and is removed when collected after expiry (or when its TTL later elapses).
 
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`; `completionGroupId` is valid only with `completionPolicy: "group"`.
 Async spawn results describe the selected coordinated behavior.
 
 Best for:
@@ -614,25 +631,21 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — context mode selector: `true` serializes the full parent branch; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `includeContext` — context mode selector: `true` includes the canonical parent session projection (including omission and replacement edits); `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux` — optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, or `"herdr"`. Auto prefers a Herdr-managed pane (`HERDR_ENV=1`), then the attached Zellij/tmux environment, and finally an installed tmux or Zellij detached-session backend. Explicit choice forces that backend. Herdr mode requires Pi to be running inside a Herdr pane and preserves its exact socket path for reload/rehydration.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
-- `completionPolicy` — `"each"` (default) or `"group"`; `"each"` makes records independently eligible, while `"group"` waits for a caller-declared named barrier
+- `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
-- `notifyOnComplete` — deprecated compatibility input; any value maps to coordinated `"each"` delivery with no full-output injection
-- `triggerTurnOnComplete` — deprecated compatibility input; coordinated `"each"` timing and human priority remain authoritative
 
-Deprecated compatibility fields cannot be combined with `completionPolicy` or
-`completionGroupId`. The spawn result describes the selected coordinated behavior.
+The spawn result describes the selected coordinated behavior.
 
-The sub-agent's artifact contains `events.ndjson` lifecycle records, mutable
-`output.md` staging, and immutable protocol-v2 `outputs/<eventId>.md` terminal
-snapshots. Terminal retrieval uses the immutable snapshot by `turnId`; mutable
-output is legacy/staging fallback only. The pane is for live monitoring, and the
-artifact survives parent restarts.
+The sub-agent's artifact contains protocol-v2 `events.ndjson`, mutable
+`output.md` staging for an active turn, and immutable
+`outputs/<eventId>.md` terminal snapshots selected by `turnId`. Unsupported
+protocol-v1 artifacts are left untouched but are not readable by this runtime.
 
 - Interactive children also have `get_current_pane_activity`, which reports
   whether their tmux or Zellij pane is active for the user's current client.
@@ -646,23 +659,25 @@ artifact survives parent restarts.
 The standalone interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
-The state file and subagent panes are preserved across these actions:
+Standalone interactive registry state and panes behave across these lifecycle actions as follows:
 
-| Action                                            | State file                   | Panes      | Rehydrated next start?                       |
-| ------------------------------------------------- | ---------------------------- | ---------- | -------------------------------------------- |
-| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved  | ✅ Same session, parentSessionId matches     |
-| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved  | ❌ Different session, no match               |
-| **`/reload`**                                     | Kept                         | Preserved  | ✅ Same session                              |
-| **`/resume`** (switch to another session)         | Kept                         | Preserved  | ✅ If parentSessionId matches                |
-| **`/new`**                                        | **Deleted**                  | **Killed** | ❌ Clean slate                               |
-| **`/fork`**                                       | Kept (owned entries removed) | **Killed** | ❌ Fresh fork does not rehydrate prior state |
+| Action                                            | State file                   | Panes                   | Rehydrated next start?                       |
+| ------------------------------------------------- | ---------------------------- | ----------------------- | -------------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved               | ✅ Same session, parentSessionId matches     |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved               | ❌ Different session, no match               |
+| **`/reload`**                                     | Kept                         | Preserved               | ✅ Same session                              |
+| **`/resume`** (switch to another session)         | Kept                         | Preserved               | ✅ If parentSessionId matches                |
+| **`/new`**                                        | **Deleted***                 | Tracked panes targeted* | ❌ Clean slate                               |
+| **`/fork`**                                       | Kept (owned entries removed) | Tracked panes targeted  | ❌ Fresh fork does not rehydrate prior state |
 
-> **Note:** `/new` deletes the whole state file. `/fork` removes entries owned
-> by the old parent while preserving any unrelated entries in that file; a
-> fresh fork does not rehydrate prior state. If you do `/new` and then
-> `/resume` back to the session where subagents were spawned, they **will not
-> reappear** because the state file was already deleted. Only `/reload` or a
-> restart with the same session (`--session`/`-r`) preserves the registry.
+> **Note:** `/new` deletes the whole state file when no other started session
+> scope remains. `/fork` removes entries owned by the old parent while preserving
+> unrelated entries. Both transitions can only stop panes known to active
+> in-memory registries; children hidden by an unreadable or unsupported state file
+> may remain alive. These are destructive transitions, not recovery steps. If you
+> do `/new` and then `/resume` the old session, its deleted records will not
+> reappear. `/reload` or restarting with the same session can preserve and
+> rehydrate only state supported by the loaded version.
 
 On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
@@ -748,7 +763,7 @@ session, and cancellation preserves its artifact directory for later inspection.
 #### Sub-agent completion protocol
 
 Every interactive child runs protocol-only Pi lifecycle hooks and therefore
-requires Pi SDK `>=0.80.6`. `before_agent_start` creates a provisional
+requires Pi SDK `>=1.2.0`. `before_agent_start` creates a provisional
 turn, the first `turn_start` binds it to the persisted Pi user-entry id, tool
 hooks record activity, and `agent_settled` records the authoritative completion
 after retries, compaction, and queued continuations. When Pi accepts Enter while
@@ -778,17 +793,20 @@ At each child turn start, mutable `output.md` is atomically reset without
 touching earlier snapshots. Before each completion event, the current staging
 file (including an empty file when the turn wrote nothing) is copied atomically to
 `outputs/<eventId>.md` with byte count and SHA-256 metadata. Events are consumed
-in physical NDJSON byte order; timestamps are display-only. Mixed v1/v2 logs and
-legacy `output-N.md` snapshots remain readable. New legacy completions are
-pointer-only because mutable `output.md` cannot be safely attributed to a turn.
+in physical NDJSON byte order; timestamps are display-only. The runtime accepts
+protocol-v2 events and immutable `turnId` snapshots only. Existing protocol-v1
+logs and numeric `output-N.md` files are left untouched but are not readable here.
+
+See the [protocol-v1 compatibility inventory](docs/protocol-v1-compatibility.md)
+for the current breaking-removal status and user-data behavior.
 
 Immutable snapshots are limited to 1 MiB. The parent and generated child CLI
 check the staging file size before reading it. If `output.md` exceeds the limit,
 the completion is still recorded with `outputError.code = "output_too_large"`
 and its observed byte count, but no immutable snapshot is created. The
-coordinated manifest therefore has no snapshot reference, and legacy injection
-cannot load the oversized output. The staging file remains available for manual
-inspection in the artifact directory.
+coordinated manifest therefore has no snapshot reference. No completion path
+injects mutable output into the parent context. The staging file remains available
+for manual inspection in the artifact directory.
 
 #### Coordinated completion delivery
 
@@ -805,9 +823,8 @@ from the parent-model channel:
 2. The parent model receives one bounded, hidden `subagent-manifest` containing
    statuses and references—not child output. Interactive records point to the
    immutable `outputs/<eventId>.md` snapshot when available plus
-   `events.ndjson`; legacy artifacts may fall back to mutable `output.md`.
-   In-process and workflow records point to `get_subagent_result` and
-   `get_workflow_result`.
+   `events.ndjson`; legacy artifact fallback is not supported. In-process and
+   workflow records point to `get_subagent_result` and `get_workflow_result`.
 3. A ready manifest attaches to a pending human-initiated turn when possible.
    Otherwise Pi receives one triggered follow-up after the parent is safely
    idle. Human prompts and steering always take priority.
@@ -815,13 +832,22 @@ from the parent-model channel:
 `completionPolicy` controls readiness:
 
 - `"each"` (default) makes every independent result eligible immediately. Results that finish while the parent is busy are coalesced into one manifest at the next safe-idle dispatch; this is the default independent-delivery behavior.
-- `"group"` requires the caller to provide one shared, explicit `completionGroupId`. Same-turn launch and task text do not infer relatedness. Register all members in the intended group before the spawning parent turn settles; settlement seals the group, rejects late members, and blocks model delivery until every registered member is `done`, `error`, or `cancelled`. Per-member TUI notices still appear immediately, and an entirely consumed group does not trigger an empty turn.
+- `"group"` requires the caller to provide one shared, explicit
+  `completionGroupId`. Same-turn launch and task text do not infer relatedness.
+  Register all members before the spawning parent turn settles; settlement seals
+  the group and rejects late members. Error records bypass the group barrier and
+  become eligible for model delivery before the group completes; this does not
+  complete the group.
+  Successful and cancelled results remain gated until every registered member is
+  terminal. Per-member TUI notices still appear immediately, while busy-parent
+  manifests wait for a safe-idle dispatch. An entirely consumed group does not
+  trigger an empty turn.
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
-The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 uses the lower-level transport to persist a wake request, publish the manifest with its wake identity, and send a synthetic user follow-up so `before_agent_start` installs the thin-router prompt. A streaming parent keeps Pi's native follow-up behavior.
+The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 records its wake request, sends the hidden `subagent-manifest` with `triggerTurn:false`, then sends a separate hidden custom message of type `orchestratorv2-completion-wakeup` with `triggerTurn:true` and `details.orchestratorV2WakeId`. This native custom wake is not a synthetic user message. A streaming parent keeps Pi's native follow-up behavior.
 
-Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. The exact synthetic prompt is marked in `before_agent_start`, and only that marked run's `agent_settled` acknowledges the wake; unrelated turns cannot consume it. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
+Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. `before_agent_start` acknowledges only a message with `messageType:"custom"`, custom type `orchestratorv2-completion-wakeup`, and `details.orchestratorV2WakeId` matching the active wake ID; natural user messages and unrelated custom messages cannot acknowledge it. The request/acknowledgement ledger types and schema are unchanged. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch. Coalescing and human-input priority are unchanged.
 
 Successful terminal retrieval through `get_subagent_result`,
 `get_workflow_result`, or `read_subagent_artifact` with output consumes the
@@ -831,15 +857,6 @@ dispatch. This is not an exactly-once delivery guarantee: a crash around parent
 dispatch can still replay a manifest as described below.
 Workflow-owned process or in-process children never publish directly; only the
 background workflow aggregate completion participates in coordinated delivery.
-
-The deprecated `notifyOnComplete` and `triggerTurnOnComplete` fields remain
-accepted for compatibility. Either legacy value maps deterministically to
-coordinated `"each"`: the notice is TUI-only, the parent receives only compact
-references, and policy plus human-priority rules control timing. Combining
-either field with `completionPolicy` or `completionGroupId` is rejected.
-Persisted pre-coordinator intents may still drain through the bounded legacy
-broker during upgrade recovery, but new API calls cannot select full-output
-injection.
 
 Interactive coordinated policy, group membership, and intents survive
 same-session startup/reload/resume through `.pi/subagentura-state.json` and
@@ -907,8 +924,7 @@ event and immutable output snapshot before killing the pane, so artifacts remain
 self-describing. The tool result acknowledges the cancellation to the parent.
 Under coordinated delivery, cancellation also creates one TUI-only terminal
 entry and satisfies an `all-terminal` group barrier; any later manifest contains
-only the bounded cancellation reference. Upgrade-recovered legacy intents retain
-their existing delivery receipt suppression.
+only the bounded cancellation reference.
 
 Parameters:
 
@@ -948,26 +964,37 @@ parent was away.
 
 #### `read_subagent_artifact`
 
-Reads a sub-agent's artifact by id. Returns the lifecycle event log (pass
-`since` to fetch only new events) and, by default, the latest terminal immutable
-protocol-v2 snapshot. Mutable `output.md` is used only when no protocol-v2 terminal
-snapshot applies, including legacy or still-running artifacts. This avoids
-misattributing active follow-up staging bytes to an earlier terminal turn. A
-successful read that returns a terminal snapshot consumes that turn's pending
-coordinated delivery; an events-only read does not.
+Reads a sub-agent's protocol-v2 lifecycle events and, by default, the output for
+the latest turn in physical event order. A completed turn returns its immutable
+snapshot; a running turn returns its current staging `output.md`, even when an
+earlier turn has completed. Empty or missing current staging never falls back to
+an earlier snapshot.
+
+For a selected terminal `error`, the model-facing response includes a separate
+status and explicitly untrusted diagnostic, even when the immutable snapshot is
+empty. The recorded `errorMessage` or `message` is passed through without parsing
+or credential redaction; provider diagnostics may include credential-shaped text.
+Markup delimiters are escaped before insertion into the wrapper, and the
+diagnostic is capped at 512 UTF-8 bytes including any truncation marker. The
+boundary labels the text as data but
+is not a prompt-injection defense. Existing snapshot output sanitization,
+snapshots, manifests, and telemetry are unchanged.
+
+`since` filters only the returned events, not output selection. A successful read
+that returns a terminal snapshot consumes that turn's pending coordinated
+delivery; staging and events-only reads do not.
 
 Protocol-v2 completions map each Pi-derived `turnId` to an immutable
-`outputs/<eventId>.md` snapshot. Pass `turnId` to read that output; the response's
-`details.outputHistory` lists the available `turnId`/`eventId` mappings. Legacy
-`output-N.md` history remains available through numeric `turn` and
-`details.availableTurns`.
+`outputs/<eventId>.md` snapshot. Pass `turnId` to select a historical snapshot
+even while a follow-up runs. The response's `details.outputHistory` lists the
+available `turnId`/`eventId` mappings. Unsupported protocol-v1 artifacts and numeric
+`output-N.md` snapshots are not read or migrated.
 
 Parameters:
 
 - `id` — required sub-agent id
 - `since` — optional unix-ms timestamp; only return events with `ts >= since`
-- `includeOutput` — include the output (default `true`); historical selectors imply output
-- `turn` — optional turn number; read `output-N.md` for that specific turn instead of the latest `output.md`
+- `includeOutput` — include the output (default `true`)
 - `turnId` — optional protocol-v2 Pi turn id, up to 256 characters; read its immutable `outputs/<eventId>.md` snapshot
 
 ### `list_available_models`
@@ -997,162 +1024,31 @@ best-effort lifecycle and operation events directly to PostHog's public capture 
 the maintainers can understand which execution modes are useful and where
 sub-agent completion or collection breaks down.
 
-Each logical root Pi session/tree receives one random UUID. It is not derived
-from Pi's session id and is never a stable installation, machine, user,
-repository, or project identity. The UUID and closed mode are stored only in the
-existing active-session `.pi/subagentura-state.json` file so live starts and
-later completions remain correlated across reload, resume, and matching startup
-recovery after quit. Fresh `new` and `fork` sessions replace or clear it.
-Bounded active-turn progress (closed dimensions, turn timestamps, and message
-counts) may be stored there for the same recovery purpose; prompt and output
-content is never included. Recursive interactive children receive correlation
-only through the existing mode-0600, one-use lineage bootstrap—not through
-ambient identity environment variables—and never read or write the root state
-file's telemetry metadata. A child without that explicit context starts an
-unrelated anonymous correlation rather than reconstructing identity.
+Each root session/tree uses a random correlation UUID, not a person, installation,
+machine, repository, or project identity. Telemetry excludes prompts, tasks,
+arguments, messages, outputs, raw errors, provider responses, paths, and runtime
+agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
+missing completion events do not prove a crash or failed task.
 
-The current payload schema, shipped in the 3.6.2 release, is version `4`;
-it contains these events:
+The detailed event schema, closed dimensions, recovery behavior, privacy limits,
+measurement caveats, and PostHog report queries live in
+[User-impact telemetry and PostHog reports](docs/telemetry.md).
 
-| Event                        | Properties                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_started`            | package version; `straight`, `orchestrator`, or `orchestrator_v2` mode                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `agent_created`              | once per accepted in-process agent or launched interactive pane; execution kind, closed mux (`none`, `tmux`, `zellij`, or `herdr`), closed invocation source (`with_context`, `isolated`, `interactive`, or `workflow`), public/sanitized model, async, exact bounded depth plus bucket, completion policy, and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                                    |
-| `agent_spawn_failed`         | once per observed rejected spawn attempt; the same agent dimensions, except mux may also be `unknown`, plus required `failure_stage` (`depth_limit`, `capacity`, `context`, `model_resolution`, `session_creation`, `mux_resolution`, `pane_launch`, `state_persistence`, `registration`, `parent_shutdown`, or `unknown`) and optional rounded `spawn_duration_ms` plus `spawn_duration_bucket`                                                                                                                     |
-| `task_started`               | once per accepted in-process job or authoritative interactive turn; repeats the closed execution and mux dimensions and adds `unit` (`job` or `turn`)                                                                                                                                                                                                                                                                                                                                                                |
-| `interactive_message_sent`   | explicit parent-to-child steering/follow-up direction and bounded count only                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `task_completed`             | repeated closed execution and mux dimensions; `unit` (`job` or `turn`), `success`, `error`, or `cancelled` status, required `terminal_reason`, error-only closed `error_category` and `error_stage`, optional closed `agent_stop_reason` (`error` or `aborted`) for errors or cancellations, `exit_code_bucket` (`zero`, `nonzero`, or `unknown`) only when `terminal_reason` is `process_exit`, optional rounded `duration_ms` plus `duration_bucket`, and bounded child-conversation message count when observable |
-| `workflow_started`           | one aggregate record for an accepted workflow invocation: required `invocation` (`tool` or `saved_command`), `async`, and `completion_policy`                                                                                                                                                                                                                                                                                                                                                                        |
-| `workflow_completed`         | the same invocation dimensions plus required `status` (`success`, `partial`, `error`, or `cancelled`), required `terminal_reason`, optional closed `error_category` and `error_stage` only for `error` or `partial` status, bounded `agents_spawned`, an `error_count_bucket` of `0`, `1`, `2+`, or `unknown`, and optional rounded `duration_ms` plus `duration_bucket`                                                                                                                                             |
-| `session_recovered`          | recovery `reason` (`startup`, `reload`, or `resume`) and bounded `total_count`, `alive_count`, `terminal_count`, and `unknown_count` (each `0..1000`); `total_count` is the eligible recovered count and equals `alive_count + terminal_count + unknown_count`                                                                                                                                                                                                                                                       |
-| `completion_delivered`       | manifest or compatibility notification kind, bounded record count, and optional rounded `delivery_latency_ms` plus `delivery_latency_bucket`; for a batch, latency is the maximum age of its included completions when that age is known                                                                                                                                                                                                                                                                             |
-| `completion_delivery_failed` | manifest delivery or standalone completion publication; closed `failure_stage` (`notice_persistence`, `manifest_dispatch`, `retry_exhausted`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`) and bounded `retry_attempt` (`0..32`, currently at most `8`); `completion_publication` identifies standalone publication failure, while `notice_persistence` remains for durable manifest-notice failures; no error text or completion identifiers                                    |
-| `runtime_failure`            | one closed runtime failure category, stage, and kind: kind is `artifact_unreadable`, `artifact_malformed`, `artifact_oversized`, `mux_probe`, `workflow_capacity`, `consumption_persistence`, `notification_dispatch`, or `completion_publication`; no identifiers or raw details                                                                                                                                                                                                                                    |
-| `result_read`                | result `source` (`in-process`, `interactive`, or `workflow`), required `outcome` (`consumed`, `already_consumed`, `empty`, `running`, `error`, `cancelled`, `wait_timeout`, `wait_cancelled`, or `unavailable`), and optional rounded `read_latency_ms` plus `read_latency_bucket`                                                                                                                                                                                                                                   |
+### Traffic provenance
 
-It also records the following operation and setup events:
+Every event includes closed `traffic_origin`: `usage`, `development`, `test`, or
+`unknown`. Missing or invalid provenance is `unknown`, never evidence of
+production use. To label a deliberately classified run:
 
-| Event                  | Properties                                                                                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session_setup_failed` | closed `failure_stage`: `telemetry_persistence`, `routing_recovery`, `state_recovery`, or `wake_recovery`; setup continues with its existing fallback                    |
-| `operation_started`    | one entered extension tool, command, or shortcut handler; closed `surface`, allowlisted `operation`, and `session_role` (`root` or `child`)                              |
-| `operation_completed`  | the same operation dimensions; `outcome` (`returned`, `reported_error`, `threw`, or `aborted`), closed `result_status`, and rounded `duration_ms` plus `duration_bucket` |
+```bash
+PI_SUBAGENTURA_TELEMETRY_ORIGIN=usage pi
+PI_SUBAGENTURA_TELEMETRY_ORIGIN=development pi
+```
 
-Operation coverage includes all 24 extension tools, eight commands, and two
-shortcuts. Names come from a fixed allowlist; arguments and output are never
-inspected. Result status is restricted to `ok`, `started`, `running`, `completed`,
-`cancelled`, `wait_timeout`, `wait_cancelled`, `unavailable`, `invalid_input`,
-`confirmation_required`, `error`, or `unknown`. A returned error flag is separate
-from an exception. A returned command means its handler finished, which can
-include a dismissed picker or a handled validation failure; it does not prove
-the requested action succeeded. Operation duration includes any intentional wait
-inside the handler. Pending calls emit no completion into a replaced or retired
-session. Host rejections before handler entry are not captured.
-
-All duration and latency fields use the existing bounded representation: values
-are rounded to 100 ms and accepted only from `0` through 30 days. The numeric
-field is omitted when the timestamp is unavailable, negative, non-finite, or
-otherwise not trustworthy; its companion bucket is then `unknown`. Workflow
-and recovery counts are capped at `1000`; workflow error counts are reduced to
-the `0`/`1`/`2+`/`unknown` bucket; other counts and depth keep their existing safe caps.
-
-Error categories are closed to `provider`, `timeout`, `schema`, `capacity`,
-`session`, `mux`, `transport`, `artifact`, `internal`, and `unknown`. Error
-stages are closed to `spawn`, `turn`, `provider`, `completion`, `polling`,
-`delivery`, `schema_validation`, and `workflow`. Task error category/stage
-fields are emitted only for `error` status; workflow error category/stage
-fields are emitted only for `error` or `partial` status. Cancellation is not
-an error, but cancelled tasks may include `agent_stop_reason` (`error` or
-`aborted`). `exit_code_bucket` is emitted only with `process_exit` terminal
-evidence.
-
-Schema v4 keeps the existing privacy model. It adds no content
-or stable identity: the random runtime correlation UUID remains scoped to the
-logical session/tree and is never a stable installation, machine, user,
-repository, or project identity. Payloads contain only closed enums, booleans,
-bounded counts, rounded numeric values, bucketed error counts, the package
-version, sanitized public model labels, and that random correlation UUID. The
-extension does **not** send tasks, personas, prompts, message content, outputs,
-error text or stacks, names, group ids, paths, repositories, artifact/agent/Pi
-session ids, token usage, cost, or a persistent installation id. PostHog can
-still observe the connection's source IP while handling the HTTP request. The
-project-level **Discard client IP data** setting should also be enabled; direct
-ingestion cannot prevent PostHog's network edge from receiving the connection
-itself.
-
-Error categories are classified locally from known execution outcomes. The raw
-error object, message, stack, and any provider response remain local and are
-never used as telemetry properties. Invalid categories fall back to `unknown`;
-invalid stages, stop reasons, exit buckets, and runtime or completion failure
-kinds are omitted.
-
-Coverage is intentionally bounded. A host-level schema rejection or tool
-not-found result that occurs before a telemetry session exists is not observable
-and is omitted rather than represented as a synthetic failure. Similarly,
-unavailable or untrustworthy timestamps do not produce fabricated duration or
-latency values; only the `unknown` bucket remains.
-
-In PostHog, group or filter events by `telemetry_session_id` to inspect one
-anonymous session. The intended aggregates are:
-
-- accepted agents: count `agent_created`
-- rejected spawns: count `agent_spawn_failed`, broken down by `failure_stage`
-- delegated tasks: count `task_started`
-- task outcomes: count `task_completed`, broken down by `status`,
-  `terminal_reason`, `error_category`, `error_stage`, and (when present)
-  `agent_stop_reason` or `exit_code_bucket`
-- workflow throughput and outcomes: compare `workflow_started` with
-  `workflow_completed`, broken down by `invocation`, `async`,
-  `completion_policy`, `status`, `terminal_reason`, `error_category`, and
-  `error_stage`
-- execution/mux mix: count lifecycle events by the closed execution and mux
-  dimensions
-- stage latency: average or percentile of `agent_created.spawn_duration_ms`,
-  `agent_spawn_failed.spawn_duration_ms`, `task_completed.duration_ms`,
-  `workflow_completed.duration_ms`, `completion_delivered.delivery_latency_ms`,
-  and `result_read.read_latency_ms`, using each event's companion bucket
-- workflow fan-out: sum bounded `agents_spawned`; error prevalence: group
-  `workflow_completed` by its error-count bucket
-- runtime failures: count `runtime_failure` by its closed `error_category`,
-  `error_stage`, and `failure_kind`; report one event per failure episode or
-  operation, not once per polling attempt
-- recovery: count `session_recovered` by `reason`; `total_count` is the
-  eligible recovered count (the sum of bounded live/terminal/unknown counts)
-- child conversation traffic: sum
-  `task_completed.child_conversation_message_count`
-- explicit interactive follow-ups: sum `interactive_message_sent.count`
-- result-read reliability: count `result_read` by `source` and `outcome`, and
-  compare aggregate reads with delivered completions
-
-These are anonymous session-level aggregates, not per-agent, per-job, or
-per-workflow joins; those identifiers are deliberately not collected. For
-`completion_delivered` batches, the latency statistic is the maximum known age
-among the included completions, not the age of every individual completion.
-
-`completion_delivery_failed` is included in telemetry schema v4. Coordinators report each failure stage once until the relevant persistence
-or delivery succeeds, a manifest dispatch succeeds, or a matching manifest is
-reconciled from the parent session (including a human-started turn).
-`consumption_persistence` covers completion-consumption receipt writes;
-`notification_dispatch` covers notification delivery; `completion_publication`
-identifies standalone completion-publication failures; and
-`notice_persistence` remains for durable manifest-notice failures that still
-emit that stage. `manifest_dispatch` and `retry_exhausted` describe the
-manifest path. The per-stage suppression set is process-local and is cleared
-with the coordinator. Reload/recovery can report an ongoing failure again.
-Counts measure observed failure episodes by stage, not failed completions or
-every retry. A notice append that wrote before throwing still stays covered by
-the existing reconciliation safeguards. `retry_attempt` is the number of
-backoff retries already scheduled at the first observation of that stage. All
-existing opt-outs and inactive-session guards apply.
-
-The observed session span is the time from `session_started` to its last event.
-There is deliberately no shutdown-only summary: crashes can skip shutdown, and
-reload/resume lifecycle transitions can occur inside one logical session.
-
-Capture is fire-and-forget with a 1.5-second timeout. Event payloads are not
-queued, persisted, or retried; only the random active-session correlation and
-bounded recovery metadata described above are stored locally. Telemetry failures
-never affect extension behavior.
+Marking a run `test` disables normal capture, as do the existing CI/Vitest/test
+and privacy opt-outs; origin cannot re-enable any of them. For marker
+normalization, child inheritance, and recovery precedence, see the
+[telemetry reference](docs/telemetry.md).
 
 ### Disable telemetry
 
@@ -1251,6 +1147,24 @@ npm test
 npm run pack:check
 ```
 
+### Testing the checkout in Pi
+
+Editing this repository does not update a separately installed
+`npm:pi-subagentura`. Check `pi list` and the enabled extension path in
+`pi config` before debugging a missing feature. To try the checkout for one
+invocation from the repository root, without loading the installed extensions:
+
+```bash
+pi --no-extensions -e ./src/subagent.ts --skill ./skills/pi-subagentura-debug
+```
+
+This disables other discovered/configured extensions for that invocation too.
+It does not change package settings or select the checkout for interactive
+children, which launch their own `pi` process in the requested `cwd`. For an
+existing session, enable the local checkout and disable the npm extension in
+that project's configuration before `/reload`. Collect any running in-process
+or background workflow results first; `/reload` cancels those jobs.
+
 ### Branch preview releases
 
 Maintainers can create a non-npm preview release from any branch through the **Branch Preview Release** GitHub Action. It verifies the branch, moves a `branch-<sanitized-branch>` tag to that commit, creates/updates a prerelease, and uploads the `npm pack` tarball plus checksums for inspection.
@@ -1266,15 +1180,59 @@ The attached release tarball is for manual download/auditing; Pi installs the pa
 
 ### Debug logging
 
-Set `SUBAGENT_DEBUG_LOG_DIR=/some/path` to write a JSONL trace of sub-agent lifecycle events to `debug-YYYY-MM-DD.jsonl` in that directory. Each line is a self-describing JSON object with `timestamp`, `level`, `event`, and event-specific fields.
+Set `SUBAGENT_DEBUG_LOG_DIR` to a private directory before starting Pi to enable
+local JSONL diagnostics. The logger appends to `debug-YYYY-MM-DD.jsonl` with
+`timestamp`, `level`, `event`, and event-specific fields; it is inactive when
+the variable is unset.
 
-The `tool_start` event records the `toolName` and full `args` of every tool the sub-agent invokes — useful for replaying or auditing what a sub-agent did. Other events cover session creation, turns, message updates, prompts, and job completion.
+- `tool_start` records `toolName` and full `args` for tools invoked by
+  **in-process** sub-agents.
+- `extension_tool_call` records `toolName` and full `args` for pi-subagentura
+  tool executions in the Pi process where the extension is loaded.
 
-The feature is a no-op when the env var is unset.
+Logs can include task/persona text, paths, identifiers, and tool contents.
+Keep them private and redact entries before sharing. These local diagnostics
+are separate from anonymous telemetry.
+
+Unknown interactive mux liveness probes also write one `interactive_mux_probe_unknown` event per tracked pane per outage. Herdr includes the closed `failureReason` values `timeout`, `command_error`, or `malformed_response`; the event omits pane and session identifiers, raw errors, and command output. This local diagnostic is separate from anonymous telemetry; see the [telemetry reference](docs/telemetry.md) for runtime-failure attribution. Probe timeout and polling behavior are unchanged.
 
 ```bash
-SUBAGENT_DEBUG_LOG_DIR=./.pi-debug pi   # writes ./pi-debug/debug-2026-06-10.jsonl
+mkdir -p .pi-debug
+SUBAGENT_DEBUG_LOG_DIR="$PWD/.pi-debug" pi
 ```
+
+For **interactive children**, configure `SUBAGENT_DEBUG_LOG_DIR` in the
+multiplexer session/server or the child's shell environment before launching
+the child. The generated launch script does not explicitly export this variable;
+do not assume an inline setting on the parent Pi command reaches a new mux pane.
+Use an absolute path to avoid resolving the directory relative to a different
+child `cwd`. This enables the child's local extension diagnostics, not a trace
+of every built-in tool it invokes.
+
+### Inspecting tool arguments
+
+On this branch (unreleased), press **Ctrl+O** (Pi's default tool-output expansion
+shortcut) in the TUI. Pi-subagentura calls retain their compact summary when
+collapsed; expanded calls add a **Parameters:** block containing the supplied
+arguments as JSON.
+This displays the call arguments, not a list of every schema parameter or
+omitted default. It does not require debug logging.
+
+The [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md) covers
+launch, working-directory, multiplexer, state-persistence, and artifact
+troubleshooting. It is included in the package tarball and registered under
+`pi.skills`, so Pi discovers it for agent selection and the `/skill:` command
+when the package is loaded as a Pi package. Discovery is agent guidance, not a
+guaranteed invocation or runtime error hook. For unsupported state/schema or
+persistence errors, interactive spawn failures (including before pane creation),
+or mux/artifact/completion symptoms, explicitly ask the agent to load
+`/skill:pi-subagentura-debug` when exposed. Loading the checkout's extension file
+alone does not load package skills; pass `--skill ./skills/pi-subagentura-debug`
+when running that extension directly. Use `pi list` and `pi config` to confirm
+the package and version Pi actually loaded.
+
+Interactive spawning also validates that the resolved `cwd` exists and is a
+directory before creating a pane; create a requested worktree before spawning.
 
 ## Contributing
 

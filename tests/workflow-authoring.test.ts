@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeSessionScope } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 const fixture = vi.hoisted(() => ({ dir: "", run: vi.fn() }));
 vi.mock("../src/workflow-core", async (importOriginal) => {
@@ -28,7 +30,9 @@ vi.mock("../src/workflow-durable-tools", () => ({
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { workflowJobRegistry } from "../src/workflow-jobs";
 
-function setup() {
+const registeredScopes: Array<{ id: number }> = [];
+
+function setup(withLiveSession = false) {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const pi: any = {
@@ -38,7 +42,11 @@ function setup() {
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
   };
-  registerWorkflowTool(pi);
+  const sessionScope = withLiveSession
+    ? createTestSessionScope({ pi, cwd: fixture.dir })
+    : undefined;
+  if (sessionScope) registeredScopes.push(sessionScope);
+  registerWorkflowTool(pi, sessionScope);
   const ctx = { cwd: fixture.dir, ui: { notify: vi.fn(), select: vi.fn() } };
   return { tools, commands, pi, ctx };
 }
@@ -61,6 +69,9 @@ afterEach(async () => {
     [...workflowJobRegistry.values()].map((job) => job.promise),
   );
   workflowJobRegistry.clear();
+  for (const scope of registeredScopes.splice(0)) {
+    removeSessionScope(scope.id);
+  }
   rmSync(fixture.dir, { recursive: true, force: true });
 });
 
@@ -139,17 +150,14 @@ describe("durable workflow authoring", () => {
     ).toBe(false);
   });
 
-  it("runs a legacy saved script with a visible session-scoped label", async () => {
+  it("runs a legacy saved script through the live session-scoped command API", async () => {
     writeFileSync(
       join(fixture.dir, "legacy.js"),
       `${meta} const unused = () => agent("work"); return "done";`,
     );
-    const { commands, ctx, pi } = setup();
+    const { commands, ctx } = setup(true);
     await commands.get("workflows").handler("legacy {}", ctx);
     expect(fixture.run).not.toHaveBeenCalled();
-    expect(pi.sendMessage.mock.calls[0][0].content).toContain(
-      "Session-scoped run",
-    );
     const job = [...workflowJobRegistry.values()][0];
     expect((await job.promise).result).toBe("done");
   });

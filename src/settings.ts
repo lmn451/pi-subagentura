@@ -10,6 +10,9 @@ import {
   type SettingStorageOptions,
 } from "@juanibiapina/pi-extension-settings";
 import { debugLog } from "./helpers";
+import { resolveTelemetryTrafficOrigin } from "./telemetry";
+
+export { TELEMETRY_ORIGIN_ENV } from "./telemetry";
 
 export const MAX_DEPTH_FLAG = "subagentura-max-depth";
 export const HIDE_AGENT_LIST_FLAG = "subagentura-hide-agent-list";
@@ -525,6 +528,7 @@ export function isTelemetryEnabled(
   storageOptions: SettingStorageOptions = {},
   onInvalidSetting?: InvalidSettingReporter,
 ): boolean {
+  if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
   const productSwitch = envSwitchValue(TELEMETRY_ENV);
   if (
     productSwitch !== undefined &&
@@ -537,7 +541,7 @@ export function isTelemetryEnabled(
   if (envSwitchIsTruthy("CI", PERMISSIVE_FALSY_VALUES)) return false;
   if (envSwitchIsTruthy("VITEST", PERMISSIVE_FALSY_VALUES)) return false;
   if (process.env.NODE_ENV === "test") return false;
-  if (readFlag(pi, TELEMETRY_OPT_OUT_FLAG) === true) return false;
+  if (resolveTelemetryTrafficOrigin() === "test") return false;
   const persistedTelemetryEnabled = readPersistedTelemetry(
     storageOptions,
     onInvalidSetting,

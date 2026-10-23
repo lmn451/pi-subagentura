@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -7,7 +9,6 @@ import {
   MAX_WORKFLOW_AGENT_RECORDS,
   SCHEMA_RETRIES,
   MAX_WORKFLOW_JOBS,
-  MAX_WORKFLOW_NOTIFICATION_ATTEMPTS,
   awaitInteractiveResult,
   deleteWorkflowScript,
   extractJson,
@@ -24,7 +25,6 @@ import {
   parseWorkflow,
   registerWorkflowTool,
   renderProgress,
-  retryPendingWorkflowNotifications,
   runWorkflow,
   saveWorkflowScript,
   sanitizeWorkflowName,
@@ -43,6 +43,7 @@ import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
+  type SessionScope,
 } from "../src/session-scope";
 import {
   clearCompletionCoordinator,
@@ -62,12 +63,28 @@ import {
   artifactPath,
   writeOutput,
 } from "../src/artifact";
-import { formatWorkflowNotificationSummary } from "../src/workflow-tool";
+import {
+  encodeRunValue,
+  WorkflowRunStore,
+  type RunEvent,
+} from "../src/workflow-run-store";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTelemetrySession } from "../src/telemetry";
+import { createTestSessionScope } from "./session-scope-fixture";
+
+let workflowScope: SessionScope;
+beforeEach(() => {
+  clearSessionScopes();
+  workflowJobRegistry.clear();
+  workflowScope = createTestSessionScope();
+});
+afterEach(() => {
+  clearSessionScopes();
+  workflowJobRegistry.clear();
+});
 
 // ── Mock sub-agent runner ────────────────────────────────────────────
 function ok(output: string, outTokens = 0): SubagentResult {
@@ -139,6 +156,24 @@ function echoRunner(): WorkflowAgentRunner {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+function expectStructuredOutput(
+  toolDef: { outputSchema?: TSchema },
+  result: unknown,
+): Record<string, unknown> {
+  const outputSchema = toolDef.outputSchema;
+  expect(outputSchema).toBeDefined();
+  if (!outputSchema) throw new Error("tool outputSchema is missing");
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("structuredContent" in result)
+  ) {
+    throw new Error("tool result has no structuredContent");
+  }
+  const structuredContent = result.structuredContent;
+  expect(Value.Check(outputSchema, structuredContent)).toBe(true);
+  return structuredContent as Record<string, unknown>;
+}
 
 function fakeState(dir: string) {
   return { id: "abcd1234", artifactDir: dir, model: "test/model" } as any;
@@ -712,6 +747,9 @@ describe("agent() + budget", () => {
           }
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     try {
@@ -1306,7 +1344,14 @@ describe("background workflow jobs", () => {
 
   it("runs in the background and exposes status + result", async () => {
     const script = `export const meta = { name: "bg", description: "d" };\nreturn await agent("done");`;
-    const job = startWorkflowJob("bg", script, { runAgent: echoRunner() });
+    const job = startWorkflowJob(
+      "bg",
+      script,
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
     expect(workflowJobRegistry.get(job.id)).toBe(job);
     const run = await job.promise;
     expect(run.result).toBe("done");
@@ -1320,7 +1365,14 @@ describe("background workflow jobs", () => {
       `export const meta = { name: "records", description: "d" };\n` +
       `return await parallel(Array.from({ length: ${count} }, (_, index) => ` +
       `() => agent(String(index), { label: "worker" })));`;
-    const job = startWorkflowJob("records", script, { runAgent: echoRunner() });
+    const job = startWorkflowJob(
+      "records",
+      script,
+      { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await job.promise;
 
@@ -1392,7 +1444,14 @@ describe("background workflow jobs", () => {
       `return await parallel([` +
       `() => agent("first", { label: "first", isolation: "in-process" }),` +
       `() => agent("second", { label: "second", isolation: "in-process" })]);`;
-    const job = startWorkflowJob("parallel-live", script, { runAgent });
+    const job = startWorkflowJob(
+      "parallel-live",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await bothStartedPromise;
     await vi.waitFor(() =>
@@ -1442,6 +1501,9 @@ describe("background workflow jobs", () => {
         },
         onProgress: (event) => progress.push(event),
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1462,6 +1524,9 @@ describe("background workflow jobs", () => {
         runAgent: async () => ({ ...ok("done"), model: undefined }),
         onProgress: (event) => progress.push(event),
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1483,6 +1548,7 @@ describe("background workflow jobs", () => {
       { runAgent: echoRunner() },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     await job.promise;
@@ -1507,6 +1573,7 @@ describe("background workflow jobs", () => {
       { runAgent },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     await expect(job.promise).rejects.toThrow("workflow boom");
@@ -1531,6 +1598,7 @@ describe("background workflow jobs", () => {
       { runAgent },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
     job.abort.abort();
     release();
@@ -1555,6 +1623,7 @@ describe("background workflow jobs", () => {
       },
       undefined,
       onComplete,
+      sessionOwner(workflowScope),
     );
 
     job.suppressCompletionNotification = true;
@@ -1577,7 +1646,14 @@ describe("background workflow jobs", () => {
       return ok(prompt);
     };
     const script = `export const meta = { name: "bgs", description: "d" };\nreturn await agent("x");`;
-    const job = startWorkflowJob("bgs", script, { runAgent });
+    const job = startWorkflowJob(
+      "bgs",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     // Worker-backed workflows cross a thread boundary before the parent emits agent_start.
     // Wait for that handoff, but assert while runAgent is still blocked on gate.
@@ -1600,14 +1676,20 @@ describe("background workflow jobs", () => {
       throw new Error("boom");
     };
     const script = `export const meta = { name: "bgr", description: "d" };\nreturn await agent("x");`;
-    const job = startWorkflowJob("bgr", script, { runAgent });
+    const job = startWorkflowJob(
+      "bgr",
+      script,
+      { runAgent },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
 
     await expect(job.promise).rejects.toThrow("boom");
     expect(job.status).toBe("error");
     expect(job.snapshot.runningCount).toBe(0);
   });
   it("keeps an earlier grouped workflow result through cap pressure until collection", async () => {
-    clearSessionScopes();
     workflowJobRegistry.clear();
     const grouped = "workflow-retention-group";
     let releaseB!: () => void;
@@ -1622,6 +1704,9 @@ describe("background workflow jobs", () => {
       "retention-a",
       `export const meta = { name: "retention-a", description: "d" };\nreturn "A";`,
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     await workflowA.promise;
     workflowA.completionPolicy = "group";
@@ -1637,6 +1722,9 @@ describe("background workflow jobs", () => {
           return ok("B");
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     workflowB.completionPolicy = "group";
     workflowB.completionGroupId = grouped;
@@ -1648,6 +1736,7 @@ describe("background workflow jobs", () => {
         const id = `workflow-running-filler-${fillerIds.length}`;
         workflowJobRegistry.set(id, {
           id,
+          parentSessionOwner: sessionOwner(workflowScope),
           name: id,
           status: "running",
           startedAt: Date.now(),
@@ -1668,6 +1757,9 @@ describe("background workflow jobs", () => {
           "retention-c",
           `export const meta = { name: "retention-c", description: "d" };\nreturn "C";`,
           { runAgent: echoRunner() },
+          undefined,
+          undefined,
+          sessionOwner(workflowScope),
         ),
       ).toThrow(/workflow jobs are retained or running/);
       expect(workflowJobRegistry.get(workflowA.id)).toBe(workflowA);
@@ -1676,26 +1768,29 @@ describe("background workflow jobs", () => {
         name: string;
         execute: (...args: unknown[]) => Promise<unknown>;
       }> = [];
-      registerWorkflowTool({
-        registerTool: vi.fn((definition: unknown) => {
-          if (
-            definition &&
-            typeof definition === "object" &&
-            "name" in definition &&
-            typeof definition.name === "string" &&
-            "execute" in definition &&
-            typeof definition.execute === "function"
-          ) {
-            tools.push({
-              name: definition.name,
-              execute: definition.execute as (
-                ...args: unknown[]
-              ) => Promise<unknown>,
-            });
-          }
-        }),
-        registerCommand: vi.fn(),
-      } as unknown as Parameters<typeof registerWorkflowTool>[0]);
+      registerWorkflowTool(
+        {
+          registerTool: vi.fn((definition: unknown) => {
+            if (
+              definition &&
+              typeof definition === "object" &&
+              "name" in definition &&
+              typeof definition.name === "string" &&
+              "execute" in definition &&
+              typeof definition.execute === "function"
+            ) {
+              tools.push({
+                name: definition.name,
+                execute: definition.execute as (
+                  ...args: unknown[]
+                ) => Promise<unknown>,
+              });
+            }
+          }),
+          registerCommand: vi.fn(),
+        } as unknown as Parameters<typeof registerWorkflowTool>[0],
+        workflowScope,
+      );
       const resultTool = tools.find(
         (definition) => definition.name === "get_workflow_result",
       );
@@ -1717,6 +1812,9 @@ describe("background workflow jobs", () => {
         "retention-c",
         `export const meta = { name: "retention-c", description: "d" };\nreturn "C";`,
         { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        sessionOwner(workflowScope),
       );
       await replacement.promise;
       expect(workflowJobRegistry.has(workflowA.id)).toBe(false);
@@ -1732,115 +1830,6 @@ describe("background workflow jobs", () => {
       clearSessionScopes();
     }
   });
-  it("publishes coordinated resolved errors with an error completion status", async () => {
-    workflowJobRegistry.clear();
-    clearSessionScopes();
-    const entries: Array<{ customType: string; data: unknown }> = [];
-    const tools: Array<{
-      name: string;
-      execute: (...args: unknown[]) => Promise<unknown>;
-    }> = [];
-    const pi = {
-      registerTool: vi.fn((definition: unknown) => {
-        if (
-          definition &&
-          typeof definition === "object" &&
-          "name" in definition &&
-          typeof definition.name === "string" &&
-          "execute" in definition &&
-          typeof definition.execute === "function"
-        ) {
-          tools.push({
-            name: definition.name,
-            execute: definition.execute as (
-              ...args: unknown[]
-            ) => Promise<unknown>,
-          });
-        }
-      }),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      registerEntryRenderer: vi.fn(),
-      appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ customType, data });
-      }),
-      on: vi.fn(),
-    };
-    const scope = registerSessionScope({
-      id: 993,
-      generation: 1,
-      lifecycle: "started",
-      pi: pi as never,
-      sessionManager: {
-        getSessionId: () => "workflow-errors",
-        getEntries: () => entries,
-      },
-      parentStreaming: false,
-      inProcessJobs: new Map(),
-      pendingInProcessDeliveries: [],
-      interactiveStates: new Map(),
-    });
-    const workflowOwner = sessionOwner(scope);
-    registerCompletionCoordinator(pi as never, scope);
-    registerWorkflowTool(pi as never, scope);
-    const workflowTool = tools.find(
-      (definition) => definition.name === "workflow",
-    );
-    const resultTool = tools.find(
-      (definition) => definition.name === "get_workflow_result",
-    );
-    expect(workflowTool).toBeDefined();
-    expect(resultTool).toBeDefined();
-    if (!workflowTool || !resultTool) {
-      throw new Error("workflow tools were not registered");
-    }
-
-    try {
-      const started = (await workflowTool.execute(
-        "resolved-error",
-        {
-          script:
-            `export const meta = { name: "resolved-error", description: "d" };\n` +
-            `return "complete";`,
-          async: true,
-          completionPolicy: "group",
-          completionGroupId: "resolved-errors",
-        },
-        undefined,
-        undefined,
-        { cwd: "/tmp", modelRegistry: undefined },
-      )) as { details: { workflowId: string } };
-      const job = workflowJobRegistry.get(started.details.workflowId);
-      expect(job).toBeDefined();
-      if (!job) throw new Error("workflow job was not registered");
-      job.suppressCompletionNotification = true;
-      await job.promise;
-
-      // The runner result is deliberately changed to the resolved partial-failure
-      // shape before invoking the real tool callback. The public job status remains
-      // `done`; only the compact completion record needs the error status.
-      if (!job.result) throw new Error("workflow did not produce a result");
-      job.result = { ...job.result, errorCount: 2 };
-      job.snapshot.errorCount = 2;
-      clearCompletionCoordinator(workflowOwner);
-      job.completionNotificationDelivered = false;
-      job.suppressCompletionNotification = false;
-      expect(job.completionNotification?.(job)).toBe(true);
-
-      const published = entries.filter(
-        (entry) => entry.customType === "subagentura-completion",
-      );
-      expect(published.at(-1)?.data).toMatchObject({ status: "error" });
-      expect(job.status).toBe("done");
-    } finally {
-      const jobIds = [...workflowJobRegistry.values()]
-        .filter((job) => job.parentSessionOwner?.id === workflowOwner.id)
-        .map((job) => job.id);
-      for (const id of jobIds) workflowJobRegistry.delete(id);
-      clearCompletionCoordinator(workflowOwner);
-      clearSessionScopes();
-    }
-  });
 });
 it("sets startedAt from the passed timestamp", () => {
   const script = `export const meta = { name: "ts", description: "d" };\nreturn 1;`;
@@ -1850,6 +1839,8 @@ it("sets startedAt from the passed timestamp", () => {
     script,
     { runAgent: echoRunner() },
     startedAt,
+    undefined,
+    sessionOwner(workflowScope),
   );
   expect(job.startedAt).toBe(startedAt);
 });
@@ -1857,7 +1848,14 @@ it("sets startedAt from the passed timestamp", () => {
 it("defaults startedAt to Date.now() when not provided", () => {
   const before = Date.now();
   const script = `export const meta = { name: "ts2", description: "d" };\nreturn 1;`;
-  const job = startWorkflowJob("ts2", script, { runAgent: echoRunner() });
+  const job = startWorkflowJob(
+    "ts2",
+    script,
+    { runAgent: echoRunner() },
+    undefined,
+    undefined,
+    sessionOwner(workflowScope),
+  );
   expect(job.startedAt).toBeGreaterThanOrEqual(before);
   expect(job.startedAt).toBeLessThanOrEqual(Date.now());
 });
@@ -1885,7 +1883,14 @@ it("throws when all 100 job slots are full and none can be evicted", () => {
     }
     const script = `export const meta = { name: "x", description: "d" };\nreturn "ok";`;
     expect(() =>
-      startWorkflowJob("x", script, { runAgent: echoRunner() }),
+      startWorkflowJob(
+        "x",
+        script,
+        { runAgent: echoRunner() },
+        undefined,
+        undefined,
+        sessionOwner(workflowScope),
+      ),
     ).toThrow(/100 workflow jobs are retained or running/);
   } finally {
     for (const id of filled) workflowJobRegistry.delete(id);
@@ -1893,72 +1898,6 @@ it("throws when all 100 job slots are full and none can be evicted", () => {
 });
 
 describe("awaitInteractiveResult", () => {
-  it("resolves with output.md when a done event is present", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
-    writeFileSync(join(dir, "output.md"), "final answer");
-    writeFileSync(
-      join(dir, "events.ndjson"),
-      JSON.stringify({ ts: 1, type: "started", status: "running" }) +
-        "\n" +
-        JSON.stringify({ ts: 2, type: "done", status: "done", exitCode: 0 }) +
-        "\n",
-    );
-    const res = await awaitInteractiveResult(fakeState(dir), undefined, 5);
-    expect(res.isError).toBe(false);
-    expect(res.output).toBe("final answer");
-  });
-
-  it("omits a model when the interactive runner did not report one", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wf-int-model-"));
-    writeFileSync(join(dir, "output.md"), "final answer");
-    writeFileSync(
-      join(dir, "events.ndjson"),
-      JSON.stringify({ ts: 1, type: "done", status: "done", exitCode: 0 }) +
-        "\n",
-    );
-    const state = fakeState(dir);
-    delete state.model;
-
-    const result = await awaitInteractiveResult(state, undefined, 5);
-
-    expect(result.isError).toBe(false);
-    expect(result).not.toHaveProperty("model");
-  });
-
-  it("does not reuse a legacy completion from a previous turn", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wf-int-stale-"));
-    writeFileSync(join(dir, "output.md"), "stale answer");
-    writeFileSync(
-      join(dir, "events.ndjson"),
-      [
-        { ts: 1, type: "done", status: "done" },
-        {
-          version: 2,
-          eventId: "turn-start-current",
-          turnId: "turn-current",
-          ts: 2,
-          type: "turn_started",
-          status: "running",
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join("\n") + "\n",
-    );
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 0);
-
-    const result = await awaitInteractiveResult(
-      fakeState(dir),
-      controller.signal,
-      1,
-    );
-
-    expect(result.isError).toBe(true);
-    if (!result.isError) throw new Error("expected aborted result");
-    expect(result.errorMessage).toBe("aborted");
-    expect(result.output).not.toBe("stale answer");
-  });
-
   it("ignores a late v2 completion for a different turn", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-int-late-"));
     writeFileSync(join(dir, "output.md"), "late stale answer");
@@ -2142,23 +2081,6 @@ describe("awaitInteractiveResult", () => {
       isError: true,
       errorMessage: "stopped by parent",
     });
-  });
-
-  it("returns an error result on an error event", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
-    writeFileSync(join(dir, "output.md"), "partial");
-    writeFileSync(
-      join(dir, "events.ndjson"),
-      JSON.stringify({
-        ts: 1,
-        type: "error",
-        status: "error",
-        message: "kaboom",
-      }) + "\n",
-    );
-    const res = await awaitInteractiveResult(fakeState(dir), undefined, 5);
-    expect(res.isError).toBe(true);
-    expect((res as any).errorMessage).toMatch(/kaboom/);
   });
 
   it("honors an already-aborted signal", async () => {
@@ -2641,28 +2563,150 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers workflow execution, recovery, and definition tools with the Pi SDK", () => {
-    const tools: Array<{ name: string }> = [];
+  it("returns native structured outputs for persisted durable workflow reads", async () => {
+    type RegisteredTool = {
+      name: string;
+      execute: (...args: unknown[]) => unknown;
+      outputSchema?: TSchema;
+    };
+    const tools: RegisteredTool[] = [];
     const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerTool: vi.fn((definition: RegisteredTool) =>
+        tools.push(definition),
+      ),
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
-    expect(tools).toHaveLength(10);
-    expect(tools.map((t) => t.name)).toEqual([
-      "resume_workflow",
-      "list_workflow_runs",
-      "inspect_workflow",
-      "workflow",
-      "get_workflow_status",
-      "get_workflow_result",
-      "cancel_workflow",
-      "save_workflow",
-      "list_workflows",
-      "delete_workflow",
-    ]);
+    registerWorkflowTool(pi as unknown as ExtensionAPI, workflowScope);
+    const workflowId = `wfd_${"a".repeat(32)}`;
+    const createdAt = Date.now() - 1_000;
+    const run: WorkflowRunResult = {
+      meta: { name: "persisted", description: "d" },
+      result: "finished",
+      agentsSpawned: 2,
+      errorCount: 1,
+      tokensSpent: 20,
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        costUsd: 0.1,
+        turns: 1,
+        costSource: "provider",
+      },
+      phases: [],
+    };
+    const events: RunEvent[] = [
+      {
+        kind: "created",
+        data: {
+          script: `export const meta = { name: "persisted", description: "d" };
+return "finished";`,
+          createdAt,
+          budgetTotal: 100,
+        },
+      },
+      { kind: "accepted", data: {} },
+      {
+        kind: "terminal",
+        data: {
+          status: "done",
+          result: encodeRunValue(run),
+          completedAt: Date.now(),
+        },
+      },
+    ];
+    const inspect = vi
+      .spyOn(WorkflowRunStore, "inspect")
+      .mockResolvedValue(events);
+    try {
+      const ctx = { cwd: process.cwd() };
+      const statusTool = tools.find(
+        (tool) => tool.name === "get_workflow_status",
+      )!;
+      const status = await statusTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+        status: "done",
+        workflowId,
+        durable: true,
+        name: "persisted",
+        agentsSpawned: 2,
+        errorCount: 1,
+      });
+
+      const resultTool = tools.find(
+        (tool) => tool.name === "get_workflow_result",
+      )!;
+      const result = await resultTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(expectStructuredOutput(resultTool, result)).toMatchObject({
+        status: "done",
+        workflowId,
+        durable: true,
+        name: "persisted",
+        result: "finished",
+        agentsSpawned: 2,
+        errorCount: 1,
+      });
+      const interruptedEvents: RunEvent[] = [
+        events[0],
+        events[1],
+        {
+          kind: "interrupted",
+          data: { status: "interrupted", error: "interrupted" },
+        },
+      ];
+      inspect.mockResolvedValue(interruptedEvents);
+      const interruptedStatus = await statusTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(
+        expectStructuredOutput(statusTool, interruptedStatus),
+      ).toMatchObject({
+        status: "interrupted",
+        workflowId,
+        durable: true,
+      });
+      expect(interruptedStatus).toMatchObject({
+        content: [{ text: expect.stringContaining("resume_workflow") }],
+      });
+
+      const interruptedResult = await resultTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(
+        expectStructuredOutput(resultTool, interruptedResult),
+      ).toMatchObject({
+        status: "interrupted",
+        workflowId,
+        durable: true,
+      });
+      expect(interruptedResult).toMatchObject({ isError: true });
+    } finally {
+      inspect.mockRestore();
+    }
   });
 
   it("registers workflow slash commands", () => {
@@ -2676,7 +2720,7 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
     };
 
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
 
     expect(commands.map((c) => c.name)).toEqual([
       "workflow",
@@ -2704,7 +2748,7 @@ describe("registerWorkflowTool", () => {
       sendUserMessage: vi.fn(),
     };
 
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const cmd = commands.find((c) => c.name === "workflow")!;
     await cmd.handler("build a release checklist", ctx);
 
@@ -2725,7 +2769,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const wf = tools.find((t) => t.name === "workflow")!;
     expect(wf.description).toContain("agent(prompt, opts?)");
     expect(wf.description).toContain("workflow(name, args?)");
@@ -2743,6 +2787,15 @@ describe("registerWorkflowTool", () => {
     expect(guidance).toContain("plain JSON Schema");
     expect(guidance).toContain("null results");
     expect(guidance).toContain("final synthesis");
+    const modelRules = [
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+    ];
+    for (const rule of modelRules) {
+      expect(wf.description).toContain(rule);
+      expect(guidance).toContain(rule);
+    }
     expect(wf.parameters).toBeDefined();
     expect(wf.parameters.properties).toBeDefined();
     expect(Object.keys(wf.parameters.properties)).toContain("script");
@@ -2756,7 +2809,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const result = await workflowTool.execute(
       "",
@@ -2785,7 +2838,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const execution = workflowTool.execute(
       "",
@@ -2847,7 +2900,14 @@ describe("registerWorkflowTool", () => {
         `return "done";`;
 
       expect(() =>
-        startWorkflowJob("async-at-cap", script, { runAgent: echoRunner() }),
+        startWorkflowJob(
+          "async-at-cap",
+          script,
+          { runAgent: echoRunner() },
+          undefined,
+          undefined,
+          sessionOwner(workflowScope),
+        ),
       ).toThrow(/workflow jobs are retained or running/);
 
       const job = startWorkflowJob(
@@ -2856,7 +2916,7 @@ describe("registerWorkflowTool", () => {
         { runAgent: echoRunner() },
         undefined,
         undefined,
-        undefined,
+        sessionOwner(workflowScope),
         "sync",
       );
       await expect(job.promise).resolves.toMatchObject({ result: "done" });
@@ -2872,7 +2932,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const started = await workflowTool.execute(
       "",
@@ -2911,14 +2971,13 @@ describe("registerWorkflowTool", () => {
       },
       undefined,
       undefined,
-      undefined,
+      sessionOwner(workflowScope),
       "sync",
     );
     controller.abort("test cancellation");
     await expect(job.promise).rejects.toThrow("Workflow aborted.");
     expect(job.executionMode).toBe("sync");
     expect(job.status).toBe("cancelled");
-    expect(job.completionNotification).toBeUndefined();
   });
 
   it("rejects workflow execution from in-process orchestration contexts", async () => {
@@ -2927,7 +2986,7 @@ describe("registerWorkflowTool", () => {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerCommand: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflowTool = tools.find((tool) => tool.name === "workflow")!;
     const result = await withOrchestrationContext(
       { ownerJobId: "parent-job", depth: 1 },
@@ -2960,11 +3019,14 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const job = startWorkflowJob(
       "already-done",
       `export const meta = { name: "already-done", description: "d" };\nreturn "done";`,
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     await job.promise;
 
@@ -2987,113 +3049,6 @@ describe("registerWorkflowTool", () => {
     });
     expect(repeated.content[0].text).toContain("already cancelled");
     workflowJobRegistry.delete(job.id);
-  });
-
-  it("publishes cancellation before a workflow promise settles", async () => {
-    clearSessionScopes();
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const entries: any[] = [];
-    const pi = {
-      registerTool: vi.fn((definition: any) => tools.push(definition)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      registerEntryRenderer: vi.fn(),
-      on: vi.fn(),
-      appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
-      }),
-      sendMessage: vi.fn(),
-    };
-    const scope = registerSessionScope({
-      id: 991,
-      generation: 1,
-      lifecycle: "started",
-      pi: pi as never,
-      sessionManager: {
-        getSessionId: () => "workflow-parent",
-        getEntries: () => entries,
-      },
-      parentStreaming: false,
-      inProcessJobs: new Map(),
-      pendingInProcessDeliveries: [],
-      interactiveStates: new Map(),
-    });
-    const workflowOwner = sessionOwner(scope);
-    registerCompletionCoordinator(pi as never, scope);
-    registerWorkflowTool(pi as never, scope);
-    let releaseAgent!: () => void;
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const completionNotification = vi.fn((settledJob: any) => {
-      publishCompletion(
-        {
-          schemaVersion: 1,
-          completionId: `workflow:${settledJob.id}`,
-          source: "workflow",
-          sourceId: settledJob.id,
-          label: `Workflow ${settledJob.id}`,
-          status: settledJob.status === "cancelled" ? "cancelled" : "done",
-          policy: settledJob.completionPolicy,
-          groupId: settledJob.completionGroupId,
-          references: [
-            { label: "result", value: `get_workflow_result ${settledJob.id}` },
-          ],
-          completedAt: 1,
-        },
-        workflowOwner,
-      );
-      return true;
-    });
-    const job = startWorkflowJob(
-      "cancel-before-settle",
-      `export const meta = { name: "cancel-before-settle", description: "d" };\nreturn await agent("wait");`,
-      {
-        runAgent: () =>
-          new Promise<SubagentResult>((resolve) => {
-            releaseAgent = () => resolve(ok("late result"));
-            markStarted();
-          }),
-      },
-      undefined,
-      completionNotification,
-      workflowOwner,
-    );
-    await started;
-    job.completionPolicy = "group";
-    job.completionGroupId = "cancel-group";
-    registerCompletionMember(
-      "workflow",
-      job.id,
-      "group",
-      job.completionGroupId,
-      workflowOwner,
-    );
-    sealCompletionGroups(workflowOwner);
-
-    try {
-      const cancel = tools.find((tool) => tool.name === "cancel_workflow")!;
-      await cancel.execute("", { workflowId: job.id });
-
-      expect(
-        entries.filter(
-          (entry) => entry.customType === "subagentura-completion",
-        ),
-      ).toHaveLength(1);
-      releaseAgent();
-      await job.promise.catch(() => undefined);
-      expect(completionNotification).toHaveBeenCalledOnce();
-      expect(
-        entries.filter(
-          (entry) => entry.customType === "subagentura-completion",
-        ),
-      ).toHaveLength(1);
-    } finally {
-      workflowJobRegistry.delete(job.id);
-      clearCompletionCoordinator(workflowOwner);
-      clearSessionScopes();
-    }
   });
 
   it("publishes completion for an accepted long workflow name", async () => {
@@ -3122,7 +3077,6 @@ describe("registerWorkflowTool", () => {
       },
       parentStreaming: false,
       inProcessJobs: new Map(),
-      pendingInProcessDeliveries: [],
       interactiveStates: new Map(),
     });
     const workflowOwner = sessionOwner(scope);
@@ -3166,7 +3120,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const save = tools.find((t) => t.name === "save_workflow")!;
     // Bad script (missing meta) should fail
     const result = await save.execute(
@@ -3181,19 +3135,27 @@ describe("registerWorkflowTool", () => {
   });
 
   it("lists workflows and rejects an invalid delete name", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
 
     const list = tools.find((tool) => tool.name === "list_workflows")!;
     const listed = await list.execute();
     expect(listed.details.status).toBe("ok");
     expect(Array.isArray(listed.details.workflows)).toBe(true);
+    expect(expectStructuredOutput(list, listed)).toMatchObject({
+      status: "ok",
+      workflows: expect.any(Array),
+    });
 
     const remove = tools.find((tool) => tool.name === "delete_workflow")!;
     const deleted = await remove.execute("", { name: "../invalid" });
@@ -3204,205 +3166,12 @@ describe("registerWorkflowTool", () => {
     expect(deleted.content[0].text).toContain("Could not delete workflow");
   });
 
-  it("notifies the captured parent when a background workflow completes", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const staleSendMessage = vi.fn();
-    const sendMessage = vi.fn();
-    const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-      sendMessage: staleSendMessage,
-    };
-    const currentPi = { sendMessage };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = currentPi;
-    registerWorkflowTool(pi as any);
-    try {
-      const workflow = tools.find((tool) => tool.name === "workflow")!;
-      const started = await workflow.execute(
-        "call-id",
-        {
-          script:
-            'export const meta = { name: "notify", description: "d" };\n' +
-            'return "final result";',
-          async: true,
-        },
-        undefined,
-        vi.fn(),
-        { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
-      );
-      const job = workflowJobRegistry.get(started.details.workflowId)!;
-
-      await job.promise;
-
-      expect(staleSendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          customType: "workflow-notify",
-          content: expect.stringContaining(
-            `Call get_workflow_result with workflowId "${job.id}"`,
-          ),
-        }),
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-      expect(staleSendMessage.mock.calls[0][0].content).toContain(
-        "from: notify, ",
-      );
-      expect(sendMessage).not.toHaveBeenCalled();
-      expect(staleSendMessage.mock.calls[0][0].content).not.toContain(
-        "final result",
-      );
-      workflowJobRegistry.delete(job.id);
-    } finally {
-      g.__piSubagenturaPiRef = previousPi;
-    }
-  });
-
-  it("does not instruct Orchestratorv2 to call a workflow result tool", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const sendMessage = vi.fn();
-    const sendUserMessage = vi.fn();
-    const pi = {
-      appendEntry: vi.fn(),
-      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
-      registerTool: vi.fn((def: any) => tools.push(def)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-      sendMessage,
-      sendUserMessage,
-    };
-    registerWorkflowTool(pi as any);
-    const workflow = tools.find((tool) => tool.name === "workflow")!;
-    const started = await workflow.execute(
-      "call-v2-compatibility",
-      {
-        script:
-          'export const meta = { name: "compatibility", description: "d" };\n' +
-          'return "final result";',
-        async: true,
-      },
-      undefined,
-      vi.fn(),
-      { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
-    );
-    const job = workflowJobRegistry.get(started.details.workflowId)!;
-
-    await job.promise;
-
-    expect(sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        customType: "workflow-notify",
-        content: expect.stringContaining(
-          "separate workflow compatibility mode",
-        ),
-      }),
-      { deliverAs: "followUp", triggerTurn: false },
-    );
-    expect(sendMessage.mock.calls[0][0].content).not.toContain(
-      "Call get_workflow_result",
-    );
-    expect(sendUserMessage).toHaveBeenCalledOnce();
-    workflowJobRegistry.delete(job.id);
-  });
-
-  it("notifies and triggers a turn when a workflow returns no result", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const sendMessage = vi.fn();
-    const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-      sendMessage,
-    };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
-    try {
-      const workflow = tools.find((tool) => tool.name === "workflow")!;
-      const started = await workflow.execute(
-        "call-id",
-        {
-          script:
-            'export const meta = { name: "empty", description: "d" };\n' +
-            "return;",
-          async: true,
-        },
-        undefined,
-        vi.fn(),
-        { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
-      );
-      const job = workflowJobRegistry.get(started.details.workflowId)!;
-
-      await job.promise;
-
-      expect(job.status).toBe("done");
-      expect(sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          customType: "workflow-notify",
-          content: expect.stringContaining(
-            `Call get_workflow_result with workflowId "${job.id}"`,
-          ),
-        }),
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-      expect(sendMessage.mock.calls[0][0].content).not.toContain(
-        "workflow returned no result",
-      );
-      workflowJobRegistry.delete(job.id);
-    } finally {
-      g.__piSubagenturaPiRef = previousPi;
-    }
-  });
-
-  it("sanitizes and caps workflow failure notifications", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const sendMessage = vi.fn();
-    const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-      sendMessage,
-    };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
-    try {
-      const workflow = tools.find((tool) => tool.name === "workflow")!;
-      const secret = "sk-" + "a".repeat(30);
-      const started = await workflow.execute(
-        "call-id",
-        {
-          script:
-            'export const meta = { name: "error", description: "d" };\n' +
-            `throw new Error(${JSON.stringify(secret + " ".repeat(30_000))});`,
-          async: true,
-        },
-        undefined,
-        vi.fn(),
-        { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
-      );
-      const job = workflowJobRegistry.get(started.details.workflowId)!;
-
-      await expect(job.promise).rejects.toThrow();
-
-      const message = sendMessage.mock.calls[0]?.[0].content as string;
-      expect(message).not.toContain(secret);
-      expect(message.length).toBeLessThan(21_000);
-      workflowJobRegistry.delete(job.id);
-    } finally {
-      g.__piSubagenturaPiRef = previousPi;
-    }
-  });
-
   it("derives completed-with-errors presentation while keeping raw done status", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const sendUserMessage = vi.fn();
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
@@ -3411,11 +3180,14 @@ describe("registerWorkflowTool", () => {
       on: vi.fn(),
       sendUserMessage,
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const job = startWorkflowJob(
       "errors",
       'export const meta = { name: "errors", description: "d" };\nreturn "ok";',
       { runAgent: echoRunner() },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
     );
     const run = await job.promise;
     run.errorCount = 2;
@@ -3426,6 +3198,12 @@ describe("registerWorkflowTool", () => {
     )!;
     const status = await statusTool.execute("", { workflowId: job.id });
     expect(status.details.status).toBe("done");
+    expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+      workflowId: job.id,
+      status: "done",
+      name: "errors",
+      errorCount: 2,
+    });
     expect(status.content[0].text).toContain("⚠");
     expect(status.content[0].text).toContain("completed with errors");
 
@@ -3434,6 +3212,13 @@ describe("registerWorkflowTool", () => {
     )!;
     const result = await resultTool.execute("", { workflowId: job.id });
     expect(result.details.status).toBe("done");
+    expect(expectStructuredOutput(resultTool, result)).toMatchObject({
+      workflowId: job.id,
+      status: "done",
+      name: "errors",
+      result: "ok",
+      errorCount: 2,
+    });
     expect(result.content[0].text).toContain("⚠");
     expect(result.content[0].text).toContain("completed with errors");
 
@@ -3449,14 +3234,18 @@ describe("registerWorkflowTool", () => {
   });
 
   it("explains current-session scope in async start and not-found messages", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
     const pi = {
       registerTool: vi.fn((def: any) => tools.push(def)),
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflow = tools.find((tool) => tool.name === "workflow")!;
     const started = await workflow.execute(
       "",
@@ -3477,239 +3266,23 @@ describe("registerWorkflowTool", () => {
     )!;
     const missing = await statusTool.execute("", { workflowId: "wf_missing" });
     expect(missing.content[0].text).toContain("current parent session");
+    expect(expectStructuredOutput(statusTool, missing)).toMatchObject({
+      workflowId: "wf_missing",
+      status: "not_found",
+    });
+    const resultTool = tools.find(
+      (tool) => tool.name === "get_workflow_result",
+    )!;
+    const missingResult = await resultTool.execute("", {
+      workflowId: "wf_missing",
+    });
+    expect(expectStructuredOutput(resultTool, missingResult)).toMatchObject({
+      workflowId: "wf_missing",
+      status: "not_found",
+    });
     expect(missing.content[0].text).toContain("reload/resume/new/quit");
     workflowJobRegistry.delete(started.details.workflowId);
   });
-
-  it("reentrant retry from within callback is guarded by _notificationInFlight", async () => {
-    let attempts = 0;
-    const onComplete = (job: any) => {
-      attempts++;
-      // Simulate a retry trigger from within the callback (e.g. poller re-entrance).
-      retryPendingWorkflowNotifications();
-    };
-    const script =
-      `export const meta = { name: "reentrant", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "reentrant",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-    // Without the guard, the reentrant call would invoke the callback a second time.
-    expect(attempts).toBe(1);
-  });
-
-  it("callback throw then successful retry via retryPendingWorkflowNotifications", async () => {
-    let attempts = 0;
-    const onComplete = () => {
-      attempts++;
-      if (attempts === 1) throw new Error("transient failure");
-      // Second attempt succeeds.
-    };
-    const script =
-      `export const meta = { name: "throw-retry", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "throw-retry",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-    // First call: hook throws, delivered stays false, attempt incremented to 1.
-    expect(job.completionNotificationDelivered).toBe(false);
-    expect(job.notificationAttempt).toBe(1);
-
-    // Simulate poller tick — retries the failed notification.
-    retryPendingWorkflowNotifications();
-    expect(job.completionNotificationDelivered).toBe(true);
-    // Attempt count is 2 (two total invocations); does NOT reset to 0.
-    expect(job.notificationAttempt).toBe(2);
-    expect(attempts).toBe(2);
-  });
-
-  it("persistent callback failure exhausts after MAX_WORKFLOW_NOTIFICATION_ATTEMPTS retries", async () => {
-    let attempts = 0;
-    const onComplete = () => {
-      attempts++;
-      throw new Error("permanent failure");
-    };
-    const script =
-      `export const meta = { name: "exhaust", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "exhaust",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-
-    // First invocation threw, so notificationAttempt is 1.
-    expect(job.notificationAttempt).toBe(1);
-    expect(job.completionNotificationDelivered).toBe(false);
-
-    // Exhaust remaining attempts via poller ticks (MAX-1 more calls).
-    for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1; i++) {
-      retryPendingWorkflowNotifications();
-    }
-
-    // Counter reached MAX; exhausted flag is set.
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    expect(job.completionNotificationDelivered).toBe(false);
-    expect(job._notificationExhausted).toBe(true);
-    expect(attempts).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-
-    // Extra retries after exhaustion are no-ops: callback not re-invoked, counter unchanged.
-    const callsBefore = attempts;
-    for (let i = 0; i < 10; i++) retryPendingWorkflowNotifications();
-    expect(attempts).toBe(callsBefore);
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    expect(job._notificationExhausted).toBe(true);
-  });
-
-  it("exhaustion log fires exactly once", async () => {
-    let attempts = 0;
-    const onComplete = () => {
-      attempts++;
-      throw new Error("always fail");
-    };
-    const script =
-      `export const meta = { name: "exhaust-log", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "exhaust-log",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-
-    // Exhaust: invoke MAX times (initial + MAX-1 retries), all throw.
-    for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS; i++) {
-      retryPendingWorkflowNotifications();
-    }
-
-    // Exhausted flag is set, callback never invoked again.
-    expect(job._notificationExhausted).toBe(true);
-    expect(attempts).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    const callsBefore = attempts;
-    for (let i = 0; i < 5; i++) retryPendingWorkflowNotifications();
-    expect(attempts).toBe(callsBefore);
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    expect(job._notificationExhausted).toBe(true);
-  });
-
-  it("success marks delivered and preserves truthful attempt count", async () => {
-    let count = 0;
-    const onComplete = () => {
-      count++;
-      if (count <= 2) throw new Error("transient");
-    };
-    const script =
-      `export const meta = { name: "truth-count", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "truth-count",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-
-    // Initial call throws (attempt 1, throw still increments the counter).
-    expect(job.notificationAttempt).toBe(1);
-    expect(job.completionNotificationDelivered).toBe(false);
-
-    // Second call throws (attempt 2).
-    retryPendingWorkflowNotifications();
-    expect(job.notificationAttempt).toBe(2);
-
-    // Third call succeeds → attempt=3, delivered.
-    retryPendingWorkflowNotifications();
-    expect(job.notificationAttempt).toBe(3);
-    expect(job.completionNotificationDelivered).toBe(true);
-    expect(count).toBe(3);
-  });
-
-  it("MAXth attempt success does not mark exhaustion", async () => {
-    let attempts = 0;
-    const onComplete = () => {
-      attempts++;
-      // Fail four times, succeed on the fifth (the MAXth invocation).
-      if (attempts < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS) {
-        throw new Error("transient failure");
-      }
-    };
-    const script =
-      `export const meta = { name: "maxth-ok", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "maxth-ok",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-    await job.promise;
-
-    // Initial call throws (attempt 1).
-    expect(job.notificationAttempt).toBe(1);
-    expect(job.completionNotificationDelivered).toBe(false);
-
-    // Retries 2-4 also throw.
-    for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 2; i++) {
-      retryPendingWorkflowNotifications();
-    }
-    expect(job.notificationAttempt).toBe(
-      MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1,
-    );
-    expect(job.completionNotificationDelivered).toBe(false);
-
-    // Attempt 5 (the MAXth) succeeds.
-    retryPendingWorkflowNotifications();
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-    expect(job.completionNotificationDelivered).toBe(true);
-    // Crucially: must NOT be marked exhausted.
-    expect(job._notificationExhausted).toBeFalsy();
-    expect(attempts).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-  });
-
-  it("suppressed jobs never attempt delivery on retry", async () => {
-    let attempts = 0;
-    const onComplete = () => {
-      attempts++;
-    };
-    const script =
-      `export const meta = { name: "supp", description: "d" }\n` +
-      `return await agent("done");`;
-    const job = startWorkflowJob(
-      "supp",
-      script,
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-
-    // Mark suppressed before workflow settles.
-    job.suppressCompletionNotification = true;
-    await job.promise;
-    expect(attempts).toBe(0);
-
-    // Retry should still skip.
-    retryPendingWorkflowNotifications();
-    expect(attempts).toBe(0);
-  });
-
   it("synchronous workflow output reflects error status for a failing script", async () => {
     const tools: Array<{ name: string; execute: Function }> = [];
     const pi = {
@@ -3718,7 +3291,7 @@ describe("registerWorkflowTool", () => {
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any);
+    registerWorkflowTool(pi as any, workflowScope);
     const workflow = tools.find((tool) => tool.name === "workflow")!;
     const result = await workflow.execute(
       "",
@@ -3739,119 +3312,7 @@ describe("registerWorkflowTool", () => {
     expect(result.details.budgetTotal).toBe(20);
     expect(result.content[0].text).toContain("Workflow failed");
   });
-
-  it("async completed-with-errors notification includes details with presentationStatus and workflowId", async () => {
-    const tools: Array<{ name: string; execute: Function }> = [];
-    const sendMessage = vi.fn();
-    const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
-      registerFlag: vi.fn(),
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-      sendMessage,
-    };
-    const g = globalThis as any;
-    const previousPi = g.__piSubagenturaPiRef;
-    g.__piSubagenturaPiRef = pi;
-    registerWorkflowTool(pi as any);
-    try {
-      // Create a job that completes with errorCount > 0.
-      const job = startWorkflowJob(
-        "notify-errors",
-        'export const meta = { name: "notify-errors", description: "d" };\nreturn "ok";',
-        { runAgent: echoRunner() },
-        undefined,
-        // Inline callback: simulate notifyWorkflowCompletion behavior.
-        (j) => {
-          j.result!.errorCount = 1;
-          // Trigger the real notification path via the tool's notifyWorkflowCompletion.
-        },
-      );
-      await job.promise;
-
-      // Now simulate what the registerWorkflowTool notify callback does.
-      // Use the actual notify function by finding it through the tool.
-      // We can call startWorkflowJob with the real notifyWorkflowCompletion
-      // by using the workflow tool's execute method.
-      const workflow = tools.find((tool) => tool.name === "workflow")!;
-      const started = await workflow.execute(
-        "call-id",
-        {
-          script:
-            'export const meta = { name: "notify-err-detail", description: "d" };\n' +
-            'return "result";',
-          async: true,
-        },
-        undefined,
-        vi.fn(),
-        { cwd: process.cwd(), model: undefined, modelRegistry: undefined },
-      );
-      const errJob = workflowJobRegistry.get(started.details.workflowId)!;
-      await errJob.promise;
-
-      // The notification should have been sent.
-      expect(sendMessage).toHaveBeenCalled();
-      const notification = sendMessage.mock.calls[0][0];
-      expect(notification.customType).toBe("workflow-notify");
-      expect(notification.details).toMatchObject({
-        workflowId: errJob.id,
-        status: errJob.status,
-      });
-      expect(notification.details.presentationStatus).toBeDefined();
-      // content should contain the workflow name and ID.
-      expect(notification.content).toContain(errJob.name);
-      expect(notification.content).toContain(errJob.id);
-      workflowJobRegistry.delete(errJob.id);
-    } finally {
-      g.__piSubagenturaPiRef = previousPi;
-    }
-  });
-
-  it("marks _notificationExhausted after MAX_WORKFLOW_NOTIFICATION_ATTEMPTS callback-return-false retries", async () => {
-    const falseReturns = Array.from(
-      { length: MAX_WORKFLOW_NOTIFICATION_ATTEMPTS },
-      () => false,
-    );
-    let callCount = 0;
-    const onComplete = vi.fn(() => {
-      callCount++;
-      return false;
-    });
-
-    const job = startWorkflowJob(
-      "exhaust-test",
-      'export const meta = { name: "exhaust-test", description: "d" };\nreturn "done";',
-      { runAgent: echoRunner() },
-      undefined,
-      onComplete,
-    );
-
-    await job.promise;
-
-    // First call succeeded, notification delivered = false because callback returned false
-    expect(job.completionNotificationDelivered).toBe(false);
-    expect(job._notificationExhausted).toBeFalsy();
-
-    // Simulate retries by calling retryPendingWorkflowNotifications
-    for (let i = 0; i < MAX_WORKFLOW_NOTIFICATION_ATTEMPTS - 1; i++) {
-      retryPendingWorkflowNotifications();
-    }
-
-    // After MAX attempts total (1 initial + MAX-1 retries), should be exhausted
-    expect(onComplete).toHaveBeenCalledTimes(
-      MAX_WORKFLOW_NOTIFICATION_ATTEMPTS,
-    );
-    expect(job._notificationExhausted).toBe(true);
-    expect(job.notificationAttempt).toBe(MAX_WORKFLOW_NOTIFICATION_ATTEMPTS);
-
-    // Further calls should be no-ops (exhausted guard)
-    retryPendingWorkflowNotifications();
-    expect(onComplete).toHaveBeenCalledTimes(
-      MAX_WORKFLOW_NOTIFICATION_ATTEMPTS,
-    );
-  });
 });
-
 describe("WorkflowProgress classification matrix", () => {
   const samples = {
     phase: {
@@ -4092,23 +3553,6 @@ it("records successful and repeated workflow result reads", async () => {
     vi.unstubAllGlobals();
     workflowJobRegistry.delete(job.id);
     clearSessionScopes();
-  }
-});
-
-it("includes snapshot usage in failed completion notification summaries", async () => {
-  const job = startWorkflowJob(
-    "notify-late-error",
-    `export const meta = { name: "notify-late-error", description: "d" };\n` +
-      `await agent("hello"); throw new Error("later failure");`,
-    { runAgent: async ({ prompt }) => richOk(prompt), budgetTotal: 20 },
-  );
-  try {
-    await expect(job.promise).rejects.toThrow("later failure");
-    expect(formatWorkflowNotificationSummary(job)).toContain(
-      "↑11 ↓7/20 R5 W3 ~$0.125",
-    );
-  } finally {
-    workflowJobRegistry.delete(job.id);
   }
 });
 
@@ -4423,7 +3867,14 @@ describe("workflow usage accounting", () => {
     expect(lastProgress?.usage).toEqual(usage);
     expect(result.usage).toEqual(usage);
 
-    const job = startWorkflowJob("usage", script, { runAgent: runner });
+    const job = startWorkflowJob(
+      "usage",
+      script,
+      { runAgent: runner },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
     try {
       await job.promise;
       expect(job.snapshot.tokensSpent).toBe(7);

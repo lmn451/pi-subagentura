@@ -2,13 +2,13 @@ import {
   convertToLlm,
   serializeConversation,
   type ExtensionAPI,
+  type ExtensionToolContext,
   type ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { homedir } from "node:os";
@@ -35,10 +35,11 @@ import {
   type JobDeliveryOwner,
   type JobState,
   type JobStatus,
-  type SubagentLiveStatus,
+  type StartSubagentJobParams,
   type SubagentResult,
   type Usage,
 } from "../helpers";
+import type { SubagentDetails } from "../subagent";
 import { resolveSpawnDepth } from "../orchestration-context";
 import {
   getStartedSessionScopes,
@@ -62,13 +63,7 @@ import {
   type ResolvedCompletionPolicy,
   type CompletionGroupReservation,
 } from "../completion-coordinator";
-import {
-  completionTriggersTurn,
-  deliverNotification,
-  formatCompletionDeliveryBehavior,
-  notifyInProcessCompletionWithoutDelivery,
-} from "../notifications";
-import { interactiveSubagentRegistry } from "../interactive-tmux";
+
 import { renderSubagentCall, renderSubagentResult } from "../rendering";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import {
@@ -85,30 +80,75 @@ import {
   type TelemetryCompletionPolicy,
   type TelemetryInvocationSource,
 } from "../telemetry";
-interface RunningFooterContext {
-  cwd?: string;
-  ui: {
-    setStatus(key: string, value?: string): void;
+import {
+  createLaunchResolutionReporter,
+  type TelemetryLaunchResolutionReporter,
+} from "../telemetry-launch";
+const IN_PROCESS_OUTPUT_PREVIEW_CHARS = 500;
+const InProcessUsageOutputSchema = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  cost: Type.Number(),
+  costSource: Type.Optional(
+    Type.Union([
+      Type.Literal("provider"),
+      Type.Literal("estimated"),
+      Type.Literal("unavailable"),
+      Type.Literal("mixed"),
+    ]),
+  ),
+  turns: Type.Number(),
+});
+const InProcessReadOutputSchema = Type.Object({
+  status: Type.Union([
+    Type.Literal("running"),
+    Type.Literal("done"),
+    Type.Literal("error"),
+    Type.Literal("cancelled"),
+    Type.Literal("not_found"),
+    Type.Literal("session_unavailable"),
+    Type.Literal("wait_cancelled"),
+    Type.Literal("wait_timeout"),
+  ]),
+  jobId: Type.Optional(Type.String()),
+  output: Type.Optional(Type.String()),
+  outputPreview: Type.Optional(
+    Type.String({ maxLength: IN_PROCESS_OUTPUT_PREVIEW_CHARS }),
+  ),
+  usage: Type.Optional(InProcessUsageOutputSchema),
+  model: Type.Optional(Type.String()),
+  usageSummary: Type.Optional(Type.String()),
+  thinkingLevel: Type.Optional(Type.String()),
+  error: Type.Optional(Type.String()),
+  timeoutMs: Type.Optional(Type.Number()),
+});
+
+function structuredInProcessUsage(
+  usage: Usage,
+): Record<string, number | string> {
+  const output: Record<string, number | string> = {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    cost: usage.cost,
+    turns: usage.turns,
   };
+  if (usage.costSource !== undefined) output.costSource = usage.costSource;
+  return output;
 }
 
+type RunningFooterContext = Partial<Pick<ExtensionToolContext, "cwd">> & {
+  ui: Pick<ExtensionToolContext["ui"], "setStatus">;
+};
+
 type InProcessSubagentDetails =
-  | { status: "started"; jobId: string; contextMessages: number }
-  | {
-      status: "running";
-      subagentStatus: SubagentLiveStatus;
-      model?: string;
-      thinkingLevel?: ThinkingLevel;
-    }
-  | {
-      status: "done" | "error";
-      usage: Usage;
-      model?: string;
-      usageSummary?: string;
-      thinkingLevel?: ThinkingLevel;
-      contextMessages?: number;
-    }
-  | { status: "cancelled" | "not_found"; jobId?: string };
+  | (SubagentDetails & { jobId?: string })
+  | { status: "wait_cancelled"; jobId: string }
+  | { status: "wait_timeout"; jobId: string; timeoutMs: number }
+  | { status?: undefined; jobId: string };
 
 function updateRunningFooter(
   ctx: RunningFooterContext,
@@ -126,12 +166,8 @@ const ZERO_USAGE: Usage = {
   turns: 0,
 };
 
-interface SpawnContext {
-  sessionManager?: { getSessionId?: () => string };
-}
-
 /** Resolve depth/ownership for a new spawn, plus the root session id for logs. */
-function resolveSpawn(ctx: SpawnContext) {
+function resolveSpawn(ctx: ExtensionToolContext) {
   const spawn = resolveSpawnDepth();
   let rootSessionId = spawn.rootSessionId;
   if (!rootSessionId) {
@@ -149,9 +185,7 @@ function resolveExecutionOwner(
 ): { owner?: SessionOwnerToken } | undefined {
   const scope = resolveToolSessionScope(token);
   if (scope) return { owner: sessionOwner(scope) };
-  // A supplied token must never fall back to whichever peer registered last.
-  if (token || getStartedSessionScopes().length > 0) return undefined;
-  return {};
+  return undefined;
 }
 
 function telemetryForAgent(
@@ -164,9 +198,7 @@ function telemetryForAgent(
   const session = owner ? resolveLiveSessionScope(owner)?.telemetry : undefined;
   if (!session) return undefined;
   const completionPolicy: TelemetryCompletionPolicy = async
-    ? completion.legacy
-      ? "legacy"
-      : (completion.policy ?? "each")
+    ? completion.policy
     : "inline";
   return {
     session,
@@ -197,11 +229,7 @@ function telemetryForSpawnFailure(
     invocationSource,
     async,
     depth,
-    completionPolicy: async
-      ? completion?.legacy
-        ? "legacy"
-        : (completion?.policy ?? "each")
-      : "inline",
+    completionPolicy: async ? (completion?.policy ?? "each") : "inline",
   };
 }
 
@@ -230,6 +258,29 @@ function captureSpawnFailure(
           : Date.now() - spawnRequestedAt,
     },
     { allowInactive: true },
+  );
+}
+
+function createInProcessLaunchResolver(
+  telemetry: AgentTelemetryContext | undefined,
+  invocationSource: TelemetryInvocationSource,
+  async: boolean,
+  depth: number | undefined,
+  completion: ResolvedCompletionPolicy | undefined,
+  startedAt: number,
+): TelemetryLaunchResolutionReporter {
+  return createLaunchResolutionReporter(
+    telemetry?.session,
+    {
+      requested_execution: "in-process",
+      requested_mux: "none",
+      invocation_source: invocationSource,
+      async,
+      depth: telemetryDepth(depth),
+      depth_bucket: telemetryDepthBucket(depth),
+      completion_policy: async ? (completion?.policy ?? "each") : "inline",
+    },
+    startedAt,
   );
 }
 
@@ -274,8 +325,12 @@ function resultReadOutcome(
   if (result.cancelled) return "cancelled";
   if (result.isError) return "error";
   if (!firstResultRead) return "already_consumed";
-  if (!result.output || result.output === "(no output)") return "empty";
+  if (result.output === "") return "empty";
   return "consumed";
+}
+
+function displaySubagentOutput(output: string): string {
+  return output === "" ? "(no output)" : output;
 }
 
 /**
@@ -299,7 +354,7 @@ function captureSyncResultRead(
 
 function captureDeliveryOwner(
   pi: ExtensionAPI,
-  ctx: SpawnContext,
+  ctx: ExtensionToolContext,
   owner: SessionOwnerToken | undefined,
 ): JobDeliveryOwner {
   let sessionId: string | undefined;
@@ -440,39 +495,19 @@ function resolveAsyncCompletionPolicy(
         "completionPolicy or completionGroupId is available only for background sub-agents",
       );
     }
-    return { legacy: false };
+    return { policy: "each" };
   }
-  // A registration without a live session scope is the pre-coordinator
-  // compatibility path. Keep its historical direct notification behavior
-  // instead of creating completion records that have nowhere to be owned.
   if (!owner) {
-    if (
-      params.completionPolicy !== undefined ||
-      params.completionGroupId !== undefined
-    ) {
-      throw new Error(
-        "completionPolicy or completionGroupId requires an active parent session",
-      );
-    }
-    return { legacy: true };
+    throw new Error(
+      "Background sub-agents require an active parent session for coordinated completion",
+    );
   }
   return resolveCompletionPolicy(params);
 }
 
 function formatResolvedCompletionBehavior(
   completion: ResolvedCompletionPolicy,
-  jobState: JobState,
 ): string {
-  if (completion.legacy) {
-    return formatCompletionDeliveryBehavior(
-      jobState.notifyOnComplete ?? "inject",
-      completionTriggersTurn(
-        jobState.notifyOnComplete ?? "inject",
-        jobState.triggerTurnOnComplete,
-      ),
-      "planned",
-    );
-  }
   return completion.policy === "group"
     ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
     : "Completion will notify the user immediately and resume the parent with a compact result reference when safely idle.";
@@ -554,25 +589,7 @@ function settleAsyncJob(
   scheduleJobCleanup(jobId, false, jobState.maxAge, owner);
 
   publishInProcessCompletion(jobState, result, owner);
-  // A workflow aggregate consumes its children's results itself; the child must
-  // never independently notify or inject into the parent session.
-  const shouldDeliver =
-    !jobState.completionPolicy &&
-    jobState.completionOwner !== "workflow" &&
-    jobState.notifyOnComplete &&
-    !jobState.notificationDelivered &&
-    !jobState.resultRetrieved &&
-    (jobState.activeResultWaits ?? 0) === 0;
-  if (shouldDeliver) {
-    deliverNotification(jobState, result);
-  } else if (
-    !jobState.completionPolicy &&
-    jobState.completionOwner !== "workflow" &&
-    jobState.notifyOnComplete &&
-    !jobState.notificationDelivered
-  ) {
-    notifyInProcessCompletionWithoutDelivery(jobState, result);
-  }
+  // Workflow aggregates own completion publication for their child jobs.
 
   if (ctx) updateRunningFooter(ctx, owner);
 }
@@ -602,15 +619,16 @@ async function runSubagent(
   cwd: string,
   contextText: string | null,
   signal: AbortSignal | undefined,
-  onUpdate: ((partial: AgentToolResult<any>) => void) | undefined,
-  defaultModel: Model<any> | undefined,
+  onUpdate: StartSubagentJobParams["onUpdate"],
+  defaultModel: StartSubagentJobParams["defaultModel"],
   parentModelRegistry: ModelRegistry | undefined,
-  thinkingLevel?: ThinkingLevel,
-  depth?: number,
-  rootSessionId?: string,
-  owner?: SessionOwnerToken,
-  telemetry?: AgentTelemetryContext,
-  spawnRequestedAt?: number,
+  thinkingLevel: ThinkingLevel | undefined,
+  depth: number | undefined,
+  rootSessionId: string | undefined,
+  owner: SessionOwnerToken | undefined,
+  telemetry: AgentTelemetryContext | undefined,
+  spawnRequestedAt: number | undefined,
+  launchResolution: TelemetryLaunchResolutionReporter,
 ): Promise<SubagentResult> {
   let started = false;
   try {
@@ -631,8 +649,22 @@ async function runSubagent(
       telemetry,
       spawnRequestedAt,
     });
-    start?.();
-    started = typeof start === "function";
+    started = start?.() ?? false;
+    if (started) {
+      launchResolution({
+        outcome: "started",
+        execution: "in-process",
+        mux: "none",
+        fallback_attempted: false,
+      });
+    } else {
+      launchResolution({
+        outcome: "cancelled",
+        mux: "none",
+        fallback_attempted: false,
+        final_failure_stage: "parent_shutdown",
+      });
+    }
     const result = await jobPromise;
     if (modelWarning && !result.isError) {
       result.output = `${modelWarning}\n---\n${result.output}`;
@@ -640,11 +672,14 @@ async function runSubagent(
     return result;
   } catch (err) {
     if (!started) {
-      captureSpawnFailure(
-        telemetry,
-        spawnFailureStage(err) ?? "unknown",
-        spawnRequestedAt,
-      );
+      const failureStage = spawnFailureStage(err) ?? "unknown";
+      captureSpawnFailure(telemetry, failureStage, spawnRequestedAt);
+      launchResolution({
+        outcome: signal?.aborted ? "cancelled" : "rejected",
+        mux: "unknown",
+        fallback_attempted: false,
+        final_failure_stage: failureStage,
+      });
     }
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -682,7 +717,10 @@ function registerSubagentWithContextTool(
       "3. Consider summarizing the context before passing to subagent",
       "",
       "The sub-agent sees everything discussed so far plus the new task.",
-      "Model is inherited by default. Use the model param to override (e.g. 'minimax/MiniMax-M2.7').",
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+      "For example, 'anthropic/claude-sonnet-4-5'.",
       "Use list_available_models to see which models have configured auth before setting model.",
       "Use thinkingLevel to control reasoning depth (off|minimal|low|medium|high|xhigh|max). Higher levels use more tokens.",
       "Streams output in real-time when sync.",
@@ -692,56 +730,81 @@ function registerSubagentWithContextTool(
       '  - task: "Review one module", completionPolicy: "each"',
       '  - task: "Review one shard", completionPolicy: "group", completionGroupId: "review"',
       "",
-      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false only for a single short sub-agent whose result you need inline.",
+      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false for one short, focused task whose answer you need inline; for a broad review, use a small number of focused async reviewers.",
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
-      "Use completionPolicy=group with a shared completionGroupId for related jobs; the parent resumes once its settled-turn group is sealed and every member is terminal.",
+      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
+      "After spawning grouped reviewers, yield the parent turn so the group seals; coordinated completion resumes the parent when all members are terminal.",
+      "While reviewers are pending, label findings as provisional and report pending jobIds. Collect terminal results before final synthesis and disclose any failed or cancelled reviewers as coverage gaps.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
-      "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
+      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
-      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection is needed.",
+      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
     parameters: BaseParams,
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const spawnRequestedAt = Date.now();
+      const runAsync = params.async ?? true;
+      const preflightTelemetry = telemetryForSpawnFailure(
+        toolToken,
+        undefined,
+        "with_context",
+        runAsync,
+        undefined,
+      );
+      let launchResolution = createInProcessLaunchResolver(
+        preflightTelemetry,
+        "with_context",
+        runAsync,
+        undefined,
+        undefined,
+        spawnRequestedAt,
+      );
       const execution = resolveExecutionOwner(toolToken);
       if (!execution) {
         const staleScope = toolToken
           ? findSessionScope(toolToken.id)
           : undefined;
-        captureSpawnFailure(
-          telemetryForSpawnFailure(
-            toolToken,
-            undefined,
-            "with_context",
-            params.async ?? true,
-            undefined,
-          ),
+        const failureStage =
           staleScope?.lifecycle === "shutdown"
             ? "parent_shutdown"
-            : "session_creation",
-          spawnRequestedAt,
-        );
+            : "session_creation";
+        captureSpawnFailure(preflightTelemetry, failureStage, spawnRequestedAt);
+        launchResolution({
+          outcome:
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: failureStage,
+        });
         return unavailableSessionResult();
       }
       const { owner } = execution;
-      const runAsync = params.async ?? true;
       let completion: ResolvedCompletionPolicy;
       try {
         completion = resolveAsyncCompletionPolicy(params, runAsync, owner);
         assertCompletionGroupOpen(completion.policy, completion.groupId, owner);
       } catch (error) {
         captureSpawnFailure(
-          telemetryForSpawnFailure(
-            toolToken,
-            owner,
-            "with_context",
-            runAsync,
-            undefined,
-          ),
+          preflightTelemetry,
           "registration",
           spawnRequestedAt,
         );
+        launchResolution({
+          outcome: "rejected",
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: "registration",
+        });
         return completionPolicyErrorResult(error);
       }
       debugLog("info", "tool_call", {
@@ -752,14 +815,7 @@ function registerSubagentWithContextTool(
         persona: params.persona ?? null,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        notifyOnComplete: completion.legacy
-          ? (params.notifyOnComplete ?? "inject")
-          : null,
-        triggerTurnOnComplete: completion.legacy
-          ? (params.triggerTurnOnComplete ?? null)
-          : null,
-        completionPolicy:
-          completion.policy ?? (completion.legacy ? "legacy" : null),
+        completionPolicy: completion.policy,
         completionGroupId: completion.groupId ?? null,
         maxAge: params.maxAge ?? null,
       });
@@ -772,37 +828,58 @@ function registerSubagentWithContextTool(
         spawn.childDepth,
         completion,
       );
+      launchResolution = createInProcessLaunchResolver(
+        telemetry,
+        "with_context",
+        runAsync,
+        spawn.childDepth,
+        completion,
+        spawnRequestedAt,
+      );
+      const resolveFailedLaunch = (
+        failureStage: InProcessSpawnFailureStage,
+        outcome: "rejected" | "cancelled" = "rejected",
+      ): void => {
+        launchResolution({
+          outcome,
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: failureStage,
+        });
+      };
       if (spawn.exceedsLimit) {
         captureSpawnFailure(telemetry, "depth_limit", spawnRequestedAt);
+        resolveFailedLaunch("depth_limit");
         return depthLimitResult(spawn.limit);
       }
 
-      const branchResult = (() => {
+      const contextResult = (() => {
         try {
-          return { ok: true as const, value: ctx.sessionManager.getBranch() };
+          return {
+            ok: true as const,
+            value: ctx.sessionManager.buildSessionProjection().messages,
+          };
         } catch (error) {
           return { ok: false as const, error };
         }
       })();
-      if (!branchResult.ok) {
+      if (!contextResult.ok) {
         captureSpawnFailure(telemetry, "context", spawnRequestedAt);
-        return completionPolicyErrorResult(branchResult.error);
+        resolveFailedLaunch("context");
+        return completionPolicyErrorResult(contextResult.error);
       }
-      const messages = branchResult.value
-        .filter(
-          (e): e is typeof e & { type: "message" } => e.type === "message",
-        )
-        .map((e) => e.message);
+      const messages = contextResult.value;
 
-      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       if (runAsync) {
         if (messages.length === 0) {
           captureSpawnFailure(telemetry, "context", spawnRequestedAt);
+          resolveFailedLaunch("context");
           return {
             content: [
               { type: "text", text: "No conversation history to inherit." },
             ],
-            details: {},
+            details: { status: "error", usage: ZERO_USAGE, contextMessages: 0 },
+            isError: true,
           };
         }
 
@@ -812,9 +889,11 @@ function registerSubagentWithContextTool(
           conversationText = serializeConversation(llmMessages);
         } catch (error) {
           captureSpawnFailure(telemetry, "context", spawnRequestedAt);
+          resolveFailedLaunch("context");
           return completionPolicyErrorResult(error);
         }
         const targetCwd = params.cwd ?? ctx.cwd;
+        const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
 
         let completionReservation: CompletionGroupReservation | undefined;
         try {
@@ -825,6 +904,7 @@ function registerSubagentWithContextTool(
           );
         } catch (error) {
           captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+          resolveFailedLaunch("registration");
           return completionPolicyErrorResult(error);
         }
         const abort = new AbortController();
@@ -847,10 +927,11 @@ function registerSubagentWithContextTool(
           spawnRequestedAt,
         }).catch((error) => {
           releaseCompletionGroup(completionReservation);
-          captureSpawnFailure(
-            telemetry,
-            spawnFailureStage(error) ?? "unknown",
-            spawnRequestedAt,
+          const failureStage = spawnFailureStage(error) ?? "unknown";
+          captureSpawnFailure(telemetry, failureStage, spawnRequestedAt);
+          resolveFailedLaunch(
+            failureStage,
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
           );
           throw error;
         });
@@ -867,6 +948,7 @@ function registerSubagentWithContextTool(
         } = startResult;
         if (owner && !resolveLiveSessionScope(owner)) {
           captureSpawnFailure(telemetry, "parent_shutdown", spawnRequestedAt);
+          resolveFailedLaunch("parent_shutdown", "cancelled");
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return cancelledAsyncSpawnResult();
@@ -885,16 +967,9 @@ function registerSubagentWithContextTool(
           abort,
           parentJobId: spawn.parentJobId,
           depth: spawn.childDepth,
-          notifyOnComplete: completion.legacy
-            ? params.notifyOnComplete === "notify"
-              ? "notify"
-              : "inject"
-            : undefined,
-          triggerTurnOnComplete: params.triggerTurnOnComplete,
           completionPolicy: completion.policy,
           completionGroupId: completion.groupId,
           deliveryOwner,
-          notificationDelivered: false,
           maxAge: params.maxAge,
         };
 
@@ -903,6 +978,7 @@ function registerSubagentWithContextTool(
           registered = registerInProcessJob(jobState, owner);
         } catch (error) {
           captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+          resolveFailedLaunch("registration");
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return completionPolicyErrorResult(error);
@@ -916,6 +992,10 @@ function registerSubagentWithContextTool(
               ? "capacity"
               : "registration";
           captureSpawnFailure(telemetry, failureStage, spawnRequestedAt);
+          resolveFailedLaunch(
+            failureStage,
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          );
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return owner && !ownerLive
@@ -934,6 +1014,7 @@ function registerSubagentWithContextTool(
             );
           } catch (error) {
             captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+            resolveFailedLaunch("registration");
             removeInProcessJob(jobId, owner);
             releaseCompletionGroup(completionReservation);
             discardAsyncSpawn(abort, session, disposeBeforeStart);
@@ -943,15 +1024,26 @@ function registerSubagentWithContextTool(
         updateRunningFooter(ctx, owner);
 
         attachAsyncJobSettlement(jobId, jobState, ctx);
-        start?.();
-
+        if (!(start?.() ?? false)) {
+          resolveFailedLaunch("parent_shutdown", "cancelled");
+          removeInProcessJob(jobId, owner);
+          releaseCompletionGroup(completionReservation);
+          discardAsyncSpawn(abort, session, disposeBeforeStart);
+          return cancelledAsyncSpawnResult();
+        }
+        launchResolution({
+          outcome: "started",
+          execution: "in-process",
+          mux: "none",
+          fallback_attempted: false,
+        });
         return {
           content: [
             {
               type: "text",
               text:
                 `Job ${jobId} started. The main agent continues — use get_subagent_status to check progress and get_subagent_result to collect output when ready.\n\n` +
-                formatResolvedCompletionBehavior(completion, jobState) +
+                formatResolvedCompletionBehavior(completion) +
                 (modelWarning ? `\n\n${modelWarning}` : ""),
             },
           ],
@@ -966,11 +1058,13 @@ function registerSubagentWithContextTool(
 
       if (messages.length === 0) {
         captureSpawnFailure(telemetry, "context", spawnRequestedAt);
+        resolveFailedLaunch("context");
         return {
           content: [
             { type: "text", text: "No conversation history to inherit." },
           ],
-          details: {},
+          details: { status: "error", usage: ZERO_USAGE, contextMessages: 0 },
+          isError: true,
         };
       }
 
@@ -980,6 +1074,7 @@ function registerSubagentWithContextTool(
         conversationText = serializeConversation(llmMessages);
       } catch (error) {
         captureSpawnFailure(telemetry, "context", spawnRequestedAt);
+        resolveFailedLaunch("context");
         return completionPolicyErrorResult(error);
       }
       const targetCwd = params.cwd ?? ctx.cwd;
@@ -999,12 +1094,15 @@ function registerSubagentWithContextTool(
         owner,
         telemetry,
         spawnRequestedAt,
+        launchResolution,
       );
 
       captureSyncResultRead(telemetry, result);
       if (result.cancelled) {
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            { type: "text", text: displaySubagentOutput(result.output) },
+          ],
           details: { status: "cancelled" },
         };
       }
@@ -1024,8 +1122,8 @@ function registerSubagentWithContextTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
@@ -1053,7 +1151,10 @@ function registerSubagentIsolatedTool(
     description: [
       "Spawn an in-process sub-agent with a fresh, empty context window.",
       "Only receives the task and optional persona. No conversation history.",
-      "Model is inherited by default. Use the model param to override (e.g. 'minimax/MiniMax-M2.7').",
+      "By default, prefer the current/parent provider and model.",
+      "Honor any provider or model explicitly requested by the user.",
+      "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
+      "For example, 'anthropic/claude-sonnet-4-5'.",
       "Use list_available_models to see which models have configured auth before setting model.",
       "Use thinkingLevel to control reasoning depth (off|minimal|low|medium|high|xhigh|max). Higher levels use more tokens.",
       "Streams output in real-time when sync.",
@@ -1063,56 +1164,81 @@ function registerSubagentIsolatedTool(
       '  - task: "Review one module", completionPolicy: "each"',
       '  - task: "Review one shard", completionPolicy: "group", completionGroupId: "review"',
       "",
-      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false only for a single short sub-agent whose result you need inline.",
+      "Runs async (background) BY DEFAULT so the parent turn stays responsive — pass async: false for one short, focused task whose answer you need inline; for a broad review, use a small number of focused async reviewers.",
+      "A returned jobId means the job was accepted and continues in the background; a running status or delay is normal, not a hang.",
       "Async completionPolicy defaults to each: the user gets one TUI-only notice, and safely-idle ready results are coalesced into one compact parent manifest.",
-      "Use completionPolicy=group with a shared completionGroupId for related jobs; the parent resumes once its settled-turn group is sealed and every member is terminal.",
+      "For a final review that depends on several async jobs, use completionPolicy=group with one completionGroupId and wait for every member to become done, error, or cancelled before finalizing.",
+      "After spawning grouped reviewers, yield the parent turn so the group seals; coordinated completion resumes the parent when all members are terminal.",
+      "While reviewers are pending, label findings as provisional and report pending jobIds. Collect terminal results before final synthesis and disclose any failed or cancelled reviewers as coverage gaps.",
       "Human input takes priority, and successful get_subagent_result collection consumes the pending automatic delivery.",
-      "Deprecated notifyOnComplete and triggerTurnOnComplete inputs map to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
+      "Do not cancel a running job merely because it is unfinished or to reclaim context.",
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence; otherwise leave it running and report its jobId.",
       "Nested orchestration depth is capped (SUBAGENTURA_MAX_ORCHESTRATION_DEPTH, default 3); over-deep spawns are refused and the sub-agent should do the work itself.",
-      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection is needed.",
+      "Use get_subagent_status for live inspection and get_subagent_result only when explicit collection or bounded final synthesis is needed.",
     ].join("\n"),
     parameters: BaseParams,
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const spawnRequestedAt = Date.now();
+      const runAsync = params.async ?? true;
+      const preflightTelemetry = telemetryForSpawnFailure(
+        toolToken,
+        undefined,
+        "isolated",
+        runAsync,
+        undefined,
+      );
+      let launchResolution = createInProcessLaunchResolver(
+        preflightTelemetry,
+        "isolated",
+        runAsync,
+        undefined,
+        undefined,
+        spawnRequestedAt,
+      );
       const execution = resolveExecutionOwner(toolToken);
       if (!execution) {
         const staleScope = toolToken
           ? findSessionScope(toolToken.id)
           : undefined;
-        captureSpawnFailure(
-          telemetryForSpawnFailure(
-            toolToken,
-            undefined,
-            "isolated",
-            params.async ?? true,
-            undefined,
-          ),
+        const failureStage =
           staleScope?.lifecycle === "shutdown"
             ? "parent_shutdown"
-            : "session_creation",
-          spawnRequestedAt,
-        );
+            : "session_creation";
+        captureSpawnFailure(preflightTelemetry, failureStage, spawnRequestedAt);
+        launchResolution({
+          outcome:
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: failureStage,
+        });
         return unavailableSessionResult();
       }
       const { owner } = execution;
-      const runAsync = params.async ?? true;
       let completion: ResolvedCompletionPolicy;
       try {
         completion = resolveAsyncCompletionPolicy(params, runAsync, owner);
         assertCompletionGroupOpen(completion.policy, completion.groupId, owner);
       } catch (error) {
         captureSpawnFailure(
-          telemetryForSpawnFailure(
-            toolToken,
-            owner,
-            "isolated",
-            runAsync,
-            undefined,
-          ),
+          preflightTelemetry,
           "registration",
           spawnRequestedAt,
         );
+        launchResolution({
+          outcome: "rejected",
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: "registration",
+        });
         return completionPolicyErrorResult(error);
       }
       debugLog("info", "tool_call", {
@@ -1123,14 +1249,7 @@ function registerSubagentIsolatedTool(
         persona: params.persona ?? null,
         model: params.model ?? null,
         cwd: params.cwd ?? ctx.cwd,
-        notifyOnComplete: completion.legacy
-          ? (params.notifyOnComplete ?? "inject")
-          : null,
-        triggerTurnOnComplete: completion.legacy
-          ? (params.triggerTurnOnComplete ?? null)
-          : null,
-        completionPolicy:
-          completion.policy ?? (completion.legacy ? "legacy" : null),
+        completionPolicy: completion.policy,
         completionGroupId: completion.groupId ?? null,
         maxAge: params.maxAge ?? null,
       });
@@ -1143,13 +1262,33 @@ function registerSubagentIsolatedTool(
         spawn.childDepth,
         completion,
       );
+      launchResolution = createInProcessLaunchResolver(
+        telemetry,
+        "isolated",
+        runAsync,
+        spawn.childDepth,
+        completion,
+        spawnRequestedAt,
+      );
+      const resolveFailedLaunch = (
+        failureStage: InProcessSpawnFailureStage,
+        outcome: "rejected" | "cancelled" = "rejected",
+      ): void => {
+        launchResolution({
+          outcome,
+          mux: "unknown",
+          fallback_attempted: false,
+          final_failure_stage: failureStage,
+        });
+      };
       if (spawn.exceedsLimit) {
         captureSpawnFailure(telemetry, "depth_limit", spawnRequestedAt);
+        resolveFailedLaunch("depth_limit");
         return depthLimitResult(spawn.limit);
       }
 
-      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       const targetCwd = params.cwd ?? ctx.cwd;
+      const deliveryOwner = captureDeliveryOwner(pi, ctx, owner);
       if (runAsync) {
         let completionReservation: CompletionGroupReservation | undefined;
         try {
@@ -1160,6 +1299,7 @@ function registerSubagentIsolatedTool(
           );
         } catch (error) {
           captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+          resolveFailedLaunch("registration");
           return completionPolicyErrorResult(error);
         }
         // Own the child's session so any ancestor abort cascades to it.
@@ -1183,10 +1323,11 @@ function registerSubagentIsolatedTool(
           spawnRequestedAt,
         }).catch((error) => {
           releaseCompletionGroup(completionReservation);
-          captureSpawnFailure(
-            telemetry,
-            spawnFailureStage(error) ?? "unknown",
-            spawnRequestedAt,
+          const failureStage = spawnFailureStage(error) ?? "unknown";
+          captureSpawnFailure(telemetry, failureStage, spawnRequestedAt);
+          resolveFailedLaunch(
+            failureStage,
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
           );
           throw error;
         });
@@ -1203,6 +1344,7 @@ function registerSubagentIsolatedTool(
         } = startResult;
         if (owner && !resolveLiveSessionScope(owner)) {
           captureSpawnFailure(telemetry, "parent_shutdown", spawnRequestedAt);
+          resolveFailedLaunch("parent_shutdown", "cancelled");
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return cancelledAsyncSpawnResult();
@@ -1221,16 +1363,9 @@ function registerSubagentIsolatedTool(
           abort,
           parentJobId: spawn.parentJobId,
           depth: spawn.childDepth,
-          notifyOnComplete: completion.legacy
-            ? params.notifyOnComplete === "notify"
-              ? "notify"
-              : "inject"
-            : undefined,
-          triggerTurnOnComplete: params.triggerTurnOnComplete,
           completionPolicy: completion.policy,
           completionGroupId: completion.groupId,
           deliveryOwner,
-          notificationDelivered: false,
           maxAge: params.maxAge,
         };
 
@@ -1239,6 +1374,7 @@ function registerSubagentIsolatedTool(
           registered = registerInProcessJob(jobState, owner);
         } catch (error) {
           captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+          resolveFailedLaunch("registration");
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return completionPolicyErrorResult(error);
@@ -1252,6 +1388,10 @@ function registerSubagentIsolatedTool(
               ? "capacity"
               : "registration";
           captureSpawnFailure(telemetry, failureStage, spawnRequestedAt);
+          resolveFailedLaunch(
+            failureStage,
+            failureStage === "parent_shutdown" ? "cancelled" : "rejected",
+          );
           releaseCompletionGroup(completionReservation);
           discardAsyncSpawn(abort, session, disposeBeforeStart);
           return owner && !ownerLive
@@ -1270,6 +1410,7 @@ function registerSubagentIsolatedTool(
             );
           } catch (error) {
             captureSpawnFailure(telemetry, "registration", spawnRequestedAt);
+            resolveFailedLaunch("registration");
             removeInProcessJob(jobId, owner);
             releaseCompletionGroup(completionReservation);
             discardAsyncSpawn(abort, session, disposeBeforeStart);
@@ -1279,15 +1420,26 @@ function registerSubagentIsolatedTool(
         updateRunningFooter(ctx, owner);
 
         attachAsyncJobSettlement(jobId, jobState, ctx);
-        start?.();
-
+        if (!(start?.() ?? false)) {
+          resolveFailedLaunch("parent_shutdown", "cancelled");
+          removeInProcessJob(jobId, owner);
+          releaseCompletionGroup(completionReservation);
+          discardAsyncSpawn(abort, session, disposeBeforeStart);
+          return cancelledAsyncSpawnResult();
+        }
+        launchResolution({
+          outcome: "started",
+          execution: "in-process",
+          mux: "none",
+          fallback_attempted: false,
+        });
         return {
           content: [
             {
               type: "text",
               text:
                 `Job ${jobId} started. The main agent continues — use get_subagent_status to check progress and get_subagent_result to collect output when ready.\n\n` +
-                formatResolvedCompletionBehavior(completion, jobState) +
+                formatResolvedCompletionBehavior(completion) +
                 (modelWarning ? `\n\n${modelWarning}` : ""),
             },
           ],
@@ -1316,12 +1468,15 @@ function registerSubagentIsolatedTool(
         owner,
         telemetry,
         spawnRequestedAt,
+        launchResolution,
       );
 
       captureSyncResultRead(telemetry, result);
       if (result.cancelled) {
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            { type: "text", text: displaySubagentOutput(result.output) },
+          ],
           details: { status: "cancelled" },
         };
       }
@@ -1341,8 +1496,8 @@ function registerSubagentIsolatedTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
@@ -1368,12 +1523,27 @@ function registerGetSubagentStatusTool(
     name: "get_subagent_status",
     label: "Get Subagent Status",
     description:
-      "Poll an async subagent job by jobId. Returns live preview of the subagent's current turn, active tool, and output.",
+      "Poll an async subagent job by jobId. Returns live preview of the subagent's current turn, active tool, and output. Polling is non-destructive; a running job is normal and is not evidence of a hang.",
     parameters: StatusParams,
+    outputSchema: InProcessReadOutputSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      _signal,
+      _onUpdate,
+      _ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const execution = resolveExecutionOwner(toolToken);
-      if (!execution) return unavailableSessionResult();
+      if (!execution) {
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
+      }
       debugLog("info", "tool_call", {
         toolName: "get_subagent_status",
         toolCallId: _toolCallId,
@@ -1392,6 +1562,7 @@ function registerGetSubagentStatusTool(
           ],
           details: { jobId: params.jobId, status: "not_found" },
           isError: true,
+          structuredContent: { status: "not_found", jobId: params.jobId },
         };
       }
 
@@ -1399,7 +1570,12 @@ function registerGetSubagentStatusTool(
         const result = job.result!;
         const usageStr = formatUsage(result.usage, result.model);
         return {
-          content: [{ type: "text", text: result.output }],
+          content: [
+            {
+              type: "text",
+              text: displaySubagentOutput(result.output),
+            },
+          ],
           details: {
             status: job.status,
             usage: result.usage,
@@ -1408,6 +1584,20 @@ function registerGetSubagentStatusTool(
             thinkingLevel: result.thinkingLevel,
           },
           isError: result.isError,
+          structuredContent: {
+            status: job.status,
+            jobId: job.id,
+            output: result.output,
+            usage: structuredInProcessUsage(result.usage),
+            ...(result.model === undefined ? {} : { model: result.model }),
+            usageSummary: usageStr,
+            ...(result.thinkingLevel === undefined
+              ? {}
+              : { thinkingLevel: result.thinkingLevel }),
+            ...(result.isError && result.errorMessage !== undefined
+              ? { error: result.errorMessage }
+              : {}),
+          },
         };
       }
 
@@ -1418,10 +1608,23 @@ function registerGetSubagentStatusTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
 
-      return buildLiveUpdate(job.liveStatus, job.modelLabel);
+      const live = buildLiveUpdate(job.liveStatus, job.modelLabel);
+      return {
+        ...live,
+        structuredContent: {
+          status: "running",
+          jobId: job.id,
+          outputPreview: job.liveStatus.output.slice(
+            0,
+            IN_PROCESS_OUTPUT_PREVIEW_CHARS,
+          ),
+          ...(job.modelLabel === undefined ? {} : { model: job.modelLabel }),
+        },
+      };
     },
 
     renderCall(args, theme) {
@@ -1433,7 +1636,7 @@ function registerGetSubagentStatusTool(
     },
 
     renderResult(result, options, theme, context) {
-      const details = result.details as InProcessSubagentDetails | undefined;
+      const details = result.details;
       if (details?.status === "running") {
         return renderSubagentResult(
           result,
@@ -1457,14 +1660,31 @@ function registerGetSubagentResultTool(
     description: [
       "Retrieve an async subagent job's current or final result and usage summary.",
       "A running job returns immediately with live status unless waiting is explicit. Pass wait: true to wait up to timeoutMs.",
-      "ONLY call this tool when the user explicitly asks you to wait for or collect a specific async result.",
+      "ONLY call this tool when the user explicitly asks you to wait for or collect a specific async result, or when a bounded final synthesis depends on this specific result.",
       "Do not call it immediately after spawning async sub-agents; coordinated completion notices and compact manifests handle normal background fan-out. Successful terminal collection consumes the matching pending automatic delivery.",
+      "A timeout does not cancel the job. It only stops this wait.",
+      "If a bounded wait times out, report the pending jobId and yield; do not cancel the job merely to finish a review.",
     ].join("\n"),
     parameters: ResultParams,
+    outputSchema: InProcessReadOutputSchema,
 
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      _onUpdate,
+      _ctx,
+    ): Promise<AgentToolResult<InProcessSubagentDetails>> {
       const execution = resolveExecutionOwner(toolToken);
-      if (!execution) return unavailableSessionResult();
+      if (!execution) {
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
+      }
       const job = getInProcessJob(params.jobId, execution.owner);
       debugLog("info", "tool_call", {
         toolName: "get_subagent_result",
@@ -1483,6 +1703,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId },
           isError: true,
+          structuredContent: { status: "not_found", jobId: params.jobId },
         };
       }
 
@@ -1502,6 +1723,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
 
@@ -1517,6 +1739,10 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "wait_cancelled" },
           isError: true,
+          structuredContent: {
+            status: "wait_cancelled",
+            jobId: params.jobId,
+          },
         };
       }
 
@@ -1534,9 +1760,16 @@ function registerGetSubagentResultTool(
                 : `Job ${params.jobId} continues in the background.`,
             },
           ],
-          details: {
-            ...(live.details as Record<string, unknown>),
+          details: live.details
+            ? { ...live.details, jobId: params.jobId }
+            : { jobId: params.jobId },
+          structuredContent: {
+            status: "running",
             jobId: params.jobId,
+            outputPreview: currentText.slice(
+              0,
+              IN_PROCESS_OUTPUT_PREVIEW_CHARS,
+            ),
           },
         };
       }
@@ -1601,6 +1834,11 @@ function registerGetSubagentResultTool(
               timeoutMs: waitTimeoutMs,
             },
             isError: true,
+            structuredContent: {
+              status: "wait_timeout",
+              jobId: params.jobId,
+              timeoutMs: waitTimeoutMs,
+            },
           };
         }
         captureInProcessResultRead(job, execution.owner, "wait_cancelled");
@@ -1609,12 +1847,22 @@ function registerGetSubagentResultTool(
             { type: "text", text: `Wait for job ${params.jobId} cancelled.` },
           ],
           details: { jobId: params.jobId, status: "wait_cancelled" },
+          structuredContent: {
+            status: "wait_cancelled",
+            jobId: params.jobId,
+          },
           isError: true,
         };
       }
       if (execution.owner && !resolveLiveSessionScope(execution.owner)) {
         captureInProcessResultRead(job, execution.owner, "unavailable");
-        return unavailableSessionResult();
+        return {
+          ...unavailableSessionResult(),
+          structuredContent: {
+            status: "session_unavailable",
+            jobId: params.jobId,
+          },
+        };
       }
       const result = waitResult.value!;
       consumeCompletionSource(
@@ -1645,6 +1893,7 @@ function registerGetSubagentResultTool(
           ],
           details: { jobId: params.jobId, status: "cancelled" },
           isError: true,
+          structuredContent: { status: "cancelled", jobId: params.jobId },
         };
       }
       const usageStr = formatUsage(result.usage, result.model);
@@ -1660,12 +1909,26 @@ function registerGetSubagentResultTool(
           {
             type: "text",
             text: result.isError
-              ? `Sub-agent failed: ${result.errorMessage || result.output}`
-              : result.output,
+              ? `Sub-agent failed: ${result.errorMessage || displaySubagentOutput(result.output)}`
+              : displaySubagentOutput(result.output),
           },
         ],
         details,
         isError: result.isError,
+        structuredContent: {
+          status: result.isError ? "error" : "done",
+          jobId: job.id,
+          output: result.output,
+          usage: structuredInProcessUsage(result.usage),
+          ...(result.model === undefined ? {} : { model: result.model }),
+          usageSummary: usageStr,
+          ...(result.thinkingLevel === undefined
+            ? {}
+            : { thinkingLevel: result.thinkingLevel }),
+          ...(result.isError && result.errorMessage !== undefined
+            ? { error: result.errorMessage }
+            : {}),
+        },
       };
     },
 
@@ -1690,7 +1953,12 @@ function registerCancelSubagentTool(
   registerToolWithDefaultGuidance(pi, {
     name: "cancel_subagent",
     label: "Cancel Subagent",
-    description: "Abort a running async subagent job by jobId.",
+    description: [
+      "Abort a running async subagent job by jobId.",
+      "This is destructive terminal control: do not use it merely because the job is still running or to reclaim context.",
+      "Do not cancel unfinished reviewers merely to finalize an audit.",
+      "Cancel only on an explicit user request, session shutdown, stale or replaced work, or clear stuck or resource evidence.",
+    ].join("\n"),
     parameters: CancelParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1738,9 +2006,7 @@ function registerCancelSubagentTool(
 
       let initiator: string | undefined;
       try {
-        initiator = (
-          ctx as { sessionManager?: { getSessionId?: () => string } }
-        ).sessionManager?.getSessionId?.();
+        initiator = ctx.sessionManager?.getSessionId?.();
       } catch {
         initiator = undefined;
       }
@@ -1843,6 +2109,16 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    outputSchema: Type.Object({
+      count: Type.Number(),
+      models: Type.Array(
+        Type.Object({
+          provider: Type.String(),
+          id: Type.String(),
+          name: Type.Optional(Type.String()),
+        }),
+      ),
+    }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const modelRegistry = ctx.modelRegistry;
@@ -1900,6 +2176,14 @@ function registerListAvailableModelsTool(pi: ExtensionAPI): void {
             provider: m.provider,
             id: m.id,
             name: m.name,
+          })),
+        },
+        structuredContent: {
+          count: filtered.length,
+          models: filtered.map((model) => ({
+            provider: model.provider,
+            id: model.id,
+            ...(model.name === undefined ? {} : { name: model.name }),
           })),
         },
       };
@@ -2051,11 +2335,7 @@ function registerCleanupArtifactsTool(
         };
       }
       const activeIds = new Set<string>();
-      const states =
-        scope?.interactiveStates ??
-        (getStartedSessionScopes().length === 0
-          ? interactiveSubagentRegistry
-          : new Map());
+      const states = scope?.interactiveStates ?? new Map();
       for (const state of states.values()) activeIds.add(state.id);
 
       const dryRun = params.dryRun !== false; // default true for safety

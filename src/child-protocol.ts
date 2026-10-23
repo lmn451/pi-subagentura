@@ -1,7 +1,22 @@
-import { readFileSync, renameSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { debugLog } from "./helpers";
 import {
+  MAX_ACTIVE_TOOL_ID_LENGTH,
+  MAX_ACTIVE_TOOL_RECORDS,
+  MAX_ACTIVE_TURN_BYTES,
+  MAX_TOOL_NAME_LENGTH,
+  MAX_TURN_ID_LENGTH,
   appendCompletionEvent,
   appendEvent,
   artifactPath,
@@ -10,11 +25,19 @@ import {
   type SubagentEventV2,
 } from "./artifact";
 
+interface ActiveTool {
+  name: string;
+  callId?: string;
+  startedAt: number;
+}
+
 interface ActiveTurn {
   turnId: string;
   startedAt: number;
   started: boolean;
   previousUserEntryId?: string;
+  activeTools?: ActiveTool[];
+  lastTool?: string;
 }
 
 let latestAgentMessages: unknown[] = [];
@@ -29,22 +52,144 @@ function activeTurnPath(art = getArtifact()): string {
   return join(art.dir, "active-turn.json");
 }
 
+const SAFE_METADATA_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+function boundedMetadataIdentifier(
+  value: unknown,
+  maxLength: number,
+): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    SAFE_METADATA_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
+function normalizeActiveTool(value: unknown): ActiveTool | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const name = boundedMetadataIdentifier(candidate.name, MAX_TOOL_NAME_LENGTH);
+  const startedAt = candidate.startedAt;
+  if (
+    !name ||
+    typeof startedAt !== "number" ||
+    !Number.isSafeInteger(startedAt) ||
+    startedAt < 0
+  ) {
+    return null;
+  }
+  const callId = boundedMetadataIdentifier(
+    candidate.callId,
+    MAX_ACTIVE_TOOL_ID_LENGTH,
+  );
+  return {
+    name,
+    ...(callId ? { callId } : {}),
+    startedAt,
+  };
+}
+
+function normalizeActiveTools(value: unknown): ActiveTool[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(-MAX_ACTIVE_TOOL_RECORDS)
+    .map(normalizeActiveTool)
+    .filter((tool): tool is ActiveTool => tool !== null);
+}
+
+function normalizeActiveTurn(value: unknown): ActiveTurn | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const turnId = boundedMetadataIdentifier(
+    candidate.turnId,
+    MAX_TURN_ID_LENGTH,
+  );
+  if (!turnId) return null;
+  const startedAt = candidate.startedAt;
+  return {
+    turnId,
+    startedAt:
+      typeof startedAt === "number" &&
+      Number.isSafeInteger(startedAt) &&
+      startedAt >= 0
+        ? startedAt
+        : Date.now(),
+    started: candidate.started === true,
+    ...(boundedMetadataIdentifier(
+      candidate.previousUserEntryId,
+      MAX_TURN_ID_LENGTH,
+    )
+      ? {
+          previousUserEntryId: boundedMetadataIdentifier(
+            candidate.previousUserEntryId,
+            MAX_TURN_ID_LENGTH,
+          ),
+        }
+      : {}),
+    activeTools: normalizeActiveTools(candidate.activeTools),
+    ...(boundedMetadataIdentifier(candidate.lastTool, MAX_TOOL_NAME_LENGTH)
+      ? {
+          lastTool: boundedMetadataIdentifier(
+            candidate.lastTool,
+            MAX_TOOL_NAME_LENGTH,
+          ),
+        }
+      : {}),
+  };
+}
+
 function writeActiveTurn(turn: ActiveTurn, art = getArtifact()): void {
+  const normalized = normalizeActiveTurn(turn);
+  if (!normalized) return;
+  const content = JSON.stringify(normalized);
+  if (Buffer.byteLength(content, "utf8") > MAX_ACTIVE_TURN_BYTES) return;
   const file = activeTurnPath(art);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = file + ".tmp";
-  writeFileSync(tmp, JSON.stringify(turn), { mode: 0o600 });
+  writeFileSync(tmp, content, { mode: 0o600 });
   renameSync(tmp, file);
 }
 
 export function readActiveTurn(art = getArtifact()): ActiveTurn | null {
+  let fd: number | undefined;
   try {
-    const value = JSON.parse(
-      readFileSync(activeTurnPath(art), "utf8"),
-    ) as ActiveTurn;
-    return typeof value.turnId === "string" ? value : null;
+    fd = openSync(
+      activeTurnPath(art),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > MAX_ACTIVE_TURN_BYTES) {
+      return null;
+    }
+    const buffer = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < metadata.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        offset,
+        metadata.size - offset,
+        offset,
+      );
+      if (bytesRead <= 0) return null;
+      offset += bytesRead;
+    }
+    return normalizeActiveTurn(JSON.parse(buffer.toString("utf8")));
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* bounded diagnostic metadata is no longer usable */
+      }
+    }
   }
 }
 
@@ -62,6 +207,53 @@ function latestUserEntryId(ctx: any): string | undefined {
   return undefined;
 }
 
+function lastActiveToolIndex(
+  tools: readonly ActiveTool[],
+  name: string | undefined,
+  callId: string | undefined,
+): number {
+  if (callId) {
+    for (let index = tools.length - 1; index >= 0; index--) {
+      if (tools[index]?.callId === callId) return index;
+    }
+  }
+  if (name) {
+    for (let index = tools.length - 1; index >= 0; index--) {
+      if (tools[index]?.name === name) return index;
+    }
+  }
+  return -1;
+}
+
+function updateActiveToolMetadata(
+  art: ReturnType<typeof getArtifact>,
+  active: ActiveTurn,
+  phase: "start" | "end",
+  event: { toolName?: string; toolCallId?: string },
+  timestamp: number,
+): void {
+  const name = boundedMetadataIdentifier(event.toolName, MAX_TOOL_NAME_LENGTH);
+  const callId = boundedMetadataIdentifier(
+    event.toolCallId,
+    MAX_ACTIVE_TOOL_ID_LENGTH,
+  );
+  const tools = [...(active.activeTools ?? [])];
+  const existingIndex = lastActiveToolIndex(tools, name, callId);
+  if (phase === "start") {
+    if (!name) return;
+    if (existingIndex >= 0) tools.splice(existingIndex, 1);
+    tools.push({ name, ...(callId ? { callId } : {}), startedAt: timestamp });
+    if (tools.length > MAX_ACTIVE_TOOL_RECORDS) {
+      tools.splice(0, tools.length - MAX_ACTIVE_TOOL_RECORDS);
+    }
+  } else if (existingIndex >= 0) {
+    tools.splice(existingIndex, 1);
+  }
+  active.activeTools = tools;
+  if (phase === "start" && name) active.lastTool = name;
+  writeActiveTurn(active, art);
+}
+
 function appendActivity(
   art: ReturnType<typeof getArtifact>,
   phase: "start" | "end",
@@ -69,11 +261,15 @@ function appendActivity(
 ): void {
   const active = readActiveTurn(art);
   if (!active) return;
+  const timestamp = Date.now();
+  if (phase === "start") {
+    updateActiveToolMetadata(art, active, phase, event, timestamp);
+  }
   const activity: SubagentEventV2 = {
     version: 2,
     eventId: newEventId(),
     turnId: active.turnId,
-    ts: Date.now(),
+    ts: timestamp,
     type: "tool_activity",
     status: "running",
     phase,
@@ -84,10 +280,83 @@ function appendActivity(
         : event.toolName,
   };
   appendEvent(art, activity);
+  if (phase === "end") {
+    updateActiveToolMetadata(art, active, phase, event, timestamp);
+  }
 }
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
+  let startupAgentStarted = false;
+  pi.on("session_start", (event, ctx) => {
+    const model = ctx.model;
+    if (event.reason !== "startup" || !model) return;
+    void ctx.modelRegistry
+      .getApiKeyAndHeaders(model)
+      .then((auth) => {
+        if (startupAgentStarted) return;
+        const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+          getRegisteredNativeProvider?: (provider: string) => unknown;
+        };
+        const isNativeProvider = Boolean(
+          registry.getRegisteredNativeProvider?.(model.provider),
+        );
+        // Legacy fallbacks can expose undefined auth fields, so require
+        // actual request config before trusting a stale auth-status snapshot.
+        const requestAuth = auth as typeof auth & {
+          baseUrl?: string;
+        };
+        const hasResolvedRequestConfig =
+          auth.ok &&
+          Boolean(
+            auth.apiKey ||
+            requestAuth.baseUrl ||
+            Object.keys(auth.headers ?? {}).length ||
+            Object.keys(auth.env ?? {}).length,
+          );
+        const missingLegacyAuth =
+          !isNativeProvider &&
+          typeof registry.hasConfiguredAuth === "function" &&
+          !registry.hasConfiguredAuth(model) &&
+          !hasResolvedRequestConfig;
+        if (auth.ok && !missingLegacyAuth) return;
+        if (!auth.ok) {
+          const missingAuthError =
+            missingLegacyAuth ||
+            /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:missing|required)\s+(?:api key|credentials?|authentication|auth)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:api key|credentials?)(?:\s+(?:is|are|was|were))?\s+(?:missing|not found|not configured|not provided|not set|unset|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:authentication|auth)(?:\s+(?:is|are|was|were))?\s+(?:missing|not configured|not provided|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\bno\s+(?:authentication|auth)\s+(?:configured|available|provided|set)\b/i.test(
+              auth.error,
+            );
+          if (!missingAuthError) {
+            debugLog("warn", "child_startup_auth_resolution_unavailable");
+            return;
+          }
+        }
+        const message = "Selected model has no configured authentication.";
+        appendCompletionEvent(art, {
+          turnId: "process",
+          outcome: "error",
+          source: "explicit",
+          exitCode: 1,
+          message,
+          errorMessage: message,
+        });
+      })
+      .catch(() => {
+        debugLog("warn", "child_startup_auth_check_failed");
+      });
+  });
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,
@@ -136,6 +405,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
+    startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
       startedAt: Date.now(),
@@ -155,8 +425,8 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
     deferredBind.unref();
   });
-  // In createAgentSession 0.80.6, the first turn_start can precede persistence
-  // of the user message. This is the earliest guaranteed pre-model fallback.
+  // The first turn_start can precede persistence of the user message.
+  // before_provider_request is the earliest guaranteed pre-model fallback.
   pi.on("before_provider_request", (_event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
   });
@@ -200,5 +470,10 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
           ? stopReason
           : undefined,
     });
+    const settled = readActiveTurn(art);
+    if (settled?.turnId === active.turnId) {
+      settled.activeTools = [];
+      writeActiveTurn(settled, art);
+    }
   });
 }

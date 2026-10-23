@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Schema from "typebox/schema";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,14 +26,29 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { registerOrchestratorTools } from "../src/tools/orchestrator";
-import {
-  ORCHESTRATOR_V2_WAKE_DETAIL_KEY,
-  orchestratorV2WakeupMessage,
-} from "../src/completion-turn";
+import { ORCHESTRATOR_V2_WAKE_DETAIL_KEY } from "../src/completion-turn";
 
 const CHILD_A = "0123456789abcdef";
 const CHILD_B = "fedcba9876543210";
 const CHILD_C = "1111111111111111";
+function expectStructuredOutput(
+  toolDef: { outputSchema?: TSchema },
+  result: unknown,
+): Record<string, unknown> {
+  const outputSchema = toolDef.outputSchema;
+  expect(outputSchema).toBeDefined();
+  if (!outputSchema) throw new Error("tool outputSchema is missing");
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("structuredContent" in result)
+  ) {
+    throw new Error("tool result has no structuredContent");
+  }
+  const structuredContent = result.structuredContent;
+  expect(Value.Check(outputSchema, structuredContent)).toBe(true);
+  return structuredContent as Record<string, unknown>;
+}
 
 function routingEntry(
   childId: string,
@@ -155,7 +172,6 @@ describe("Orchestratorv2 compact agent projection", () => {
     const state = runtimeState(CHILD_A, {
       name: "API owner",
       task: `  Review\n the API   ${"x".repeat(600)} ${secret}`,
-      lastStopText: secret,
       lastToolSummary: secret,
     });
 
@@ -464,6 +480,17 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE-parent-b-agent");
     expect(JSON.stringify(result)).not.toContain("PRIVATE parent B task");
     expect(JSON.stringify(result)).not.toContain(CHILD_C);
+    expect(
+      expectStructuredOutput(tool(apiA, "list_orchestrator_agents"), result),
+    ).toMatchObject({
+      status: "ok",
+      total: 2,
+      omitted: 0,
+      agents: result.details.agents,
+    });
+    expect(JSON.stringify(result.structuredContent)).not.toContain(
+      "PRIVATE-parent-b-agent",
+    );
   });
 
   it("loads missing, empty, and loaded metadata on demand without a routing cache", async () => {
@@ -525,6 +552,26 @@ describe("Orchestratorv2 metadata tools", () => {
         },
       ],
     });
+  });
+  it("returns a typed unavailable error when the list registration is stale", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerOrchestratorTools(api as never, scope);
+    scope.lifecycle = "shutdown";
+
+    const list = tool(api, "list_orchestrator_agents");
+    const result = await list.execute(
+      "list-unavailable",
+      {},
+      undefined,
+      undefined,
+      toolContext(root),
+    );
+
+    expect(expectStructuredOutput(list, result)).toMatchObject({
+      status: "session_unavailable",
+    });
+    expect(result.isError).toBe(true);
   });
 
   it("updates metadata only after the exact token appears in a later user message", async () => {
@@ -607,7 +654,7 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(replay.details.status).toBe("confirmation_invalid");
   });
 
-  it("ignores extension-generated coordinator wakes when finding user confirmation", async () => {
+  it("accepts user confirmation when the branch has a native coordinator pointer", async () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
     registerState(scope, CHILD_A);
@@ -645,16 +692,6 @@ describe("Orchestratorv2 metadata tools", () => {
             "12345678-1234-1234-9234-123456789abc",
         },
       },
-      {
-        id: "extension-wake",
-        type: "message",
-        message: {
-          role: "user",
-          content: `hook prefix\n${orchestratorV2WakeupMessage(
-            "12345678-1234-1234-9234-123456789abc",
-          )}\nhook suffix`,
-        },
-      },
     ];
 
     const result = await update.execute(
@@ -668,7 +705,7 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(result.details.status).toBe("updated");
   });
 
-  it("accepts a real confirmation after a pointer whose synthetic wake never arrived", async () => {
+  it("accepts a real confirmation after a native coordinator pointer", async () => {
     const api = mockApi();
     const scope = startedScope(api, 1, "parent-a");
     registerState(scope, CHILD_A);

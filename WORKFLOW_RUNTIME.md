@@ -99,10 +99,18 @@ work because dispatch follows manifest persistence.
 
 The parent receives phase/counter updates and a final result reference, not
 intermediate prompts and answers. Durable aggregates use the current completion
-coordinator, including human-priority delivery, group barriers, and persisted
-result-consumption receipts. Recovery never imports another session's runs.
-If a persisted completion-group file is unreadable, grouped delivery stays
-blocked until recovery succeeds; independent completions remain deliverable.
+coordinator, including its ordinary parent-turn dispatch rules, group barriers,
+and persisted result-consumption receipts. Manual durable result consumption is
+recorded against the initiating owner; a replacement session does not inherit
+that receipt. Fallback receipts are reconciled when completion expectations are
+restored later; each receipt applies only to its matching completion and never
+suppresses unrelated later-turn completions.
+
+Recovery never imports another session's runs. If persisted completion-group
+recovery is unavailable, group errors remain eligible for delivery under the
+ordinary parent-turn rules. Their mixed-source membership is preserved, and
+successful or cancelled members remain behind the group barrier. Independent
+completions remain deliverable.
 
 ## Failure and cancellation contract
 
@@ -112,9 +120,16 @@ blocked until recovery succeeds; independent completions remain deliverable.
   Use read-only agents or application-level idempotency for irreversible work.
 - Usage is recorded, not inferred from model prose. Uncommitted attempts can
   leave unknown usage; recovered totals are lower bounds, not billing guarantees.
-- `cancel_workflow` durably records cancellation intent. Process wrappers consume
-  their exact attempt's cancellation marker and terminate their child process
-  group. A persisted pane id alone never authorizes killing a recovered pane.
+- `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
+  before aborting owned work. When snapshots are enabled, cancel-all captures
+  receipts for owned work, including durable process attempts, before aborting.
+  A failed intent or attempt-marker write reports the workflow as failed to
+  cancel and keeps its owned in-process/process-backed work protected and
+  retryable. Retrying after the run-level intent is recorded still retries the
+  per-attempt markers.
+- Process wrappers consume the exact attempt's cancellation marker and
+  terminate their child process group. A persisted pane id alone never
+  authorizes killing a recovered pane.
   Cancellation cannot undo earlier writes, remote requests, or independently
   detached descendants. Inspect cancellation state rather than assuming every
   external effect has stopped immediately.

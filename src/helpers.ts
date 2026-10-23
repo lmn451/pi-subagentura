@@ -8,33 +8,35 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
-import type { Model } from "@earendil-works/pi-ai";
+import {
+  getBuiltinModel,
+  getBuiltinProviders,
+  type BuiltinProvider,
+} from "@earendil-works/pi-ai/providers/all";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 import type {
   AgentToolResult,
+  AgentToolUpdateCallback,
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 
+import * as CodingAgent from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
-  type ModelRegistry,
   type ExtensionAPI,
   type ExtensionUIContext,
+  type ModelRegistry,
+  type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  copyProviderConfig,
-  createCompatibleSessionRuntime,
-  type CompatibleSessionRuntime,
-} from "./pi-sdk-compat";
 import {
   createWorkflowStructuredOutputTool,
   type WorkflowStructuredOutputCapture,
 } from "./workflow-structured-output";
+import type { SubagentDetails } from "./subagent";
 import {
   snapshotInProcessSession,
   type CancellationSnapshotReceipt,
@@ -42,11 +44,9 @@ import {
 } from "./cancellation-snapshots";
 import { withOrchestrationContext } from "./orchestration-context";
 import { asStringIdentifier, type InProcessJobId } from "./identifier-types";
-import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { CompletionPolicy } from "./completion-coordinator";
 import {
-  findSessionScope,
-  ownerlessEntitiesVisible,
+  resolveLiveSessionScope,
   type SessionOwnerToken,
 } from "./session-scope";
 import {
@@ -302,9 +302,6 @@ export function spawnFailureStage(
 
 export type JobStatus = "running" | "done" | "error" | "cancelled";
 
-/** Notification delivery mode for async subagent completion */
-export type NotifyOnComplete = "notify" | "inject";
-
 export interface JobDeliveryOwner {
   /** Pi API identity captured when the async job was spawned. */
   pi: ExtensionAPI;
@@ -329,18 +326,12 @@ export interface JobState {
   thinkingLevel?: ThinkingLevel;
   /** Anonymous telemetry context retained for post-shutdown result reads. */
   telemetry?: AgentTelemetryContext;
-  /** Deprecated legacy pointer/output delivery mode. */
-  notifyOnComplete?: NotifyOnComplete;
   /** Delivery owner captured at async spawn time. */
   deliveryOwner?: JobDeliveryOwner;
-  /** Deprecated legacy parent-turn trigger override. */
-  triggerTurnOnComplete?: boolean;
   /** Coordinated default: independent readiness or an explicit group barrier. */
   completionPolicy?: CompletionPolicy;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
-  /** At-most-once delivery guard */
-  notificationDelivered?: boolean;
   /** At-most-once durable publication into the completion coordinator. */
   completionPublished?: boolean;
   /** Set true by get_subagent_result to suppress redundant notification */
@@ -468,31 +459,16 @@ function telemetryErrorCategoryForResult(
 // ── Job Registry ────────────────────────────────────────────────────
 
 /**
- * Persisted job registry using global to survive module reloads (jiti).
- *
- * Lifecycle:
- *   - Jobs added on async subagent spawn
- *   - Completed/error jobs follow their optional maxAge; uncollected coordinated
- *     results remain protected until explicit collection
- *   - Cancelled jobs removed immediately
- *   - All jobs lost on Pi restart (in-memory only)
+ * In-process jobs are owned by a live SessionScope. There is intentionally no
+ * process-wide aggregate index: callers must carry the owner they received at
+ * tool registration/spawn time, and missing ownership fails closed.
  */
-
-// Use 'global' for Node.js global, fall back to globalThis
-const g = typeof global !== "undefined" ? global : globalThis;
-
-// Create or reuse the registry on the global object
-if (!g.__piSubagenturaRegistry) {
-  g.__piSubagenturaRegistry = new Map<string, JobState>();
-}
-
-export const jobRegistry = g.__piSubagenturaRegistry as Map<string, JobState>;
 
 export function inProcessJobBelongsToOwner(
   job: JobState,
   owner: SessionOwnerToken | undefined,
 ): boolean {
-  if (!owner) return true;
+  if (!owner) return false;
   return (
     job.deliveryOwner?.sessionScopeId === owner.id &&
     job.deliveryOwner?.sessionScopeGeneration === owner.generation
@@ -514,29 +490,26 @@ const EMPTY_IN_PROCESS_JOBS: ReadonlyMap<string, JobState> = new Map();
 function exactSessionJobRegistry(
   owner: SessionOwnerToken,
 ): Map<string, JobState> | undefined {
-  const scope = findSessionScope(owner.id);
-  return scope?.generation === owner.generation
-    ? scope.inProcessJobs
-    : undefined;
+  return resolveLiveSessionScope(owner)?.inProcessJobs;
 }
 
-/** Authoritative registry for one owner, or the legacy aggregate with no live scopes. */
+/** Authoritative registry for one owner. Missing ownership is empty. */
 export function inProcessJobsForOwner(
   owner?: SessionOwnerToken,
 ): ReadonlyMap<string, JobState> {
-  if (owner) return exactSessionJobRegistry(owner) ?? EMPTY_IN_PROCESS_JOBS;
-  return ownerlessEntitiesVisible() ? jobRegistry : EMPTY_IN_PROCESS_JOBS;
+  if (!owner) return EMPTY_IN_PROCESS_JOBS;
+  return exactSessionJobRegistry(owner) ?? EMPTY_IN_PROCESS_JOBS;
 }
 
 export function getInProcessJob(
   jobId: string,
   owner?: SessionOwnerToken,
 ): JobState | undefined {
-  if (owner) return exactSessionJobRegistry(owner)?.get(jobId);
-  return ownerlessEntitiesVisible() ? jobRegistry.get(jobId) : undefined;
+  if (!owner) return undefined;
+  return exactSessionJobRegistry(owner)?.get(jobId);
 }
 
-/** Add a job to its authoritative scope and the process-wide compatibility index. */
+/** Add a job to its authoritative session scope. */
 export function registerInProcessJob(
   job: JobState,
   owner?: SessionOwnerToken,
@@ -551,18 +524,13 @@ export function registerInProcessJob(
     return false;
   }
   const effectiveOwner = owner ?? embeddedOwner;
-  if (!effectiveOwner && !ownerlessEntitiesVisible()) return false;
-  if (effectiveOwner) {
-    const registry = exactSessionJobRegistry(effectiveOwner);
-    if (!registry) return false;
-    if (!registry.has(job.id) && !ensureInProcessJobCapacity(effectiveOwner)) {
-      return false;
-    }
-    registry.set(job.id, job);
-  } else {
-    if (!ensureInProcessJobCapacity()) return false;
+  if (!effectiveOwner) return false;
+  const registry = exactSessionJobRegistry(effectiveOwner);
+  if (!registry) return false;
+  if (!registry.has(job.id) && !ensureInProcessJobCapacity(effectiveOwner)) {
+    return false;
   }
-  jobRegistry.set(job.id, job);
+  registry.set(job.id, job);
   return true;
 }
 
@@ -571,30 +539,12 @@ export function removeInProcessJob(
   jobId: string,
   owner?: SessionOwnerToken,
 ): boolean {
-  if (!owner && !ownerlessEntitiesVisible()) return false;
-  if (!owner) {
-    const indexedJob = jobRegistry.get(jobId);
-    const indexedOwner = indexedJob ? inProcessJobOwner(indexedJob) : undefined;
-    return indexedOwner
-      ? removeInProcessJob(jobId, indexedOwner)
-      : jobRegistry.delete(jobId);
-  }
+  if (!owner) return false;
   const registry = exactSessionJobRegistry(owner);
-  if (!registry) {
-    const aggregateJob = jobRegistry.get(jobId);
-    return aggregateJob && inProcessJobBelongsToOwner(aggregateJob, owner)
-      ? jobRegistry.delete(jobId)
-      : false;
-  }
+  if (!registry) return false;
   const ownedJob = registry.get(jobId);
-  if (!ownedJob) {
-    const aggregateJob = jobRegistry.get(jobId);
-    return aggregateJob && inProcessJobBelongsToOwner(aggregateJob, owner)
-      ? jobRegistry.delete(jobId)
-      : false;
-  }
+  if (!ownedJob) return false;
   registry.delete(jobId);
-  if (jobRegistry.get(jobId) === ownedJob) jobRegistry.delete(jobId);
   return true;
 }
 
@@ -616,24 +566,9 @@ function ensureInProcessJobCapacity(owner?: SessionOwnerToken): boolean {
 }
 
 declare global {
-  var __piSubagenturaRegistry: Map<string, JobState> | undefined;
-  var __piSubagenturaInteractiveRegistry:
-    | Map<string, InteractiveSubagentState>
-    | undefined;
-  var __piSubagenturaPiRef: ExtensionAPI | undefined;
-  var __piSubagenturaUi: ExtensionUIContext | undefined;
-  var __piSubagenturaSessionManager:
-    | { getEntries?: () => unknown[]; getSessionId?: () => string }
-    | undefined;
-  var __piSubagenturaInjectCount: number | undefined;
   var __piSubagenturaInteractivePollerHandle:
     | ReturnType<typeof setInterval>
     | undefined;
-}
-
-// Initialize the global pi ref
-if (!g.__piSubagenturaPiRef) {
-  g.__piSubagenturaPiRef = undefined;
 }
 
 /** Jobs persist indefinitely — no automatic expiration */
@@ -796,15 +731,15 @@ export function generateJobId(): InProcessJobId {
  * This function does NOT guess — it only does exact lookups:
  *   1. undefined → defaultModel
  *   2. Use parent modelRegistry (has extension-added models like minimax)
- *   3. "provider/id" format → exact getModel lookup (global static registry)
- *   4. Bare id → exact getModel scan across all providers (global static registry)
+ *   3. "provider/id" format → exact lookup in the built-in catalog
+ *   4. Bare id → exact scan across built-in providers
  *   5. Falls back to defaultModel when nothing matches
  */
 export function resolveModel(
   modelId: string | undefined,
-  defaultModel: Model<any> | undefined,
+  defaultModel: Model<Api> | undefined,
   parentModelRegistry?: ModelRegistry,
-) {
+): Model<Api> | undefined {
   if (!modelId) return defaultModel;
 
   // Only exact matching — no fuzzy/substring guessing.
@@ -813,29 +748,48 @@ export function resolveModel(
     if (modelId.includes("/")) {
       const [provider, id] = modelId.split("/", 2);
       const exact = parentModelRegistry.find(provider, id);
-      if (exact) return exact as any;
+      if (exact) return exact;
     } else {
       // Bare id — search all models in parent registry
       for (const m of parentModelRegistry.getAll()) {
-        if (m.id === modelId) return m as any;
+        if (m.id === modelId) return m;
       }
     }
   }
 
-  // Fall back to global static registry (built-in models only)
+  // Fall back to the generated built-in catalog (built-in models only)
   if (modelId.includes("/")) {
     const [provider, id] = modelId.split("/", 2);
-    return getModel(provider as any, id) ?? defaultModel;
+    return (
+      getBuiltinModel(provider as BuiltinProvider, id as never) ?? defaultModel
+    );
   }
 
   // Bare id — exact match across all providers
-  for (const provider of getProviders()) {
-    const found = getModel(provider as any, modelId);
+  for (const provider of getBuiltinProviders()) {
+    const found = getBuiltinModel(provider, modelId as never);
     if (found) return found;
   }
 
   return defaultModel;
 }
+
+function copyProviderConfig(
+  modelRuntime: ModelRuntime,
+  parentModelRegistry: ModelRegistry | undefined,
+  provider: string,
+): void {
+  if (!parentModelRegistry) return;
+  const nativeProvider =
+    parentModelRegistry.getRegisteredNativeProvider(provider);
+  if (nativeProvider) {
+    modelRuntime.registerNativeProvider(nativeProvider);
+    return;
+  }
+  const config = parentModelRegistry.getRegisteredProviderConfig(provider);
+  if (config) modelRuntime.registerProvider(provider, config);
+}
+
 export function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -858,7 +812,7 @@ export function formatUsage(u: Usage, model?: string): string {
 export function buildLiveUpdate(
   status: SubagentLiveStatus,
   model?: string,
-): AgentToolResult<any> {
+): AgentToolResult<Extract<SubagentDetails, { status: "running" }>> {
   return {
     content: [{ type: "text", text: status.output }],
     details: {
@@ -879,8 +833,10 @@ export interface StartSubagentJobParams {
   cwd: string;
   contextText: string | null;
   signal: AbortSignal | undefined;
-  onUpdate: ((partial: AgentToolResult<any>) => void) | undefined;
-  defaultModel: Model<any> | undefined;
+  onUpdate:
+    | AgentToolUpdateCallback<Extract<SubagentDetails, { status: "running" }>>
+    | undefined;
+  defaultModel: Model<Api> | undefined;
   maxAge?: number;
   /** Parent session's model registry for resolving extension-added models (e.g. minimax) */
   parentModelRegistry?: ModelRegistry;
@@ -911,7 +867,7 @@ export interface StartSubagentJobResult {
   session: AgentSession;
   liveStatus: SubagentLiveStatus;
   /** Begin prompt execution after the caller validates and registers the job. */
-  start: () => void;
+  start: () => boolean;
   /** Settle and dispose a prepared session without ever starting its prompt. */
   disposeBeforeStart: () => void;
   modelLabel?: string;
@@ -954,22 +910,37 @@ export async function startSubagentJob(
     spawnRequestedAt,
   } = params;
 
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error("A live session owner is required to start a sub-agent.");
+  }
+
   // Enforce the cap within this exact scope; peer sessions never evict each other.
   while (inProcessJobsForOwner(owner).size >= MAX_REGISTRY_SIZE) {
     if (!pruneOldestJob(owner)) break; // registration rejects when no slot is available
   }
 
   const jobId = generateJobId();
-  let sessionRuntime: CompatibleSessionRuntime;
+  let sessionRuntime: ModelRuntime;
   try {
-    sessionRuntime = await createCompatibleSessionRuntime();
+    const modelRuntimeFactory = CodingAgent.ModelRuntime;
+    if (typeof modelRuntimeFactory?.create !== "function") {
+      throw new Error(
+        "Pi SDK >=1.2.0 is required for child ModelRuntime sessions.",
+      );
+    }
+    sessionRuntime = await modelRuntimeFactory.create();
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
+  }
+  if (!resolveLiveSessionScope(owner)) {
+    throw new Error(
+      "Sub-agent owner session shut down before session creation.",
+    );
   }
 
   // Resolve model: exact match only, fallback to default
   // Uses parent's modelRegistry to find extension-added models (e.g. minimax)
-  let targetModel: Model<any> | undefined;
+  let targetModel: Model<Api> | undefined;
   try {
     targetModel = resolveModel(
       modelOverride,
@@ -1070,19 +1041,17 @@ export async function startSubagentJob(
 
   let session: AgentSession;
   try {
-    const sessionOptions = buildSessionOptions(sessionRuntime, {
-      sessionManager: SessionManager.inMemory(),
-      model: targetModel,
-      cwd,
-      ...(thinkingLevel ? { thinkingLevel } : {}),
-      ...(workflowStructuredOutputTool
-        ? { customTools: [workflowStructuredOutputTool] }
-        : {}),
-    });
     session = (
-      await createAgentSession(
-        sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-      )
+      await createAgentSession({
+        sessionManager: SessionManager.inMemory(),
+        model: targetModel,
+        cwd,
+        modelRuntime: sessionRuntime,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+        ...(workflowStructuredOutputTool
+          ? { customTools: [workflowStructuredOutputTool] }
+          : {}),
+      })
     ).session;
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
@@ -1261,8 +1230,17 @@ export async function startSubagentJob(
   const startGate = new Promise<void>((resolve) => {
     startGateResolve = resolve;
   });
-  const start = (): void => {
+  const disposePreparedSession = (): void => {
     if (started || disposedBeforeStart) return;
+    disposedBeforeStart = true;
+    startGateResolve();
+  };
+  const start = (): boolean => {
+    if (started || disposedBeforeStart) return started;
+    if (!resolveLiveSessionScope(owner)) {
+      disposePreparedSession();
+      return false;
+    }
     started = true;
     const startedAt = Date.now();
     telemetryStartedAt = startedAt;
@@ -1290,15 +1268,11 @@ export async function startSubagentJob(
       unit: "job",
     });
     startGateResolve();
-  };
-  const disposePreparedSession = (): void => {
-    if (started || disposedBeforeStart) return;
-    disposedBeforeStart = true;
-    startGateResolve();
+    return true;
   };
   let result: SubagentResult = {
     isError: true,
-    output: "(no output)",
+    output: "",
     usage: {
       input: 0,
       output: 0,
@@ -1414,7 +1388,7 @@ export async function startSubagentJob(
       if (session.agent.state.errorMessage) {
         result = attachWorkflowStructuredOutput({
           isError: true,
-          output: finalOutput || "(no output)",
+          output: finalOutput,
           usage,
           model: undefined,
           thinkingLevel: effectiveThinkingLevel,
@@ -1423,7 +1397,7 @@ export async function startSubagentJob(
       } else {
         result = attachWorkflowStructuredOutput({
           isError: false,
-          output: finalOutput || "(no output)",
+          output: finalOutput,
           usage,
           model: session.model
             ? `${session.model.provider}/${session.model.id}`

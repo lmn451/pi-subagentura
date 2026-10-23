@@ -19,21 +19,17 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 
-const { mockSendCommandToPane, mockGet } = vi.hoisted(() => ({
+const { mockSendCommandToPane } = vi.hoisted(() => ({
   mockSendCommandToPane: vi.fn(),
-  mockGet: vi.fn(),
 }));
 
-// Mock interactive-tmux so we get a stub registry + controllable send-keys helper.
+// Keep the scoped registry real while controlling the send-keys helper.
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
   return {
     ...actual,
     sendCommandToPane: mockSendCommandToPane,
-    interactiveSubagentRegistry: {
-      get: mockGet,
-    } as unknown as Map<string, InteractiveSubagentState>,
   };
 });
 
@@ -124,7 +120,6 @@ describe("send_interactive_subagent_message", () => {
       message: "now do step 2",
     });
 
-    expect(mockGet).not.toHaveBeenCalled();
     expect(mockSendCommandToPane).toHaveBeenCalledWith(
       expect.objectContaining({ paneId: "%99" }),
       expect.stringMatching(/^now do step 2 \[MANDATORY COMPLETION PROTOCOL/),
@@ -407,7 +402,6 @@ describe("send_interactive_subagent_message", () => {
       message: "hi",
     });
 
-    expect(mockGet).not.toHaveBeenCalled();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(result.isError).toBe(true);
     expect(result.details).toMatchObject({ id, status: "invalid_id" });
@@ -425,7 +419,6 @@ describe("send_interactive_subagent_message", () => {
         message,
       });
 
-      expect(mockGet).not.toHaveBeenCalled();
       expect(mockSendCommandToPane).not.toHaveBeenCalled();
       expect(result.isError).toBe(true);
       expect(result.details.status).toBe("empty_message");
@@ -444,7 +437,6 @@ describe("send_interactive_subagent_message", () => {
       message,
     });
 
-    expect(mockGet).not.toHaveBeenCalled();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(result.isError).toBe(true);
     expect(result.details).toMatchObject({
@@ -476,15 +468,18 @@ describe("send_interactive_subagent_message", () => {
     expect(result.details.status).toBe("sent");
     expect(result.details.messageLength).toBe(64 * 1024);
   });
-  it("rejects ids found only in the aggregate compatibility registry", async () => {
-    mockGet.mockReturnValue(runningState({ id: "deadbeefcafebabe" }));
+  it("rejects ids found only in another registered session", async () => {
+    const peer = setupExtension();
+    registerState(peer.sessionScope, { id: "deadbeefcafebabe" });
     const toolDef = getToolDef(api, "send_interactive_subagent_message");
     const result = await toolDef.execute("call-3", {
       id: "deadbeefcafebabe",
       message: "hi",
     });
 
-    expect(mockGet).not.toHaveBeenCalled();
+    expect(peer.sessionScope.interactiveStates.has("deadbeefcafebabe")).toBe(
+      true,
+    );
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(result.isError).toBe(true);
     expect(result.details.status).toBe("not_found");

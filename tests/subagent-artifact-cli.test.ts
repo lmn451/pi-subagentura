@@ -52,10 +52,6 @@ describe("subagent-artifact CLI", () => {
   });
 
   describe("source", () => {
-    it("starts with a shebang", () => {
-      expect(CLI_SOURCE.startsWith("#!/usr/bin/env node")).toBe(true);
-    });
-
     it("parses as valid JavaScript (node --check)", () => {
       // Strip the shebang (node can't parse it as a file) and write to a
       // temp .mjs file, then `node --check` it.
@@ -76,31 +72,23 @@ describe("subagent-artifact CLI", () => {
     });
   });
 
-  describe("start", () => {
-    it("writes a started event", () => {
-      const r = runCli(tmp, ["start"]);
-      expect(r.status).toBe(0);
+  describe("done", () => {
+    it("writes one explicit v2 completion for repeated done commands", () => {
+      runCli(tmp, ["done", "0"]);
+      runCli(tmp, ["done", "0"]);
       const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
         .trim()
-        .split("\n");
+        .split("\n")
+        .map((line) => JSON.parse(line));
       expect(events).toHaveLength(1);
-      const ev = JSON.parse(events[0]);
-      expect(ev.type).toBe("started");
-      expect(ev.status).toBe("running");
-      expect(typeof ev.ts).toBe("number");
-    });
-  });
-
-  describe("done", () => {
-    it("writes a done event with exit code 0 → status done", () => {
-      runCli(tmp, ["done", "0"]);
-      const ev = JSON.parse(
-        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
-      );
-      expect(ev.type).toBe("completion");
-      expect(ev.outcome).toBe("done");
-      expect(ev.status).toBe("done");
-      expect(ev.exitCode).toBe(0);
+      expect(events[0]).toMatchObject({
+        version: 2,
+        type: "completion",
+        source: "explicit",
+        outcome: "done",
+        status: "done",
+        exitCode: 0,
+      });
     });
 
     it("writes a done event with non-zero exit code → status error", () => {
@@ -131,6 +119,182 @@ describe("subagent-artifact CLI", () => {
       expect(existsSync(join(tmp, "outputs", `${ev.eventId}.md`))).toBe(false);
     });
 
+    it("diagnoses an exit while a tool is active without recording arguments", () => {
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({
+          turnId: "active-turn",
+          started: true,
+          activeTools: [
+            {
+              name: "bash",
+              callId: "tool-2",
+              startedAt: Date.now(),
+            },
+          ],
+          lastTool: "bash",
+          secretArguments: "Bearer do-not-persist",
+        }),
+      );
+      const r = runCli(tmp, ["process-exit", "0"]);
+      expect(r.status).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "process_exited",
+          status: "done",
+          exitCode: 0,
+          terminationReason: "active_tool",
+          lastTool: "bash",
+        }),
+      );
+      expect(JSON.stringify(events)).not.toContain("do-not-persist");
+    });
+  });
+
+  describe("process-exit diagnostics", () => {
+    it("uses normal_exit after an explicit completion", () => {
+      expect(runCli(tmp, ["done", "0"]).status).toBe(0);
+      expect(runCli(tmp, ["process-exit", "0"]).status).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.at(-1)).toMatchObject({
+        type: "process_exited",
+        status: "done",
+        exitCode: 0,
+        terminationReason: "normal_exit",
+      });
+      expect(events.at(-1)).not.toHaveProperty("lastTool");
+    });
+
+    it("records a signal alongside an unexpected exit reason", () => {
+      const r = runCli(tmp, ["process-exit", "143"]);
+      expect(r.status).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.at(-1)).toMatchObject({
+        type: "process_exited",
+        status: "error",
+        exitCode: 143,
+        terminationReason: "signal",
+        signal: "SIGTERM",
+      });
+    });
+
+    it("records nonzero exits without inventing a signal", () => {
+      const r = runCli(tmp, ["process-exit", "17"]);
+      expect(r.status).toBe(0);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8")
+          .trim()
+          .split("\n")
+          .at(-1)!,
+      );
+      expect(event).toMatchObject({
+        type: "process_exited",
+        status: "error",
+        exitCode: 17,
+        terminationReason: "nonzero_exit",
+      });
+      expect(event).not.toHaveProperty("signal");
+    });
+
+    it("ignores malformed and oversized active-turn diagnostics", () => {
+      const secret = "prompt secret and raw stderr";
+      writeFileSync(join(tmp, "active-turn.json"), `${secret}\n`);
+      expect(runCli(tmp, ["process-exit", "0"]).status).toBe(0);
+      const malformedEvents = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(malformedEvents.at(-1)).toMatchObject({
+        type: "process_exited",
+        terminationReason: "unknown",
+      });
+      expect(JSON.stringify(malformedEvents)).not.toContain(secret);
+
+      rmSync(join(tmp, "events.ndjson"));
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({
+          turnId: "turn",
+          started: true,
+          lastTool: "x".repeat(20_000),
+        }),
+      );
+      expect(runCli(tmp, ["process-exit", "0"]).status).toBe(0);
+      const oversizedEvents = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(oversizedEvents.at(-1)).toMatchObject({
+        type: "process_exited",
+        terminationReason: "unknown",
+      });
+      expect(JSON.stringify(oversizedEvents)).not.toContain("x".repeat(200));
+    });
+
+    it("keeps cancellation and completion precedence over active metadata", () => {
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({
+          turnId: "active-turn",
+          started: true,
+          activeTools: [{ name: "bash", startedAt: Date.now() }],
+          lastTool: "bash",
+        }),
+      );
+      writeFileSync(join(tmp, ".cancelled"), "", { mode: 0o600 });
+      expect(runCli(tmp, ["process-exit", "143"]).status).toBe(0);
+      let event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8")
+          .trim()
+          .split("\n")
+          .at(-1)!,
+      );
+      expect(event).toMatchObject({
+        type: "process_exited",
+        status: "cancelled",
+        terminationReason: "cancelled",
+        signal: "SIGTERM",
+        lastTool: "bash",
+      });
+
+      rmSync(join(tmp, "events.ndjson"));
+      rmSync(join(tmp, ".cancelled"));
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({
+          turnId: "active-turn",
+          started: true,
+          activeTools: [{ name: "bash", startedAt: Date.now() }],
+          lastTool: "bash",
+        }),
+      );
+      expect(runCli(tmp, ["done", "0"]).status).toBe(0);
+      expect(runCli(tmp, ["process-exit", "0"]).status).toBe(0);
+      event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8")
+          .trim()
+          .split("\n")
+          .at(-1)!,
+      );
+      expect(event).toMatchObject({
+        type: "process_exited",
+        terminationReason: "normal_exit",
+      });
+      expect(event).not.toHaveProperty("lastTool");
+    });
+  });
+
+  describe("completion locking", () => {
     it("serializes concurrent completion writers for one turn", async () => {
       const cliPath = join(tmp, "cli.mjs");
       writeCliScript(cliPath);

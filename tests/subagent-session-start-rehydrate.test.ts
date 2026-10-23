@@ -9,7 +9,11 @@ import { createHash } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type * as InteractiveTmuxModule from "../src/interactive-tmux";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import {
+  clearSessionScopes,
+  getSessionScopes,
+  type SessionScope,
+} from "../src/session-scope";
 import { appendInteractiveState } from "../src/artifact";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { writeCompletionGroup } from "../src/completion-group-store";
@@ -52,12 +56,11 @@ const LEGACY_ROUTED_CHILD = "abc12345";
 
 describe("session_start rehydrate integration", () => {
   let cwd: string;
+  let scope: SessionScope;
 
   beforeEach(() => {
     cwd = makeTmp();
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
-    g.__piSubagenturaPiRef = undefined;
+    clearSessionScopes();
   });
 
   afterEach(() => {
@@ -82,6 +85,9 @@ describe("session_start rehydrate integration", () => {
       await importFresh<typeof import("../src/subagent")>("../src/subagent")
     ).default;
     mod(api as any);
+    scope = getSessionScopes().find(
+      (candidate) => candidate.pi === (api as unknown),
+    )!;
     let startHandler:
       | ((event: any, ctx: any) => void | Promise<void>)
       | undefined;
@@ -117,7 +123,7 @@ describe("session_start rehydrate integration", () => {
       },
     );
 
-    expect(interactiveSubagentRegistry.has("abc12345")).toBe(true);
+    expect(scope.interactiveStates.has("abc12345")).toBe(true);
   });
 
   it("session_start handler survives a missing state file (empty registry)", async () => {
@@ -131,7 +137,7 @@ describe("session_start rehydrate integration", () => {
         },
       ),
     ).not.toThrow();
-    expect(interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("session_start restores a pending durable group before sealing it", async () => {
@@ -197,7 +203,7 @@ describe("session_start rehydrate integration", () => {
         "list_orchestrator_agents",
       ).execute("list-after-lifecycle", {}, undefined, undefined, ctx);
 
-      expect(interactiveSubagentRegistry.size).toBe(0);
+      expect(scope.interactiveStates.size).toBe(0);
       expect(result.details).toMatchObject({
         status: "ok",
         routingMetadataStatus: "loaded",
@@ -294,7 +300,7 @@ describe("session_start rehydrate integration", () => {
     const { startHandler } = await setupExtension();
     await startHandler!({ type: "session_start", reason: "reload" }, { cwd });
 
-    expect(interactiveSubagentRegistry.has("runtime-survives")).toBe(true);
+    expect(scope.interactiveStates.has("runtime-survives")).toBe(true);
     expect(mockDebugLog).toHaveBeenCalledWith(
       "error",
       "orchestrator_routing_recovery_failed",
@@ -321,7 +327,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     // Registry should be empty - different session, no match
-    expect(interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("session_start DOES rehydrate on startup when session ID matches (--session / -r)", async () => {
@@ -342,8 +348,8 @@ describe("session_start rehydrate integration", () => {
     });
 
     // Registry should have the entry - matching session after restart with --session
-    expect(interactiveSubagentRegistry.size).toBe(1);
-    expect(interactiveSubagentRegistry.has("from-same-session")).toBe(true);
+    expect(scope.interactiveStates.size).toBe(1);
+    expect(scope.interactiveStates.has("from-same-session")).toBe(true);
   });
 
   it("session_start filters by parentSessionId on reload", async () => {
@@ -374,9 +380,9 @@ describe("session_start rehydrate integration", () => {
     });
 
     // Only the matching entry should be rehydrated
-    expect(interactiveSubagentRegistry.size).toBe(1);
-    expect(interactiveSubagentRegistry.has("other-session-agent")).toBe(false);
-    expect(interactiveSubagentRegistry.has("this-session-agent")).toBe(true);
+    expect(scope.interactiveStates.size).toBe(1);
+    expect(scope.interactiveStates.has("other-session-agent")).toBe(false);
+    expect(scope.interactiveStates.has("this-session-agent")).toBe(true);
   });
 
   it("session_start does NOT rehydrate on new (explicit new session)", async () => {
@@ -393,7 +399,7 @@ describe("session_start rehydrate integration", () => {
     startHandler!({ type: "session_start", reason: "new" }, { cwd });
 
     // Registry should be empty - new sessions don't rehydrate old subagents
-    expect(interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("session_start does NOT rehydrate on fork (forked session)", async () => {
@@ -410,7 +416,7 @@ describe("session_start rehydrate integration", () => {
     startHandler!({ type: "session_start", reason: "fork" }, { cwd });
 
     // Registry should be empty - forked sessions don't rehydrate old subagents
-    expect(interactiveSubagentRegistry.size).toBe(0);
+    expect(scope.interactiveStates.size).toBe(0);
   });
 
   it("session_start DOES rehydrate on resume (resumed session)", async () => {
@@ -427,8 +433,8 @@ describe("session_start rehydrate integration", () => {
     startHandler!({ type: "session_start", reason: "resume" }, { cwd });
 
     // Registry should have the rehydrated entry - resume preserves subagents
-    expect(interactiveSubagentRegistry.size).toBe(1);
-    expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(true);
+    expect(scope.interactiveStates.size).toBe(1);
+    expect(scope.interactiveStates.has("from-previous-session")).toBe(true);
   });
 
   it("session_start DOES rehydrate on reload (reloaded session)", async () => {
@@ -445,7 +451,7 @@ describe("session_start rehydrate integration", () => {
     startHandler!({ type: "session_start", reason: "reload" }, { cwd });
 
     // Registry should have the rehydrated entry - reload preserves subagents
-    expect(interactiveSubagentRegistry.size).toBe(1);
-    expect(interactiveSubagentRegistry.has("from-previous-session")).toBe(true);
+    expect(scope.interactiveStates.size).toBe(1);
+    expect(scope.interactiveStates.has("from-previous-session")).toBe(true);
   });
 });

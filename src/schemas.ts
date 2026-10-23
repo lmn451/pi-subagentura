@@ -22,83 +22,66 @@ function thinkingLevelSchema(description: string) {
   return StringEnum(THINKING_LEVELS, { description });
 }
 
-export const BaseParams = Type.Object({
-  task: Type.String({ description: "Task to delegate to the sub-agent" }),
-  persona: Type.Optional(
-    Type.String({
-      description:
-        "Optional persona / system prompt (e.g. 'You are a senior TypeScript reviewer')",
-    }),
-  ),
-  model: Type.Optional(
-    Type.String({
-      description:
-        "Override model (e.g. 'anthropic/claude-sonnet-4-5'). Default: inherit from current session.",
-    }),
-  ),
-  thinkingLevel: Type.Optional(
-    thinkingLevelSchema(
-      'Thinking/reasoning level. Default: from settings, else "medium". Higher levels use more tokens. Clamped to model capabilities automatically.',
-    ),
-  ),
-  cwd: Type.Optional(
-    Type.String({
-      description: "Working directory (default: current cwd)",
-    }),
-  ),
-  async: Type.Optional(
-    Type.Boolean({
-      description:
-        "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false ONLY for a single short sub-agent whose answer you need inline before continuing. Async keeps the parent responsive but does NOT by itself prevent nested fan-out — depth is capped separately.",
-    }),
-  ),
-  notifyOnComplete: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("notify", {
-          description:
-            "Deprecated compatibility value. Maps to coordinated each delivery with a TUI-only notice and compact references.",
-        }),
-        Type.Literal("inject", {
-          description:
-            "Deprecated compatibility value. Maps to coordinated each delivery and never injects full output.",
-        }),
-      ],
-      {
+export const BaseParams = Type.Object(
+  {
+    task: Type.String({ description: "Task to delegate to the sub-agent" }),
+    persona: Type.Optional(
+      Type.String({
         description:
-          "Deprecated compatibility payload mode. Either value maps to coordinated each delivery and cannot be combined with completionPolicy or completionGroupId.",
-      },
+          "Optional persona / system prompt (e.g. 'You are a senior TypeScript reviewer')",
+      }),
     ),
-  ),
-  triggerTurnOnComplete: Type.Optional(
-    Type.Boolean({
-      description:
-        "Deprecated compatibility input. Coordinated policy/barrier and human-priority timing are authoritative; cannot be combined with completionPolicy or completionGroupId.",
-    }),
-  ),
-  completionPolicy: Type.Optional(
-    Type.Union([Type.Literal("each"), Type.Literal("group")], {
-      description:
-        'Completion coordination policy for background work. "each" resumes the parent for ready independent work (coalesced while busy). "group" waits for every explicitly registered member sharing completionGroupId after the spawning parent turn settles. Defaults to "each"; sync sub-agent calls reject completionPolicy/completionGroupId.',
-    }),
-  ),
-  completionGroupId: Type.Optional(
-    Type.String({
-      maxLength: 128,
-      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-      description:
-        'Required with completionPolicy="group". Explicit identifier shared by related jobs. Safe 1–128 character IDs only; at most 32 members per group and 512 groups per parent session.',
-    }),
-  ),
-  maxAge: Type.Optional(
-    Type.Integer({
-      minimum: 0,
-      maximum: 2_147_483_647,
-      description:
-        "Optional TTL in milliseconds for completed job retention. Omitted or 0 keeps results indefinitely; positive values expire uncollected coordinated results only after collection and expire other completed results after the TTL.",
-    }),
-  ),
-});
+    model: Type.Optional(
+      Type.String({
+        description:
+          "Optional model override. By default, prefer the current/parent provider and model. " +
+          "Honor any provider or model explicitly requested by the user. " +
+          "If a requested model omits its provider, qualify it with the current/parent provider " +
+          "unless the user explicitly requested another provider. " +
+          "For example, 'anthropic/claude-sonnet-4-5'.",
+      }),
+    ),
+    thinkingLevel: Type.Optional(
+      thinkingLevelSchema(
+        'Thinking/reasoning level. Default: from settings, else "medium". Higher levels use more tokens. Clamped to model capabilities automatically.',
+      ),
+    ),
+    cwd: Type.Optional(
+      Type.String({
+        description: "Working directory (default: current cwd)",
+      }),
+    ),
+    async: Type.Optional(
+      Type.Boolean({
+        description:
+          "Run subagent in background. DEFAULT: true — fan-out and long-running work must not block the parent turn. Returns a jobId immediately; coordinated completion publishes a TUI-only notice and later resumes the parent with a compact retrieval reference. Pass async: false for one short, focused task whose answer you need inline; use a small number of focused async reviewers for broad work. A returned jobId is accepted background work: running or delayed is normal, not evidence of a hang. Do not cancel unfinished work merely to finalize or reclaim context; use an explicit group when a final synthesis depends on several reviewers. Yield the spawning turn to seal the group; report pending jobIds in provisional updates rather than cancelling reviewers to finalize.",
+      }),
+    ),
+    completionPolicy: Type.Optional(
+      Type.Union([Type.Literal("each"), Type.Literal("group")], {
+        description:
+          'Completion coordination policy for background work. "each" resumes the parent for ready independent work (coalesced while busy). "group" waits for every explicitly registered member sharing completionGroupId after the spawning parent turn settles. Defaults to "each"; sync sub-agent calls reject completionPolicy/completionGroupId.',
+      }),
+    ),
+    completionGroupId: Type.Optional(
+      Type.String({
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        description:
+          'Required with completionPolicy="group". Explicit identifier shared by related jobs. Safe 1–128 character IDs only; at most 32 members per group and 512 groups per parent session.',
+      }),
+    ),
+    maxAge: Type.Optional(
+      Type.Integer({
+        minimum: 0,
+        maximum: 2_147_483_647,
+        description:
+          "Optional TTL in milliseconds for completed job retention. Omitted or 0 keeps results indefinitely; positive values expire uncollected coordinated results only after collection and expire other completed results after the TTL.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 export const StatusParams = Type.Object({
   jobId: Type.String({
@@ -115,7 +98,7 @@ export const ResultParams = Type.Object({
   wait: Type.Optional(
     Type.Boolean({
       description:
-        "Explicitly wait for a running job. Set true ONLY when the user asks to wait. Otherwise running jobs return immediately and continue in the background.",
+        "Explicitly wait for a running job when the user asks or when a bounded final synthesis depends on that specific result. Otherwise running jobs return immediately and continue in the background. A timeout stops only this wait and does not cancel the job.",
     }),
   ),
   timeoutMs: Type.Optional(
@@ -153,7 +136,12 @@ const InteractiveSpawnFields = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Optional model override for the child Pi process",
+      description:
+        "Optional model override for the child Pi process. By default, prefer the current/parent provider and model. " +
+        "Honor any provider or model explicitly requested by the user. " +
+        "If a requested model omits its provider, qualify it with the current/parent provider " +
+        "unless the user explicitly requested another provider. " +
+        "For example, 'anthropic/claude-sonnet-4-5'.",
     }),
   ),
   thinkingLevel: Type.Optional(
@@ -189,18 +177,6 @@ const InteractiveSpawnFields = Type.Object({
     Type.Boolean({
       description:
         "Spawn the sub-agent in a detached named window (hidden from your mux layout) instead of a visible horizontal split. Default true. Pass background: false for a side-by-side split you can watch in real time.",
-    }),
-  ),
-  notifyOnComplete: Type.Optional(
-    Type.Union([Type.Literal("notify"), Type.Literal("inject")], {
-      description:
-        "Deprecated compatibility mode. Either value maps to coordinated each delivery with TUI-only notice and compact references; cannot be combined with completionPolicy or completionGroupId.",
-    }),
-  ),
-  triggerTurnOnComplete: Type.Optional(
-    Type.Boolean({
-      description:
-        "Deprecated compatibility input. Coordinated policy/barrier and human-priority timing are authoritative; cannot be combined with completionPolicy or completionGroupId.",
     }),
   ),
   completionPolicy: Type.Optional(
@@ -292,7 +268,7 @@ function exposeProviderObjectShape<T extends object>(
   validationSchema: T,
   providerShape: typeof InteractiveProviderFields,
 ): T {
-  // Pi 0.80.6's Anthropic adapter projects only these top-level keywords.
+  // The Anthropic adapter projects only these top-level keywords.
   // Keep allOf/anyOf on the returned schema so TypeBox validation stays strict.
   return {
     ...validationSchema,

@@ -113,8 +113,6 @@ function setup() {
     },
     parentStreaming: false,
     inProcessJobs: new Map(),
-    pendingInProcessDeliveries: [],
-    interactiveStates: new Map(),
   });
   registerCompletionCoordinator(pi as never, registeredScope);
   return {
@@ -176,6 +174,60 @@ describe("completion coordinator", () => {
       .render(200)
       .join("\n");
     expect(expanded).toContain('("worker", turn "turn-worker")');
+  });
+
+  it("renders resolved workflow errors as completed with errors", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const renderer = setupResult.pi.registerEntryRenderer.mock.calls.find(
+      ([type]) => type === "subagentura-completion",
+    )?.[1];
+    const theme = { fg: (_color: string, text: string) => text };
+    const entry = {
+      data: record("workflow-id", {
+        source: "workflow",
+        status: "error",
+        presentation: "completed-with-errors",
+        label: "demo workflow",
+      }),
+    };
+    const rendered = renderer(entry, { expanded: false }, theme)
+      .render(200)
+      .join("\n")
+      .trimEnd();
+    expect(rendered).toBe("from: demo workflow, ⚠ completed with errors");
+
+    publishCompletion(entry.data, sessionOwner(scope));
+    const published = userCompletions(setupResult.entries)[0];
+    expect(published.data.presentation).toBe("completed-with-errors");
+
+    clearCompletionCoordinator(sessionOwner(scope));
+    registerCompletionCoordinator(setupResult.pi as never, scope);
+    const recoveredRenderer = setupResult.pi.registerEntryRenderer.mock.calls
+      .filter(([type]) => type === "subagentura-completion")
+      .at(-1)?.[1];
+    const recovered = recoveredRenderer(
+      { data: published.data },
+      { expanded: false },
+      theme,
+    )
+      .render(200)
+      .join("\n")
+      .trimEnd();
+    expect(recovered).toBe("from: demo workflow, ⚠ completed with errors");
+
+    const manifest = prepareCompletionManifest(sessionOwner(scope));
+    expect(manifest?.content).toContain('"status":"error"');
+    expect(manifest?.content).not.toContain("presentation");
+
+    expect(() =>
+      publishCompletion(
+        record("invalid-presentation", {
+          presentation: "completed-with-errors",
+        }),
+        sessionOwner(scope),
+      ),
+    ).toThrow("Invalid completion presentation");
   });
   it("uses known interactive telemetry timestamps and omits legacy latency", () => {
     const setupResult = setup();
@@ -331,9 +383,10 @@ describe("completion coordinator", () => {
     expect(content).toContain("Agent b");
   });
 
-  it("waits for a sealed group and every member including errors and cancels", () => {
+  it("delivers group errors before the barrier and groups remaining results", () => {
     const setupResult = setup();
     scope = setupResult.scope;
+    const owner = sessionOwner(scope);
     const group = {
       policy: "group" as const,
       groupId: "review-group",
@@ -344,33 +397,38 @@ describe("completion coordinator", () => {
         id,
         "group",
         group.groupId,
-        sessionOwner(scope),
+        owner,
       );
     }
 
-    publishCompletion(record("a", group), sessionOwner(scope));
-    publishCompletion(
-      record("b", { ...group, status: "error" }),
-      sessionOwner(scope),
-    );
-    flushCompletionManifests(sessionOwner(scope));
-    expect(manifests(setupResult.pi)).toHaveLength(0);
+    publishCompletion(record("a", group), owner);
+    publishCompletion(record("b", { ...group, status: "error" }), owner);
+    flushCompletionManifests(owner);
 
-    settleCompletionParentTurn(sessionOwner(scope));
-    flushCompletionManifests(sessionOwner(scope));
-    expect(manifests(setupResult.pi)).toHaveLength(0);
+    expect(manifests(setupResult.pi)).toHaveLength(1);
+    const errorManifest = manifests(setupResult.pi)[0][0];
+    expect(errorManifest.details.completionIds).toEqual(["completion-b"]);
+    expect(errorManifest.details.groups).toEqual(["review-group"]);
+    expect(errorManifest.content).toContain('"status":"error"');
 
-    publishCompletion(
-      record("c", { ...group, status: "cancelled" }),
-      sessionOwner(scope),
-    );
-    flushCompletionManifests(sessionOwner(scope));
+    flushCompletionManifests(owner);
+    expect(manifests(setupResult.pi)).toHaveLength(1);
+
+    settleCompletionParentTurn(owner);
+    flushCompletionManifests(owner);
+    expect(manifests(setupResult.pi)).toHaveLength(1);
+
+    publishCompletion(record("c", { ...group, status: "cancelled" }), owner);
+    flushCompletionManifests(owner);
 
     expect(userCompletions(setupResult.entries)).toHaveLength(3);
-    expect(manifests(setupResult.pi)).toHaveLength(1);
-    expect(manifests(setupResult.pi)[0][0].details.completionIds).toHaveLength(
-      3,
+    expect(manifests(setupResult.pi)).toHaveLength(2);
+    expect(manifests(setupResult.pi)[1][0].details.completionIds).toHaveLength(
+      2,
     );
+    expect(manifests(setupResult.pi)[1][0].content).toContain("Agent a");
+    expect(manifests(setupResult.pi)[1][0].content).toContain("Agent c");
+    expect(manifests(setupResult.pi)[1][0].content).not.toContain("Agent b");
   });
 
   it("renders grouped progress for each terminal member before the final manifest", () => {
@@ -411,6 +469,8 @@ describe("completion coordinator", () => {
     expect(render(second)).toContain(
       "from: Agent b, ✕ error; waiting for 1 more",
     );
+    flushCompletionManifests(owner);
+    expect(manifests(setupResult.pi)).toHaveLength(0);
 
     sealCompletionGroups(owner);
     publishCompletion(record("c", { ...group, status: "cancelled" }), owner);
@@ -691,10 +751,7 @@ describe("completion coordinator", () => {
   });
 
   it("requires safe explicit group identifiers", () => {
-    expect(resolveCompletionPolicy({})).toEqual({
-      policy: "each",
-      legacy: false,
-    });
+    expect(resolveCompletionPolicy({})).toEqual({ policy: "each" });
     expect(() =>
       resolveCompletionPolicy({
         completionPolicy: "group",
@@ -919,19 +976,6 @@ describe("completion coordinator", () => {
 
     const completionEntries = userCompletions(setupResult.entries);
     expect(completionEntries.at(-1)?.data.policy).toBe("each");
-  });
-
-  it("maps legacy completion controls and rejects mixed group options", () => {
-    expect(resolveCompletionPolicy({ notifyOnComplete: "inject" })).toEqual({
-      policy: "each",
-      legacy: false,
-    });
-    expect(() =>
-      resolveCompletionPolicy({
-        notifyOnComplete: "notify",
-        completionGroupId: "mixed",
-      }),
-    ).toThrow(/cannot be combined/i);
   });
 
   it("rejects unregistered grouped publication after sealing", () => {

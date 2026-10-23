@@ -10,13 +10,11 @@
  * represents potentially active work.
  */
 import { inProcessJobsForOwner, scheduleJobCleanup } from "./helpers";
-import {
-  cancelInteractiveSubagent,
-  interactiveSubagentRegistry,
-} from "./interactive-tmux";
+import { cancelInteractiveSubagent } from "./interactive-tmux";
 import {
   cancelWorkflowJob,
   normalizeCancelledWorkflowState,
+  requestDurableWorkflowCancellation,
   workflowJobsForOwner,
 } from "./workflow-jobs";
 import {
@@ -33,6 +31,7 @@ import {
 export interface CancelAllResult {
   jobsAborted: number;
   workflowsAborted: number;
+  workflowsFailed: number;
   interactiveKilled: number;
   interactivePreserved: number;
   snapshots?: CancellationSnapshotReceipt[];
@@ -44,6 +43,7 @@ export async function cancelAllFlows(
   const result: CancelAllResult = {
     jobsAborted: 0,
     workflowsAborted: 0,
+    workflowsFailed: 0,
     interactiveKilled: 0,
     interactivePreserved: 0,
     snapshots: [],
@@ -57,10 +57,12 @@ export async function cancelAllFlows(
     snapshots!.push(receipt);
   };
 
+  const failedDurableWorkflowIds = new Set<string>();
+
   // Snapshot every known child before the first potentially slow abort.
   const interactiveRegistry = owner
     ? resolveLiveSessionScope(owner)?.interactiveStates
-    : interactiveSubagentRegistry;
+    : undefined;
   const interactiveStates = [...(interactiveRegistry?.values() ?? [])].filter(
     (state) => interactiveStateBelongsToOwner(state, owner),
   );
@@ -88,8 +90,6 @@ export async function cancelAllFlows(
     reason: "cancel-all-flows aborted every running flow",
   };
   for (const job of jobs) {
-    const cancellationAt = Date.now();
-    job.cancellation = { ...jobCancellation, at: cancellationAt };
     job.cancellationSnapshot = snapshotInProcessSession({
       kind: "in-process",
       jobId: job.id,
@@ -104,7 +104,43 @@ export async function cancelAllFlows(
     });
     addSnapshot(job.cancellationSnapshot);
   }
+
+  // 1. Persist explicit workflow cancellation before aborting owned children.
+  for (const workflow of workflowJobsForOwner(owner)) {
+    if (workflow.status === "running") {
+      if (workflow.durable) {
+        try {
+          await requestDurableWorkflowCancellation(
+            workflow.durable.store,
+            workflow,
+            { suppressCompletionNotification: true },
+          );
+          result.workflowsAborted++;
+        } catch {
+          // A failed persistence/marker write leaves the job alive for retry.
+          failedDurableWorkflowIds.add(workflow.id);
+          result.workflowsFailed++;
+        }
+      } else {
+        // Cancel-all owns the aggregate notification for this invocation.
+        workflow.suppressCompletionNotification = true;
+        cancelWorkflowJob(workflow, "explicit_cancel");
+        result.workflowsAborted++;
+      }
+    }
+    if (workflow.status === "cancelled") {
+      normalizeCancelledWorkflowState(workflow);
+      for (const receipt of workflow.cancellationSnapshots ?? []) {
+        addSnapshot(receipt);
+      }
+    }
+  }
+  // 2. Abort in-process jobs not already canceled by a workflow.
   for (const job of jobs) {
+    if (job.workflowId && failedDurableWorkflowIds.has(job.workflowId))
+      continue;
+    if (job.status !== "running") continue;
+    job.cancellation = { ...jobCancellation, at: Date.now() };
     try {
       // Prefer the controller so the abort handler cascades to descendants;
       // fall back to a direct session abort for jobs spawned without one.
@@ -118,26 +154,10 @@ export async function cancelAllFlows(
     scheduleJobCleanup(job.id, true, undefined, owner);
     result.jobsAborted++;
   }
-
-  // 2. Abort all running workflows
-  for (const workflow of workflowJobsForOwner(owner)) {
-    if (workflow.status === "running") {
-      // Cancel-all owns the aggregate notification, so retain the existing
-      // suppression while routing state changes through the shared helper.
-      workflow.suppressCompletionNotification = true;
-      cancelWorkflowJob(workflow, "explicit_cancel");
-      result.workflowsAborted++;
-    }
-    if (workflow.status === "cancelled") {
-      normalizeCancelledWorkflowState(workflow);
-      for (const receipt of workflow.cancellationSnapshots ?? []) {
-        addSnapshot(receipt);
-      }
-    }
-  }
-
   // 3. Kill active interactive agents; preserve confirmed-idle ones
   for (const state of interactiveStates) {
+    if (state.workflowId && failedDurableWorkflowIds.has(state.workflowId))
+      continue;
     if (state.status === "running" || state.status === "unknown") {
       try {
         const cancelled = cancelInteractiveSubagent(
