@@ -131,8 +131,39 @@ describe("durable workflow journal", () => {
     ).toHaveLength(1);
   });
 
+  it("resumes a complete append after failed fsync and confirms it is durable once", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    vi.spyOn(file, "sync").mockRejectedValueOnce(
+      new Error("injected fsync failure"),
+    );
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow("fsync");
+    const path = join(store.directory, "journal.ndjson");
+    const committedBytes = await readFile(path);
+    stores.splice(stores.indexOf(store), 1);
+    await expect(store.close()).rejects.toThrow("fsync");
+
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    expect(
+      reopened.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    await reopened.close();
+    expect(await readFile(path)).toEqual(committedBytes);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
+        (event) => event.kind === "cancelled",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("blocks a partial real append and preserves its bytes", async () => {
-    const { store } = await fixture("return 1;");
+    const { scope, store } = await fixture("return 1;");
     const path = join(store.directory, "journal.ndjson");
     const before = await readFile(path);
     const file = (
@@ -157,6 +188,10 @@ describe("durable workflow journal", () => {
     expect(partial.subarray(0, before.length)).toEqual(before);
     stores.splice(stores.indexOf(store), 1);
     await expect(store.close()).rejects.toThrow(/recovery|journal/i);
+    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
+      /incomplete final event/i,
+    );
+    expect(await readFile(path)).toEqual(partial);
   });
 
   it("compares replay values independently of V8's numeric encoding while retaining iteration order", () => {
@@ -675,15 +710,21 @@ describe("durable workflow journal", () => {
     expect(await WorkflowRunStore.inspect(scope, "../outside")).toBeUndefined();
   });
 
-  it("repairs only torn final lines, never complete corrupt records", async () => {
+  it("rejects torn final lines without rewriting them or accepting corrupt records", async () => {
     const { scope, store } = await fixture("return 1;");
     await store.close();
     const path = join(store.directory, "journal.ndjson");
+    const complete = await readFile(path);
     await appendFile(path, '{"torn":');
-    const reopened = await WorkflowRunStore.resume(scope, store.id);
-    await reopened.close();
-    expect((await readFile(path, "utf8")).endsWith("\n")).toBe(true);
-    await appendFile(path, '{"corrupt":true}\n');
+    const torn = await readFile(path);
+    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
+      /incomplete final event/i,
+    );
+    expect(await readFile(path)).toEqual(torn);
+    await writeFile(
+      path,
+      Buffer.concat([complete, Buffer.from('{"corrupt":true}\n')]),
+    );
     await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
       "corrupt",
     );

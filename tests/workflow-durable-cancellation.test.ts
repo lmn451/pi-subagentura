@@ -4,6 +4,7 @@ import type * as NodeFs from "node:fs";
 import {
   mkdtemp,
   mkdir,
+  appendFile,
   readFile,
   rm,
   writeFile,
@@ -262,7 +263,7 @@ async function persistedRunWithAttempt() {
   const path = attempt.path;
   const id = store.id;
   await store.close();
-  return { id, path, runScope };
+  return { id, path, runScope, directory: store.directory };
 }
 
 beforeEach(async () => {
@@ -298,6 +299,29 @@ afterEach(async () => {
 });
 
 describe("durable cancellation regressions", () => {
+  it("does not cancel a run when a partial journal tail survives close and reopen", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    const { id, runScope, directory } = await persistedRunWithAttempt();
+    const journalPath = join(directory, "journal.ndjson");
+    await appendFile(journalPath, '{"partial":');
+    const partialJournal = await readFile(journalPath);
+    const cancel = getTool("cancel_workflow");
+
+    const result = await cancel.execute(
+      "partial-journal-cancel",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("error");
+    expect(await readFile(journalPath)).toEqual(partialJournal);
+    const events = await WorkflowRunStore.inspect(runScope, id);
+    expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
+  });
+
   it("commits cancel-all intent before abort and retains it when settlement is interrupted", async () => {
     const agentStarted = deferred<void>();
     const abortObserved = deferred<void>();
