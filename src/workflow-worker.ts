@@ -1389,6 +1389,7 @@ export async function awaitInteractiveResult(
     terminal: null,
   };
   let cancellationRequested = false;
+  let hasCancellationError = false;
   let cancellationError: unknown;
   const requestCancellationOnce = () => {
     if (cancellationRequested) return;
@@ -1398,8 +1399,33 @@ export async function awaitInteractiveResult(
         requestCancellation();
       } catch (error) {
         cancellationError = error;
+        hasCancellationError = true;
       }
-    } else requestInteractiveCancellation(state, onCancellationSnapshot);
+    }
+    const durableInterrupt =
+      (signal?.reason as { source?: string } | undefined)?.source ===
+      "durable_interrupt";
+    if (!durableInterrupt) {
+      try {
+        requestInteractiveCancellation(state, onCancellationSnapshot);
+      } catch (error) {
+        if (!hasCancellationError) {
+          cancellationError = error;
+          hasCancellationError = true;
+        }
+      }
+    }
+  };
+  const settleCancellationError = () => {
+    if (!hasCancellationError) return;
+    if (requestCancellation) throw cancellationError;
+    debugLog("warn", "interactive_cancel_cleanup_failed", {
+      agentId: state.id,
+      error:
+        cancellationError instanceof Error
+          ? cancellationError.message
+          : String(cancellationError),
+    });
   };
   const onAbort = () => requestCancellationOnce();
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -1409,7 +1435,7 @@ export async function awaitInteractiveResult(
       let terminal: TurnTerminalEvent | null;
       if (signal?.aborted) {
         requestCancellationOnce();
-        if (cancellationError) throw cancellationError;
+        settleCancellationError();
         const cancellationUsage = await parseUsageFromSessionFile(
           state.sessionFile,
         );
@@ -1420,6 +1446,7 @@ export async function awaitInteractiveResult(
         const usage = await parseUsageFromSessionFile(state.sessionFile);
         if (signal?.aborted) {
           requestCancellationOnce();
+          settleCancellationError();
           return abortedInteractiveResult(usage);
         }
         switch (terminal.outcome) {
@@ -1468,6 +1495,7 @@ export async function awaitInteractiveResult(
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
           return {
@@ -1489,6 +1517,7 @@ export async function awaitInteractiveResult(
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
           reportMuxProbeRuntimeFailure(state, telemetry);

@@ -136,6 +136,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result callbacks against public Pi SDK types instead of local SDK-shaped
   interfaces and broad casts; retain extension-owned state and result protocols.
 
+### Fixed
+
+- Reject new workflows during session teardown and replacement setup, including
+  lifecycle changes inside options builders, while retaining terminal telemetry
+  for already accepted work.
+- A failed durable completion-group recovery no longer suppresses independent
+  completions. Group errors remain eligible under ordinary parent-turn rules
+  without discarding mixed-source membership; successful and cancelled members
+  remain behind the group barrier.
+- Reconcile fallback result-consumption receipts with completion expectations
+  restored later; receipts consume only their matching completion and do not
+  suppress unrelated later-turn completions.
+- Bind durable manual result-consumption receipts to the initiating session owner.
+- Persist durable cancellation before cancel-all aborts owned work; failed writes
+  keep the workflow protected and retryable rather than counted as aborted.
+- Retrying durable cancellation reissues per-attempt markers even after the
+  run-level cancellation intent is already recorded.
+- Preserve enabled cancellation snapshot receipts for durable process attempts
+  without treating persisted mux pane ids as authority to kill panes.
+- Preserve persisted child token/cost usage and forward the actual cancellation
+  snapshot receipt when best-effort non-durable interactive artifact or pane
+  termination cleanup fails. Durable cancellation errors remain explicit.
+
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
+
 ## [4.0.1] - 2026-10-18
 
 ### Fixed

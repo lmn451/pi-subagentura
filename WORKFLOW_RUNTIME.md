@@ -298,6 +298,22 @@ blocked until recovery succeeds; independent completions remain deliverable.
 - `cancel_workflow` durably records cancellation intent. Process wrappers consume
   their exact attempt's cancellation marker and terminate their child process
   group. A persisted pane id alone never authorizes killing a recovered pane.
+- For non-durable process-backed cancellation, interactive artifact and
+  pane-termination cleanup are best effort. A cleanup failure does not discard
+  usage already persisted in the child Pi session file, including token and cost
+  fields; the actual cancellation snapshot receipt is forwarded when captured.
+  Durable cancellation intent or attempt-marker write failures remain explicit
+  errors rather than being downgraded to best-effort cancellation.
+- `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
+  before aborting owned work. When snapshots are enabled, cancel-all captures
+  receipts for owned work, including durable process attempts, before aborting.
+  A failed intent or attempt-marker write reports the workflow as failed to
+  cancel and keeps its owned in-process/process-backed work protected and
+  retryable. Retrying after the run-level intent is recorded still retries the
+  per-attempt markers.
+- Process wrappers consume the exact attempt's cancellation marker and
+  terminate their child process group. A persisted pane id alone never
+  authorizes killing a recovered pane.
   Cancellation cannot undo earlier writes, remote requests, or independently
   detached descendants. Inspect cancellation state rather than assuming every
   external effect has stopped immediately.
