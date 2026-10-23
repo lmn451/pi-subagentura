@@ -11,7 +11,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   clearSessionScopes,
@@ -43,11 +43,35 @@ import {
   type CompletionRecord,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
+import { readCompletionGroupsSync } from "../src/completion-group-store";
 import { createTelemetrySession } from "../src/telemetry";
 
+const groupDirectorySyncFault = vi.hoisted(() => ({
+  path: "",
+  descriptor: -1,
+  fail: false,
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync) };
+  return {
+    ...actual,
+    openSync: vi.fn((...args: any[]) => {
+      const descriptor = actual.openSync(...args);
+      if (args[0] === groupDirectorySyncFault.path && args[1] === "r")
+        groupDirectorySyncFault.descriptor = descriptor;
+      return descriptor;
+    }),
+    fsyncSync: vi.fn((descriptor: number) => {
+      if (
+        groupDirectorySyncFault.fail &&
+        descriptor === groupDirectorySyncFault.descriptor
+      ) {
+        groupDirectorySyncFault.fail = false;
+        throw new Error("completion group parent sync failed");
+      }
+      return actual.fsyncSync(descriptor);
+    }),
+  };
 });
 const coordinatorLedgerRoots: string[] = [];
 
@@ -145,6 +169,9 @@ describe("completion coordinator", () => {
   });
 
   afterEach(() => {
+    groupDirectorySyncFault.path = "";
+    groupDirectorySyncFault.descriptor = -1;
+    groupDirectorySyncFault.fail = false;
     if (scope) clearCompletionCoordinator(sessionOwner(scope));
     clearSessionScopes();
     vi.unstubAllGlobals();
@@ -818,6 +845,31 @@ describe("completion coordinator", () => {
         sessionOwner(scope),
       ),
     ).toThrow(/full/);
+  });
+
+  it("retries durable group registration after syncing a newly created directory fails", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const groupId = "directory-sync-retry";
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    groupDirectorySyncFault.path = dirname(directory);
+    groupDirectorySyncFault.fail = true;
+
+    expect(() =>
+      registerCompletionMember("workflow", "wfd_a", "group", groupId, owner),
+    ).toThrow("parent sync failed");
+    expect(readCompletionGroupsSync(directory)).toEqual([]);
+
+    registerCompletionMember("workflow", "wfd_a", "group", groupId, owner);
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      { version: 1, groupId, members: ["workflow:wfd_a"], sealed: false },
+    ]);
   });
 
   it("rejects new work before launching into a sealed group", () => {
