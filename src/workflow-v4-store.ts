@@ -37,6 +37,13 @@ export interface V4StepNode {
   answer?: unknown;
 }
 
+type StoredV4StepNode = Omit<V4StepNode, "error"> & {
+  retryFrameHash?: string;
+  error?: NonNullable<V4StepNode["error"]> & {
+    schemaRepairExhausted?: true;
+  };
+};
+
 const MAX_STEPS = 8192;
 const MAX_VALUE_BYTES = 512 * 1024;
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
@@ -45,6 +52,7 @@ const liveStores = new Map<string, WorkflowV4Store>();
 const liveStoreIds = new WeakMap<WorkflowV4Store, string>();
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+const EMPTY_RETRY_FRAME_HASH = hash("[]");
 const key = (path: string[]) => JSON.stringify(path);
 
 function checkedPath(value: unknown): string[] {
@@ -72,8 +80,11 @@ function encoded(value: unknown): string {
   return result;
 }
 
-export function workflowV4Steps(events: RunEvent[], limit = 256) {
-  const nodes = new Map<string, V4StepNode>();
+export function workflowV4Steps(
+  events: RunEvent[],
+  limit = 256,
+): Omit<V4StepNode, "input" | "policy" | "output" | "answer">[] {
+  const nodes = new Map<string, StoredV4StepNode>();
   for (const event of events) {
     if (event.kind === "v4.step") nodes.set(key(event.data.path), event.data);
   }
@@ -107,12 +118,20 @@ export function workflowV4Steps(events: RunEvent[], limit = 256) {
   }
   return all
     .filter((node) => selected.has(node))
-    .map(({ input, policy, output, answer, ...node }) => node);
+    .map(({ input, policy, output, answer, ...visible }) => {
+      delete visible.retryFrameHash;
+      if (visible.error?.schemaRepairExhausted === true) {
+        const { schemaRepairExhausted: _schemaRepairExhausted, ...error } =
+          visible.error;
+        visible.error = error;
+      }
+      return visible;
+    });
 }
 
 /** The journal owns step state; this adapter also serves deterministic memory tests. */
 export class WorkflowV4Store {
-  private nodes = new Map<string, V4StepNode>();
+  private nodes = new Map<string, StoredV4StepNode>();
   private artifacts = new Map<string, { ref: any; value?: unknown }>();
   private waiters = new Map<
     string,
@@ -149,11 +168,14 @@ export class WorkflowV4Store {
     this.publish();
   }
 
-  snapshot() {
-    return workflowV4Steps([
-      ...(this.store?.events ?? []),
-      ...[...this.nodes.values()].map((data) => ({ kind: "v4.step", data })),
-    ]);
+  snapshot(limit?: number) {
+    return workflowV4Steps(
+      [
+        ...(this.store?.events ?? []),
+        ...[...this.nodes.values()].map((data) => ({ kind: "v4.step", data })),
+      ],
+      limit,
+    );
   }
 
   getStep(path: string[]) {
@@ -167,7 +189,7 @@ export class WorkflowV4Store {
     this.onStep?.(this.snapshot());
   }
 
-  private async save(node: V4StepNode): Promise<void> {
+  private async save(node: StoredV4StepNode): Promise<void> {
     if (this.closed) throw new Error("Workflow step store is closed.");
     await this.store?.append("v4.step", node);
     this.nodes.set(key(node.path), node);
@@ -182,7 +204,7 @@ export class WorkflowV4Store {
     return next;
   }
 
-  private node(path: unknown): V4StepNode {
+  private node(path: unknown): StoredV4StepNode {
     const found = this.nodes.get(key(checkedPath(path)));
     if (!found) throw new Error("Workflow step has not started.");
     return found;
@@ -245,6 +267,7 @@ export class WorkflowV4Store {
         )
           ? payload.status
           : "failed";
+        const policy = decodeRunValue<any>(node.policy);
         await this.save({
           ...node,
           status,
@@ -260,6 +283,12 @@ export class WorkflowV4Store {
             ...(typeof payload.error?.stage === "string"
               ? { stage: payload.error.stage.slice(0, 64) }
               : {}),
+            ...(status === "failed" &&
+            node.kind === "agent" &&
+            policy.persist !== false &&
+            payload.error?.schemaRepairExhausted === true
+              ? { schemaRepairExhausted: true }
+              : {}),
             path: node.path,
           },
         });
@@ -271,6 +300,10 @@ export class WorkflowV4Store {
   private async enter(payload: any) {
     const path = checkedPath(payload.path);
     const previous = this.nodes.get(key(path));
+    const retryFrameHash = hash(JSON.stringify(payload.retryFrames ?? []));
+    const previousRetryFrameHash =
+      previous?.retryFrameHash ?? EMPTY_RETRY_FRAME_HASH;
+    const sameRetryFrame = previousRetryFrameHash === retryFrameHash;
     if (!previous && this.nodes.size >= MAX_STEPS)
       throw new Error("Workflow step limit exceeded.");
     const input = encoded(payload.input);
@@ -304,19 +337,20 @@ export class WorkflowV4Store {
             previous.input,
             previous.policy,
             previous.generation ?? 0,
+            retryFrameHash,
           ]),
         ),
       };
     }
     if (
       compatible &&
+      sameRetryFrame &&
       previous.status === "failed" &&
       payload.policy?.persist !== false &&
       payload.policy?.cache !== false &&
       payload.policy?.resume !== false &&
       (previous.attempt >= (payload.policy?.retry?.attempts ?? 1) ||
-        previous.error?.category === "budget") &&
-      ["collect", "continue"].includes(payload.policy?.failure)
+        previous.error?.category === "budget")
     ) {
       return {
         reuse: false,
@@ -329,6 +363,7 @@ export class WorkflowV4Store {
             previous.input,
             previous.policy,
             previous.generation ?? 0,
+            retryFrameHash,
           ]),
         ),
       };
@@ -343,12 +378,18 @@ export class WorkflowV4Store {
     const generation = compatible
       ? (previous.generation ?? 0) + (freshExecution ? 1 : 0)
       : 0;
+    const newEnclosingRetry =
+      compatible && previous.status === "failed" && !sameRetryFrame;
     const attempt =
       compatible && !freshExecution
-        ? previous.attempt +
-          (["failed", "cancelled", "blocked"].includes(previous.status) ? 1 : 0)
+        ? newEnclosingRetry
+          ? 1
+          : previous.attempt +
+            (["failed", "cancelled", "blocked"].includes(previous.status)
+              ? 1
+              : 0)
         : 1;
-    const node: V4StepNode = {
+    const node: StoredV4StepNode = {
       ...(compatible ? previous : {}),
       path,
       id: path.at(-1)!,
@@ -359,6 +400,7 @@ export class WorkflowV4Store {
       generation,
       input,
       policy,
+      retryFrameHash,
       inputHash: hash(input),
       definitionHash,
       startedAt: compatible ? previous.startedAt : Date.now(),
@@ -370,7 +412,14 @@ export class WorkflowV4Store {
       reuse: false,
       attempt,
       idempotencyKey: hash(
-        JSON.stringify([path, definitionHash, input, policy, generation]),
+        JSON.stringify([
+          path,
+          definitionHash,
+          input,
+          policy,
+          generation,
+          retryFrameHash,
+        ]),
       ),
     };
   }
@@ -513,7 +562,7 @@ export class WorkflowV4Store {
     const bytes = Buffer.byteLength(content);
     if (bytes > MAX_ARTIFACT_BYTES)
       throw new Error("Workflow artifact exceeds 2 MiB.");
-    const id = hash(key(path) + content);
+    const id = hash(JSON.stringify([key(path), type, content]));
     const existing = this.artifacts.get(id);
     if (existing) return existing.ref;
     if (

@@ -1,5 +1,8 @@
 import { Type } from "typebox";
-import { registerDurableWorkflowTools } from "./workflow-durable-tools";
+import {
+  formatWaitingInputActions,
+  registerDurableWorkflowTools,
+} from "./workflow-durable-tools";
 import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
 import {
   prepareDurableProcess,
@@ -56,6 +59,7 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
+import { getLiveWorkflowV4Store } from "./workflow-v4-store";
 import { sanitizeOutput } from "./notifications";
 import {
   completionDisplayLabel,
@@ -1292,12 +1296,17 @@ export function registerWorkflowTool(
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
       const usage = presentWorkflowUsage(st.snapshot.usage);
       const liveUsage = presentWorkflowUsage(st.snapshot.liveUsage);
-      const waiting =
+      const allWaiting =
         st.status === "running"
-          ? (st.snapshot.steps?.filter(
-              (step) => step.status === "waiting_for_input",
-            ) ?? [])
+          ? (
+              getLiveWorkflowV4Store(st.id)?.snapshot(Infinity) ??
+              st.snapshot.steps ??
+              []
+            ).filter((step) => step.status === "waiting_for_input")
           : [];
+      const waitingActions = formatWaitingInputActions(st.id, allWaiting);
+      const waiting = waitingActions.visible;
+      const waitingRemainderCount = waitingActions.omittedCount;
       return {
         content: [
           {
@@ -1315,15 +1324,17 @@ export function registerWorkflowTool(
               (st.snapshot.currentPhase
                 ? `, phase: ${st.snapshot.currentPhase}`
                 : "") +
-              (st.error ? `\nerror: ${st.error}` : ""),
+              (st.error ? `\nerror: ${st.error}` : "") +
+              waitingActions.text,
           },
         ],
         details: {
           status:
-            st.status === "running" && waiting.length
+            st.status === "running" && allWaiting.length
               ? "waiting_for_input"
               : st.status,
           waiting,
+          waitingRemainderCount,
           presentationStatus: presentation.label,
           workflowId: st.id,
           name: st.name,

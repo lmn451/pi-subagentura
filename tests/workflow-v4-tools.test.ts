@@ -1590,4 +1590,566 @@ describe("v4 workflow public tools", () => {
       releaseSecond(true);
     }
   });
+  it("shows every nested durable wait path in registered model-visible tools before and after reopening", async () => {
+    vi.stubEnv("HOME", root);
+    const current = setup(1, "durable-wait-path", {
+      input: vi.fn(async () => "PRIVATE_ANSWER_VALUE"),
+    });
+    clearCompletionCoordinator(sessionOwner(current.scope));
+    registerCompletionCoordinator(current.pi, current.scope);
+    const expectedPaths = [
+      ["review-bundle", "static-review"],
+      ["review-bundle", "dynamic-customer-47"],
+    ];
+    const script = definition(
+      "durable-wait-path",
+      `await ctx.step("private-step", async () => "PRIVATE_STEP_VALUE");
+       await ctx.group("review-bundle", async () => {
+         await ctx.ask("answered-input", {
+           type: "input",
+           question: "Capture a private value",
+         });
+         await Promise.all([
+          ctx.gate("static-review", {
+            title: "Review the general changes",
+            summary: "Wait for the first decision",
+          }),
+          ctx.gate("dynamic-customer-47", {
+            title: "Review customer",
+            summary: "Wait for the next decision",
+          }),
+         ]);
+       });
+       return "complete";`,
+    );
+    try {
+      registerWorkflowTool(current.pi, current.scope);
+      const started = await executeTool(
+        current.tools,
+        "workflow",
+        { script, async: true },
+        current.ctx,
+      );
+      const workflowId = started.details.workflowId;
+      const job = workflowJobRegistry.get(workflowId)!;
+      await waitForWorkflowWorker(() =>
+        expect(
+          job.snapshot.steps?.some(
+            (step) =>
+              step.status === "waiting_for_input" &&
+              JSON.stringify(step.path) ===
+                JSON.stringify(["review-bundle", "answered-input"]),
+          ),
+        ).toBe(true),
+      );
+      const answered = await executeTool(
+        current.tools,
+        "respond_workflow_input",
+        { workflowId, path: ["review-bundle", "answered-input"] },
+        current.ctx,
+      );
+      expect(answered.details.status).toBe("running");
+      await waitForWorkflowWorker(() =>
+        expect(
+          job.snapshot.steps
+            ?.filter((step) => step.status === "waiting_for_input")
+            .map((step) => step.path),
+        ).toEqual(expect.arrayContaining(expectedPaths)),
+      );
+
+      const recordOf = (value: unknown): Record<string, unknown> | undefined =>
+        value !== null && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : undefined;
+      const stringPath = (value: unknown): value is string[] =>
+        Array.isArray(value) &&
+        value.every((segment: unknown) => typeof segment === "string");
+      const waitingSteps = (value: unknown): { path: string[] }[] =>
+        Array.isArray(value)
+          ? value.flatMap((step) => {
+              const path = recordOf(step)?.path;
+              return stringPath(path) ? [{ path }] : [];
+            })
+          : [];
+      const statusWaiting = (details: unknown) =>
+        waitingSteps(recordOf(details)?.waiting);
+      const listWaiting = (details: unknown): { path: string[] }[] => {
+        const runs = recordOf(details)?.runs;
+        return Array.isArray(runs)
+          ? runs.flatMap((run) => {
+              const record = recordOf(run);
+              if (!record || record.workflowId !== workflowId) return [];
+              return waitingSteps(record.waiting);
+            })
+          : [];
+      };
+      const assertWaitingPathsAreModelVisible = (
+        response: unknown,
+        selectWaiting: (details: unknown) => { path: string[] }[],
+      ) => {
+        const result = recordOf(response);
+        const content = Array.isArray(result?.content) ? result.content : [];
+        const text = content
+          .map((item) => {
+            const record = recordOf(item);
+            return typeof record?.text === "string" ? record.text : "";
+          })
+          .join("\n");
+        const serialized = JSON.stringify(response) ?? "";
+        const waiting = selectWaiting(result?.details);
+        expect(text).toContain("respond_workflow_input");
+        for (const step of waiting) {
+          expect(text).toContain(JSON.stringify(step.path));
+        }
+        for (const path of expectedPaths) {
+          expect(waiting.map((step) => step.path)).toContainEqual(path);
+          expect(text).toContain(JSON.stringify(path));
+        }
+        expect(serialized).not.toContain("PRIVATE_ANSWER_VALUE");
+        expect(serialized).not.toContain("PRIVATE_STEP_VALUE");
+      };
+      const liveStatus = await executeTool(
+        current.tools,
+        "get_workflow_status",
+        { workflowId },
+        current.ctx,
+      );
+      const liveList = await executeTool(
+        current.tools,
+        "list_workflow_runs",
+        {},
+        current.ctx,
+      );
+      assertWaitingPathsAreModelVisible(liveStatus, statusWaiting);
+      assertWaitingPathsAreModelVisible(liveList, listWaiting);
+      const oldOwner = sessionOwner(current.scope);
+      cleanupWorkflowJobsForOwner(oldOwner);
+      await expect(job.promise).rejects.toThrow();
+      clearCompletionCoordinator(oldOwner);
+      current.scope.generation++;
+      registerCompletionCoordinator(current.pi, current.scope);
+      registerWorkflowTool(current.pi, current.scope);
+
+      const reopenedStatus = await executeTool(
+        current.tools,
+        "get_workflow_status",
+        { workflowId },
+        current.ctx,
+      );
+      const reopenedList = await executeTool(
+        current.tools,
+        "list_workflow_runs",
+        {},
+        current.ctx,
+      );
+      assertWaitingPathsAreModelVisible(reopenedStatus, statusWaiting);
+      assertWaitingPathsAreModelVisible(reopenedList, listWaiting);
+    } finally {
+      clearCompletionCoordinator(sessionOwner(current.scope));
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("exposes waits beyond the 256-step presentation cap on live and reopened tools", async () => {
+    vi.stubEnv("HOME", root);
+    const current = setup(1, "wait-path-presentation-cap");
+    const expectedPath = ["review-bundle", "dynamic-customer-47"];
+    const holdPath = ["review-bundle", "shared-hold"];
+    const expectedWaitPaths = [holdPath, expectedPath];
+    try {
+      registerWorkflowTool(current.pi, current.scope);
+      const durable = registerDurableWorkflowTools(
+        current.pi,
+        () => sessionOwner(current.scope),
+        () => successfulRunner("unused"),
+        () => true,
+        join(root, ".pi-subagentura", "workflow-runs"),
+      );
+      const script = definition(
+        "wait-path-presentation-cap",
+        `await ctx.group("review-bundle", async () => {
+       const hold = ctx.gate("shared-hold", {
+         title: "Hold presentation groups",
+         summary: "Wait for the test to inspect nested workflow paths",
+       });
+       const pending = [];
+       for (let index = 0; index < 256; index++) {
+         pending.push(ctx.group(\`presentation-\${index}\`, async () => {
+           await hold;
+           return "released";
+         }));
+       }
+       const review = ctx.gate("dynamic-customer-47", {
+         title: "Review the hidden nested wait",
+         summary: "This gate follows more active steps than the display limit",
+       });
+       await Promise.all([hold, review, Promise.all(pending)]);
+     });
+     return "complete";`,
+      );
+      const started = await durable.run(
+        { script, async: true },
+        undefined,
+        undefined,
+        current.ctx,
+      );
+      const workflowId = started.details.workflowId;
+      const job = workflowJobRegistry.get(workflowId)!;
+      const liveStore = getLiveWorkflowV4Store(workflowId)!;
+      await waitForWorkflowWorker(() => {
+        for (let index = 0; index < 256; index++) {
+          expect(
+            liveStore.getStep(["review-bundle", `presentation-${index}`])
+              ?.status,
+          ).toBe("running");
+        }
+        for (const path of expectedWaitPaths) {
+          expect(liveStore.getStep(path)?.status, JSON.stringify(path)).toBe(
+            "waiting_for_input",
+          );
+        }
+        expect(
+          job.snapshot.steps?.some(
+            (step) =>
+              JSON.stringify(step.path) === JSON.stringify(expectedPath),
+          ),
+        ).toBe(false);
+      });
+
+      const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+        value !== null && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : undefined;
+      const assertActionablePaths = (response: unknown) => {
+        const result = asRecord(response);
+        const content = Array.isArray(result?.content) ? result.content : [];
+        const text = content
+          .map((item) => {
+            const record = asRecord(item);
+            return typeof record?.text === "string" ? record.text : "";
+          })
+          .join("\n");
+        const details = asRecord(result?.details);
+        const summary = Array.isArray(details?.runs)
+          ? details.runs
+              .map(asRecord)
+              .find((run) => run?.workflowId === workflowId)
+          : details;
+        expect(summary).toBeDefined();
+        const structured = summary ?? {};
+        const detailsPaths = Array.isArray(structured.waiting)
+          ? structured.waiting.flatMap((step) => {
+              const path = asRecord(step)?.path;
+              return Array.isArray(path) &&
+                path.every((segment) => typeof segment === "string")
+                ? [path as string[]]
+                : [];
+            })
+          : [];
+        const remainderCount =
+          typeof structured.waitingRemainderCount === "number"
+            ? structured.waitingRemainderCount
+            : 0;
+        const actionArgs = text.split("\n").flatMap((line) => {
+          const match = line.match(/respond_workflow_input\((\{.*?\})\)/);
+          return match ? [JSON.parse(match[1]) as Record<string, unknown>] : [];
+        });
+        const actionPaths = actionArgs.map((action) => {
+          expect(action.workflowId).toBe(workflowId);
+          expect(Array.isArray(action.path)).toBe(true);
+          return action.path as string[];
+        });
+        expect(
+          actionPaths,
+          JSON.stringify({
+            text,
+            summary: {
+              status: structured.status,
+              waiting: structured.waiting,
+              waitingRemainderCount: structured.waitingRemainderCount,
+            },
+          }),
+        ).toContainEqual(expectedPath);
+        expect(actionPaths).toEqual(detailsPaths);
+        expect(
+          new Set(actionPaths.map((path) => JSON.stringify(path))).size,
+        ).toBe(actionPaths.length);
+        for (const path of actionPaths) {
+          expect(expectedWaitPaths).toContainEqual(path);
+        }
+        expect(actionPaths.length + remainderCount).toBe(
+          expectedWaitPaths.length,
+        );
+        const totalMatch = text.match(/Waiting for input at (\d+) step\(s\):/);
+        expect(Number(totalMatch?.[1])).toBe(expectedWaitPaths.length);
+        const remainderMatch = text.match(
+          /(\d+) additional waiting path\(s\) not listed/,
+        );
+        expect(Number(remainderMatch?.[1] ?? 0)).toBe(remainderCount);
+        expect(
+          expectedWaitPaths.filter(
+            (path) =>
+              !actionPaths.some(
+                (actionPath) =>
+                  JSON.stringify(actionPath) === JSON.stringify(path),
+              ),
+          ),
+        ).toHaveLength(remainderCount);
+      };
+      assertActionablePaths(
+        await executeTool(
+          current.tools,
+          "get_workflow_status",
+          { workflowId },
+          current.ctx,
+        ),
+      );
+      assertActionablePaths(
+        await executeTool(current.tools, "list_workflow_runs", {}, current.ctx),
+      );
+
+      const oldOwner = sessionOwner(current.scope);
+
+      job.suppressCompletionNotification = true;
+      job.durableInterrupted = true;
+      job.abort.abort(
+        Object.assign(new Error("Workflow durably interrupted."), {
+          source: "durable_interrupt",
+        }),
+      );
+      await expect(job.promise).rejects.toThrow();
+      workflowJobRegistry.delete(workflowId);
+      clearCompletionCoordinator(oldOwner);
+      current.scope.generation++;
+      registerCompletionCoordinator(current.pi, current.scope);
+      registerWorkflowTool(current.pi, current.scope);
+      registerDurableWorkflowTools(
+        current.pi,
+        () => sessionOwner(current.scope),
+        () => successfulRunner("unused"),
+        () => true,
+        join(root, ".pi-subagentura", "workflow-runs"),
+      );
+      assertActionablePaths(
+        await executeTool(
+          current.tools,
+          "get_workflow_status",
+          { workflowId },
+          current.ctx,
+        ),
+      );
+      assertActionablePaths(
+        await executeTool(current.tools, "list_workflow_runs", {}, current.ctx),
+      );
+    } finally {
+      clearCompletionCoordinator(sessionOwner(current.scope));
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("bounds serialized waiting actions for deep paths across public tools", async () => {
+    vi.stubEnv("HOME", root);
+    const current = setup(1, "deep-bounded-wait-paths");
+    const actionBudgetBytes = 16 * 1024;
+    const longSegment = (prefix: string) =>
+      `${prefix}${"x".repeat(128 - prefix.length)}`;
+    const groupIds = Array.from({ length: 31 }, (_, index) =>
+      longSegment(`group-${String(index).padStart(2, "0")}-`),
+    );
+    const gateIdsByRun = Array.from({ length: 2 }, (_, runIndex) =>
+      Array.from({ length: 5 }, (_, gateIndex) =>
+        longSegment(`gate-${runIndex}-${gateIndex}-`),
+      ),
+    );
+    const pathsByRun = gateIdsByRun.map((gateIds) =>
+      gateIds.map((gateId) => [...groupIds, gateId]),
+    );
+    const makeScript = (name: string, gateIds: string[]) => {
+      const gateCalls = gateIds.map(
+        (gateId) =>
+          `ctx.gate(${JSON.stringify(gateId)}, { title: "Review", summary: "Waiting for review" })`,
+      );
+      let body = `await Promise.all([${gateCalls.join(",")}]);`;
+      for (let index = groupIds.length - 1; index >= 0; index--) {
+        body = `await ctx.group(${JSON.stringify(groupIds[index])}, async () => { ${body} });`;
+      }
+      return definition(name, `${body} return "complete";`);
+    };
+    const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+    const contentText = (response: unknown) => {
+      const result = asRecord(response);
+      const content = Array.isArray(result?.content) ? result.content : [];
+      return content
+        .map((item) => {
+          const record = asRecord(item);
+          return typeof record?.text === "string" ? record.text : "";
+        })
+        .join("\n");
+    };
+    const toolCalls = (text: string, name: string) => {
+      const pattern = new RegExp(`${name}\\(\\s*(\\{[^\\n]*?\\})\\s*\\)`, "g");
+      return [...text.matchAll(pattern)].map((match) => ({
+        raw: match[0],
+        args: JSON.parse(match[1]) as Record<string, unknown>,
+      }));
+    };
+    const recordPaths = (value: unknown): string[][] =>
+      Array.isArray(value)
+        ? value.flatMap((item) => {
+            const path = asRecord(item)?.path;
+            return Array.isArray(path) &&
+              path.every((part) => typeof part === "string")
+              ? [path as string[]]
+              : [];
+          })
+        : [];
+    const summariesFor = (response: unknown) => {
+      const details = asRecord(asRecord(response)?.details);
+      return Array.isArray(details?.runs)
+        ? details.runs
+            .map(asRecord)
+            .filter(
+              (summary): summary is Record<string, unknown> =>
+                summary !== undefined,
+            )
+        : details
+          ? [details]
+          : [];
+    };
+    const jobs: { promise: Promise<unknown> }[] = [];
+    const runInfos: { workflowId: string; paths: string[][] }[] = [];
+    try {
+      registerWorkflowTool(current.pi, current.scope);
+      const durable = registerDurableWorkflowTools(
+        current.pi,
+        () => sessionOwner(current.scope),
+        () => successfulRunner("unused"),
+        () => true,
+        root,
+      );
+      for (const [index, gateIds] of gateIdsByRun.entries()) {
+        const started = await durable.run(
+          {
+            script: makeScript(`deep-bounded-wait-${index}`, gateIds),
+            async: true,
+          },
+          undefined,
+          undefined,
+          current.ctx,
+        );
+        const workflowId = started.details.workflowId;
+        runInfos.push({
+          workflowId,
+          paths: pathsByRun[index],
+        });
+        const job = workflowJobRegistry.get(workflowId);
+        expect(job).toBeDefined();
+        if (job) jobs.push(job);
+      }
+
+      for (const paths of pathsByRun) {
+        for (const path of paths) {
+          expect(path).toHaveLength(32);
+          expect(path.every((part) => part.length === 128)).toBe(true);
+        }
+      }
+      await waitForWorkflowWorker(() => {
+        for (const run of runInfos) {
+          const liveStore = getLiveWorkflowV4Store(run.workflowId);
+          expect(liveStore).toBeDefined();
+          for (const path of run.paths) {
+            expect(liveStore?.getStep(path)?.status, JSON.stringify(path)).toBe(
+              "waiting_for_input",
+            );
+          }
+        }
+      });
+
+      const assertBoundedSurface = (
+        response: unknown,
+        targetRuns: typeof runInfos,
+        maxActionBytes: number,
+      ) => {
+        const text = contentText(response);
+        const actions = toolCalls(text, "respond_workflow_input");
+        const actionBytes = Buffer.byteLength(
+          actions.map((action) => action.raw).join("\n"),
+          "utf8",
+        );
+        expect(actionBytes).toBeLessThanOrEqual(maxActionBytes);
+        const summaries = summariesFor(response);
+        let totalWaiting = 0;
+        let totalOmitted = 0;
+        const omittedRunIds: string[] = [];
+        for (const run of targetRuns) {
+          totalWaiting += run.paths.length;
+          const visible = actions.filter(
+            (action) => action.args.workflowId === run.workflowId,
+          );
+          const visiblePaths = visible.map(
+            (action) => action.args.path as string[],
+          );
+          expect(visiblePaths.length).toBeLessThan(run.paths.length);
+          expect(
+            new Set(visiblePaths.map((path) => JSON.stringify(path))).size,
+          ).toBe(visiblePaths.length);
+          for (const path of visiblePaths) {
+            expect(run.paths).toContainEqual(path);
+          }
+          const omitted = run.paths.length - visiblePaths.length;
+          totalOmitted += omitted;
+          if (omitted > 0) omittedRunIds.push(run.workflowId);
+          const summary = summaries.find(
+            (candidate) => candidate.workflowId === run.workflowId,
+          );
+          expect(summary?.waitingRemainderCount).toBe(omitted);
+          expect(recordPaths(summary?.waiting)).toEqual(visiblePaths);
+        }
+        expect(actions.length).toBeGreaterThan(0);
+        const totalMatches = [
+          ...text.matchAll(/Waiting for input at (\d+) step\(s\):/g),
+        ];
+        expect(
+          totalMatches.reduce((sum, match) => sum + Number(match[1]), 0),
+        ).toBe(totalWaiting);
+        const remainderMatches = [
+          ...text.matchAll(/(\d+) additional waiting path\(s\) not listed/g),
+        ];
+        expect(
+          remainderMatches.reduce((sum, match) => sum + Number(match[1]), 0),
+        ).toBe(totalOmitted);
+        const statusSelectors = toolCalls(text, "get_workflow_status").map(
+          (call) => call.args.workflowId,
+        );
+        for (const workflowId of omittedRunIds) {
+          expect(statusSelectors).toContain(workflowId);
+        }
+      };
+
+      for (const run of runInfos) {
+        const status = await executeTool(
+          current.tools,
+          "get_workflow_status",
+          { workflowId: run.workflowId },
+          current.ctx,
+        );
+        assertBoundedSurface(status, [run], actionBudgetBytes);
+      }
+      const listed = await executeTool(
+        current.tools,
+        "list_workflow_runs",
+        {},
+        current.ctx,
+      );
+      assertBoundedSurface(listed, runInfos, actionBudgetBytes);
+    } finally {
+      cleanupWorkflowJobsForOwner(sessionOwner(current.scope));
+      await Promise.allSettled(jobs.map((job) => job?.promise));
+      clearCompletionCoordinator(sessionOwner(current.scope));
+      vi.unstubAllEnvs();
+    }
+  });
 });

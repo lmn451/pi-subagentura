@@ -33,6 +33,12 @@ function cancellationError(message = "Workflow aborted.") {
   error.cancelled = true;
   return error;
 }
+function isTimeoutSignal(signal) {
+  const reason = signal?.reason;
+  return (
+    reason?.category === "timeout" || reason?.name === "WorkflowTimeoutError"
+  );
+}
 
 function rpc(method, payload, signal, onUsage) {
   if (aborted) return Promise.reject(cancellationError());
@@ -117,8 +123,14 @@ parentPort.on("message", (msg) => {
   if (typeof msg.id === "number" && pending.has(msg.id)) {
     const waiter = pending.get(msg.id);
     pending.delete(msg.id);
-    tokensSpent += typeof msg.tokensDelta === "number" ? msg.tokensDelta : 0;
-    if (typeof msg.tokensDelta === "number") waiter.onUsage?.(msg.tokensDelta);
+    const tokensDelta =
+      typeof msg.tokensDelta === "number" ? msg.tokensDelta : undefined;
+    const budgetTokensDelta =
+      typeof msg.budgetTokensDelta === "number"
+        ? msg.budgetTokensDelta
+        : tokensDelta;
+    tokensSpent += budgetTokensDelta ?? 0;
+    if (tokensDelta !== undefined) waiter.onUsage?.(tokensDelta);
     if (msg.ok) {
       waiter.resolve(msg.value);
     } else {
@@ -127,6 +139,9 @@ parentPort.on("message", (msg) => {
       if (failure && typeof failure === "object") {
         error.category = failure.errorCategory;
         error.stage = failure.errorStage;
+      }
+      if (workerConfig.stepBased && msg.stats?.schemaRepairExhausted === true) {
+        error.schemaRepairExhausted = true;
       }
       if (msg.cancelled === true) error.cancelled = true;
       rpcErrorIds.set(error, msg.id);
@@ -162,8 +177,21 @@ async function executeScript(
     invocationKey,
     inheritedUsage,
   );
-  while (depth === 0 && outstandingAgentCalls.size > 0) {
-    await Promise.all([...outstandingAgentCalls]);
+  // A timed-out V4 step has already recorded its failure; don't let its
+  // eventual agent RPC rejection override it while draining the worker.
+  if (depth === 0) {
+    while (outstandingAgentCalls.size > 0) {
+      await Promise.all(
+        [...outstandingAgentCalls].map((call) =>
+          call.promise
+            ? call.promise.catch((err) => {
+                if (call.handledTimeout && isTimeoutSignal(call.signal)) return;
+                throw err;
+              })
+            : call,
+        ),
+      );
+    }
   }
   return { meta: parsed.meta, result };
 }
@@ -187,6 +215,10 @@ async function executeBody(
       : undefined;
   let currentPhase;
   let legacyAgentIndex = 0;
+  // Map V4 step attempts to their calls so timeout ownership can include
+  // pending work inside a nested workflow.
+  const v4StepIds = new Map();
+  const v4StepCalls = new Map();
 
   function checkAbort() {
     if (aborted) throw cancellationError();
@@ -253,10 +285,26 @@ async function executeBody(
         },
       );
     })();
-    outstandingAgentCalls.add(call);
+    const isV4AgentCall =
+      format === "definition" && typeof opts.id === "string";
+    const isOwnedDescendant =
+      workerConfig.stepBased &&
+      (invocationKey !== undefined || operationPath.length > 0);
+    const trackedCall =
+      isV4AgentCall || isOwnedDescendant
+        ? {
+            promise: call,
+            signal: agentSignal,
+            handledTimeout: false,
+            invocationKey,
+            operationPath,
+          }
+        : call;
+    if (isV4AgentCall) v4StepCalls.set(opts.id, trackedCall);
+    outstandingAgentCalls.add(trackedCall);
     void call.then(
-      () => outstandingAgentCalls.delete(call),
-      () => outstandingAgentCalls.delete(call),
+      () => outstandingAgentCalls.delete(trackedCall),
+      () => outstandingAgentCalls.delete(trackedCall),
     );
     return call;
   }
@@ -404,10 +452,26 @@ async function executeBody(
       );
       return child.result;
     })();
-    outstandingAgentCalls.add(call);
+    const isV4WorkflowCall =
+      format === "definition" && typeof options.id === "string";
+    const isOwnedDescendant =
+      workerConfig.stepBased &&
+      (invocationKey !== undefined || operationPath.length > 0);
+    const trackedCall =
+      isV4WorkflowCall || isOwnedDescendant
+        ? {
+            promise: call,
+            signal: options.signal ?? signal,
+            handledTimeout: false,
+            invocationKey: isV4WorkflowCall ? options.id : invocationKey,
+            operationPath,
+          }
+        : call;
+    if (isV4WorkflowCall) v4StepCalls.set(options.id, trackedCall);
+    outstandingAgentCalls.add(trackedCall);
     void call.then(
-      () => outstandingAgentCalls.delete(call),
-      () => outstandingAgentCalls.delete(call),
+      () => outstandingAgentCalls.delete(trackedCall),
+      () => outstandingAgentCalls.delete(trackedCall),
     );
     return call;
   }
@@ -428,8 +492,15 @@ async function executeBody(
         signal,
         budget,
         maxItems: workerConfig.maxItemsPerCall,
-        request: (action, payload, requestSignal) =>
-          rpc(
+        request: async (action, payload, requestSignal) => {
+          const stepFailureSignal = requestSignal ?? signal;
+          // Ignore only the nested abort; the worker-wide signal still fences
+          // terminal writes if the session is cancelled.
+          const rpcSignal =
+            action === "step.fail" && stepFailureSignal?.aborted && !aborted
+              ? workflowAbort.signal
+              : stepFailureSignal;
+          const response = await rpc(
             "v4",
             {
               action,
@@ -443,8 +514,61 @@ async function executeBody(
                   .digest("hex"),
               },
             },
-            requestSignal ?? signal,
-          ),
+            rpcSignal,
+          );
+          if (
+            action === "step.enter" &&
+            ["agent", "workflow"].includes(payload.kind) &&
+            response?.reuse !== true &&
+            response?.persistedFailure === undefined &&
+            Array.isArray(payload.path)
+          ) {
+            const attempt = Number.isInteger(response?.attempt)
+              ? response.attempt
+              : 1;
+            const idempotencyKey =
+              typeof response?.idempotencyKey === "string"
+                ? response.idempotencyKey
+                : payload.path.join("/");
+            v4StepIds.set(
+              JSON.stringify([payload.path, attempt]),
+              `${idempotencyKey}:${attempt}`,
+            );
+          } else if (action === "step.fail" || action === "step.complete") {
+            const key = JSON.stringify([payload.path, payload.attempt]);
+            const stepId = v4StepIds.get(key);
+            const trackedCall =
+              stepId === undefined ? undefined : v4StepCalls.get(stepId);
+            if (
+              action === "step.fail" &&
+              trackedCall &&
+              isTimeoutSignal(trackedCall.signal)
+            ) {
+              trackedCall.handledTimeout = true;
+              const failedPath = [
+                ...operationPath,
+                ...(Array.isArray(payload.path) ? payload.path : []),
+              ];
+              for (const descendant of outstandingAgentCalls) {
+                if (!descendant.promise) continue;
+                const descendantPath = descendant.operationPath;
+                const isOwned =
+                  descendant.invocationKey === stepId ||
+                  (Array.isArray(descendantPath) &&
+                    descendantPath.length >= failedPath.length &&
+                    failedPath.every(
+                      (part, index) => descendantPath[index] === part,
+                    ));
+                if (isOwned && isTimeoutSignal(descendant.signal)) {
+                  descendant.handledTimeout = true;
+                }
+              }
+            }
+            v4StepIds.delete(key);
+            if (stepId !== undefined) v4StepCalls.delete(stepId);
+          }
+          return response;
+        },
         validate: (value, schema) =>
           rpc("v4", { action: "validate", payload: { value, schema } }, signal),
         log: (message, path) => {
@@ -500,6 +624,14 @@ async function executeBody(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const wrapped = new Error(`Workflow "${meta.name}" failed: ${msg}`);
+    if (typeof err?.name === "string") wrapped.name = err.name;
+    if (typeof err?.category === "string") wrapped.category = err.category;
+    if (typeof err?.stage === "string") wrapped.stage = err.stage;
+    if (Array.isArray(err?.path)) wrapped.path = err.path;
+    if (err?.blocked === true) wrapped.blocked = true;
+    if (err?.schemaRepairExhausted === true) {
+      wrapped.schemaRepairExhausted = true;
+    }
     if (err?.cancelled === true || err?.name === "WorkflowCancelledError") {
       wrapped.name = "WorkflowCancelledError";
       wrapped.cancelled = true;

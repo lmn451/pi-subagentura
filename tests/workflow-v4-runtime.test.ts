@@ -373,6 +373,70 @@ describe("v4 workflow runtime", () => {
     expect(childRuns).toBe(1);
   });
 
+  it("retries a failed child in a new enclosing frame while reusing successful children", async () => {
+    const state = new WorkflowV4Store("failed-child-enclosing-retry");
+    let childCalls = 0;
+    let stableCalls = 0;
+    const agent = vi.fn(async (prompt: string) => {
+      if (prompt === "Stable sibling") {
+        stableCalls++;
+        return "stable";
+      }
+      childCalls++;
+      if (childCalls === 1) {
+        throw Object.assign(new Error("child failed"), {
+          category: "provider",
+        });
+      }
+      return "recovered";
+    });
+    const bridge = makeBridge({
+      request: (action: string, payload: unknown, signal?: AbortSignal) =>
+        state.request(action, payload, signal),
+      agent,
+    });
+
+    try {
+      const result = await runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.step(
+            "parent",
+            { kind: "group", retry: { attempts: 2 } },
+            async () => {
+              const stable = await ctx.agent("stable", {
+                prompt: "Stable sibling",
+              });
+              const child = await ctx.agent("child", {
+                prompt: "Retry the child",
+              });
+              return { stable, child };
+            },
+          ),
+        ),
+        {},
+        bridge,
+      );
+
+      expect(result).toEqual({ stable: "stable", child: "recovered" });
+      expect(childCalls).toBe(2);
+      expect(stableCalls).toBe(1);
+      expect(state.getStep(["parent"])).toMatchObject({
+        status: "completed",
+        attempt: 2,
+      });
+      expect(state.getStep(["parent", "child"])).toMatchObject({
+        status: "completed",
+        attempt: 1,
+      });
+      expect(state.getStep(["parent", "stable"])).toMatchObject({
+        status: "restored",
+        attempt: 1,
+      });
+    } finally {
+      state.close();
+    }
+  });
+
   it("replays a collected persisted step failure after its attempt limit", async () => {
     const bridge = makeBridge({
       async request(action: string, payload: any) {
@@ -722,6 +786,177 @@ describe("v4 workflow runtime", () => {
     }
   });
 
+  it.each([
+    ["model", { model: "model-a" }, { model: "model-b" }],
+    ["persona", { persona: "persona-a" }, { persona: "persona-b" }],
+    ["isolation", { isolation: "process" }, { isolation: "in-process" }],
+    ["thinking level", { thinkingLevel: "low" }, { thinkingLevel: "high" }],
+    [
+      "output contract",
+      { output: { type: "string" } },
+      { output: { type: "object" } },
+    ],
+  ])(
+    "does not reuse an agent result when its %s changes",
+    async (_field: string, firstOptions: object, secondOptions: object) => {
+      const state = new WorkflowV4Store(`agent-config-${_field}`);
+      let calls = 0;
+      const agent = vi.fn(async () => `agent-result-${++calls}`);
+      const bridge = makeBridge({
+        request: (action: string, payload: unknown, signal?: AbortSignal) =>
+          state.request(action, payload, signal),
+        agent,
+      });
+      const run = (agentOptions: object) =>
+        runWorkflowDefinition(
+          definition((ctx) =>
+            ctx.agent("review", {
+              prompt: "Review the same source",
+              ...agentOptions,
+            }),
+          ),
+          {},
+          bridge,
+        );
+
+      try {
+        await expect(run(firstOptions)).resolves.toBe("agent-result-1");
+        await expect(run(secondOptions)).resolves.toBe("agent-result-2");
+        expect(agent).toHaveBeenCalledTimes(2);
+      } finally {
+        state.close();
+      }
+    },
+  );
+
+  it("normalizes omitted read-only and process isolation in cached agent identity", async () => {
+    const state = new WorkflowV4Store("agent-default-identity");
+    let calls = 0;
+    const agent = vi.fn(
+      async (_prompt: string, _options: Record<string, unknown>) =>
+        `agent-result-${++calls}`,
+    );
+    const bridge = makeBridge({
+      request: (action: string, payload: unknown, signal?: AbortSignal) =>
+        state.request(action, payload, signal),
+      agent,
+    });
+    const run = (agentOptions: object) =>
+      runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.agent("review", {
+            prompt: "Review defaults",
+            ...agentOptions,
+          }),
+        ),
+        {},
+        bridge,
+      );
+
+    try {
+      await expect(run({})).resolves.toBe("agent-result-1");
+      await expect(
+        run({ readOnly: false, isolation: "process" }),
+      ).resolves.toBe("agent-result-1");
+      await expect(run({ readOnly: false })).resolves.toBe("agent-result-1");
+      expect(agent).toHaveBeenCalledOnce();
+      expect(agent.mock.calls[0]?.[1]).toMatchObject({
+        readOnly: false,
+        isolation: "process",
+      });
+    } finally {
+      state.close();
+    }
+  });
+
+  it("dispatches the agent options captured for step identity", async () => {
+    const state = new WorkflowV4Store("agent-option-snapshot");
+    const entered = Promise.withResolvers<void>();
+    const releaseEntry = Promise.withResolvers<void>();
+    let enteredPayload: unknown;
+    const options: {
+      prompt: string;
+      model: string;
+      persona: string;
+      isolation: string;
+      thinkingLevel: string;
+      readOnly: boolean;
+      output: { type: string };
+    } = {
+      prompt: "Review before suspension",
+      model: "model-a",
+      persona: "persona-a",
+      isolation: "process",
+      thinkingLevel: "low",
+      readOnly: false,
+      output: { type: "string" },
+    };
+    const agent = vi.fn(
+      async (_prompt: string, _options: Record<string, unknown>) => "done",
+    );
+    const bridge = makeBridge({
+      request: async (
+        action: string,
+        payload: unknown,
+        signal?: AbortSignal,
+      ) => {
+        if (action === "step.enter") {
+          enteredPayload = payload;
+          entered.resolve();
+          await releaseEntry.promise;
+        }
+        return state.request(action, payload, signal);
+      },
+      agent,
+    });
+    const running = runWorkflowDefinition(
+      definition((ctx) => ctx.agent("snapshot", options)),
+      {},
+      bridge,
+    );
+
+    try {
+      await entered.promise;
+      options.prompt = "mutated prompt";
+      options.model = "model-b";
+      options.persona = "persona-b";
+      options.isolation = "in-process";
+      options.thinkingLevel = "high";
+      options.readOnly = true;
+      options.output = { type: "object" };
+      releaseEntry.resolve();
+
+      await expect(running).resolves.toBe("done");
+      expect(enteredPayload).toMatchObject({
+        input: {
+          prompt: "Review before suspension",
+          model: "model-a",
+          persona: "persona-a",
+          isolation: "process",
+          thinkingLevel: "low",
+          readOnly: false,
+          output: { type: "string" },
+        },
+      });
+      expect(agent).toHaveBeenCalledWith(
+        "Review before suspension",
+        expect.objectContaining({
+          model: "model-a",
+          persona: "persona-a",
+          isolation: "process",
+          thinkingLevel: "low",
+          readOnly: false,
+          output: { type: "string" },
+        }),
+        expect.any(AbortSignal),
+        expect.any(Function),
+      );
+    } finally {
+      releaseEntry.resolve();
+      state.close();
+    }
+  });
+
   it("rejects malformed read-only policy before entering or spawning an agent", async () => {
     const state = new WorkflowV4Store("invalid-read-only-agent-runtime");
     const agent = vi.fn(async () => "must not run");
@@ -885,6 +1120,48 @@ describe("v4 workflow runtime", () => {
           payload.path[0] === "budgeted",
       ),
     ).toHaveLength(1);
+  });
+
+  it("checks failed agent usage against its budget before retrying", async () => {
+    let calls = 0;
+    let outputTokens = 0;
+    const bridge = makeBridge({
+      async agent(
+        _prompt: string,
+        _options: unknown,
+        _signal: AbortSignal,
+        onUsage?: (tokens: number) => void,
+      ) {
+        calls++;
+        outputTokens += 3;
+        onUsage?.(3);
+        throw Object.assign(new Error("provider failed"), {
+          category: "provider",
+        });
+      },
+    });
+
+    await expect(
+      runWorkflowDefinition(
+        definition((ctx) =>
+          ctx.agent("budgeted", {
+            prompt: "Generate a response",
+            budget: 2,
+            retry: { attempts: 3 },
+          }),
+        ),
+        {},
+        bridge,
+      ),
+    ).rejects.toMatchObject({ category: "budget" });
+    expect(calls).toBe(1);
+    expect(outputTokens).toBe(3);
+    expect(
+      bridge.events.find(
+        ({ action, payload }: StepEvent) =>
+          action === "step.fail" && payload.path[0] === "budgeted",
+      )?.payload.error.category,
+    ).toBe("budget");
   });
 
   it("charges concurrent step budgets only for that step's agent usage", async () => {

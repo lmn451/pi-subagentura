@@ -137,6 +137,29 @@ describe("v4 step journal", () => {
       }),
     ).toMatchObject({ reuse: false });
   });
+
+  it("keeps artifact encoding distinct when JSON and text bytes match", async () => {
+    const { state } = await setup();
+    const jsonRef = await state.request("artifact.write", {
+      path: ["formatted"],
+      value: { count: 1 },
+      type: "json",
+    });
+    const textRef = await state.request("artifact.write", {
+      path: ["formatted"],
+      value: '{"count":1}',
+      type: "text",
+    });
+
+    expect(textRef.id).not.toBe(jsonRef.id);
+    expect(textRef.type).toBe("text");
+    await expect(
+      state.request("artifact.read", { ref: textRef }),
+    ).resolves.toBe('{"count":1}');
+    await expect(
+      state.request("artifact.read", { ref: jsonRef }),
+    ).resolves.toEqual({ count: 1 });
+  });
   it("rejects same-size artifact corruption", async () => {
     const { state, store } = await setup();
     const ref = await state.request("artifact.write", {

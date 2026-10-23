@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Duration, Effect } from "effect";
+import { types } from "node:util";
 
 const MAX_ITEMS = 4096;
 const MAX_STEPS = 8192;
@@ -85,7 +86,7 @@ function boundedConcurrency(value, fallback, itemCount) {
 }
 
 function serializeError(error, path) {
-  const e = error instanceof Error ? error : new Error(String(error));
+  const e = types.isNativeError(error) ? error : new Error(String(error));
   return {
     name: e.name || "Error",
     message: e.message,
@@ -95,14 +96,17 @@ function serializeError(error, path) {
   };
 }
 
-function serializeStepFailure(error, path, persist) {
+function serializeStepFailure(error, path, persist, isAgent) {
   const serialized = serializeError(error, path);
-  return persist === false
-    ? {
-        ...serialized,
-        name: "WorkflowStepError",
-        message: "Workflow step failed.",
-      }
+  if (persist === false) {
+    return {
+      ...serialized,
+      name: "WorkflowStepError",
+      message: "Workflow step failed.",
+    };
+  }
+  return isAgent && error?.schemaRepairExhausted === true
+    ? { ...serialized, schemaRepairExhausted: true }
     : serialized;
 }
 
@@ -370,6 +374,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
         throw new WorkflowCancelledError(path, parentSignal.reason);
       const entered = await bridgeRequest(bridge, "step.enter", {
         path,
+        retryFrames: parentScope.retryFrames ?? [],
         kind: options?.kind ?? "step",
         title: options?.title ?? id,
         ...(options?.input !== undefined ? { input: options.input } : {}),
@@ -394,8 +399,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
         entered?.persistedFailure &&
         policy.persist !== false &&
         policy.cache !== false &&
-        policy.resume !== false &&
-        (policy.failure === "collect" || policy.failure === "continue")
+        policy.resume !== false
       ) {
         const saved = entered.persistedFailure;
         const error = Object.assign(
@@ -407,7 +411,10 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
             path: Array.isArray(saved.path) ? saved.path : path,
           },
         );
-        return taskResult(error, path);
+        if (policy.failure === "collect" || policy.failure === "continue") {
+          return taskResult(error, path);
+        }
+        throw error;
       }
       if (attempt > maxAttempts) {
         const exhausted = new WorkflowStepError(
@@ -479,7 +486,20 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
           controller.signal.aborted && !parentSignal?.aborted
             ? new WorkflowTimeoutError(path, policy.timeout)
             : undefined;
-        const error = timeoutError ?? caught;
+        const attemptError = timeoutError ?? caught;
+        const overBudget =
+          !timeoutError &&
+          !isCancelled(attemptError, parentSignal) &&
+          attemptError?.category !== "timeout" &&
+          attemptError?.category !== "budget" &&
+          policy.budget !== undefined &&
+          budgetCounter.spent > policy.budget;
+        const error = overBudget
+          ? new WorkflowStepError(
+              `Workflow step exceeded its budget of ${policy.budget}.`,
+              { path, category: "budget", stage: "budget" },
+            )
+          : attemptError;
         lastError = error;
         const cancelled =
           isCancelled(error, parentSignal) || parentSignal?.aborted;
@@ -490,7 +510,12 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
             : undefined;
         await bridgeRequest(bridge, "step.fail", {
           path,
-          error: serializeStepFailure(error, path, policy.persist),
+          error: serializeStepFailure(
+            error,
+            path,
+            policy.persist,
+            options?.kind === "agent",
+          ),
           attempt,
           ...(status ? { status } : {}),
         });
@@ -522,9 +547,22 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
   };
 
   const agent = (id, options = {}) => {
-    const readOnly = options.readOnly;
+    const {
+      prompt,
+      output,
+      model,
+      persona,
+      isolation,
+      thinkingLevel,
+      readOnly: requestedReadOnly,
+      ...stepOptions
+    } = options;
+    const readOnly = requestedReadOnly ?? false;
     validateId(id, "agent id");
-    if (readOnly !== undefined && typeof readOnly !== "boolean") {
+    if (
+      requestedReadOnly !== undefined &&
+      typeof requestedReadOnly !== "boolean"
+    ) {
       throw new WorkflowStepError("ctx.agent readOnly must be a boolean.", {
         path: childPath(id),
         category: "schema",
@@ -539,29 +577,47 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
         },
       );
     }
+    const effectiveIsolation = isolation ?? "process";
+    const outputContract =
+      output === undefined ? undefined : structuredClone(output);
+    const dispatchOptions = {
+      ...stepOptions,
+      prompt,
+      ...(model !== undefined ? { model } : {}),
+      ...(persona !== undefined ? { persona } : {}),
+      isolation: effectiveIsolation,
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      readOnly,
+      output: outputContract,
+    };
+    const input = {
+      prompt,
+      output: outputContract,
+      ...(model !== undefined ? { model } : {}),
+      ...(persona !== undefined ? { persona } : {}),
+      isolation: effectiveIsolation,
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      readOnly,
+    };
+    const policy = stepPolicy(dispatchOptions);
     return executeStep(
       id,
       {
-        ...options,
+        ...dispatchOptions,
         kind: "agent",
-        input: {
-          prompt: options.prompt,
-          output: options.output,
-          ...(readOnly === true ? { readOnly: true } : {}),
-        },
+        input,
       },
       async (stepSignal, entered) => {
         const counters = currentScope().budgetCounters ?? [];
-        const persist = stepPolicy(options).persist;
+        const persist = policy.persist;
         const agentId = `${entered?.idempotencyKey ?? pathKey(childPath(id))}:${entered?.attempt ?? 1}`;
         const value = await bridge.agent(
-          options.prompt,
+          prompt,
           {
-            ...options,
-            readOnly,
+            ...dispatchOptions,
             ...(persist !== undefined ? { persist } : {}),
             id: agentId,
-            output: options.output,
+            output: outputContract,
           },
           stepSignal,
           (amount) => {
@@ -569,7 +625,7 @@ export async function runWorkflowDefinition(definition, args, bridge = {}) {
             for (const counter of counters) counter.spent += amount;
           },
         );
-        return validateValue(bridge, value, options.output, childPath(id));
+        return validateValue(bridge, value, outputContract, childPath(id));
       },
     );
   };

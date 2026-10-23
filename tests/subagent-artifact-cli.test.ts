@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
@@ -184,8 +184,10 @@ describe("subagent-artifact CLI", () => {
       expect(events.at(-1)).not.toHaveProperty("lastTool");
     });
 
-    it("records a signal alongside an unexpected exit reason", () => {
-      const r = runCli(tmp, ["process-exit", "143"]);
+    it("records a host-derived signal alongside an unexpected exit reason", () => {
+      const signalNumber = osConstants.signals.SIGTERM;
+      const exitCode = 128 + signalNumber;
+      const r = runCli(tmp, ["process-exit", String(exitCode)]);
       expect(r.status).toBe(0);
       const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
         .trim()
@@ -194,10 +196,79 @@ describe("subagent-artifact CLI", () => {
       expect(events.at(-1)).toMatchObject({
         type: "process_exited",
         status: "error",
-        exitCode: 143,
+        exitCode,
         terminationReason: "signal",
         signal: "SIGTERM",
       });
+    });
+
+    it("maps host-supported process signals to closed-enum names", () => {
+      const signalNames = [
+        "SIGHUP",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGILL",
+        "SIGTRAP",
+        "SIGABRT",
+        "SIGBUS",
+        "SIGFPE",
+        "SIGKILL",
+        "SIGUSR1",
+        "SIGSEGV",
+        "SIGUSR2",
+        "SIGPIPE",
+        "SIGALRM",
+        "SIGTERM",
+        "SIGCHLD",
+        "SIGCONT",
+        "SIGSTOP",
+        "SIGTSTP",
+        "SIGTTIN",
+        "SIGTTOU",
+        "SIGURG",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+        "SIGWINCH",
+        "SIGIO",
+        "SIGPWR",
+        "SIGSYS",
+      ] as const;
+      const nativeSignals = osConstants.signals as Record<
+        string,
+        number | undefined
+      >;
+      // Filter names unavailable on this OS; aliases collapse to the first
+      // supported enum name for their host signal number.
+      const supportedSignalNames = signalNames.filter(
+        (name) => typeof nativeSignals[name] === "number",
+      );
+      const signalByNumber = new Map<number, (typeof signalNames)[number]>();
+      for (const name of supportedSignalNames) {
+        const number = nativeSignals[name]!;
+        if (!signalByNumber.has(number)) signalByNumber.set(number, name);
+      }
+
+      for (const [number, name] of signalByNumber) {
+        rmSync(join(tmp, "events.ndjson"), { force: true });
+        const exitCode = 128 + number;
+        const result = runCli(tmp, ["process-exit", String(exitCode)]);
+        expect(result.status).toBe(0);
+        const event = JSON.parse(
+          readFileSync(join(tmp, "events.ndjson"), "utf8")
+            .trim()
+            .split("\n")
+            .at(-1)!,
+        );
+        expect(event).toMatchObject({
+          type: "process_exited",
+          exitCode,
+          terminationReason: "signal",
+          signal: name,
+        });
+        expect(signalNames).toContain(event.signal);
+      }
     });
 
     it("records nonzero exits without inventing a signal", () => {

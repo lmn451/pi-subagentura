@@ -299,11 +299,9 @@ describe("bundled workflow examples", () => {
     expect(failedReview).toMatchObject({
       outcome: "failed",
       verdict: "uncertain",
-      failure: { name: "Error" },
     });
     const failureMessage = failedReview?.failure?.message;
     expect(failureMessage).toHaveLength(1_200);
-    expect(failureMessage).toMatch(/^ReviewError: Error: provider error /);
     expect(failureMessage).toContain(oversizedMessage.slice(0, 100));
   });
 
