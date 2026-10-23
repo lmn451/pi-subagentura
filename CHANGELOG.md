@@ -77,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve persisted child token/cost usage and forward the actual cancellation
   snapshot receipt when best-effort non-durable interactive artifact or pane
   termination cleanup fails. Durable cancellation errors remain explicit.
+- Recover a failed durable journal append only after verifying its on-disk
+  state; complete writes are synced once, while partial or ambiguous tails stay
+  blocked without rewriting journal history.
 
 ### Breaking
 
