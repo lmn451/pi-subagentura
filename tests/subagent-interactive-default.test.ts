@@ -72,6 +72,7 @@ function mockCtx() {
     ui: { notify: vi.fn(), setStatus: vi.fn() },
     sessionManager: {
       getBranch: vi.fn().mockReturnValue([]),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
       getSessionId: vi.fn().mockReturnValue("test-session-id"),
     },
   };
@@ -365,15 +366,13 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
-  it("uses only the serialized parent branch when includeContext is true", async () => {
+  it("uses projected parent messages when includeContext is true", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();
-    ctx.sessionManager.getBranch.mockReturnValue([
-      {
-        type: "message",
-        message: { role: "user", content: "PARENT-BRANCH-MARKER" },
-      },
-    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({
+      messages: [{ role: "user", content: "PARENT-PROJECTED-MARKER" }],
+    });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
 
     await toolDef.execute(
       "call-parent-context",
@@ -387,10 +386,11 @@ describe("subagent_interactive tool lifecycle", () => {
       ctx,
     );
 
-    expect(ctx.sessionManager.getBranch).toHaveBeenCalledOnce();
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
     const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
       .contextText as string;
-    expect(contextText).toContain("PARENT-BRANCH-MARKER");
+    expect(contextText).toContain("PARENT-PROJECTED-MARKER");
     expect(contextText).not.toContain(
       "EXPLICIT-CONTEXT-MUST-NOT-BE-CONCATENATED",
     );

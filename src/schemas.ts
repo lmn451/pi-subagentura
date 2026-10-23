@@ -268,7 +268,7 @@ function exposeProviderObjectShape<T extends object>(
   validationSchema: T,
   providerShape: typeof InteractiveProviderFields,
 ): T {
-  // Pi 0.80.6's Anthropic adapter projects only these top-level keywords.
+  // The Anthropic adapter projects only these top-level keywords.
   // Keep allOf/anyOf on the returned schema so TypeBox validation stays strict.
   return {
     ...validationSchema,

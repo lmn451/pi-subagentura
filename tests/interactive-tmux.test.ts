@@ -57,11 +57,6 @@ function installMockExec(scenario: (file: string, args: string[]) => string) {
     execFileSync: (_file: string, args: string[]) =>
       scenario("tmux", args as string[]),
   }));
-  // Ensure getMux selects tmux, not zellij. The mock only handles tmux
-  // commands; if ZELLIJ_SESSION_NAME is set from the outer environment,
-  // getMux would pick zellij and the mock would not intercept its calls.
-  delete process.env.ZELLIJ;
-  delete process.env.ZELLIJ_SESSION_NAME;
 }
 
 function lineageNodesDir(sessionRoot: string, rootId: string): string {
@@ -128,6 +123,14 @@ describe("interactive-tmux", () => {
   beforeEach(() => {
     clearSessionScopes();
     scope = createTestSessionScope();
+    // Isolate auto-selection from ambient Herdr and Zellij identities in this
+    // mocked-tmux suite. Individual cases may opt into a backend afterward.
+    vi.stubEnv("HERDR_ENV", "");
+    vi.stubEnv("HERDR_SOCKET_PATH", "");
+    vi.stubEnv("HERDR_PANE_ID", "");
+    vi.stubEnv("ZELLIJ", "");
+    vi.stubEnv("ZELLIJ_SESSION_NAME", "");
+    vi.stubEnv("ZELLIJ_PANE_ID", "");
     // Tests may run inside a live child; never let fixtures mutate its lineage.
     delete process.env.PI_SUBAGENTURA_AGENT_ID;
     delete process.env.PI_SUBAGENTURA_ROOT_ID;
@@ -149,6 +152,7 @@ describe("interactive-tmux", () => {
     vi.doUnmock("node:fs");
     vi.doUnmock("../src/artifact");
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   afterAll(() => {

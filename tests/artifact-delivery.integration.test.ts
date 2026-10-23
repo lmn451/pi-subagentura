@@ -13,9 +13,11 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { readActiveTurn } from "../src/child-protocol";
-import type {
-  ExtensionAPI,
-  ExtensionUIContext,
+import {
+  ModelRegistry,
+  type ExtensionAPI,
+  type SessionEntry,
+  type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
@@ -39,9 +41,10 @@ import {
 } from "../src/completion-coordinator";
 import {
   createPiSessionHarness,
-  supportsNativeProviderRegistration,
   type PiSessionHarness,
+  withIsolatedPiRuntime,
 } from "./helpers/pi-session-harness";
+import { startSubagentJob } from "../src/helpers";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const childHarnesses: PiSessionHarness[] = [];
@@ -439,9 +442,12 @@ describe("protocol-v2 artifact delivery", () => {
       pi: pi as any,
       sessionManager: {
         getSessionId: () => "parent-session",
-        getEntries: () =>
-          entries.map(({ customType, data }) => ({
+        getEntries: (): SessionEntry[] =>
+          entries.map<SessionEntry>(({ customType, data }, index) => ({
             type: "custom",
+            id: `test-entry-${index}`,
+            parentId: index === 0 ? null : `test-entry-${index - 1}`,
+            timestamp: "1970-01-01T00:00:00.000Z",
             customType,
             data,
           })),
@@ -545,9 +551,12 @@ describe("protocol-v2 artifact delivery", () => {
         pi: pi as any,
         sessionManager: {
           getSessionId: () => "parent-session",
-          getEntries: () =>
-            entries.map(({ customType, data }) => ({
+          getEntries: (): SessionEntry[] =>
+            entries.map<SessionEntry>(({ customType, data }, index) => ({
               type: "custom",
+              id: `test-entry-${index}`,
+              parentId: index === 0 ? null : `test-entry-${index - 1}`,
+              timestamp: "1970-01-01T00:00:00.000Z",
               customType,
               data,
             })),
@@ -703,9 +712,12 @@ describe("protocol-v2 artifact delivery", () => {
         pi: pi as any,
         sessionManager: {
           getSessionId: () => "parent-session",
-          getEntries: () =>
-            entries.map(({ customType, data }) => ({
+          getEntries: (): SessionEntry[] =>
+            entries.map<SessionEntry>(({ customType, data }, index) => ({
               type: "custom",
+              id: `test-entry-${index}`,
+              parentId: index === 0 ? null : `test-entry-${index - 1}`,
+              timestamp: "1970-01-01T00:00:00.000Z",
               customType,
               data,
             })),
@@ -835,109 +847,140 @@ describe("protocol-v2 artifact delivery", () => {
     expect(readActiveTurn(art)?.turnId).toBe(resumedUserEntry?.id);
   });
 
-  it.skipIf(!supportsNativeProviderRegistration())(
-    "does not record a startup auth error while a native provider resolver is pending",
-    async () => {
-      const art = makeArtifact();
-      const native = createNativeAuthProvider();
-      const harness = await createPiSessionHarness(repoRoot, {
-        bindExtensionLifecycle: true,
-        childArtifactDir: art.dir,
-        nativeProvider: native.provider,
-        nativeModel: native.model,
-        onNativeSessionStart: async (ctx: any) => {
-          const pendingAuth = ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-          void pendingAuth.catch(() => {});
-          await native.resolverStarted;
-          expect(
-            ctx.modelRegistry.hasConfiguredAuth(native.model.provider),
-          ).toBe(false);
-        },
-      });
-      childHarnesses.push(harness);
-      const completionBeforeResolution = readEventRecords(art)
-        .map(({ event }) => event)
-        .find(
-          (event) => event.type === "completion" && event.turnId === "process",
+  it("does not record a startup auth error while a native provider resolver is pending", async () => {
+    const art = makeArtifact();
+    const native = createNativeAuthProvider();
+    const harness = await createPiSessionHarness(repoRoot, {
+      bindExtensionLifecycle: true,
+      childArtifactDir: art.dir,
+      nativeProvider: native.provider,
+      nativeModel: native.model,
+      onNativeSessionStart: async (ctx: any) => {
+        const pendingAuth = ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+        void pendingAuth.catch(() => {});
+        await native.resolverStarted;
+        expect(ctx.modelRegistry.hasConfiguredAuth(native.model.provider)).toBe(
+          false,
         );
-      const prompt = harness.session.prompt(
-        "exercise pending native authentication",
+      },
+    });
+    childHarnesses.push(harness);
+    const completionBeforeResolution = readEventRecords(art)
+      .map(({ event }) => event)
+      .find(
+        (event) => event.type === "completion" && event.turnId === "process",
       );
+    const prompt = harness.session.prompt(
+      "exercise pending native authentication",
+    );
+    await native.resolverStarted;
+    native.resolveAuthentication();
+    await prompt;
+    await harness.session.waitForIdle();
+    const completions = readEventRecords(art)
+      .map(({ event }) => event)
+      .filter((event) => event.type === "completion");
+    expect(completionBeforeResolution).toBeUndefined();
+    expect(completions.some((event) => event.turnId === "process")).toBe(false);
+    expect(completions).toMatchObject([
+      expect.objectContaining({ outcome: "done", source: "agent_settled" }),
+    ]);
+    expect(harness.session.getLastAssistantText()).toContain(
+      "Native provider authenticated locally",
+    );
+    expect(native.streamCalls()).toBe(1);
+    expect(native.requestApiKey()).toBe("local-test-api-key");
+  });
+  it("copies a native provider registration into a child ModelRuntime", async () => {
+    const native = createNativeAuthProvider();
+    const harness = await createPiSessionHarness(repoRoot, {
+      bindExtensionLifecycle: true,
+      nativeProvider: native.provider,
+      nativeModel: native.model,
+    });
+    childHarnesses.push(harness);
+    const scope = getStartedSessionScopes().find(
+      (candidate) => candidate.sessionManager === harness.sessionManager,
+    );
+    if (!scope)
+      throw new Error("native provider test session was not registered");
+
+    await withIsolatedPiRuntime(async ({ cwd }) => {
+      const prepared = await startSubagentJob({
+        task: "exercise child native provider authentication",
+        persona: undefined,
+        modelOverride: undefined,
+        cwd,
+        contextText: null,
+        signal: undefined,
+        onUpdate: undefined,
+        defaultModel: native.model,
+        parentModelRegistry: new ModelRegistry(harness.session.modelRuntime),
+        owner: sessionOwner(scope),
+      });
+      expect(prepared.start()).toBe(true);
       await native.resolverStarted;
       native.resolveAuthentication();
-      await prompt;
-      await harness.session.waitForIdle();
-      const completions = readEventRecords(art)
-        .map(({ event }) => event)
-        .filter((event) => event.type === "completion");
-      expect(completionBeforeResolution).toBeUndefined();
-      expect(completions.some((event) => event.turnId === "process")).toBe(
-        false,
-      );
-      expect(completions).toMatchObject([
-        expect.objectContaining({ outcome: "done", source: "agent_settled" }),
-      ]);
-      expect(harness.session.getLastAssistantText()).toContain(
-        "Native provider authenticated locally",
-      );
+
+      await expect(prepared.jobPromise).resolves.toMatchObject({
+        output: "Native provider authenticated locally",
+        isError: false,
+      });
       expect(native.streamCalls()).toBe(1);
       expect(native.requestApiKey()).toBe("local-test-api-key");
-    },
-  );
+    });
+  });
 
   for (const firstResolutionError of [
     "No response from authentication provider",
     "Authentication resolver failed; retry required",
     "Authentication resolver failed: response body missing",
   ]) {
-    it.skipIf(!supportsNativeProviderRegistration())(
-      `does not report missing auth for ${firstResolutionError}`,
-      async () => {
-        const art = makeArtifact();
-        const native = createNativeAuthProvider({ firstResolutionError });
-        const harness = await createPiSessionHarness(repoRoot, {
-          bindExtensionLifecycle: true,
-          childArtifactDir: art.dir,
-          nativeProvider: native.provider,
-          nativeModel: native.model,
-        });
-        childHarnesses.push(harness);
-        await native.resolverStarted;
-        await new Promise<void>((resolve) => setImmediate(resolve));
+    it(`does not report missing auth for ${firstResolutionError}`, async () => {
+      const art = makeArtifact();
+      const native = createNativeAuthProvider({ firstResolutionError });
+      const harness = await createPiSessionHarness(repoRoot, {
+        bindExtensionLifecycle: true,
+        childArtifactDir: art.dir,
+        nativeProvider: native.provider,
+        nativeModel: native.model,
+      });
+      childHarnesses.push(harness);
+      await native.resolverStarted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
-        expect(
-          readEventRecords(art)
-            .map(({ event }) => event)
-            .filter(
-              (event) =>
-                event.type === "completion" && event.turnId === "process",
-            ),
-        ).toEqual([]);
-
-        native.resolveAuthentication();
-        const prompt = harness.session.prompt(
-          "retry after a transient authentication failure",
-        );
-        await prompt;
-        await harness.session.waitForIdle();
-
-        const completions = readEventRecords(art)
+      expect(
+        readEventRecords(art)
           .map(({ event }) => event)
-          .filter((event) => event.type === "completion");
-        expect(completions.some((event) => event.turnId === "process")).toBe(
-          false,
-        );
-        expect(completions).toMatchObject([
-          expect.objectContaining({
-            outcome: "done",
-            source: "agent_settled",
-          }),
-        ]);
-        expect(native.resolverCalls()).toBeGreaterThan(1);
-        expect(native.streamCalls()).toBe(1);
-        expect(native.requestApiKey()).toBe("local-test-api-key");
-      },
-    );
+          .filter(
+            (event) =>
+              event.type === "completion" && event.turnId === "process",
+          ),
+      ).toEqual([]);
+
+      native.resolveAuthentication();
+      const prompt = harness.session.prompt(
+        "retry after a transient authentication failure",
+      );
+      await prompt;
+      await harness.session.waitForIdle();
+
+      const completions = readEventRecords(art)
+        .map(({ event }) => event)
+        .filter((event) => event.type === "completion");
+      expect(completions.some((event) => event.turnId === "process")).toBe(
+        false,
+      );
+      expect(completions).toMatchObject([
+        expect.objectContaining({
+          outcome: "done",
+          source: "agent_settled",
+        }),
+      ]);
+      expect(native.resolverCalls()).toBeGreaterThan(1);
+      expect(native.streamCalls()).toBe(1);
+      expect(native.requestApiKey()).toBe("local-test-api-key");
+    });
   }
 
   it("does not publish workflow-owned child completions independently", async () => {

@@ -101,14 +101,16 @@ function mockStaleCtx() {
 
 /** Build a mock ctx with sessionManager for subagent_with_context tests. */
 function mockCtxWithHistory() {
+  const branch = [
+    { type: "message", message: { role: "user", content: "test input" } },
+  ];
   return {
     cwd: "/tmp",
     sessionManager: {
-      getBranch: vi
-        .fn()
-        .mockReturnValue([
-          { type: "message", message: { role: "user", content: "test input" } },
-        ]),
+      getBranch: vi.fn().mockReturnValue(branch),
+      buildSessionProjection: vi.fn().mockReturnValue({
+        messages: [{ role: "user", content: "test input" }],
+      }),
     },
     model: { provider: "test", id: "test-model" },
     ui: { setStatus: vi.fn() },

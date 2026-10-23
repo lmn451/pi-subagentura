@@ -65,7 +65,6 @@
     "src/usage.ts",
     "src/orchestrator-routing.ts",
     "src/orchestration-context.ts",
-    "src/pi-sdk-compat.ts",
     "src/tools/in-process.ts",
     "src/tools/interactive.ts",
     "src/tools/orchestrator.ts",
@@ -150,19 +149,17 @@
     "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css,html}": "oxfmt --no-error-on-unmatched-pattern"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.80.6",
-    "@earendil-works/pi-ai": ">=0.80.6",
-    "@earendil-works/pi-coding-agent": ">=0.80.6",
-    "@earendil-works/pi-server": ">=0.84.0",
-    "@earendil-works/pi-tui": ">=0.80.6",
+    "@earendil-works/pi-agent-core": ">=1.2.0",
+    "@earendil-works/pi-ai": ">=1.2.0",
+    "@earendil-works/pi-coding-agent": ">=1.2.0",
+    "@earendil-works/pi-tui": ">=1.2.0",
     "typebox": ">=1.1.38 <2"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.85.0",
-    "@earendil-works/pi-ai": "0.85.0",
-    "@earendil-works/pi-coding-agent": "0.85.0",
-    "@earendil-works/pi-server": "0.85.0",
-    "@earendil-works/pi-tui": "0.85.0",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^5.0.0",
@@ -171,7 +168,8 @@
     "oxfmt": "^0.68.0",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",

@@ -51,8 +51,10 @@ import {
   type WorkflowPickerChoice,
 } from "./workflow-picker-ui";
 import type {
+  AgentToolResult,
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { cancellationSnapshotsEnabled } from "./cancellation-snapshots";
 import {
@@ -96,6 +98,77 @@ import { createLaunchResolutionReporter } from "./telemetry-launch";
 const WORKFLOW_SESSION_SCOPE_MESSAGE =
   "Workflow jobs are scoped to the current parent session and do not survive reload/resume/new/quit.";
 
+const WorkflowUsageOutputSchema = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  totalTokens: Type.Number(),
+  costUsd: Type.Number(),
+  turns: Type.Number(),
+  costSource: Type.Optional(
+    Type.Union([
+      Type.Literal("provider"),
+      Type.Literal("estimated"),
+      Type.Literal("unavailable"),
+      Type.Literal("mixed"),
+    ]),
+  ),
+});
+const WorkflowStatusOutputSchema = Type.Union([
+  Type.Object({
+    status: Type.Union([
+      Type.Literal("running"),
+      Type.Literal("done"),
+      Type.Literal("error"),
+      Type.Literal("cancelled"),
+    ]),
+    workflowId: Type.String(),
+    name: Type.String(),
+    presentationStatus: Type.String(),
+    elapsedMs: Type.Number(),
+    agentsSpawned: Type.Number(),
+    runningCount: Type.Optional(Type.Number()),
+    errorCount: Type.Number(),
+    usage: Type.Optional(WorkflowUsageOutputSchema),
+    liveUsage: Type.Optional(WorkflowUsageOutputSchema),
+    budgetTotal: Type.Optional(Type.Number()),
+    currentPhase: Type.Optional(Type.String()),
+    error: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    status: Type.Literal("not_found"),
+    workflowId: Type.String(),
+  }),
+]);
+const WorkflowResultOutputSchema = Type.Object({
+  status: Type.Union([
+    Type.Literal("not_found"),
+    Type.Literal("wait_cancelled"),
+    Type.Literal("running"),
+    Type.Literal("done"),
+    Type.Literal("error"),
+    Type.Literal("cancelled"),
+  ]),
+  workflowId: Type.String(),
+  name: Type.Optional(Type.String()),
+  presentationStatus: Type.Optional(Type.String()),
+  result: Type.Optional(Type.String()),
+  agentsSpawned: Type.Optional(Type.Number()),
+  errorCount: Type.Optional(Type.Number()),
+  usage: Type.Optional(WorkflowUsageOutputSchema),
+  budgetTotal: Type.Optional(Type.Number()),
+  error: Type.Optional(Type.String()),
+});
+const WorkflowListOutputSchema = Type.Object({
+  status: Type.Literal("ok"),
+  workflows: Type.Array(
+    Type.Object({
+      name: Type.String(),
+      description: Type.String(),
+    }),
+  ),
+});
 /**
  * One derivation of the reported completion-policy dimension for every workflow
  * entry point. Each caller already knows the coordination settings it is about
@@ -109,15 +182,16 @@ function workflowTelemetryCompletionPolicy(
   return runAsync ? completion.policy : "inline";
 }
 
+type SpawnContext = Partial<Pick<ExtensionContext, "sessionManager">>;
+
 /**
  * Resolve the depth a workflow's children occupy, plus the root session id for
  * their logs. Mirrors `resolveSpawn` in the in-process tools: the ambient
  * orchestration context is authoritative, and the parent's own session id is
  * the fallback when there is no ambient context to inherit from.
  */
-function resolveWorkflowSpawn(ctx: {
-  sessionManager?: { getSessionId?: () => string };
-}): SpawnDepthDecision {
+
+function resolveWorkflowSpawn(ctx: SpawnContext): SpawnDepthDecision {
   const spawn = resolveSpawnDepth();
   if (spawn.rootSessionId) return spawn;
   let rootSessionId: string | undefined;
@@ -238,7 +312,7 @@ export function registerWorkflowTool(
     sessionScope ? sessionOwner(sessionScope) : undefined;
   // Build the real spawn function from the tool ctx. Switches backend on `isolation`.
   function makeRunAgent(
-    ctx: any,
+    ctx: Pick<ExtensionContext, "cwd" | "model" | "modelRegistry">,
     ownedWorkflowId: string,
     supervisorOwner: SessionOwnerToken | undefined,
     workflowAsync: boolean,
@@ -764,13 +838,7 @@ export function registerWorkflowTool(
       ),
     }),
 
-    async execute(
-      _toolCallId: string,
-      params: any,
-      signal: AbortSignal | undefined,
-      onUpdate: any,
-      ctx: any,
-    ): Promise<any> {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const orchestrationContext = getOrchestrationContext();
       if (orchestrationContext) {
         const error =
@@ -1079,7 +1147,8 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    outputSchema: WorkflowStatusOutputSchema,
+    async execute(_id, params): Promise<AgentToolResult<unknown>> {
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
         return {
@@ -1088,6 +1157,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "not_found", workflowId: params.workflowId },
           isError: true,
+          structuredContent: {
+            status: "not_found",
+            workflowId: params.workflowId,
+          },
         };
       }
       const errorCount = st.result?.errorCount ?? st.snapshot.errorCount;
@@ -1126,6 +1199,27 @@ export function registerWorkflowTool(
           elapsedMs: Date.now() - st.startedAt,
           ...st.snapshot,
         },
+        structuredContent: {
+          status: st.status,
+          workflowId: st.id,
+          name: st.name,
+          presentationStatus: presentation.label,
+          elapsedMs: Date.now() - st.startedAt,
+          agentsSpawned: st.snapshot.agentsSpawned,
+          ...(st.snapshot.runningCount === undefined
+            ? {}
+            : { runningCount: st.snapshot.runningCount }),
+          errorCount,
+          ...(usage === undefined ? {} : { usage }),
+          ...(liveUsage === undefined ? {} : { liveUsage }),
+          ...(st.snapshot.budgetTotal == null
+            ? {}
+            : { budgetTotal: st.snapshot.budgetTotal }),
+          ...(st.snapshot.currentPhase === undefined
+            ? {}
+            : { currentPhase: st.snapshot.currentPhase }),
+          ...(st.error === undefined ? {} : { error: st.error }),
+        },
       };
     },
   });
@@ -1141,11 +1235,8 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(
-      _id: string,
-      params: any,
-      signal?: AbortSignal,
-    ): Promise<any> {
+    outputSchema: WorkflowResultOutputSchema,
+    async execute(_id, params, signal): Promise<AgentToolResult<unknown>> {
       const workflowOwner = owner();
       const st = getWorkflowJobForOwner(params.workflowId, workflowOwner);
       if (!st) {
@@ -1160,6 +1251,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "not_found", workflowId: params.workflowId },
           isError: true,
+          structuredContent: {
+            status: "not_found",
+            workflowId: params.workflowId,
+          },
         };
       }
 
@@ -1175,6 +1270,10 @@ export function registerWorkflowTool(
           ],
           details: { status: "wait_cancelled", workflowId: st.id },
           isError: true,
+          structuredContent: {
+            status: "wait_cancelled",
+            workflowId: st.id,
+          },
         };
       }
 
@@ -1193,6 +1292,10 @@ export function registerWorkflowTool(
             ],
             details: { status: "wait_cancelled", workflowId: st.id },
             isError: true,
+            structuredContent: {
+              status: "wait_cancelled",
+              workflowId: st.id,
+            },
           };
         }
         run = waitResult.value!;
@@ -1234,6 +1337,13 @@ export function registerWorkflowTool(
             ...usageDetails,
           },
           isError: true,
+          structuredContent: {
+            status: st.status,
+            workflowId: st.id,
+            error: msg,
+            ...(outputBudget == null ? {} : { budgetTotal: outputBudget }),
+            ...(usage === undefined ? {} : { usage }),
+          },
         };
       }
 
@@ -1294,6 +1404,19 @@ export function registerWorkflowTool(
           budgetTotal: st.snapshot.budgetTotal,
           phases: run.phases,
         },
+        structuredContent: {
+          status: "done",
+          workflowId: st.id,
+          name: run.meta.name,
+          presentationStatus: presentation.label,
+          result: resultText,
+          agentsSpawned: run.agentsSpawned,
+          errorCount: run.errorCount,
+          ...(run.usage === undefined ? {} : { usage: run.usage }),
+          ...(st.snapshot.budgetTotal == null
+            ? {}
+            : { budgetTotal: st.snapshot.budgetTotal }),
+        },
       };
     },
   });
@@ -1309,7 +1432,7 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    async execute(_id, params): Promise<AgentToolResult<unknown>> {
       const st = getWorkflowJobForOwner(params.workflowId, owner());
       if (!st) {
         return {
@@ -1383,7 +1506,7 @@ export function registerWorkflowTool(
         description: "The workflow script to save (validated before writing).",
       }),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    async execute(_id, params): Promise<AgentToolResult<unknown>> {
       try {
         const file = saveWorkflowScript(params.name, params.script);
         return {
@@ -1412,7 +1535,8 @@ export function registerWorkflowTool(
     label: "List Workflows",
     description: "List saved workflows (name + description).",
     parameters: Type.Object({}),
-    async execute(): Promise<any> {
+    outputSchema: WorkflowListOutputSchema,
+    async execute() {
       const items = listSavedWorkflows();
       const text = items.length
         ? items.map((w) => `- ${w.name}: ${w.description}`).join("\n")
@@ -1420,6 +1544,13 @@ export function registerWorkflowTool(
       return {
         content: [{ type: "text", text }],
         details: { status: "ok", workflows: items },
+        structuredContent: {
+          status: "ok",
+          workflows: items.map(({ name, description }) => ({
+            name,
+            description,
+          })),
+        },
       };
     },
   });
@@ -1434,7 +1565,7 @@ export function registerWorkflowTool(
         description: "Name of the saved workflow to delete.",
       }),
     }),
-    async execute(_id: string, params: any): Promise<any> {
+    async execute(_id, params): Promise<AgentToolResult<unknown>> {
       try {
         const existed = deleteWorkflowScript(params.name);
         return {
@@ -1467,7 +1598,7 @@ export function registerWorkflowTool(
   // ── Workflow user commands (guarded) ──
   if (typeof pi.registerCommand === "function") {
     const sendCommandMessage = (text: string) => {
-      const sendMessage = (pi as any).sendMessage;
+      const sendMessage = pi.sendMessage;
       if (typeof sendMessage === "function") {
         sendMessage.call(
           pi,
@@ -1488,7 +1619,10 @@ export function registerWorkflowTool(
       task: string,
     ) => {
       const prompt = buildWorkflowCreationPrompt(task);
-      const sendUserMessage = (ctx as any).sendUserMessage;
+      const sendUserMessage = (
+        ctx as ExtensionCommandContext &
+          Partial<Pick<ExtensionAPI, "sendUserMessage">>
+      ).sendUserMessage;
       if (typeof sendUserMessage === "function") {
         await sendUserMessage.call(ctx, prompt, { deliverAs: "followUp" });
         return;
@@ -1554,17 +1688,11 @@ export function registerWorkflowTool(
       ui: ExtensionCommandContext["ui"],
       choices: WorkflowPickerChoice[],
     ): Promise<WorkflowPickerAction | undefined> => {
-      const custom = (ui as any).custom;
-      if (typeof custom === "function") {
-        return custom.call(
-          ui,
-          (
-            _tui: unknown,
-            theme: unknown,
-            _kb: unknown,
-            done: (action: WorkflowPickerAction) => void,
-          ) => new WorkflowPickerComponent(choices, theme as any, done),
-        ) as Promise<WorkflowPickerAction | undefined>;
+      if (typeof ui.custom === "function") {
+        return ui.custom<WorkflowPickerAction | undefined>(
+          (_tui, theme, _kb, done) =>
+            new WorkflowPickerComponent(choices, theme, done),
+        );
       }
       const deleteLabel = "🗑  Delete a workflow…";
       const labels = choices.map(
@@ -1676,8 +1804,12 @@ export function registerWorkflowTool(
         "Create a reusable workflow from a task, save it, and run it immediately.",
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const inlineTask = args.trim();
-        const editor = (ctx.ui as any).editor;
-        const input = (ctx.ui as any).input;
+        const editor = (
+          ctx.ui as typeof ctx.ui & {
+            editor?: typeof ctx.ui.input;
+          }
+        ).editor;
+        const input = ctx.ui.input;
         const promptedTask =
           !inlineTask && typeof editor === "function"
             ? await editor.call(ctx.ui, "Workflow task:", "")
@@ -1793,8 +1925,12 @@ export function registerWorkflowTool(
   async function promptForWorkflowArgs(
     ctx: ExtensionCommandContext,
   ): Promise<unknown | typeof CANCELLED_ARGS_PROMPT> {
-    const editor = (ctx.ui as any).editor;
-    const input = (ctx.ui as any).input;
+    const editor = (
+      ctx.ui as typeof ctx.ui & {
+        editor?: typeof ctx.ui.input;
+      }
+    ).editor;
+    const input = ctx.ui.input;
     const raw =
       typeof editor === "function"
         ? await editor.call(ctx.ui, "Workflow args JSON (optional):", "{}")

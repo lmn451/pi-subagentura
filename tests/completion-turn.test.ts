@@ -39,6 +39,18 @@ function completion(content: string) {
   };
 }
 
+function wakeMessages(pi: ReturnType<typeof mockPi>) {
+  return pi.sendMessage.mock.calls
+    .filter(([, options]) => options?.triggerTurn === true)
+    .map(([message]) => message);
+}
+
+function findWakeMessage(pi: ReturnType<typeof mockPi>) {
+  const message = wakeMessages(pi)[0];
+  if (!message) throw new Error("native custom wake not sent");
+  return message;
+}
+
 describe("Orchestratorv2 completion turns", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -66,23 +78,34 @@ describe("Orchestratorv2 completion turns", () => {
       expect.objectContaining({ state: "requested" }),
     );
     const firstWakeId =
-      pi.sendMessage.mock.calls[0][0].details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
-    expect(pi.sendMessage.mock.calls[1][0].details).toMatchObject({
+      findWakeMessage(pi).details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    expect(pi.sendMessage).toHaveBeenCalledTimes(3);
+    expect(pi.sendMessage.mock.calls[0][1]).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(pi.sendMessage.mock.calls[1][1]).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(pi.sendMessage.mock.calls[2][1]).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(findWakeMessage(pi).details).toMatchObject({
       [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: firstWakeId,
     });
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS - 1);
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(wakeMessages(pi)).toHaveLength(1);
     vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS);
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(wakeMessages(pi)).toHaveLength(2);
     vi.advanceTimersByTime(
       ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS *
         (ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS - 1),
     );
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(
-      ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS,
-    );
+    expect(wakeMessages(pi)).toHaveLength(ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS);
 
     acknowledgeCompletionTurnWake(pi as never);
     expect(pi.appendEntry).toHaveBeenLastCalledWith(
@@ -132,8 +155,7 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    const wakeId =
-      pi.sendMessage.mock.calls[0][0].details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    const wakeId = findWakeMessage(pi).details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
     for (let attempt = 0; attempt < 2; attempt++) {
       pi.appendEntry.mockImplementationOnce(() => {
         throw new Error("transient append failure");
@@ -147,8 +169,8 @@ describe("Orchestratorv2 completion turns", () => {
       parentStreaming: false,
     });
 
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
-    expect(pi.sendMessage.mock.calls[1][0].details).toMatchObject({
+    expect(wakeMessages(pi)).toHaveLength(2);
+    expect(wakeMessages(pi)[1].details).toMatchObject({
       [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId,
     });
     expect(
@@ -165,29 +187,42 @@ describe("Orchestratorv2 completion turns", () => {
     );
   });
 
-  it("does not acknowledge unrelated runs and requires the exact wake prompt", () => {
+  it("marks only the native custom message carrying the active wake id", () => {
     const pi = mockPi();
     sendCompletionTurn(pi as never, completion("one"), {
       deliverAs: "followUp",
       triggerTurn: true,
       parentStreaming: false,
     });
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
+    const wakeMessage = findWakeMessage(pi);
+    const wakeId = wakeMessage.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
 
     expect(settleCompletionTurnWake(pi as never)).toBe(false);
     expect(
-      markCompletionTurnWakeStarted(pi as never, `${wakePrompt} extra`),
+      markCompletionTurnWakeStarted(pi as never, {
+        ...wakeMessage,
+        customType: "unrelated",
+        content: `unrelated custom message mentions wake id ${wakeId}`,
+      }),
+    ).toBe(false);
+    expect(
+      markCompletionTurnWakeStarted(pi as never, {
+        ...wakeMessage,
+        content: `unrelated custom message mentions wake id ${wakeId}`,
+        details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: "different-wake-id" },
+      }),
     ).toBe(false);
     expect(settleCompletionTurnWake(pi as never)).toBe(false);
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    expect(markCompletionTurnWakeStarted(pi as never, wakePrompt)).toBe(true);
+    expect(markCompletionTurnWakeStarted(pi as never, wakeMessage)).toBe(true);
     expect(settleCompletionTurnWake(pi as never)).toBe(true);
     expect(pi.appendEntry).toHaveBeenLastCalledWith(
       ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
       expect.objectContaining({ state: "acknowledged" }),
     );
   });
+
   it("retries a transient acknowledgement failure without replaying the wake", () => {
     vi.useFakeTimers();
     const pi = mockPi();
@@ -196,14 +231,14 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(markCompletionTurnWakeStarted(pi as never, wakePrompt)).toBe(true);
+    const wakeMessage = findWakeMessage(pi);
+    expect(markCompletionTurnWakeStarted(pi as never, wakeMessage)).toBe(true);
     pi.appendEntry.mockImplementationOnce(() => {
       throw new Error("transient append failure");
     });
 
     expect(settleCompletionTurnWake(pi as never)).toBe(false);
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(1);
 
     vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_ACK_RETRY_DELAY_MS);
@@ -212,9 +247,10 @@ describe("Orchestratorv2 completion turns", () => {
       ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
       expect.objectContaining({ state: "acknowledged" }),
     );
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
+
   it("starts a fresh wake for a completion arriving during ack retry", () => {
     vi.useFakeTimers();
     const pi = mockPi();
@@ -223,8 +259,8 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    const firstWakePrompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(markCompletionTurnWakeStarted(pi as never, firstWakePrompt)).toBe(
+    const firstWakeMessage = findWakeMessage(pi);
+    expect(markCompletionTurnWakeStarted(pi as never, firstWakeMessage)).toBe(
       true,
     );
     pi.appendEntry.mockImplementationOnce(() => {
@@ -238,13 +274,12 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
-    expect(pi.sendUserMessage.mock.calls[1][0]).toBe(firstWakePrompt);
+    expect(wakeMessages(pi)).toHaveLength(2);
 
     vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_ACK_RETRY_DELAY_MS);
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
-    const secondWakePrompt = pi.sendUserMessage.mock.calls[1][0];
-    expect(markCompletionTurnWakeStarted(pi as never, secondWakePrompt)).toBe(
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    const secondWakeMessage = wakeMessages(pi)[1];
+    expect(markCompletionTurnWakeStarted(pi as never, secondWakeMessage)).toBe(
       true,
     );
     expect(settleCompletionTurnWake(pi as never)).toBe(true);
@@ -263,8 +298,8 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(markCompletionTurnWakeStarted(pi as never, wakePrompt)).toBe(true);
+    const wakeMessage = findWakeMessage(pi);
+    expect(markCompletionTurnWakeStarted(pi as never, wakeMessage)).toBe(true);
     pi.appendEntry.mockImplementation(() => {
       throw new Error("persistent append failure");
     });
@@ -274,7 +309,7 @@ describe("Orchestratorv2 completion turns", () => {
       ORCHESTRATOR_V2_WAKE_ACK_RETRY_DELAY_MS *
         (ORCHESTRATOR_V2_WAKE_ACK_MAX_ATTEMPTS + 2),
     );
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(wakeMessages(pi)).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
 
     sendCompletionTurn(pi as never, completion("two"), {
@@ -282,7 +317,7 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(wakeMessages(pi)).toHaveLength(2);
     clearCompletionTurnWake(pi as never);
   });
 
@@ -294,8 +329,8 @@ describe("Orchestratorv2 completion turns", () => {
       triggerTurn: true,
       parentStreaming: false,
     });
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
-    markCompletionTurnWakeStarted(pi as never, wakePrompt);
+    const wakeMessage = findWakeMessage(pi);
+    markCompletionTurnWakeStarted(pi as never, wakeMessage);
     pi.appendEntry.mockImplementationOnce(() => {
       throw new Error("transient append failure");
     });
@@ -308,19 +343,22 @@ describe("Orchestratorv2 completion turns", () => {
     expect(pi.appendEntry).toHaveBeenCalledTimes(2);
   });
 
-  it("retries swallowed async wake failures up to a cap, then retries a later completion", () => {
+  it("retries native custom wake sends up to a cap, then retries a later completion", () => {
     vi.useFakeTimers();
     const pi = mockPi();
-    pi.sendUserMessage.mockImplementation(() =>
-      Promise.reject(new Error("preflight failed")),
-    );
+    pi.sendMessage
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error("transient send failure");
+      });
 
     sendCompletionTurn(pi as never, completion("one"), {
       deliverAs: "followUp",
       triggerTurn: true,
       parentStreaming: false,
     });
-    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(wakeMessages(pi)).toHaveLength(1);
 
     for (
       let attempt = 1;
@@ -328,19 +366,17 @@ describe("Orchestratorv2 completion turns", () => {
       attempt++
     ) {
       vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS);
-      expect(pi.sendUserMessage).toHaveBeenCalledTimes(attempt + 1);
+      expect(wakeMessages(pi)).toHaveLength(attempt + 1);
     }
     vi.advanceTimersByTime(ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS * 2);
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(
-      ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS,
-    );
+    expect(wakeMessages(pi)).toHaveLength(ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS);
 
     sendCompletionTurn(pi as never, completion("two"), {
       deliverAs: "followUp",
       triggerTurn: true,
       parentStreaming: false,
     });
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(
+    expect(wakeMessages(pi)).toHaveLength(
       ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS + 1,
     );
 
@@ -371,7 +407,7 @@ describe("Orchestratorv2 completion turns", () => {
     clearCompletionTurnWake(pi as never);
   });
 
-  it("allows the final wake attempt to start before exhaustion releases the fence", () => {
+  it("allows the final native wake attempt to start before exhaustion releases the fence", () => {
     vi.useFakeTimers();
     const pi = mockPi();
     const exhausted = vi.fn();
@@ -382,19 +418,20 @@ describe("Orchestratorv2 completion turns", () => {
       parentStreaming: false,
       onWakeExhausted: exhausted,
     });
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
 
     vi.advanceTimersByTime(
       ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS *
         (ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS - 1),
     );
 
-    expect(pi.sendUserMessage).toHaveBeenCalledTimes(
-      ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS,
-    );
+    expect(wakeMessages(pi)).toHaveLength(ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS);
     expect(exhausted).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(1);
-    expect(markCompletionTurnWakeStarted(pi as never, wakePrompt)).toBe(true);
+    const finalWakeMessage =
+      wakeMessages(pi)[ORCHESTRATOR_V2_WAKE_MAX_ATTEMPTS - 1];
+    expect(markCompletionTurnWakeStarted(pi as never, finalWakeMessage)).toBe(
+      true,
+    );
     expect(exhausted).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
     clearCompletionTurnWake(pi as never);
@@ -410,8 +447,8 @@ describe("Orchestratorv2 completion turns", () => {
     });
     expect(vi.getTimerCount()).toBe(1);
 
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(markCompletionTurnWakeStarted(pi as never, wakePrompt)).toBe(true);
+    const wakeMessage = findWakeMessage(pi);
+    expect(markCompletionTurnWakeStarted(pi as never, wakeMessage)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
     expect(settleCompletionTurnWake(pi as never)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
@@ -452,7 +489,7 @@ describe("Orchestratorv2 completion turns", () => {
 
     expect(recoverCompletionTurnWakes(pendingPi as never, entries)).toBe(true);
     expect(recoverCompletionTurnWakes(pendingPi as never, entries)).toBe(true);
-    expect(pendingPi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(pendingPi.sendMessage).toHaveBeenCalledOnce();
     clearCompletionTurnWake(pendingPi as never);
 
     const acknowledgedPi = mockPi();
@@ -470,6 +507,6 @@ describe("Orchestratorv2 completion turns", () => {
         },
       ]),
     ).toBe(false);
-    expect(acknowledgedPi.sendUserMessage).not.toHaveBeenCalled();
+    expect(acknowledgedPi.sendMessage).not.toHaveBeenCalled();
   });
 });

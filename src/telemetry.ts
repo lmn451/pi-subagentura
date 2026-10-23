@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  getBuiltinModel,
+  getBuiltinProviders,
+  type BuiltinProvider,
+} from "@earendil-works/pi-ai/providers/all";
 import {
   asStringIdentifier,
   type TelemetryCorrelationId,
@@ -498,7 +502,10 @@ export function retireTelemetrySession(
 
 function builtInModel(provider: string, modelId: string): boolean {
   try {
-    return getModel(provider as never, modelId) !== undefined;
+    return (
+      getBuiltinModel(provider as BuiltinProvider, modelId as never) !==
+      undefined
+    );
   } catch {
     return false;
   }
@@ -514,11 +521,10 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
     const modelId = model.slice(separator + 1);
     return builtInModel(provider, modelId) ? model : "custom";
   }
-  // Provider enumeration reaches registry code owned by the host agent. A throw
-  // there must degrade the dimension, never fail the sub-agent launch that only
-  // wanted to label a model.
+  // The generated provider catalog is used only to label telemetry. Any
+  // lookup failure must degrade this dimension, not fail sub-agent launch.
   try {
-    for (const provider of getProviders()) {
+    for (const provider of getBuiltinProviders()) {
       if (builtInModel(provider, model)) return model;
     }
   } catch {

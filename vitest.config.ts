@@ -18,8 +18,6 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      // Compatibility branches are exercised by the baseline/latest SDK matrix.
-      exclude: ["src/pi-sdk-compat.ts"],
       thresholds: {
         statements: 71,
         branches: 64,

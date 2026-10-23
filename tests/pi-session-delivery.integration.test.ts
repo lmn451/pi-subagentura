@@ -16,6 +16,7 @@ import { writeCliScript } from "../src/subagent-artifact-cli";
 import {
   createPiSessionHarness,
   type PiSessionHarness,
+  withIsolatedPiRuntime,
 } from "./helpers/pi-session-harness";
 import {
   mkdirSync,
@@ -27,14 +28,17 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   registerInProcessJob,
   removeInProcessJob,
+  startSubagentJob,
   type JobState,
   type SubagentResult,
 } from "../src/helpers";
 import { sessionLedgerPath } from "../src/completion-ledger";
+import { registerInProcessSubagentTools } from "../src/tools/in-process";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 import {
   clearCompletionCoordinator,
@@ -377,6 +381,168 @@ describe("coordinated completion delivery", () => {
 });
 
 describe("child protocol lifecycle integration", () => {
+  it.each([
+    ["subagent_with_context", false],
+    ["subagent_with_context", true],
+    ["subagent_isolated", false],
+    ["subagent_isolated", true],
+  ] as const)(
+    "%s applies an explicit thinking level on the %s path using a real child session",
+    async (toolName, runAsync) => {
+      const { harness } = await setupCoordinatorHarness();
+      const api = {
+        registerTool: vi.fn(),
+        sendMessage: vi.fn(),
+        sendUserMessage: vi.fn(),
+      };
+      const scope = createTestSessionScope({ pi: api as never });
+      scope.sessionManager = harness.sessionManager;
+      scope.ui = harness.session.extensionRunner.getUIContext();
+      scope.isParentIdle = () => !harness.session.isStreaming;
+      registerInProcessSubagentTools(api as never, scope);
+      const definitions = api.registerTool.mock.calls.map(([tool]) => tool);
+      const spawn = definitions.find((tool) => tool.name === toolName);
+      const getResult = definitions.find(
+        (tool) => tool.name === "get_subagent_result",
+      );
+      if (!spawn || !getResult)
+        throw new Error("in-process tools not registered");
+
+      const parentTurn = harness.session.prompt("Parent context for child.");
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.completeNext("parent ready");
+      await parentTurn;
+
+      await withIsolatedPiRuntime(async ({ cwd }) => {
+        const context = {
+          cwd,
+          model: harness.session.model,
+          modelRegistry: new ModelRegistry(harness.session.modelRuntime),
+          sessionManager: harness.sessionManager,
+          ui: harness.session.extensionRunner.getUIContext(),
+        };
+        const priorChildRequests = harness.contexts.length;
+        const launchedPromise = spawn.execute(
+          `thinking-${toolName}-${runAsync}`,
+          {
+            task: "Return the child provider response.",
+            async: runAsync,
+            thinkingLevel: "high",
+            model: "subagentura-faux/faux-model",
+          },
+          undefined,
+          undefined,
+          context as never,
+        );
+
+        const childExecution = async () => {
+          await vi.waitFor(() =>
+            expect(harness.contexts).toHaveLength(priorChildRequests + 1),
+          );
+          harness.completeNext("child completed at high thinking level");
+        };
+
+        if (runAsync) {
+          const launched = await launchedPromise;
+          const jobId = (launched.details as { jobId?: string }).jobId;
+          expect(jobId).toEqual(expect.any(String));
+          const pendingResult = getResult.execute(
+            "thinking-result",
+            { jobId, wait: true },
+            undefined,
+            undefined,
+            context as never,
+          );
+          await childExecution();
+          const result = await pendingResult;
+          expect(result.details).toMatchObject({
+            status: "done",
+            thinkingLevel: "high",
+          });
+          expect(result.content[0]?.text).toContain(
+            "child completed at high thinking level",
+          );
+        } else {
+          await childExecution();
+          const launched = await launchedPromise;
+          expect(launched.details).toMatchObject({
+            status: "done",
+            thinkingLevel: "high",
+          });
+          expect(launched.content[0]?.text).toContain(
+            "child completed at high thinking level",
+          );
+        }
+        expect(JSON.stringify(harness.contexts.at(-1)?.messages)).toContain(
+          "Return the child provider response.",
+        );
+        expect(harness.thinkingLevels.at(-1)).toBe("high");
+      });
+    },
+  );
+
+  it("copies a registered provider into a child ModelRuntime", async () => {
+    const { harness, scope } = await setupCoordinatorHarness();
+    await withIsolatedPiRuntime(async ({ cwd }) => {
+      const prepared = await startSubagentJob({
+        task: "child provider request",
+        persona: undefined,
+        modelOverride: "subagentura-faux/faux-model",
+        cwd,
+        contextText: "inherited-parent-context",
+        signal: undefined,
+        onUpdate: undefined,
+        defaultModel: harness.session.model,
+        parentModelRegistry: new ModelRegistry(harness.session.modelRuntime),
+        owner: sessionOwner(scope),
+      });
+
+      expect(prepared.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      const childContext = JSON.stringify(harness.contexts[0]?.messages);
+      expect(childContext).toContain("inherited-parent-context");
+      expect(childContext).toContain("child provider request");
+      harness.completeNext("child provider response");
+      await expect(prepared.jobPromise).resolves.toMatchObject({
+        output: "child provider response",
+        isError: false,
+      });
+    });
+  });
+
+  it("preserves empty child output separately from literal '(no output)'", async () => {
+    const { harness, scope } = await setupCoordinatorHarness();
+    await withIsolatedPiRuntime(async ({ cwd }) => {
+      const start = (task: string) =>
+        startSubagentJob({
+          task,
+          persona: undefined,
+          modelOverride: "subagentura-faux/faux-model",
+          cwd,
+          contextText: null,
+          signal: undefined,
+          onUpdate: undefined,
+          defaultModel: harness.session.model,
+          parentModelRegistry: new ModelRegistry(harness.session.modelRuntime),
+          owner: sessionOwner(scope),
+        });
+
+      const empty = await start("produce no text");
+      expect(empty.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.completeNext("");
+      await expect(empty.jobPromise).resolves.toMatchObject({ output: "" });
+
+      const literal = await start("produce the literal sentinel text");
+      expect(literal.start()).toBe(true);
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(2));
+      harness.completeNext("(no output)");
+      await expect(literal.jobPromise).resolves.toMatchObject({
+        output: "(no output)",
+      });
+    });
+  });
+
   it("uses persisted user entry ids for first and second turns", async () => {
     const art = childArtifact();
     const harness = await createPiSessionHarness(repoRoot, {

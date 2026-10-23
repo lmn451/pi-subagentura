@@ -24,6 +24,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifecycle changes inside options builders, while retaining terminal telemetry
   for already accepted work.
 
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
+
+### Added
+
+- Add schema-backed structured results to 11 read-only tools, preserving human
+  content/details while exposing explicit machine-readable states and exact
+  terminal output.
+- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
+  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+
+### Changed
+
+- Remove the unused Pi server peer/dev/test-install dependency and legacy SDK
+  compatibility code, including `src/pi-sdk-compat.ts`, obsolete runtime
+  branches, wrappers, and aliases. Child sessions use `ModelRuntime` with copied
+  extension-added custom/native provider registrations; inherited context uses
+  `buildSessionProjection().messages` directly.
+- Replace synthetic user wake messages with a manifest-first native custom
+  wake; preserve the existing request/acknowledgement ledger schema.
+- Rename the minimum SDK CI check to `Test (Pi 1.2.0)` and keep required check
+  names synchronized with the repository ruleset.
+- Check tool definitions, session/context projections, model resolution, and
+  result callbacks against public Pi SDK types instead of local SDK-shaped
+  interfaces and broad casts; retain extension-owned state and result protocols.
+
 ## [4.0.1] - 2026-10-18
 
 ### Fixed

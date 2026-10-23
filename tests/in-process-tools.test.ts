@@ -104,6 +104,8 @@ import {
   type SessionScope,
 } from "../src/session-scope";
 import { createTelemetrySession } from "../src/telemetry";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { createTestSessionScope } from "./session-scope-fixture";
 
 let testScope: SessionScope;
@@ -117,6 +119,7 @@ function mockCtx(overrides: Record<string, any> = {}) {
     ui: { setStatus: vi.fn() },
     sessionManager: {
       getBranch: vi.fn().mockReturnValue([]),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
       getSessionId: vi.fn().mockReturnValue("test-session"),
     },
     model: undefined,
@@ -221,6 +224,18 @@ function getToolDef(
   name: string,
 ) {
   return api.registerTool.mock.calls.find(([t]: any[]) => t.name === name)?.[0];
+}
+function expectStructuredOutput(
+  toolDef: { outputSchema?: TSchema },
+  result: { structuredContent?: unknown },
+): Record<string, unknown> {
+  const outputSchema = toolDef.outputSchema;
+  expect(outputSchema).toBeDefined();
+  if (!outputSchema) throw new Error("tool outputSchema is missing");
+  const structuredContent = result.structuredContent;
+  expect(structuredContent).toEqual(expect.any(Object));
+  expect(Value.Check(outputSchema, structuredContent)).toBe(true);
+  return structuredContent as Record<string, unknown>;
 }
 
 /** A default success SubagentResult for mockStartSubagentJob. */
@@ -1027,6 +1042,9 @@ describe("synchronous in-process result reads", () => {
               .mockReturnValue([
                 { type: "message", message: { role: "user", content: "hi" } },
               ]),
+            buildSessionProjection: vi.fn().mockReturnValue({
+              messages: [{ role: "user", content: "hi" }],
+            }),
             getSessionId: vi.fn().mockReturnValue("test-session"),
           },
         }),
@@ -1096,13 +1114,13 @@ describe("synchronous in-process result reads", () => {
             "a cancelled run",
             { ...defaultSuccessResult, cancelled: true, output: "cancelled" },
           ],
-          ["an empty run", { ...defaultSuccessResult, output: "(no output)" }],
+          ["an empty run", { ...defaultSuccessResult, output: "" }],
         ] as const
       ).map(([label, jobResult]) => [name, label, jobResult, makeCtx] as const),
     ),
   )(
     "records the terminal result-read outcome for %s on %s",
-    async (name, _label, jobResult, makeCtx) => {
+    async (name, label, jobResult, makeCtx) => {
       const payloads = captureTelemetryPosts();
       mockStartSubagentJob.mockResolvedValue({
         ...defaultStartSubagentJobResult,
@@ -1112,13 +1130,16 @@ describe("synchronous in-process result reads", () => {
       scoped.scope.telemetry = createTelemetrySession(true);
       const scopedTool = getToolDef(scoped.api, name);
 
-      await scopedTool.execute(
+      const toolResult = await scopedTool.execute(
         "sync-not-consumed",
         { task: "analyze code", async: false },
         undefined,
         undefined,
         makeCtx(),
       );
+      if (label === "an empty run") {
+        expect(toolResult.content[0]?.text).toBe("(no output)");
+      }
 
       await vi.waitFor(() =>
         expect(resultReadEvents(payloads)).toHaveLength(1),
@@ -1130,6 +1151,38 @@ describe("synchronous in-process result reads", () => {
           : "empty";
       expect(resultReadEvents(payloads)[0]?.properties?.outcome).toBe(
         expectedOutcome,
+      );
+    },
+  );
+  it.each(SYNC_TOOLS)(
+    "preserves literal '(no output)' as user output for %s",
+    async (name, makeCtx) => {
+      const payloads = captureTelemetryPosts();
+      mockStartSubagentJob.mockResolvedValue({
+        ...defaultStartSubagentJobResult,
+        jobPromise: Promise.resolve({
+          ...defaultSuccessResult,
+          output: "(no output)",
+        }),
+      });
+      const scoped = setupScopedExtension(716);
+      scoped.scope.telemetry = createTelemetrySession(true);
+      const scopedTool = getToolDef(scoped.api, name);
+
+      const result = await scopedTool.execute(
+        "sync-literal-output",
+        { task: "analyze code", async: false },
+        undefined,
+        undefined,
+        makeCtx(),
+      );
+
+      expect(result.content[0]?.text).toBe("(no output)");
+      await vi.waitFor(() =>
+        expect(resultReadEvents(payloads)).toHaveLength(1),
+      );
+      expect(resultReadEvents(payloads)[0]?.properties?.outcome).toBe(
+        "consumed",
       );
     },
   );
@@ -1268,6 +1321,12 @@ describe("get_subagent_status tool", () => {
     expect(result.details.status).toBe("error");
     expect(result.details.usageSummary).toBe("1 turn ↑50 ↓10 $0.0005");
     expect(result.isError).toBe(true);
+    expect(expectStructuredOutput(toolDef, result)).toMatchObject({
+      status: "error",
+      jobId,
+      output: "Something went wrong",
+      error: "LLM returned an error",
+    });
   });
 
   it("returns running update for running job", async () => {
@@ -1296,6 +1355,117 @@ describe("get_subagent_status tool", () => {
 
     expect(result.details.status).toBe("running");
     expect(result.content[0].text).toBe("still working...");
+  });
+  it("returns schema-valid status and result data across pending, terminal, and missing states", async () => {
+    const resultTool = getToolDef(api, "get_subagent_result");
+    const jobId = "structured-transition";
+    const { promise: jobPromise, resolve: resolveJob } =
+      Promise.withResolvers<SubagentResult>();
+    const job = createJobState({
+      id: jobId,
+      promise: jobPromise,
+      liveStatus: {
+        turn: 1,
+        output: "live progress",
+        usage: defaultSuccessResult.usage,
+      },
+    });
+    testScope.inProcessJobs.set(jobId, job);
+    mockBuildLiveUpdate.mockReturnValue({
+      content: [{ type: "text", text: "live progress" }],
+      details: {
+        status: "running",
+        subagentStatus: {
+          turn: 1,
+          output: "live progress",
+          usage: defaultSuccessResult.usage,
+        },
+      },
+    });
+
+    const pendingStatus = await toolDef.execute(
+      "status-pending",
+      { jobId },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(toolDef, pendingStatus)).toMatchObject({
+      jobId,
+      status: "running",
+    });
+    const pendingResult = await resultTool.execute(
+      "result-pending",
+      { jobId },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(resultTool, pendingResult)).toMatchObject({
+      jobId,
+      status: "running",
+    });
+    expect(job.resultRetrieved).toBeFalsy();
+
+    const terminal: SubagentResult = {
+      ...defaultSuccessResult,
+      output: "terminal payload",
+    };
+    job.status = "done";
+    job.result = terminal;
+    resolveJob(terminal);
+    await jobPromise;
+
+    const terminalStatus = await toolDef.execute(
+      "status-terminal",
+      { jobId },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(toolDef, terminalStatus)).toMatchObject({
+      jobId,
+      status: "done",
+      output: "terminal payload",
+    });
+    const terminalResult = await resultTool.execute(
+      "result-terminal",
+      { jobId },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(resultTool, terminalResult)).toMatchObject({
+      jobId,
+      status: "done",
+      output: "terminal payload",
+    });
+    expect(job.resultRetrieved).toBe(true);
+
+    const missing = await resultTool.execute(
+      "result-missing",
+      { jobId: "missing-structured" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(resultTool, missing)).toMatchObject({
+      jobId: "missing-structured",
+      status: "not_found",
+    });
+    expect(missing.isError).toBe(true);
+    const missingStatus = await toolDef.execute(
+      "status-missing",
+      { jobId: "missing-status-structured" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+    expect(expectStructuredOutput(toolDef, missingStatus)).toMatchObject({
+      jobId: "missing-status-structured",
+      status: "not_found",
+    });
+    expect(missingStatus.isError).toBe(true);
   });
 });
 
@@ -2077,6 +2247,22 @@ describe("list_available_models tool", () => {
     expect(getAvailable).toHaveBeenCalledTimes(1);
     expect(getAll).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("3 models with auth configured");
+    expect(expectStructuredOutput(toolDef, result)).toEqual({
+      count: 3,
+      models: [
+        {
+          provider: "anthropic",
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+        },
+        {
+          provider: "anthropic",
+          id: "claude-haiku-4",
+          name: "Claude Haiku 4",
+        },
+        { provider: "openai", id: "gpt-4o", name: "GPT-4o" },
+      ],
+    });
   });
 
   it("uses modelRegistry.getAll() when authOnly is false", async () => {
@@ -2730,6 +2916,12 @@ describe("subagent_with_context async path", () => {
     const ctx = mockCtx({
       sessionManager: {
         getBranch: vi.fn().mockReturnValue(branchMessages),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi there" },
+          ],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -2796,6 +2988,9 @@ describe("subagent_with_context async path", () => {
           .mockReturnValue([
             { type: "message", message: { role: "user", content: "Hi" } },
           ]),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -2835,6 +3030,9 @@ describe("subagent_with_context async path", () => {
           .mockReturnValue([
             { type: "message", message: { role: "user", content: "Hi" } },
           ]),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -2913,6 +3111,9 @@ describe("subagent_with_context async path", () => {
           .mockReturnValue([
             { type: "message", message: { role: "user", content: "Hi" } },
           ]),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -2971,6 +3172,9 @@ describe("subagent_with_context async path", () => {
           .mockReturnValue([
             { type: "message", message: { role: "user", content: "Hi" } },
           ]),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -3025,6 +3229,9 @@ describe("async rejection settlement", () => {
           .mockReturnValue([
             { type: "message", message: { role: "user", content: "Hi" } },
           ]),
+        buildSessionProjection: vi.fn().mockReturnValue({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
         getSessionId: vi.fn().mockReturnValue("test-session"),
       },
     });
@@ -3078,6 +3285,14 @@ describe("async rejection settlement", () => {
     );
     expect(status.details.status).toBe("error");
     expect(status.isError).toBe(true);
+    expect(
+      expectStructuredOutput(getToolDef(api, "get_subagent_status"), status),
+    ).toMatchObject({
+      status: "error",
+      jobId: "default-job",
+      output: "Sub-agent crashed: context crash",
+      error: "context crash",
+    });
 
     const result = await getToolDef(api, "get_subagent_result").execute(
       "result-call",
@@ -3089,6 +3304,14 @@ describe("async rejection settlement", () => {
     expect(result.content[0].text).toBe("Sub-agent failed: context crash");
     expect(result.details.status).toBe("error");
     expect(result.isError).toBe(true);
+    expect(
+      expectStructuredOutput(getToolDef(api, "get_subagent_result"), result),
+    ).toMatchObject({
+      status: "error",
+      jobId: "default-job",
+      output: "Sub-agent crashed: context crash",
+      error: "context crash",
+    });
   });
 
   it("settles rejected subagent_isolated jobs as structured errors", async () => {
@@ -3151,6 +3374,14 @@ describe("async rejection settlement", () => {
     expect(result.content[0].text).toBe("Sub-agent failed: isolated crash");
     expect(result.details.status).toBe("error");
     expect(result.isError).toBe(true);
+    expect(
+      expectStructuredOutput(getToolDef(api, "get_subagent_result"), result),
+    ).toMatchObject({
+      status: "error",
+      jobId: "default-job",
+      output: "Sub-agent crashed: isolated crash",
+      error: "isolated crash",
+    });
   });
 
   it("keeps a cancelled job cancelled when its promise rejects", async () => {

@@ -727,6 +727,23 @@ describe("renderSubagentNotify", () => {
     expect(t(result)).toContain("all good");
   });
 
+  it("renders empty raw output with a human-readable sentinel", () => {
+    sanitizeOutputMock.mockReturnValue("(no output)");
+    const result = renderSubagentNotify(
+      {
+        content: "Completed",
+        details: {
+          mode: "notify",
+          result: { isError: false, output: "" },
+        },
+      },
+      { expanded: true },
+      testTheme,
+    );
+    expect(t(result)).toContain("(no output)");
+    expect(sanitizeOutputMock).toHaveBeenCalledWith("(no output)");
+  });
+
   it("renders expanded notification with missing output (falls back to empty)", () => {
     sanitizeOutputMock.mockReturnValue("");
     const result = renderSubagentNotify(

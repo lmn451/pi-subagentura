@@ -350,8 +350,12 @@ const SPAWN_ENV_NAMES = [
   "TMUX",
   "TMUX_PANE",
   "HOME",
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
   "ZELLIJ",
   "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
   "PI_CODING_AGENT_SESSION_DIR",
   "PI_SUBAGENTURA_AGENT_ID",
   "PI_SUBAGENTURA_ROOT_ID",
@@ -393,11 +397,14 @@ describe("spawn-time state persistence", () => {
     process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
     process.env.TMUX_PANE = "%1";
     process.env.HOME = process.env.HOME ?? "/tmp";
-    // Ensure getMux selects tmux, not zellij. The test mock only handles
-    // tmux commands; if ZELLIJ_SESSION_NAME is set from the outer environment,
-    // getMux would pick zellij and the mock would not intercept its calls.
+    // Keep auto-selection on the mocked tmux backend, not an ambient Herdr or
+    // Zellij session whose operations are not covered by this mock.
     delete process.env.ZELLIJ;
     delete process.env.ZELLIJ_SESSION_NAME;
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_PANE_ID;
+    delete process.env.ZELLIJ_PANE_ID;
   });
 
   afterEach(() => {

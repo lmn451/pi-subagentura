@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  getBuiltinModels,
+  getBuiltinProviders,
+} from "@earendil-works/pi-ai/providers/all";
 import {
   ACTIVE_TOOL_DEBOUNCE_MS,
   buildLiveUpdate,
@@ -375,8 +378,8 @@ describe("resolveModel", () => {
   });
 
   it("should parse provider/id format correctly", () => {
-    const provider = getProviders()[0];
-    const expected = getModels(provider)[0];
+    const provider = getBuiltinProviders()[0];
+    const expected = getBuiltinModels(provider)[0];
     const result = resolveModel(
       `${expected.provider}/${expected.id}`,
       undefined,
@@ -395,9 +398,9 @@ describe("resolveModel", () => {
     expect(resolveModel("unknown/model", defaultModel)).toBe(defaultModel);
   });
 
-  it("should search all providers dynamically for bare id", () => {
-    // resolveModel iterates getProviders() for bare IDs
-    const providers = getProviders();
+  it("should search built-in providers dynamically for bare id", () => {
+    // resolveModel scans the generated provider catalog for bare IDs.
+    const providers = getBuiltinProviders();
     expect(providers.length).toBeGreaterThan(0);
     expect(providers).toContain("anthropic");
   });

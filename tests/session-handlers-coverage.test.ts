@@ -844,7 +844,7 @@ describe("session handler lifecycle callbacks", () => {
     expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
   });
 
-  it("acknowledges only the marked wake run after it settles", () => {
+  it("starts and acknowledges only the native custom completion wake", () => {
     const registration = registerHandlers();
     startSession(registration, root, "session-a");
     const { handlers, pi } = registration;
@@ -858,23 +858,133 @@ describe("session handler lifecycle callbacks", () => {
       },
       { deliverAs: "followUp", triggerTurn: true, parentStreaming: false },
     );
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
 
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+    const [completionMessage, completionOptions] = pi.sendMessage.mock.calls[0];
+    const [wakeMessage, wakeOptions] = pi.sendMessage.mock.calls[1];
+    expect(completionOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(completionMessage.customType).toBe("subagent-notify");
+    expect(wakeOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(wakeMessage).toMatchObject({
+      customType: "orchestratorv2-completion-wakeup",
+      display: false,
+    });
+    const wakeId = wakeMessage.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    expect(completionMessage.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY]).toBe(
+      wakeId,
+    );
+    const requestOrder = pi.appendEntry.mock.invocationCallOrder[0];
+    const completionOrder = pi.sendMessage.mock.invocationCallOrder[0];
+    const wakeOrder = pi.sendMessage.mock.invocationCallOrder[1];
+    expect(requestOrder).toBeLessThan(completionOrder);
+    expect(completionOrder).toBeLessThan(wakeOrder);
+
+    handlers.get("before_agent_start")![0]({
+      messageType: "user",
+      prompt: `Please handle the completion ${wakeId}`,
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({ prompt: `${wakePrompt} extra` });
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: {
+        customType: "unrelated",
+        content: `An unrelated message mentions completion id ${wakeId}.`,
+        display: false,
+        details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+      },
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({ prompt: wakePrompt });
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: wakeMessage,
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenLastCalledWith(
       ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
-      expect.objectContaining({ state: "acknowledged" }),
+      expect.objectContaining({ state: "acknowledged", wakeIds: [wakeId] }),
+    );
+  });
+
+  it("recovers a durable requested wake through a native custom turn", () => {
+    const registration = registerHandlers();
+    const { handlers, pi } = registration;
+    const branch: unknown[] = [];
+    const sessionManager = {
+      getSessionId: () => "session-a",
+      getEntries: () => [],
+      getBranch: () => branch,
+    };
+    const ctx = {
+      cwd: root,
+      ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+      sessionManager,
+    };
+    handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+
+    sendCompletionTurn(
+      pi,
+      {
+        customType: "subagent-notify",
+        content: "completion",
+        display: true,
+      },
+      { deliverAs: "followUp", triggerTurn: true, parentStreaming: false },
+    );
+    const originalMessage = pi.sendMessage.mock.calls[0][0];
+    const originalWake = pi.sendMessage.mock.calls[1][0];
+    const request = pi.appendEntry.mock.calls[0][1];
+    const wakeId = originalWake.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    branch.push(
+      {
+        type: "custom",
+        customType: ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
+        data: request,
+      },
+      {
+        type: "custom_message",
+        customType: originalMessage.customType,
+        details: originalMessage.details,
+      },
+    );
+
+    handlers.get("session_start")![0]({ reason: "reload" }, ctx);
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledTimes(3);
+    const [recoveredMessage, recoveredOptions] = pi.sendMessage.mock.calls[2];
+    expect(recoveredOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(recoveredMessage).toMatchObject({
+      customType: "orchestratorv2-completion-wakeup",
+      details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+    });
+    expect(pi.appendEntry).toHaveBeenCalledOnce();
+
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: recoveredMessage,
+    });
+    handlers.get("agent_start")![0]();
+    handlers.get("agent_settled")![0]();
+    expect(pi.appendEntry).toHaveBeenLastCalledWith(
+      ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
+      expect.objectContaining({ state: "acknowledged", wakeIds: [wakeId] }),
     );
   });
 
@@ -919,7 +1029,11 @@ describe("session handler lifecycle callbacks", () => {
 
     registration.handlers.get("session_start")![0]({ reason: "reload" }, ctx);
 
-    expect(registration.pi.sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(registration.pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(registration.pi.sendMessage).toHaveBeenCalledTimes(3);
+    expect(registration.pi.sendMessage.mock.calls[2][1]).toMatchObject({
+      triggerTurn: true,
+    });
     expect(vi.getTimerCount()).toBe(timersBeforeWake + 1);
     registration.handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
     expect(vi.getTimerCount()).toBe(0);
