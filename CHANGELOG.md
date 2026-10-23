@@ -149,8 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restored later; receipts consume only their matching completion and do not
   suppress unrelated later-turn completions.
 - Bind durable manual result-consumption receipts to the initiating session owner.
-- Persist durable cancellation before cancel-all aborts owned work; failed writes
-  keep the workflow protected and retryable rather than counted as aborted.
+- Persist durable cancellation before cancel-all aborts owned work. Failed writes
+  keep the affected workflow protected and retryable rather than counted as
+  aborted; both cancel-all entry points leave the foreground tool signal active
+  until all durable cancellation intents and attempt markers succeed.
 - Retrying durable cancellation reissues per-attempt markers even after the
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts

@@ -309,8 +309,10 @@ blocked until recovery succeeds; independent completions remain deliverable.
   receipts for owned work, including durable process attempts, before aborting.
   A failed intent or attempt-marker write reports the workflow as failed to
   cancel and keeps its owned in-process/process-backed work protected and
-  retryable. Retrying after the run-level intent is recorded still retries the
-  per-attempt markers.
+  retryable. Both cancel-all entry points abort their foreground tool signal
+  only after all durable cancellations succeed; if no durable workflow is
+  present the normal foreground abort still occurs. Retrying after the run-level
+  intent is recorded still retries the per-attempt markers.
 - Process wrappers consume the exact attempt's cancellation marker and
   terminate their child process group. A persisted pane id alone never
   authorizes killing a recovered pane.
