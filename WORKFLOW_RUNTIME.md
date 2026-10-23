@@ -341,6 +341,11 @@ adds an 8,192-operation transcript cap, a 2 MiB serialized-value limit, and a
 256 MiB journal limit. The default budget remains 100 billion completed output
 tokens and the wall deadline remains 100 hours; choose a practical lower budget.
 
+If an append or its fsync fails, the next write verifies the journal against
+the last committed prefix. It syncs an exact complete pending line or retries
+only when the file still ends at that prefix. Partial, corrupt, or unexpected
+tails remain blocked for explicit recovery; committed bytes are never rewritten.
+
 Runs are local and manually recoverable, not remote jobs. There is no daemon,
 always-on coordinator, automatic recovery loop, declarative plan surface, or
 transaction with agent-controlled external systems.

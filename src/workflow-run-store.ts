@@ -323,6 +323,7 @@ async function parseJournal(bytes: Buffer): Promise<{
 export class WorkflowRunStore {
   readonly events: RunEvent[];
   private tail: Promise<void> = Promise.resolve();
+  private pending: { event: RunEvent; line: Buffer } | undefined;
   private closed = false;
   private constructor(
     readonly id: string,
@@ -456,34 +457,122 @@ export class WorkflowRunStore {
       return Promise.reject(
         new WorkflowPersistenceError("Workflow writer is closed."),
       );
-    this.tail = this.tail.then(async () => {
-      if (!EVENT_KINDS.has(kind))
-        throw new WorkflowPersistenceError("Unknown workflow event kind.");
-      const content = {
-        sequence: this.events.length,
-        previous: this.checksum,
-        kind,
-        data,
-      };
-      const hash = createHash("sha256")
-        .update(JSON.stringify(content))
-        .digest("hex");
-      const line = Buffer.from(JSON.stringify({ ...content, hash }) + "\n");
+    this.tail = this.tail
+      .catch(() => undefined)
+      .then(async () => {
+        if (!EVENT_KINDS.has(kind))
+          throw new WorkflowPersistenceError("Unknown workflow event kind.");
+        if (this.pending) {
+          const same =
+            this.pending.event.kind === kind &&
+            (isDeepStrictEqual(this.pending.event.data, data) ||
+              kind === "cancelled");
+          await this.reconcilePending();
+          if (same) return;
+        }
+        await this.writeEvent(kind, data);
+      });
+    return this.tail;
+  }
+
+  private async writeEvent(kind: string, data: unknown): Promise<void> {
+    const content = {
+      sequence: this.events.length,
+      previous: this.checksum,
+      kind,
+      data,
+    };
+    const hash = createHash("sha256")
+      .update(JSON.stringify(content))
+      .digest("hex");
+    const line = Buffer.from(JSON.stringify({ ...content, hash }) + "\n");
+    if (
+      line.length > MAX_RUN_EVENT_BYTES ||
+      this.length + line.length > MAX_RUN_BYTES
+    ) {
+      throw new WorkflowPersistenceError(
+        "Workflow journal storage bound exceeded.",
+      );
+    }
+    const event = { kind, data };
+    this.pending = { event, line };
+    await this.file.writeFile(line);
+    await this.file.sync();
+    this.commitPending();
+  }
+
+  private commitPending(): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.events.push(pending.event);
+    this.checksum = JSON.parse(pending.line.toString("utf8")).hash;
+    this.length += pending.line.length;
+    this.pending = undefined;
+  }
+
+  private async reconcilePending(): Promise<void> {
+    const pending = this.pending;
+    if (!pending) return;
+    let bytes: Buffer;
+    try {
+      bytes = await readBounded(join(this.directory, "journal.ndjson"));
+    } catch (error) {
+      throw new WorkflowRecoveryRequiredError(
+        "Cannot verify the failed workflow journal append; recovery is required.",
+        error,
+      );
+    }
+    let journal: Awaited<ReturnType<typeof parseJournal>>;
+    try {
+      journal = await parseJournal(bytes);
+    } catch (error) {
+      throw new WorkflowRecoveryRequiredError(
+        "Workflow journal append is ambiguous; inspect the journal before recovery.",
+        error,
+      );
+    }
+    if (
+      journal.events.length < this.events.length ||
+      !isDeepStrictEqual(
+        journal.events.slice(0, this.events.length),
+        this.events,
+      )
+    ) {
+      throw new WorkflowRecoveryRequiredError(
+        "Workflow journal append is ambiguous; inspect the journal before recovery.",
+      );
+    }
+    if (bytes.length === this.length + pending.line.length) {
       if (
-        line.length > MAX_RUN_EVENT_BYTES ||
-        this.length + line.length > MAX_RUN_BYTES
+        !bytes.subarray(this.length).equals(pending.line) ||
+        journal.length !== bytes.length ||
+        journal.events.length !== this.events.length + 1
       ) {
-        throw new WorkflowPersistenceError(
-          "Workflow journal storage bound exceeded.",
+        throw new WorkflowRecoveryRequiredError(
+          "Workflow journal append is ambiguous; inspect the journal before recovery.",
         );
       }
-      await this.file.writeFile(line);
       await this.file.sync();
-      this.events.push({ kind, data });
-      this.checksum = hash;
-      this.length += line.length;
-    });
-    return this.tail;
+      this.commitPending();
+      return;
+    }
+    if (bytes.length === this.length) {
+      if (
+        journal.length !== this.length ||
+        journal.events.length !== this.events.length
+      ) {
+        throw new WorkflowRecoveryRequiredError(
+          "Workflow journal append is ambiguous; inspect the journal before recovery.",
+        );
+      }
+      await this.file.writeFile(pending.line);
+      await this.file.sync();
+      this.commitPending();
+      return;
+    }
+    throw new WorkflowRecoveryRequiredError(
+      "Workflow journal has a partial or unexpected append; inspect it before recovery.",
+    );
   }
 
   async flush(): Promise<void> {

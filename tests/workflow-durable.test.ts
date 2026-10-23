@@ -70,6 +70,95 @@ async function execute(
 }
 
 describe("durable workflow journal", () => {
+  it("retries a real append failure after confirming no bytes were written", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const path = join(store.directory, "journal.ndjson");
+    const before = await readFile(path);
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const write = file.writeFile.bind(file);
+    let fail = true;
+    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
+      if (fail) {
+        fail = false;
+        throw new Error("injected write failure before bytes");
+      }
+      return write(data);
+    });
+    const data = { status: "cancelled", completedAt: 1 };
+    await expect(store.append("cancelled", data)).rejects.toThrow(
+      "injected write failure",
+    );
+    expect(await readFile(path)).toEqual(before);
+    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.at(-1)?.data,
+    ).toEqual(data);
+  });
+
+  it("reconciles a complete real append after fsync fails without duplicating it", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const sync = file.sync.bind(file);
+    let fail = true;
+    vi.spyOn(file, "sync").mockImplementation(async () => {
+      if (fail) {
+        fail = false;
+        throw new Error("injected fsync failure");
+      }
+      return sync();
+    });
+    const data = { status: "cancelled", completedAt: 2 };
+    await expect(store.append("cancelled", data)).rejects.toThrow("fsync");
+    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
+        (event) => event.kind === "cancelled",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("blocks a partial real append and preserves its bytes", async () => {
+    const { store } = await fixture("return 1;");
+    const path = join(store.directory, "journal.ndjson");
+    const before = await readFile(path);
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const write = file.writeFile.bind(file);
+    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
+      const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data as string);
+      await write(bytes.subarray(0, Math.floor(bytes.length / 2)));
+      throw new Error("injected partial write");
+    });
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow("partial write");
+    const partial = await readFile(path);
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow(/recovery|journal/i);
+    expect(await readFile(path)).toEqual(partial);
+    expect(partial.subarray(0, before.length)).toEqual(before);
+    stores.splice(stores.indexOf(store), 1);
+    await expect(store.close()).rejects.toThrow(/recovery|journal/i);
+  });
+
   it("compares replay values independently of V8's numeric encoding while retaining iteration order", () => {
     const integer = encodeRunValue({ n: 1 });
     const floating = Buffer.from(
