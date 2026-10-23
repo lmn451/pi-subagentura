@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep historical workflow diagnostics generic during native compaction and legacy RPC replay without hiding safe workflow-list IDs, names, or statuses.
+
 ### Added
 
 - Executable TypeScript V4 workflows with `defineWorkflow()` and a typed

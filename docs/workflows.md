@@ -82,22 +82,29 @@ This is a storage setting, not permission to disclose data to a model or
 provider. In particular, `persist: false` does not authorize sharing validation
 diagnostics or agent-thrown errors.
 
-Schema retries use generic feedback and do not include unexpected property
-names/paths, parser details, or other raw diagnostics. Failed workflow status,
-result, run-list, and automatic notification surfaces likewise return generic
-summaries. Historical failed workflow tool results and tagged legacy workflow
-error notifications are redacted again when Pi builds later model context. Raw
-agent failure text may remain in the local durable journal, but is not copied
-into retry configuration or telemetry.
+Schema retries use generic feedback and omit unexpected property names/paths,
+parser details, and other raw diagnostics. Failed workflow status, result,
+run-list, and automatic notification surfaces likewise use generic summaries;
+`list_workflow_runs` keeps safe workflow IDs, names, and statuses while
+redacting diagnostic fields. Recognized historical workflow errors stay
+generic in normal model context and during native manual or automatic
+compaction, including split-turn summaries. Historical legacy agent RPC
+failures are made generic before reaching workers or workflow tool results.
+Redaction operates on sanitized copies of SDK-prepared message arrays; original
+session messages, the local transcript, and session ledger remain local and
+unmodified. Raw agent failure text may remain in the local durable journal, but
+is not copied into retry configuration or telemetry.
 
-Optional diagnostic sharing is currently unavailable and fails closed. In the
-Pi SDK version tested for this patch, `before_provider_request` exposes only
-an unknown payload, not the concrete physical provider/model/endpoint selected
-before dispatch. The session model can also be a virtual selection. A pre-send
-grant therefore cannot be bound to the actual destination. This implementation
-does not prompt for consent or send raw diagnostics; workflow invocation,
-`ctx.ask()`, and `ctx.gate()` are not disclosure consent. Generic retries
-continue normally.
+Optional raw diagnostic sharing remains unavailable and fails closed. This
+patch adds no diagnostic-sharing consent UI or grants and does not infer the
+physical route. In the Pi SDK version tested for this patch,
+`before_provider_request` exposes only an unknown payload, not the concrete
+physical provider/model/endpoint selected before dispatch. The session model can
+also be a virtual selection, so a pre-send grant cannot be bound to the actual
+destination. Workflow invocation, `ctx.ask()`, and `ctx.gate()` are not
+disclosure consent; explicit sharing remains deferred to
+[issue #213](https://github.com/lmn451/pi-subagentura/issues/213). Generic
+retries continue normally.
 
 `checkpoint` values and artifact references persist; artifact content is kept
 in a separate bounded private file. V4 status snapshots omit step inputs,

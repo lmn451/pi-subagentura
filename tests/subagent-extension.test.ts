@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { sanitizeWorkflowDiagnosticContext } from "../src/workflow-disclosure";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -478,8 +480,75 @@ describe("extension registration", () => {
         "agent_end",
         "agent_settled",
         "session_start",
+        "session_before_compact",
         "session_shutdown",
       ]),
     );
+  });
+});
+
+describe("workflow diagnostic context filtering", () => {
+  it("preserves safe rows in mixed failed workflow-run context", () => {
+    const diagnostic = "PRIVATE_WORKFLOW_DIAGNOSTIC_canary";
+    const message: ToolResultMessage<{
+      runs: {
+        workflowId: string;
+        name: string;
+        status: "error" | "waiting_for_input" | "done";
+        error?: string;
+      }[];
+    }> = {
+      role: "toolResult",
+      toolCallId: "list-runs-call",
+      toolName: "list_workflow_runs",
+      content: [
+        {
+          type: "text",
+          text: [
+            "failed-run-id failed-run-name: error",
+            "waiting-run-id waiting-run-name: waiting_for_input",
+            "done-run-id done-run-name: done",
+          ].join("\n"),
+        },
+      ],
+      details: {
+        runs: [
+          {
+            workflowId: "failed-run-id",
+            name: "failed-run-name",
+            status: "error",
+            error: diagnostic,
+          },
+          {
+            workflowId: "waiting-run-id",
+            name: "waiting-run-name",
+            status: "waiting_for_input",
+          },
+          { workflowId: "done-run-id", name: "done-run-name", status: "done" },
+        ],
+      },
+      isError: false,
+      timestamp: 1,
+    };
+
+    const [sanitized] = sanitizeWorkflowDiagnosticContext([message]);
+    const safeContent = JSON.stringify(sanitized.content);
+    const safeDetails = JSON.stringify(sanitized.details);
+
+    expect(safeContent).not.toContain(diagnostic);
+    expect(safeDetails).not.toContain(diagnostic);
+    for (const value of [
+      "failed-run-id",
+      "failed-run-name",
+      "error",
+      "waiting-run-id",
+      "waiting-run-name",
+      "waiting_for_input",
+      "done-run-id",
+      "done",
+    ]) {
+      expect(safeContent).toContain(value);
+      expect(safeDetails).toContain(value);
+    }
   });
 });
