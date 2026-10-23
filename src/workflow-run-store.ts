@@ -405,7 +405,13 @@ export class WorkflowRunStore {
     let file: FileHandle | undefined;
     try {
       const path = join(directory, "journal.ndjson");
-      const journal = await parseJournal(await readBounded(path));
+      const bytes = await readBounded(path);
+      const journal = await parseJournal(bytes);
+      if (journal.length !== bytes.length) {
+        throw new WorkflowRecoveryRequiredError(
+          "Workflow journal has an incomplete final event; recovery is required.",
+        );
+      }
       const created = journal.events[0].data;
       if (
         created.id !== id ||

@@ -143,7 +143,8 @@ completions remain deliverable.
   external effect has stopped immediately.
 - A live controller lock is never stolen on a timer. Unknown ownership,
   malformed state, storage failures, and complete corrupt journal records fail
-  closed. Only an incomplete final journal line is truncated during recovery.
+  closed. Resume rejects an incomplete final journal line and preserves its
+  bytes for inspection; it never truncates an ambiguous append.
   A crash while acquiring the short `claim.json` lock needs operator inspection
   of the dead controller before removing that exact claim file; do not delete
   a live owner's files or guess from timestamps.
