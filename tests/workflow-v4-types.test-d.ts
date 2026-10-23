@@ -8,6 +8,8 @@ import {
   type WorkflowFailureResult,
   type WorkflowJsonValue,
   type WorkflowStepNode,
+  type WorkflowStepOptions,
+  type WorkflowStepPolicy,
 } from "pi-subagentura/workflow";
 
 type Equal<A, B> =
@@ -101,12 +103,84 @@ const definition = defineWorkflow({
     type NestedStepUsesCollectPolicy = Assert<
       Equal<typeof nestedRecoverable, Promise<number | WorkflowFailureResult>>
     >;
+    const widenedPolicy: WorkflowStepPolicy = { failure: "collect" };
+    const widenedNestedRecoverable = ctx.step(
+      "widened-nested-recoverable",
+      { policy: widenedPolicy },
+      (): number => {
+        throw new Error("boom");
+      },
+    );
+    type WidenedNestedPolicyInference = Assert<
+      Equal<
+        typeof widenedNestedRecoverable,
+        Promise<number | WorkflowFailureResult>
+      >
+    >;
+    // @ts-expect-error a widened nested policy may return a failure outcome
+    const unsafeWidenedNumber: Promise<number> = widenedNestedRecoverable;
+    const unknownNestedPolicy: WorkflowStepOptions["policy"] = widenedPolicy;
+    const unknownNestedRecoverable = ctx.step(
+      "unknown-nested-recoverable",
+      { policy: unknownNestedPolicy },
+      (): number => 1,
+    );
+    type UnknownNestedPolicyInference = Assert<
+      Equal<
+        typeof unknownNestedRecoverable,
+        Promise<number | WorkflowFailureResult>
+      >
+    >;
+    // @ts-expect-error an optional nested policy is not known to be fail-fast
+    const unsafeUnknownNumber: Promise<number> = unknownNestedRecoverable;
+
     const simpleStep = ctx.step("simple", () => 1);
     const ordinaryStep = ctx.step(
       "ordinary",
       { policy: { failure: "fail" } },
       () => 1,
     );
+    const nestedFailOverridesDirectCollect = ctx.step(
+      "nested-fail-overrides-direct-collect",
+      { failure: "collect", policy: { failure: "fail" } },
+      (): number => 5,
+    );
+    type NestedFailOverridesDirectCollectInference = Assert<
+      Equal<typeof nestedFailOverridesDirectCollect, Promise<number>>
+    >;
+    const explicitlyTypedFailFast = ctx.step<number>(
+      "explicitly-typed-fail-fast",
+      { timeout: 1000 },
+      () => 1,
+    );
+    type ExplicitlyTypedFailFastInference = Assert<
+      Equal<typeof explicitlyTypedFailFast, Promise<number>>
+    >;
+    const explicitlyTypedCollect = ctx.step<number>(
+      "explicitly-typed-collect",
+      { failure: "collect" },
+      () => 1,
+    );
+    type ExplicitlyTypedCollectInference = Assert<
+      Equal<
+        typeof explicitlyTypedCollect,
+        Promise<number | WorkflowFailureResult>
+      >
+    >;
+    const explicitlyTypedWidenedNested = ctx.step<number>(
+      "explicitly-typed-widened-nested",
+      { policy: widenedPolicy },
+      () => 1,
+    );
+    type ExplicitlyTypedWidenedNestedInference = Assert<
+      Equal<
+        typeof explicitlyTypedWidenedNested,
+        Promise<number | WorkflowFailureResult>
+      >
+    >;
+    // @ts-expect-error explicit result typing must not erase broad nested failure
+    const unsafeExplicitlyTypedWidened: Promise<number> =
+      explicitlyTypedWidenedNested;
     type FailFastStepInference = Assert<
       Equal<typeof simpleStep, Promise<number>>
     >;
@@ -208,6 +282,21 @@ const definition = defineWorkflow({
     void ordinaryStep;
     void (0 as unknown as FailFastStepInference);
     void (0 as unknown as FailFastConfiguredStepInference);
+    void widenedNestedRecoverable;
+    void (0 as unknown as WidenedNestedPolicyInference);
+    void unsafeWidenedNumber;
+    void unknownNestedRecoverable;
+    void (0 as unknown as UnknownNestedPolicyInference);
+    void unsafeUnknownNumber;
+    void nestedFailOverridesDirectCollect;
+    void (0 as unknown as NestedFailOverridesDirectCollectInference);
+    void explicitlyTypedFailFast;
+    void (0 as unknown as ExplicitlyTypedFailFastInference);
+    void explicitlyTypedCollect;
+    void (0 as unknown as ExplicitlyTypedCollectInference);
+    void explicitlyTypedWidenedNested;
+    void (0 as unknown as ExplicitlyTypedWidenedNestedInference);
+    void unsafeExplicitlyTypedWidened;
     void ordinaryPipeline;
     void (0 as unknown as FailFastPipelineInference);
     void explicitFailPipeline;

@@ -307,35 +307,42 @@ type WorkerRpcResponse = {
   cancelled?: boolean;
   failure?: WorkflowFailureClassification;
   tokensDelta: number;
+  budgetTokensDelta?: number;
   stats?: {
     errorCount?: number;
     cancelledCount?: number;
     failure?: WorkflowFailureClassification;
+    schemaRepairExhausted?: true;
   };
 };
 
 type AgentCallResponse = {
   value: unknown;
   tokensDelta: number;
+  budgetTokensDelta: number;
   errorCount?: number;
   cancelledCount?: number;
   failure?: WorkflowFailureClassification;
+  schemaRepairExhausted?: true;
 };
 
 class WorkerRpcFailure extends Error {
   readonly tokensDelta: number;
+  readonly budgetTokensDelta: number;
   readonly runnerFailure: { cause: unknown } | undefined;
 
   constructor(
     error: unknown,
     tokensDelta: number,
     runnerFailure?: { cause: unknown },
+    budgetTokensDelta = tokensDelta,
   ) {
     super(error instanceof Error ? error.message : String(error), {
       cause: error,
     });
     this.name = "WorkerRpcFailure";
     this.tokensDelta = tokensDelta;
+    this.budgetTokensDelta = budgetTokensDelta;
     this.runnerFailure = runnerFailure;
   }
 }
@@ -436,6 +443,8 @@ async function executeScript(
       agentOpts.phase != null ? String(agentOpts.phase) : undefined;
     await sem.acquire();
     let tokensDelta = 0;
+    let budgetTokensDelta: number | undefined =
+      engine.v4 && engine.durable ? 0 : undefined;
     let runnerFailure: { cause: unknown } | undefined;
     try {
       let lastErr = "";
@@ -479,9 +488,31 @@ async function executeScript(
               : buildInProcessSchemaPrompt(prompt, attempt, lastErr !== "")
             : prompt;
           let res: SubagentResult;
+          let durableOutcomeReplayed = false;
+          let failureUsageResolved = false;
+          let failureAgentUsage: WorkflowUsage | undefined;
+          let failureProjectUsage: Usage | undefined;
           const activeRun: ActiveAgentRun = {
             promise: undefined as unknown as Promise<SubagentResult>,
             usageAccounted: false,
+          };
+          const resolveFailureUsage = (error: unknown): Usage | undefined => {
+            if (failureUsageResolved) return failureProjectUsage;
+            const errorUsage = (error as { usage?: Usage } | null)?.usage;
+            const terminalAgentUsage = workflowUsageFromUsage(errorUsage);
+            const partialUsage =
+              terminalAgentUsage !== undefined
+                ? errorUsage
+                : activeRun.liveUsage
+                  ? usageAsProjectUsage(activeRun.liveUsage)
+                  : undefined;
+            failureAgentUsage =
+              terminalAgentUsage ?? workflowUsageFromUsage(partialUsage);
+            failureProjectUsage = failureAgentUsage
+              ? usageAsProjectUsage(failureAgentUsage)
+              : undefined;
+            failureUsageResolved = true;
+            return failureProjectUsage;
           };
           const invokeAgent: WorkflowAgentRunner = (request) =>
             engine.durable
@@ -490,7 +521,13 @@ async function executeScript(
                   attempt,
                   request,
                   engine.runAgent,
-                  { persist: !engine.v4 || agentOpts.persist !== false },
+                  {
+                    persist: !engine.v4 || agentOpts.persist !== false,
+                    onOutcomeReplay: () => {
+                      durableOutcomeReplayed = true;
+                    },
+                    ...(engine.v4 ? { failureUsage: resolveFailureUsage } : {}),
+                  },
                 )
               : engine.runAgent(request);
           const agentRun = Promise.resolve().then(() =>
@@ -537,17 +574,12 @@ async function executeScript(
                 engine.failure = resultFailure;
               }
             } catch (error) {
-              const errorUsage = (error as { usage?: Usage } | null)?.usage;
-              const terminalAgentUsage = workflowUsageFromUsage(errorUsage);
-              const partialUsage =
-                terminalAgentUsage !== undefined
-                  ? errorUsage
-                  : activeRun.liveUsage
-                    ? usageAsProjectUsage(activeRun.liveUsage)
-                    : undefined;
-              agentUsage =
-                terminalAgentUsage ?? workflowUsageFromUsage(partialUsage);
-              tokensDelta += agentUsage?.output ?? 0;
+              const partialUsage = resolveFailureUsage(error);
+              agentUsage = failureAgentUsage;
+              const outputTokens = agentUsage?.output ?? 0;
+              tokensDelta += outputTokens;
+              if (budgetTokensDelta !== undefined && !durableOutcomeReplayed)
+                budgetTokensDelta += outputTokens;
               accountAgentUsage(engine, activeRun, partialUsage);
               const failure = workflowFailureClassification(error);
               if (failure && engine.failure === undefined)
@@ -568,6 +600,8 @@ async function executeScript(
           agentUsage = workflowUsageFromUsage(res.usage);
           const outTokens = agentUsage?.output ?? 0;
           tokensDelta += outTokens;
+          if (budgetTokensDelta !== undefined && !durableOutcomeReplayed)
+            budgetTokensDelta += outTokens;
           accountAgentUsage(engine, activeRun, res.usage);
           if (res.cancelled) {
             status = "cancelled";
@@ -575,6 +609,7 @@ async function executeScript(
             return {
               value: null,
               tokensDelta,
+              budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
               cancelledCount: 1,
             };
           }
@@ -589,11 +624,17 @@ async function executeScript(
             return {
               value: null,
               tokensDelta,
+              budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
               errorCount: 1,
               failure: callFailure,
             };
           }
-          if (!hasSchema) return { value: res.output, tokensDelta };
+          if (!hasSchema)
+            return {
+              value: res.output,
+              tokensDelta,
+              budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
+            };
           if (!isProcess && res.workflowStructuredOutput != null) {
             const schemaCapture = res.workflowStructuredOutput;
             if (!schemaCapture?.called) {
@@ -611,7 +652,11 @@ async function executeScript(
             }
             const verrs = validateSchema(schemaCapture.value, agentOpts.schema);
             if (verrs.length === 0)
-              return { value: schemaCapture.value, tokensDelta };
+              return {
+                value: schemaCapture.value,
+                tokensDelta,
+                budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
+              };
             status = "error";
             engine.failure ??= {
               errorCategory: "schema",
@@ -629,7 +674,12 @@ async function executeScript(
             try {
               const parsed = JSON.parse(raw);
               const verrs = validateSchema(parsed, agentOpts.schema);
-              if (verrs.length === 0) return { value: parsed, tokensDelta };
+              if (verrs.length === 0)
+                return {
+                  value: parsed,
+                  tokensDelta,
+                  budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
+                };
               status = "error";
               engine.failure ??= {
                 errorCategory: "schema",
@@ -685,9 +735,21 @@ async function executeScript(
         errorStage: "schema_validation",
       };
       engine.failure ??= callFailure;
-      return { value: null, tokensDelta, errorCount: 1, failure: callFailure };
+      return {
+        value: null,
+        tokensDelta,
+        budgetTokensDelta: budgetTokensDelta ?? tokensDelta,
+        errorCount: 1,
+        failure: callFailure,
+        schemaRepairExhausted: true,
+      };
     } catch (error) {
-      throw new WorkerRpcFailure(error, tokensDelta, runnerFailure);
+      throw new WorkerRpcFailure(
+        error,
+        tokensDelta,
+        runnerFailure,
+        budgetTokensDelta ?? tokensDelta,
+      );
     } finally {
       sem.release();
     }
@@ -886,6 +948,8 @@ function runWorkflowWorker(
                 }
               : {}),
             tokensDelta,
+            budgetTokensDelta:
+              err instanceof WorkerRpcFailure ? err.budgetTokensDelta : 0,
             stats: {
               errorCount:
                 err instanceof WorkerRpcFailure && err.runnerFailure ? 1 : 0,
@@ -970,10 +1034,14 @@ async function handleWorkerRpc(
             }
           : { value: response.value }),
       tokensDelta: response.tokensDelta,
+      budgetTokensDelta: response.budgetTokensDelta,
       stats: {
         errorCount: response.errorCount,
         cancelledCount: response.cancelledCount,
         failure: response.failure ?? engine.failure,
+        ...(response.schemaRepairExhausted === true
+          ? { schemaRepairExhausted: true }
+          : {}),
       },
     };
   }

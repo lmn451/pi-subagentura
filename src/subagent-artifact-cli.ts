@@ -55,6 +55,7 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { constants as osConstants } from "node:os";
 
 const dir = process.env.ARTIFACT_DIR;
 if (!dir) {
@@ -183,8 +184,7 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
-const signalNames = [
-  undefined,
+const processSignalNames = [
   "SIGHUP",
   "SIGINT",
   "SIGQUIT",
@@ -215,11 +215,21 @@ const signalNames = [
   "SIGIO",
   "SIGPWR",
   "SIGSYS",
-  ];
+];
+const signalNamesByNumber = new Map();
+for (const name of processSignalNames) {
+  const signalNumber = osConstants.signals[name];
+  if (
+    Number.isSafeInteger(signalNumber) &&
+    !signalNamesByNumber.has(signalNumber)
+  ) {
+    signalNamesByNumber.set(signalNumber, name);
+  }
+}
 const signalForExitCode = (exitCode) => {
   const signalNumber = exitCode - 128;
-  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
-    ? signalNames[signalNumber]
+  return Number.isSafeInteger(exitCode) && signalNumber > 0
+    ? signalNamesByNumber.get(signalNumber)
     : undefined;
 };
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {

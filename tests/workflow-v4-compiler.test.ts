@@ -54,6 +54,82 @@ describe("v4 workflow compiler", () => {
       ok: true,
     });
   });
+  it("compiles and runs a generic workflow definition without other TypeScript syntax", async () => {
+    const compiled = compileWorkflowScript(`
+      import { defineWorkflow, schema } from 'pi-subagentura/workflow';
+      const Input = schema.string();
+      export default defineWorkflow<typeof Input>({
+        name: 'generic-input',
+        version: 1,
+        input: Input,
+        run(_ctx, args) { return args; },
+      });
+    `);
+
+    expect(compiled).toMatchObject({
+      format: "definition",
+      meta: { name: "generic-input", version: 1 },
+    });
+
+    const invoke = runInNewContext(compiled.body) as (
+      run: (definition: unknown) => Promise<unknown>,
+      define: typeof defineWorkflow,
+      schemas: typeof schema,
+    ) => Promise<{
+      run(ctx: unknown, args: string): string;
+    }>;
+    const definition = await invoke(
+      vi.fn(async (value) => value),
+      defineWorkflow,
+      schema,
+    );
+
+    expect(definition.run({}, "typed input")).toBe("typed input");
+  });
+  it("erases generic schema-builder arguments before running a V4 workflow", async () => {
+    const compiled = compileWorkflowScript(`
+      import { defineWorkflow, schema } from "pi-subagentura/workflow";
+      const Input = schema.string();
+      const List = schema.array<typeof Input>(Input);
+      export default defineWorkflow({
+        name: "generic-schema",
+        version: 1,
+        input: List,
+        run(_ctx, args) { return args; },
+      });
+    `);
+
+    const invoke = runInNewContext(compiled.body) as (
+      run: (definition: unknown) => Promise<unknown>,
+      define: typeof defineWorkflow,
+      schemas: typeof schema,
+    ) => Promise<{
+      run(ctx: unknown, args: string[]): string[];
+    }>;
+    const definition = await invoke(
+      vi.fn(async (value) => value),
+      defineWorkflow,
+      schema,
+    );
+
+    expect(definition.run({}, ["typed input"])).toEqual(["typed input"]);
+  });
+
+  it("preserves legacy relational expressions", () => {
+    const compiled = compileWorkflowScript(`
+      export const meta = {
+        name: "legacy-relational",
+        description: "Legacy relational expression",
+      };
+      return args.left < args.right;
+    `);
+
+    expect(compiled.format).toBe("legacy");
+    const args = { left: 1, right: 2 };
+    expect(
+      runInNewContext(`(function (args) {${compiled.body}\n})(args)`, { args }),
+    ).toBe(true);
+  });
 
   it("keeps the legacy meta format available", () => {
     const compiled = compileWorkflowScript(`
@@ -147,15 +223,7 @@ describe("v4 workflow compiler", () => {
     });
   });
 
-  it("rejects top-level return while preserving returns inside functions", async () => {
-    expect(() =>
-      compileWorkflowScript(`
-      import { defineWorkflow } from "pi-subagentura/workflow";
-      return 1;
-      export default defineWorkflow({ name: "bad-return", version: 1, run() {} });
-    `),
-    ).toThrow(/top-level return/i);
-
+  it("executes returns inside a workflow run function", async () => {
     const compiled = compileWorkflowScript(`
       import { defineWorkflow } from "pi-subagentura/workflow";
       export default defineWorkflow({

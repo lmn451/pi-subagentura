@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +13,7 @@ import {
   readOutput,
 } from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
+import { writeCliScript } from "../src/subagent-artifact-cli";
 
 type ChildProtocolHandlers = Map<string, Function> & {
   registeredFlags: Array<{ name: string; options: Record<string, unknown> }>;
@@ -115,49 +118,126 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
-  it("retains the newest active tool across concurrent starts", () => {
+  it("keeps the unmatched same-name call active when an identified call ends", () => {
     const handlers = registerHandlers();
-    const entries = [
-      { id: "turn-tools", type: "message", message: { role: "user" } },
-    ];
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
     const ctx = { sessionManager: { getEntries: () => entries } };
 
     handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
     handlers.get("before_provider_request")!({}, ctx);
     handlers.get("tool_execution_start")!(
-      { toolName: "bash", toolCallId: "tool-1" },
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
     handlers.get("tool_execution_start")!(
-      { toolName: "npm_test", toolCallId: "tool-2" },
+      { toolName: "read", toolCallId: "B" },
+      ctx,
+    );
+    handlers.get("tool_execution_end")!(
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
 
     expect(readActiveTurn()).toMatchObject({
-      activeTools: [
-        { name: "bash", callId: "tool-1" },
-        { name: "npm_test", callId: "tool-2" },
-      ],
-      lastTool: "npm_test",
+      activeTools: [{ name: "read", callId: "B" }],
+      lastTool: "read",
+    });
+  });
+
+  it("reports active_tool before a remaining same-name call settles", () => {
+    const handlers = registerHandlers();
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "B" },
+      ctx,
+    );
+    handlers.get("tool_execution_end")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+
+    const cliPath = join(artifactDir, "cli.mjs");
+    writeCliScript(cliPath);
+    const result = spawnSync("node", [cliPath, "process-exit", "0"], {
+      env: { ...process.env, ARTIFACT_DIR: artifactDir },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    const processExit = readEvents(artifactPath(root, "child"))
+      .filter((event) => event.type === "process_exited")
+      .at(-1);
+    expect(processExit).toMatchObject({
+      type: "process_exited",
+      status: "done",
+      exitCode: 0,
+      terminationReason: "active_tool",
+      lastTool: "read",
+    });
+  });
+
+  it("supports SDK events without IDs and deduplicates repeated call IDs", () => {
+    const handlers = registerHandlers();
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")!({ toolName: "read" }, ctx);
+    expect(readActiveTurn()).toMatchObject({ activeTools: [] });
+
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    expect(readActiveTurn()).toMatchObject({
+      activeTools: [{ name: "read", callId: "A" }],
     });
 
     handlers.get("tool_execution_end")!(
-      { toolName: "bash", toolCallId: "tool-1" },
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
-    expect(readActiveTurn()).toMatchObject({
-      activeTools: [{ name: "npm_test", callId: "tool-2" }],
-      lastTool: "npm_test",
-    });
-
-    handlers.get("tool_execution_end")!(
-      { toolName: "npm_test", toolCallId: "tool-2" },
-      ctx,
-    );
-    expect(readActiveTurn()).toMatchObject({
-      activeTools: [],
-      lastTool: "npm_test",
-    });
+    expect(readActiveTurn()).toMatchObject({ activeTools: [] });
   });
 
   it("records an error completion and supports getBranch fallback", () => {

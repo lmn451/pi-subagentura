@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +12,11 @@ import {
   type RunScope,
 } from "../src/workflow-run-store";
 import { zeroUsage } from "../src/usage";
-import type { WorkflowAgentRunner } from "../src/workflow-core";
+import {
+  WorkflowFailureError,
+  zeroWorkflowUsage,
+  type WorkflowAgentRunner,
+} from "../src/workflow-core";
 
 const roots: string[] = [];
 const stores: WorkflowRunStore[] = [];
@@ -288,6 +293,214 @@ describe("v4 workflow integration through worker and durable store", () => {
         .status,
     ).toBe("failed");
   });
+  it("restores collected schema error counts after a gate interruption", async () => {
+    const script = `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "schema-error-resume", version: 1,
+        async run(ctx) {
+          const failed = await ctx.agent("structured", {
+            prompt: "invalid json",
+            output: schema.object({ answer: schema.string() }),
+            failure: "collect",
+          });
+          const answer = await ctx.ask("schema-gate", {
+            prompt: "Continue?",
+            choices: ["yes", "no"],
+          });
+          return { failed, answer };
+        } });`;
+    const { scope, store } = await fixture(script);
+    const runner = vi.fn<WorkflowAgentRunner>(async () => ok("{}"));
+    const abort = new AbortController();
+    const firstDurable = new DurableWorkflow(store);
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          store.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "schema-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(3);
+      abort.abort(
+        Object.assign(new Error("durable_interrupt"), {
+          source: "durable_interrupt",
+        }),
+      );
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    const resumed = runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      durable: resumedDurable,
+      runAgent: runner,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          resumedStore.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "schema-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(3);
+      const live = getLiveWorkflowV4Store(resumedStore.id);
+      expect(live).toBeDefined();
+      await live!.answer(["schema-gate"], "yes");
+
+      const result = await resumed;
+      expect(result.errorCount).toBe(1);
+      expect(result.result).toMatchObject({
+        failed: {
+          ok: false,
+          error: { category: "schema", stage: "schema_validation" },
+        },
+        answer: "yes",
+      });
+      expect(runner).toHaveBeenCalledTimes(3);
+    } finally {
+      resumedDurable.stop();
+      await resumedDurable.drain();
+    }
+  });
+
+  it("counts schema exhaustion per outer retry without double-counting runner failures", async () => {
+    const script = `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "schema-retry-error-count", version: 1,
+        async run(ctx) {
+          const schemaFailure = await ctx.agent("repeated-schema", {
+            prompt: "invalid json",
+            output: schema.object({ answer: schema.string() }),
+            failure: "collect",
+            retry: { attempts: 2 },
+          });
+          const runnerFailure = await ctx.agent("runner-error", {
+            prompt: "runner-error",
+            failure: "collect",
+          });
+          const arbitraryStepFailure = await ctx.step(
+            "non-agent-step",
+            { failure: "collect" },
+            async () => ctx.step("invalid-step", {}, null),
+          );
+          const answer = await ctx.ask("resume-gate", {
+            prompt: "Continue?",
+            choices: ["yes", "no"],
+          });
+          return { schemaFailure, runnerFailure, arbitraryStepFailure, answer };
+        } });`;
+    const { scope, store } = await fixture(script);
+    const runner = vi.fn<WorkflowAgentRunner>(async ({ prompt }) =>
+      prompt === "runner-error"
+        ? {
+            isError: true,
+            output: "runner failed",
+            errorMessage: "runner failed",
+            usage: { ...zeroUsage(), output: 1 },
+          }
+        : ok("{}"),
+    );
+    const abort = new AbortController();
+    const firstDurable = new DurableWorkflow(store);
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          store.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "resume-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(7);
+      abort.abort(
+        Object.assign(new Error("durable_interrupt"), {
+          source: "durable_interrupt",
+        }),
+      );
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    const resumed = runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      durable: resumedDurable,
+      runAgent: runner,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          resumedStore.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "resume-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(7);
+      const live = getLiveWorkflowV4Store(resumedStore.id);
+      expect(live).toBeDefined();
+      await live!.answer(["resume-gate"], "yes");
+
+      const result = await resumed;
+      expect(result.errorCount).toBe(3);
+      expect(result.result).toMatchObject({
+        answer: "yes",
+        arbitraryStepFailure: {
+          ok: false,
+          error: { category: "schema" },
+        },
+      });
+      expect(
+        resumedStore.events.some(
+          (event) =>
+            event.kind === "v4.step" &&
+            event.data.kind !== "agent" &&
+            event.data.error?.category === "schema",
+        ),
+      ).toBe(true);
+      expect(runner).toHaveBeenCalledTimes(7);
+    } finally {
+      resumedDurable.stop();
+      await resumedDurable.drain();
+    }
+  });
 
   it("journals ctx.log progress with its scoped step path", async () => {
     const script = `import { defineWorkflow } from "pi-subagentura/workflow";
@@ -458,6 +671,598 @@ describe("v4 workflow integration through worker and durable store", () => {
           event.kind === "v4.step" && event.data.status === "completed",
       ),
     ).toBe(true);
+  });
+  it("replays committed output once globally while retaining step budget attribution", async () => {
+    const script = `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "replay-budget-accounting", version: 1,
+        async run(ctx) {
+          const first = await ctx.step("first-step", {
+            budget: 2,
+            failure: "collect",
+          }, () => ctx.agent("first-agent", { prompt: "first" }));
+          await ctx.gate("continue", { prompt: "Continue?" });
+          const spentBeforeFollowing = ctx.budget.spent();
+          const remainingBeforeFollowing = ctx.budget.remaining();
+          const following = await ctx.agent("following-agent", {
+            prompt: "following",
+          });
+          return {
+            first,
+            spentBeforeFollowing,
+            remainingBeforeFollowing,
+            following,
+            spentAfterFollowing: ctx.budget.spent(),
+          };
+        } });`;
+    const { scope, store } = await fixture(script);
+    const abort = new AbortController();
+    const runner = vi.fn<WorkflowAgentRunner>(async ({ prompt }) =>
+      ok(prompt === "first" ? "first-result" : "following-result"),
+    );
+    const firstDurable = new DurableWorkflow(store);
+    const originalAppend = store.append.bind(store);
+    let committedOutcome = false;
+    const appendSpy = vi
+      .spyOn(store, "append")
+      .mockImplementation(async (kind, data) => {
+        await originalAppend(kind, data);
+        if (kind === "outcome" && !committedOutcome) {
+          committedOutcome = true;
+          abort.abort(
+            Object.assign(new Error("durable_interrupt"), {
+              source: "durable_interrupt",
+            }),
+          );
+        }
+      });
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+      budgetTotal: 6,
+    });
+    try {
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      appendSpy.mockRestore();
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+    expect(committedOutcome).toBe(true);
+    expect(
+      store.events.some(
+        (event) => event.kind === "outcome" && event.data.ok === true,
+      ),
+    ).toBe(true);
+    expect(
+      store.events.some(
+        (event) =>
+          event.kind === "v4.step" &&
+          event.data.path.join("/") === "first-step" &&
+          event.data.status === "completed",
+      ),
+    ).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    const resumed = runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      durable: resumedDurable,
+      runAgent: runner,
+      budgetTotal: 6,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          resumedStore.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "continue" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(resumedDurable.usage().output).toBe(3);
+      expect(runner).toHaveBeenCalledTimes(1);
+      const live = getLiveWorkflowV4Store(resumedStore.id);
+      expect(live).toBeDefined();
+      await live!.answer(["continue"], true);
+
+      const result = await resumed;
+      expect(result.result).toMatchObject({
+        first: {
+          ok: false,
+          error: { category: "budget", stage: "budget" },
+        },
+        spentBeforeFollowing: 3,
+        remainingBeforeFollowing: 3,
+        following: "following-result",
+        spentAfterFollowing: 6,
+      });
+      expect(result.usage?.output).toBe(6);
+      expect(resumedDurable.usage().output).toBe(6);
+      expect(runner).toHaveBeenCalledTimes(2);
+    } finally {
+      resumedDurable.stop();
+      await resumedDurable.drain();
+    }
+  });
+
+  it.each([
+    { caseName: "missing terminal usage", terminalUsage: undefined },
+    { caseName: "empty terminal usage", terminalUsage: zeroUsage() },
+  ])(
+    "charges normalized live output to the global budget after a durable runner failure ($caseName)",
+    async ({ terminalUsage }) => {
+      const script = source(`
+        const failed = await ctx.agent("partial", {
+          prompt: "partial",
+          failure: "collect",
+        });
+        return { failed, spent: ctx.budget.spent() };`);
+      const { store } = await fixture(script);
+      const runner = vi.fn<WorkflowAgentRunner>(async (request) => {
+        request.onProgress?.({
+          kind: "phase",
+          phase: "partial",
+          liveUsage: {
+            input: 0,
+            output: 3,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 3,
+            costUsd: 0,
+            turns: 0,
+          },
+        });
+        const error = new Error("runner failed");
+        if (terminalUsage !== undefined)
+          Object.assign(error, { usage: terminalUsage });
+        throw error;
+      });
+
+      const result = await execute(store, runner, { budgetTotal: 10 });
+      expect(runner).toHaveBeenCalledOnce();
+      expect(result.result).toMatchObject({ spent: 3 });
+      expect(result.usage?.output).toBe(3);
+    },
+  );
+
+  it("restores live usage from a committed failed runner outcome", async () => {
+    const script = source(`
+      const failed = await ctx.agent("partial", {
+        prompt: "partial",
+        failure: "collect",
+      });
+      return { failed, spent: ctx.budget.spent() };`);
+    const { scope, store } = await fixture(script);
+    const abort = new AbortController();
+    const runner = vi.fn<WorkflowAgentRunner>(async (request) => {
+      request.onProgress?.({
+        kind: "phase",
+        phase: "partial",
+        liveUsage: {
+          input: 0,
+          output: 3,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3,
+          costUsd: 0,
+          turns: 0,
+        },
+      });
+      throw new Error("runner failed");
+    });
+    const firstDurable = new DurableWorkflow(store);
+    const originalAppend = store.append.bind(store);
+    let committedOutcome = false;
+    const appendSpy = vi
+      .spyOn(store, "append")
+      .mockImplementation(async (kind, data) => {
+        await originalAppend(kind, data);
+        if (kind === "outcome" && !committedOutcome) {
+          committedOutcome = true;
+          abort.abort(
+            Object.assign(new Error("durable_interrupt"), {
+              source: "durable_interrupt",
+            }),
+          );
+        }
+      });
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      budgetTotal: 10,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+    });
+    try {
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      appendSpy.mockRestore();
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+    expect(committedOutcome).toBe(true);
+    expect(
+      store.events.find((event) => event.kind === "outcome")?.data.usage
+        ?.output,
+    ).toBe(3);
+    expect(runner).toHaveBeenCalledTimes(1);
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    expect(resumedDurable.usage().output).toBe(3);
+    const result = await runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      budgetTotal: 10,
+      durable: resumedDurable,
+      runAgent: runner,
+    });
+    expect(result.result).toMatchObject({ spent: 3 });
+    expect(result.usage?.output).toBe(3);
+    expect(resumedDurable.usage().output).toBe(3);
+    expect(runner).toHaveBeenCalledTimes(1);
+    resumedDurable.stop();
+    await resumedDurable.drain();
+  });
+
+  it.each([
+    { caseName: "negative", output: -3 },
+    { caseName: "non-finite", output: Number.POSITIVE_INFINITY },
+  ])(
+    "uses normalized usage for durable global budget deltas ($caseName)",
+    async ({ output }) => {
+      const script = source(`
+        await ctx.agent("invalid-usage", { prompt: "invalid-usage" });
+        return ctx.budget.spent();`);
+      const { store } = await fixture(script);
+      const runner: WorkflowAgentRunner = async () => ({
+        isError: false,
+        output: "done",
+        usage: { ...zeroUsage(), output },
+      });
+
+      const result = await execute(store, runner, { budgetTotal: 10 });
+      expect(result.result).toBe(0);
+      expect(result.usage?.output).toBe(0);
+    },
+  );
+
+  it("deduplicates runner schema errors from restored schema exhaustion", async () => {
+    const script = `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "schema-error-dedup", version: 1,
+        async run(ctx) {
+          const budgetFailure = await ctx.step("runner-schema-budget", {
+            budget: 0,
+            failure: "collect",
+          }, () => ctx.agent("runner-schema", {
+            prompt: "runner-schema",
+            failure: "collect",
+          }));
+          const ordinaryFailure = await ctx.agent("ordinary-runner", {
+            prompt: "ordinary-runner",
+            failure: "collect",
+          });
+          const schemaFailure = await ctx.agent("schema-exhaustion", {
+            prompt: "invalid json",
+            output: schema.object({ answer: schema.string() }),
+            failure: "collect",
+          });
+          const answer = await ctx.ask("error-count-gate", {
+            prompt: "Continue?",
+            choices: ["yes", "no"],
+          });
+          return { budgetFailure, ordinaryFailure, schemaFailure, answer };
+        } });`;
+    const { scope, store } = await fixture(script);
+    const runner = vi.fn<WorkflowAgentRunner>(async ({ prompt }) => {
+      if (prompt === "runner-schema") {
+        throw Object.assign(
+          new WorkflowFailureError("runner schema failure", {
+            errorCategory: "schema",
+            errorStage: "schema_validation",
+          }),
+          { usage: { ...zeroUsage(), output: 3 } },
+        );
+      }
+      if (prompt === "ordinary-runner") {
+        return {
+          isError: true,
+          output: "runner failed",
+          errorMessage: "runner failed",
+          usage: { ...zeroUsage(), output: 1 },
+        };
+      }
+      return ok("{}");
+    });
+    const abort = new AbortController();
+    const firstDurable = new DurableWorkflow(store);
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          store.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "error-count-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(5);
+      abort.abort(
+        Object.assign(new Error("durable_interrupt"), {
+          source: "durable_interrupt",
+        }),
+      );
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    const resumed = runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      durable: resumedDurable,
+      runAgent: runner,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          resumedStore.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "error-count-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(5);
+      const live = getLiveWorkflowV4Store(resumedStore.id);
+      expect(live).toBeDefined();
+      await live!.answer(["error-count-gate"], "yes");
+
+      const result = await resumed;
+      expect(result.errorCount).toBe(3);
+      expect(result.result).toMatchObject({ answer: "yes" });
+      expect(runner).toHaveBeenCalledTimes(5);
+    } finally {
+      resumedDurable.stop();
+      await resumedDurable.drain();
+    }
+  });
+
+  it("reconstructs schema exhaustion from an unmarked prior journal", async () => {
+    const script = `import { defineWorkflow, schema } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "schema-error-old-journal", version: 1,
+        async run(ctx) {
+          const runnerFailure = await ctx.agent("runner-schema", {
+            prompt: "runner-schema",
+            failure: "collect",
+          });
+          const schemaFailure = await ctx.agent("schema-exhaustion", {
+            prompt: "invalid json",
+            output: schema.object({ answer: schema.string() }),
+            failure: "collect",
+          });
+          const answer = await ctx.ask("legacy-gate", {
+            prompt: "Continue?",
+            choices: ["yes", "no"],
+          });
+          return { runnerFailure, schemaFailure, answer };
+        } });`;
+    const { scope, store } = await fixture(script);
+    const runner = vi.fn<WorkflowAgentRunner>(async ({ prompt }) => {
+      if (prompt === "runner-schema") {
+        throw Object.assign(
+          new WorkflowFailureError("runner schema failure", {
+            errorCategory: "schema",
+            errorStage: "schema_validation",
+          }),
+          { usage: { ...zeroUsage(), output: 3 } },
+        );
+      }
+      return ok("{}");
+    });
+    const abort = new AbortController();
+    const firstDurable = new DurableWorkflow(store);
+    const originalAppend = store.append.bind(store);
+    const appendSpy = vi
+      .spyOn(store, "append")
+      .mockImplementation(async (kind, data) => {
+        if (
+          kind === "v4.step" &&
+          data !== null &&
+          typeof data === "object" &&
+          "error" in data &&
+          data.error !== null &&
+          typeof data.error === "object" &&
+          "schemaRepairExhausted" in data.error &&
+          data.error.schemaRepairExhausted === true
+        ) {
+          const { schemaRepairExhausted: _marker, ...error } = data.error;
+          await originalAppend(kind, { ...data, error });
+          return;
+        }
+        await originalAppend(kind, data);
+      });
+    const interrupted = runWorkflow(script, {
+      args: {},
+      cwd: store.events[0].data.cwd,
+      durable: firstDurable,
+      runAgent: runner,
+      signal: abort.signal,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          store.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "legacy-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(
+        runner.mock.calls.filter(
+          ([request]) => request.prompt === "runner-schema",
+        ),
+      ).toHaveLength(1);
+      expect(runner).toHaveBeenCalledTimes(4);
+      abort.abort(
+        Object.assign(new Error("durable_interrupt"), {
+          source: "durable_interrupt",
+        }),
+      );
+      await expect(interrupted).rejects.toThrow();
+    } finally {
+      appendSpy.mockRestore();
+      firstDurable.stop();
+      await firstDurable.drain();
+    }
+
+    await store.close();
+    const resumedStore = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(resumedStore);
+    const resumedDurable = new DurableWorkflow(resumedStore);
+    const resumed = runWorkflow(script, {
+      args: {},
+      cwd: resumedStore.events[0].data.cwd,
+      durable: resumedDurable,
+      runAgent: runner,
+    });
+    try {
+      await waitForWorkflowWorker(() =>
+        expect(
+          resumedStore.events.some(
+            (event) =>
+              event.kind === "v4.step" &&
+              event.data.path.join("/") === "legacy-gate" &&
+              event.data.status === "waiting_for_input",
+          ),
+        ).toBe(true),
+      );
+      expect(runner).toHaveBeenCalledTimes(4);
+      const live = getLiveWorkflowV4Store(resumedStore.id);
+      expect(live).toBeDefined();
+      await live!.answer(["legacy-gate"], "yes");
+
+      const result = await resumed;
+      expect(result.errorCount).toBe(2);
+      expect(result.result).toMatchObject({ answer: "yes" });
+      expect(runner).toHaveBeenCalledTimes(4);
+    } finally {
+      resumedDurable.stop();
+      await resumedDurable.drain();
+    }
+  });
+
+  it("counts schema exhaustion in a baseline five-field attempt journal", async () => {
+    const script = `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({ name: "legacy-attempt-identity", version: 1,
+        async run() { return null; } });`;
+    const { store } = await fixture(script);
+    const path = ["legacy-agent"];
+    const generation = 0;
+    const stepAttempt = 1;
+    const input = encodeRunValue({ prompt: "schema repair call" });
+    const policy = encodeRunValue({ failure: "collect" });
+    const sourceHash = createHash("sha256").update(script).digest("hex");
+    const invocationHash = createHash("sha256")
+      .update(JSON.stringify([script, null]))
+      .digest("hex");
+    const definitionHash = createHash("sha256")
+      .update(sourceHash + invocationHash)
+      .digest("hex");
+    const stepIdempotencyKey = createHash("sha256")
+      .update(JSON.stringify([path, definitionHash, input, policy, generation]))
+      .digest("hex");
+    const agentId = `${stepIdempotencyKey}:${stepAttempt}`;
+    const requestId = createHash("sha256")
+      .update(JSON.stringify([agentId]))
+      .digest("hex");
+
+    await store.append("v4.step", {
+      path,
+      id: "legacy-agent",
+      kind: "agent",
+      title: "legacy-agent",
+      status: "failed",
+      attempt: stepAttempt,
+      generation,
+      inputHash: createHash("sha256").update(input).digest("hex"),
+      definitionHash,
+      startedAt: 1,
+      completedAt: 2,
+      input,
+      policy,
+      error: {
+        name: "WorkflowFailureError",
+        message: "Schema validation failed.",
+        category: "schema",
+        stage: "schema_validation",
+        path,
+      },
+    });
+    expect(
+      store.events.find((event) => event.kind === "v4.step")?.data,
+    ).not.toHaveProperty("retryFrameHash");
+
+    for (let repairAttempt = 0; repairAttempt < 3; repairAttempt++) {
+      const key = `${requestId}-${repairAttempt}`;
+      await store.append("attempt", {
+        key,
+        configuration: encodeRunValue({
+          prompt: `schema repair ${repairAttempt}`,
+        }),
+        isolation: "process",
+      });
+      await store.append("outcome", {
+        key,
+        ok: true,
+        value: encodeRunValue({
+          isError: false,
+          output: "{}",
+          usage: zeroUsage(),
+        }),
+      });
+    }
+
+    const durable = new DurableWorkflow(store);
+    const result = durable.result({
+      meta: { name: "legacy-attempt-identity", description: "" },
+      result: null,
+      agentsSpawned: 0,
+      errorCount: 0,
+      tokensSpent: 0,
+      usage: zeroWorkflowUsage(),
+      phases: [],
+    });
+    expect(result.errorCount).toBe(1);
+    durable.stop();
   });
 
   it("rejects a nested workflow cycle", async () => {

@@ -65,6 +65,50 @@ function terminal(events: RunEvent[]) {
     events.findLast((e) => e.kind === "terminal")
   );
 }
+const MAX_WAITING_INPUT_ACTIONS = 256;
+const MAX_WAITING_INPUT_ACTION_BYTES = 16 * 1024;
+
+export interface WaitingInputActionBatch<T extends { path: string[] }> {
+  text: string;
+  visible: T[];
+  omittedCount: number;
+  actionBytes: number;
+}
+
+export function formatWaitingInputActions<T extends { path: string[] }>(
+  workflowId: string,
+  waiting: readonly T[],
+  actionBudgetBytes = MAX_WAITING_INPUT_ACTION_BYTES,
+  remainderCount = 0,
+): WaitingInputActionBatch<T> {
+  const totalWaiting = waiting.length + remainderCount;
+  const candidates = waiting.slice(0, MAX_WAITING_INPUT_ACTIONS);
+  const visible: T[] = [];
+  const actions: string[] = [];
+  let actionBytes = 0;
+  for (const step of candidates) {
+    const action = `respond_workflow_input({ "workflowId": ${JSON.stringify(workflowId)}, "path": ${JSON.stringify(step.path)} })`;
+    const separatorBytes = actions.length > 0 ? 1 : 0;
+    const nextActionBytes = Buffer.byteLength(action, "utf8");
+    if (actionBytes + separatorBytes + nextActionBytes > actionBudgetBytes)
+      break;
+    visible.push(step);
+    actions.push(action);
+    actionBytes += separatorBytes + nextActionBytes;
+  }
+  const omittedCount = totalWaiting - visible.length;
+  const omissionNotice = omittedCount
+    ? `\n${omittedCount} additional waiting path(s) not listed.\nUse get_workflow_status({ "workflowId": ${JSON.stringify(workflowId)} }) to inspect this run.`
+    : "";
+  return {
+    text: totalWaiting
+      ? `\nWaiting for input at ${totalWaiting} step(s):${actions.length ? `\n${actions.join("\n")}` : ""}${omissionNotice}`
+      : "",
+    visible,
+    omittedCount,
+    actionBytes,
+  };
+}
 
 export function completionIntentForOwner(
   events: RunEvent[],
@@ -124,15 +168,21 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
     ? decodeRunValue<WorkflowRunResult>(end.data.result)
     : undefined;
   const steps = sanitizeWorkflowDiagnosticDetails(workflowV4Steps(events));
-  const waiting = steps.filter((step) => step.status === "waiting_for_input");
+  const allWaiting = workflowV4Steps(events, Infinity).filter(
+    (step) => step.status === "waiting_for_input",
+  );
+  const waiting = sanitizeWorkflowDiagnosticDetails(
+    allWaiting.slice(0, MAX_WAITING_INPUT_ACTIONS),
+  );
+  const waitingRemainderCount = allWaiting.length - waiting.length;
   return {
     workflowId: id,
     name: parseWorkflow(events[0].data.script).meta.name,
     durable: true,
     status:
       end?.data.status ??
-      (waiting.length ? "waiting_for_input" : "interrupted"),
-    ...(steps.length ? { steps, waiting } : {}),
+      (allWaiting.length ? "waiting_for_input" : "interrupted"),
+    ...(steps.length ? { steps, waiting, waitingRemainderCount } : {}),
     createdAt: events[0].data.createdAt,
     completedAt: end?.data.completedAt,
     operations: events.filter((e) => e.kind === "request").length,
@@ -243,6 +293,20 @@ export function registerDurableWorkflowTools(
       );
       if (!events) return undefined;
       const details = durableRunSummary(id, events);
+      const waitingActions = formatWaitingInputActions(
+        id,
+        details.waiting ?? [],
+        MAX_WAITING_INPUT_ACTION_BYTES,
+        details.waitingRemainderCount ?? 0,
+      );
+      const visibleDetails =
+        details.waiting !== undefined
+          ? {
+              ...details,
+              waiting: waitingActions.visible,
+              waitingRemainderCount: waitingActions.omittedCount,
+            }
+          : details;
       const end = terminal(events);
       if (result && end) {
         consumeCompletionSource(
@@ -261,10 +325,10 @@ export function registerDurableWorkflowTools(
             type: "text",
             text: run
               ? stringify(run.result)
-              : `Workflow ${id}: ${details.status}.${details.error ? ` ${details.error}` : ""}${end ? "" : " Use resume_workflow to continue the recorded program; no controller is running in this parent session."}`,
+              : `Workflow ${id}: ${details.status}.${details.error ? ` ${details.error}` : ""}${waitingActions.text}${end ? "" : " Use resume_workflow to continue the recorded program; no controller is running in this parent session."}`,
           },
         ],
-        details,
+        details: visibleDetails,
         ...(result && details.status !== "done" ? { isError: true } : {}),
       };
     } catch (error) {
@@ -362,6 +426,11 @@ export function registerDurableWorkflowTools(
           },
         );
       }
+      // Background runs have an effective default even when an older sync
+      // delivery record had no policy. Reuse this value for persistence and the
+      // live job so restart recovery cannot lose the same-session wake intent.
+      if (runAsync && !completion.policy)
+        completion = { ...completion, policy: "each" };
       if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
         throw new Error("Parent session changed before workflow acceptance.");
       const durable = new DurableWorkflow(store);
@@ -513,8 +582,7 @@ export function registerDurableWorkflowTools(
         }
         throw error;
       }
-      job.completionPolicy =
-        completion.policy ?? (runAsync ? "each" : undefined);
+      job.completionPolicy = completion.policy;
       job.completionGroupId = completion.groupId;
       accepted = true;
       if (runAsync)
@@ -690,35 +758,56 @@ export function registerDurableWorkflowTools(
     ): Promise<any> {
       try {
         const runs = [];
+        const runLines = [];
+        let remainingActionBytes = MAX_WAITING_INPUT_ACTION_BYTES;
+        let hasListedAction = false;
         for (const runScope of [scope(ctx), scope(ctx, true)]) {
           for (const id of await WorkflowRunStore.list(runScope)) {
             const events = await WorkflowRunStore.inspect(runScope, id);
-            if (events)
-              runs.push({
-                ...durableRunSummary(id, events),
-                ...(getWorkflowJobForOwner(id, owner())?.status === "running"
-                  ? {
-                      status: getWorkflowJobForOwner(
-                        id,
-                        owner(),
-                      )?.snapshot.steps?.some(
-                        (node) => node.status === "waiting_for_input",
-                      )
-                        ? "waiting_for_input"
-                        : "running",
-                    }
-                  : {}),
-              });
+            if (!events) continue;
+            const summary = durableRunSummary(id, events);
+            const separatorBytes = hasListedAction ? 1 : 0;
+            const waitingActions = formatWaitingInputActions(
+              id,
+              summary.waiting ?? [],
+              Math.max(0, remainingActionBytes - separatorBytes),
+              summary.waitingRemainderCount ?? 0,
+            );
+            if (waitingActions.visible.length) {
+              remainingActionBytes -=
+                waitingActions.actionBytes + separatorBytes;
+              hasListedAction = true;
+            }
+            const job = getWorkflowJobForOwner(id, owner());
+            const waitingCount =
+              (summary.waiting?.length ?? 0) +
+              (summary.waitingRemainderCount ?? 0);
+            const run = {
+              ...summary,
+              ...(summary.waiting !== undefined
+                ? {
+                    waiting: waitingActions.visible,
+                    waitingRemainderCount: waitingActions.omittedCount,
+                  }
+                : {}),
+              ...(job?.status === "running"
+                ? {
+                    status: waitingCount ? "waiting_for_input" : "running",
+                  }
+                : {}),
+            };
+            runs.push(run);
+            runLines.push(
+              `${run.workflowId} ${run.name}: ${run.status}${waitingActions.text}`,
+            );
           }
         }
         return {
           content: [
             {
               type: "text",
-              text: runs.length
-                ? runs
-                    .map((r) => `${r.workflowId} ${r.name}: ${r.status}`)
-                    .join("\n")
+              text: runLines.length
+                ? runLines.join("\n")
                 : "No durable workflow runs in this Pi session.",
             },
           ],

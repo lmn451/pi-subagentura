@@ -12,11 +12,12 @@ remain available for compatibility. V4 definitions use the typed SDK and a
 `ctx` object as described below. Node.js 24.12 or newer is required. V4 strips
 erasable TypeScript syntax with Node's native TypeScript support; it does not
 type-check workflow source or compile TypeScript features that require code
-generation. Runtime imports are limited to named `defineWorkflow` and `schema`
-imports from `pi-subagentura/workflow`. Type-only imports are erased. Other
-runtime imports, dynamic imports, `import.meta`, and additional module exports
-are rejected. The worker uses `effect@4.0.0-rc.117` internally; Effect types and
-values are not exposed to workflow authors.
+generation. Supported erasable syntax includes explicit generic calls to
+`defineWorkflow()` and schema helpers. Runtime imports are limited to named
+`defineWorkflow` and `schema` imports from `pi-subagentura/workflow`. Type-only
+imports are erased. Other runtime imports, dynamic imports, `import.meta`, and
+additional module exports are rejected. The worker uses `effect@4.0.0-rc.117`
+internally; Effect types and values are not exposed to workflow authors.
 
 ## V4 definitions
 
@@ -40,8 +41,13 @@ Step and agent options accept the shared policy fields `timeout`, `retry`,
 `failure`, `persist`, `resume`, `cache`, and `budget`. Timeouts are positive
 milliseconds or strings such as `"10 minutes"`; retry attempts are bounded from
 1 through 10, with fixed or exponential backoff. `failure: "continue"` or
-`"collect"` returns structured task results for failed branches. Step budgets
-are output-token limits checked after the step settles.
+`"collect"` returns structured task results for failed branches. On `ctx.step()`,
+a nested `policy.failure` takes precedence over its flat `failure`; if that
+typed step policy may collect, its return type includes the failure outcome.
+Step budgets are output-token limits checked after each step settles, including
+failed attempts; budget failures do not trigger retries. Structured error
+categories survive nested calls. A timeout already collected or caught is not
+rethrown merely because cancellation acknowledgement settles later.
 
 ### Read-only agent tool policy
 
@@ -113,6 +119,12 @@ manual: a live Pi process must call `resume_workflow`; there is no daemon.
 Recovery re-executes the same source from the beginning and reuses a completed
 step only when its stable path, input, policy, and definition hash still match.
 Changing the source invalidates that compatibility and may run the step again.
+Agent result compatibility includes the captured prompt/output contract, model,
+persona, isolation, thinking level, and read-only policy; equivalent defaults
+are normalized. Committed output usage is charged once to the global total while
+remaining attributed to its step. Replay retains logical schema-error counts
+and the original caught failure when persistence and reuse are enabled and
+compatibility matches.
 
 `persist: false` omits a step's output from the durable workflow journal,
 including agent attempt results and failure messages. Usage and terminal status
@@ -124,18 +136,26 @@ artifacts, or values the workflow explicitly returns or writes elsewhere.
 `resume: false` prevents a compatible completed output from being reused.
 Checkpoints persist their value. Artifacts persist content separately from the
 journal and return a reference; each artifact is limited to 2 MiB and the run's
-artifact total to 64 MiB. Step values are limited to 512 KiB. Step snapshots
-omit inputs, policies, outputs, and human answers; the private run journal
-contains source, arguments, prompts, answers, and step outputs and must not be
-shared as telemetry.
+artifact total to 64 MiB. Artifact identity distinguishes text and JSON
+encoding even when their bytes match. Step values are limited to 512 KiB.
+
+Step snapshots omit inputs, policies, outputs, and human answers; the private
+run journal contains source, arguments, prompts, answers, and step outputs and
+must not be shared as telemetry.
 
 `ctx.ask()` and `ctx.gate()` can pause a V4 run for human input. With
 `async:false`, the workflow tool collects the answer directly in Pi's UI. For
 background runs, inspect the waiting step with workflow status/list tools, then
 use `respond_workflow_input({workflowId, path})`. Pi presents the question or
 approval in its UI and writes the answer to the project-scoped run before
-execution continues. With `durable: false`, the same sync and background input
-flows work while the run is live, and answers remain in memory.
+execution continues. Status/list tool content exposes pending paths and bounded
+actionable `respond_workflow_input` calls without answers or other private
+values. Responses include at most 256 whole paths in total and share a 16 KiB
+serialized-action budget across all listed runs. Omission counts are accurate,
+and each omitted run includes the exact `get_workflow_status` selector.
+Answering visible inputs permits the next poll to expose additional paths. With
+`durable: false`, the same sync and background input flows work while the run
+is live, and answers remain in memory.
 The answer is private run data; it is not included in the
 step summary. Legacy `.mjs` workflows still cannot pause for interactive input.
 
@@ -230,8 +250,9 @@ multiple model calls per outer attempt. All calls retain workflow resource caps.
 
 Use `list_workflow_runs`, `get_workflow_status`, and `get_workflow_result` for
 persisted runs; `resume_workflow({workflowId})` explicitly continues an interrupted
-run. Use `async:false` on resume when you need its result immediately. Terminal
-runs do not resume; rerunning a saved definition creates a new run.
+run. Use `async:false` on resume when you need its result immediately. Resumed
+background runs persist their effective completion policy before work proceeds.
+Terminal runs do not resume; rerunning a saved definition creates a new run.
 
 Legacy recovery requires the same host, canonical working directory, Pi
 session id, and Node major version. V4 project-scoped recovery requires the
