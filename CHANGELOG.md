@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   include the failure outcome in their return union.
 - Track concurrent interactive tool calls by their call IDs and decode
   process-exit signal diagnostics using host-native signal numbers.
+- Keep historical workflow diagnostics generic during native compaction and legacy
+  RPC replay without hiding safe workflow-list IDs, names, or statuses.
 
 ## [3.6.4] - 2026-10-03
 

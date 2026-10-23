@@ -75,6 +75,14 @@ export function sanitizeWorkflowDiagnosticContext<T>(messages: T[]): T[] {
     if (!isRecord(candidate) || !shouldSanitizeWorkflowMessage(candidate))
       return candidate;
     changed = true;
+    if (candidate.toolName === "list_workflow_runs") {
+      return {
+        ...candidate,
+        ...(candidate.details === undefined
+          ? {}
+          : { details: sanitizeDiagnosticFields(candidate.details) }),
+      } as T;
+    }
     return {
       ...candidate,
       content:
@@ -100,6 +108,15 @@ export function registerWorkflowDiagnosticContextFilter(
   pi.on("context", (event) => {
     const messages = sanitizeWorkflowDiagnosticContext(event.messages);
     return messages === event.messages ? undefined : { messages };
+  });
+  pi.on("session_before_compact", (event) => {
+    const preparation = event.preparation;
+    preparation.messagesToSummarize = sanitizeWorkflowDiagnosticContext(
+      preparation.messagesToSummarize,
+    );
+    preparation.turnPrefixMessages = sanitizeWorkflowDiagnosticContext(
+      preparation.turnPrefixMessages,
+    );
   });
 }
 

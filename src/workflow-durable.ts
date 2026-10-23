@@ -336,7 +336,14 @@ export class DurableWorkflow {
       if (!pending?.durable) return;
       this.pending.delete(response.id);
       this.responseIndex++;
-      this.send(decodeRunValue(response.value));
+      const recorded = decodeRunValue<WorkflowRpcResponse>(response.value);
+      this.send(
+        pending.request.method === "agent" &&
+          !recorded.ok &&
+          recorded.error !== "Workflow agent failed."
+          ? { ...recorded, error: "Workflow agent failed." }
+          : recorded,
+      );
     }
     if (this.requestIndex < this.requests.length) return;
     for (const [id, pending] of this.pending) {
