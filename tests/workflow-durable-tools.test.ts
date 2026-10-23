@@ -35,7 +35,11 @@ import {
 } from "../src/completion-coordinator";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
-import { WorkflowRunStore } from "../src/workflow-run-store";
+import {
+  decodeRunValue,
+  encodeRunValue,
+  WorkflowRunStore,
+} from "../src/workflow-run-store";
 
 let root: string;
 beforeEach(async () => {
@@ -307,6 +311,256 @@ describe("durable public tools", () => {
         )
       ).isError,
     ).toBe(true);
+  });
+  it("sanitizes historical agent RPC diagnostics on synchronous legacy resume while preserving stored metadata and unrelated RPC errors", async () => {
+    const { pi, scope, ctx, tools } = setup();
+    const owner = sessionOwner(scope);
+    const runScope = { cwd: root, sessionId: "same-parent", root };
+    const marker = "PRIVATE_HISTORICAL_AGENT_RPC_CANARY";
+    const failure = {
+      errorCategory: "provider" as const,
+      errorStage: "provider" as const,
+    };
+    const usage = { ...zeroUsage(), output: 7 };
+    const source = `export const meta = { name: "legacy-replay", description: "test" };
+      let agentFailure;
+      try {
+        await agent("private", { id: "private", isolation: "in-process" });
+      } catch (error) {
+        agentFailure = {
+          message: error.message,
+          category: error.category,
+          stage: error.stage,
+          spent: budget.spent(),
+        };
+      }
+      let missingWorkflow;
+      try {
+        await workflow("requested-missing-workflow", undefined, { id: "nested" });
+      } catch (error) {
+        missingWorkflow = error.message;
+      }
+      return { agentFailure, missingWorkflow };`;
+    const store = await WorkflowRunStore.create(runScope, {
+      parentSessionId: "same-parent",
+      script: source,
+      args: encodeRunValue(undefined),
+      budgetTotal: 1000,
+      concurrency: 4,
+      processConcurrency: 1,
+      workflowTimeoutMs: 60_000,
+    });
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.append("request", {
+      id: 1,
+      method: "agent",
+      payload: encodeRunValue({
+        prompt: "private",
+        opts: {
+          id: "private",
+          isolation: "in-process",
+          phase: undefined,
+        },
+        v4Definition: false,
+        operationPath: ["private"],
+      }),
+    });
+    await store.append("attempt", {
+      key: "1-0",
+      configuration: encodeRunValue({
+        prompt: "private",
+        persona: undefined,
+        model: undefined,
+        isolation: "in-process",
+        label: undefined,
+        thinkingLevel: undefined,
+      }),
+      isolation: "in-process",
+    });
+    await store.append("dispatch", { key: "1-0", sequence: 1 });
+    await store.append("outcome", {
+      key: "1-0",
+      ok: false,
+      error: marker,
+      failure,
+      usage,
+    });
+    await store.append("response", {
+      id: 1,
+      frontier: 1,
+      value: encodeRunValue({
+        id: 1,
+        ok: false,
+        error: marker,
+        tokensDelta: 7,
+        stats: { errorCount: 1, failure },
+      }),
+    });
+    await store.append("request", {
+      id: 2,
+      method: "loadWorkflow",
+      payload: encodeRunValue({
+        name: "requested-missing-workflow",
+        args: undefined,
+        operationPath: ["nested"],
+      }),
+    });
+    await store.append("response", {
+      id: 2,
+      frontier: 2,
+      value: encodeRunValue({
+        id: 2,
+        ok: false,
+        error:
+          'workflow(): no saved workflow named "requested-missing-workflow".',
+        tokensDelta: 0,
+        stats: { errorCount: 0 },
+      }),
+    });
+    await store.close();
+
+    const runAgent: WorkflowAgentRunner = vi.fn(async () => {
+      throw new Error("Historical agent RPC must not redispatch.");
+    });
+    registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => runAgent,
+      () => true,
+      root,
+    );
+    try {
+      const response = await tools
+        .get("resume_workflow")!
+        .execute(
+          "resume-legacy",
+          { workflowId: id, async: false },
+          undefined,
+          undefined,
+          ctx,
+        );
+      expect(response.content[0].text).not.toContain(marker);
+      expect(JSON.stringify(response.details)).not.toContain(marker);
+      expect(response.details.status).toBe("done");
+      const visible = JSON.parse(response.content[0].text);
+      expect(visible.agentFailure.message).not.toContain(marker);
+      expect(visible.agentFailure).toMatchObject({
+        category: "provider",
+        stage: "provider",
+        spent: 7,
+      });
+      expect(visible.missingWorkflow).toContain("requested-missing-workflow");
+      expect(response.details.usage.output).toBe(7);
+      expect(runAgent).not.toHaveBeenCalled();
+
+      const events = await WorkflowRunStore.inspect(runScope, id);
+      const recordedResponse = events?.find(
+        (event) => event.kind === "response" && event.data.id === 1,
+      );
+      expect(
+        recordedResponse?.kind === "response"
+          ? decodeRunValue<{ error: string }>(recordedResponse.data.value).error
+          : undefined,
+      ).toBe(marker);
+      const terminal = events?.findLast((event) => event.kind === "terminal");
+      expect(terminal?.kind).toBe("terminal");
+      if (terminal?.kind !== "terminal") return;
+      const result = decodeRunValue<{
+        errorCount: number;
+        failure?: { errorCategory: string; errorStage: string };
+        usage: { output: number };
+      }>(terminal.data.result);
+      expect(result.errorCount).toBe(1);
+      expect(result.failure).toEqual(failure);
+      expect(result.usage.output).toBe(7);
+    } finally {
+      clearCompletionCoordinator(owner);
+    }
+  });
+  it("keeps historical uncaught legacy agent RPC diagnostics private on synchronous resume", async () => {
+    const { pi, scope, ctx, tools } = setup();
+    const owner = sessionOwner(scope);
+    const runScope = { cwd: root, sessionId: "same-parent", root };
+    const marker = "PRIVATE_UNCAUGHT_HISTORICAL_AGENT_RPC_CANARY";
+    const source = `export const meta = { name: "uncaught-legacy-replay", description: "test" };
+      return await agent("private", { id: "private", isolation: "in-process" });`;
+    const store = await WorkflowRunStore.create(runScope, {
+      parentSessionId: "same-parent",
+      script: source,
+      args: encodeRunValue(undefined),
+      budgetTotal: 1000,
+      concurrency: 4,
+      processConcurrency: 1,
+      workflowTimeoutMs: 60_000,
+    });
+    const id = store.id;
+    await store.append("accepted", {});
+    await store.append("request", {
+      id: 1,
+      method: "agent",
+      payload: encodeRunValue({
+        prompt: "private",
+        opts: {
+          id: "private",
+          isolation: "in-process",
+          phase: undefined,
+        },
+        v4Definition: false,
+        operationPath: ["private"],
+      }),
+    });
+    await store.append("response", {
+      id: 1,
+      frontier: 1,
+      value: encodeRunValue({
+        id: 1,
+        ok: false,
+        error: marker,
+        tokensDelta: 0,
+        stats: { errorCount: 1 },
+      }),
+    });
+    await store.close();
+
+    const runAgent: WorkflowAgentRunner = vi.fn(async () => {
+      throw new Error("Historical agent RPC must not redispatch.");
+    });
+    registerDurableWorkflowTools(
+      pi,
+      () => owner,
+      () => runAgent,
+      () => true,
+      root,
+    );
+    try {
+      const response = await tools
+        .get("resume_workflow")!
+        .execute(
+          "resume-legacy-uncaught",
+          { workflowId: id, async: false },
+          undefined,
+          undefined,
+          ctx,
+        );
+      expect(response.isError).toBe(true);
+      expect(response.details.status).toBe("error");
+      expect(response.content[0].text).not.toContain(marker);
+      expect(JSON.stringify(response.details)).not.toContain(marker);
+      expect(runAgent).not.toHaveBeenCalled();
+
+      const events = await WorkflowRunStore.inspect(runScope, id);
+      const recordedResponse = events?.find(
+        (event) => event.kind === "response" && event.data.id === 1,
+      );
+      expect(
+        recordedResponse?.kind === "response"
+          ? decodeRunValue<{ error: string }>(recordedResponse.data.value).error
+          : undefined,
+      ).toBe(marker);
+    } finally {
+      clearCompletionCoordinator(owner);
+    }
   });
 
   it.each(["in-process", "process"])(

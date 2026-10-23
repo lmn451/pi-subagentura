@@ -19,16 +19,17 @@ import {
   type AssistantMessage,
   type Context,
   type ToolCall,
+  type Usage,
 } from "@earendil-works/pi-ai";
 
-function assistant(text: string): AssistantMessage {
+function assistant(text: string, usage?: Usage): AssistantMessage {
   return {
     role: "assistant",
     content: [{ type: "text", text }],
     api: "subagentura-faux",
     provider: "subagentura-faux",
     model: "faux-model",
-    usage: {
+    usage: usage ?? {
       input: 1,
       output: 1,
       cacheRead: 0,
@@ -61,6 +62,13 @@ export async function createPiSessionHarness(
     extensionRoot?: string;
     includeTools?: boolean;
     sessionManager?: SessionManager;
+    modelContextWindow?: number;
+    compactionSettings?: {
+      enabled: boolean;
+      reserveTokens: number;
+      keepRecentTokens: number;
+    };
+    assistantUsage?: Usage;
     retrySettings?: {
       enabled: boolean;
       maxRetries: number;
@@ -97,7 +105,7 @@ export async function createPiSessionHarness(
           cacheRead: 0,
           cacheWrite: 0,
         },
-        contextWindow: 200_000,
+        contextWindow: options.modelContextWindow ?? 200_000,
         maxTokens: 4_096,
       },
     ],
@@ -117,6 +125,11 @@ export async function createPiSessionHarness(
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
     settingsManager.getRetrySettings = () => options.retrySettings!;
+  }
+  if (options.compactionSettings) {
+    settingsManager.getCompactionEnabled = () =>
+      options.compactionSettings!.enabled;
+    settingsManager.getCompactionSettings = () => options.compactionSettings!;
   }
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -169,7 +182,7 @@ export async function createPiSessionHarness(
     completeNext(text = "ok") {
       const stream = pending.shift();
       if (!stream) throw new Error("no pending faux provider response");
-      const message = assistant(text);
+      const message = assistant(text, options.assistantUsage);
       const started = { ...message, content: [] };
       const textStarted = {
         ...message,
