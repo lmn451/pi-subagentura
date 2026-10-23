@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts
   without treating persisted mux pane ids as authority to kill panes.
+- Preserve persisted child token/cost usage and forward the actual cancellation
+  snapshot receipt when best-effort non-durable interactive artifact or pane
+  termination cleanup fails. Durable cancellation errors remain explicit.
 
 ### Breaking
 

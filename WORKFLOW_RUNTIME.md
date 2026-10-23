@@ -120,6 +120,12 @@ completions remain deliverable.
   Use read-only agents or application-level idempotency for irreversible work.
 - Usage is recorded, not inferred from model prose. Uncommitted attempts can
   leave unknown usage; recovered totals are lower bounds, not billing guarantees.
+- For non-durable process-backed cancellation, interactive artifact and
+  pane-termination cleanup are best effort. A cleanup failure does not discard
+  usage already persisted in the child Pi session file, including token and cost
+  fields; the actual cancellation snapshot receipt is forwarded when captured.
+  Durable cancellation intent or attempt-marker write failures remain explicit
+  errors rather than being downgraded to best-effort cancellation.
 - `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
   before aborting owned work. When snapshots are enabled, cancel-all captures
   receipts for owned work, including durable process attempts, before aborting.

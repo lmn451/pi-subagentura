@@ -1159,6 +1159,17 @@ export async function awaitInteractiveResult(
       }
     }
   };
+  const settleCancellationError = () => {
+    if (!hasCancellationError) return;
+    if (requestCancellation) throw cancellationError;
+    debugLog("warn", "interactive_cancel_cleanup_failed", {
+      agentId: state.id,
+      error:
+        cancellationError instanceof Error
+          ? cancellationError.message
+          : String(cancellationError),
+    });
+  };
   const onAbort = () => requestCancellationOnce();
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
@@ -1167,7 +1178,7 @@ export async function awaitInteractiveResult(
       let terminal: TurnTerminalEvent | null;
       if (signal?.aborted) {
         requestCancellationOnce();
-        if (hasCancellationError) throw cancellationError;
+        settleCancellationError();
         const cancellationUsage = await parseUsageFromSessionFile(
           state.sessionFile,
         );
@@ -1178,7 +1189,7 @@ export async function awaitInteractiveResult(
         const usage = await parseUsageFromSessionFile(state.sessionFile);
         if (signal?.aborted) {
           requestCancellationOnce();
-          if (hasCancellationError) throw cancellationError;
+          settleCancellationError();
           return abortedInteractiveResult(usage);
         }
         switch (terminal.outcome) {
@@ -1227,7 +1238,7 @@ export async function awaitInteractiveResult(
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
-            if (hasCancellationError) throw cancellationError;
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
           return {
@@ -1249,7 +1260,7 @@ export async function awaitInteractiveResult(
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
-            if (hasCancellationError) throw cancellationError;
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
           reportMuxProbeRuntimeFailure(state, telemetry);
