@@ -305,6 +305,7 @@ function lastActiveToolIndex(
     for (let index = tools.length - 1; index >= 0; index--) {
       if (tools[index]?.callId === callId) return index;
     }
+    return -1;
   }
   if (name) {
     for (let index = tools.length - 1; index >= 0; index--) {

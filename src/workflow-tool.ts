@@ -1,5 +1,8 @@
 import { Type } from "typebox";
-import { registerDurableWorkflowTools } from "./workflow-durable-tools";
+import {
+  formatWaitingInputActions,
+  registerDurableWorkflowTools,
+} from "./workflow-durable-tools";
 import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
 import {
   prepareDurableProcess,
@@ -52,12 +55,8 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
+import { getLiveWorkflowV4Store } from "./workflow-v4-store";
 import { sanitizeOutput } from "./notifications";
-import {
-  modelSafeWorkflowErrorMessage,
-  safeWorkflowDiagnosticMessage,
-  sanitizeWorkflowDiagnosticDetails,
-} from "./workflow-disclosure";
 import {
   completionDisplayLabel,
   formatCompletionMessage,
@@ -294,7 +293,7 @@ export function formatWorkflowNotificationSummary(
     return `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${usageSummary}.`;
   }
   const usage = presentWorkflowUsage(job.snapshot.usage);
-  return `${safeWorkflowDiagnosticMessage()}${
+  return `${job.error ?? "Workflow did not produce a result."}${
     usage
       ? ` (${formatWorkflowUsage(usage, {
           outputBudget: job.snapshot.budgetTotal,
@@ -1317,7 +1316,7 @@ export function registerWorkflowTool(
           },
         };
       } catch (err) {
-        const msg = modelSafeWorkflowErrorMessage(err);
+        const msg = err instanceof Error ? err.message : String(err);
         emitWorkflowResultReadTelemetry(
           job,
           workflowOwner,
@@ -1394,12 +1393,17 @@ export function registerWorkflowTool(
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
       const usage = presentWorkflowUsage(st.snapshot.usage);
       const liveUsage = presentWorkflowUsage(st.snapshot.liveUsage);
-      const waiting =
+      const allWaiting =
         st.status === "running"
-          ? (st.snapshot.steps?.filter(
-              (step) => step.status === "waiting_for_input",
-            ) ?? [])
+          ? (
+              getLiveWorkflowV4Store(st.id)?.snapshot(Infinity) ??
+              st.snapshot.steps ??
+              []
+            ).filter((step) => step.status === "waiting_for_input")
           : [];
+      const waitingActions = formatWaitingInputActions(st.id, allWaiting);
+      const waiting = waitingActions.visible;
+      const waitingRemainderCount = waitingActions.omittedCount;
       return {
         content: [
           {
@@ -1417,20 +1421,22 @@ export function registerWorkflowTool(
               (st.snapshot.currentPhase
                 ? `, phase: ${st.snapshot.currentPhase}`
                 : "") +
-              (st.error ? `\n${safeWorkflowDiagnosticMessage()}` : ""),
+              (st.error ? `\nerror: ${st.error}` : "") +
+              waitingActions.text,
           },
         ],
         details: {
           status:
-            st.status === "running" && waiting.length
+            st.status === "running" && allWaiting.length
               ? "waiting_for_input"
               : st.status,
           waiting,
+          waitingRemainderCount,
           presentationStatus: presentation.label,
           workflowId: st.id,
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
-          ...sanitizeWorkflowDiagnosticDetails(st.snapshot),
+          ...st.snapshot,
         },
         structuredContent: {
           status: st.status,
@@ -1546,7 +1552,7 @@ export function registerWorkflowTool(
         run = waitResult.value!;
       } catch (err) {
         // Non-abort errors preserve the original structured handling
-        const msg = modelSafeWorkflowErrorMessage(err);
+        const msg = err instanceof Error ? err.message : String(err);
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};

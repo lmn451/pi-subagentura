@@ -12,7 +12,10 @@ import { prepareDurableProcess } from "../src/workflow-durable-process";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { registerDurableWorkflowTools } from "../src/workflow-durable-tools";
+import {
+  registerDurableWorkflowTools,
+  restoreDurableWorkflowRuns,
+} from "../src/workflow-durable-tools";
 import {
   registerSessionScope,
   sessionOwner,
@@ -461,5 +464,164 @@ describe("durable public tools", () => {
     );
     expect(prepareCompletionManifest(owner)).toBeDefined();
     clearCompletionCoordinator(owner);
+  });
+  it("recovers each completion after a same-session async resume of an interrupted sync gate", async () => {
+    const { pi, scope, ctx, tools } = setup();
+    const oldOwner = sessionOwner(scope);
+    clearCompletionCoordinator(oldOwner);
+    registerCompletionCoordinator(pi, scope);
+    const script = `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "sync-resume-delivery",
+        version: 1,
+        run: async (ctx) => {
+          return await ctx.gate("approval", {
+            title: "Approve?",
+            summary: "Confirm the workflow step",
+          });
+        },
+      });`;
+    const { promise: promptStarted, resolve: continuePrompt } =
+      Promise.withResolvers<void>();
+    let approve = false;
+    const confirm = vi.fn(
+      (_title: string, _summary: string, options: { signal?: AbortSignal }) => {
+        if (approve) return Promise.resolve(true);
+        continuePrompt();
+        const { promise, reject } = Promise.withResolvers<boolean>();
+        const interrupted = () => reject(new Error("interrupted"));
+        if (options.signal?.aborted) interrupted();
+        else
+          options.signal?.addEventListener("abort", interrupted, {
+            once: true,
+          });
+        return promise;
+      },
+    );
+    const runCtx = {
+      ...ctx,
+      hasUI: true,
+      ui: { confirm },
+    };
+    const runner: WorkflowAgentRunner = async () => ({
+      isError: false,
+      output: "unused",
+      usage: zeroUsage(),
+    });
+    const notify = vi.fn(() => true);
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => runner,
+      notify,
+      root,
+    );
+    const runScope = { cwd: root, sessionId: "workflow-v4", root };
+
+    try {
+      const initialRun = api.run(
+        { script, async: false },
+        undefined,
+        undefined,
+        runCtx,
+      );
+      await promptStarted;
+      const interruptedJob = [...workflowJobRegistry.values()].find(
+        (job) => job.executionMode === "sync" && job.durable,
+      )!;
+      const workflowId = interruptedJob.id;
+      cleanupWorkflowJobsForOwner(oldOwner);
+      await expect(interruptedJob.promise).rejects.toThrow();
+      await initialRun;
+      const interruptedEvents = await WorkflowRunStore.inspect(
+        runScope,
+        workflowId,
+      );
+      expect(
+        interruptedEvents?.some((event) => event.kind === "interrupted"),
+      ).toBe(true);
+
+      clearCompletionCoordinator(oldOwner);
+      scope.generation++;
+      const owner = sessionOwner(scope);
+      registerCompletionCoordinator(pi, scope);
+      const resumed = await api.run(
+        { workflowId, async: true },
+        undefined,
+        undefined,
+        runCtx,
+      );
+      expect(resumed.details).toMatchObject({
+        status: "started",
+        workflowId,
+        durable: true,
+      });
+      const resumedJob = workflowJobRegistry.get(workflowId)!;
+      await vi.waitFor(() =>
+        expect(
+          resumedJob.snapshot.steps?.some(
+            (step) =>
+              step.status === "waiting_for_input" &&
+              JSON.stringify(step.path) === JSON.stringify(["approval"]),
+          ),
+        ).toBe(true),
+      );
+      resumedJob.suppressCompletionNotification = true;
+      approve = true;
+      const answer = await tools
+        .get("respond_workflow_input")!
+        .execute(
+          "answer",
+          { workflowId, path: ["approval"] },
+          undefined,
+          undefined,
+          runCtx,
+        );
+      expect(answer.details.status).toBe("running");
+      await expect(resumedJob.promise).resolves.toMatchObject({
+        result: true,
+      });
+      expect(notify).not.toHaveBeenCalled();
+
+      const terminalEvents = await WorkflowRunStore.inspect(
+        runScope,
+        workflowId,
+      );
+      expect(terminalEvents?.at(-1)).toMatchObject({
+        kind: "terminal",
+        data: { status: "done" },
+      });
+      const latestDelivery = terminalEvents
+        ?.filter((event) => event.kind === "delivery")
+        .at(-1);
+      expect(latestDelivery?.data).toMatchObject({
+        parentSessionId: "same-parent",
+        completion: { policy: "each" },
+      });
+
+      clearCompletionCoordinator(owner);
+      registerCompletionCoordinator(pi, scope);
+      // A busy parent leaves the recovered wake queued for explicit inspection.
+      scope.parentStreaming = true;
+      await restoreDurableWorkflowRuns(pi, owner, runCtx, root);
+      const manifest = prepareCompletionManifest(owner);
+      expect(manifest?.details.completionIds).toEqual([
+        `workflow:${workflowId}`,
+      ]);
+      expect(manifest).toBeDefined();
+      const manifestRecords = manifest!.content
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(manifestRecords).toContainEqual(
+        expect.objectContaining({
+          sourceId: workflowId,
+          retrieve: `get_workflow_result(workflowId: ${JSON.stringify(workflowId)})`,
+        }),
+      );
+      clearCompletionCoordinator(owner);
+    } finally {
+      clearCompletionCoordinator(sessionOwner(scope));
+    }
   });
 });

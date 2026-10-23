@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SubagentResult } from "./helpers";
 import { parseWorkflow } from "./workflow-script";
 import {
@@ -15,6 +16,7 @@ import {
   encodeRunValue,
   decodeRunValue,
   runValueMatches,
+  type RunEvent,
 } from "./workflow-run-store";
 
 export interface WorkflowRpcRequest {
@@ -28,6 +30,8 @@ export interface WorkflowRpcResponse {
   value?: unknown;
   error?: string;
   tokensDelta: number;
+  /** Global output-token budget charge; defaults to tokensDelta for older journals. */
+  budgetTokensDelta?: number;
 }
 
 export interface DurableAttemptContext {
@@ -45,6 +49,108 @@ export class WorkflowReplayError extends WorkflowPersistenceError {
   constructor(message: string) {
     super(`Workflow replay divergence: ${message}`);
   }
+}
+
+function isUsage(value: unknown): value is SubagentResult["usage"] {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    "input" in value &&
+    typeof value.input === "number" &&
+    "output" in value &&
+    typeof value.output === "number" &&
+    "cacheRead" in value &&
+    typeof value.cacheRead === "number" &&
+    "cacheWrite" in value &&
+    typeof value.cacheWrite === "number" &&
+    "cost" in value &&
+    typeof value.cost === "number" &&
+    "turns" in value &&
+    typeof value.turns === "number" &&
+    (!("costSource" in value) ||
+      value.costSource === undefined ||
+      value.costSource === "provider" ||
+      value.costSource === "estimated" ||
+      value.costSource === "unavailable" ||
+      value.costSource === "mixed")
+  );
+}
+
+function usageFromError(error: unknown): SubagentResult["usage"] | undefined {
+  if (!error || typeof error !== "object" || !("usage" in error))
+    return undefined;
+  return isUsage(error.usage) ? error.usage : undefined;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+interface WorkflowV4AgentStepIdentity {
+  path?: unknown;
+  definitionHash?: unknown;
+  input?: unknown;
+  policy?: unknown;
+  attempt?: unknown;
+  generation?: unknown;
+  retryFrameHash?: unknown;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((part: unknown) => typeof part === "string")
+  );
+}
+
+/** Prefix for the durable repair-attempt outcomes belonging to one V4 agent step. */
+function workflowAgentAttemptPrefix(
+  events: RunEvent[],
+  step: WorkflowV4AgentStepIdentity,
+): string | undefined {
+  if (
+    !isStringArray(step.path) ||
+    step.path.length === 0 ||
+    typeof step.definitionHash !== "string" ||
+    typeof step.input !== "string" ||
+    typeof step.policy !== "string" ||
+    typeof step.attempt !== "number" ||
+    !Number.isInteger(step.attempt) ||
+    step.attempt < 1
+  ) {
+    return undefined;
+  }
+  const path = step.path;
+  let operationPath: string[] = [];
+  for (const event of events) {
+    if (event.kind !== "v4.step" || event.data.kind !== "workflow") continue;
+    const candidate: unknown = event.data.path;
+    if (
+      !isStringArray(candidate) ||
+      candidate.length >= path.length ||
+      candidate.length < operationPath.length ||
+      !candidate.every((part, index) => part === path[index])
+    ) {
+      continue;
+    }
+    operationPath = candidate;
+  }
+  const generation = typeof step.generation === "number" ? step.generation : 0;
+  const idempotencyParts = [
+    path,
+    step.definitionHash,
+    step.input,
+    step.policy,
+    generation,
+  ];
+  if (Object.prototype.hasOwnProperty.call(step, "retryFrameHash")) {
+    if (typeof step.retryFrameHash !== "string") return undefined;
+    idempotencyParts.push(step.retryFrameHash);
+  }
+  const idempotencyKey = sha256(JSON.stringify(idempotencyParts));
+  const agentId = `${idempotencyKey}:${step.attempt}`;
+  const requestId = sha256(JSON.stringify([...operationPath, agentId]));
+  return `${requestId}-`;
 }
 
 /** One transcript across root and nested scripts; no per-branch replay lanes. */
@@ -295,7 +401,13 @@ export class DurableWorkflow {
     attempt: number,
     request: Parameters<WorkflowAgentRunner>[0],
     run: WorkflowAgentRunner,
-    options: { persist?: boolean } = {},
+    options: {
+      persist?: boolean;
+      /** Marks reuse of a committed outcome, without exposing its usage. */
+      onOutcomeReplay?: () => void;
+      /** Resolves normalized runner/progress usage before failure is committed. */
+      failureUsage?: (error: unknown) => SubagentResult["usage"] | undefined;
+    } = {},
   ): Promise<SubagentResult> {
     if (this.stopped || request.signal?.aborted)
       throw new Error("Workflow interrupted.");
@@ -327,10 +439,14 @@ export class DurableWorkflow {
     const committed = this.attemptOutcomes.get(key);
     const privateOutcome = this.privateOutcomes.get(key);
     if (privateOutcome) {
+      options.onOutcomeReplay?.();
       if ("value" in privateOutcome) return privateOutcome.value;
       throw privateOutcome.error;
     }
-    if (committed) return this.restoreOutcome(committed);
+    if (committed) {
+      options.onOutcomeReplay?.();
+      return this.restoreOutcome(committed);
+    }
     if (!previous) {
       if (this.attempts.size >= MAX_TOTAL_AGENTS)
         throw new WorkflowPersistenceError(
@@ -407,6 +523,9 @@ export class DurableWorkflow {
         error instanceof WorkflowPersistenceError
       )
         throw error;
+      const usage = options.failureUsage
+        ? options.failureUsage(error)
+        : usageFromError(error);
       const data = {
         key,
         ok: false,
@@ -414,7 +533,7 @@ export class DurableWorkflow {
           ? { error: error instanceof Error ? error.message : String(error) }
           : { outputOmitted: true }),
         failure: workflowFailureClassification(error),
-        usage: (error as { usage?: SubagentResult["usage"] } | null)?.usage,
+        usage,
       };
       await this.store.append("outcome", data);
       this.attemptOutcomes.set(key, data);
@@ -452,6 +571,7 @@ export class DurableWorkflow {
     if (this.stepBased) {
       let errors = 0;
       let cancelled = 0;
+      let schemaErrors = 0;
       for (const outcome of this.attemptOutcomes.values()) {
         const value = outcome.outputOmitted
           ? outcome
@@ -461,11 +581,47 @@ export class DurableWorkflow {
         if (value?.cancelled) cancelled++;
         else if (!outcome.ok || value?.isError) errors++;
       }
+      for (const event of this.store.events) {
+        if (
+          event.kind !== "v4.step" ||
+          event.data.kind !== "agent" ||
+          event.data.status !== "failed" ||
+          event.data.error?.category !== "schema" ||
+          event.data.error?.stage !== "schema_validation"
+        ) {
+          continue;
+        }
+        if (event.data.error?.schemaRepairExhausted === true) {
+          schemaErrors++;
+          continue;
+        }
+        const prefix = workflowAgentAttemptPrefix(
+          this.store.events,
+          event.data,
+        );
+        if (!prefix) continue;
+        let foundOutcome = false;
+        let outcomeAlreadyCounted = false;
+        for (const [key, outcome] of this.attemptOutcomes) {
+          if (!key.startsWith(prefix)) continue;
+          foundOutcome = true;
+          const value = outcome.outputOmitted
+            ? outcome
+            : outcome.ok
+              ? decodeRunValue<SubagentResult>(outcome.value)
+              : undefined;
+          if (!outcome.ok || value?.isError || value?.cancelled) {
+            outcomeAlreadyCounted = true;
+            break;
+          }
+        }
+        if (foundOutcome && !outcomeAlreadyCounted) schemaErrors++;
+      }
       return {
         ...result,
         usage,
         tokensSpent: usage.output,
-        errorCount: Math.max(result.errorCount, errors),
+        errorCount: Math.max(result.errorCount, errors + schemaErrors),
         cancelledCount: Math.max(result.cancelledCount ?? 0, cancelled),
         agentsSpawned: this.agentsSpawned,
       };

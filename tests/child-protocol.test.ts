@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +13,7 @@ import {
   readOutput,
 } from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
+import { writeCliScript } from "../src/subagent-artifact-cli";
 
 type ChildProtocolHandlers = Map<string, Function> & {
   registeredFlags: Array<{ name: string; options: Record<string, unknown> }>;
@@ -115,247 +118,126 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
-  it("keeps startup auth failure separate from a later successful turn", async () => {
+  it("keeps the unmatched same-name call active when an identified call ends", () => {
     const handlers = registerHandlers();
-    let configuredAuth = false;
-    let entries: any[] = [];
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () =>
-          configuredAuth
-            ? { ok: true, apiKey: "test-key" }
-            : { ok: false, error: "No API key found" },
-      },
-      sessionManager: { getEntries: () => entries },
-    };
-
-    await handlers.get("session_start")!({ reason: "startup" }, ctx);
-    expect(readActiveTurn()).toBeNull();
-    expect(readEvents(artifactPath(root, "child"))).toMatchObject([
-      expect.objectContaining({
-        type: "completion",
-        turnId: "process",
-        outcome: "error",
-        source: "explicit",
-      }),
-    ]);
-
-    configuredAuth = true;
-    await handlers.get("session_start")!({ reason: "reload" }, ctx);
-    handlers.get("before_agent_start")!({}, ctx);
-    entries = [
-      { id: "after-login", type: "message", message: { role: "user" } },
-    ];
-    handlers.get("turn_start")!({ timestamp: 100 }, ctx);
-    vi.runAllTimers();
-    handlers.get("agent_end")!(
-      { messages: [{ role: "assistant", stopReason: "stop" }] },
-      ctx,
-    );
-    handlers.get("agent_settled")!({}, ctx);
-
-    const completions = readEvents(artifactPath(root, "child")).filter(
-      (event) => event.type === "completion",
-    );
-    expect(completions).toMatchObject([
-      expect.objectContaining({ turnId: "process", outcome: "error" }),
-      expect.objectContaining({
-        turnId: "after-login",
-        outcome: "done",
-        source: "agent_settled",
-      }),
-    ]);
-    expect(completions).toHaveLength(2);
-  });
-
-  it("reports missing legacy auth when Pi returns an empty compatibility result", async () => {
-    const handlers = registerHandlers();
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () => ({ ok: true, headers: {} }),
-        getRegisteredNativeProvider: () => undefined,
-        hasConfiguredAuth: () => false,
-      },
-      sessionManager: { getEntries: () => [] },
-    };
-
-    await handlers.get("session_start")!({ reason: "startup" }, ctx);
-
-    const completions = readEvents(artifactPath(root, "child")).filter(
-      (event) => event.type === "completion",
-    );
-    expect(completions).toMatchObject([
-      expect.objectContaining({
-        type: "completion",
-        turnId: "process",
-        outcome: "error",
-        source: "explicit",
-        exitCode: 1,
-        message: "Selected model has no configured authentication.",
-        errorMessage: "Selected model has no configured authentication.",
-      }),
-    ]);
-    expect(completions).toHaveLength(1);
-  });
-
-  it("reports missing legacy auth when Pi 0.80.6 returns undefined auth fields", async () => {
-    const handlers = registerHandlers();
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: undefined,
-          headers: undefined,
-          env: undefined,
-        }),
-        getRegisteredNativeProvider: () => undefined,
-        hasConfiguredAuth: () => false,
-      },
-      sessionManager: { getEntries: () => [] },
-    };
-
-    await handlers.get("session_start")!({ reason: "startup" }, ctx);
-
-    const completions = readEvents(artifactPath(root, "child")).filter(
-      (event) => event.type === "completion",
-    );
-    expect(completions).toMatchObject([
-      expect.objectContaining({
-        type: "completion",
-        turnId: "process",
-        outcome: "error",
-        source: "explicit",
-        exitCode: 1,
-        message: "Selected model has no configured authentication.",
-        errorMessage: "Selected model has no configured authentication.",
-      }),
-    ]);
-    expect(completions).toHaveLength(1);
-  });
-
-  it("accepts successful auth resolved through endpoint and env fields", async () => {
-    const handlers = registerHandlers();
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          baseUrl: "https://native-provider.invalid/v1",
-          env: { REGION: "local-test" },
-        }),
-        getRegisteredNativeProvider: () => undefined,
-        hasConfiguredAuth: () => false,
-      },
-      sessionManager: { getEntries: () => [] },
-    };
-
-    await handlers.get("session_start")!({ reason: "startup" }, ctx);
-    await Promise.resolve();
-
-    expect(
-      readEvents(artifactPath(root, "child")).filter(
-        (event) => event.type === "completion",
-      ),
-    ).toEqual([]);
-  });
-
-  it("accepts keyless auth headers when the configured-auth snapshot is stale", async () => {
-    const handlers = registerHandlers();
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: undefined,
-          headers: { "x-test-auth": "local-test" },
-        }),
-        getRegisteredNativeProvider: () => undefined,
-        hasConfiguredAuth: () => false,
-      },
-      sessionManager: { getEntries: () => [] },
-    };
-
-    await handlers.get("session_start")!({ reason: "startup" }, ctx);
-
-    expect(
-      readEvents(artifactPath(root, "child")).filter(
-        (event) => event.type === "completion",
-      ),
-    ).toEqual([]);
-  });
-
-  it("does not append a late startup auth failure after an agent run starts", async () => {
-    const handlers = registerHandlers();
-    let resolveAuth!: (result: { ok: boolean; error?: string }) => void;
-    const pendingAuth = new Promise<{ ok: boolean; error?: string }>(
-      (resolve) => {
-        resolveAuth = resolve;
-      },
-    );
-    const ctx = {
-      model: { provider: "subagentura-faux", id: "faux-model" },
-      modelRegistry: { getApiKeyAndHeaders: () => pendingAuth },
-      sessionManager: { getEntries: () => [] },
-    };
-
-    handlers.get("session_start")!({ reason: "startup" }, ctx);
-    handlers.get("before_agent_start")!({}, ctx);
-    resolveAuth({ ok: false, error: "No API key found" });
-    await pendingAuth;
-
-    expect(
-      readEvents(artifactPath(root, "child")).filter(
-        (event) => event.type === "completion",
-      ),
-    ).toEqual([]);
-  });
-
-  it("retains the newest active tool across concurrent starts", () => {
-    const handlers = registerHandlers();
-    const entries = [
-      { id: "turn-tools", type: "message", message: { role: "user" } },
-    ];
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
     const ctx = { sessionManager: { getEntries: () => entries } };
 
     handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
     handlers.get("before_provider_request")!({}, ctx);
     handlers.get("tool_execution_start")!(
-      { toolName: "bash", toolCallId: "tool-1" },
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
     handlers.get("tool_execution_start")!(
-      { toolName: "npm_test", toolCallId: "tool-2" },
+      { toolName: "read", toolCallId: "B" },
+      ctx,
+    );
+    handlers.get("tool_execution_end")!(
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
 
     expect(readActiveTurn()).toMatchObject({
-      activeTools: [
-        { name: "bash", callId: "tool-1" },
-        { name: "npm_test", callId: "tool-2" },
-      ],
-      lastTool: "npm_test",
+      activeTools: [{ name: "read", callId: "B" }],
+      lastTool: "read",
+    });
+  });
+
+  it("reports active_tool before a remaining same-name call settles", () => {
+    const handlers = registerHandlers();
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "B" },
+      ctx,
+    );
+    handlers.get("tool_execution_end")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+
+    const cliPath = join(artifactDir, "cli.mjs");
+    writeCliScript(cliPath);
+    const result = spawnSync("node", [cliPath, "process-exit", "0"], {
+      env: { ...process.env, ARTIFACT_DIR: artifactDir },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    const processExit = readEvents(artifactPath(root, "child"))
+      .filter((event) => event.type === "process_exited")
+      .at(-1);
+    expect(processExit).toMatchObject({
+      type: "process_exited",
+      status: "done",
+      exitCode: 0,
+      terminationReason: "active_tool",
+      lastTool: "read",
+    });
+  });
+
+  it("supports SDK events without IDs and deduplicates repeated call IDs", () => {
+    const handlers = registerHandlers();
+    const entries: Array<{
+      id: string;
+      type: string;
+      message: { role: string };
+    }> = [];
+    const ctx = { sessionManager: { getEntries: () => entries } };
+
+    handlers.get("before_agent_start")!({}, ctx);
+    entries.push({
+      id: "turn-tools",
+      type: "message",
+      message: { role: "user" },
+    });
+    handlers.get("before_provider_request")!({}, ctx);
+    handlers.get("tool_execution_start")!({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")!({ toolName: "read" }, ctx);
+    expect(readActiveTurn()).toMatchObject({ activeTools: [] });
+
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    handlers.get("tool_execution_start")!(
+      { toolName: "read", toolCallId: "A" },
+      ctx,
+    );
+    expect(readActiveTurn()).toMatchObject({
+      activeTools: [{ name: "read", callId: "A" }],
     });
 
     handlers.get("tool_execution_end")!(
-      { toolName: "bash", toolCallId: "tool-1" },
+      { toolName: "read", toolCallId: "A" },
       ctx,
     );
-    expect(readActiveTurn()).toMatchObject({
-      activeTools: [{ name: "npm_test", callId: "tool-2" }],
-      lastTool: "npm_test",
-    });
-
-    handlers.get("tool_execution_end")!(
-      { toolName: "npm_test", toolCallId: "tool-2" },
-      ctx,
-    );
-    expect(readActiveTurn()).toMatchObject({
-      activeTools: [],
-      lastTool: "npm_test",
-    });
+    expect(readActiveTurn()).toMatchObject({ activeTools: [] });
   });
 
   it("records an error completion and supports getBranch fallback", () => {

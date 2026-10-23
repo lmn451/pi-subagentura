@@ -60,6 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle promptless Pi custom agent-start events in completion coordination.
 - Retain terminal fixture gate routing for async children and workflow agents
   under strict known-marker validation.
+- V4 timeouts that are collected or caught remain handled when cancellation
+  acknowledgement settles later, and nested calls preserve structured error
+  categories.
+- Recovery charges committed output usage once globally while retaining per-step
+  attribution, preserves logical schema-error counts, and enforces step budgets
+  on settled failed attempts as well as successes without retrying budget
+  failures.
+- Compatible replay retains the original caught failure; agent cache
+  compatibility includes the captured prompt/output contract and execution
+  options with equivalent defaults normalized; artifact identity distinguishes
+  text from JSON even when their bytes match.
+- Workflow status/list exposes bounded actionable `respond_workflow_input`
+  batches of at most 256 whole paths per response and a shared 16 KiB
+  serialized-action budget per response across all listed runs. Omission counts
+  are accurate; omitted runs include exact `get_workflow_status` selectors.
+  Answering visible inputs permits later polls to show additional paths without
+  answers or private values. Resumed background runs persist their effective
+  completion policy before work proceeds.
+- V4 supports explicit generic calls in `defineWorkflow()` and schema helpers
+  under native erasable TypeScript; for `ctx.step()`, nested `policy.failure`
+  takes precedence over flat `failure`, and typed policies that may collect
+  include the failure outcome in their return union.
+- Track concurrent interactive tool calls by their call IDs and decode
+  process-exit signal diagnostics using host-native signal numbers.
 
 ## [5.0.0] - 2026-10-24
 

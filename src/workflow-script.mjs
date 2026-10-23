@@ -11,22 +11,42 @@ export function compileWorkflowScript(script) {
   }
   let source = script;
   let ast;
+  let stripped = false;
   try {
     ast = parseWorkflowAst(source);
-  } catch (err) {
+  } catch {
     try {
       source = stripTypeScriptTypes(script, { mode: "strip" });
       ast = parseWorkflowAst(source);
+      stripped = true;
     } catch (stripError) {
       const message =
         stripError instanceof Error ? `: ${stripError.message}` : "";
       throw new Error(`Workflow TypeScript must use erasable syntax${message}`);
     }
   }
-  if (
-    findMetaExport(ast.body) === null &&
-    ast.body.some((node) => node.type === "ExportDefaultDeclaration")
-  ) {
+  const metaExport = findMetaExport(ast.body);
+  const defaultExport = ast.body.find(
+    (node) => node.type === "ExportDefaultDeclaration",
+  );
+  if (metaExport === null && defaultExport !== undefined) {
+    if (!stripped) {
+      try {
+        const strippedSource = stripTypeScriptTypes(source, { mode: "strip" });
+        if (strippedSource !== source) {
+          const strippedAst = parseWorkflowAst(strippedSource);
+          source = strippedSource;
+          ast = strippedAst;
+        }
+        stripped = true;
+      } catch (stripError) {
+        const message =
+          stripError instanceof Error ? `: ${stripError.message}` : "";
+        throw new Error(
+          `Workflow TypeScript must use erasable syntax${message}`,
+        );
+      }
+    }
     return compileDefinition(source, ast);
   }
   const legacy = parseLegacyWorkflow(source, ast);

@@ -295,7 +295,6 @@ export interface WorkflowBudget {
   remaining(): number | null;
   assertAvailable(amount: number): void;
 }
-
 export interface WorkflowContext {
   readonly signal: AbortSignal;
   readonly budget: WorkflowBudget;
@@ -303,22 +302,30 @@ export interface WorkflowContext {
   step<T>(
     id: string,
     options: WorkflowStepOptions & {
-      readonly policy: WorkflowStepPolicy & {
-        readonly failure: "continue" | "collect";
-      };
+      readonly policy: WorkflowStepPolicy & { readonly failure: "fail" };
+    },
+    work: () => Awaitable<T>,
+  ): Promise<T>;
+  step<T>(
+    id: string,
+    options: WorkflowStepOptions & {
+      readonly failure?: "fail";
+      readonly policy?: WorkflowStepPolicy & { readonly failure?: "fail" };
+    },
+    work: () => Awaitable<T>,
+  ): Promise<T>;
+  step<T>(
+    id: string,
+    options: WorkflowStepOptions & {
+      readonly policy: WorkflowStepPolicy | undefined;
     },
     work: () => Awaitable<T>,
   ): Promise<WorkflowStepOutcome<T>>;
   step<T>(
     id: string,
-    options: WorkflowStepOptions & { readonly failure: "continue" | "collect" },
+    options: WorkflowStepOptions,
     work: () => Awaitable<T>,
   ): Promise<WorkflowStepOutcome<T>>;
-  step<T>(
-    id: string,
-    options: WorkflowStepOptions & { readonly failure?: "fail" },
-    work: () => Awaitable<T>,
-  ): Promise<T>;
   agent<S extends WorkflowSchema<unknown> | undefined = undefined>(
     id: string,
     options: WorkflowAgentOptions<S> & {
