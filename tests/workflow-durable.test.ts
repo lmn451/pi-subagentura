@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, appendFile, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  appendFile,
+  readFile,
+  writeFile,
+  open,
+  readdir,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -15,7 +23,11 @@ import {
 } from "../src/workflow-run-store";
 import { runWorkflow } from "../src/workflow-worker";
 import { zeroUsage } from "../src/usage";
-import type { WorkflowAgentRunner } from "../src/workflow-core";
+import {
+  WorkflowFailureError,
+  workflowFailureClassification,
+  type WorkflowAgentRunner,
+} from "../src/workflow-core";
 import { prepareDurableProcess } from "../src/workflow-durable-process";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 
@@ -70,6 +82,189 @@ async function execute(
 }
 
 describe("durable workflow journal", () => {
+  it("does not expose a run before newly created store directories are synced", async () => {
+    const root = await mkdtemp(join(tmpdir(), "workflow-store-sync-"));
+    roots.push(root);
+    const scope = { root, cwd: root, sessionId: "fresh-parent" };
+    const handle = await open(root, "r");
+    const syncSpy = vi.spyOn(Object.getPrototypeOf(handle), "sync");
+    syncSpy.mockRejectedValueOnce(new Error("injected directory sync failure"));
+    try {
+      await expect(
+        WorkflowRunStore.create(scope, {
+          script: script('return "unused";'),
+          args: encodeRunValue(undefined),
+          budgetTotal: 100,
+        }),
+      ).rejects.toThrow("directory sync failure");
+      expect(await readdir(join(root, "v1"))).toHaveLength(0);
+    } finally {
+      syncSpy.mockRestore();
+      await handle.close();
+    }
+
+    const retry = await WorkflowRunStore.create(scope, {
+      script: script('return "unused";'),
+      args: encodeRunValue(undefined),
+      budgetTotal: 100,
+    });
+    stores.push(retry);
+    expect(await WorkflowRunStore.list(scope)).toEqual([retry.id]);
+    await retry.close();
+  });
+
+  it("retries a real append failure after confirming no bytes were written", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const path = join(store.directory, "journal.ndjson");
+    const before = await readFile(path);
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const write = file.writeFile.bind(file);
+    let fail = true;
+    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
+      if (fail) {
+        fail = false;
+        throw new Error("injected write failure before bytes");
+      }
+      return write(data);
+    });
+    const data = { status: "cancelled", completedAt: 1 };
+    await expect(store.append("cancelled", data)).rejects.toThrow(
+      "injected write failure",
+    );
+    expect(await readFile(path)).toEqual(before);
+    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.at(-1)?.data,
+    ).toEqual(data);
+  });
+
+  it("retries cancellation after a committed V4 node omits undefined fields on disk", async () => {
+    const { scope, store } = await fixture("return 1;");
+    await store.append("v4.step", {
+      nodeId: "step",
+      completedAt: undefined,
+      error: undefined,
+    });
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    vi.spyOn(file, "writeFile").mockRejectedValueOnce(
+      new Error("injected cancellation journal failure"),
+    );
+    const cancelled = { status: "cancelled", completedAt: 3 };
+    await expect(store.append("cancelled", cancelled)).rejects.toThrow(
+      "injected cancellation journal failure",
+    );
+    await expect(store.append("cancelled", cancelled)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.at(-1)?.data,
+    ).toEqual(cancelled);
+  });
+
+  it("reconciles a complete real append after fsync fails without duplicating it", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const sync = file.sync.bind(file);
+    let fail = true;
+    vi.spyOn(file, "sync").mockImplementation(async () => {
+      if (fail) {
+        fail = false;
+        throw new Error("injected fsync failure");
+      }
+      return sync();
+    });
+    const data = { status: "cancelled", completedAt: 2 };
+    await expect(store.append("cancelled", data)).rejects.toThrow("fsync");
+    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
+        (event) => event.kind === "cancelled",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("resumes a complete append after failed fsync and confirms it is durable once", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    vi.spyOn(file, "sync").mockRejectedValueOnce(
+      new Error("injected fsync failure"),
+    );
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow("fsync");
+    const path = join(store.directory, "journal.ndjson");
+    const committedBytes = await readFile(path);
+    stores.splice(stores.indexOf(store), 1);
+    await expect(store.close()).rejects.toThrow("fsync");
+
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    expect(
+      reopened.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    await reopened.close();
+    expect(await readFile(path)).toEqual(committedBytes);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
+        (event) => event.kind === "cancelled",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("blocks a partial real append and preserves its bytes", async () => {
+    const { scope, store } = await fixture("return 1;");
+    const path = join(store.directory, "journal.ndjson");
+    const before = await readFile(path);
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    const write = file.writeFile.bind(file);
+    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
+      const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data as string);
+      await write(bytes.subarray(0, Math.floor(bytes.length / 2)));
+      throw new Error("injected partial write");
+    });
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow("partial write");
+    const partial = await readFile(path);
+    await expect(
+      store.append("cancelled", { status: "cancelled" }),
+    ).rejects.toThrow(/recovery|journal/i);
+    expect(await readFile(path)).toEqual(partial);
+    expect(partial.subarray(0, before.length)).toEqual(before);
+    stores.splice(stores.indexOf(store), 1);
+    await expect(store.close()).rejects.toThrow(/recovery|journal/i);
+    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
+      /incomplete final event/i,
+    );
+    expect(await readFile(path)).toEqual(partial);
+  });
+
   it("compares replay values independently of V8's numeric encoding while retaining iteration order", () => {
     const integer = encodeRunValue({ n: 1 });
     const floating = Buffer.from(
@@ -449,6 +644,115 @@ describe("durable workflow journal", () => {
     expect(await execute(reopened, vi.fn())).toEqual(first);
   });
 
+  it("projects historical agent RPC failures without changing the journal", async () => {
+    const diagnostic = "private provider endpoint and credential detail";
+    const classification = {
+      errorCategory: "provider" as const,
+      errorStage: "provider" as const,
+    };
+    const { scope, store } = await fixture(
+      'try { await agent("work", {id:"work"}); } catch (error) { return error.message; } return "unreachable";',
+    );
+    const first = await execute(store, async () => {
+      throw new WorkflowFailureError(diagnostic, classification);
+    });
+    await store.close();
+    const request = store.events.find((event) => event.kind === "request");
+    const response = store.events.find((event) => event.kind === "response");
+    if (!request || !response)
+      throw new Error("Expected a committed agent RPC receipt.");
+
+    const definition = store.events[0].data;
+    const historicalStore = await WorkflowRunStore.create(scope, {
+      script: definition.script,
+      args: definition.args,
+      budgetTotal: definition.budgetTotal,
+    });
+    stores.push(historicalStore);
+    // Model a pre-patch journal receipt that retained the raw provider error.
+    const prePatchReceipt = {
+      ...decodeRunValue<Record<string, unknown>>(response.data.value),
+      error: diagnostic,
+    };
+    expect(prePatchReceipt.error).toBe(diagnostic);
+    await historicalStore.append("request", request.data);
+    await historicalStore.append("response", {
+      ...response.data,
+      value: encodeRunValue(prePatchReceipt),
+    });
+    await historicalStore.close();
+
+    const path = join(historicalStore.directory, "journal.ndjson");
+    const journalBeforeReplay = await readFile(path);
+    const reopened = await WorkflowRunStore.resume(scope, historicalStore.id);
+    stores.push(reopened);
+    const runner = vi.fn(async () => {
+      throw new Error("historical agent RPC was redispatched");
+    });
+    const replayed = await execute(reopened, runner);
+
+    expect(typeof replayed.result).toBe("string");
+    expect(String(replayed.result)).not.toContain(diagnostic);
+    expect(replayed.failure).toEqual(classification);
+    expect(replayed.errorCount).toBe(first.errorCount);
+    expect(runner).not.toHaveBeenCalled();
+    expect(await readFile(path)).toEqual(journalBeforeReplay);
+  });
+
+  it("preserves non-agent RPC replay errors", async () => {
+    const { scope, store } = await fixture(
+      'try { await workflow("missing", undefined, {id:"nested"}); } catch (error) { return error.message; } return "unreachable";',
+    );
+    const loadWorkflow = () => null;
+    const first = await execute(store, vi.fn(), { loadWorkflow });
+    expect(typeof first.result).toBe("string");
+    await store.close();
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(reopened);
+    const runner = vi.fn();
+    const replayed = await execute(reopened, runner, { loadWorkflow });
+    expect(replayed.result).toBe(first.result);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("projects an interrupted committed agent outcome without calling its runner again", async () => {
+    const diagnostic = "private transport response body";
+    const classification = {
+      errorCategory: "transport" as const,
+      errorStage: "turn" as const,
+    };
+    const { scope, store } = await fixture(
+      'return await agent("work", {id:"work"});',
+    );
+    const request = { prompt: "work", isolation: "in-process" as const };
+    const first = new DurableWorkflow(store);
+    await expect(
+      first.runAttempt(1, 1, request, async () => {
+        throw new WorkflowFailureError(diagnostic, classification);
+      }),
+    ).rejects.toThrow(diagnostic);
+    await store.close();
+    const path = join(store.directory, "journal.ndjson");
+    const journalBeforeReplay = await readFile(path);
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(reopened);
+    const replay = new DurableWorkflow(reopened);
+    const runner = vi.fn(async () => ok("must not run"));
+
+    const replayedError = await replay
+      .runAttempt(1, 1, request, runner)
+      .catch((error) => error);
+    expect(replayedError).toMatchObject({
+      message: "Agent execution failed.",
+      usage: undefined,
+    });
+    expect(workflowFailureClassification(replayedError)).toEqual(
+      classification,
+    );
+    expect(runner).not.toHaveBeenCalled();
+    expect(await readFile(path)).toEqual(journalBeforeReplay);
+  });
+
   it("drains an unawaited nested workflow before completing the root", async () => {
     const { store } = await fixture(
       'workflow("child", undefined, {id:"nested"}); return "root";',
@@ -586,15 +890,21 @@ describe("durable workflow journal", () => {
     expect(await WorkflowRunStore.inspect(scope, "../outside")).toBeUndefined();
   });
 
-  it("repairs only torn final lines, never complete corrupt records", async () => {
+  it("rejects torn final lines without rewriting them or accepting corrupt records", async () => {
     const { scope, store } = await fixture("return 1;");
     await store.close();
     const path = join(store.directory, "journal.ndjson");
+    const complete = await readFile(path);
     await appendFile(path, '{"torn":');
-    const reopened = await WorkflowRunStore.resume(scope, store.id);
-    await reopened.close();
-    expect((await readFile(path, "utf8")).endsWith("\n")).toBe(true);
-    await appendFile(path, '{"corrupt":true}\n');
+    const torn = await readFile(path);
+    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
+      /incomplete final event/i,
+    );
+    expect(await readFile(path)).toEqual(torn);
+    await writeFile(
+      path,
+      Buffer.concat([complete, Buffer.from('{"corrupt":true}\n')]),
+    );
     await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
       "corrupt",
     );

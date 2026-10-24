@@ -549,8 +549,9 @@ export class WorkflowRunStore {
   private commitPending(): void {
     const pending = this.pending;
     if (!pending) return;
-    this.events.push(pending.event);
-    this.checksum = JSON.parse(pending.line.toString("utf8")).hash;
+    const persisted = JSON.parse(pending.line.toString("utf8"));
+    this.events.push({ kind: persisted.kind, data: persisted.data });
+    this.checksum = persisted.hash;
     this.length += pending.line.length;
     this.pending = undefined;
   }
