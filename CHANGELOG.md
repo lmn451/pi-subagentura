@@ -144,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed durable completion-group recovery no longer suppresses independent
   completions. Group errors remain eligible under ordinary parent-turn rules
   without discarding mixed-source membership; successful and cancelled members
-  remain behind the group barrier.
+  remain behind the group barrier. After repair, terminal errors count once only
+  when included in the validated authoritative group snapshot.
 - Reconcile fallback result-consumption receipts with completion expectations
   restored later; receipts consume only their matching completion and do not
   suppress unrelated later-turn completions.
@@ -163,6 +164,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover a failed durable journal append only after verifying its on-disk
   state; complete writes are synced once, while partial or ambiguous tails stay
   blocked without rewriting journal history.
+- Sync each newly created durable run-store directory entry before accepting a
+  run; a failed sync blocks creation and remains retryable.
+- Keep valid durable run listings visible when an unrelated journal is
+  unreadable, report only its safe ID and unavailable status, and leave its bytes
+  untouched.
+- Replay failed historical agent RPCs with a generic error while preserving
+  their stored response, failure classification, and no-redispatch behavior;
+  non-agent RPC replay errors retain their recorded meaning.
 
 ### Breaking
 

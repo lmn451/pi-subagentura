@@ -153,6 +153,17 @@ async function restoreAcceptedWorkflowMembers(
   }
 }
 
+const WorkflowRunListOutputSchema = Type.Object({
+  status: Type.Literal("ok"),
+  runs: Type.Array(
+    Type.Object({
+      workflowId: Type.String(),
+      name: Type.Optional(Type.String()),
+      status: Type.String(),
+    }),
+  ),
+});
+
 export function durableRunSummary(id: string, events: RunEvent[]) {
   const end = terminal(events);
   const interrupted = events.findLast(
@@ -195,6 +206,12 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
     cancellationRequested:
       end?.kind === "cancelled" || end?.data.status === "cancelled",
   };
+}
+
+function durableRunListSummary(id: string, events: RunEvent[]) {
+  const summary = durableRunSummary(id, events);
+  delete summary.error;
+  return summary;
 }
 
 export function registerDurableWorkflowTools(
@@ -737,8 +754,9 @@ export function registerDurableWorkflowTools(
     name: "list_workflow_runs",
     label: "Workflow Runs",
     description:
-      "List persisted v4 runs for this working directory and legacy durable runs for the current Pi session. Does not resume work.",
+      "List persisted V4 runs for this working directory and legacy durable runs for the current Pi session. Unreadable journals appear as unavailable without hiding other runs. Does not resume work.",
     parameters: Type.Object({}),
+    outputSchema: WorkflowRunListOutputSchema,
     async execute(
       _id: string,
       _params: any,
@@ -753,45 +771,59 @@ export function registerDurableWorkflowTools(
         let hasListedAction = false;
         for (const runScope of [scope(ctx), scope(ctx, true)]) {
           for (const id of await WorkflowRunStore.list(runScope)) {
-            const events = await WorkflowRunStore.inspect(runScope, id);
-            if (!events) continue;
-            const summary = durableRunSummary(id, events);
-            const separatorBytes = hasListedAction ? 1 : 0;
-            const waitingActions = formatWaitingInputActions(
-              id,
-              summary.waiting ?? [],
-              Math.max(0, remainingActionBytes - separatorBytes),
-              summary.waitingRemainderCount ?? 0,
-            );
-            if (waitingActions.visible.length) {
-              remainingActionBytes -=
-                waitingActions.actionBytes + separatorBytes;
-              hasListedAction = true;
+            try {
+              const events = await WorkflowRunStore.inspect(runScope, id);
+              if (!events) {
+                runs.push({ workflowId: id, status: "unavailable" });
+                runLines.push(`${id}: unavailable`);
+                continue;
+              }
+              const summary = durableRunListSummary(id, events);
+              const separatorBytes = hasListedAction ? 1 : 0;
+              const waitingActions = formatWaitingInputActions(
+                id,
+                summary.waiting ?? [],
+                Math.max(0, remainingActionBytes - separatorBytes),
+                summary.waitingRemainderCount ?? 0,
+              );
+              if (waitingActions.visible.length) {
+                remainingActionBytes -=
+                  waitingActions.actionBytes + separatorBytes;
+                hasListedAction = true;
+              }
+              const job = getWorkflowJobForOwner(id, owner());
+              const waitingCount =
+                (summary.waiting?.length ?? 0) +
+                (summary.waitingRemainderCount ?? 0);
+              const run = {
+                ...summary,
+                ...(summary.waiting !== undefined
+                  ? {
+                      waiting: waitingActions.visible,
+                      waitingRemainderCount: waitingActions.omittedCount,
+                    }
+                  : {}),
+                ...(job?.status === "running"
+                  ? {
+                      status: waitingCount ? "waiting_for_input" : "running",
+                    }
+                  : {}),
+              };
+              runs.push(run);
+              runLines.push(
+                `${run.workflowId} ${run.name}: ${run.status}${waitingActions.text}`,
+              );
+            } catch {
+              runs.push({ workflowId: id, status: "unavailable" });
+              runLines.push(`${id}: unavailable`);
             }
-            const job = getWorkflowJobForOwner(id, owner());
-            const waitingCount =
-              (summary.waiting?.length ?? 0) +
-              (summary.waitingRemainderCount ?? 0);
-            const run = {
-              ...summary,
-              ...(summary.waiting !== undefined
-                ? {
-                    waiting: waitingActions.visible,
-                    waitingRemainderCount: waitingActions.omittedCount,
-                  }
-                : {}),
-              ...(job?.status === "running"
-                ? {
-                    status: waitingCount ? "waiting_for_input" : "running",
-                  }
-                : {}),
-            };
-            runs.push(run);
-            runLines.push(
-              `${run.workflowId} ${run.name}: ${run.status}${waitingActions.text}`,
-            );
           }
         }
+        const structuredRuns = runs.map(({ workflowId, name, status }) => ({
+          workflowId,
+          ...(typeof name === "string" ? { name } : {}),
+          status,
+        }));
         return {
           content: [
             {
@@ -802,6 +834,7 @@ export function registerDurableWorkflowTools(
             },
           ],
           details: { runs },
+          structuredContent: { status: "ok", runs: structuredRuns },
         };
       } catch (error) {
         return failure(error);
@@ -812,7 +845,7 @@ export function registerDurableWorkflowTools(
     name: "inspect_workflow",
     label: "Inspect Workflow",
     description:
-      "Read and parse a saved workflow's source without executing agents. V4 definitions run durably by default.",
+      "Read and parse a saved workflow's source without executing agents. Workflow persistence requires explicit durable:true.",
     parameters: Type.Object({ name: Type.String() }),
     async execute(_id: string, params: any): Promise<any> {
       try {

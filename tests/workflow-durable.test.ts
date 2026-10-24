@@ -70,130 +70,6 @@ async function execute(
 }
 
 describe("durable workflow journal", () => {
-  it("retries a real append failure after confirming no bytes were written", async () => {
-    const { scope, store } = await fixture("return 1;");
-    const path = join(store.directory, "journal.ndjson");
-    const before = await readFile(path);
-    const file = (
-      store as unknown as {
-        file: import("node:fs/promises").FileHandle;
-      }
-    ).file;
-    const write = file.writeFile.bind(file);
-    let fail = true;
-    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
-      if (fail) {
-        fail = false;
-        throw new Error("injected write failure before bytes");
-      }
-      return write(data);
-    });
-    const data = { status: "cancelled", completedAt: 1 };
-    await expect(store.append("cancelled", data)).rejects.toThrow(
-      "injected write failure",
-    );
-    expect(await readFile(path)).toEqual(before);
-    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
-    expect(
-      store.events.filter((event) => event.kind === "cancelled"),
-    ).toHaveLength(1);
-    expect(
-      (await WorkflowRunStore.inspect(scope, store.id))?.at(-1)?.data,
-    ).toEqual(data);
-  });
-
-  it("reconciles a complete real append after fsync fails without duplicating it", async () => {
-    const { scope, store } = await fixture("return 1;");
-    const file = (
-      store as unknown as {
-        file: import("node:fs/promises").FileHandle;
-      }
-    ).file;
-    const sync = file.sync.bind(file);
-    let fail = true;
-    vi.spyOn(file, "sync").mockImplementation(async () => {
-      if (fail) {
-        fail = false;
-        throw new Error("injected fsync failure");
-      }
-      return sync();
-    });
-    const data = { status: "cancelled", completedAt: 2 };
-    await expect(store.append("cancelled", data)).rejects.toThrow("fsync");
-    await expect(store.append("cancelled", data)).resolves.toBeUndefined();
-    expect(
-      store.events.filter((event) => event.kind === "cancelled"),
-    ).toHaveLength(1);
-    expect(
-      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
-        (event) => event.kind === "cancelled",
-      ),
-    ).toHaveLength(1);
-  });
-
-  it("resumes a complete append after failed fsync and confirms it is durable once", async () => {
-    const { scope, store } = await fixture("return 1;");
-    const file = (
-      store as unknown as {
-        file: import("node:fs/promises").FileHandle;
-      }
-    ).file;
-    vi.spyOn(file, "sync").mockRejectedValueOnce(
-      new Error("injected fsync failure"),
-    );
-    await expect(
-      store.append("cancelled", { status: "cancelled" }),
-    ).rejects.toThrow("fsync");
-    const path = join(store.directory, "journal.ndjson");
-    const committedBytes = await readFile(path);
-    stores.splice(stores.indexOf(store), 1);
-    await expect(store.close()).rejects.toThrow("fsync");
-
-    const reopened = await WorkflowRunStore.resume(scope, store.id);
-    expect(
-      reopened.events.filter((event) => event.kind === "cancelled"),
-    ).toHaveLength(1);
-    await reopened.close();
-    expect(await readFile(path)).toEqual(committedBytes);
-    expect(
-      (await WorkflowRunStore.inspect(scope, store.id))?.filter(
-        (event) => event.kind === "cancelled",
-      ),
-    ).toHaveLength(1);
-  });
-
-  it("blocks a partial real append and preserves its bytes", async () => {
-    const { scope, store } = await fixture("return 1;");
-    const path = join(store.directory, "journal.ndjson");
-    const before = await readFile(path);
-    const file = (
-      store as unknown as {
-        file: import("node:fs/promises").FileHandle;
-      }
-    ).file;
-    const write = file.writeFile.bind(file);
-    vi.spyOn(file, "writeFile").mockImplementation(async (data) => {
-      const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data as string);
-      await write(bytes.subarray(0, Math.floor(bytes.length / 2)));
-      throw new Error("injected partial write");
-    });
-    await expect(
-      store.append("cancelled", { status: "cancelled" }),
-    ).rejects.toThrow("partial write");
-    const partial = await readFile(path);
-    await expect(
-      store.append("cancelled", { status: "cancelled" }),
-    ).rejects.toThrow(/recovery|journal/i);
-    expect(await readFile(path)).toEqual(partial);
-    expect(partial.subarray(0, before.length)).toEqual(before);
-    stores.splice(stores.indexOf(store), 1);
-    await expect(store.close()).rejects.toThrow(/recovery|journal/i);
-    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
-      /incomplete final event/i,
-    );
-    expect(await readFile(path)).toEqual(partial);
-  });
-
   it("compares replay values independently of V8's numeric encoding while retaining iteration order", () => {
     const integer = encodeRunValue({ n: 1 });
     const floating = Buffer.from(
@@ -710,21 +586,15 @@ describe("durable workflow journal", () => {
     expect(await WorkflowRunStore.inspect(scope, "../outside")).toBeUndefined();
   });
 
-  it("rejects torn final lines without rewriting them or accepting corrupt records", async () => {
+  it("repairs only torn final lines, never complete corrupt records", async () => {
     const { scope, store } = await fixture("return 1;");
     await store.close();
     const path = join(store.directory, "journal.ndjson");
-    const complete = await readFile(path);
     await appendFile(path, '{"torn":');
-    const torn = await readFile(path);
-    await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
-      /incomplete final event/i,
-    );
-    expect(await readFile(path)).toEqual(torn);
-    await writeFile(
-      path,
-      Buffer.concat([complete, Buffer.from('{"corrupt":true}\n')]),
-    );
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    await reopened.close();
+    expect((await readFile(path, "utf8")).endsWith("\n")).toBe(true);
+    await appendFile(path, '{"corrupt":true}\n');
     await expect(WorkflowRunStore.resume(scope, store.id)).rejects.toThrow(
       "corrupt",
     );

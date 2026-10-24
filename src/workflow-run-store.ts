@@ -9,7 +9,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { deserialize, serialize } from "node:v8";
 import { isDeepStrictEqual } from "node:util";
 
@@ -169,6 +169,44 @@ async function syncDirectory(path: string): Promise<void> {
     await file.sync();
   } finally {
     await file.close();
+  }
+}
+
+async function ensureDurableDirectoryChain(
+  anchorPath: string,
+  targetPath: string,
+): Promise<void> {
+  const anchor = resolve(anchorPath);
+  const target = resolve(targetPath);
+  const relativePath = relative(anchor, target);
+  if (
+    !relativePath ||
+    isAbsolute(relativePath) ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`)
+  ) {
+    throw new WorkflowPersistenceError(
+      "Invalid durable workflow store directory.",
+    );
+  }
+  const directories: string[] = [];
+  let current = target;
+  while (current !== anchor) {
+    directories.push(current);
+    const parent = dirname(current);
+    if (parent === current)
+      throw new WorkflowPersistenceError(
+        "Invalid durable workflow store directory.",
+      );
+    current = parent;
+  }
+  for (const directory of directories.reverse()) {
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    await syncDirectory(dirname(directory));
   }
 }
 
@@ -342,8 +380,9 @@ export class WorkflowRunStore {
     definition: object,
   ): Promise<WorkflowRunStore> {
     const id = `wfd_${randomUUID().replaceAll("-", "")}`;
-    const parent = await scopeDirectory(scope);
-    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const parent = resolve(await scopeDirectory(scope));
+    const anchor = resolve(scope.root ?? homedir());
+    await ensureDurableDirectoryChain(anchor, parent);
     const directory = join(parent, id);
     await mkdir(directory, { mode: 0o700 });
     await syncDirectory(parent);
