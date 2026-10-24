@@ -60,6 +60,14 @@ import {
 } from "./workflow-v4-store";
 
 function terminal(events: RunEvent[]) {
+  const created = events[0]?.data;
+  const stepBased =
+    typeof created?.script === "string" &&
+    parseWorkflow(created.script).format === "definition";
+  if (!stepBased)
+    return events.findLast((event) =>
+      ["rejected", "cancelled", "terminal"].includes(event.kind),
+    );
   return (
     events.findLast((e) => e.kind === "rejected") ??
     events.findLast((e) => e.kind === "cancelled") ??
@@ -774,15 +782,18 @@ export function registerDurableWorkflowTools(
   async function cancel(id: string, ctx?: any): Promise<any | undefined> {
     if (!id.startsWith("wfd_")) return undefined;
     let store;
+    let ownsStore = false;
     try {
       const cancellationOwner = owner();
       const workflowJob = getWorkflowJobForOwner(id, cancellationOwner);
-      store =
-        workflowJob?.durable?.store ??
-        (await WorkflowRunStore.resume(
+      store = workflowJob?.durable?.store;
+      if (!store) {
+        store = await WorkflowRunStore.resume(
           await lookupScope(id, ctx, cancellationOwner),
           id,
-        ));
+        );
+        ownsStore = true;
+      }
       const terminalEvent = terminal(store.events);
       if (terminalEvent && terminalEvent.data.status !== "cancelled")
         return await inspect(id, ctx, false, cancellationOwner);
@@ -814,7 +825,7 @@ export function registerDurableWorkflowTools(
     } catch (error) {
       return failure(error);
     } finally {
-      await store?.close();
+      if (ownsStore) await store?.close();
     }
   }
 
