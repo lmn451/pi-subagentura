@@ -924,6 +924,7 @@ describe("completion coordinator", () => {
       owner,
     );
     expect(prepareCompletionManifest(owner)).toBeUndefined();
+    markCompletionTurnStarting(owner);
     expect(() => reserveCompletionGroup("group", groupId, owner)).toThrow(
       /sealed/,
     );
@@ -947,6 +948,15 @@ describe("completion coordinator", () => {
         sealed: false,
       },
     ]);
+    expect(() =>
+      registerCompletionMember(
+        "workflow",
+        "wfd_new_turn",
+        "group",
+        "new-turn-group",
+        owner,
+      ),
+    ).not.toThrow();
   });
 
   it("reopens only new-group admission for the next parent turn", () => {
