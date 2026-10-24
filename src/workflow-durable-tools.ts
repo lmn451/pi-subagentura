@@ -701,6 +701,8 @@ export function registerDurableWorkflowTools(
       const inheritedAbort = () => {
         if (runAsync) return;
         void withWorkflowTerminalTransition(job, async () => {
+          const committed = terminal(store!.events);
+          if (committed && committed.data.status !== "cancelled") return;
           await requestDurableWorkflowCancellation(store!, job);
         }).catch(() => {
           onUpdate?.({

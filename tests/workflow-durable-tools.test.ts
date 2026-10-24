@@ -26,6 +26,7 @@ import {
 import {
   cleanupWorkflowJobsForOwner,
   workflowJobRegistry,
+  type WorkflowJobState,
 } from "../src/workflow-jobs";
 import {
   registerCompletionCoordinator,
@@ -150,7 +151,136 @@ describe("durable public tools", () => {
     expect(JSON.stringify(updates)).not.toContain("private append failure");
     append.mockRestore();
     finishProvider();
-    await expect(execution).resolves.toMatchObject({ details: { status: "done" } });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "done" },
+    });
+  });
+
+  it("does not cancel a committed synchronous result after a late inherited abort", async () => {
+    const { pi, scope, ctx } = setup();
+    const inherited = new AbortController();
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    append.mockImplementation(async function (kind: any, ...args: any[]) {
+      const result = await originalAppend.call(this, kind, ...args);
+      if (kind === "terminal") inherited.abort();
+      return result;
+    });
+    try {
+      const result = await api.run(
+        {
+          script:
+            'export const meta={name:"late-abort",description:"d"}; return "committed";',
+          async: false,
+        },
+        inherited.signal,
+        undefined,
+        ctx,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const events = await WorkflowRunStore.inspect(
+        { cwd: root, sessionId: "same-parent", root },
+        result.details.workflowId,
+      );
+      expect(result.details.status).toBe("done");
+      expect(result.content[0].text).toBe('"committed"');
+      expect(events?.map((event) => event.kind)).toContain("terminal");
+      expect(events?.map((event) => event.kind)).not.toContain("cancelled");
+      expect(
+        (await api.inspect(result.details.workflowId, ctx, true)).content[0]
+          .text,
+      ).toBe('"committed"');
+    } finally {
+      append.mockRestore();
+    }
+  });
+
+  it("keeps synchronous durable input active when inherited cancellation persistence fails", async () => {
+    const { pi, scope, ctx } = setup();
+    const inherited = new AbortController();
+    let inputSignal: AbortSignal | undefined;
+    let reportCancellationFailure!: () => void;
+    const cancellationFailureReported = new Promise<void>((resolve) => {
+      reportCancellationFailure = resolve;
+    });
+    let startInput!: () => void;
+    const inputStarted = new Promise<void>((resolve) => {
+      startInput = resolve;
+    });
+    const runCtx = {
+      ...ctx,
+      hasUI: true,
+      ui: {
+        confirm: vi.fn(
+          (
+            _title: string,
+            _summary: string,
+            options: { signal?: AbortSignal },
+          ) => {
+            inputSignal = options.signal;
+            startInput();
+            return new Promise<boolean>((_resolve, reject) => {
+              options.signal?.addEventListener(
+                "abort",
+                () => reject(new Error("input aborted")),
+                { once: true },
+              );
+            });
+          },
+        ),
+      },
+    };
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => true,
+      root,
+    );
+    const execution = api.run(
+      {
+        script: `import { defineWorkflow } from "pi-subagentura/workflow";
+          export default defineWorkflow({
+            name: "input-cancel", version: 1,
+            run: async (ctx) => await ctx.gate("approval", { title: "Approve?" }),
+          });`,
+        async: false,
+      },
+      inherited.signal,
+      (update) => {
+        if (JSON.stringify(update).includes("could not be saved"))
+          reportCancellationFailure();
+      },
+      runCtx,
+    );
+    await inputStarted;
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    append.mockImplementation(async function (kind: any, ...args: any[]) {
+      if (kind === "cancelled") throw new Error("private append failure");
+      return originalAppend.call(this, kind, ...args);
+    });
+    let job: WorkflowJobState | undefined;
+    try {
+      inherited.abort();
+      await cancellationFailureReported;
+      expect(inputSignal?.aborted).toBe(false);
+      job = [...workflowJobRegistry.values()].at(-1)!;
+      expect(job.status).toBe("running");
+      append.mockRestore();
+      await api.cancel(job.id, runCtx);
+      await expect(execution).resolves.toMatchObject({ isError: true });
+    } finally {
+      append.mockRestore();
+      if (job?.status === "running") job.abort.abort();
+    }
   });
 
   it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
