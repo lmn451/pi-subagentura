@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-10-24
+
 ### Changed
 
 - Keep transient mux-liveness uncertainty in local debug logs; anonymous
@@ -17,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcomes, mode-aware adoption and busiest-tree concentration, schema/provenance
   and unknown coverage, diagnostic event units, and workflow lifecycle window
   coverage. Window totals remain coverage diagnostics, not matched workflows.
+- Remove the bundled RALPLAN skill.
+- Add the `herdr` keyword for npm package discovery.
 
 ### Fixed
 
@@ -35,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal output.
 - Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
   with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+- Expand the bundled debug skill with guidance for safe state recovery.
 
 ### Changed
 
@@ -449,7 +454,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
