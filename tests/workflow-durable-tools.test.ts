@@ -125,7 +125,7 @@ describe("durable public tools", () => {
     const execution = api.run(
       {
         script:
-          'export const meta={name:"inherited-cancel",description:"d"}; return await agent("wait");',
+          'export const meta={name:"inherited-cancel",description:"d"}; return await agent("wait", {id:"wait"});',
         async: false,
       },
       inherited.signal,
@@ -190,13 +190,13 @@ describe("durable public tools", () => {
         result.details.workflowId,
       );
       expect(result.details.status).toBe("done");
-      expect(result.content[0].text).toBe('"committed"');
+      expect(result.content[0].text).toBe("committed");
       expect(events?.map((event) => event.kind)).toContain("terminal");
       expect(events?.map((event) => event.kind)).not.toContain("cancelled");
       expect(
         (await api.inspect(result.details.workflowId, ctx, true)).content[0]
           .text,
-      ).toBe('"committed"');
+      ).toBe("committed");
     } finally {
       append.mockRestore();
     }
@@ -275,7 +275,9 @@ describe("durable public tools", () => {
       job = [...workflowJobRegistry.values()].at(-1)!;
       expect(job.status).toBe("running");
       append.mockRestore();
-      await api.cancel(job.id, runCtx);
+      await expect(api.cancel(job.id, runCtx)).resolves.toMatchObject({
+        details: { status: "cancelled" },
+      });
       await expect(execution).resolves.toMatchObject({ isError: true });
     } finally {
       append.mockRestore();

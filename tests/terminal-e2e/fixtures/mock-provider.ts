@@ -18,7 +18,9 @@ export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
 export const E2E_API = "subagentura-e2e";
 const FIXED_TIMESTAMP = 1_700_000_000_000;
-const GATE_TIMEOUT_MS = 30_000;
+const GATE_TIMEOUT_MS = Number(
+  process.env.SUBAGENTURA_E2E_GATE_TIMEOUT_MS ?? 30_000,
+);
 
 type Stage = "initial" | "toolIssued" | "gated" | "complete" | "failed";
 type State = {
@@ -443,6 +445,14 @@ const KNOWN_MARKERS = new Set([
   "[E2E:CHILD_READONLY_NESTED_SPAWN]",
   "[E2E:WORKFLOW_READONLY_PROCESS]",
   "[E2E:WORKFLOW_READONLY_IN_PROCESS]",
+  "[E2E:WORKFLOW_LIST_RUNS]",
+  "[E2E:DURABLE_CANCEL_SYNC]",
+  "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+  "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+  "[E2E:DURABLE_CANCEL_START]",
+  "[E2E:DURABLE_CANCEL_STATUS]",
+  "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+  "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
   "[E2E:CHILD_WORKFLOW_OK]",
   "[E2E:CHILD_WORKFLOW_ERROR]",
   "[E2E:CHILD_INTERACTIVE]",
@@ -456,6 +466,10 @@ const GATES = new Map<string, string>([
   ["[E2E:CHILD_SYNC_ISOLATED]", "release-sync-isolated"],
   ["[E2E:CHILD_ASYNC_ISOLATED]", "release-async-isolated"],
   ["[E2E:CHILD_WORKFLOW_PROCESS]", "release-workflow-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
   ["[E2E:CHILD_WORKFLOW]", "release-workflow"],
   ["[E2E:CHILD_WORKFLOW_OK]", "release-workflow"],
   ["[E2E:CHILD_INTERACTIVE_FOLLOWUP]", "release-interactive-followup"],
@@ -954,6 +968,60 @@ async function runRequest(
 }
 
 function parentTool(marker: string, context: TranscriptContext): ToolCall {
+  if (marker === "[E2E:WORKFLOW_LIST_RUNS]") {
+    return toolCall("e2e-workflow-list-runs", "list_workflow_runs", {});
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_SYNC]") {
+    return toolCall("e2e-durable-cancel-sync", "workflow", {
+      script: `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "e2e-durable-cancel-sync",
+        version: 1,
+        run: async function(ctx) {
+          return await Promise.all([
+            ctx.agent("process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_PROCESS] Wait for durable cancellation.",
+              isolation: "process"
+            }),
+            ctx.agent("in-process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS] Wait for durable cancellation.",
+              isolation: "in-process"
+            })
+          ]);
+        }
+      });`,
+      async: false,
+      durable: true,
+    });
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_START]") {
+    return toolCall("e2e-durable-cancel-start", "workflow", {
+      script: `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "e2e-durable-cancel",
+        version: 1,
+        run: async function(ctx) {
+          return await Promise.all([
+            ctx.agent("process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_PROCESS] Wait for durable cancellation.",
+              isolation: "process"
+            }),
+            ctx.agent("in-process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS] Wait for durable cancellation.",
+              isolation: "in-process"
+            })
+          ]);
+        }
+      });`,
+      async: true,
+      durable: true,
+    });
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_STATUS]") {
+    return toolCall("e2e-durable-cancel-status", "get_workflow_status", {
+      workflowId: resultId(context, "workflow", /wfd_[a-f0-9]{32}/),
+    });
+  }
   if (marker === "[E2E:TOOL_PARAMETERS]") {
     return toolCall("e2e-tool-parameters-1", "list_available_models", {
       filter: "subagentura-e2e",
@@ -1028,6 +1096,7 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
        }
      });`,
       async: false,
+      ...(processMode ? { durable: true } : {}),
     });
   }
   if (marker.includes("WORKFLOW_PARTIAL")) {

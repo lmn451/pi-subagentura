@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gateForMarker } from "./fixtures/mock-provider";
@@ -206,7 +212,109 @@ function completionForArtifactDir(
   return event;
 }
 
+function findWorkflowJournal(root: string): string | undefined {
+  if (!existsSync(root)) return undefined;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isFile() && entry.name === "journal.ndjson") return path;
+    if (entry.isDirectory()) {
+      const nested = findWorkflowJournal(path);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
 describe("real Pi terminal E2E", () => {
+  it(
+    "keeps a synchronous durable V4 workflow and both child modes alive until cancel intent commits",
+    async () => {
+      const previousFault = process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT;
+      process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT = "1";
+      try {
+        await startScenario("durable-cancel-sync");
+        await harness.waitForProvider(
+          (events) =>
+            events.some(
+              (event) =>
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_PROCESS]" &&
+                event.afterStage === "gated",
+            ) &&
+            events.some(
+              (event) =>
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]" &&
+                event.afterStage === "gated",
+            ),
+          "both durable workflow child modes at their wait gates",
+        );
+        const child = childPane();
+        expect(child).toBeDefined();
+        const journal = findWorkflowJournal(
+          join(harness.home, ".pi-subagentura", "workflow-runs"),
+        );
+        expect(journal).toBeDefined();
+
+        harness.sendKey("C-M-x");
+        await harness.waitForScreen(
+          (screen) => screen.includes("Failed to cancel 1 workflow(s). Retry"),
+          "durable cancellation persistence failure guidance",
+        );
+        const failedAttemptEvents = harness.providerEvents();
+        expect(
+          failedAttemptEvents.some(
+            (event) =>
+              (event.marker === "[E2E:CHILD_DURABLE_CANCEL_PROCESS]" ||
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]") &&
+              event.afterStage === "failed",
+          ),
+        ).toBe(false);
+        expect(
+          failedAttemptEvents.some(
+            (event) =>
+              event.marker === "[E2E:DURABLE_CANCEL_SYNC]" &&
+              event.requestSeq > 1,
+          ),
+        ).toBe(false);
+        expect(harness.panes().some((pane) => pane.id === child?.id)).toBe(true);
+        expect(
+          readFileSync(journal!, "utf8").split("\n").some((line) => {
+            if (!line) return false;
+            return JSON.parse(line).kind === "cancelled";
+          }),
+        ).toBe(false);
+
+        unlinkSync(join(harness.gates, "fail-cancel-write"));
+        harness.sendKey("C-M-x");
+        await harness.waitFor(
+          () =>
+            readFileSync(journal!, "utf8").split("\n").some((line) => {
+              if (!line) return false;
+              return JSON.parse(line).kind === "cancelled";
+            }),
+          "durable cancelled intent persisted after retry",
+        );
+        await harness.waitForProvider(
+          (events) =>
+            [
+              "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+              "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+            ].every((marker) =>
+              events.some(
+                (event) => event.marker === marker && event.abort === true,
+              ),
+            ),
+          "owned process and in-process children aborted after retry",
+        );
+        await harness.assertNoNetwork();
+      } finally {
+        if (previousFault === undefined)
+          delete process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT;
+        else process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT = previousFault;
+      }
+    },
+    timeout,
+  );
+
   it(
     "shows extension tool parameters only after Ctrl+O expansion",
     async () => {
@@ -527,6 +635,30 @@ describe("real Pi terminal E2E", () => {
         (workflowResult?.details as { workflowId?: unknown } | undefined)
           ?.workflowId,
       ).toMatch(/^wfd_/);
+
+      const workflowId = String(
+        (workflowResult?.details as { workflowId?: unknown } | undefined)
+          ?.workflowId,
+      );
+      await harness.sendPrompt(
+        "[E2E:WORKFLOW_LIST_RUNS] List the completed durable workflow.",
+      );
+      await waitForParentSettled("[E2E:WORKFLOW_LIST_RUNS]");
+      const listing = harness
+        .providerEvents()
+        .find(
+          (event) =>
+            event.marker === "[E2E:WORKFLOW_LIST_RUNS]" &&
+            event.requestSeq === 2,
+        )
+        ?.contextToolResults?.find(
+          (candidate) => candidate.toolName === "list_workflow_runs",
+        );
+      expect(listing?.details).toMatchObject({
+        runs: expect.arrayContaining([
+          expect.objectContaining({ workflowId, status: "done" }),
+        ]),
+      });
     },
     timeout,
   );
@@ -600,8 +732,8 @@ describe("real Pi terminal E2E", () => {
       });
       expect(workflowResult?.details).toMatchObject({
         status: "done",
-        durable: true,
       });
+      expect(workflowResult?.details).not.toHaveProperty("durable");
     },
     timeout,
   );

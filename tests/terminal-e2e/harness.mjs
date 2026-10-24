@@ -347,6 +347,17 @@ export class TerminalHarness {
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
     };
+    if (process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT === "1") {
+      this._env.SUBAGENTURA_E2E_GATE_TIMEOUT_MS = "120000";
+      this._env.SUBAGENTURA_E2E_FAIL_CANCEL_MARKER = join(
+        this.gates,
+        "fail-cancel-write",
+      );
+      this._env.NODE_OPTIONS += ` --import=${join(HERE, "fixtures/fail-cancel-write.mjs")}`;
+      writeFileSync(this._env.SUBAGENTURA_E2E_FAIL_CANCEL_MARKER, "armed\n", {
+        mode: 0o600,
+      });
+    }
     this.assertChildCanExecNode(safePath);
     appendFileSync(
       this.providerLog,

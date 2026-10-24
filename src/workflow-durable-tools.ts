@@ -768,14 +768,16 @@ export function registerDurableWorkflowTools(
     let store;
     try {
       const cancellationOwner = owner();
-      store = await WorkflowRunStore.resume(
-        await lookupScope(id, ctx, cancellationOwner),
-        id,
-      );
+      const workflowJob = getWorkflowJobForOwner(id, cancellationOwner);
+      store =
+        workflowJob?.durable?.store ??
+        (await WorkflowRunStore.resume(
+          await lookupScope(id, ctx, cancellationOwner),
+          id,
+        ));
       const terminalEvent = terminal(store.events);
       if (terminalEvent && terminalEvent.data.status !== "cancelled")
         return await inspect(id, ctx, false, cancellationOwner);
-      const workflowJob = getWorkflowJobForOwner(id, cancellationOwner);
       if (workflowJob) {
         await withWorkflowTerminalTransition(workflowJob, async () => {
           const currentTerminal = terminal(store!.events);
