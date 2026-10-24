@@ -467,9 +467,15 @@ const GATES = new Map<string, string>([
   ["[E2E:CHILD_ASYNC_ISOLATED]", "release-async-isolated"],
   ["[E2E:CHILD_WORKFLOW_PROCESS]", "release-workflow-process"],
   ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
-  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
+  [
+    "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+    "release-durable-cancel-in-process",
+  ],
   ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
-  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
+  [
+    "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+    "release-durable-cancel-in-process",
+  ],
   ["[E2E:CHILD_WORKFLOW]", "release-workflow"],
   ["[E2E:CHILD_WORKFLOW_OK]", "release-workflow"],
   ["[E2E:CHILD_INTERACTIVE_FOLLOWUP]", "release-interactive-followup"],

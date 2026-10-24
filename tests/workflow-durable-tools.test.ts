@@ -112,13 +112,14 @@ describe("durable public tools", () => {
     const api = registerDurableWorkflowTools(
       pi,
       () => sessionOwner(scope),
-      () => async ({ signal }) => {
-        providerSignal = signal;
-        releaseProvider();
-        await providerResult;
-        if (signal?.aborted) throw new Error("provider aborted");
-        return { isError: false, output: "done", usage: zeroUsage() };
-      },
+      () =>
+        async ({ signal }) => {
+          providerSignal = signal;
+          releaseProvider();
+          await providerResult;
+          if (signal?.aborted) throw new Error("provider aborted");
+          return { isError: false, output: "done", usage: zeroUsage() };
+        },
       () => true,
       root,
     );
@@ -129,7 +130,7 @@ describe("durable public tools", () => {
         async: false,
       },
       inherited.signal,
-      (update) => {
+      (update: unknown) => {
         updates.push(update);
         if (JSON.stringify(update).includes("could not be saved"))
           reportCancellationFailure();
@@ -140,9 +141,13 @@ describe("durable public tools", () => {
     const job = [...workflowJobRegistry.values()].at(-1)!;
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    append.mockImplementation(async function (kind: any, ...args: any[]) {
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind: string,
+      data: unknown,
+    ) {
       if (kind === "cancelled") throw new Error("private append failure");
-      return originalAppend.call(this, kind, ...args);
+      return originalAppend.call(this, kind, data);
     });
     inherited.abort();
     await cancellationFailureReported;
@@ -168,8 +173,12 @@ describe("durable public tools", () => {
     );
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    append.mockImplementation(async function (kind: any, ...args: any[]) {
-      const result = await originalAppend.call(this, kind, ...args);
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind: string,
+      data: unknown,
+    ) {
+      const result = await originalAppend.call(this, kind, data);
       if (kind === "terminal") inherited.abort();
       return result;
     });
@@ -254,7 +263,7 @@ describe("durable public tools", () => {
         async: false,
       },
       inherited.signal,
-      (update) => {
+      (update: unknown) => {
         if (JSON.stringify(update).includes("could not be saved"))
           reportCancellationFailure();
       },
@@ -263,9 +272,13 @@ describe("durable public tools", () => {
     await inputStarted;
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    append.mockImplementation(async function (kind: any, ...args: any[]) {
+    append.mockImplementation(async function (
+      this: WorkflowRunStore,
+      kind: string,
+      data: unknown,
+    ) {
       if (kind === "cancelled") throw new Error("private append failure");
-      return originalAppend.call(this, kind, ...args);
+      return originalAppend.call(this, kind, data);
     });
     let job: WorkflowJobState | undefined;
     try {

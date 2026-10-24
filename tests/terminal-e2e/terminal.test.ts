@@ -250,7 +250,7 @@ describe("real Pi terminal E2E", () => {
         const child = childPane();
         expect(child).toBeDefined();
         const journal = findWorkflowJournal(
-          join(harness.home, ".pi-subagentura", "workflow-runs"),
+          join(harness.env.HOME, ".pi-subagentura", "workflow-runs"),
         );
         expect(journal).toBeDefined();
 
@@ -272,25 +272,32 @@ describe("real Pi terminal E2E", () => {
           failedAttemptEvents.some(
             (event) =>
               event.marker === "[E2E:DURABLE_CANCEL_SYNC]" &&
+              typeof event.requestSeq === "number" &&
               event.requestSeq > 1,
           ),
         ).toBe(false);
-        expect(harness.panes().some((pane) => pane.id === child?.id)).toBe(true);
+        expect(harness.panes().some((pane) => pane.id === child?.id)).toBe(
+          true,
+        );
         expect(
-          readFileSync(journal!, "utf8").split("\n").some((line) => {
-            if (!line) return false;
-            return JSON.parse(line).kind === "cancelled";
-          }),
+          readFileSync(journal!, "utf8")
+            .split("\n")
+            .some((line) => {
+              if (!line) return false;
+              return JSON.parse(line).kind === "cancelled";
+            }),
         ).toBe(false);
 
         unlinkSync(join(harness.gates, "fail-cancel-write"));
         harness.sendKey("C-M-x");
         await harness.waitFor(
           () =>
-            readFileSync(journal!, "utf8").split("\n").some((line) => {
-              if (!line) return false;
-              return JSON.parse(line).kind === "cancelled";
-            }),
+            readFileSync(journal!, "utf8")
+              .split("\n")
+              .some((line) => {
+                if (!line) return false;
+                return JSON.parse(line).kind === "cancelled";
+              }),
           "durable cancelled intent persisted after retry",
         );
         await harness.waitForProvider(
@@ -644,16 +651,23 @@ describe("real Pi terminal E2E", () => {
         "[E2E:WORKFLOW_LIST_RUNS] List the completed durable workflow.",
       );
       await waitForParentSettled("[E2E:WORKFLOW_LIST_RUNS]");
-      const listing = harness
+      const listingEvent = harness
         .providerEvents()
         .find(
           (event) =>
             event.marker === "[E2E:WORKFLOW_LIST_RUNS]" &&
             event.requestSeq === 2,
-        )
-        ?.contextToolResults?.find(
-          (candidate) => candidate.toolName === "list_workflow_runs",
         );
+      const toolResults = listingEvent?.contextToolResults;
+      const listing = Array.isArray(toolResults)
+        ? toolResults.find(
+            (candidate: unknown): candidate is Record<string, unknown> =>
+              typeof candidate === "object" &&
+              candidate !== null &&
+              "toolName" in candidate &&
+              candidate.toolName === "list_workflow_runs",
+          )
+        : undefined;
       expect(listing?.details).toMatchObject({
         runs: expect.arrayContaining([
           expect.objectContaining({ workflowId, status: "done" }),
