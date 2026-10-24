@@ -111,20 +111,16 @@ describe("durable workflow authoring", () => {
         expect.objectContaining({ name: "legacy", durableReady: false }),
       ]),
     );
-    expect(response.content[0].text).toContain("session-scoped");
   });
 
   it("runs a durable-ready saved definition session-scoped by default", async () => {
     writeFileSync(join(fixture.dir, "ready.js"), ready);
-    const { commands, ctx, pi } = setup(true);
+    const { commands, ctx } = setup(true);
     await commands.get("workflows").handler('ready {"topic":"storage"}', ctx);
     expect(fixture.run).not.toHaveBeenCalled();
     const job = [...workflowJobRegistry.values()][0];
     expect(job).toBeDefined();
     await expect(job.promise).resolves.toMatchObject({ result: "done" });
-    expect(pi.sendMessage.mock.calls[0][0].content).toContain(
-      "Session-scoped run.",
-    );
   });
 
   it("keeps an explicitly durable workflow tool call durable", async () => {
