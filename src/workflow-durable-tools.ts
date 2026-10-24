@@ -526,7 +526,12 @@ export function registerDurableWorkflowTools(
         const listOwner = owner();
         const runScope = scope(ctx, listOwner);
         const ids = await WorkflowRunStore.list(runScope);
-        const runs = [];
+        const runs: Array<
+          Partial<ReturnType<typeof durableRunListSummary>> & {
+            workflowId: string;
+            status: string;
+          }
+        > = [];
         for (const id of ids) {
           try {
             const events = await WorkflowRunStore.inspect(runScope, id);

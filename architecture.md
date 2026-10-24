@@ -919,10 +919,9 @@ It loads the saved child over RPC and evaluates it in the same worker, sharing s
 Only one nested child level is allowed.
 An in-process subagent is forbidden from invoking the top-level Pi workflow tool because cross-registry cancellation for that shape is unsupported.
 
-Saved workflows can also be invoked through their compatible slash-command
-path, which runs definitions durably by default. The workflow tool keeps
-durability opt-in through `durable: true`; saving or inspecting a definition
-alone does not make a run durable.
+Saved workflow slash commands keep the session-scoped default. See
+[the workflow runtime contract](WORKFLOW_RUNTIME.md#definitions-and-runs-are-different)
+for run-mode selection.
 
 ### 9.6 Background lifecycle
 
@@ -963,25 +962,9 @@ On completion, `notifyWorkflowCompletion` publishes one coordinated workflow rec
 
 ### 9.7 Durable lifecycle and recovery
 
-Durability is opt-in for inline scripts and the workflow tool; saved slash
-commands run durably by default. A durable run records its source, arguments, definition digest,
-request outcomes, usage, and terminal state in a bounded journal under the run
-scope. `resume_workflow` explicitly reclaims an interrupted run only when the
-host, working directory, Pi session, and Node major version match; there is no
-daemon and no exactly-once side-effect guarantee. Uncommitted agent work may
-repeat after an interruption, while committed requests replay from recorded
-outcomes.
-
-The durable runner uses the same worker and runner selection as ordinary
-workflows. Process-backed attempts have a private recovery manifest, and a
-partially dispatched attempt is not duplicated by falling back to an
-in-process runner. Durable workflow-owned child completions are aggregated by
-the parent workflow record.
-
-Persisted completion groups are only used for groups containing durable
-workflow members. If group recovery is malformed or unavailable, all records
-in that group remain blocked for the owner, while independently eligible
-`each` records remain deliverable.
+Durable execution and recovery semantics, including process-attempt and
+completion-group recovery, are specified in
+[the workflow runtime contract](WORKFLOW_RUNTIME.md#recovery-and-observation).
 
 ### 9.8 Usage accounting, pricing provenance, and live projection
 

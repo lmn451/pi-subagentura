@@ -84,6 +84,13 @@ continues an interrupted run. Use `async:false` on resume when you need its resu
 immediately. Terminal runs do not resume; rerunning a saved definition creates a
 new run.
 
+Durable workflow members can share persisted completion groups with other
+completion sources. If group recovery is unavailable, terminal errors remain
+eligible under their original group identity; successful and cancelled members
+stay gated. Recovery does not infer membership from records while the
+authoritative snapshot is unavailable. After repair, only validated snapshot
+members count toward readiness, and a retained terminal error counts once.
+
 Recovery requires the same host, canonical working directory, Pi session id,
 and Node major version. It re-executes the immutable program from the beginning,
 validates request identity, and delivers committed responses in their recorded
