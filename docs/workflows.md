@@ -6,12 +6,14 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 # Workflows
 
 `/workflow <task>` creates a reusable script with stable operation IDs, validates
-it with `save_workflow({requireDurable:true})`, and starts a durable background
-run. `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts;
-compatible scripts run durably, while legacy scripts keep session-scoped behavior.
-The `list_workflows` tool also returns readiness and a SHA-256 source digest.
-Computed operation IDs are checked again during execution; static readiness
-does not guarantee that every runtime input will produce unique IDs.
+it with `save_workflow({requireDurable:true})`, and explicitly starts a durable
+background run. `/workflows` shows `durable-ready` or `session-scoped` beside
+saved scripts; the label reports capability, and selecting a script runs it
+session-scoped. To persist a saved script's run, explicitly call
+`workflow({name, args, durable:true})`. The `list_workflows` tool also returns
+readiness and a SHA-256 source digest. Computed operation IDs are checked again
+during durable execution; static readiness does not guarantee that every runtime
+input will produce unique IDs.
 
 After interruption, use `resume_workflow({workflowId})` in the same Pi session
 and working directory. Recovery is manual and requires Pi to run. Direct calls

@@ -83,9 +83,11 @@ pi --orchestrator
 /workflow-tree
 ```
 
-`/workflow` asks the parent to create, validate, save, and immediately run a
+`/workflow` asks the parent to create, validate, save, and immediately start a
 durable reusable workflow. `/workflows` labels saved scripts as `durable-ready`
-or `session-scoped` and runs compatible scripts durably by default.
+or `session-scoped`; selecting one runs it session-scoped by default. Use an
+explicit `durable: true` argument to the `workflow` tool to persist a saved
+workflow run.
 `/workflow-tree` shows live phases, agents, and cancellation controls.
 
 ## Reusable workflows
@@ -146,9 +148,10 @@ Use `save_workflow({ name, script, requireDurable: true })` to reject missing or
 ambiguous operation IDs before replacing a saved definition. `list_workflows`
 returns `durableReady` and a source `definitionDigest`; readiness also checks
 the current saved child definitions. Computed IDs remain validated at runtime.
-The `/workflows` command reports durable startup errors without falling back
-to a session-scoped run. Direct `workflow` tool calls still require explicit
-`durable: true`.
+Durable readiness is capability metadata and does not select a run mode.
+`/workflows` starts saved scripts session-scoped. Direct `workflow` tool calls
+require explicit `durable: true`; a failed durable start reports its error
+without falling back to a session-scoped run.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
