@@ -499,7 +499,6 @@ export function registerDurableWorkflowTools(
         runnerCompletion,
         workflowOwner,
       );
-      const synchronousCancellation = new AbortController();
       const workflowOptions: RunWorkflowOptions = {
         workflowId: store.id,
         args: decodeRunValue(definition.args),
@@ -521,7 +520,7 @@ export function registerDurableWorkflowTools(
             model: request.model ?? definition.defaultModel,
           }),
         loadWorkflow: loadWorkflowScript,
-        signal: runAsync ? undefined : synchronousCancellation.signal,
+        signal: undefined,
         requestInput: runAsync
           ? undefined
           : async (request, stepSignal) => {
@@ -612,6 +611,7 @@ export function registerDurableWorkflowTools(
       }
       const inheritedAbort = () => {
         if (runAsync) return;
+        if (getWorkflowJobForOwner(job.id, workflowOwner) !== job) return;
         void withWorkflowTerminalTransition(job, async () => {
           const committed = terminal(store!.events);
           if (committed && committed.data.status !== "cancelled") return;

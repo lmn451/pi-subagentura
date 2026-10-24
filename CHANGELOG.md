@@ -154,6 +154,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the affected workflow protected and retryable rather than counted as
   aborted; both cancel-all entry points leave the foreground tool signal active
   until all durable cancellation intents and attempt markers succeed.
+- Route inherited native-tool aborts for synchronous durable starts and resumes
+  through the same persistence-first cancellation path. Failed intent writes
+  leave owned work active and retryable; late aborts preserve committed results.
 - Retrying durable cancellation reissues per-attempt markers even after the
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts

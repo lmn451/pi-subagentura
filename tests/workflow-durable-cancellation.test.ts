@@ -32,7 +32,12 @@ import { clearSessionScopes, sessionOwner } from "../src/session-scope";
 import type { SessionScope } from "../src/session-scope";
 import { createTestSessionScope } from "./session-scope-fixture";
 import { zeroUsage } from "../src/usage";
-import type { WorkflowAgentRunner } from "../src/workflow-core";
+import {
+  defaultConcurrency,
+  defaultProcessConcurrency,
+  WORKFLOW_WALL_TIMEOUT_MS,
+  type WorkflowAgentRunner,
+} from "../src/workflow-core";
 import { registerInProcessJob, type JobState } from "../src/helpers";
 
 const fsFault = vi.hoisted(() => ({
@@ -88,6 +93,34 @@ interface RegisteredTool {
     onUpdate: unknown,
     ctx: unknown,
   ): Promise<ToolResult>;
+}
+async function waitForAgentStart(
+  started: Promise<void>,
+  invocation: Promise<ToolResult>,
+  stage: string,
+): Promise<void> {
+  const outcome = await Promise.race([
+    started.then(() => ({ kind: "started" as const })),
+    invocation.then(
+      (result) => ({ kind: "returned" as const, result }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    ),
+  ]);
+  if (outcome.kind === "returned") {
+    const response = JSON.stringify({
+      isError: outcome.result.isError,
+      details: outcome.result.details,
+      content: outcome.result.content?.map((item) => item.text),
+    });
+    throw new Error(`${stage} returned before provider start: ${response}`);
+  }
+  if (outcome.kind === "rejected") {
+    const error =
+      outcome.error instanceof Error
+        ? outcome.error.message
+        : String(outcome.error);
+    throw new Error(`${stage} rejected before provider start: ${error}`);
+  }
 }
 
 interface DurableToolsApi {
@@ -264,6 +297,26 @@ async function persistedRunWithAttempt() {
   const id = store.id;
   await store.close();
   return { id, path, runScope, directory: store.directory };
+}
+async function persistedRunForResume() {
+  const runScope: RunScope = {
+    cwd: root,
+    sessionId: harness.runScope.sessionId,
+    root,
+  };
+  const store = await WorkflowRunStore.create(runScope, {
+    script: DURABLE_SCRIPT,
+    args: encodeRunValue(undefined),
+    budgetTotal: 100,
+    concurrency: defaultConcurrency(),
+    processConcurrency: defaultProcessConcurrency(),
+    workflowTimeoutMs: WORKFLOW_WALL_TIMEOUT_MS,
+  });
+  await store.append("accepted", {});
+  await store.append("delivery", { completion: {} });
+  const id = store.id;
+  await store.close();
+  return { id, runScope };
 }
 
 beforeEach(async () => {
@@ -485,6 +538,199 @@ describe("durable cancellation regressions", () => {
       finish();
     }
     await job.promise;
+  });
+
+  it("persists native abort intent before stopping synchronous resumed work", async () => {
+    const agentStarted = deferred<void>();
+    const agentAborted = deferred<void>();
+    const intentEntered = deferred<void>();
+    const allowIntentFailure = deferred<void>();
+    releases.add(() => allowIntentFailure.resolve());
+    let runnerSignal: AbortSignal | undefined;
+    const runner: WorkflowAgentRunner = async ({ signal }) => {
+      runnerSignal = signal;
+      agentStarted.resolve();
+      const provider = Promise.withResolvers<never>();
+      const onAbort = () => {
+        agentAborted.resolve();
+        provider.reject(new Error("controlled provider stopped"));
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+      return provider.promise;
+    };
+    const { id, runScope } = await persistedRunForResume();
+    registerWorkflowTool(harness.pi, harness.scope);
+    durableTools(runner);
+    const nativeSignal = new AbortController();
+    const resume = getTool("resume_workflow").execute(
+      "native-abort-resume",
+      { workflowId: id, async: false },
+      nativeSignal.signal,
+      undefined,
+      harness.ctx,
+    );
+    let resumeSettled = false;
+    void resume.then(() => {
+      resumeSettled = true;
+    });
+    await waitForAgentStart(
+      agentStarted.promise,
+      resume,
+      "Synchronous registered resume",
+    );
+    const job = workflowJobRegistry.get(id);
+    if (!job?.durable || !runnerSignal)
+      throw new Error("Synchronous durable resume did not start its runner.");
+    const append = job.durable.store.append.bind(job.durable.store);
+    let failIntent = true;
+    vi.spyOn(job.durable.store, "append").mockImplementation(
+      async (kind, data) => {
+        if (kind === "cancelled" && failIntent) {
+          failIntent = false;
+          intentEntered.resolve();
+          await allowIntentFailure.promise;
+          throw new Error("injected cancellation intent failure");
+        }
+        return append(kind, data);
+      },
+    );
+
+    nativeSignal.abort();
+
+    expect(nativeSignal.signal.aborted).toBe(true);
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(runnerSignal.aborted).toBe(false);
+    expect(resumeSettled).toBe(false);
+    await intentEntered.promise;
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(runnerSignal.aborted).toBe(false);
+    allowIntentFailure.resolve();
+    const nextTurn = Promise.withResolvers<void>();
+    setImmediate(nextTurn.resolve);
+    await nextTurn.promise;
+
+    const failedEvents = await WorkflowRunStore.inspect(runScope, id);
+    expect(failedEvents?.some((event) => event.kind === "cancelled")).toBe(
+      false,
+    );
+    expect(failedEvents?.some((event) => event.kind === "terminal")).toBe(
+      false,
+    );
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(runnerSignal.aborted).toBe(false);
+    expect(resumeSettled).toBe(false);
+
+    let journalAtAbort: Promise<RunEvent[] | undefined> | undefined;
+    job.abort.signal.addEventListener(
+      "abort",
+      () => {
+        journalAtAbort = WorkflowRunStore.inspect(runScope, id);
+      },
+      { once: true },
+    );
+    const cancelled = await getTool("cancel_workflow").execute(
+      "retry-native-abort",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(cancelled.details.status).toBe("cancelled");
+    expect(job.abort.signal.aborted).toBe(true);
+    await agentAborted.promise;
+    expect(journalAtAbort).toBeDefined();
+    expect(
+      (await journalAtAbort!)?.some((event) => event.kind === "cancelled"),
+    ).toBe(true);
+
+    await Promise.allSettled([job.promise, resume]);
+    expect(job.status).toBe("cancelled");
+    expect(resumeSettled).toBe(true);
+    const finalEvents = await WorkflowRunStore.inspect(runScope, id);
+    expect(
+      finalEvents?.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      finalEvents?.some(
+        (event) =>
+          event.kind === "terminal" && event.data.status === "cancelled",
+      ),
+    ).toBe(true);
+  });
+
+  it("preserves committed terminal outcomes when native abort arrives late", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    for (const expectedStatus of ["done", "error"] as const) {
+      const agentStarted = deferred<void>();
+      const finishAgent = deferred<void>();
+      releases.add(() => finishAgent.resolve());
+      const runner: WorkflowAgentRunner = async () => {
+        agentStarted.resolve();
+        await finishAgent.promise;
+        if (expectedStatus === "error")
+          throw new Error("controlled provider failure");
+        return {
+          isError: false,
+          output: "completed",
+          usage: zeroUsage(),
+        };
+      };
+      const { id, runScope } = await persistedRunForResume();
+      durableTools(runner);
+      const nativeSignal = new AbortController();
+      const resume = getTool("resume_workflow").execute(
+        "late-native-abort-resume",
+        { workflowId: id, async: false },
+        nativeSignal.signal,
+        undefined,
+        harness.ctx,
+      );
+      await waitForAgentStart(
+        agentStarted.promise,
+        resume,
+        `Synchronous ${expectedStatus} resume`,
+      );
+      const job = workflowJobRegistry.get(id);
+      if (!job?.durable)
+        throw new Error("Synchronous durable resume did not start its job.");
+      const terminalCommitted = deferred<void>();
+      const append = job.durable.store.append.bind(job.durable.store);
+      vi.spyOn(job.durable.store, "append").mockImplementation(
+        async (kind, data) => {
+          const result = await append(kind, data);
+          if (
+            kind === "terminal" &&
+            data !== null &&
+            typeof data === "object" &&
+            "status" in data &&
+            data.status === expectedStatus
+          ) {
+            nativeSignal.abort();
+            terminalCommitted.resolve();
+          }
+          return result;
+        },
+      );
+
+      finishAgent.resolve();
+      const result = await resume;
+      await terminalCommitted.promise;
+      expect(nativeSignal.signal.aborted).toBe(true);
+      expect(result.details.status).toBe(expectedStatus);
+      expect(job.status).toBe(expectedStatus);
+      const events = await WorkflowRunStore.inspect(runScope, id);
+      expect(
+        events?.some(
+          (event) =>
+            event.kind === "terminal" && event.data.status === expectedStatus,
+        ),
+      ).toBe(true);
+      expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
+    }
   });
 
   it("keeps a sync durable workflow alive through both handlers when cancellation intent cannot persist", async () => {
