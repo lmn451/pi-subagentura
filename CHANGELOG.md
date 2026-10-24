@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Executable TypeScript V4 workflows with `defineWorkflow()` and a typed
   `ctx` API for persisted steps, agent calls, bounded fan-out/repeat, human
-  input, checkpoints, and artifacts. V4 definitions default to project-scoped
-  durable runs; `durable: false` selects an in-memory run.
+  input, checkpoints, and artifacts. V4 definitions use the in-memory engine
+  unless `durable: true` explicitly selects project-scoped persistence.
 - Explicit bounded `retry()` workflow primitive, independent of existing
   three-attempt schema repair, with typed attempt numbers and cancellation guards.
 - Opt-in durable legacy code workflows: private request/response and agent-attempt
@@ -23,15 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arguments, effective settings, and nested definitions are recorded; parallel
   response ordering and worker-visible budget deltas replay without new agent calls.
 - One-use process attempt supervisors and persisted unfinished completion
-  barriers for durable workflows. Legacy `.mjs` execution remains non-durable
-  by default; V4 definitions default to project-scoped durable runs. Neither
-  mode adds a daemon, remote execution, VM snapshots, or an exactly-once
-  external-side-effect guarantee. Interrupted runs require explicit resume from
-  a live Pi process.
+  barriers for durable workflows. Both formats use the in-memory engine unless
+  `durable: true` is explicit. Neither mode adds a daemon, remote execution, VM
+  snapshots, or an exactly-once external-side-effect guarantee. Interrupted
+  persisted runs require explicit resume from a live Pi process.
 - Durable authoring preflight via `save_workflow({ requireDurable: true })`,
-  saved-definition readiness and source digests, and durable execution by default
-  for compatible `/workflows` selections. `/workflow <task>` generates stable
-  IDs, validates before saving, and requests a durable background run.
+  saved-definition readiness and source digests. `/workflows` selections run
+  session-scoped by default; persisted execution requires an explicit
+  `durable: true` request. `/workflow <task>` generates stable IDs, validates
+  before saving, and can request a durable background run explicitly.
 - A reusable four-aspect source-review example with schema-validated findings,
   deterministic severity counts and verdict precedence, and explicit failed or
   uncertain review outcomes.
