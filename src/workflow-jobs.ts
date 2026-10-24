@@ -477,9 +477,9 @@ export async function requestDurableWorkflowCancellation(
       completedAt: Date.now(),
     });
   }
+  await stopDurableProcessAttempts(store.directory);
   if (job && options?.suppressCompletionNotification)
     job.suppressCompletionNotification = true;
-  await stopDurableProcessAttempts(store.directory);
   if (job) cancelWorkflowJob(job, "explicit_cancel");
 }
 
@@ -704,7 +704,10 @@ export function startWorkflowJob(
           );
           if (terminal) {
             if (terminal.data.status === "done") return;
-            throw new Error("Workflow interrupted before result commit.");
+            // A legacy cancellation event records intent before marker cleanup;
+            // if cleanup failed, a still-running provider may complete normally.
+            if (terminal.kind !== "cancelled" || state.durable!.stepBased)
+              throw new Error("Workflow interrupted before result commit.");
           }
           if (state.durableInterrupted || abort.signal.aborted)
             throw new Error("Workflow interrupted before result commit.");

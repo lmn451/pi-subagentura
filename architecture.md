@@ -734,7 +734,7 @@ For every parent-visible standalone terminal record and every background workflo
 
 `completionPolicy="each"` is the default. Records become independently eligible as soon as they are terminal; records that finish while the parent is busy coalesce into one manifest at the next safe dispatch. A related group is formed only when the caller explicitly selects `completionPolicy="group"` and provides a shared `completionGroupId`; same-turn launch and task text never infer relatedness.
 
-For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group and late members are rejected. Errors are eligible for parent delivery before the group barrier; success and cancellation wait until every registered member is terminal. Early error delivery leaves the group member registered and its terminal accounting intact, so remaining successful or cancelled members stay gated until the group is ready. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
+For an explicit group, every member is registered before the spawning parent turn settles. Settlement seals the group and late members are rejected. If durable seal persistence fails, admission still closes at that turn boundary; later turns cannot add members to the group. Errors are eligible for parent delivery before the group barrier; success and cancellation wait until every registered member is terminal. Early error delivery leaves the group member registered and its terminal accounting intact, so remaining successful or cancelled members stay gated until the group is ready. Per-member TUI notices remain immediate, and an entirely consumed group creates no empty turn. Groups use `source:sourceId` member keys, support at most 32 members and 512 groups per parent session, and accept 1–128 character IDs matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source satisfies a group once; repeated turns from that source/group are independent `each` records.
 
 The coordinator never injects into a streaming turn. Human input and steering set a priority fence; `before_agent_start` attaches one hidden bounded `subagent-manifest` to that natural turn. Without human input, safe idleness triggers one Pi follow-up. The manifest contains completion IDs, statuses, and references only. Interactive references use immutable `outputs/<eventId>.md` snapshots when available plus `events.ndjson`; in-process and workflow references name their result tools.
 The user-visible handling and limits for terminal error diagnostics are documented
@@ -818,8 +818,10 @@ It selects inline versus saved source, foreground versus background, owner ident
 `src/workflow-worker.ts` is the host engine and worker RPC server.
 `src/workflow-worker-thread.mjs` evaluates the script and owns DSL calls.
 `src/workflow-jobs.ts` owns background workflow state.
-Durable legacy runs are opt-in; V4 definition workflows use project-scoped
-durable runs by default unless `durable: false` is set. Both use
+Legacy durable runs are opt-in. Direct V4 definitions use project-scoped
+durable runs only with `durable:true`; an omitted flag or `durable:false`
+selects the session-scoped in-memory engine. Definitions selected through
+`/workflows` remain session-scoped. Durable runs use
 `workflow-run-store.ts` journals,
 `workflow-durable.ts` replay/dispatch coordination,
 `workflow-durable-process.ts` process-attempt recovery, and
@@ -1302,7 +1304,7 @@ The restrictive exports map matters: shipping all source files in `package.json#
 
 - [ ] Rehydrate runs only for `startup`, `reload`, or `resume`.
 - [ ] Rehydrate restores coordinated interactive policy/group membership and completes before polling begins.
-- [ ] Recovered groups seal before polling; in-process/workflow jobs do not rehydrate.
+- [ ] Recovered interactive groups seal before polling. In-process and session-scoped workflow jobs do not rehydrate; durable workflow runs require explicit recovery (see the [workflow runtime contract](WORKFLOW_RUNTIME.md)).
 - [ ] Shutdown advances generation before asynchronous teardown.
 - [ ] Final shutdown clears the poll interval.
 - [ ] Final shutdown clears interactive registry identity before killing panes.

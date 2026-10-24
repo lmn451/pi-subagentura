@@ -255,6 +255,10 @@ multiple model calls per outer attempt. All calls retain workflow resource caps.
 Use `list_workflow_runs`, `get_workflow_status`, and `get_workflow_result` for
 ordinary parent-turn rules. Their mixed-source membership is preserved, and successful or cancelled members remain behind the group barrier. Once the authoritative snapshot is repaired, only its validated members count toward the barrier; previously delivered terminal errors are reconciled once. Independent completions remain deliverable.
 
+An explicit completion group's admission closes when the spawning parent turn
+settles. If durable seal persistence fails, later turns cannot add members to
+that group; the failed write does not reopen admission.
+
 Legacy recovery requires the same host, canonical working directory, Pi
 session id, and Node major version. V4 project-scoped recovery requires the
 same host, canonical working directory, and Node major version, and must be
@@ -310,14 +314,26 @@ ordinary parent-turn rules. While recovery is blocked, errors retain their origi
   Durable cancellation intent or attempt-marker write failures remain explicit
   errors rather than being downgraded to best-effort cancellation.
 - `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
-  before aborting owned work. When snapshots are enabled, cancel-all captures
-  receipts for owned work, including durable process attempts, before aborting.
-  A failed intent or attempt-marker write reports the workflow as failed to
-  cancel and keeps its owned in-process/process-backed work protected and
-  retryable. Both cancel-all entry points abort their foreground tool signal
-  only after all durable cancellations succeed; if no durable workflow is
-  present the normal foreground abort still occurs. Retrying after the run-level
-  intent is recorded still retries the per-attempt markers.
+  before aborting owned work. A native tool abort linked to a synchronous
+  durable start or resume follows the same persistence-first transition before
+  aborting the run or its owned work. When snapshots are enabled, cancel-all
+  captures receipts for owned work, including durable process attempts, before
+  aborting. A failed intent or attempt-marker write reports cancellation
+  failure. Retries persist any missing run-level intent and retry outstanding
+  per-attempt markers. For durable legacy workflows, a cancelled-intent row
+  alone does not reject a successful provider result when marker cleanup fails:
+  the normal result remains eligible and produces one ordinary completion
+  notification. Existing abort and `durableInterrupted` guards still apply.
+  V4 step-based cancellation is different: an authoritative cancelled row
+  remains terminal and takes precedence over queued success. Both cancel-all
+  entry points abort their foreground tool signal only after all durable
+  cancellations succeed; if no durable workflow is present the normal
+  foreground abort still occurs.
+- A native abort observed after a terminal event is committed preserves that
+  result. If cancellation is requested while the final journal write is still
+  in flight, cancellation can be appended after the terminal event and
+  inspection can report `cancelled`; atomic ordering for this race is deferred
+  to pi-durable.
 - Process wrappers consume the exact attempt's cancellation marker and
   terminate their child process group. A persisted pane id alone never
   authorizes killing a recovered pane.

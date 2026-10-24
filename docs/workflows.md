@@ -7,8 +7,10 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 Workflows support two source formats. New typed workflows use the V4 TypeScript
 SDK described below; existing `.mjs` scripts use the legacy injected-global API.
-See [the runtime contract](../WORKFLOW_RUNTIME.md) for execution and recovery
-details, and the [typed example](../examples/workflows/review-source.ts).
+See [README workflow usage](../README.md#reusable-workflows) for command
+defaults and the [runtime contract](../WORKFLOW_RUNTIME.md) for execution,
+recovery, cancellation, and result-consumption details. See also the typed
+[example](../examples/workflows/review-source.ts).
 
 `/workflow <task>` explicitly opts into authoring, not durable execution. By
 default it assesses suitability, authors with the typed V4 API when its step
@@ -152,9 +154,19 @@ unrelated later-turn result.
 
 `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
 before aborting owned workflow/process work. A failed intent or attempt-marker
-write reports cancellation failure and protects the run and its owned children
-for retry. After the run-level intent is recorded, a retry still repairs each
-per-attempt marker.
+write reports cancellation failure. Retries persist any missing run-level
+intent and retry outstanding per-attempt markers. For durable legacy workflows,
+a cancelled-intent row alone does not reject a successful provider result when
+marker cleanup fails: the normal result remains eligible and produces one
+ordinary completion notice. Existing abort and `durableInterrupted` guards
+still apply. V4 step-based cancellation is different: an authoritative
+cancelled row remains terminal and takes precedence over queued success.
+
+A native abort linked to a synchronous durable start or resume uses the same
+persistence-first transition. An abort after a terminal result is committed
+preserves it; cancellation requested while the final journal write is still in
+flight can still append after the terminal event and make inspection report
+`cancelled`. Atomic ordering remains deferred to `pi-durable`.
 
 ## Creating and resuming workflows
 

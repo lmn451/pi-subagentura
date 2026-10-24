@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require Node.js 24.12 or newer for native erasable TypeScript workflow
   syntax. The workflow worker pins Effect 4 internally; Effect remains outside
   the public workflow API.
+- Use native Pi SDK APIs with peers `>=1.2.0` and development/lock version
+  `1.4.0`; no pi-server dependency, SDK compatibility adapter, shim, or
+  compatibility re-export is used.
 - `/workflow <task>` defaults to session-scoped authoring, preferring the typed
   V4 API when its step APIs fit and using legacy `.mjs` only when simpler. The
   parent assesses feasibility, semantically reviews the exact source, then
@@ -67,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Further durability, storage, and crash-consistency hardening is deferred to
   `pi-durable`. Keep completed journal, cancellation, and completion-group
   repairs; this changelog does not claim additional crash-consistency guarantees.
+- An abort after a terminal result is committed preserves that result.
+  Cancellation requested while the final journal write is in flight can still
+  append after the terminal record and make inspection report `cancelled`;
+  atomic ordering is deferred to `pi-durable`.
 
 ### Fixed
 
@@ -75,12 +82,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts; successful and cancelled members stay behind the process-global
   recovery fence. Only validated snapshot members count after authoritative
   repair, and held terminal errors are reconciled once.
+- Close explicit completion-group admission when the spawning parent turn
+  settles, even if persisting the durable seal fails; later turns cannot add
+  members to that group.
 - Reconcile early fallback consumption receipts only with the exact completion
   identity, source, and turn; stale result reads cannot transfer a receipt away
   from their initiating owner.
-- Persist durable cancel-all intent before aborting. Failed writes protect the
-  run and owned children for retry; later retries still apply per-attempt
-  cancellation markers after run-level intent is recorded.
+- Persist durable cancel-all intent before aborting. Inherited native-tool
+  aborts for synchronous durable starts and resumes use the same
+  persistence-first transition. Failed intent or attempt-marker writes report
+  cancellation failure; retries persist missing run-level intent and retry
+  outstanding per-attempt markers. For durable legacy workflows, a cancelled-
+  intent row alone does not reject a successful provider result when marker
+  cleanup fails; its ordinary completion remains eligible and produces one
+  ordinary completion notification. Existing abort and `durableInterrupted`
+  guards still apply. V4 step-based cancellation is different: an authoritative
+  cancelled row remains terminal and takes precedence over queued success.
 - Forward the actual process cancellation snapshot and never kill a recovered
   pane on the authority of a persisted pane ID alone.
 - Handle promptless Pi custom agent-start events in completion coordination.
@@ -156,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the affected workflow protected and retryable rather than counted as
   aborted; both cancel-all entry points leave the foreground tool signal active
   until all durable cancellation intents and attempt markers succeed.
+- Route inherited native-tool aborts for synchronous durable starts and resumes
+  through the same persistence-first cancellation path. Failed intent writes
+  leave owned work active and retryable; aborts observed after a terminal event
+  is committed preserve that result. An abort during the final journal write can
+  still append cancellation after the terminal event and make inspection report
+  cancelled; atomic ordering is deferred to pi-durable.
 - Retrying durable cancellation reissues per-attempt markers even after the
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts
@@ -253,6 +276,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include a bounded, explicitly untrusted terminal error diagnostic in interactive
   artifact reads, including for empty snapshots; diagnostic credentials are not
   redacted.
+
+## [3.6.5] - 2026-10-14
+
+### Added
+
+- Added opt-in local diagnostics for unknown mux liveness, logged once per
+  tracked pane per outage. Herdr reports only closed timeout, command-error,
+  or malformed-response reasons; anonymous telemetry is unchanged.
+- Added telemetry schema v5's optional closed `failure_operation` dimension to
+  distinguish interactive spawn preparation, persistence, and registration
+  failures without collecting exception text or user data.
+- Show supplied pi-subagentura tool arguments as JSON when tool output is
+  expanded with Pi's default Ctrl+O shortcut, retaining compact call summaries
+  when collapsed.
+- Record pi-subagentura tool names and full arguments in `extension_tool_call`
+  events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
+- Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
+  artifact diagnostics.
+
+### Fixed
+
+- Keep terminal interactive rows from reopening a persistent mux-probe
+  runtime-failure episode on every poll. A known-liveness poll ends the
+  episode; a later unknown result may report a new one.
+- Render coordinated workflow completion notices with resolved agent errors
+  as “completed with errors” while retaining the internal error status.
+- Reject missing or non-directory interactive child working directories before
+  creating a multiplexer pane.
+
+## [3.6.4] - 2026-10-03
+
+### Changed
+
+- Clarified provider and model selection guidance across sub-agent tools.
+
+### Fixed
+
+- Require explicit opt-in before workflows are selected by the orchestrator.
+- Distinguish Orchestratorv2 footer status from other interactive sub-agents.
+
+## [3.6.3] - 2026-09-24
+
+### Added
+
+- Added bounded diagnostics for interactive sub-agent processes that exit
+  before completing a turn.
+
+### Fixed
+
+- Corrected opt-in parent context inheritance to use Pi's canonical session
+  projection when available, preserve omission and replacement edits, and fall
+  back on older supported SDKs.
 
 ## [3.6.2] - 2026-09-06
 

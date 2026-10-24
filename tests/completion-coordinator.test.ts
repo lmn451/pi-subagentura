@@ -890,6 +890,89 @@ describe("completion coordinator", () => {
     ).toThrow(/sealed/);
   });
 
+  it("keeps an existing group closed when seal persistence fails", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const groupId = "seal-write-failure";
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    registerCompletionMember("workflow", "wfd_prior", "group", groupId, owner);
+    registerCompletionMember(
+      "workflow",
+      "wfd_cancelled",
+      "group",
+      groupId,
+      owner,
+    );
+    groupDirectorySyncFault.path = dirname(directory);
+    groupDirectorySyncFault.fail = true;
+
+    expect(() => sealCompletionGroups(owner)).toThrow(
+      "completion group parent sync failed",
+    );
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      {
+        version: 1,
+        groupId,
+        members: ["workflow:wfd_prior", "workflow:wfd_cancelled"],
+        sealed: false,
+      },
+    ]);
+    publishCompletion(
+      record("wfd_prior", {
+        source: "workflow",
+        policy: "group",
+        groupId,
+      }),
+      owner,
+    );
+    publishCompletion(
+      record("wfd_cancelled", {
+        source: "workflow",
+        policy: "group",
+        groupId,
+        status: "cancelled",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+    markCompletionTurnStarting(owner);
+    restoreDurableCompletionGroupsSync(owner);
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+    expect(() => reserveCompletionGroup("group", groupId, owner)).toThrow(
+      /sealed/,
+    );
+    expect(() => assertCompletionGroupOpen("group", groupId, owner)).toThrow(
+      /sealed/,
+    );
+    expect(() =>
+      registerCompletionMember("workflow", "wfd_late", "group", groupId, owner),
+    ).toThrow(/sealed/);
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      {
+        version: 1,
+        groupId,
+        members: ["workflow:wfd_prior", "workflow:wfd_cancelled"],
+        sealed: false,
+      },
+    ]);
+    expect(() =>
+      registerCompletionMember(
+        "workflow",
+        "wfd_new_turn",
+        "group",
+        "new-turn-group",
+        owner,
+      ),
+    ).not.toThrow();
+  });
+
   it("reopens only new-group admission for the next parent turn", () => {
     const setupResult = setup();
     scope = setupResult.scope;

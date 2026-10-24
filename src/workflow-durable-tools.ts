@@ -451,6 +451,7 @@ export function registerDurableWorkflowTools(
     let store: WorkflowRunStore | undefined;
     let accepted = false;
     let reservation: ReturnType<typeof reserveCompletionGroup>;
+    let removeNativeAbortListener: (() => void) | undefined;
     try {
       if (getOrchestrationContext())
         throw new Error(
@@ -692,33 +693,45 @@ export function registerDurableWorkflowTools(
         }
         throw error;
       }
-      const inheritedAbort = () => {
-        if (runAsync) return;
-        void withWorkflowTerminalTransition(job, async () => {
-          const committed = terminal(store!.events);
-          if (committed && committed.data.status !== "cancelled") return;
-          await requestDurableWorkflowCancellation(store!, job);
-        }).catch(() => {
-          onUpdate?.({
-            content: [
-              {
-                type: "text",
-                text: "Workflow cancellation could not be saved. The workflow remains active; retry cancellation.",
-              },
-            ],
-            details: { status: "running", workflowId: job.id },
-          });
-        });
-      };
       if (!runAsync && signal) {
-        signal.addEventListener("abort", inheritedAbort, { once: true });
-        void job.promise.then(
-          () => signal.removeEventListener("abort", inheritedAbort),
-          () => signal.removeEventListener("abort", inheritedAbort),
-        );
-        if (signal.aborted) inheritedAbort();
+        const runStore = store!;
+        const onNativeAbort = () => {
+          void withWorkflowTerminalTransition(job, async () => {
+            if (getWorkflowJobForOwner(job.id, workflowOwner) !== job) return;
+            const committed = terminal(runStore.events);
+            if (committed && committed.data.status !== "cancelled") return;
+            await requestDurableWorkflowCancellation(runStore, job);
+          }).catch(() => {
+            try {
+              onUpdate?.({
+                content: [
+                  {
+                    type: "text",
+                    text: "Workflow cancellation could not be saved. The workflow remains active; retry cancellation.",
+                  },
+                ],
+                details: { status: "running", workflowId: job.id },
+              });
+            } catch {
+              // The interrupted tool context may no longer accept updates.
+            }
+            try {
+              ctx.ui?.notify?.(
+                "Durable workflow cancellation could not be completed; the workflow may still be running. Retry with cancel_workflow.",
+                "warning",
+              );
+            } catch {
+              // The interrupted tool context may no longer be able to notify.
+            }
+          });
+        };
+        signal.addEventListener("abort", onNativeAbort, { once: true });
+        removeNativeAbortListener = () =>
+          signal.removeEventListener("abort", onNativeAbort);
+        if (signal.aborted) onNativeAbort();
       }
-      job.completionPolicy = completion.policy;
+      job.completionPolicy =
+        completion.policy ?? (runAsync ? "each" : undefined);
       job.completionGroupId = completion.groupId;
       accepted = true;
       if (runAsync)
@@ -750,6 +763,7 @@ export function registerDurableWorkflowTools(
     } catch (error) {
       return failure(error);
     } finally {
+      removeNativeAbortListener?.();
       if (!accepted) {
         releaseCompletionGroup(reservation);
         await store?.close();

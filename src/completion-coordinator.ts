@@ -232,6 +232,7 @@ interface CompletionCoordinatorState {
   groupReservations: Map<string, number>;
   reservedGroups: Set<string>;
   groupsSealed: boolean;
+  admissionClosedGroups: Set<string>;
   overflow: CompletionOverflowState;
   manifestRetryAttempt: number;
   manifestRetryExhausted: boolean;
@@ -1461,6 +1462,7 @@ function getState(
     groupReservations: new Map(),
     reservedGroups: new Set(),
     groupsSealed: false,
+    admissionClosedGroups: new Set(),
     overflow: undefined as unknown as CompletionOverflowState,
     manifestRetryAttempt: 0,
     manifestRetryExhausted: false,
@@ -1914,13 +1916,14 @@ export function reserveCompletionGroup(
   }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
+  if (
+    state.groupsSealed ||
+    state.admissionClosedGroups.has(normalizedGroupId) ||
+    group?.sealed
+  ) {
+    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
+  }
   const hasReservation = state.reservedGroups.has(normalizedGroupId);
-  if (group?.sealed) {
-    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
-  }
-  if (state.groupsSealed && !group) {
-    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
-  }
   const reserved = state.groupReservations.get(normalizedGroupId) ?? 0;
   if ((group?.members.size ?? 0) + reserved >= MAX_GROUP_MEMBERS) {
     throw new Error(`Completion group ${normalizedGroupId} is full`);
@@ -1980,7 +1983,10 @@ export function assertCompletionGroupOpen(
   ) {
     throw new Error("Too many completion groups in this parent session");
   }
-  if (state.groupsSealed && !group) {
+  if (
+    state.groupsSealed ||
+    state.admissionClosedGroups.has(normalizedGroupId)
+  ) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
 }
@@ -2062,14 +2068,17 @@ function registerCompletionMemberInner(
     groupId: normalizedGroupId,
     members: new Set<string>(),
     terminalMembers: new Set<string>(),
-    sealed: state.groupsSealed,
+    sealed:
+      state.groupsSealed || state.admissionClosedGroups.has(normalizedGroupId),
   };
   const memberKey = completionMemberKey(source, sourceId);
   if (
-    group.sealed &&
-    !group.members.has(memberKey) &&
+    !recovered &&
+    (state.groupsSealed ||
+      state.admissionClosedGroups.has(normalizedGroupId) ||
+      group.sealed) &&
     !hasReservation &&
-    !recovered
+    !group.members.has(memberKey)
   ) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
@@ -2095,6 +2104,10 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
   if (!state) return;
   if (isCompletionGroupRecoveryBlocked(state.owner)) return;
   state.groupsSealed = true;
+  for (const groupId of state.groups.keys())
+    state.admissionClosedGroups.add(groupId);
+  for (const groupId of state.reservedGroups)
+    state.admissionClosedGroups.add(groupId);
   for (const group of state.groups.values()) {
     writeCompletionGroup(
       sessionLedgerFile(state.owner, "subagentura-completion-groups") +
@@ -2128,8 +2141,9 @@ function installRecoveredGroup(
     groupId: saved.groupId,
     members,
     terminalMembers,
-    sealed: true,
+    sealed: saved.sealed || prior?.sealed === true,
   });
+  state.admissionClosedGroups.add(saved.groupId);
 }
 
 function reconcileRecoveredGroupTerminals(
@@ -2137,7 +2151,7 @@ function reconcileRecoveredGroupTerminals(
 ): void {
   for (const [groupId, members] of state.pendingGroupTerminals) {
     const group = state.groups.get(groupId);
-    if (!group?.sealed) continue;
+    if (!group) continue;
     for (const member of members) {
       if (group.members.has(member)) group.terminalMembers.add(member);
     }
@@ -2148,8 +2162,7 @@ function reconcileRecoveredGroupTerminals(
     if (record.policy !== "group") continue;
     const member = completionMemberKey(record.source, record.sourceId);
     const group = state.groups.get(record.groupId!);
-    if (group?.sealed && group.members.has(member))
-      group.terminalMembers.add(member);
+    if (group?.members.has(member)) group.terminalMembers.add(member);
   }
 }
 
@@ -2222,13 +2235,13 @@ export async function restoreDurableCompletionGroups(
       installRecoveredGroup(state, {
         groupId: saved.groupId,
         members: [...members],
-        sealed: true,
+        sealed: saved.sealed,
       });
       if (recoveredMembers.length !== saved.members.length) {
         writeCompletionGroup(directory, {
           groupId: saved.groupId,
           members: [...members],
-          sealed: true,
+          sealed: saved.sealed,
         });
       }
     }
