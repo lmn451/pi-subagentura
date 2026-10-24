@@ -39,8 +39,8 @@ Each reviewer returns a schema-validated verdict and up to 15 findings with
 severity, location, direct evidence, and explanation; the workflow combines
 these results without deduplicating independent evidence.
 
-Pass the full source to the `workflow` tool with both `files` and
-`intendedChange`, for example:
+Pass the full source to the direct `workflow` tool with both `files` and
+`intendedChange`. This example explicitly opts into durable execution:
 
 ```js
 workflow({
@@ -50,6 +50,7 @@ workflow({
     intendedChange:
       "Replace the token cache while preserving existing callers.",
   },
+  durable: true,
 });
 ```
 
@@ -90,13 +91,15 @@ Failed/unknown aspects never pass. After review, the workflow optionally asks
 whether to save the report as a run artifact; it never asks for permission to run
 the read-only review.
 
-V4 definitions are durable by default and use project-scoped run storage; set
-`durable: false` for an in-memory invocation. They support Node's erasable
-TypeScript syntax, but the workflow runner does not type-check it. Runtime
-imports must be named `defineWorkflow` / `schema` imports from
-`pi-subagentura/workflow`; other runtime imports are rejected. Node.js 24.12 or
-newer is required. The exact `effect@4.0.0-rc.117` runtime dependency remains
-internal.
+V4 definitions use the typed engine with session-scoped in-memory state when
+`durable` is omitted or `false`; a direct workflow-tool call with
+`durable: true` opts into project-scoped storage and restart recovery. Saved
+V4 definitions selected through `/workflows` also run session-scoped. The
+definition uses Node's erasable TypeScript syntax, but the workflow runner does
+not type-check it. Runtime imports must be named `defineWorkflow` / `schema`
+imports from `pi-subagentura/workflow`; other runtime imports are rejected.
+Node.js 24.12 or newer is required. The exact `effect@4.0.0-rc.117` runtime
+dependency remains internal.
 
 To inspect a paused run, use `list_workflow_runs` or `get_workflow_status`, then
 call `respond_workflow_input({workflowId, path})`; Pi asks the person at the UI
@@ -266,8 +269,9 @@ bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, the
 run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
 durable: true})`. Use `async: false` for an immediate result. After an
 interruption, use `resume_workflow({workflowId})` in the same project. This
-legacy `.mjs` example opts into durability; V4 definitions are durable by
-default unless `durable: false` is supplied.
+legacy `.mjs` example opts into durability; V4 direct launches also require
+`durable: true` to opt into persistence. Saved V4 definitions selected through
+`/workflows` remain session-scoped.
 
 `retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
 and `null`, but never cancellation. Every attempt may repeat agent side effects;

@@ -4,6 +4,7 @@ import {
   rm,
   access,
   mkdir,
+  appendFile,
   writeFile,
   readFile,
 } from "node:fs/promises";
@@ -34,6 +35,7 @@ import {
   clearCompletionCoordinator,
   restoreDurableCompletionGroups,
   publishCompletion,
+  restoreDurableCompletionGroupsSync,
   prepareCompletionManifest,
 } from "../src/completion-coordinator";
 import { zeroUsage } from "../src/usage";
@@ -43,6 +45,7 @@ import {
   WorkflowRunStore,
 } from "../src/workflow-run-store";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+import { writeCompletionGroup } from "../src/completion-group-store";
 
 let root: string;
 beforeEach(async () => {
@@ -69,21 +72,22 @@ function setup() {
       entries.push({ type: "custom", customType, data }),
     sendMessage: vi.fn(),
   };
+  const sessionManager = {
+    getSessionId: () => "same-parent",
+    getSessionDir: () => root,
+    getEntries: () => entries,
+  };
   const scope = registerSessionScope({
     id: 1,
     generation: 1,
     lifecycle: "started",
     pi,
     cwd: root,
-    sessionManager: {
-      getSessionId: () => "same-parent",
-      getSessionDir: () => root,
-      getEntries: () => entries,
-    },
+    sessionManager,
   });
   registerCompletionCoordinator(pi, scope);
   const ctx = { cwd: root, sessionManager: scope.sessionManager };
-  return { pi, scope, ctx, tools, entries };
+  return { pi, scope, ctx, tools, entries, sessionManager };
 }
 
 describe("durable public tools", () => {
@@ -246,9 +250,10 @@ describe("durable public tools", () => {
   });
 
   it("restores grouped workflow errors while holding safe terminals behind corrupt group state", async () => {
-    const { pi, scope, ctx, tools } = setup();
+    const { pi, scope, ctx, tools, entries, sessionManager } = setup();
     const owner = sessionOwner(scope);
     scope.parentStreaming = true;
+    sessionManager.getEntries = () => [];
     const runScope = { cwd: root, sessionId: "same-parent", root };
     const stores: WorkflowRunStore[] = [];
     const listRuns = WorkflowRunStore.list.bind(WorkflowRunStore);
@@ -308,6 +313,15 @@ describe("durable public tools", () => {
       const errorId = await persistTerminal("failed", "error");
       const successId = await persistTerminal("successful", "done");
       const cancelledId = await persistTerminal("cancelled", "cancelled");
+      writeCompletionGroup(groupsDirectory, {
+        groupId: "g",
+        members: [
+          `workflow:${errorId}`,
+          `workflow:${successId}`,
+          `workflow:${cancelledId}`,
+        ],
+        sealed: true,
+      });
 
       expect(prepareCompletionManifest(owner)).toBeUndefined();
       registerWorkflowTool(pi, scope);
@@ -326,6 +340,13 @@ describe("durable public tools", () => {
         completionId: `workflow:${errorId}`,
         status: "error",
       });
+      expect(
+        entries.some(
+          (entry) =>
+            entry.data?.completionId === `workflow:${errorId}` &&
+            entry.data?.groupId === "g",
+        ),
+      ).toBe(true);
       expect(manifestRecords).not.toContainEqual(
         expect.objectContaining({
           source: "workflow",
@@ -356,6 +377,38 @@ describe("durable public tools", () => {
         privateErrorMarker,
       );
       expect(await readFile(invalidSnapshotPath, "utf8")).toBe(invalidSnapshot);
+
+      await rm(invalidSnapshotPath);
+      await restoreDurableCompletionGroups(owner);
+      const publishPeer = (sourceId: string, status: "done" | "cancelled") =>
+        publishCompletion(
+          {
+            schemaVersion: 1,
+            completionId: `workflow:${sourceId}`,
+            source: "workflow",
+            sourceId,
+            label: sourceId,
+            status,
+            policy: "group",
+            groupId: "g",
+            references: [{ label: "result", value: "result" }],
+            completedAt: Date.now(),
+          },
+          owner,
+        );
+      publishPeer(successId, "done");
+      publishPeer(cancelledId, "cancelled");
+      const repairedManifest = prepareCompletionManifest(owner);
+      expect(repairedManifest?.details.completionIds).toHaveLength(2);
+      expect(repairedManifest?.details.completionIds).toEqual(
+        expect.arrayContaining([
+          `workflow:${successId}`,
+          `workflow:${cancelledId}`,
+        ]),
+      );
+      expect(repairedManifest?.details.completionIds).not.toContain(
+        `workflow:${errorId}`,
+      );
     } finally {
       listSpy.mockRestore();
       inspectSpy.mockRestore();
@@ -367,6 +420,152 @@ describe("durable public tools", () => {
         ),
       );
     }
+  });
+
+  it("counts a blocked error once after sync group recovery validates its membership", async () => {
+    const { scope, sessionManager } = setup();
+    const owner = sessionOwner(scope);
+    sessionManager.getEntries = () => [];
+    const directory =
+      sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
+      ".groups";
+    const errorId = `wfd_${"1".repeat(32)}`;
+    const peerId = `wfd_${"2".repeat(32)}`;
+    await mkdir(directory, { recursive: true });
+    writeCompletionGroup(directory, {
+      groupId: "sync-repair",
+      members: [`workflow:${errorId}`, `workflow:${peerId}`],
+      sealed: true,
+    });
+    const invalidPath = join(directory, "a".repeat(64) + ".json");
+    await writeFile(invalidPath, "broken snapshot");
+
+    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
+    const failedRecord = {
+      schemaVersion: 1 as const,
+      completionId: `completion-${errorId}`,
+      source: "workflow" as const,
+      sourceId: errorId,
+      label: "failed member",
+      status: "error" as const,
+      policy: "group" as const,
+      groupId: "sync-repair",
+      references: [{ label: "result", value: "result" }],
+      completedAt: 1,
+    };
+    publishCompletion(failedRecord, owner);
+    const firstManifest = prepareCompletionManifest(owner);
+    expect(firstManifest?.details.completionIds).toEqual([
+      failedRecord.completionId,
+    ]);
+
+    await rm(invalidPath);
+    restoreDurableCompletionGroupsSync(owner);
+    publishCompletion(
+      {
+        ...failedRecord,
+        completionId: `completion-${peerId}`,
+        sourceId: peerId,
+        label: "successful member",
+        status: "done",
+        completedAt: 2,
+      },
+      owner,
+    );
+    const repairedManifest = prepareCompletionManifest(owner);
+    expect(repairedManifest?.details.completionIds).toEqual([
+      `completion-${peerId}`,
+    ]);
+    expect(repairedManifest?.details.completionIds).not.toContain(
+      failedRecord.completionId,
+    );
+    clearCompletionCoordinator(owner);
+  });
+
+  it("keeps valid listed runs when another run journal is corrupt", async () => {
+    const { pi, scope, ctx, tools } = setup();
+    const runScope = { cwd: root, sessionId: "same-parent", root };
+    const valid = await WorkflowRunStore.create(runScope, {
+      script:
+        'export const meta={name:"waiting",description:"d"}; return "unused";',
+      args: encodeRunValue(undefined),
+      budgetTotal: 100,
+    });
+    await valid.close();
+    const validError = await WorkflowRunStore.create(runScope, {
+      script:
+        'export const meta={name:"failed",description:"d"}; return "unused";',
+      args: encodeRunValue(undefined),
+      budgetTotal: 100,
+    });
+    await validError.append("terminal", {
+      status: "error",
+      error: "private listed terminal diagnostic",
+      completedAt: Date.now(),
+    });
+    await validError.close();
+    const corrupt = await WorkflowRunStore.create(runScope, {
+      script:
+        'export const meta={name:"private-run",description:"d"}; return "unused";',
+      args: encodeRunValue(undefined),
+      budgetTotal: 100,
+    });
+    await corrupt.close();
+    const corruptPath = join(corrupt.directory, "journal.ndjson");
+    await appendFile(corruptPath, '{"private":"listing diagnostic"}\n');
+    const unreadableBytes = await readFile(corruptPath);
+    registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => vi.fn(),
+      () => false,
+      root,
+    );
+
+    const listed = await tools
+      .get("list_workflow_runs")
+      .execute("list-runs", {}, undefined, undefined, ctx);
+
+    expect(listed.isError).not.toBe(true);
+    expect(listed.details.runs).toContainEqual(
+      expect.objectContaining({ workflowId: valid.id, name: "waiting" }),
+    );
+    expect(listed.details.runs).toContainEqual(
+      expect.objectContaining({
+        workflowId: validError.id,
+        name: "failed",
+        status: "error",
+      }),
+    );
+    expect(listed.details.runs).toContainEqual({
+      workflowId: corrupt.id,
+      status: "unavailable",
+    });
+    expect(listed.content[0].text).toContain(valid.id);
+    expect(listed.content[0].text).toContain(`${corrupt.id}: unavailable`);
+    expect(listed.content[0].text).not.toContain("listing diagnostic");
+    expect(
+      JSON.stringify({
+        details: listed.details,
+        structured: listed.structuredContent,
+      }),
+    ).not.toContain("listing diagnostic");
+    expect(
+      JSON.stringify({
+        details: listed.details,
+        structured: listed.structuredContent,
+      }),
+    ).not.toContain("private listed terminal diagnostic");
+    expect(listed.structuredContent.runs).toContainEqual({
+      workflowId: valid.id,
+      name: "waiting",
+      status: "interrupted",
+    });
+    expect(listed.structuredContent.runs).toContainEqual({
+      workflowId: corrupt.id,
+      status: "unavailable",
+    });
+    expect(await readFile(corruptPath)).toEqual(unreadableBytes);
   });
   it("does not let a stale durable result read consume a replacement generation's completion", async () => {
     const { pi, scope, ctx } = setup();

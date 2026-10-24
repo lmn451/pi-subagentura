@@ -1523,11 +1523,14 @@ describe("v4 workflow public tools", () => {
     const asyncRun = await executeTool(
       current.tools,
       "workflow",
-      { script, durable: false, async: true },
+      { script, async: true },
       current.ctx,
     );
     const workflowId = asyncRun.details.workflowId;
     const job = workflowJobRegistry.get(workflowId)!;
+    expect(asyncRun.details.status).toBe("started");
+    expect(asyncRun.details.durable).toBeUndefined();
+    expect(job.durable).toBeUndefined();
     await waitForWorkflowWorker(() =>
       expect(
         job.snapshot.steps?.some((step) => step.status === "waiting_for_input"),
@@ -1638,7 +1641,7 @@ describe("v4 workflow public tools", () => {
       const started = await executeTool(
         current.tools,
         "workflow",
-        { script, async: true },
+        { script, durable: true, async: true },
         current.ctx,
       );
       const workflowId = started.details.workflowId;
@@ -1769,13 +1772,6 @@ describe("v4 workflow public tools", () => {
     const expectedWaitPaths = [holdPath, expectedPath];
     try {
       registerWorkflowTool(current.pi, current.scope);
-      const durable = registerDurableWorkflowTools(
-        current.pi,
-        () => sessionOwner(current.scope),
-        () => successfulRunner("unused"),
-        () => true,
-        join(root, ".pi-subagentura", "workflow-runs"),
-      );
       const script = definition(
         "wait-path-presentation-cap",
         `await ctx.group("review-bundle", async () => {
@@ -1798,15 +1794,52 @@ describe("v4 workflow public tools", () => {
      });
      return "complete";`,
       );
-      const started = await durable.run(
-        { script, async: true },
-        undefined,
-        undefined,
+      const started = await executeTool(
+        current.tools,
+        "workflow",
+        { script, durable: true, async: true },
         current.ctx,
       );
+      expect(started.details, JSON.stringify(started)).toMatchObject({
+        status: "started",
+        durable: true,
+      });
       const workflowId = started.details.workflowId;
-      const job = workflowJobRegistry.get(workflowId)!;
-      const liveStore = getLiveWorkflowV4Store(workflowId)!;
+      expect(workflowId, JSON.stringify(started)).toEqual(expect.any(String));
+      const job = workflowJobRegistry.get(workflowId);
+      expect(
+        job,
+        JSON.stringify({
+          started,
+          workflowId,
+          job: job && {
+            id: job.id,
+            status: job.status,
+            error: job.error,
+          },
+        }),
+      ).toBeDefined();
+      if (!job) throw new Error("Workflow start did not publish its job.");
+      expect(job.id).toBe(workflowId);
+      expect(
+        { status: job.status, error: job.error },
+        JSON.stringify({
+          started,
+          workflowId,
+          job: { id: job.id, status: job.status, error: job.error },
+        }),
+      ).toEqual({ status: "running", error: undefined });
+      const liveStore = getLiveWorkflowV4Store(workflowId);
+      expect(
+        liveStore,
+        JSON.stringify({
+          started,
+          workflowId,
+          job: { id: job.id, status: job.status, error: job.error },
+        }),
+      ).toBeDefined();
+      if (!liveStore)
+        throw new Error("Workflow start did not publish its live V4 store.");
       await waitForWorkflowWorker(() => {
         for (let index = 0; index < 256; index++) {
           expect(
@@ -1934,13 +1967,6 @@ describe("v4 workflow public tools", () => {
       current.scope.generation++;
       registerCompletionCoordinator(current.pi, current.scope);
       registerWorkflowTool(current.pi, current.scope);
-      registerDurableWorkflowTools(
-        current.pi,
-        () => sessionOwner(current.scope),
-        () => successfulRunner("unused"),
-        () => true,
-        join(root, ".pi-subagentura", "workflow-runs"),
-      );
       assertActionablePaths(
         await executeTool(
           current.tools,

@@ -5,10 +5,22 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
-Workflows support two source formats. New typed workflows can use the V4
-TypeScript SDK described below; existing `.mjs` scripts continue to use the
-legacy injected-global API. See [the runtime contract](../WORKFLOW_RUNTIME.md)
-for execution and recovery details, and the [typed example](../examples/workflows/review-source.ts).
+Workflows support two source formats. New typed workflows use the V4 TypeScript
+SDK described below; existing `.mjs` scripts use the legacy injected-global API.
+See [the runtime contract](../WORKFLOW_RUNTIME.md) for execution and recovery
+details, and the [typed example](../examples/workflows/review-source.ts).
+
+`/workflow <task>` explicitly opts into authoring, not durable execution. By
+default it assesses suitability, authors with the typed V4 API when its step
+APIs fit or the legacy `.mjs` API only when simpler, then semantically reviews
+the exact source before saving and running it session-scoped. If persisted
+restart recovery is explicitly requested, author a suitable V4 definition,
+save it with `requireDurable:true`, and launch the direct workflow tool with
+`durable:true`.
+`/workflows` labels saved scripts `durable-ready` or `session-scoped`; readiness
+is capability metadata only, and selecting a definition remains session-scoped.
+`list_workflows` returns readiness and a SHA-256 source digest; computed
+operation IDs are still checked at runtime.
 
 ## V4 typed workflows
 
@@ -73,14 +85,16 @@ reuse an incompatible result or adopt an attempt with a different policy.
 Recovery preserves the recorded policy. The normal workflow step records remain
 the progress source; this adds no separate ledger or scheduler.
 
-V4 definitions use project-scoped durable storage by default. Pass
-`durable: false` for a non-durable run. Completed durable steps are reused only
-when source definition, stable path, inputs, and policy remain compatible. A
-changed source hash causes the step to run again. `persist: false` omits a step
-output from durable storage; `cache: false` and `resume: false` disable reuse.
-This is a storage setting, not permission to disclose data to a model or
-provider. In particular, `persist: false` does not authorize sharing validation
-diagnostics or agent-thrown errors.
+V4 definitions use project-scoped durable storage when the direct `workflow`
+tool is called with `durable:true`; omitted or `durable:false` selects the
+session-scoped in-memory engine. Saved definitions launched through `/workflows`
+also run with the typed V4 engine and session-owned in-memory state. Completed
+durable steps are reused only when source definition, stable path, inputs, and
+policy remain compatible. A changed source hash causes the step to run again.
+`persist:false` omits a step output from durable storage; `cache:false` and
+`resume:false` disable reuse. This is a storage setting, not permission to
+disclose data to a model or provider. In particular, `persist:false` does not
+authorize sharing validation diagnostics or agent-thrown errors.
 
 Schema retries use generic feedback and omit unexpected property names/paths,
 parser details, and other raw diagnostics. Failed workflow status, result,
@@ -120,14 +134,15 @@ active V4 worker's execution-time limit.
 
 `ctx.ask()` and `ctx.gate()` wait for a human answer in the Pi UI. Use
 `list_workflow_runs` or `get_workflow_status` to find a waiting step, then call
-`respond_workflow_input({workflowId, path})`; the answer is persisted before
-the background run continues. With `async: false`, the tool collects input
-directly in Pi's UI. `ctx.budget.assertAvailable(amount)` checks whether a
-non-negative finite output-token amount fits in the current remaining soft
-budget; it does not reserve capacity or limit already-running work. Restart recovery is manual with
-`resume_workflow({workflowId})` in a live Pi process. See
-[review-source.ts](../examples/workflows/review-source.ts) for a runnable
-definition.
+`respond_workflow_input({workflowId, path})`. Durable runs persist the answer
+before continuing; session-scoped V4 runs selected through `/workflows` or
+started with `durable:false` keep the answer in memory. With `async: false`, the
+tool collects input directly in Pi's UI. `ctx.budget.assertAvailable(amount)`
+checks whether a non-negative finite output-token amount fits in the current
+remaining soft budget; it does not reserve capacity or limit already-running
+work. Restart recovery is manual with `resume_workflow({workflowId})` in a live
+Pi process. See [review-source.ts](../examples/workflows/review-source.ts) for
+a runnable definition.
 
 Manual durable result reads are owned by the initiating Pi session. A session
 change while result I/O is pending cannot transfer the consumption receipt.
@@ -143,18 +158,21 @@ per-attempt marker.
 
 ## Creating and resuming workflows
 
-`/workflow <task>` is explicit opt-in, not automatic workflow routing. The
-command hands the task to the parent with authoring guidance: first assess
-feasibility and suitability. If suitable, draft a reusable TypeScript V4
-definition with meaningful structured input/output/agent contracts and stable,
-bounded steps. Semantically review the exact draft in a distinct pass, using
-an independent reviewer when available; otherwise do a fresh self-review as a
-separate phase. Address findings and re-review every revision before saving.
-An explicit request normally authorizes saving and running without routine
-confirmation; human input is needed only when requested or when the task's risk
-warrants it. If the task is infeasible, unsupported, or materially
-underspecified, or material review issues remain unresolved, explain why and
-do not save or start.
+`/workflow <task>` is explicit authoring opt-in, not automatic workflow
+routing. By default the parent assesses suitability, authors with typed V4
+when its step APIs fit or legacy `.mjs` only when simpler, semantically reviews
+the exact source in a distinct pass, then saves and starts it asynchronously in
+the current session. Use a separate reviewer when
+available, otherwise a fresh self-review; address findings and re-review each
+revision. If work is infeasible, unsupported, materially underspecified, or
+material issues remain unresolved, explain without saving or starting. Explicit
+authoring normally needs no routine approval unless the user or task risk
+warrants it.
+
+If persisted restart recovery is explicitly requested, author a suitable V4
+definition with structured contracts and stable IDs, review the exact source
+and revisions, save with `requireDurable:true`, inspect the saved source, and
+launch the direct workflow tool with `durable:true`.
 
 This sequence is parent prompt guidance, not an enforced semantic-review gate or
 authorization state machine. `save_workflow({name, script, requireDurable:true})`
@@ -166,11 +184,14 @@ running agents, so the parent can confirm it matches the reviewed source before
 launch.
 
 `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts and
-starts compatible scripts durably by default. The `list_workflows` tool returns
-readiness and a SHA-256 source digest. Use `resume_workflow({workflowId})` from
-a live Pi process in the same project after interruption; recovery is manual. A
-direct V4 `workflow` call is durable by default, while legacy `.mjs` calls
-require `durable: true` to opt in.
+starts selected definitions session-scoped. The `list_workflows` tool returns
+readiness and a SHA-256 source digest; readiness is capability metadata, not
+execution permission. Use `resume_workflow({workflowId})` from a live Pi
+process in the same project after interruption; recovery is manual. Direct V4
+workflow-tool launches with `durable:true` use project-scoped storage;
+`durable:false` or an omitted flag runs session-scoped. Direct legacy `.mjs`
+calls retain the session-scoped default unless `durable:true` is passed.
+Failed explicit durable starts report their error without falling back.
 
 ## Legacy `.mjs` workflow scripts
 

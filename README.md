@@ -84,21 +84,25 @@ pi --orchestrator
 /workflow-tree
 ```
 
-`/workflow` is explicit opt-in. The parent first assesses feasibility and, if
-suitable, drafts a reusable V4 workflow with structured contracts and stable,
-bounded steps. It performs a distinct semantic review (using an independent
-reviewer when available), addresses findings, and re-reviews revisions before
-saving and starting the reviewed source durably in the background. If the task
-is infeasible or material issues remain, it explains without saving or starting.
-An explicit request needs no routine approval unless the user or task risk
-warrants it. This is prompt guidance, not an enforced semantic gate:
-`save_workflow` parses the source and, with `requireDurable: true`, checks static
-durable readiness; it cannot prove suitability, semantic correctness, or whether
-a review occurred. See [workflow authoring details](./docs/workflows.md#creating-and-resuming-workflows).
+`/workflow` explicitly opts into reusable-workflow authoring, not durable
+execution. By default the parent assesses suitability and drafts a typed V4
+workflow when its APIs fit, using a trusted legacy `.mjs` only when simpler; it
+semantically reviews the exact source in a separate pass, then saves and starts
+it session-scoped. Infeasible work or unresolved material findings are not
+saved or started. Explicit authoring normally needs no routine approval unless
+the user or task risk warrants it. This is prompt guidance, not an enforced
+semantic gate.
 
-`/workflows` labels saved scripts as `durable-ready` or `session-scoped` and runs
-compatible scripts durably by default. `/workflow-tree` shows live phases,
-agents, and cancellation controls.
+`/workflows` labels saved scripts as `durable-ready` or `session-scoped`;
+readiness is capability metadata, not execution permission. Selecting a saved
+workflow runs it session-scoped. Persist a run only through an explicit
+`durable: true` request; an opted-in durable process launch fails closed rather
+than falling back. `/workflow-tree` shows live phases, agents, and cancellation
+controls.
+
+Direct V4 `workflow(...)` calls also default to session-scoped, in-memory
+execution when `durable` is omitted or `false`. Use `durable: true` only when
+persistent execution was explicitly requested.
 
 ## Reusable workflows
 
@@ -119,11 +123,12 @@ of injected orchestration primitives:
 
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
-agent tools. Workflow agents default to separate Pi processes in tmux, Zellij,
-or Herdr, so they are observable and attachable; when no multiplexer is
-available, the runtime falls back to in-process execution. Intermediate agent
-results stay in workflow variables outside the parent model context. Only the
-workflow completion enters coordinated parent delivery; the retained final
+agent tools. Session-scoped workflow agents default to separate Pi processes in
+tmux, Zellij, or Herdr, so they are observable and attachable; when no
+multiplexer is available, the runtime falls back to in-process execution.
+Durable process attempts fail closed rather than falling back. Intermediate
+agent results stay in workflow variables outside the parent model context. Only
+the workflow completion enters coordinated parent delivery; the retained final
 result is available through `get_workflow_result`.
 
 An omitted workflow `budget` defaults to the finite `100_000_000_000` completed
@@ -141,9 +146,9 @@ interactive sub-agents use durable artifacts and survive parent `reload`,
 cleans up their owned panes and state entries; workflow-owned interactive panes
 are also cleaned up with their owning workflow.
 
-Legacy `.mjs` scripts opt into restart-resumable execution with
-`workflow({ name, args, durable: true })`. V4 TypeScript definitions are
-durable by default unless `durable: false` is set. Legacy durable scripts give
+Legacy `.mjs` workflows and V4 definitions are session-scoped by default. Pass
+`durable: true` to a direct `workflow` call to opt into persistent execution;
+`/workflows` selections remain session-scoped. Legacy durable scripts give
 every `agent()` and nested `workflow()` call a unique stable `id` option; V4
 definitions use stable IDs as the first argument to `ctx.step()`, `ctx.agent()`,
 and related operations. Include item keys in mapped work. Use
@@ -164,9 +169,7 @@ Use `save_workflow({ name, script, requireDurable: true })` to reject missing or
 ambiguous operation IDs before replacing a saved definition. `list_workflows`
 returns `durableReady` and a source `definitionDigest`; readiness also checks
 the current saved child definitions. Computed IDs remain validated at runtime.
-The `/workflows` command reports durable startup errors without falling back
-to a session-scoped run. Direct legacy `workflow` calls require explicit
-`durable: true`; V4 definitions are durable by default unless set to false.
+Durable readiness is capability metadata and does not select a run mode. `/workflows` starts saved scripts session-scoped. Direct workflow calls use session-scoped execution unless the caller explicitly passes `durable: true`; a failed explicit durable start reports its error without falling back to a session-scoped run.
 
 See the [workflow guide](./docs/workflows.md) and
 [bundled examples](./examples/workflows/README.md).
@@ -183,17 +186,16 @@ are limited to the named SDK bindings, and the workflow runner does not
 type-check source code. Effect 4 (`effect@4.0.0-rc.117`) is an internal runtime
 dependency and is not part of the workflow API.
 
-V4 definitions use project-scoped durable runs by default. Set `durable: false`
-for an in-memory run. To resume an interrupted run, use `resume_workflow`; to
-answer a paused question or approval, use `respond_workflow_input` with the
-workflow id and waiting step path. The Pi process must be running to resume or
-answer; no background daemon is provided. Durable step outputs are reused only
-when their source definition, stable path, inputs, and policy are compatible.
-Step summaries omit outputs and answers. A step callback interrupted before its
-completed value is committed can run again; make callbacks idempotent around
-external effects. Paused human waits and downtime before manual resume do not
-consume the active V4 worker's execution-time limit. See the
-[V4 workflow guide](./docs/workflows.md#v4-typed-workflows),
+V4 definitions use the typed engine in session-scoped memory when `durable` is
+omitted or false. Direct workflow calls with `durable: true` use project-scoped
+durable storage. To resume an interrupted durable run, use `resume_workflow`;
+the Pi process must be running and no background daemon is provided. Durable
+step outputs are reused only when their source definition, stable path, inputs,
+and policy are compatible. Step summaries omit outputs and answers. A step
+callback interrupted before its completed value is committed can run again;
+make callbacks idempotent around external effects. Paused human waits and
+downtime before manual resume do not consume the active V4 worker's
+execution-time limit. See the [V4 workflow guide](./docs/workflows.md#v4-typed-workflows),
 [runtime contract](./WORKFLOW_RUNTIME.md#v4-definitions), and
 [runnable TypeScript example](./examples/workflows/review-source.ts).
 

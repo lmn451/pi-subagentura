@@ -167,7 +167,7 @@ describe("private V4 agent results", () => {
         throw new Error(marker);
       },
     });
-    expect(result.result).toBe("Workflow agent failed.");
+    expect(result.result).toBe("Agent execution failed.");
     expect(JSON.stringify(result)).not.toContain(marker);
   });
 

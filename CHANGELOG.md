@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Executable TypeScript V4 workflows with `defineWorkflow()` and a typed
-  `ctx` API for persisted steps, agent calls, bounded fan-out/repeat, human
-  input, checkpoints, and artifacts. V4 definitions default to project-scoped
-  durable runs; `durable: false` selects an in-memory run.
+  `ctx` API for agent calls, bounded fan-out/repeat, human input, checkpoints,
+  artifacts, and optional durable steps. Omitted `durable` or `durable: false`
+  selects the session-scoped in-memory engine; `durable: true` opts into
+  project-scoped persistence.
 - Explicit bounded `retry()` workflow primitive, independent of existing
   three-attempt schema repair, with typed attempt numbers and cancellation guards.
 - Opt-in durable legacy code workflows: private request/response and agent-attempt
@@ -21,15 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arguments, effective settings, and nested definitions are recorded; parallel
   response ordering and worker-visible budget deltas replay without new agent calls.
 - One-use process attempt supervisors and persisted unfinished completion
-  barriers for durable workflows. Legacy `.mjs` execution remains non-durable
-  by default; V4 definitions default to project-scoped durable runs. Neither
-  mode adds a daemon, remote execution, VM snapshots, or an exactly-once
-  external-side-effect guarantee. Interrupted runs require explicit resume from
-  a live Pi process.
+  barriers for explicitly durable workflows. Legacy `.mjs` and V4 execution
+  remain session-scoped by default; `/workflows` selections are session-scoped.
+  Direct V4 workflow calls opt into project-scoped storage only with
+  `durable: true`. Neither mode adds a daemon, remote execution, VM snapshots,
+  or an exactly-once external-side-effect guarantee. Interrupted durable runs
+  require explicit resume from a live Pi process.
 - Durable authoring preflight via `save_workflow({ requireDurable: true })`,
-  saved-definition readiness and source digests, and durable execution by default
-  for compatible `/workflows` selections. `/workflow <task>` generates stable
-  IDs, validates before saving, and requests a durable background run.
+  saved-definition readiness and source digests. `/workflow <task>` defaults to
+  reviewed, session-scoped authoring, preferring the typed V4 API when its step
+  APIs fit and using legacy `.mjs` only when simpler; `/workflows` launches
+  saved definitions session-scoped. Readiness is capability metadata only, and
+  durable execution requires an explicit request for persisted recovery.
 - A reusable four-aspect source-review example with schema-validated findings,
   deterministic severity counts and verdict precedence, and explicit failed or
   uncertain review outcomes.
@@ -53,17 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require Node.js 24.12 or newer for native erasable TypeScript workflow
   syntax. The workflow worker pins Effect 4 internally; Effect remains outside
   the public workflow API.
-- `/workflow <task>` now instructs the parent to assess feasibility, draft and
-  semantically review the script, re-review revisions, then save and inspect the
-  reviewed source before durable execution. These authoring phases are model
-  guidance, not runtime-enforced approval gates.
+- `/workflow <task>` defaults to session-scoped authoring, preferring the typed
+  V4 API when its step APIs fit and using legacy `.mjs` only when simpler. The
+  parent assesses feasibility, semantically reviews the exact source, then
+  saves and starts. V4 persistence uses `durable:true` only for explicitly
+  requested restart recovery. These phases are model guidance, not runtime-
+  enforced approval gates.
+
+- Further durability, storage, and crash-consistency hardening is deferred to
+  `pi-durable`. Keep completed journal, cancellation, and completion-group
+  repairs; this changelog does not claim additional crash-consistency guarantees.
 
 ### Fixed
 
 - Failed completion-group recovery no longer suppresses independent manifests.
-  Group errors remain eligible without releasing successful or cancelled
-  members; original mixed-source membership is preserved and repaired snapshots
-  count each terminal error once.
+  Errors remain eligible under their original group ID without guessed group
+  counts; successful and cancelled members stay behind the process-global
+  recovery fence. Only validated snapshot members count after authoritative
+  repair, and held terminal errors are reconciled once.
 - Reconcile early fallback consumption receipts only with the exact completion
   identity, source, and turn; stale result reads cannot transfer a receipt away
   from their initiating owner.
@@ -135,17 +146,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed durable completion-group recovery no longer suppresses independent
   completions. Group errors remain eligible under ordinary parent-turn rules
   without discarding mixed-source membership; successful and cancelled members
-  remain behind the group barrier.
+  remain behind the group barrier. After repair, terminal errors count once only
+  when included in the validated authoritative group snapshot.
 - Reconcile fallback result-consumption receipts with completion expectations
   restored later; receipts consume only their matching completion and do not
   suppress unrelated later-turn completions.
 - Bind durable manual result-consumption receipts to the initiating session owner.
-- Persist durable cancellation before cancel-all aborts owned work; failed writes
-  keep the workflow protected and retryable rather than counted as aborted.
+- Persist durable cancellation before cancel-all aborts owned work. Failed writes
+  keep the affected workflow protected and retryable rather than counted as
+  aborted; both cancel-all entry points leave the foreground tool signal active
+  until all durable cancellation intents and attempt markers succeed.
 - Retrying durable cancellation reissues per-attempt markers even after the
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts
   without treating persisted mux pane ids as authority to kill panes.
+- Preserve persisted child token/cost usage and forward the actual cancellation
+  snapshot receipt when best-effort non-durable interactive artifact or pane
+  termination cleanup fails. Durable cancellation errors remain explicit.
+- Recover a failed durable journal append only after verifying its on-disk
+  state; complete writes are synced once, while partial or ambiguous tails stay
+  blocked without rewriting journal history.
+- Sync each newly created durable run-store directory entry before accepting a
+  run; a failed sync blocks creation and remains retryable.
+- Keep valid durable run listings visible when an unrelated journal is
+  unreadable, report only its safe ID and unavailable status, and leave its bytes
+  untouched.
+- Replay failed historical agent RPCs with a generic error while preserving
+  their stored response, failure classification, and no-redispatch behavior;
+  non-agent RPC replay errors retain their recorded meaning.
 
 ### Breaking
 

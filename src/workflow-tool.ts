@@ -896,7 +896,7 @@ export function registerWorkflowTool(
       "In-process sub-agents cannot invoke this tool; this topology is unsupported",
       "until cross-registry cancellation is implemented (GitHub issue #62).",
       "",
-      "V4 shape (preferred for new workflows):",
+      "V4 shape (session-scoped by default; opt into persistence explicitly):",
       "  import { defineWorkflow, schema } from 'pi-subagentura/workflow';",
       "  export default defineWorkflow({ name: 'my-flow', version: 1, async run(ctx, args) {",
       "    return ctx.agent('review', { prompt: 'Review the change', readOnly: true, output: schema.object({ ok: schema.boolean() }) });",
@@ -906,7 +906,7 @@ export function registerWorkflowTool(
       "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this organizes prompts but does not enforce semantic scope.",
       "For purely observational review or research, set readOnly: true. It restricts model-facing tools to Pi read/grep/find/ls (in-process schema capture may also use internal structured_output), not OS access or paths.",
       "Read-only process agents should return final prose/JSON directly rather than writing an output file or using bash for handoff. Progress comes from actual workflow step records; do not maintain a second model-authored todo ledger.",
-      "V4 definitions are durable by default and can resume in a new Pi session in the same cwd. respond_workflow_input asks the human to answer waiting questions or approvals. async:false collects input directly through Pi UI.",
+      "V4 definitions run through the existing in-memory session engine by default; durable: true opts into persisted execution and recovery. Saved /workflows launches remain session-scoped. respond_workflow_input asks the human to answer waiting questions or approvals. async:false collects input directly through Pi UI.",
       "Erasable TypeScript and named imports of defineWorkflow/schema from pi-subagentura/workflow are supported; other runtime imports and dynamic imports are rejected.",
       "",
       "Legacy script shape:",
@@ -922,8 +922,9 @@ export function registerWorkflowTool(
       "                            subset (type, enum, required/properties, additionalProperties, items,",
       "                            minItems, maxItems), or null after retries. Returns null on error",
       "                            (filter with Boolean).",
-      "                            Defaults to attachable multiplexer process isolation;",
-      "                            falls back to in-process if no multiplexer is available.",
+      "                            Session-scoped calls default to attachable multiplexer process isolation",
+      "                            and may fall back to in-process if no multiplexer is available.",
+      "                            Durable process attempts fail closed instead of falling back.",
       "Model selection: By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
       "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
@@ -945,11 +946,11 @@ export function registerWorkflowTool(
     promptGuidelines: [
       "Use workflows for repeatable multi-agent work, including sequential pipelines; handle simple one-off tasks directly.",
       "A vague request to create a new workflow means suggest one and confirm before saving/running.",
-      "An explicit `/workflow` request opts into authoring but still requires feasibility assessment and distinct semantic review of the exact final source before saving or running; decline unsuitable/infeasible drafts or unresolved material findings.",
+      "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation; assess feasibility and semantically review the exact final source before saving or running, and decline unsuitable/infeasible drafts or unresolved material findings.",
       "Explicit requests to run an existing named workflow keep the normal saved-workflow execution path.",
-      "V4 definitions are durable by default. Legacy durability is opt-in with durable:true and requires unique stable id options on agent() and workflow(). Resume interrupted runs explicitly with resume_workflow.",
+      "Durability is opt-in with durable:true. `/workflow` authoring defaults to session-scoped execution and may use the existing V4 in-memory engine or a legacy script as appropriate. Only use durable:true when the user's task explicitly requests persisted restart recovery; durable readiness is metadata, not permission. Saved `/workflows` name/picker launches remain session-scoped. Durable calls need unique stable id options on agent() and workflow(); include item keys and retry attempt numbers. Resume interrupted runs explicitly with resume_workflow.",
       "Omit async for the default background behavior; use async: false only when synchronous execution is required.",
-      "For new workflows pass a raw defineWorkflow module with no markdown fences. Legacy scripts may use top-level pure-literal `export const meta = { name, description, phases? }`.",
+      "For new workflows use a raw defineWorkflow module with no markdown fences when its typed step APIs fit; legacy scripts may use top-level pure-literal `export const meta = { name, description, phases? }`.",
       "Use erasable TypeScript with only the pi-subagentura/workflow SDK import. Do not use require, fs, other Node APIs, or dynamic imports. Date.now(), Math.random(), and argless new Date() are unavailable.",
       "V4 orchestration uses ctx; legacy globals are agent, parallel, pipeline, retry, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
       "retry(work, {attempts:3, retryOnNull:true}) explicitly repeats thrown/null failures with a one-based attempt argument (1–10 attempts). Agent schema repair separately uses up to three total attempts. Side effects may repeat.",
@@ -969,7 +970,7 @@ export function registerWorkflowTool(
       durable: Type.Optional(
         Type.Boolean({
           description:
-            "Persist this run for explicit restart recovery in the same host/cwd. Defaults true for v4 definitions; legacy runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
+            "Persist this run for explicit restart recovery in the same host/cwd. durable: true opts into persistence; omitted or false is session-scoped, including V4 in-memory execution. Legacy durable runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
         }),
       ),
       script: Type.Optional(
@@ -1088,26 +1089,6 @@ export function registerWorkflowTool(
         };
       }
 
-      try {
-        if (
-          parseWorkflow(script).format === "definition" &&
-          params.durable !== false
-        )
-          return durableTools.run(
-            { ...params, script, durable: true },
-            signal,
-            onUpdate,
-            ctx,
-          );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${message}` }],
-          details: { status: "error", error: message },
-          isError: true,
-        };
-      }
-
       // Resolved here, inside the tool call, while the caller's orchestration
       // context and session manager are both still reachable. The guard above
       // refuses a workflow started from inside an in-process sub-agent (issue
@@ -1120,7 +1101,7 @@ export function registerWorkflowTool(
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
-        ...(params.durable === false && params.async === false
+        ...(params.durable !== true && params.async === false
           ? {
               requestInput: async (
                 request: unknown,
@@ -1984,30 +1965,10 @@ export function registerWorkflowTool(
       name: string,
       argsValue: unknown,
       ctx: ExtensionCommandContext,
-      requireDurable: boolean,
     ) => {
       const script = loadWorkflowScript(name);
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
-      const { durableReady } = inspectSavedWorkflow(script);
-      if (requireDurable && !durableReady)
-        throw new Error(
-          `Workflow "${name}" is no longer durable-ready. Inspect the changed definition before starting it again.`,
-        );
-      if (durableReady) {
-        const result = await durableTools.run(
-          { script, args: argsValue, durable: true, async: true },
-          undefined,
-          undefined,
-          ctx,
-          "saved_command",
-        );
-        if (result.isError)
-          throw new Error(
-            result.content?.[0]?.text ?? "Durable workflow did not start.",
-          );
-        return { id: result.details.workflowId as string, meta, durable: true };
-      }
       const workflowOwner = owner();
       if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         throw new Error(
@@ -2051,7 +2012,7 @@ export function registerWorkflowTool(
         },
       );
       configureWorkflowCompletion(job, commandCompletion, workflowOwner);
-      return { id: job.id, meta, durable: false };
+      return { id: job.id, meta };
     };
 
     const selectSavedWorkflow = async (
@@ -2116,12 +2077,7 @@ export function registerWorkflowTool(
       // If name was provided inline, try run it directly
       const inlineName = parsed.name;
       if (inlineName) {
-        await runNamedWorkflow(
-          inlineName,
-          parsed,
-          ctx,
-          items.find((item) => item.name === inlineName)?.durableReady ?? false,
-        );
+        await runNamedWorkflow(inlineName, parsed, ctx);
         return;
       }
 
@@ -2135,19 +2091,13 @@ export function registerWorkflowTool(
         return;
       }
 
-      await runNamedWorkflow(
-        action.name,
-        parsed,
-        ctx,
-        items.find((item) => item.name === action.name)?.durableReady ?? false,
-      );
+      await runNamedWorkflow(action.name, parsed, ctx);
     };
 
     async function runNamedWorkflow(
       name: string,
       parsed: { name: string | null; argsJson: string | null },
       ctx: ExtensionCommandContext,
-      requireDurable: boolean,
     ) {
       const items = listSavedWorkflows();
       const known = items.some((w) => w.name === name);
@@ -2162,17 +2112,14 @@ export function registerWorkflowTool(
           ? parseArgsJson(parsed.argsJson)
           : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
-        const { id, meta, durable } = await startSavedWorkflowFromCommand(
+        const { id, meta } = await startSavedWorkflowFromCommand(
           name,
           argsValue,
           ctx,
-          requireDurable,
         );
         const text =
           `Workflow "${meta.name}" started in background as ${id}. ` +
-          (durable
-            ? "Durable run: after interruption use resume_workflow in the same Pi session and cwd. "
-            : `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} `) +
+          `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} ` +
           "Use /workflow-status to inspect running jobs.";
         ctx.ui.notify(`Started workflow ${meta.name}.`);
         sendCommandMessage(text);
@@ -2331,26 +2278,25 @@ export function registerWorkflowTool(
     return [
       "You are handling the `/workflow <task>` command.",
       "",
-      "First assess whether the task is feasible and suitable for a reusable V4 workflow with the available SDK, runtime, and tools. Prefer a bounded plan with reusable inputs. If it is unsuitable, unsupported, materially underspecified, or otherwise infeasible, explain why and do not save or start a workflow.",
+      "First assess whether the task is feasible and suitable for a reusable workflow with the available SDK, runtime, and tools. Prefer a bounded plan with reusable inputs. If it is unsuitable, unsupported, materially underspecified, or otherwise infeasible, explain why and do not save or start a workflow.",
       "",
       "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation. Do not route ordinary requests to workflows. Ask for human input only when the user requests it or the task's risk warrants it.",
       "",
-      "Once feasibility is established, draft a reusable TypeScript V4 workflow. Keep orchestration in the saved program rather than an improvised sequence of parent calls.",
+      "Once feasibility is established, draft a reusable workflow using V4 where its typed step APIs fit, or the legacy script shape where simpler. Execution is session-scoped by default; only use durable:true when the user's task explicitly requests persisted restart recovery.",
       "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this is prompt organization, not semantic scope enforcement.",
       "Use readOnly: true for purely observational review/research. It restricts model-facing tools to Pi read/grep/find/ls, with internal structured_output only for in-process schema capture; it is not an OS sandbox or path restriction.",
       "Read-only process agents should return final prose/JSON directly rather than requiring a file write or bash handoff. Track progress using actual workflow step records, not a second model-maintained todo ledger.",
       "",
       "Requirements:",
-      "1. Import defineWorkflow/schema from pi-subagentura/workflow and default-export defineWorkflow({ name, version: 1, description, input, output, async run(ctx, args) { ... } }). Pass task/config through args and define meaningful input/output schemas and structured agent-output contracts.",
-      "2. Use ordinary JavaScript control flow where it is clearest. Give persisted steps stable unique IDs; bound loops, repeat iterations, map/parallel work, and other fan-out. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow as appropriate, literal saved names for nested workflows, and handle TaskResult failures explicitly.",
+      "1. Pass task/config through args. Use a V4 defineWorkflow module with meaningful input/output schemas and structured agent-output contracts when its step APIs fit, including for session-scoped execution; otherwise use the legacy `export const meta = { name, description, phases? }` script shape.",
+      "2. Use ordinary JavaScript control flow where it is clearest. For persisted V4 steps, give persisted operations stable unique IDs; bound loops, repeat iterations, map/parallel work, and other fan-out. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow as appropriate, literal saved names for nested workflows, and handle TaskResult failures explicitly.",
       "3. Do not use Node APIs inside the workflow script. Workflow-agent file I/O must use tools actually available to those agents.",
       "4. Before saving or running anything, semantically review the exact draft in a distinct pass. Use an independent reviewer through an available existing tool when possible; otherwise do a fresh self-review as a separate phase. Review task fit, contracts, prompts/roles, stable bounded control flow, failure handling, side effects, and whether available tools can do the work. Parsing, durable-readiness checks, and execution/smoke tests are not semantic review.",
       "5. Address material findings and repeat semantic review after every source revision. If material issues remain or you cannot reach a sound review, explain why and do not save or start. Any validation-driven or other source change requires another semantic review before saving.",
-      "6. After review is complete, fix validation errors before persistence. Save the final reviewed source with save_workflow using a lowercase slug name and requireDurable: true.",
-      "Use inspect_workflow({ name }) to read the saved source and confirm an exact match to the reviewed source. If it differs, do not start it; reconcile and re-review the final source first.",
-      "Only then start that saved name with the workflow tool, suitable args, durable: true, and async: true; never silently fall back to a session-scoped run.",
-      "7. Do not set isolation unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
-      "8. Report the saved workflow name and returned workflowId. Explain that V4 recovery is manual in the same project and requires Pi to be running. Human gates wait for respond_workflow_input.",
+      "6. After review is complete, fix validation errors before persistence. Save the final reviewed source with save_workflow using a lowercase slug name. Set requireDurable: true only when persisted restart recovery was requested. Inspect the saved source with inspect_workflow and confirm it exactly matches the reviewed source; otherwise do not start until reconciled and re-reviewed.",
+      "Only then start the saved name with the workflow tool, suitable args, and async: true. Use durable: true if and only if persistence was requested; otherwise omit it for session-scoped execution. If an explicit durable start fails, report the error without retrying as session-scoped.",
+      "7. Do not set isolation unless the workflow explicitly needs to opt out. Session-scoped agents may fall back from process to in-process execution when no multiplexer is available; durable process attempts fail closed instead of falling back.",
+      "8. Report the saved workflow name and returned workflowId. Explain that session-scoped work ends with its parent session; V4 recovery is manual in the same project and requires Pi to be running. Human gates wait for respond_workflow_input.",
       "",
       "The save/runtime checks do not prove semantic suitability or that this review occurred; do not describe them as doing so.",
       "",

@@ -14,7 +14,7 @@ import {
   fstatSync,
 } from "node:fs";
 import { readdir, open } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface PersistedCompletionGroup {
   groupId: string;
@@ -32,6 +32,12 @@ export function writeCompletionGroup(
   group: PersistedCompletionGroup,
 ): void {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const ancestor = openSync(dirname(directory), "r");
+  try {
+    fsyncSync(ancestor);
+  } finally {
+    closeSync(ancestor);
+  }
   const name = createHash("sha256").update(group.groupId).digest("hex");
   const target = join(directory, `${name}.json`);
   if (!group.members.some((member) => member.startsWith("workflow:wfd_"))) {

@@ -929,7 +929,7 @@ function runWorkflowWorker(
           }
           const error =
             err instanceof WorkerRpcFailure
-              ? "Workflow agent failed."
+              ? "Agent execution failed."
               : err instanceof Error
                 ? err.message
                 : String(err);
@@ -1027,7 +1027,7 @@ async function handleWorkerRpc(
         ? { error: "Workflow agent was cancelled.", cancelled: true }
         : failed
           ? {
-              error: "Workflow agent failed.",
+              error: "Agent execution failed.",
               failure:
                 response.failure ??
                 (engine.v4

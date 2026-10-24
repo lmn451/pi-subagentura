@@ -2777,6 +2777,7 @@ return "finished";`,
     const task = "build a release checklist";
     await cmd.handler(task, ctx);
 
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
     expect(sendUserMessage).toHaveBeenCalledWith(
       expect.stringContaining(task),
       { deliverAs: "followUp" },

@@ -4,6 +4,7 @@ import type * as NodeFs from "node:fs";
 import {
   mkdtemp,
   mkdir,
+  appendFile,
   readFile,
   rm,
   writeFile,
@@ -262,7 +263,7 @@ async function persistedRunWithAttempt() {
   const path = attempt.path;
   const id = store.id;
   await store.close();
-  return { id, path, runScope };
+  return { id, path, runScope, directory: store.directory };
 }
 
 beforeEach(async () => {
@@ -298,6 +299,29 @@ afterEach(async () => {
 });
 
 describe("durable cancellation regressions", () => {
+  it("does not cancel a run when a partial journal tail survives close and reopen", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    const { id, runScope, directory } = await persistedRunWithAttempt();
+    const journalPath = join(directory, "journal.ndjson");
+    await appendFile(journalPath, '{"partial":');
+    const partialJournal = await readFile(journalPath);
+    const cancel = getTool("cancel_workflow");
+
+    const result = await cancel.execute(
+      "partial-journal-cancel",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("error");
+    expect(await readFile(journalPath)).toEqual(partialJournal);
+    const events = await WorkflowRunStore.inspect(runScope, id);
+    expect(events?.some((event) => event.kind === "cancelled")).toBe(false);
+  });
+
   it("commits cancel-all intent before abort and settles as cancelled", async () => {
     const agentStarted = deferred<void>();
     const abortObserved = deferred<void>();
@@ -458,6 +482,139 @@ describe("durable cancellation regressions", () => {
       finish();
     }
     await job.promise;
+  });
+
+  it("keeps a sync durable workflow alive through both handlers when cancellation intent cannot persist", async () => {
+    const agentStarted = deferred<void>();
+    let childSignal: AbortSignal | undefined;
+    let childState: InteractiveSubagentState | undefined;
+    let attemptPath = "";
+    const runner: WorkflowAgentRunner = async ({ signal, durableAttempt }) => {
+      if (!durableAttempt) throw new Error("Expected a durable attempt.");
+      const attempt = await prepareDurableProcess(durableAttempt);
+      const state = {
+        ...fakeAttemptState(root),
+        status: "running",
+        parentSessionId: harness.runScope.sessionId,
+      } as InteractiveSubagentState;
+      attempt.beforeDispatch(state);
+      attemptPath = attempt.path;
+      childState = state;
+      harness.scope.interactiveStates.set(state.id, state);
+      childSignal = signal;
+      agentStarted.resolve();
+      const { promise, reject } = Promise.withResolvers<never>();
+      const onAbort = () => {
+        state.status = "cancelled";
+        reject(new Error("sync durable child cancelled"));
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+      return promise;
+    };
+    const api = durableTools(runner);
+    const foreground = new AbortController();
+    type CommandOptions = Parameters<ExtensionAPI["registerCommand"]>[1];
+    type ShortcutOptions = Parameters<ExtensionAPI["registerShortcut"]>[1];
+    type CommandHandler = CommandOptions["handler"];
+    type ShortcutHandler = ShortcutOptions["handler"];
+    let commandHandler: CommandHandler | undefined;
+    let shortcutHandler: ShortcutHandler | undefined;
+    const registrationApi = {
+      registerCommand: (_name: string, options: CommandOptions) => {
+        commandHandler = options.handler;
+      },
+      registerShortcut: (_shortcut: string, options: ShortcutOptions) => {
+        shortcutHandler = options.handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerCancelAllFlows(registrationApi, harness.scope);
+    if (!commandHandler || !shortcutHandler)
+      throw new Error("Cancel-all handlers were not registered.");
+
+    const cancelCtx = {
+      ...harness.ctx,
+      abort: () => foreground.abort(),
+      ui: { notify: vi.fn(), setStatus: vi.fn() },
+    };
+    const commandContext =
+      cancelCtx as unknown as Parameters<CommandHandler>[1];
+    const shortcutContext =
+      cancelCtx as unknown as Parameters<ShortcutHandler>[0];
+    const syncRun = api.run(
+      { script: DURABLE_SCRIPT, async: false },
+      foreground.signal,
+      undefined,
+      harness.ctx,
+    );
+    let syncRunSettled = false;
+    void syncRun.then(() => {
+      syncRunSettled = true;
+    });
+    await agentStarted.promise;
+    const job = [...workflowJobRegistry.values()].find(
+      (candidate) => candidate.executionMode === "sync",
+    );
+    if (!job?.durable || !childState || !childSignal)
+      throw new Error("Synchronous durable workflow child did not start.");
+    const id = job.id;
+    childState.workflowId = id;
+    const append = job.durable.store.append.bind(job.durable.store);
+    let cancellationAppendFailures = 2;
+    vi.spyOn(job.durable.store, "append").mockImplementation((kind, data) => {
+      if (kind === "cancelled" && cancellationAppendFailures > 0) {
+        cancellationAppendFailures--;
+        return Promise.reject(
+          new Error("run cancellation intent write failed"),
+        );
+      }
+      return append(kind, data);
+    });
+
+    await commandHandler("", commandContext);
+
+    expect(foreground.signal.aborted).toBe(false);
+    expect(syncRunSettled).toBe(false);
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(childSignal.aborted).toBe(false);
+    expect(childState.status).toBe("running");
+    await expect(access(attemptPath + ".cancel")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const failedEvents = await WorkflowRunStore.inspect(harness.runScope, id);
+    expect(failedEvents?.some((event) => event.kind === "cancelled")).toBe(
+      false,
+    );
+
+    await shortcutHandler(shortcutContext);
+    expect(foreground.signal.aborted).toBe(false);
+    expect(job.status).toBe("running");
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(childSignal.aborted).toBe(false);
+    expect(childState.status).toBe("running");
+    await expect(access(attemptPath + ".cancel")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const secondFailureEvents = await WorkflowRunStore.inspect(
+      harness.runScope,
+      id,
+    );
+    expect(
+      secondFailureEvents?.some((event) => event.kind === "cancelled"),
+    ).toBe(false);
+
+    await shortcutHandler(shortcutContext);
+    expect(foreground.signal.aborted).toBe(true);
+    expect(job.abort.signal.aborted).toBe(true);
+    await Promise.allSettled([job.promise, syncRun]);
+    expect(job.status).toBe("cancelled");
+    expect(childState.status).toBe("cancelled");
+    await expect(access(attemptPath + ".cancel")).resolves.toBeUndefined();
+    const retriedEvents = await WorkflowRunStore.inspect(harness.runScope, id);
+    expect(retriedEvents?.some((event) => event.kind === "cancelled")).toBe(
+      true,
+    );
   });
 
   it("retries a failed attempt marker through public cancel_workflow after terminal intent", async () => {
