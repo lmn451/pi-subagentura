@@ -5,28 +5,9 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
-`/workflow <task>` creates a reusable script with stable operation IDs and runs
-it asynchronously, session-scoped by default. Only when the user's task
-explicitly requests persisted restart recovery should the parent use
-`save_workflow({requireDurable:true})` and start it with `durable:true`.
-`/workflows` shows `durable-ready` or `session-scoped` beside saved scripts; the
-label reports capability, and selecting a script runs it session-scoped. To
-persist a saved script's run, explicitly call
-`workflow({name, args, durable:true})`. The `list_workflows` tool also returns
-readiness and a SHA-256 source digest. Computed operation IDs are checked again
-during durable execution; static readiness does not guarantee that every runtime
-input will produce unique IDs.
-
-After interruption, use `resume_workflow({workflowId})` in the same Pi session
-and working directory. Recovery is manual and requires Pi to run. Direct calls
-to `workflow` opt into persistence with `durable:true`; saving or using `async`
-alone does not enable it. See [the runtime contract](../WORKFLOW_RUNTIME.md) for
-replay, process adoption, cancellation, and side-effect limits.
-
-Manual durable result-consumption receipts remain tied to the initiating Pi
-session owner. `/cancel-all-flows` persists cancellation before aborting owned
-work; if persistence fails, the workflow is reported as failed to cancel and
-remains retryable.
+See [README workflow usage](../README.md#reusable-workflows) for command defaults
+and [the runtime contract](../WORKFLOW_RUNTIME.md) for durable execution,
+recovery, cancellation, and result-consumption behavior.
 
 This project ships several `.mjs` workflow scripts under
 `examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`

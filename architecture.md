@@ -1276,7 +1276,7 @@ The restrictive exports map matters: shipping all source files in `package.json#
 
 - [ ] Rehydrate runs only for `startup`, `reload`, or `resume`.
 - [ ] Rehydrate restores coordinated interactive policy/group membership and completes before polling begins.
-- [ ] Recovered groups seal before polling; in-process/workflow jobs do not rehydrate.
+- [ ] Recovered interactive groups seal before polling. In-process and session-scoped workflow jobs do not rehydrate; durable workflow runs require explicit recovery (see the [workflow runtime contract](WORKFLOW_RUNTIME.md)).
 - [ ] Shutdown advances generation before asynchronous teardown.
 - [ ] Final shutdown clears the poll interval.
 - [ ] Final shutdown clears interactive registry identity before killing panes.
