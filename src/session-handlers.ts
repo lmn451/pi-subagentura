@@ -35,6 +35,7 @@ import {
   retireSessionScopedCompletions,
   sealCompletionGroups,
   settleCompletionParentTurn,
+  restoreDurableCompletionGroupsSync,
 } from "./completion-coordinator";
 import {
   createRootSpawnTreeContext,
@@ -44,6 +45,10 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
+import {
+  restoreDurableWorkflowRuns,
+  restoreWorkflowV4View,
+} from "./workflow-durable-tools";
 import {
   deleteOrchestratorRoutingFile,
   loadOrchestratorRoutingMetadata,
@@ -129,8 +134,9 @@ function recordPreparedManifest(
 
 function isInMemoryWorkflowPane(state: InteractiveSubagentState): boolean {
   return (
-    state.completionOwner === "workflow" ||
-    state.workflowResultConsumed === true
+    !state.durableWorkflowAttempt &&
+    (state.completionOwner === "workflow" ||
+      state.workflowResultConsumed === true)
   );
 }
 
@@ -460,12 +466,20 @@ export function registerSessionHandlers(
     }
     return { action: "continue" as const };
   });
-  pi.on("before_agent_start", (event) => {
+  // Triggered custom turns bypass before_agent_start; message_start retains identity.
+
+  pi.on("message_start", (event) => {
+    if (scope.lifecycle !== "started" || event.message.role !== "custom")
+      return;
+    if (markCompletionTurnWakeStarted(pi, event.message)) {
+      markCompletionTurnStarting(sessionOwner(scope));
+    }
+  });
+
+  pi.on("before_agent_start", () => {
     if (scope.lifecycle !== "started") return;
     const owner = sessionOwner(scope);
-    if (event.messageType === "custom") {
-      markCompletionTurnWakeStarted(pi, event.message);
-    }
+
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
     if (message) recordPreparedManifest(scope, message);
@@ -484,7 +498,7 @@ export function registerSessionHandlers(
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
   });
 
-  pi.on("session_start", (event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     scope.workflowAdmissionClosed = true;
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
@@ -660,6 +674,7 @@ export function registerSessionHandlers(
         terminal: 0,
         unknown: 0,
       };
+      let completionGroupsRestored = true;
       if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
         try {
           // Tools reload on demand; startup only validates persistence so the
@@ -672,6 +687,18 @@ export function registerSessionHandlers(
           });
           logSessionError("orchestrator_routing_recovery_failed", error);
         }
+      }
+      try {
+        // Restore durable group membership before rehydrated interactive
+        // states can register members or seal a partial in-memory barrier.
+        restoreDurableCompletionGroupsSync(sessionOwner(scope));
+      } catch (error) {
+        completionGroupsRestored = false;
+        captureTelemetry(scope.telemetry, {
+          event: "session_setup_failed",
+          failure_stage: "state_recovery",
+        });
+        logSessionError("durable_completion_group_recovery_failed", error);
       }
       try {
         recovery = rehydrateInteractiveSubagents(
@@ -695,7 +722,9 @@ export function registerSessionHandlers(
         terminal_count: recovery.terminal,
         unknown_count: recovery.unknown,
       });
-      sealCompletionGroups(sessionOwner(scope));
+      if (completionGroupsRestored) {
+        sealCompletionGroups(sessionOwner(scope));
+      }
       try {
         recoverCompletionTurnWakes(pi, ctx.sessionManager?.getBranch?.() ?? []);
       } catch (error) {
@@ -706,8 +735,17 @@ export function registerSessionHandlers(
         logSessionError("orchestratorv2_wake_recovery_failed", error);
       }
     }
+    const recoveryOwner = sessionOwner(scope);
+    const durableRecovery = continuityReason
+      ? restoreDurableWorkflowRuns(pi, recoveryOwner, ctx)
+      : undefined;
     ensureInteractivePoller(globalState);
-    scope.workflowAdmissionClosed = false;
+    if (durableRecovery) await durableRecovery;
+    await restoreWorkflowV4View(ctx);
+    // A later lifecycle may retire this generation while recovery awaits I/O.
+    if (resolveLiveSessionScope(recoveryOwner) === scope) {
+      scope.workflowAdmissionClosed = false;
+    }
   });
 
   pi.on("session_shutdown", (event, ctx) => {

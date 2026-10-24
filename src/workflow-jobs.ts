@@ -1,4 +1,10 @@
 import { randomBytes } from "node:crypto";
+import {
+  encodeRunValue,
+  requiresWorkflowRecovery,
+  type WorkflowRunStore,
+} from "./workflow-run-store";
+import { stopDurableProcessAttempts } from "./workflow-durable-process";
 import { debugLog } from "./helpers";
 import {
   isSessionOwnerLive,
@@ -244,6 +250,8 @@ function emitWorkflowCompletedTelemetry(
 export type WorkflowJobStatus = "running" | "done" | "error" | "cancelled";
 
 export interface WorkflowJobState {
+  durable?: RunWorkflowOptions["durable"];
+  durableInterrupted?: boolean;
   id: string;
   name: string;
   status: WorkflowJobStatus;
@@ -258,6 +266,7 @@ export interface WorkflowJobState {
   promise: Promise<WorkflowRunResultWithUsage>;
   abort: AbortController;
   snapshot: {
+    steps?: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>;
     agentsSpawned: number;
     errorCount: number;
     cancelledCount?: number;
@@ -306,6 +315,28 @@ export interface WorkflowJobState {
   telemetryFailure?: WorkflowFailureClassification;
   /** Runtime failures are emitted once per workflow operation. */
   telemetryRuntimeFailureReported?: boolean;
+  terminalTransition?: {
+    promise: Promise<void>;
+    release: () => void;
+  };
+}
+
+export async function withWorkflowTerminalTransition<T>(
+  job: WorkflowJobState,
+  transition: () => Promise<T>,
+): Promise<T> {
+  const previous = job.terminalTransition?.promise ?? Promise.resolve();
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => (release = resolve));
+  const slot = { promise, release };
+  job.terminalTransition = slot;
+  await previous;
+  try {
+    return await transition();
+  } finally {
+    release();
+    if (job.terminalTransition === slot) job.terminalTransition = undefined;
+  }
 }
 
 function isProtectedCoordinatedResult(job: WorkflowJobState): boolean {
@@ -330,6 +361,15 @@ export const workflowJobRegistry = g.__piSubagenturaWorkflowJobs as Map<
 
 export const MAX_WORKFLOW_JOBS = 100;
 
+export class WorkflowJobCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowJobCapacityError";
+  }
+}
+
+/** Maximum notification delivery attempts before giving up. */
+export const MAX_WORKFLOW_NOTIFICATION_ATTEMPTS = 5;
 export function workflowJobBelongsToOwner(
   job: WorkflowJobState,
   owner: SessionOwnerToken | undefined,
@@ -365,6 +405,16 @@ export function cleanupWorkflowJobsForOwner(
   for (const [id, job] of workflowJobRegistry) {
     if (!workflowJobBelongsToOwner(job, owner)) continue;
     job.suppressCompletionNotification = true;
+    if (
+      job.durable &&
+      job.status === "running" &&
+      (terminalReason !== "fresh_session" || job.durable.stepBased)
+    ) {
+      job.durableInterrupted = true;
+      job.abort.abort({ source: "durable_interrupt" });
+      workflowJobRegistry.delete(id);
+      continue;
+    }
     if (job.status === "running" || job.status === "cancelled") {
       cancelWorkflowJob(job, terminalReason);
     }
@@ -409,6 +459,28 @@ export function cancelWorkflowJob(
   } else {
     normalizeCancelledWorkflowState(job);
   }
+}
+
+/**
+ * Persist explicit durable cancellation before stopping any attempt or aborting
+ * its live controller. Retrying this operation also retries per-attempt markers
+ * after the run-level cancellation event is already present.
+ */
+export async function requestDurableWorkflowCancellation(
+  store: WorkflowRunStore,
+  job?: WorkflowJobState,
+  options?: { suppressCompletionNotification?: boolean },
+): Promise<void> {
+  if (!store.events.some((event) => event.kind === "cancelled")) {
+    await store.append("cancelled", {
+      status: "cancelled",
+      completedAt: Date.now(),
+    });
+  }
+  await stopDurableProcessAttempts(store.directory);
+  if (job && options?.suppressCompletionNotification)
+    job.suppressCompletionNotification = true;
+  if (job) cancelWorkflowJob(job, "explicit_cancel");
 }
 
 /** Roll back a just-created workflow whose completion registration failed. */
@@ -471,6 +543,7 @@ export function startWorkflowJob(
   owner?: SessionOwnerToken,
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
+  durableId?: string,
 ): WorkflowJobState {
   if (!owner) {
     throw new Error("Workflow jobs require an owner from a live session.");
@@ -510,14 +583,14 @@ export function startWorkflowJob(
         errorStage: "workflow",
         runtimeFailureKind: "workflow_capacity",
       });
-      throw new Error(
+      throw new WorkflowJobCapacityError(
         `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
     }
   }
 
   const id: WorkflowId = asStringIdentifier<"workflow">(
-    `wf_${randomBytes(5).toString("hex")}`,
+    durableId ?? `wf_${randomBytes(5).toString("hex")}`,
   );
   const defaultAsync = executionMode === "async";
   const defaultCompletionPolicy: TelemetryCompletionPolicy = defaultAsync
@@ -550,6 +623,7 @@ export function startWorkflowJob(
   if (externalSignal?.aborted) abort.abort(externalSignal.reason);
   else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
   const state: WorkflowJobState = {
+    durable: opts.durable,
     id,
     name,
     status: "running",
@@ -576,10 +650,14 @@ export function startWorkflowJob(
     parentSessionOwner,
     telemetry,
   };
-  emitWorkflowStartedTelemetry(state);
+  if (!opts.durable?.replaying) emitWorkflowStartedTelemetry(state);
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
   state.promise = runWorkflow(script, {
     ...opts,
+    onStep: (steps) => {
+      state.snapshot.steps = steps;
+      opts.onStep?.(steps);
+    },
     runAgent: (request) =>
       runTrackedWorkflowAgent(state, opts.runAgent, request),
     signal: abort.signal,
@@ -618,7 +696,30 @@ export function startWorkflowJob(
       (state.cancellationSnapshots ??= []).push(receipt);
     },
   })
-    .then((r) => {
+    .then(async (r) => {
+      if (state.durable) {
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            if (terminal.data.status === "done") return;
+            // A legacy cancellation event records intent before marker cleanup;
+            // if cleanup failed, a still-running provider may complete normally.
+            if (terminal.kind !== "cancelled" || state.durable!.stepBased)
+              throw new Error("Workflow interrupted before result commit.");
+          }
+          if (state.durableInterrupted || abort.signal.aborted)
+            throw new Error("Workflow interrupted before result commit.");
+          await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.flush();
+          await state.durable!.store.append("terminal", {
+            status: "done",
+            result: encodeRunValue(r),
+            completedAt: Date.now(),
+          });
+        });
+      }
       if (state.status === "running") state.status = "done";
       state.result = r;
       state.snapshot.cancelledCount = r.cancelledCount ?? 0;
@@ -626,16 +727,66 @@ export function startWorkflowJob(
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
+      else normalizeTerminalWorkflowSteps(state, "done");
       emitWorkflowCompletedTelemetry(state, r);
       invokeWorkflowCompletionHook(state);
       return r;
     })
-    .catch((err) => {
+    .catch(async (err) => {
+      if (state.durable && requiresWorkflowRecovery(err)) {
+        state.durableInterrupted = true;
+        state.suppressCompletionNotification = true;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const timedOut = isWorkflowWallTimeout(err);
+      const workerCancelled =
+        (err as { cancelled?: unknown } | null)?.cancelled === true;
       if (timedOut) state.telemetryTerminalReason = "timeout";
-      state.status = abort.signal.aborted ? "cancelled" : "error";
+      state.status =
+        abort.signal.aborted || workerCancelled ? "cancelled" : "error";
+      const workerCancelledCount = (err as { cancelledCount?: unknown } | null)
+        ?.cancelledCount;
+      if (
+        workerCancelled &&
+        typeof workerCancelledCount === "number" &&
+        Number.isInteger(workerCancelledCount) &&
+        workerCancelledCount >= 0
+      ) {
+        state.snapshot.cancelledCount = Math.max(
+          state.snapshot.cancelledCount ?? 0,
+          workerCancelledCount,
+        );
+      }
       state.error = msg;
+      if (state.durable) {
+        state.durable.stop();
+        await state.durable.drain();
+        await withWorkflowTerminalTransition(state, async () => {
+          const terminal = state.durable!.store.events.findLast((event) =>
+            ["cancelled", "rejected", "terminal"].includes(event.kind),
+          );
+          if (terminal) {
+            state.status =
+              terminal.data.status === "done"
+                ? "done"
+                : terminal.data.status === "error"
+                  ? "error"
+                  : "cancelled";
+            return;
+          }
+          if (!state.durableInterrupted)
+            await stopDurableProcessAttempts(state.durable!.store.directory);
+          await state.durable!.store.append(
+            state.durableInterrupted ? "interrupted" : "terminal",
+            {
+              status: state.durableInterrupted ? "interrupted" : state.status,
+              error: msg,
+              usage: state.durable!.usage(),
+              completedAt: Date.now(),
+            },
+          );
+        });
+      }
       if (state.status !== "cancelled") {
         state.telemetryFailure =
           workflowFailureForError(err) ??
@@ -649,12 +800,25 @@ export function startWorkflowJob(
       }
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
-      if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
-      emitWorkflowCompletedTelemetry(state, undefined);
+      if (!state.durableInterrupted) {
+        if (state.status === "cancelled")
+          normalizeCancelledWorkflowState(state);
+        else normalizeTerminalWorkflowSteps(state, "error");
+      }
+      if (!state.durableInterrupted)
+        emitWorkflowCompletedTelemetry(state, undefined);
       invokeWorkflowCompletionHook(state);
       throw err;
     })
-    .finally(() => {
+    .finally(async () => {
+      if (state.durable) {
+        state.durable.stop();
+        try {
+          await state.durable.drain();
+        } finally {
+          await state.durable.store.close();
+        }
+      }
       externalSignal?.removeEventListener("abort", forwardAbort);
       // A sync workflow returns its result inline. Retaining the terminal job
       // would let get_workflow_result re-serve that result and would leave a dead
@@ -699,6 +863,24 @@ export function normalizeCancelledWorkflowState(state: WorkflowJobState): void {
   for (const record of state.snapshot.agentRecords ?? []) {
     if (record.status === "running") record.status = "cancelled";
   }
+  normalizeTerminalWorkflowSteps(state, "cancelled");
+}
+
+function normalizeTerminalWorkflowSteps(
+  state: WorkflowJobState,
+  status: "cancelled" | "error" | "done",
+): void {
+  const retiredStatus =
+    status === "cancelled"
+      ? "cancelled"
+      : status === "error"
+        ? "failed"
+        : "skipped";
+  state.snapshot.steps = state.snapshot.steps?.map((step) =>
+    ["waiting_for_input", "running", "pending"].includes(step.status)
+      ? { ...step, status: retiredStatus }
+      : step,
+  ) as WorkflowJobState["snapshot"]["steps"];
 }
 
 /** Count running workflow jobs (status === "running"). */

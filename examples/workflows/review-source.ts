@@ -1,0 +1,351 @@
+import { defineWorkflow, schema } from "pi-subagentura/workflow";
+import type { InferWorkflowSchema, TaskResult } from "pi-subagentura/workflow";
+
+const ASPECT_IDS = [
+  "intent-design",
+  "compatibility",
+  "behavior-change",
+  "correctness-quality",
+] as const;
+
+const ASPECTS = [
+  {
+    id: ASPECT_IDS[0],
+    title: "Intent and design alignment",
+    target:
+      "The match between the implementation and the stated intent/design.",
+    change:
+      "Compare the implementation with the request and design. Look for missing requirements, unsuitable choices, or drift from the requested problem.",
+    acceptance:
+      "A finding must identify a concrete mismatch with the intended change, not merely a different reasonable design choice.",
+  },
+  {
+    id: ASPECT_IDS[1],
+    title: "Compatibility",
+    target:
+      "Consumer-facing and persisted contracts affected by the implementation.",
+    change:
+      "Check public APIs, persisted data, configuration, protocol behavior, and supported runtime compatibility for breaks to existing consumers.",
+    acceptance:
+      "A finding must identify a concrete incompatibility and the affected consumer or contract.",
+  },
+  {
+    id: ASPECT_IDS[2],
+    title: "Unintended behavior changes",
+    target:
+      "Observable behavior outside the stated scope of the intended change.",
+    change:
+      "Look for side effects or behavior changes outside the intended scope, including regressions in existing callers and workflows.",
+    acceptance:
+      "A finding must connect an unintended behavior change to a concrete affected path or caller.",
+  },
+  {
+    id: ASPECT_IDS[3],
+    title: "Correctness and quality",
+    target: "Correctness and maintainability of the changed implementation.",
+    change:
+      "Check correctness, edge cases, error handling, and maintainability in the changed code.",
+    acceptance:
+      "A finding must explain a concrete failure mode or maintainability risk, not a stylistic preference.",
+  },
+] as const;
+
+const REVIEW_CONTEXT = [
+  "# Goal",
+  "Review the supplied source files against the stated intended change/design.",
+  "",
+  "# Contract",
+  "Do not modify files. Ground findings in direct source evidence and do not invent evidence.",
+  "Return a verdict (pass, concern, blocking, or uncertain) and at most 15 concrete findings.",
+  "Each finding must include severity (critical, high, medium, or low), a precise location, direct evidence from the source, and an explanation of the impact.",
+  "Use an empty findings array when no material issue is found; use uncertain when the available evidence is insufficient.",
+  "Return JSON matching the supplied schema.",
+].join("\n");
+
+const Aspect = schema.enum(ASPECT_IDS);
+const Verdict = schema.enum([
+  "pass",
+  "concern",
+  "blocking",
+  "uncertain",
+] as const);
+const Severity = schema.enum(["critical", "high", "medium", "low"] as const);
+
+const Input = schema.object({
+  files: schema.array(schema.string(), { minItems: 1, maxItems: 40 }),
+  intendedChange: schema.string(),
+});
+
+const FindingFields = {
+  severity: Severity,
+  location: schema.string(),
+  evidence: schema.string(),
+  explanation: schema.string(),
+};
+
+const Finding = schema.object(FindingFields);
+
+const AspectReview = schema.object({
+  verdict: Verdict,
+  findings: schema.array(Finding, { maxItems: 15 }),
+});
+
+const ReviewOutcome = schema.object({
+  aspect: Aspect,
+  outcome: schema.enum(["completed", "failed"] as const),
+  verdict: Verdict,
+  failure: schema.optional(
+    schema.object({
+      name: schema.string(),
+      message: schema.string(),
+    }),
+  ),
+});
+
+const AggregateFinding = schema.object({
+  aspect: Aspect,
+  ...FindingFields,
+});
+
+const SeverityCounts = schema.object({
+  critical: schema.integer(),
+  high: schema.integer(),
+  medium: schema.integer(),
+  low: schema.integer(),
+});
+
+const Review = schema.object({
+  status: Verdict,
+  reviews: schema.array(ReviewOutcome, { minItems: 4, maxItems: 4 }),
+  findings: schema.array(AggregateFinding, { maxItems: 60 }),
+  severityCounts: SeverityCounts,
+  artifactId: schema.optional(schema.string()),
+});
+
+type AspectId = InferWorkflowSchema<typeof Aspect>;
+type SeverityValue = InferWorkflowSchema<typeof Severity>;
+type AspectReviewValue = InferWorkflowSchema<typeof AspectReview>;
+type ReviewTaskResult = TaskResult<AspectReviewValue>;
+type AggregateFindingValue = InferWorkflowSchema<typeof AggregateFinding>;
+type ReviewOutcomeValue = InferWorkflowSchema<typeof ReviewOutcome>;
+type ReviewReport = InferWorkflowSchema<typeof Review>;
+type ReviewStatus = ReviewReport["status"];
+
+const ASPECT_ORDER: Record<AspectId, number> = {
+  [ASPECT_IDS[0]]: 0,
+  [ASPECT_IDS[1]]: 1,
+  [ASPECT_IDS[2]]: 2,
+  [ASPECT_IDS[3]]: 3,
+};
+
+const severityOrder: Record<SeverityValue, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function requireBoundedText(
+  value: string,
+  label: string,
+  maximum: number,
+): void {
+  if (value.trim().length === 0 || value.length > maximum) {
+    throw new Error(
+      `${label} must be non-empty and at most ${maximum} characters.`,
+    );
+  }
+}
+
+function boundedReviewError(error: unknown): Error {
+  const name = error instanceof Error ? error.name : "ReviewError";
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = new Error(message.slice(0, 1_200));
+  bounded.name = name.slice(0, 128);
+  return bounded;
+}
+
+function validateInput(args: {
+  files: readonly string[];
+  intendedChange: string;
+}): void {
+  requireBoundedText(args.intendedChange, "intendedChange", 12_000);
+  let totalFileChars = 0;
+  for (const file of args.files) {
+    requireBoundedText(file, "file path", 512);
+    totalFileChars += file.length;
+  }
+  if (totalFileChars > 8_192) {
+    throw new Error("Combined file paths must be at most 8192 characters.");
+  }
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function aggregate(results: readonly ReviewTaskResult[]): ReviewReport {
+  if (!Array.isArray(results) || results.length !== ASPECTS.length) {
+    throw new Error(
+      "Aspect review collection did not return all four results.",
+    );
+  }
+  const reviews: ReviewOutcomeValue[] = [];
+  const findings: AggregateFindingValue[] = [];
+  for (let index = 0; index < results.length; index++) {
+    const aspectAtIndex = ASPECTS[index];
+    if (!aspectAtIndex) {
+      throw new Error(
+        "Review result count did not match the requested aspects.",
+      );
+    }
+    const aspect = aspectAtIndex.id;
+    const result = results[index];
+    if (!result.ok) {
+      reviews.push({
+        aspect,
+        outcome: "failed",
+        verdict: "uncertain",
+        failure: {
+          name: result.error.name || "ReviewError",
+          message: String(
+            result.error.message || "Review did not complete.",
+          ).slice(0, 1_200),
+        },
+      });
+      continue;
+    }
+
+    const review = result.value;
+    reviews.push({
+      aspect,
+      outcome: "completed",
+      verdict: review.verdict,
+    });
+    for (const finding of review.findings) {
+      findings.push({ aspect, ...finding });
+    }
+  }
+
+  findings.sort((left, right) => {
+    let order = severityOrder[left.severity] - severityOrder[right.severity];
+    if (order !== 0) return order;
+    order = ASPECT_ORDER[left.aspect] - ASPECT_ORDER[right.aspect];
+    if (order !== 0) return order;
+    order = compareText(left.location, right.location);
+    if (order !== 0) return order;
+    order = compareText(left.evidence, right.evidence);
+    if (order !== 0) return order;
+    return compareText(left.explanation, right.explanation);
+  });
+
+  const severityCounts: Record<SeverityValue, number> = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+  };
+  let blocking = false;
+  let uncertain = false;
+  let concern = findings.length > 0;
+  for (const finding of findings) {
+    severityCounts[finding.severity] =
+      (severityCounts[finding.severity] ?? 0) + 1;
+    if (finding.severity === "critical" || finding.severity === "high") {
+      blocking = true;
+    }
+  }
+  for (const review of reviews) {
+    if (review.verdict === "blocking") blocking = true;
+    if (review.outcome === "failed" || review.verdict === "uncertain") {
+      uncertain = true;
+    }
+    if (review.verdict === "concern") concern = true;
+  }
+
+  const status: ReviewStatus = blocking
+    ? "blocking"
+    : uncertain
+      ? "uncertain"
+      : concern
+        ? "concern"
+        : "pass";
+  return { status, reviews, findings, severityCounts };
+}
+
+export default defineWorkflow({
+  name: "review-source",
+  version: 1,
+  description:
+    "Independently review bounded source inputs across four aspects and aggregate evidence-backed findings.",
+  input: Input,
+  output: Review,
+  async run(ctx, args) {
+    validateInput(args);
+    let fileList = "";
+    for (const file of args.files) {
+      fileList += `${fileList ? "\n" : ""}- ${file}`;
+    }
+
+    const reviewContext = `${REVIEW_CONTEXT}
+
+Files:
+${fileList}
+
+Intended change/design:
+${args.intendedChange}`;
+
+    const collected = await ctx.map(
+      ASPECTS,
+      async (aspect) => {
+        let review: AspectReviewValue;
+        try {
+          review = await ctx.agent(`review-${aspect.id}`, {
+            title: aspect.title,
+            prompt:
+              `${reviewContext}\n\n` +
+              `# Target\n${aspect.target}\n\n` +
+              `# Change\n${aspect.change}\n\n` +
+              `# Acceptance\n${aspect.acceptance}`,
+            output: AspectReview,
+            readOnly: true,
+          });
+        } catch (error) {
+          throw boundedReviewError(error);
+        }
+        for (const finding of review.findings) {
+          requireBoundedText(finding.location, "finding location", 512);
+          requireBoundedText(finding.evidence, "finding evidence", 1_200);
+          requireBoundedText(finding.explanation, "finding explanation", 1_200);
+        }
+        return review;
+      },
+      {
+        stepId: "review-aspects",
+        title: "Review source aspects",
+        concurrency: 4,
+        failure: "collect",
+      },
+    );
+
+    const report = await ctx.group(
+      "aggregate",
+      "Aggregate review",
+      async () => {
+        const result = aggregate(collected);
+        await ctx.checkpoint("review-report", result);
+        return result;
+      },
+    );
+
+    const save = await ctx.ask("save-review", {
+      type: "confirm",
+      question: "Save this completed review report as a workflow artifact?",
+      defaultValue: true,
+    });
+    if (!save) return report;
+
+    const artifact = await ctx.artifact.write("review", report);
+    return { ...report, artifactId: artifact.id };
+  },
+});

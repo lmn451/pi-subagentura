@@ -29,6 +29,7 @@ import {
   type Usage,
 } from "./helpers";
 import { registerWorkflowTool } from "./workflow";
+import { registerWorkflowDiagnosticContextFilter } from "./workflow-disclosure";
 import {
   registerInProcessMaintenanceTools,
   registerInProcessSubagentTools,
@@ -94,6 +95,7 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
 ).trim();
 
 export default function (pi: ExtensionAPI) {
+  registerWorkflowDiagnosticContextFilter(pi);
   const isChild = process.env.PI_SUBAGENTURA_CHILD === "1";
   const childArtifactDir = isChild ? process.env.ARTIFACT_DIR : undefined;
   if (!isChild || !childArtifactDir) {

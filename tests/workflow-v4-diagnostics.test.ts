@@ -325,6 +325,7 @@ describe("workflow mux probe diagnostics", () => {
         controller.signal,
         1000,
         undefined,
+        undefined,
         telemetry,
       );
       await vi.waitFor(() => {
@@ -462,12 +463,14 @@ describe("workflow mux probe diagnostics", () => {
         firstController.signal,
         1,
         undefined,
+        undefined,
         telemetry,
       );
       const secondWaiting = awaitInteractiveResult(
         secondState,
         secondController.signal,
         1,
+        undefined,
         undefined,
         disabledObserver,
       );
@@ -568,6 +571,7 @@ describe("workflow mux probe diagnostics", () => {
         state,
         undefined,
         1,
+        undefined,
         undefined,
         telemetry,
       );
@@ -671,6 +675,7 @@ describe("workflow mux probe diagnostics", () => {
         state,
         controller.signal,
         1,
+        undefined,
         undefined,
         telemetry,
       );
