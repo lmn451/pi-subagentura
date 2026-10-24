@@ -607,16 +607,10 @@ export function registerDurableWorkflowTools(
         requestInput: runAsync
           ? undefined
           : async (request, stepSignal) => {
-              if (
-                !isSessionOwnerLive(workflowOwner) ||
-                stepSignal?.aborted
-              )
+              if (!isSessionOwnerLive(workflowOwner) || stepSignal?.aborted)
                 throw new Error("Workflow input was interrupted.");
               const value = await queuedInput(ctx, request, stepSignal);
-              if (
-                !isSessionOwnerLive(workflowOwner) ||
-                stepSignal?.aborted
-              )
+              if (!isSessionOwnerLive(workflowOwner) || stepSignal?.aborted)
                 throw new Error("Workflow input was interrupted.");
               return value;
             },
