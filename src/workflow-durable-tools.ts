@@ -248,11 +248,15 @@ export function registerDurableWorkflowTools(
     };
   }
 
-  async function lookupScope(id: string, ctx: any): Promise<RunScope> {
-    const current = scope(ctx);
+  async function lookupScope(
+    id: string,
+    ctx: any,
+    ownerToken = owner(),
+  ): Promise<RunScope> {
+    const current = scope(ctx, false, ownerToken);
     return (await WorkflowRunStore.inspect(current, id))
       ? current
-      : scope(ctx, true);
+      : scope(ctx, true, ownerToken);
   }
 
   let inputTail: Promise<unknown> = Promise.resolve();
@@ -681,15 +685,29 @@ export function registerDurableWorkflowTools(
     if (!id.startsWith("wfd_")) return undefined;
     let store;
     try {
-      store = await WorkflowRunStore.resume(await lookupScope(id, ctx), id);
-      if (terminal(store.events)) return await inspect(id, ctx);
-      // A persistent cancel request is consumed by each exact attempt supervisor;
-      // never kill a potentially recycled mux pane ID recovered from old disk state.
-      await stopDurableProcessAttempts(store.directory);
-      await store.append("cancelled", {
-        status: "cancelled",
-        completedAt: Date.now(),
-      });
+      const cancellationOwner = owner();
+      const workflowJob = getWorkflowJobForOwner(id, cancellationOwner);
+      store =
+        workflowJob?.durable?.store ??
+        (await WorkflowRunStore.resume(
+          await lookupScope(id, ctx, cancellationOwner),
+          id,
+        ));
+      const terminalEvent = terminal(store.events);
+      if (terminalEvent && terminalEvent.data.status !== "cancelled")
+        return await inspect(id, ctx, false, cancellationOwner);
+      if (workflowJob) {
+        await withWorkflowTerminalTransition(workflowJob, async () => {
+          const currentTerminal = terminal(store!.events);
+          if (currentTerminal && currentTerminal.data.status !== "cancelled")
+            return;
+          await requestDurableWorkflowCancellation(store!, workflowJob);
+        });
+      } else {
+        await requestDurableWorkflowCancellation(store);
+      }
+      if (terminal(store.events))
+        return await inspect(id, ctx, false, cancellationOwner);
       return {
         content: [
           {

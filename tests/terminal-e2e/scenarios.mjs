@@ -64,6 +64,13 @@ export const scenarios = {
     child: "[E2E:CHILD_WORKFLOW]",
     expected: 'Workflow "e2e-workflow" started in background',
   },
+  "durable-cancel-sync": {
+    name: "durable-cancel-sync",
+    marker: "[E2E:DURABLE_CANCEL_SYNC]",
+    gate: null,
+    prompt: "[E2E:DURABLE_CANCEL_SYNC] Start the synchronous durable cancellation fixture.",
+    expected: "",
+  },
   "process-workflow": {
     name: "process-workflow",
     marker: "[E2E:WORKFLOW_PROCESS]",

@@ -1,23 +1,26 @@
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Type } from "typebox";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
   type AssistantMessageEvent,
-  type Context,
   type Model,
   type SimpleStreamOptions,
   type ToolCall,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import { normalizeProviderContext } from "../../../src/pi-sdk-compat";
 
 export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
 export const E2E_API = "subagentura-e2e";
 const FIXED_TIMESTAMP = 1_700_000_000_000;
-const GATE_TIMEOUT_MS = 30_000;
+const GATE_TIMEOUT_MS = Number(
+  process.env.SUBAGENTURA_E2E_GATE_TIMEOUT_MS ?? 30_000,
+);
 
 type Stage = "initial" | "toolIssued" | "gated" | "complete" | "failed";
 type State = {
@@ -29,7 +32,9 @@ type State = {
 
 const states = new Map<string, State>();
 
-function observedToolResults(context: Context): Array<Record<string, unknown>> {
+function observedToolResults(
+  context: TranscriptContext,
+): Array<Record<string, unknown>> {
   return context.messages.flatMap((entry) =>
     entry.role === "toolResult"
       ? [
@@ -72,7 +77,7 @@ function readOnlyWorkflowRequest(
   marker: string,
   requestSeq: number,
   state: State,
-  context: Context,
+  context: TranscriptContext,
   stream: ReturnType<typeof createAssistantMessageEventStream>,
 ): void {
   const processMode = marker === "[E2E:CHILD_WORKFLOW_READONLY_PROCESS]";
@@ -219,7 +224,7 @@ function processMcpControlRequest(
   marker: string,
   requestSeq: number,
   state: State,
-  context: Context,
+  context: TranscriptContext,
   stream: ReturnType<typeof createAssistantMessageEventStream>,
 ): void {
   const previousTool = state.toolName;
@@ -302,7 +307,7 @@ function markers(value: unknown): string[] {
   return [...text.matchAll(/\[E2E:[A-Z0-9_:-]+\]/g)].map((match) => match[0]);
 }
 
-function newestMarker(context: Context): string | undefined {
+function newestMarker(context: TranscriptContext): string | undefined {
   const latest = context.messages.at(-1);
   if (!latest) return undefined;
   const values: unknown[] = [];
@@ -315,12 +320,12 @@ function newestMarker(context: Context): string | undefined {
   return found.at(-1);
 }
 
-function latestToolResult(context: Context): string | undefined {
+function latestToolResult(context: TranscriptContext): string | undefined {
   const latest = context.messages.at(-1);
   return latest?.role === "toolResult" ? latest.toolCallId : undefined;
 }
 
-function toolResultText(context: Context, toolName: string): string {
+function toolResultText(context: TranscriptContext, toolName: string): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (current.role !== "toolResult" || current.toolName !== toolName)
@@ -330,7 +335,11 @@ function toolResultText(context: Context, toolName: string): string {
   throw new Error(`mock provider could not find result for ${toolName}`);
 }
 
-function resultId(context: Context, toolName: string, pattern: RegExp): string {
+function resultId(
+  context: TranscriptContext,
+  toolName: string,
+  pattern: RegExp,
+): string {
   const id = toolResultText(context, toolName).match(pattern)?.[0];
   if (!id) throw new Error(`mock provider could not find ${toolName} id`);
   return id;
@@ -339,7 +348,7 @@ function resultId(context: Context, toolName: string, pattern: RegExp): string {
 const INTERACTIVE_ID = /^[a-f0-9]{16}$/;
 const INTERACTIVE_LAUNCH = /^Interactive sub-agent ([a-f0-9]{16}) started \(/;
 
-function interactiveResultId(context: Context): string {
+function interactiveResultId(context: TranscriptContext): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (
@@ -406,6 +415,7 @@ function toolCall(
 
 const KNOWN_MARKERS = new Set([
   "[E2E:SMOKE]",
+  "[E2E:TOOL_PARAMETERS]",
   "[E2E:SYNC_CONTEXT]",
   "[E2E:SYNC_ISOLATED]",
   "[E2E:ASYNC_ISOLATED]",
@@ -435,6 +445,14 @@ const KNOWN_MARKERS = new Set([
   "[E2E:CHILD_READONLY_NESTED_SPAWN]",
   "[E2E:WORKFLOW_READONLY_PROCESS]",
   "[E2E:WORKFLOW_READONLY_IN_PROCESS]",
+  "[E2E:WORKFLOW_LIST_RUNS]",
+  "[E2E:DURABLE_CANCEL_SYNC]",
+  "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+  "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+  "[E2E:DURABLE_CANCEL_START]",
+  "[E2E:DURABLE_CANCEL_STATUS]",
+  "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+  "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
   "[E2E:CHILD_WORKFLOW_OK]",
   "[E2E:CHILD_WORKFLOW_ERROR]",
   "[E2E:CHILD_INTERACTIVE]",
@@ -448,6 +466,10 @@ const GATES = new Map<string, string>([
   ["[E2E:CHILD_SYNC_ISOLATED]", "release-sync-isolated"],
   ["[E2E:CHILD_ASYNC_ISOLATED]", "release-async-isolated"],
   ["[E2E:CHILD_WORKFLOW_PROCESS]", "release-workflow-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_PROCESS]", "release-durable-cancel-process"],
+  ["[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]", "release-durable-cancel-in-process"],
   ["[E2E:CHILD_WORKFLOW]", "release-workflow"],
   ["[E2E:CHILD_WORKFLOW_OK]", "release-workflow"],
   ["[E2E:CHILD_INTERACTIVE_FOLLOWUP]", "release-interactive-followup"],
@@ -681,7 +703,7 @@ export function streamThinkingForTest(text: string) {
 async function runRequest(
   stream: ReturnType<typeof createAssistantMessageEventStream>,
   model: Model<any>,
-  context: Context,
+  context: TranscriptContext,
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
   const toolResultId = latestToolResult(context);
@@ -714,7 +736,8 @@ async function runRequest(
   ) {
     throw new Error("mock provider received a provider/model/API mismatch");
   }
-  const normalizedContext = normalizeProviderContext(context);
+  const systemPrompt = getCurrentSystemPrompt(context.messages);
+  const tools = getCurrentTools(context.messages);
   diagnostic({
     marker,
     requestSeq,
@@ -727,9 +750,9 @@ async function runRequest(
     contextRoles: context.messages.map((entry) => entry.role),
     contextHasParentSentinel: JSON.stringify([
       context.messages,
-      normalizedContext.systemPrompt,
+      systemPrompt,
     ]).includes("PARENT_CONTEXT_SENTINEL"),
-    contextToolNames: normalizedContext.tools.map((tool) => tool.name),
+    contextToolNames: tools.map((tool) => tool.name),
     contextWorkingDirectory: process.cwd(),
     childArtifactDir: process.env.ARTIFACT_DIR,
     contextToolResults: observedToolResults(context),
@@ -944,7 +967,67 @@ async function runRequest(
   diagnostic({ marker, requestSeq, afterStage: "complete", eventType: "done" });
 }
 
-function parentTool(marker: string, context: Context): ToolCall {
+function parentTool(marker: string, context: TranscriptContext): ToolCall {
+  if (marker === "[E2E:WORKFLOW_LIST_RUNS]") {
+    return toolCall("e2e-workflow-list-runs", "list_workflow_runs", {});
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_SYNC]") {
+    return toolCall("e2e-durable-cancel-sync", "workflow", {
+      script: `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "e2e-durable-cancel-sync",
+        version: 1,
+        run: async function(ctx) {
+          return await Promise.all([
+            ctx.agent("process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_PROCESS] Wait for durable cancellation.",
+              isolation: "process"
+            }),
+            ctx.agent("in-process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS] Wait for durable cancellation.",
+              isolation: "in-process"
+            })
+          ]);
+        }
+      });`,
+      async: false,
+      durable: true,
+    });
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_START]") {
+    return toolCall("e2e-durable-cancel-start", "workflow", {
+      script: `import { defineWorkflow } from "pi-subagentura/workflow";
+      export default defineWorkflow({
+        name: "e2e-durable-cancel",
+        version: 1,
+        run: async function(ctx) {
+          return await Promise.all([
+            ctx.agent("process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_PROCESS] Wait for durable cancellation.",
+              isolation: "process"
+            }),
+            ctx.agent("in-process-child", {
+              prompt: "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS] Wait for durable cancellation.",
+              isolation: "in-process"
+            })
+          ]);
+        }
+      });`,
+      async: true,
+      durable: true,
+    });
+  }
+  if (marker === "[E2E:DURABLE_CANCEL_STATUS]") {
+    return toolCall("e2e-durable-cancel-status", "get_workflow_status", {
+      workflowId: resultId(context, "workflow", /wfd_[a-f0-9]{32}/),
+    });
+  }
+  if (marker === "[E2E:TOOL_PARAMETERS]") {
+    return toolCall("e2e-tool-parameters-1", "list_available_models", {
+      filter: "subagentura-e2e",
+      authOnly: false,
+    });
+  }
   if (marker.includes("ASYNC_STATUS")) {
     return toolCall("e2e-async-status-1", "get_subagent_status", {
       jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),
@@ -1013,6 +1096,7 @@ function parentTool(marker: string, context: Context): ToolCall {
        }
      });`,
       async: false,
+      ...(processMode ? { durable: true } : {}),
     });
   }
   if (marker.includes("WORKFLOW_PARTIAL")) {
@@ -1036,8 +1120,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_PROVIDER_ERROR] Fail the provider fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   if (marker.includes("INTERACTIVE")) {
@@ -1046,8 +1128,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_INTERACTIVE] Complete the artifact fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   const isolated = marker.includes("ISOLATED");
@@ -1058,9 +1138,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: `[E2E:CHILD_${marker.replace("[E2E:", "").replace("]", "")}] Return the deterministic fixture.`,
       model: "subagentura-e2e/mock",
       async: marker.includes("ASYNC"),
-      ...(marker.includes("ASYNC")
-        ? { notifyOnComplete: "notify", triggerTurnOnComplete: false }
-        : {}),
     },
   );
 }
@@ -1093,7 +1170,7 @@ export function createMockProviderConfig() {
     ],
     streamSimple(
       model: Model<any>,
-      context: Context,
+      context: TranscriptContext,
       options?: SimpleStreamOptions,
     ) {
       const stream = createAssistantMessageEventStream();
