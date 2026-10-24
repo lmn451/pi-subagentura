@@ -932,13 +932,7 @@ describe("completion coordinator", () => {
       /sealed/,
     );
     expect(() =>
-      registerCompletionMember(
-        "workflow",
-        "wfd_late",
-        "group",
-        groupId,
-        owner,
-      ),
+      registerCompletionMember("workflow", "wfd_late", "group", groupId, owner),
     ).toThrow(/sealed/);
     expect(readCompletionGroupsSync(directory)).toEqual([
       {
