@@ -27,6 +27,7 @@
     "agent-observability",
     "tmux",
     "zellij",
+    "herdr",
     "swarm",
     "crew"
   ],
