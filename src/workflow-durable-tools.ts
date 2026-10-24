@@ -263,6 +263,7 @@ export function registerDurableWorkflowTools(
     let store: WorkflowRunStore | undefined;
     let accepted = false;
     let reservation: ReturnType<typeof reserveCompletionGroup>;
+    let removeNativeAbortListener: (() => void) | undefined;
     try {
       if (getOrchestrationContext())
         throw new Error(
@@ -382,7 +383,7 @@ export function registerDurableWorkflowTools(
               model: request.model ?? definition.defaultModel,
             }),
           loadWorkflow: loadWorkflowScript,
-          signal: runAsync ? undefined : signal,
+          signal: undefined,
           onProgress: (progress) => {
             if (progress.kind === "phase") {
               void store!
@@ -421,6 +422,28 @@ export function registerDurableWorkflowTools(
         completion.policy ?? (runAsync ? "each" : undefined);
       job.completionGroupId = completion.groupId;
       accepted = true;
+      if (!runAsync && signal) {
+        const runStore = store!;
+        const onNativeAbort = () => {
+          if (runStore.events.some((event) => event.kind === "terminal"))
+            return;
+          if (getWorkflowJobForOwner(job.id, workflowOwner) !== job) return;
+          void requestDurableWorkflowCancellation(runStore, job).catch(() => {
+            try {
+              ctx.ui?.notify?.(
+                "Durable workflow cancellation could not be completed; the workflow may still be running. Retry with cancel_workflow.",
+                "warning",
+              );
+            } catch {
+              // The interrupted tool context may no longer be able to notify.
+            }
+          });
+        };
+        signal.addEventListener("abort", onNativeAbort, { once: true });
+        removeNativeAbortListener = () =>
+          signal.removeEventListener("abort", onNativeAbort);
+        if (signal.aborted) onNativeAbort();
+      }
       if (runAsync)
         return {
           content: [
@@ -450,6 +473,7 @@ export function registerDurableWorkflowTools(
     } catch (error) {
       return failure(error);
     } finally {
+      removeNativeAbortListener?.();
       if (!accepted) {
         releaseCompletionGroup(reservation);
         await store?.close();
