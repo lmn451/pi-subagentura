@@ -17,6 +17,8 @@ import { registerCancelAllFlows } from "../src/cancel-all-flows-registration";
 import {
   registerCompletionCoordinator,
   clearCompletionCoordinator,
+  COMPLETION_ENTRY_TYPE,
+  publishCompletion,
 } from "../src/completion-coordinator";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import type { Multiplexer } from "../src/multiplexer-contracts";
@@ -959,6 +961,63 @@ describe("durable cancellation regressions", () => {
           event.kind === "terminal" && event.data.status === "cancelled",
       ),
     ).toBe(true);
+  });
+
+  it("publishes normal completion if cancel-all cannot persist an attempt marker", async () => {
+    const agentStarted = deferred<void>();
+    const finishAgent = deferred<Awaited<ReturnType<WorkflowAgentRunner>>>();
+    let attemptPath = "";
+    const runner: WorkflowAgentRunner = async ({ durableAttempt }) => {
+      const attempt = await prepareDurableProcess(durableAttempt!);
+      attempt.beforeDispatch(fakeAttemptState(root));
+      attemptPath = attempt.path;
+      agentStarted.resolve();
+      return finishAgent.promise;
+    };
+    const api = registerDurableWorkflowTools(
+      harness.pi,
+      () => sessionOwner(harness.scope),
+      () => runner,
+      (job) => {
+        publishCompletion(
+          {
+            schemaVersion: 1,
+            completionId: `workflow:${job.id}`,
+            source: "workflow",
+            sourceId: job.id,
+            label: job.name,
+            status: job.status === "error" ? "error" : "done",
+            policy: job.completionPolicy ?? "each",
+            references: [{ label: "result", value: job.id }],
+            completedAt: Date.now(),
+          },
+          sessionOwner(harness.scope),
+        );
+      },
+      root,
+    ) as unknown as DurableToolsApi;
+    const id = await startDurableRun(api);
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted.promise;
+    fsFault.failOpenPath = attemptPath + ".cancel";
+
+    const result = await cancelAllFlows(sessionOwner(harness.scope));
+    expect(result.workflowsFailed).toBe(1);
+    expect(job.abort.signal.aborted).toBe(false);
+    expect(job.status).toBe("running");
+
+    finishAgent.resolve({
+      isError: false,
+      output: "completed after failed cancellation",
+      usage: zeroUsage(),
+    });
+    await expect(job.promise).resolves.toMatchObject({
+      result: "completed after failed cancellation",
+    });
+    expect(harness.pi.appendEntry).toHaveBeenCalledWith(
+      COMPLETION_ENTRY_TYPE,
+      expect.objectContaining({ sourceId: id, status: "done" }),
+    );
   });
 
   it("returns the real interactive cancellation snapshot for a durable process without killing its mux pane", async () => {

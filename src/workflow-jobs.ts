@@ -445,9 +445,9 @@ export async function requestDurableWorkflowCancellation(
       completedAt: Date.now(),
     });
   }
+  await stopDurableProcessAttempts(store.directory);
   if (job && options?.suppressCompletionNotification)
     job.suppressCompletionNotification = true;
-  await stopDurableProcessAttempts(store.directory);
   if (job) cancelWorkflowJob(job, "explicit_cancel");
 }
 

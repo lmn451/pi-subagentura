@@ -1879,13 +1879,10 @@ export function reserveCompletionGroup(
   }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
+  if (state.groupsSealed || group?.sealed) {
+    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
+  }
   const hasReservation = state.reservedGroups.has(normalizedGroupId);
-  if (group?.sealed) {
-    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
-  }
-  if (state.groupsSealed && !group) {
-    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
-  }
   const reserved = state.groupReservations.get(normalizedGroupId) ?? 0;
   if ((group?.members.size ?? 0) + reserved >= MAX_GROUP_MEMBERS) {
     throw new Error(`Completion group ${normalizedGroupId} is full`);
@@ -1945,7 +1942,7 @@ export function assertCompletionGroupOpen(
   ) {
     throw new Error("Too many completion groups in this parent session");
   }
-  if (state.groupsSealed && !group) {
+  if (state.groupsSealed) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
 }
@@ -1986,6 +1983,13 @@ export function registerCompletionMember(
     sealed: state.groupsSealed,
   };
   const memberKey = completionMemberKey(source, sourceId);
+  if (
+    state.groupsSealed &&
+    !hasReservation &&
+    !group.members.has(memberKey)
+  ) {
+    throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
+  }
   if (group.sealed && !group.members.has(memberKey) && !hasReservation) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
