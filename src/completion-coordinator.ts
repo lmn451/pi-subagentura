@@ -232,6 +232,7 @@ interface CompletionCoordinatorState {
   groupReservations: Map<string, number>;
   reservedGroups: Set<string>;
   groupsSealed: boolean;
+  admissionClosedGroups: Set<string>;
   overflow: CompletionOverflowState;
   manifestRetryAttempt: number;
   manifestRetryExhausted: boolean;
@@ -1424,6 +1425,7 @@ function getState(
     groupReservations: new Map(),
     reservedGroups: new Set(),
     groupsSealed: false,
+    admissionClosedGroups: new Set(),
     overflow: undefined as unknown as CompletionOverflowState,
     manifestRetryAttempt: 0,
     manifestRetryExhausted: false,
@@ -1879,7 +1881,11 @@ export function reserveCompletionGroup(
   }
   const normalizedGroupId = normalizeGroupId(groupId);
   const group = state.groups.get(normalizedGroupId);
-  if (state.groupsSealed || group?.sealed) {
+  if (
+    state.groupsSealed ||
+    state.admissionClosedGroups.has(normalizedGroupId) ||
+    group?.sealed
+  ) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
   const hasReservation = state.reservedGroups.has(normalizedGroupId);
@@ -1942,7 +1948,10 @@ export function assertCompletionGroupOpen(
   ) {
     throw new Error("Too many completion groups in this parent session");
   }
-  if (state.groupsSealed) {
+  if (
+    state.groupsSealed ||
+    state.admissionClosedGroups.has(normalizedGroupId)
+  ) {
     throw new Error(`Completion group ${normalizedGroupId} is already sealed`);
   }
 }
@@ -1980,11 +1989,13 @@ export function registerCompletionMember(
     groupId: normalizedGroupId,
     members: new Set<string>(),
     terminalMembers: new Set<string>(),
-    sealed: state.groupsSealed,
+    sealed:
+      state.groupsSealed || state.admissionClosedGroups.has(normalizedGroupId),
   };
   const memberKey = completionMemberKey(source, sourceId);
   if (
-    state.groupsSealed &&
+    (state.groupsSealed ||
+      state.admissionClosedGroups.has(normalizedGroupId)) &&
     !hasReservation &&
     !group.members.has(memberKey)
   ) {
@@ -2015,6 +2026,10 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
   if (!state) return;
   if (isCompletionGroupRecoveryBlocked(state.owner)) return;
   state.groupsSealed = true;
+  for (const groupId of state.groups.keys())
+    state.admissionClosedGroups.add(groupId);
+  for (const groupId of state.reservedGroups)
+    state.admissionClosedGroups.add(groupId);
   for (const group of state.groups.values()) {
     writeCompletionGroup(
       sessionLedgerFile(state.owner, "subagentura-completion-groups") +
@@ -2052,6 +2067,7 @@ function installRecoveredGroup(
     terminalMembers,
     sealed: true,
   });
+  state.admissionClosedGroups.add(saved.groupId);
 }
 
 function reconcileRecoveredGroupTerminals(
