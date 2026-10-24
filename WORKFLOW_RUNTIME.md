@@ -257,10 +257,17 @@ immediately. Resumed background runs persist their effective completion policy
 before work proceeds. Terminal runs do not resume; rerunning a saved definition
 creates a new run.
 
-Legacy recovery requires the same host, canonical working directory, Pi
-session id, and Node major version. V4 project-scoped recovery requires the
-same host, canonical working directory, and Node major version, and must be
-started manually from a live Pi session. Both re-execute the immutable program from the beginning,
+Durable workflow members can share persisted completion groups with other
+completion sources. If group recovery is unavailable, terminal errors remain
+eligible under their original group identity; successful and cancelled members
+stay gated. Recovery does not infer membership from records while the
+authoritative snapshot is unavailable. After repair, only validated snapshot
+members count toward readiness, and a retained terminal error counts once.
+
+Legacy recovery requires the same host, canonical working directory, Pi session,
+and Node major version. V4 project-scoped recovery requires the same host,
+canonical working directory, and Node major version, and can be started manually
+from a live Pi session. Recovery re-executes the immutable program from the beginning,
 validates request identity, and delivers committed responses in their recorded
 global order, including nested loads and output-token deltas. It does not
 serialize VM stacks or closures. Divergence terminates the host worker and

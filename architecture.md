@@ -924,10 +924,9 @@ It loads the saved child over RPC and evaluates it in the same worker, sharing s
 Only one nested child level is allowed.
 An in-process subagent is forbidden from invoking the top-level Pi workflow tool because cross-registry cancellation for that shape is unsupported.
 
-Saved workflows can also be invoked through their compatible slash-command
-path, which runs definitions durably by default. The workflow tool keeps
-durability opt-in through `durable: true`; saving or inspecting a definition
-alone does not make a run durable.
+Saved workflow slash commands keep the session-scoped default. See
+[the workflow runtime contract](WORKFLOW_RUNTIME.md#definitions-and-runs-are-different)
+for run-mode selection.
 
 ### 9.6 Background lifecycle
 
@@ -968,50 +967,9 @@ On completion, `notifyWorkflowCompletion` publishes one coordinated workflow rec
 
 ### 9.7 Durable lifecycle and recovery
 
-Durability is opt-in for legacy `.mjs` scripts; V4 typed definitions use
-durable runs by default unless `durable: false` is passed. Compatible saved
-slash commands also start durably by default. A durable run records its source,
-arguments, definition digest, request outcomes, usage, and terminal state in a
-bounded journal under its run scope. Recovery is manual through
-`resume_workflow` from a live Pi process. Legacy runs require the same host,
-working directory, Pi session, and Node major version. V4 runs use the
-project-scoped store and require the same host, canonical working directory,
-and Node major version. There is no daemon or exactly-once side-effect
-guarantee. Uncommitted agent work may repeat after interruption, while
-committed requests replay from recorded outcomes.
-
-V4 workflow source is a default-exported `defineWorkflow()` module with typed
-input/output schemas and a `run(ctx, args)` callback. Node.js 24.12 or newer
-strips erasable TypeScript syntax; source is not type-checked and runtime imports
-are limited to named `defineWorkflow` and `schema` bindings from
-`pi-subagentura/workflow`. The worker uses `effect@4.0.0-rc.117` internally;
-Effect types are not part of the workflow API. The V4 context provides steps,
-agent calls, groups, bounded parallel/map/pipeline, repeat cycles, nested
-workflows, human input/gates, checkpoints, artifacts, logging, budget, and
-cancellation signal.
-
-The V4 step store appends step, progress, answer, and artifact-reference events
-to the durable journal. Step output values and answers remain private journal
-data; status snapshots omit step input, policy, output, and answer. Checkpoints
-persist their value. Artifact bytes live in private per-run files separate from
-the journal. A resumed definition re-executes from the beginning and skips a
-completed step only when the definition hash, stable step path, input, and
-policy match. Changing the source invalidates that reuse check. `persist:false`
-does not store a step result, while `cache:false` and `resume:false` disable
-reuse. Human questions and gates persist `waiting_for_input` state; the
-`respond_workflow_input` tool gathers the answer through Pi UI and persists it
-before a live or resumed run continues.
-
-The durable runner uses the same worker and runner selection as ordinary
-workflows. Process-backed attempts have a private recovery manifest, and a
-partially dispatched attempt is not duplicated by falling back to an
-in-process runner. Durable workflow-owned child completions are aggregated by
-the parent workflow record.
-
-Persisted completion groups are only used for groups containing durable
-workflow members. If group recovery is malformed or unavailable, all records
-in that group remain blocked for the owner, while independently eligible
-`each` records remain deliverable.
+Durable execution and recovery semantics, including process-attempt and
+completion-group recovery, are specified in
+[the workflow runtime contract](WORKFLOW_RUNTIME.md#recovery-and-observation).
 
 ### 9.8 Usage accounting, pricing provenance, and live projection
 

@@ -227,8 +227,12 @@ export function registerDurableWorkflowTools(
   /** Private fixture root; production callers use the user-owned run store. */
   storeRoot?: string,
 ) {
-  function scope(ctx?: any, project = false): RunScope {
-    const live = resolveLiveSessionScope(owner());
+  function scope(
+    ctx?: any,
+    project = false,
+    ownerToken = owner(),
+  ): RunScope {
+    const live = resolveLiveSessionScope(ownerToken);
     const cwd = ctx?.cwd ?? live?.cwd;
     const sessionId =
       ctx?.sessionManager?.getSessionId?.() ??
@@ -765,11 +769,20 @@ export function registerDurableWorkflowTools(
       ctx: any,
     ): Promise<any> {
       try {
-        const runs = [];
+        const listOwner = owner();
+        const runs: Array<
+          Partial<ReturnType<typeof durableRunListSummary>> & {
+            workflowId: string;
+            status: string;
+          }
+        > = [];
         const runLines = [];
         let remainingActionBytes = MAX_WAITING_INPUT_ACTION_BYTES;
         let hasListedAction = false;
-        for (const runScope of [scope(ctx), scope(ctx, true)]) {
+        for (const runScope of [
+          scope(ctx, false, listOwner),
+          scope(ctx, true, listOwner),
+        ]) {
           for (const id of await WorkflowRunStore.list(runScope)) {
             try {
               const events = await WorkflowRunStore.inspect(runScope, id);
@@ -791,7 +804,7 @@ export function registerDurableWorkflowTools(
                   waitingActions.actionBytes + separatorBytes;
                 hasListedAction = true;
               }
-              const job = getWorkflowJobForOwner(id, owner());
+              const job = getWorkflowJobForOwner(id, listOwner);
               const waitingCount =
                 (summary.waiting?.length ?? 0) +
                 (summary.waitingRemainderCount ?? 0);
@@ -830,7 +843,7 @@ export function registerDurableWorkflowTools(
               type: "text",
               text: runLines.length
                 ? runLines.join("\n")
-                : "No durable workflow runs in this Pi session.",
+                : "No persisted workflow runs in this Pi session or project.",
             },
           ],
           details: { runs },
