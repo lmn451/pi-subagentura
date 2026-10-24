@@ -48,7 +48,14 @@ it("continues workflow artifact reads from the previous byte offset", async () =
   const art = artifactPath(temporaryDirectory, id);
   mkdirSync(art.dir, { recursive: true });
   writeFileSync(art.statusFile, "");
-  appendEvent(art, { ts: 1, type: "started", status: "running" });
+  appendEvent(art, {
+    version: 2,
+    eventId: "start",
+    turnId: "turn",
+    ts: 1,
+    type: "turn_started",
+    status: "running",
+  });
   const state = {
     id,
     name: id,
@@ -70,7 +77,16 @@ it("continues workflow artifact reads from the previous byte offset", async () =
     getPaneLivenessAsync: vi.fn(async () => {
       probeCount++;
       if (probeCount === 1) {
-        appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
+        appendEvent(art, {
+          version: 2,
+          eventId: "done",
+          turnId: "turn",
+          ts: 2,
+          type: "completion",
+          status: "done",
+          outcome: "done",
+          source: "agent_settled",
+        });
       }
       return "alive";
     }),

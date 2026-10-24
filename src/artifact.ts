@@ -8,7 +8,6 @@
  *   output.md        — mutable staging file for the active child turn; reset at turn start
  *   outputs/<id>.md  — immutable protocol-v2 snapshots, atomically captured
  *                      before their completion event is appended
- *   output-N.md      — legacy numeric snapshots retained for compatibility
  *
  * Files survive parent-agent restarts, so a sub-agent can complete while the
  * parent is down and the parent can catch up by reading the artifact later.
@@ -37,8 +36,13 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
-import { sanitizeTelemetryModel, type TelemetryMux } from "./telemetry";
 import { asStringIdentifier, type EventId } from "./identifier-types";
+import {
+  sanitizeTelemetryModel,
+  sanitizeTelemetryTrafficOrigin,
+  type TelemetryMux,
+  type TelemetryTrafficOrigin,
+} from "./telemetry";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -201,39 +205,8 @@ export type CompletionEventV2 = Extract<
   SubagentEventV2,
   { type: "completion" }
 >;
-export type SubagentEvent =
-  | { ts: number; type: "started"; status: "running"; message?: string }
-  | {
-      ts: number;
-      type: "tool_activity";
-      status: "running";
-      tool?: string;
-      summary?: string;
-      message?: string;
-    }
-  | {
-      ts: number;
-      type: "done";
-      status: "done";
-      exitCode?: number;
-      message?: string;
-      summary?: string;
-    }
-  | {
-      ts: number;
-      type: "error";
-      status: "error";
-      message?: string;
-      exitCode?: number;
-    }
-  | { ts: number; type: "cancelled"; status: "cancelled"; message?: string }
-  | SubagentEventV2;
-
-export type LegacyCompletionEvent = Extract<
-  SubagentEvent,
-  { type: "done" | "error" | "cancelled" }
->;
-export type TurnTerminalEvent = LegacyCompletionEvent | CompletionEventV2;
+export type SubagentEvent = SubagentEventV2;
+export type TurnTerminalEvent = Extract<SubagentEvent, { type: "completion" }>;
 export type CompletionEvent = TurnTerminalEvent;
 
 // ── Exhaustive event classification helpers ────────────────────────
@@ -243,23 +216,15 @@ export function assertNever(value: never): never {
   throw new Error(`Unexpected value: ${String(value)}`);
 }
 
-/**
- * Workflow-waiting semantics: authoritative turn completions are legacy
- * done/error/cancelled events or a v2 completion. A process_exited event is
- * excluded so the pane-death grace period can observe a final completion flush.
- */
+/** Workflow waits for authoritative turn completions, not process exit. */
 export function isTurnTerminal(
   event: SubagentEvent,
 ): event is TurnTerminalEvent {
   switch (event.type) {
-    case "done":
-    case "error":
-    case "cancelled":
     case "completion":
       return true;
-    case "started":
-    case "tool_activity":
     case "turn_started":
+    case "tool_activity":
     case "process_exited":
       return false;
     default:
@@ -267,43 +232,29 @@ export function isTurnTerminal(
   }
 }
 
-/**
- * Output-reporting semantics: these events establish that output is no longer
- * pending for the current observed turn or process.
- */
+/** These events establish that output is no longer pending. */
 export function isArtifactOutputSettled(event: SubagentEvent): boolean {
   switch (event.type) {
-    case "done":
-    case "error":
-    case "cancelled":
     case "completion":
     case "process_exited":
       return true;
-    case "started":
-    case "tool_activity":
     case "turn_started":
+    case "tool_activity":
       return false;
     default:
       return assertNever(event);
   }
 }
 
-/**
- * Notification semantics: only completion/error/cancelled events should trigger
- * a wakeup notification to the parent. process_exited and activity events do not.
- */
+/** Only a completion event should trigger a parent wakeup. */
 export function isCompletionEvent(
   event: SubagentEvent,
 ): event is CompletionEvent {
   switch (event.type) {
     case "completion":
-    case "done":
-    case "error":
-    case "cancelled":
       return true;
-    case "started":
-    case "tool_activity":
     case "turn_started":
+    case "tool_activity":
     case "process_exited":
       return false;
     default:
@@ -316,7 +267,6 @@ export interface EventRecord {
   startOffset: number;
   endOffset: number;
   raw: string;
-  legacy: boolean;
 }
 
 export type EventReadIssue =
@@ -568,66 +518,6 @@ export function writeOutput(art: SubagentArtifact, content: string): void {
   renameSync(tmp, art.outputFile);
 }
 
-/**
- * Path of the per-turn snapshot file: `${artifactDir}/output-N.md`.
- * Exported so the poller (and tests) can name the file consistently.
- */
-export function outputPathForTurn(art: SubagentArtifact, turn: number): string {
-  return join(art.dir, `output-${turn}.md`);
-}
-
-/**
- * Snapshot the latest output.md into output-N.md, where N is the caller's choice (typically the
- * count of `done` events in events.ndjson at the moment of the snapshot). No-op if output.md is missing.
- * The snapshot uses an atomic rename from a sibling .tmp file, matching writeOutput's durability.
- *
- * Callers should pass N = events.filter(type === "done").length so that a re-poll of the same event
- * would compute the same N — but a guard inside would be brittle. Trust the caller.
- */
-export function snapshotOutput(art: SubagentArtifact, turn: number): void {
-  let fd: number | undefined;
-  let content: Buffer;
-  try {
-    fd = openSync(art.outputFile, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > MAX_OUTPUT_SNAPSHOT_BYTES) return;
-    content = Buffer.alloc(stat.size);
-    let offset = 0;
-    while (offset < content.length) {
-      const bytesRead = readSync(
-        fd,
-        content,
-        offset,
-        content.length - offset,
-        offset,
-      );
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    content = content.subarray(0, offset);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      debugLog("warn", "legacy_snapshot_output_unavailable", {
-        artifactId: art.id,
-        turn,
-      });
-    }
-    return;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* legacy snapshot content is already bounded in memory */
-      }
-    }
-  }
-  const target = outputPathForTurn(art, turn);
-  const tmp = target + ".tmp";
-  writeFileSync(tmp, content, { mode: 0o600 });
-  renameSync(tmp, target);
-}
-
 export function snapshotOutputForEvent(
   art: SubagentArtifact,
   eventId: string,
@@ -775,43 +665,6 @@ export function appendCompletionEvent(
   });
 }
 
-/**
- * Read a specific turn's snapshot (output-N.md). Returns null if the snapshot doesn't exist.
- */
-export function readOutputForTurn(
-  art: SubagentArtifact,
-  turn: number,
-): string | null {
-  const target = outputPathForTurn(art, turn);
-  if (!existsSync(target)) return null;
-  try {
-    return readFileSync(target, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * List the turn numbers for which a snapshot exists. Sorted ascending. Used by read_subagent_artifact
- * to summarize the available history.
- */
-export function listOutputTurns(art: SubagentArtifact): number[] {
-  if (!existsSync(art.dir)) return [];
-  let entries: string[];
-  try {
-    entries = readdirSync(art.dir);
-  } catch {
-    return [];
-  }
-  const turns: number[] = [];
-  for (const name of entries) {
-    const m = /^output-(\d+)\.md$/.exec(name);
-    if (m) turns.push(Number(m[1]));
-  }
-  turns.sort((a, b) => a - b);
-  return turns;
-}
-
 /** Protocol-v2 completion-to-snapshot mappings in physical event-log order. */
 export function listOutputHistory(art: SubagentArtifact): OutputHistoryEntry[] {
   return readEvents(art).flatMap((event) => {
@@ -876,14 +729,15 @@ export function readOutputForTurnId(
 
 // ── Reads ───────────────────────────────────────────────────────────
 
-function normalizeEvent(
-  value: unknown,
-  startOffset: number,
-  raw: string,
-): { event: SubagentEvent; legacy: boolean } | null {
+function normalizeEvent(value: unknown): SubagentEvent | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
-  if (typeof obj.ts !== "number" || !Number.isFinite(obj.ts) || obj.ts < 0) {
+  if (
+    obj.version !== 2 ||
+    typeof obj.ts !== "number" ||
+    !Number.isFinite(obj.ts) ||
+    obj.ts < 0
+  ) {
     return null;
   }
   const message = boundedOptionalEventText(obj.message);
@@ -893,77 +747,34 @@ function normalizeEvent(
     typeof obj.exitCode === "number" && Number.isSafeInteger(obj.exitCode)
       ? obj.exitCode
       : undefined;
-  if (obj.version !== 2) {
-    const base = { ts: obj.ts, message };
-    if (obj.type === "started")
-      return {
-        event: { ...base, type: "started", status: "running" },
-        legacy: true,
-      };
-    if (obj.type === "tool_activity")
-      return {
-        event: {
-          ...base,
-          type: "tool_activity",
-          status: "running",
-          tool,
-          summary,
-        },
-        legacy: true,
-      };
-    if (obj.type === "done")
-      return {
-        event: { ...base, type: "done", status: "done", exitCode, summary },
-        legacy: true,
-      };
-    if (obj.type === "error")
-      return {
-        event: { ...base, type: "error", status: "error", exitCode },
-        legacy: true,
-      };
-    if (obj.type === "cancelled")
-      return {
-        event: { ...base, type: "cancelled", status: "cancelled" },
-        legacy: true,
-      };
-    return null;
-  }
-  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 24);
-  const normalizeId = (
-    candidate: unknown,
-    prefix: "event" | "turn",
-    maxLength: number,
-  ): string =>
+  const normalizeId = (candidate: unknown, maxLength: number): string | null =>
     typeof candidate === "string" &&
     candidate.length > 0 &&
     candidate.length <= maxLength &&
     /^[A-Za-z0-9._:-]+$/.test(candidate)
       ? candidate
-      : `invalid-${prefix}-${startOffset}-${hash}`;
-  const eventId = normalizeId(obj.eventId, "event", MAX_EVENT_ID_LENGTH);
-  const turnId = normalizeId(obj.turnId, "turn", MAX_TURN_ID_LENGTH);
+      : null;
+  const eventId = normalizeId(obj.eventId, MAX_EVENT_ID_LENGTH);
+  const turnId = normalizeId(obj.turnId, MAX_TURN_ID_LENGTH);
+  if (!eventId || !turnId) return null;
   const base = { version: 2 as const, eventId, turnId, ts: obj.ts };
-  if (obj.type === "turn_started")
-    return {
-      event: { ...base, type: "turn_started", status: "running", message },
-      legacy: false,
-    };
+  if (obj.type === "turn_started") {
+    return { ...base, type: "turn_started", status: "running", message };
+  }
   if (
     obj.type === "tool_activity" &&
     (obj.phase === "start" || obj.phase === "end")
-  )
+  ) {
     return {
-      event: {
-        ...base,
-        type: "tool_activity",
-        status: "running",
-        phase: obj.phase,
-        tool,
-        summary,
-        message,
-      },
-      legacy: false,
+      ...base,
+      type: "tool_activity",
+      status: "running",
+      phase: obj.phase,
+      tool,
+      summary,
+      message,
     };
+  }
   if (
     obj.type === "completion" &&
     (obj.outcome === "done" ||
@@ -1035,23 +846,20 @@ function normalizeEvent(
         ? obj.agentStopReason
         : undefined;
     return {
-      event: {
-        ...base,
-        type: "completion",
-        status: obj.outcome,
-        outcome: obj.outcome,
-        source: obj.source,
-        output,
-        outputError,
-        exitCode,
-        message,
-        errorMessage: boundedOptionalEventText(obj.errorMessage),
-        summary,
-        cancellationOrigin,
-        cancellationLifecycleReason,
-        ...(agentStopReason ? { agentStopReason } : {}),
-      },
-      legacy: false,
+      ...base,
+      type: "completion",
+      status: obj.outcome,
+      outcome: obj.outcome,
+      source: obj.source,
+      output,
+      outputError,
+      exitCode,
+      message,
+      errorMessage: boundedOptionalEventText(obj.errorMessage),
+      summary,
+      cancellationOrigin,
+      cancellationLifecycleReason,
+      ...(agentStopReason ? { agentStopReason } : {}),
     };
   }
   if (
@@ -1067,17 +875,14 @@ function normalizeEvent(
     const signal = normalizeProcessSignal(obj.signal);
     const lastTool = normalizeDiagnosticTool(obj.lastTool);
     return {
-      event: {
-        ...base,
-        type: "process_exited",
-        status: obj.status,
-        exitCode,
-        ...(terminationReason === undefined ? {} : { terminationReason }),
-        ...(signal === undefined ? {} : { signal }),
-        ...(lastTool === undefined ? {} : { lastTool }),
-        message,
-      },
-      legacy: false,
+      ...base,
+      type: "process_exited",
+      status: obj.status,
+      exitCode,
+      ...(terminationReason === undefined ? {} : { terminationReason }),
+      ...(signal === undefined ? {} : { signal }),
+      ...(lastTool === undefined ? {} : { lastTool }),
+      message,
     };
   }
   return null;
@@ -1270,35 +1075,18 @@ export function readEventBatch(
     const recordStart = offset + start;
     const recordEnd = offset + lineEnd;
     const raw = content.subarray(start, newline).toString("utf8");
-    let normalized: { event: SubagentEvent; legacy: boolean } | null = null;
+    let normalized: SubagentEvent | null = null;
     try {
-      normalized = normalizeEvent(JSON.parse(raw), recordStart, raw);
+      normalized = normalizeEvent(JSON.parse(raw));
     } catch {
       normalized = null;
     }
     if (normalized) {
-      if (normalized.legacy) {
-        Object.defineProperties(normalized.event, {
-          eventId: {
-            value: `legacy-${createHash("sha256")
-              .update(`${recordStart}:`)
-              .update(raw)
-              .digest("hex")
-              .slice(0, 24)}`,
-            enumerable: false,
-          },
-          turnId: {
-            value: `legacy-${recordStart}`,
-            enumerable: false,
-          },
-        });
-      }
       records.push({
-        event: normalized.event,
+        event: normalized,
         startOffset: recordStart,
         endOffset: recordEnd,
         raw,
-        legacy: normalized.legacy,
       });
     } else {
       appendEventReadIssue(issues, {
@@ -1602,41 +1390,31 @@ export function cleanupOldArtifacts(
  
  */
 
-export interface InteractiveSubagentPersistedStateV1 {
+export interface InteractiveSubagentPersistedStateV2 {
   id: string;
-
   paneId: string;
-
-  /** Stable mux terminal identity (Herdr); absent for tmux/Zellij and legacy states. */
+  /** Stable mux terminal identity (Herdr); absent for tmux/Zellij. */
   muxTerminalId?: string;
-
   windowName?: string;
-
   mux: MuxName;
-
   muxSession?: string;
-
   artifactDir: string;
-
   sessionFile: string;
-  /**
-   * Resolved child process working directory. `cwd` remains the parent
-   * state-file scope used by poll, delivery, and removal.
-   */
+  /** Resolved child process working directory. */
   workingCwd?: string;
-
-  notifyOnComplete?: "notify" | "inject";
-  triggerTurnOnComplete?: boolean;
   completionPolicy?: "each" | "group";
   completionTombstone?: "failed";
   completionTombstoneAt?: number;
   completionGroupId?: string;
-
   /** Parent pi session id; only rehydrated when the current session matches. */
   parentSessionId?: string;
-
   /** Closed analytics dimensions only; never task, prompt, output, or identity. */
   telemetry?: PersistedInteractiveTelemetry;
+  eventByteCursor?: number;
+  activeTurnId?: string;
+  pendingDeliveries?: PersistedDeliveryIntent[];
+  deliveryReceipts?: string[];
+  lifecycle?: PersistedLifecycleFold;
 }
 
 export interface PersistedInteractiveTelemetry {
@@ -1646,7 +1424,7 @@ export interface PersistedInteractiveTelemetry {
   mux: TelemetryMux;
   depth?: number;
   depthBucket: "1" | "2" | "3" | "4-7" | "8+" | "unknown";
-  completionPolicy: "inline" | "each" | "group" | "legacy";
+  completionPolicy: "inline" | "each" | "group";
   model: string;
   activeTurnId?: string;
   turnStartedAt?: number;
@@ -1657,6 +1435,7 @@ export interface PersistedInteractiveTelemetry {
 export interface PersistedTelemetrySession {
   correlationId: string;
   mode: "straight" | "orchestrator" | "orchestrator_v2";
+  trafficOrigin?: TelemetryTrafficOrigin;
 }
 
 export interface PersistedDeliveryIntent {
@@ -1664,16 +1443,14 @@ export interface PersistedDeliveryIntent {
   subagentId: string;
   turnId: string;
   eventId: string;
-  mode: "notify" | "inject";
-  triggerTurn: boolean;
   status: CompletionOutcome;
   artifactDir: string;
   output?: OutputSnapshot;
   message?: string;
   /** Terminal artifact timestamp used for delivery-latency telemetry. */
   completedAt?: number;
-  state: "queued" | "dispatchAttempted";
-  completionPolicy?: "each" | "group";
+  state: "queued";
+  completionPolicy: "each" | "group";
   completionGroupId?: string;
 }
 
@@ -1690,19 +1467,6 @@ export interface PersistedLifecycleFold {
   processStatus?: "done" | "error" | "cancelled";
   processExitCode?: number;
   parentCancelled?: boolean;
-  legacyTerminal?: "done" | "error" | "cancelled";
-}
-
-export interface InteractiveSubagentPersistedStateV2 extends InteractiveSubagentPersistedStateV1 {
-  eventByteCursor: number;
-  sessionByteCursor: number;
-  /** Null means the cursor ends at a line boundary; absent means legacy state. */
-  sessionPartialLineStart?: number | null;
-  activeTurnId?: string;
-  pendingDeliveries: PersistedDeliveryIntent[];
-  deliveryReceipts: string[];
-  legacyCutoverOffset?: number;
-  lifecycle?: PersistedLifecycleFold;
 }
 
 export interface InteractiveSubagentStateFile {
@@ -1718,13 +1482,7 @@ export interface InteractiveSubagentStateFile {
   states: { [id: string]: InteractiveSubagentPersistedStateV2 };
 }
 
-type InteractiveSubagentStateFileInput =
-  | InteractiveSubagentStateFile
-  | {
-      schemaVersion: 1;
-      parent: string;
-      states: { [id: string]: InteractiveSubagentPersistedStateV1 };
-    };
+type InteractiveSubagentStateFileInput = InteractiveSubagentStateFile;
 
 /** File path for the project-local state file under .pi/. */
 
@@ -1812,6 +1570,64 @@ function readStateFileSnapshot(file: string): StateReadResult {
   }
 }
 
+const REMOVED_INTERACTIVE_STATE_FIELDS = [
+  "notifyOnComplete",
+  "triggerTurnOnComplete",
+  "lastInjectedEventTs",
+  "lastSnapshotEventTs",
+  "lastDeliveredEventTs",
+  "lastDeliveredSessionByte",
+  "sessionByteCursor",
+  "sessionPartialLineStart",
+  "sessionObservedByteCursor",
+  "autoDoneForTurnAt",
+  "lastStopReason",
+  "lastStopReasonAt",
+  "lastStopText",
+  "legacyCutoverOffset",
+  "legacyTerminal",
+  "injected",
+] as const;
+
+function hasRemovedInteractiveStateFields(
+  payload: Record<string, unknown>,
+): boolean {
+  if ("legacyCutoverOffset" in payload) return true;
+  const rawStates = payload.states;
+  if (!rawStates || typeof rawStates !== "object" || Array.isArray(rawStates)) {
+    return false;
+  }
+  for (const value of Object.values(rawStates)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const state = value as Record<string, unknown>;
+    const lifecycle = state.lifecycle;
+    if (
+      REMOVED_INTERACTIVE_STATE_FIELDS.some((key) => key in state) ||
+      (lifecycle &&
+        typeof lifecycle === "object" &&
+        !Array.isArray(lifecycle) &&
+        "legacyTerminal" in lifecycle)
+    ) {
+      return true;
+    }
+    if (!Array.isArray(state.pendingDeliveries)) continue;
+    for (const intent of state.pendingDeliveries) {
+      if (!intent || typeof intent !== "object" || Array.isArray(intent)) {
+        continue;
+      }
+      const delivery = intent as Record<string, unknown>;
+      if (
+        delivery.state === "dispatchAttempted" ||
+        (delivery.completionPolicy !== "each" &&
+          delivery.completionPolicy !== "group")
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function loadInteractiveStatesResult(cwd: string): StateLoadResult {
   const file = stateFilePath(cwd);
   const read = readStateFileSnapshot(file);
@@ -1841,17 +1657,14 @@ function loadInteractiveStatesResult(cwd: string): StateLoadResult {
     return { kind: "invalid", reason: "oversized" };
   }
   const version = obj.schemaVersion;
-  if (
-    version !== undefined &&
-    version !== null &&
-    version !== 1 &&
-    version !== CURRENT_STATE_SCHEMA_VERSION &&
-    !(typeof version === "number" && version < 1)
-  ) {
+  if (version !== CURRENT_STATE_SCHEMA_VERSION) {
+    return { kind: "invalid", reason: "unsupported" };
+  }
+  if (hasRemovedInteractiveStateFields(obj)) {
     return { kind: "invalid", reason: "unsupported" };
   }
   try {
-    const payload = migrateStatePayload(obj);
+    const payload = normalizeV2StatePayload(obj);
     return payload
       ? { kind: "valid", payload }
       : { kind: "invalid", reason: "unsupported" };
@@ -1881,22 +1694,15 @@ function validatedWorkingCwd(value: unknown): string | undefined {
     : undefined;
 }
 
-/**
- * Migrate a parsed (and validated-to-be-an-object) state file payload
- * from any known older schema version to the current version.
- *
- * Returns the migrated payload on success, or null if the version is
- * unknown / unsupported (i.e. a future version this code does not
- * know how to migrate from).
- */
-function migrateStatePayload(
+/** Normalize and validate the current protocol-v2 persisted state shape. */
+function normalizeV2StatePayload(
   obj: Record<string, unknown>,
 ): InteractiveSubagentStateFile | null {
-  const version = obj.schemaVersion;
   const rawStates = obj.states;
   if (
-    rawStates &&
-    typeof rawStates === "object" &&
+    !rawStates ||
+    typeof rawStates !== "object" ||
+    Array.isArray(rawStates) ||
     Object.keys(rawStates).length > MAX_PERSISTED_STATE_COUNT
   ) {
     return null;
@@ -1909,8 +1715,7 @@ function migrateStatePayload(
     !Array.isArray(obj.telemetry)
       ? (obj.telemetry as Record<string, unknown>)
       : undefined;
-  const rawTelemetryMode =
-    rawTelemetry?.mode === "manual" ? "straight" : rawTelemetry?.mode;
+  const rawTelemetryMode = rawTelemetry?.mode;
   const telemetry: PersistedTelemetrySession | undefined =
     rawTelemetry &&
     typeof rawTelemetry.correlationId === "string" &&
@@ -1923,18 +1728,28 @@ function migrateStatePayload(
       ? {
           correlationId: rawTelemetry.correlationId.toLowerCase(),
           mode: rawTelemetryMode,
+          ...(Object.hasOwn(rawTelemetry, "trafficOrigin")
+            ? {
+                trafficOrigin: sanitizeTelemetryTrafficOrigin(
+                  rawTelemetry.trafficOrigin,
+                ),
+              }
+            : {}),
         }
       : undefined;
 
-  // Helper: produce a valid states object from an untrusted value.
+  // Validate only the current protocol-v2 state representation.
   const asStates = (
     v: unknown,
-    legacy: boolean,
-  ): { [id: string]: InteractiveSubagentPersistedStateV2 } => {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-    const migrated: { [id: string]: InteractiveSubagentPersistedStateV2 } = {};
+  ): { [id: string]: InteractiveSubagentPersistedStateV2 } | null => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    const normalizedStates: {
+      [id: string]: InteractiveSubagentPersistedStateV2;
+    } = {};
     for (const [id, value] of Object.entries(v)) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return null;
+      }
       const raw = value as Record<string, unknown>;
       if (
         typeof raw.id !== "string" ||
@@ -1950,7 +1765,7 @@ function migrateStatePayload(
         typeof raw.sessionFile !== "string" ||
         (raw.mux !== "tmux" && raw.mux !== "zellij" && raw.mux !== "herdr")
       ) {
-        continue;
+        return null;
       }
       const terminalIdCandidate = raw.muxTerminalId;
       const muxTerminalId =
@@ -1962,14 +1777,8 @@ function migrateStatePayload(
           MAX_MUX_TERMINAL_ID_BYTES
           ? terminalIdCandidate
           : undefined;
-      const entry = raw as unknown as InteractiveSubagentPersistedStateV1 &
-        Partial<InteractiveSubagentPersistedStateV2>;
+      const entry = raw as unknown as InteractiveSubagentPersistedStateV2;
       const workingCwd = validatedWorkingCwd(entry.workingCwd);
-      const art = artifactPath(
-        dirname(entry.artifactDir),
-        basename(entry.artifactDir),
-      );
-      const cutoverOffset = legacy ? eventLogEndOffset(art) : 0;
       const completionGroupId =
         typeof entry.completionGroupId === "string" &&
         /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(entry.completionGroupId)
@@ -1989,12 +1798,28 @@ function migrateStatePayload(
         candidate >= 0
           ? candidate
           : fallback;
+      if (
+        entry.pendingDeliveries !== undefined &&
+        (!Array.isArray(entry.pendingDeliveries) ||
+          entry.pendingDeliveries.length > MAX_PERSISTED_DELIVERY_INTENTS)
+      ) {
+        return null;
+      }
       const pendingDeliveries = Array.isArray(entry.pendingDeliveries)
-        ? entry.pendingDeliveries
-            .flatMap((intent): PersistedDeliveryIntent[] => {
+        ? entry.pendingDeliveries.flatMap(
+            (intent): PersistedDeliveryIntent[] => {
               if (!intent || typeof intent !== "object") return [];
               const rawIntent = intent as unknown as Record<string, unknown>;
+              const intentGroupId =
+                typeof rawIntent.completionGroupId === "string" &&
+                /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+                  rawIntent.completionGroupId,
+                )
+                  ? rawIntent.completionGroupId
+                  : undefined;
+              const intentPolicy = rawIntent.completionPolicy;
               if (
+                "dispatchAttempted" in rawIntent ||
                 typeof rawIntent.deliveryId !== "string" ||
                 rawIntent.deliveryId.length === 0 ||
                 rawIntent.deliveryId.length > MAX_EVENT_ID_LENGTH ||
@@ -2009,32 +1834,18 @@ function migrateStatePayload(
                 rawIntent.eventId.length === 0 ||
                 rawIntent.eventId.length > MAX_EVENT_ID_LENGTH ||
                 !/^[A-Za-z0-9._:-]+$/.test(rawIntent.eventId) ||
-                (rawIntent.mode !== "notify" && rawIntent.mode !== "inject") ||
-                typeof rawIntent.triggerTurn !== "boolean" ||
                 (rawIntent.status !== "done" &&
                   rawIntent.status !== "error" &&
                   rawIntent.status !== "cancelled") ||
                 rawIntent.artifactDir !== entry.artifactDir ||
-                (rawIntent.state !== "queued" &&
-                  rawIntent.state !== "dispatchAttempted")
+                rawIntent.state !== "queued" ||
+                (intentPolicy !== "each" && intentPolicy !== "group") ||
+                (rawIntent.completionGroupId !== undefined &&
+                  intentGroupId === undefined) ||
+                (intentPolicy === "group" && intentGroupId === undefined)
               ) {
                 return [];
               }
-              const intentGroupId =
-                typeof rawIntent.completionGroupId === "string" &&
-                /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
-                  rawIntent.completionGroupId,
-                )
-                  ? rawIntent.completionGroupId
-                  : undefined;
-              const intentPolicy =
-                rawIntent.completionPolicy === "each"
-                  ? "each"
-                  : rawIntent.completionPolicy === "group"
-                    ? intentGroupId
-                      ? "group"
-                      : "each"
-                    : undefined;
               const output =
                 rawIntent.output &&
                 typeof rawIntent.output === "object" &&
@@ -2061,8 +1872,6 @@ function migrateStatePayload(
                   subagentId: rawIntent.subagentId,
                   turnId: rawIntent.turnId,
                   eventId: rawIntent.eventId,
-                  mode: rawIntent.mode,
-                  triggerTurn: rawIntent.triggerTurn,
                   status: rawIntent.status,
                   artifactDir: rawIntent.artifactDir,
                   ...(output ? { output } : {}),
@@ -2074,16 +1883,22 @@ function migrateStatePayload(
                   rawIntent.completedAt >= 0
                     ? { completedAt: rawIntent.completedAt }
                     : {}),
-                  ...(intentPolicy ? { completionPolicy: intentPolicy } : {}),
-                  ...(intentPolicy === "group"
+                  completionPolicy: intentPolicy,
+                  ...(intentPolicy === "group" && intentGroupId
                     ? { completionGroupId: intentGroupId }
                     : {}),
-                  state: rawIntent.state,
+                  state: "queued",
                 },
               ];
-            })
-            .slice(-MAX_PERSISTED_DELIVERY_INTENTS)
+            },
+          )
         : [];
+      if (
+        Array.isArray(entry.pendingDeliveries) &&
+        pendingDeliveries.length !== entry.pendingDeliveries.length
+      ) {
+        return null;
+      }
       const deliveryReceipts = Array.isArray(entry.deliveryReceipts)
         ? [
             ...new Set(
@@ -2142,11 +1957,6 @@ function migrateStatePayload(
             ...(rawLifecycle.parentCancelled === true
               ? { parentCancelled: true }
               : {}),
-            ...(rawLifecycle.legacyTerminal === "done" ||
-            rawLifecycle.legacyTerminal === "error" ||
-            rawLifecycle.legacyTerminal === "cancelled"
-              ? { legacyTerminal: rawLifecycle.legacyTerminal }
-              : {}),
           }
         : undefined;
       const rawEntryTelemetry =
@@ -2183,8 +1993,7 @@ function migrateStatePayload(
           rawEntryTelemetry.depthBucket === "unknown") &&
         (rawEntryTelemetry.completionPolicy === "inline" ||
           rawEntryTelemetry.completionPolicy === "each" ||
-          rawEntryTelemetry.completionPolicy === "group" ||
-          rawEntryTelemetry.completionPolicy === "legacy") &&
+          rawEntryTelemetry.completionPolicy === "group") &&
         typeof rawEntryTelemetry.model === "string" &&
         rawEntryTelemetry.model.length <= 128
           ? {
@@ -2243,7 +2052,7 @@ function migrateStatePayload(
                 : {}),
             }
           : undefined;
-      migrated[id] = {
+      normalizedStates[id] = {
         id,
         paneId: entry.paneId,
         ...(muxTerminalId ? { muxTerminalId } : {}),
@@ -2257,13 +2066,6 @@ function migrateStatePayload(
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,
         ...(workingCwd !== undefined ? { workingCwd } : {}),
-        ...(entry.notifyOnComplete === "notify" ||
-        entry.notifyOnComplete === "inject"
-          ? { notifyOnComplete: entry.notifyOnComplete }
-          : {}),
-        ...(typeof entry.triggerTurnOnComplete === "boolean"
-          ? { triggerTurnOnComplete: entry.triggerTurnOnComplete }
-          : {}),
         ...(completionPolicy ? { completionPolicy } : {}),
         ...(completionPolicy === "group" ? { completionGroupId } : {}),
         ...(entry.completionTombstone === "failed"
@@ -2277,105 +2079,26 @@ function migrateStatePayload(
         ...(typeof entry.parentSessionId === "string"
           ? { parentSessionId: entry.parentSessionId }
           : {}),
-        eventByteCursor: cursor(entry.eventByteCursor, cutoverOffset),
-        sessionByteCursor: cursor(entry.sessionByteCursor, 0),
-        ...(entry.sessionPartialLineStart === null
-          ? { sessionPartialLineStart: null }
-          : typeof entry.sessionPartialLineStart === "number"
-            ? {
-                sessionPartialLineStart: cursor(
-                  entry.sessionPartialLineStart,
-                  0,
-                ),
-              }
-            : {}),
+        eventByteCursor: cursor(entry.eventByteCursor, 0),
         ...(typeof entry.activeTurnId === "string"
           ? { activeTurnId: entry.activeTurnId }
           : {}),
         pendingDeliveries,
         deliveryReceipts,
-        legacyCutoverOffset: cursor(entry.legacyCutoverOffset, cutoverOffset),
         ...(lifecycle ? { lifecycle } : {}),
         ...(entryTelemetry ? { telemetry: entryTelemetry } : {}),
       };
     }
-    return migrated;
+    return normalizedStates;
   };
-  const withLegacyCatchup = (states: {
-    [id: string]: InteractiveSubagentPersistedStateV2;
-  }): { [id: string]: InteractiveSubagentPersistedStateV2 } => {
-    for (const entry of Object.values(states)) {
-      const cutover = entry.legacyCutoverOffset ?? 0;
-      if (cutover <= 0 || entry.pendingDeliveries.length > 0) continue;
-      const turnId = `legacy-cutover-${cutover}`;
-      const mode = "notify";
-      entry.pendingDeliveries.push({
-        deliveryId: createHash("sha256")
-          .update(
-            `${entry.parentSessionId ?? "pi"}\0${entry.id}\0${turnId}\0${mode}`,
-          )
-          .digest("hex")
-          .slice(0, 32),
-        subagentId: entry.id,
-        turnId,
-        eventId: turnId,
-        mode,
-        triggerTurn: false,
-        status: "done",
-        artifactDir: entry.artifactDir,
-        message: `Legacy artifact backlog cut over at byte ${cutover}; inspect the artifact pointers for content.`,
-        state: "queued",
-      });
-    }
-    return states;
+  const states = asStates(rawStates);
+  if (!states) return null;
+  return {
+    schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+    parent,
+    ...(telemetry ? { telemetry } : {}),
+    states,
   };
-
-  // No schema version → assume oldest known (v1 format).
-  if (version === undefined || version === null) {
-    debugLog("warn", "state-file-missing-schema", {});
-    return {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent,
-      ...(telemetry ? { telemetry } : {}),
-      states: withLegacyCatchup(asStates(rawStates, true)),
-    };
-  }
-
-  // Known version → return validated shape.
-  if (version === 1) {
-    return {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent,
-      ...(telemetry ? { telemetry } : {}),
-      states: withLegacyCatchup(asStates(rawStates, true)),
-    };
-  }
-
-  if (version === CURRENT_STATE_SCHEMA_VERSION) {
-    return {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent,
-      ...(telemetry ? { telemetry } : {}),
-      states: asStates(rawStates, false),
-    };
-  }
-
-  // Negative or zero — treat as an old version, migrate to current.
-  if (typeof version === "number" && version < 1) {
-    debugLog("warn", "state-file-old-schema", { schemaVersion: version });
-    return {
-      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-      parent,
-      ...(telemetry ? { telemetry } : {}),
-      states: withLegacyCatchup(asStates(rawStates, true)),
-    };
-  }
-
-  // Future / unknown — cannot migrate safely.
-  debugLog("error", "state-file-unsupported-schema", {
-    schemaVersion: version as number,
-  });
-  return null;
 }
 function stateLoadError(
   cwd: string,
@@ -2431,15 +2154,12 @@ function serializeInteractiveStates(
  */
 export function saveInteractiveStates(
   cwd: string,
-  payload: InteractiveSubagentStateFileInput,
+  payload: InteractiveSubagentStateFile,
 ): void {
-  const current =
-    payload.schemaVersion === 1
-      ? migrateStatePayload(payload as unknown as Record<string, unknown>)
-      : payload;
-  if (!current || current.schemaVersion !== CURRENT_STATE_SCHEMA_VERSION) {
+  if (payload.schemaVersion !== CURRENT_STATE_SCHEMA_VERSION) {
     throw new Error(`unsupported schemaVersion: ${payload.schemaVersion}`);
   }
+  const current = payload;
   withInteractiveStateLock(cwd, () => {
     const result = loadInteractiveStatesResult(cwd);
     const existing =
@@ -2663,9 +2383,7 @@ function writeInteractiveStatesUnlocked(
  */
 export function appendInteractiveState(
   cwd: string,
-  entry:
-    | InteractiveSubagentPersistedStateV1
-    | InteractiveSubagentPersistedStateV2,
+  entry: InteractiveSubagentPersistedStateV2,
 ): void {
   withInteractiveStateLock(cwd, () => {
     const result = loadInteractiveStatesResult(cwd);
@@ -2694,16 +2412,10 @@ export function appendInteractiveState(
     current.states[entry.id] = {
       ...entry,
       eventByteCursor: "eventByteCursor" in entry ? entry.eventByteCursor : 0,
-      sessionByteCursor:
-        "sessionByteCursor" in entry ? entry.sessionByteCursor : 0,
       pendingDeliveries:
         "pendingDeliveries" in entry ? entry.pendingDeliveries : [],
       deliveryReceipts:
         "deliveryReceipts" in entry ? entry.deliveryReceipts : [],
-      legacyCutoverOffset:
-        "legacyCutoverOffset" in entry
-          ? entry.legacyCutoverOffset
-          : eventLogEndOffset(art),
     };
     writeInteractiveStatesUnlocked(cwd, current);
   });

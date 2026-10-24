@@ -205,8 +205,8 @@ describe("v4 workflow public tools", () => {
     expect(job.status).toBe("running");
     expect(job.abort.signal.aborted).toBe(false);
     expect(
-      job.durable?.store.events.some((event) => event.kind === "cancelled"),
-    ).toBe(false);
+      job.durable?.store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
 
     try {
       durableProcessControl.stop = undefined;
@@ -226,7 +226,9 @@ describe("v4 workflow public tools", () => {
         { cwd: root, sessionId: "workflow-v4", root },
         workflowId,
       );
-      expect(events?.some((event) => event.kind === "cancelled")).toBe(true);
+      expect(
+        events?.filter((event) => event.kind === "cancelled"),
+      ).toHaveLength(1);
 
       const rejected = await resume.execute(
         "resume",
@@ -727,7 +729,7 @@ describe("v4 workflow public tools", () => {
     ).toMatchObject({ policy: "group", groupId, groupComplete: true });
   });
 
-  it("writes cancellation markers before terminalizing a durable workflow", async () => {
+  it("commits cancellation intent before retrying durable process cleanup", async () => {
     const current = setup(1, "cancel-owner");
     const store = await WorkflowRunStore.create(
       { cwd: root, sessionId: "workflow-v4", root },
@@ -756,20 +758,13 @@ describe("v4 workflow public tools", () => {
     const api = register(current, successfulRunner("unused"));
     const originalAppend = WorkflowRunStore.prototype.append;
     const append = vi.spyOn(WorkflowRunStore.prototype, "append");
-    let markerExistedAtTerminal = false;
+    let cancellationIntentWrites = 0;
     append.mockImplementation(async function (
       this: WorkflowRunStore,
       kind: string,
       data: any,
     ) {
-      if (kind === "cancelled") {
-        try {
-          await access(join(attempts, "1-1.json.cancel"));
-          markerExistedAtTerminal = true;
-        } catch {
-          markerExistedAtTerminal = false;
-        }
-      }
+      if (kind === "cancelled") cancellationIntentWrites++;
       return originalAppend.call(this, kind, data);
     });
     try {
@@ -782,17 +777,31 @@ describe("v4 workflow public tools", () => {
         { cwd: root, sessionId: "workflow-v4", root },
         workflowId,
       );
-      expect(afterFailure?.some((event) => event.kind === "cancelled")).toBe(
-        false,
-      );
+      expect(
+        afterFailure?.filter((event) => event.kind === "cancelled"),
+      ).toHaveLength(1);
+      await expect(
+        access(join(attempts, "1-1.json.cancel")),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(cancellationIntentWrites).toBe(1);
       durableProcessControl.stop = undefined;
       const cancelled = await api.cancel(workflowId, current.ctx);
       expect(cancelled.details.status).toBe("cancelled");
+      await access(join(attempts, "1-1.json.cancel"));
     } finally {
       durableProcessControl.stop = undefined;
       append.mockRestore();
     }
-    expect(markerExistedAtTerminal).toBe(true);
+    const afterRetry = await WorkflowRunStore.inspect(
+      { cwd: root, sessionId: "workflow-v4", root },
+      workflowId,
+    );
+    expect(
+      afterRetry?.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(cancellationIntentWrites).toBe(1);
   });
 
   it("keeps accepted peers completable when another acceptance append fails", async () => {
@@ -1067,6 +1076,8 @@ describe("v4 workflow public tools", () => {
 
   it("terminally rejects a new workflow that cannot enter at capacity", async () => {
     const current = setup(1, "capacity-rejection");
+    // Keep the error completion queued for the manifest assertion below.
+    current.scope.parentStreaming = true;
     workflowJobRegistry.clear();
     for (let index = 0; index < MAX_WORKFLOW_JOBS; index++) {
       workflowJobRegistry.set(`occupied-${index}`, {

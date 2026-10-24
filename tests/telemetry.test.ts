@@ -25,12 +25,15 @@ import {
   telemetryDurationBucket,
   telemetryErrorCountBucket,
   type TelemetryEvent,
+  sanitizeTelemetryTrafficOrigin,
+  TELEMETRY_ORIGIN_ENV as TELEMETRY_ORIGIN_ENV_VALUE,
 } from "../src/telemetry";
 import {
   isTelemetryEnabled,
   TELEMETRY_ENV,
   TELEMETRY_FLAG,
   TELEMETRY_OPT_OUT_FLAG,
+  TELEMETRY_ORIGIN_ENV,
 } from "../src/settings";
 
 const originalEnvironment = {
@@ -41,6 +44,7 @@ const originalEnvironment = {
   PI_OFFLINE: process.env.PI_OFFLINE,
   TELEMETRY: process.env[TELEMETRY_ENV],
   VITEST: process.env.VITEST,
+  TELEMETRY_ORIGIN: process.env[TELEMETRY_ORIGIN_ENV_VALUE],
 };
 
 function restoreEnvironment(): void {
@@ -52,6 +56,7 @@ function restoreEnvironment(): void {
     PI_OFFLINE: originalEnvironment.PI_OFFLINE,
     [TELEMETRY_ENV]: originalEnvironment.TELEMETRY,
     VITEST: originalEnvironment.VITEST,
+    [TELEMETRY_ORIGIN_ENV_VALUE]: originalEnvironment.TELEMETRY_ORIGIN,
   })) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -65,6 +70,7 @@ function clearTelemetryOptOuts(): void {
   delete process.env.PI_OFFLINE;
   delete process.env[TELEMETRY_ENV];
   delete process.env.VITEST;
+  delete process.env[TELEMETRY_ORIGIN_ENV_VALUE];
 }
 
 let telemetrySettingsRoot: string | undefined;
@@ -80,6 +86,7 @@ describe("anonymous product telemetry", () => {
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     telemetryStorageOptions = { agentDir, cwd };
     process.env.PI_CODING_AGENT_DIR = agentDir;
+    delete process.env[TELEMETRY_ORIGIN_ENV_VALUE];
   });
 
   afterEach(() => {
@@ -117,8 +124,9 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 4,
+      schema_version: 6,
       mode: "orchestrator_v2",
+      traffic_origin: "unknown",
     });
     expect(agent.properties).toMatchObject({
       execution: "in-process",
@@ -156,6 +164,192 @@ describe("anonymous product telemetry", () => {
     expect(resolveTelemetryMode(false, true)).toBe("orchestrator_v2");
     expect(resolveTelemetryMode(true, true)).toBe("orchestrator_v2");
     expect(createTelemetrySession(true, "manual").mode).toBe("straight");
+  });
+  it("uses only explicit closed traffic origins and defaults invalid values to unknown", () => {
+    clearTelemetryOptOuts();
+    process.env[TELEMETRY_ORIGIN_ENV] = " Usage ";
+    const session = createTelemetrySession(true);
+    expect(session.trafficOrigin).toBe("usage");
+    expect(
+      buildTelemetryPayload(session, { event: "session_started" }).properties
+        .traffic_origin,
+    ).toBe("usage");
+    expect(sanitizeTelemetryTrafficOrigin(" Usage ")).toBe("unknown");
+
+    process.env[TELEMETRY_ORIGIN_ENV] = "production /private";
+    const invalid = createTelemetrySession(true);
+    expect(invalid.trafficOrigin).toBe("unknown");
+    expect(
+      sanitizeTelemetryTrafficOrigin("PI_SUBAGENTURA_TELEMETRY_ORIGIN"),
+    ).toBe("unknown");
+    expect(
+      buildTelemetryPayload(invalid, { event: "session_started" }).properties
+        .traffic_origin,
+    ).toBe("unknown");
+  });
+
+  it("blocks real capture for test origin but keeps an injected collector usable", () => {
+    const realFetch = vi.fn<typeof fetch>();
+    const injectedFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", realFetch);
+    try {
+      process.env[TELEMETRY_ORIGIN_ENV_VALUE] = " TEST ";
+      const session = createTelemetrySession(true, "straight");
+      expect(session.trafficOrigin).toBe("test");
+      captureTelemetry(session, { event: "session_started" });
+      expect(realFetch).not.toHaveBeenCalled();
+
+      captureTelemetry(
+        session,
+        { event: "session_started" },
+        { fetchImpl: injectedFetch },
+      );
+      expect(injectedFetch).toHaveBeenCalledOnce();
+      const request = JSON.parse(String(injectedFetch.mock.calls[0][1]?.body));
+      expect(request.properties.traffic_origin).toBe("test");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not let explicit test origin override privacy and environment opt-outs", () => {
+    clearTelemetryOptOuts();
+    process.env[TELEMETRY_ORIGIN_ENV] = " TEST ";
+    process.env[TELEMETRY_ENV] = "1";
+    writeFileSync(
+      join(telemetryStorageOptions.agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { telemetry: "true" } }),
+    );
+    const pi = {
+      getFlag: vi.fn((name: string): boolean | undefined =>
+        name === TELEMETRY_FLAG
+          ? true
+          : name === TELEMETRY_OPT_OUT_FLAG
+            ? false
+            : undefined,
+      ),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions)).toBe(false);
+
+    process.env[TELEMETRY_ORIGIN_ENV] = "usage";
+    process.env.CI = "1";
+    expect(isTelemetryEnabled(pi, telemetryStorageOptions)).toBe(false);
+  });
+  it("serializes only closed launch fields and sanitized optional diagnostics", () => {
+    const session = createTelemetrySession(
+      true,
+      "straight",
+      undefined,
+      "development",
+    );
+    const event = {
+      event: "agent_launch_resolved",
+      outcome: "recovered",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      execution: "in-process",
+      mux: "none",
+      invocation_source: "workflow",
+      async: true,
+      depth: 65,
+      depth_bucket: "1",
+      completion_policy: "each",
+      duration_ms: 30 * 24 * 60 * 60 * 1_000 + 1,
+      fallback_attempted: true,
+      initial_failure_stage: "pane_launch",
+      initial_failure_operation: "pane_launch",
+      final_failure_stage: "private stage",
+      final_failure_operation: "private operation",
+      task_text: "private task",
+    } as unknown as TelemetryEvent;
+    const payload = buildTelemetryPayload(session, event);
+
+    expect(payload.event).toBe("pi_subagentura_agent_launch_resolved");
+    expect(Object.keys(payload.properties).sort()).toEqual(
+      [
+        "$geoip_disable",
+        "$ip",
+        "$lib",
+        "$lib_version",
+        "$process_person_profile",
+        "async",
+        "completion_policy",
+        "depth_bucket",
+        "duration_bucket",
+        "execution",
+        "fallback_attempted",
+        "initial_failure_operation",
+        "initial_failure_stage",
+        "invocation_source",
+        "mode",
+        "mux",
+        "outcome",
+        "requested_execution",
+        "requested_mux",
+        "schema_version",
+        "telemetry_session_id",
+        "traffic_origin",
+      ].sort(),
+    );
+    expect(payload.properties).toMatchObject({
+      traffic_origin: "development",
+      outcome: "recovered",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      execution: "in-process",
+      mux: "none",
+      invocation_source: "workflow",
+      async: true,
+      depth_bucket: "unknown",
+      duration_bucket: "unknown",
+      completion_policy: "each",
+      fallback_attempted: true,
+      initial_failure_stage: "pane_launch",
+      initial_failure_operation: "pane_launch",
+    });
+    expect(payload.properties).not.toHaveProperty("depth");
+    expect(payload.properties).not.toHaveProperty("duration_ms");
+    expect(payload.properties).not.toHaveProperty("final_failure_stage");
+    expect(payload.properties).not.toHaveProperty("final_failure_operation");
+    expect(JSON.stringify(payload)).not.toContain("private");
+    const bounded = buildTelemetryPayload(session, {
+      event: "agent_launch_resolved",
+      outcome: "started",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      execution: "interactive",
+      mux: "tmux",
+      invocation_source: "interactive",
+      async: false,
+      depth: 64,
+      depth_bucket: "1",
+      completion_policy: "inline",
+      duration_ms: 1_234,
+      fallback_attempted: false,
+    });
+    expect(bounded.properties).toMatchObject({
+      depth: 64,
+      depth_bucket: "8+",
+      duration_ms: 1_200,
+      duration_bucket: "1-5s",
+    });
+
+    const invalidRuntime = buildTelemetryPayload(session, {
+      event: "runtime_failure",
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+      execution: "private execution",
+      mux: "private mux",
+      reporter: "private reporter",
+      impact: "private impact",
+    } as unknown as TelemetryEvent);
+    expect(invalidRuntime.properties).not.toHaveProperty("execution");
+    expect(invalidRuntime.properties).not.toHaveProperty("mux");
+    expect(invalidRuntime.properties).not.toHaveProperty("reporter");
+    expect(invalidRuntime.properties).not.toHaveProperty("impact");
   });
 
   it("sanitizes models and buckets numeric values", () => {
@@ -277,6 +471,7 @@ describe("anonymous product telemetry", () => {
         "mode",
         "schema_version",
         "telemetry_session_id",
+        "traffic_origin",
       ].sort(),
     );
     expect(payload.properties).toMatchObject({
@@ -309,6 +504,7 @@ describe("anonymous product telemetry", () => {
         "mode",
         "schema_version",
         "telemetry_session_id",
+        "traffic_origin",
       ].sort(),
     );
     expect(payload.properties).toMatchObject({
@@ -341,6 +537,7 @@ describe("anonymous product telemetry", () => {
         "retry_attempt",
         "schema_version",
         "telemetry_session_id",
+        "traffic_origin",
       ].sort(),
     );
     expect(payload.properties).toMatchObject({
@@ -462,6 +659,7 @@ describe("anonymous product telemetry", () => {
         "status",
         "telemetry_session_id",
         "terminal_reason",
+        "traffic_origin",
         "error_category",
         "unit",
       ].sort(),
@@ -679,6 +877,7 @@ describe("anonymous product telemetry", () => {
       depth_bucket: "4-7",
       completion_policy: "each",
       failure_stage: "pane_launch",
+      failure_operation: "pane_launch",
       spawn_duration_ms: 12_345,
     });
 
@@ -695,6 +894,7 @@ describe("anonymous product telemetry", () => {
         "depth",
         "depth_bucket",
         "failure_stage",
+        "failure_operation",
         "invocation_source",
         "mode",
         "model",
@@ -704,15 +904,17 @@ describe("anonymous product telemetry", () => {
         "spawn_duration_ms",
         "telemetry_session_id",
         "execution",
+        "traffic_origin",
       ].sort(),
     );
     expect(payload.properties).toMatchObject({
       execution: "interactive",
       mux: "unknown",
       failure_stage: "pane_launch",
+      failure_operation: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 4,
+      schema_version: 6,
     });
   });
 
@@ -775,6 +977,24 @@ describe("anonymous product telemetry", () => {
     expect(payload.properties.failure_stage).toBe(failure_stage);
     expect(payload.properties.spawn_duration_bucket).toBe("unknown");
     expect(payload.properties).not.toHaveProperty("spawn_duration_ms");
+  });
+
+  it("omits an unrecognized spawn failure operation", () => {
+    const payload = buildTelemetryPayload(createTelemetrySession(true), {
+      event: "agent_spawn_failed",
+      execution: "interactive",
+      mux: "herdr",
+      invocation_source: "interactive",
+      model: "default",
+      async: true,
+      depth: undefined,
+      depth_bucket: "unknown",
+      completion_policy: "each",
+      failure_stage: "state_persistence",
+      failure_operation: "/private/path" as never,
+    });
+
+    expect(payload.properties).not.toHaveProperty("failure_operation");
   });
 
   it("emits a paired unknown bucket when an optional spawn duration is invalid", () => {
@@ -862,6 +1082,7 @@ describe("anonymous product telemetry", () => {
         "mode",
         "schema_version",
         "telemetry_session_id",
+        "traffic_origin",
       ].sort(),
     );
     expect(Object.keys(completed.properties).sort()).toEqual(
@@ -884,6 +1105,7 @@ describe("anonymous product telemetry", () => {
         "status",
         "telemetry_session_id",
         "terminal_reason",
+        "traffic_origin",
       ].sort(),
     );
     expect(completed.properties).toMatchObject({
@@ -943,6 +1165,7 @@ describe("anonymous product telemetry", () => {
           "telemetry_session_id",
           "terminal_count",
           "total_count",
+          "traffic_origin",
           "unknown_count",
         ].sort(),
       );
@@ -1005,7 +1228,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("keeps every v4 event within the privacy allowlist", () => {
+  it("keeps every schema-v6 event within the privacy allowlist", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
     const dimensions = {
       execution: "in-process" as const,
@@ -1039,6 +1262,30 @@ describe("anonymous product telemetry", () => {
         event: "interactive_message_sent",
         direction: "parent_to_child",
         count: 1,
+      }),
+      buildTelemetryPayload(session, {
+        event: "agent_launch_resolved",
+        outcome: "started",
+        requested_execution: "in-process",
+        requested_mux: "none",
+        execution: "in-process",
+        mux: "none",
+        invocation_source: "workflow",
+        async: true,
+        depth: 1,
+        depth_bucket: "1",
+        completion_policy: "each",
+        fallback_attempted: false,
+      }),
+      buildTelemetryPayload(session, {
+        event: "runtime_failure",
+        error_category: "mux",
+        error_stage: "polling",
+        failure_kind: "mux_probe",
+        execution: "interactive",
+        mux: "tmux",
+        reporter: "artifact_poller",
+        impact: "unknown",
       }),
       buildTelemetryPayload(session, {
         event: "task_completed",
@@ -1086,6 +1333,16 @@ describe("anonymous product telemetry", () => {
         read_latency_ms: 100,
       }),
     ];
+    expect(
+      payloads.find(
+        (payload) => payload.event === "pi_subagentura_runtime_failure",
+      )?.properties,
+    ).toMatchObject({
+      execution: "interactive",
+      mux: "tmux",
+      reporter: "artifact_poller",
+      impact: "unknown",
+    });
     const allowed = new Set([
       "$geoip_disable",
       "$ip",
@@ -1109,7 +1366,11 @@ describe("anonymous product telemetry", () => {
       "error_category",
       "error_count_bucket",
       "execution",
+      "error_stage",
+      "failure_kind",
+      "impact",
       "failure_stage",
+      "failure_operation",
       "invocation",
       "invocation_source",
       "mode",
@@ -1119,6 +1380,7 @@ describe("anonymous product telemetry", () => {
       "read_latency_bucket",
       "read_latency_ms",
       "reason",
+      "reporter",
       "schema_version",
       "source",
       "spawn_duration_bucket",
@@ -1126,6 +1388,10 @@ describe("anonymous product telemetry", () => {
       "status",
       "telemetry_session_id",
       "terminal_count",
+      "traffic_origin",
+      "requested_execution",
+      "requested_mux",
+      "fallback_attempted",
       "terminal_reason",
       "total_count",
       "unknown_count",
@@ -1139,7 +1405,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(4);
+      expect(payload.properties.schema_version).toBe(6);
     }
   });
 
@@ -1397,9 +1663,18 @@ describe("anonymous product telemetry", () => {
     ["NODE_ENV", "test"],
   ])("honors the %s=%s opt-out", (name, value) => {
     clearTelemetryOptOuts();
+    process.env[TELEMETRY_ORIGIN_ENV] = "usage";
     process.env[name] = value;
-    const pi = { getFlag: vi.fn(() => true) };
-    expect(isTelemetryEnabled(pi as any)).toBe(false);
+    const pi = {
+      getFlag: vi.fn((flagName: string) =>
+        flagName === TELEMETRY_FLAG
+          ? true
+          : flagName === TELEMETRY_OPT_OUT_FLAG
+            ? false
+            : undefined,
+      ),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi)).toBe(false);
   });
 
   it.each([
@@ -1424,10 +1699,26 @@ describe("anonymous product telemetry", () => {
     [TELEMETRY_ENV, "1"],
   ])("leaves telemetry enabled for %s=%s", (name, value) => {
     clearTelemetryOptOuts();
+    process.env[TELEMETRY_ORIGIN_ENV] = "usage";
     process.env[name] = value;
-    expect(isTelemetryEnabled({ getFlag: vi.fn(() => undefined) } as any)).toBe(
-      true,
-    );
+    const pi = {
+      getFlag: vi.fn(() => undefined),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi)).toBe(true);
+  });
+  it("honors the explicit negative telemetry flag over usage origin", () => {
+    clearTelemetryOptOuts();
+    process.env[TELEMETRY_ORIGIN_ENV] = "usage";
+    const pi = {
+      getFlag: vi.fn((flagName: string) =>
+        flagName === TELEMETRY_FLAG
+          ? true
+          : flagName === TELEMETRY_OPT_OUT_FLAG
+            ? true
+            : undefined,
+      ),
+    } as unknown as Parameters<typeof isTelemetryEnabled>[0];
+    expect(isTelemetryEnabled(pi)).toBe(false);
   });
 
   it("disables telemetry when the global persisted setting is false", () => {

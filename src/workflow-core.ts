@@ -46,7 +46,7 @@ export type WorkflowCostSource =
   | "unavailable"
   | "mixed";
 
-export interface WorkflowUsage {
+export type WorkflowUsage = {
   input: number;
   output: number;
   cacheRead: number;
@@ -56,7 +56,7 @@ export interface WorkflowUsage {
   turns: number;
   /** Pricing provenance; omitted only for legacy/empty aggregates. */
   costSource?: WorkflowCostSource;
-}
+};
 
 export function zeroWorkflowUsage(): WorkflowUsage {
   return {

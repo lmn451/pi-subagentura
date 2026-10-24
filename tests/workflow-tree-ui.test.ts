@@ -1,10 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   showWorkflowTree,
   WorkflowTreeComponent,
   workflowJobRegistry,
   type WorkflowJobState,
 } from "../src/workflow";
+import {
+  clearSessionScopes,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
+
+let scope: SessionScope;
 
 function makeJob(overrides: Partial<WorkflowJobState> = {}): WorkflowJobState {
   return {
@@ -14,6 +22,7 @@ function makeJob(overrides: Partial<WorkflowJobState> = {}): WorkflowJobState {
     startedAt: 123,
     promise: Promise.resolve({}) as any,
     abort: new AbortController(),
+    parentSessionOwner: sessionOwner(scope),
     snapshot: {
       agentsSpawned: 2,
       errorCount: 0,
@@ -32,10 +41,20 @@ function makeJob(overrides: Partial<WorkflowJobState> = {}): WorkflowJobState {
 describe("WorkflowTreeComponent", () => {
   beforeEach(() => {
     workflowJobRegistry.clear();
+    clearSessionScopes();
+    scope = createTestSessionScope();
+  });
+
+  afterEach(() => {
+    workflowJobRegistry.clear();
+    clearSessionScopes();
   });
 
   it("renders an empty state", () => {
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
 
     const lines = component.render(80);
 
@@ -44,7 +63,10 @@ describe("WorkflowTreeComponent", () => {
 
   it("renders workflow summaries and expands details", () => {
     workflowJobRegistry.set("wf_test", makeJob());
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
 
     expect(component.render(100).join("\n")).toContain(
       "demo-flow (wf_test) · [running] · 2 agents · 1 running",
@@ -74,7 +96,10 @@ describe("WorkflowTreeComponent", () => {
       }),
     );
 
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
     component.handleInput("\r");
     const expanded = component.render(220).join("\n");
 
@@ -110,7 +135,10 @@ describe("WorkflowTreeComponent", () => {
       }),
     );
 
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
     component.handleInput("\r");
     const expanded = component.render(220).join("\n");
 
@@ -146,7 +174,10 @@ describe("WorkflowTreeComponent", () => {
         },
       }),
     );
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
     component.handleInput("\r");
     const expanded = component.render(240).join("\n");
     expect(expanded).toContain("↑ input tokens: 11");
@@ -174,7 +205,10 @@ describe("WorkflowTreeComponent", () => {
         },
       }),
     );
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
     component.handleInput("\r");
     const lines = component.render(60);
 
@@ -214,7 +248,10 @@ describe("WorkflowTreeComponent", () => {
         },
       }),
     );
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
     component.handleInput("\r");
     const rendered = component.render(100).join("\n");
 
@@ -227,7 +264,10 @@ describe("WorkflowTreeComponent", () => {
     delete job.snapshot.agentRecords;
     delete job.snapshot.agentRecordsOmitted;
     workflowJobRegistry.set(job.id, job);
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
 
     component.handleInput("\r");
 
@@ -237,7 +277,10 @@ describe("WorkflowTreeComponent", () => {
   it("navigates, clamps, and collapses selected workflows", () => {
     workflowJobRegistry.set("wf_a", makeJob({ id: "wf_a", name: "alpha" }));
     workflowJobRegistry.set("wf_b", makeJob({ id: "wf_b", name: "beta" }));
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
 
     component.handleInput("k");
     expect(component.render(100).join("\n")).toContain("▶ ▸ alpha");
@@ -257,7 +300,10 @@ describe("WorkflowTreeComponent", () => {
 
   it("closes on q or escape", () => {
     const done = vi.fn();
-    const component = new WorkflowTreeComponent({ done });
+    const component = new WorkflowTreeComponent({
+      done,
+      owner: sessionOwner(scope),
+    });
 
     component.handleInput("q");
     component.handleInput("\x1b");
@@ -277,7 +323,11 @@ describe("WorkflowTreeComponent", () => {
     workflowJobRegistry.set(job.id, job);
     const done = vi.fn();
     const notify = vi.fn();
-    const component = new WorkflowTreeComponent({ done, notify });
+    const component = new WorkflowTreeComponent({
+      done,
+      notify,
+      owner: sessionOwner(scope),
+    });
 
     component.handleInput("c");
 
@@ -300,7 +350,11 @@ describe("WorkflowTreeComponent", () => {
     workflowJobRegistry.set(job.id, job);
     const notify = vi.fn();
     const done = vi.fn();
-    const component = new WorkflowTreeComponent({ done, notify });
+    const component = new WorkflowTreeComponent({
+      done,
+      notify,
+      owner: sessionOwner(scope),
+    });
 
     component.handleInput("c");
 
@@ -320,16 +374,63 @@ describe("WorkflowTreeComponent", () => {
       },
     });
     workflowJobRegistry.set(job.id, job);
-    const component = new WorkflowTreeComponent({ done: vi.fn() });
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
 
     expect(component.render(100).join("\n")).toContain(
       "⚠ demo-flow (wf_test) · [completed with errors]",
     );
   });
 
+  it("keeps peer rows out of rendering, selection, and cancellation", () => {
+    const peerScope = createTestSessionScope();
+    const peerJob = makeJob({
+      id: "wf_peer",
+      name: "peer-only",
+      parentSessionOwner: sessionOwner(peerScope),
+    });
+    const owned = makeJob({ id: "wf_owned", name: "owned-only" });
+    const peerAbort = vi.spyOn(peerJob.abort, "abort");
+    const ownedAbort = vi.spyOn(owned.abort, "abort");
+    workflowJobRegistry.set(peerJob.id, peerJob);
+    workflowJobRegistry.set(owned.id, owned);
+    const component = new WorkflowTreeComponent({
+      done: vi.fn(),
+      owner: sessionOwner(scope),
+    });
+
+    expect(component.render(120).join("\n")).not.toContain("peer-only");
+    expect(component.render(120).join("\n")).toContain("▶ ▸ owned-only");
+    component.handleInput("j");
+    component.handleInput("c");
+
+    expect(ownedAbort).toHaveBeenCalledOnce();
+    expect(owned.status).toBe("cancelled");
+    expect(peerAbort).not.toHaveBeenCalled();
+    expect(peerJob.status).toBe("running");
+  });
+
+  it("fails closed without an owner despite registered workflow rows", () => {
+    const job = makeJob();
+    workflowJobRegistry.set(job.id, job);
+    const abortSpy = vi.spyOn(job.abort, "abort");
+    const component = new WorkflowTreeComponent({ done: vi.fn() });
+
+    expect(component.render(100).join("\n")).toContain("No workflow jobs");
+    component.handleInput("\r");
+    component.handleInput("c");
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(job.status).toBe("running");
+  });
+
   it("falls back when custom UI is unavailable", async () => {
     const notify = vi.fn();
-    const result = await showWorkflowTree({ notify } as any);
+    const result = await showWorkflowTree(
+      { notify } as any,
+      sessionOwner(scope),
+    );
 
     expect(result).toEqual({ kind: "close" });
     expect(notify).toHaveBeenCalledWith(

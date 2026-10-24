@@ -24,13 +24,15 @@ random-order and mutation checks.
 The `Protect master` repository ruleset must require these stable CI check names:
 
 - `Minimum Node 24.12.0`
-- `Test (Pi 0.80.6)`
+- `Test (Pi 1.2.0)`
 - `Test (Pi latest)`
 
 The separate minimum-Node check makes runtime support visible rather than hiding
 it inside the Pi SDK matrix. Keep all three names stable; renaming one requires a
 coordinated ruleset update by a repository administrator. The minimum-Node job
 runs Node.js 24.12.0, matching the package's declared `>=24.12.0` requirement.
+`Test (Pi 1.2.0)` tests the minimum supported Pi SDK; development dependencies
+pin SDK 1.4.0, and `Test (Pi latest)` tests the latest published SDK.
 
 ### Real Herdr integration coverage
 
@@ -114,9 +116,7 @@ and manual workflows, with `continue-on-error` on the pinned SDK leg, so mutatio
 results never gate a pull request. Local configuration or test-runner failures
 still return a non-zero exit code.
 
-## Provider list
-
-`resolveModel()` in `helpers.ts` dynamically queries all providers via `getProviders()` from the Pi SDK — no hardcoded list. When Pi adds new providers, bare model IDs resolve automatically without code changes.
+For model resolution behavior, see [architecture §5.2](architecture.md#52-context-and-model-selection).
 
 ## Guidelines
 

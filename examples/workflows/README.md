@@ -127,15 +127,12 @@ parent is busy coalesce into a safe-idle continuation.
 
 Use `completionPolicy: "group"` only with a caller-declared shared
 `completionGroupId` for related top-level background work. Same-turn launch and
-task text never infer membership. Named groups are advanced cross-call control:
-they seal when the spawning parent turn settles and release after every
-registered member is terminal, including `done`, `error`, and `cancelled`.
+task text never infer membership. Named groups are advanced cross-call control
+and seal when the spawning parent turn settles. See [coordinated completion](../../README.md#coordinated-completion-delivery)
+for delivery behavior.
 Human input takes priority, successful terminal retrieval consumes pending
 automatic delivery, and an entirely consumed group creates no turn. Jobs and
 results remain scoped to the current parent session.
-
-Deprecated `notifyOnComplete` and `triggerTurnOnComplete` fields map to
-coordinated `each`.
 
 Parent-session consumption receipts are preferred; when unavailable, a private
 session-scoped append-only fallback ledger is read from fixed snapshots in
@@ -200,7 +197,7 @@ the resulting plan.
 
 ### `ralplan-from-skill.mjs`
 
-A generated, self-contained RALPLAN example derived from the bundled skill.
+A self-contained RALPLAN workflow example with role prompts inlined from the upstream skill.
 
 | Argument        | Required | Meaning                                        |
 | --------------- | -------- | ---------------------------------------------- |

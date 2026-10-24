@@ -18,7 +18,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { formatCompletionMessage } from "./completion-presentation";
 import { MAX_TURN_ID_LENGTH } from "./artifact";
 import {
-  getActiveSessionOwner,
   resolveLiveSessionScope,
   resolveStreamingFlag,
   resolveActualStreamingFlag,
@@ -75,6 +74,8 @@ export interface CompletionRecord {
   turnId?: string;
   label: string;
   status: CompletionStatus;
+  /** TUI-only label metadata; status remains authoritative for behavior. */
+  presentation?: "completed-with-errors";
   policy: CompletionPolicy;
   groupId?: string;
   /** Number of registered group members still awaiting terminal completion. */
@@ -97,41 +98,25 @@ export interface CompletionRecord {
 export interface CompletionPolicyParams {
   completionPolicy?: CompletionPolicy;
   completionGroupId?: string;
-  notifyOnComplete?: unknown;
-  triggerTurnOnComplete?: unknown;
 }
 
 export interface ResolvedCompletionPolicy {
-  policy?: CompletionPolicy;
+  policy: CompletionPolicy;
   groupId?: string;
-  legacy: boolean;
 }
 
 export function resolveCompletionPolicy(
   params: CompletionPolicyParams,
 ): ResolvedCompletionPolicy {
-  const hasLegacyFields =
-    params.notifyOnComplete !== undefined ||
-    params.triggerTurnOnComplete !== undefined;
-  if (
-    hasLegacyFields &&
-    (params.completionPolicy !== undefined ||
-      params.completionGroupId !== undefined)
-  ) {
-    throw new Error(
-      "Deprecated notifyOnComplete or triggerTurnOnComplete cannot be combined with completionPolicy or completionGroupId",
-    );
-  }
-  if (hasLegacyFields) return { policy: "each", legacy: false };
   const policy = params.completionPolicy ?? "each";
   if (policy === "each") {
     if (params.completionGroupId !== undefined) {
       throw new Error('completionGroupId requires completionPolicy="group"');
     }
-    return { policy, legacy: false };
+    return { policy };
   }
   const groupId = normalizeGroupId(params.completionGroupId);
-  return { policy, groupId, legacy: false };
+  return { policy, groupId };
 }
 
 interface CompletionConsumptionBase {
@@ -256,11 +241,25 @@ interface CoordinatorGlobalState {
     string,
     CompletionCoordinatorState
   >;
+  __piSubagenturaCompletionRecoveringGroupOwners?: Set<string>;
+  __piSubagenturaCompletionFailedGroupRecoveryOwners?: Set<string>;
 }
 
 function coordinatorRegistry(): Map<string, CompletionCoordinatorState> {
   const state = globalThis as typeof globalThis & CoordinatorGlobalState;
   return (state.__piSubagenturaCompletionCoordinators ??= new Map());
+}
+
+/** Recovery fences are shared with the process-global coordinator registry. */
+function recoveringGroupOwners(): Set<string> {
+  const state = globalThis as typeof globalThis & CoordinatorGlobalState;
+  return (state.__piSubagenturaCompletionRecoveringGroupOwners ??= new Set());
+}
+
+function failedGroupRecoveryOwners(): Set<string> {
+  const state = globalThis as typeof globalThis & CoordinatorGlobalState;
+  return (state.__piSubagenturaCompletionFailedGroupRecoveryOwners ??=
+    new Set());
 }
 
 function ownerKey(owner: SessionOwnerToken): string {
@@ -270,7 +269,7 @@ function ownerKey(owner: SessionOwnerToken): string {
 function effectiveOwner(
   owner?: SessionOwnerToken,
 ): SessionOwnerToken | undefined {
-  return owner ?? getActiveSessionOwner();
+  return owner;
 }
 
 function sessionId(scope: SessionScope | undefined): string | undefined {
@@ -323,6 +322,18 @@ function normalizeRecord(value: unknown): CompletionRecord {
     raw.status !== "cancelled"
   ) {
     throw new Error("Invalid completion status");
+  }
+  const presentation =
+    raw.presentation === "completed-with-errors"
+      ? "completed-with-errors"
+      : undefined;
+  if (
+    raw.presentation !== undefined &&
+    (presentation === undefined ||
+      raw.source !== "workflow" ||
+      raw.status !== "error")
+  ) {
+    throw new Error("Invalid completion presentation");
   }
   if (raw.policy !== "each" && raw.policy !== "group") {
     throw new Error("Invalid completion policy");
@@ -406,6 +417,7 @@ function normalizeRecord(value: unknown): CompletionRecord {
       : {}),
     label: boundedString(raw.label, "label", MAX_COMPLETION_LABEL_LENGTH),
     status: raw.status,
+    ...(presentation ? { presentation } : {}),
     policy: raw.policy,
     ...(groupId ? { groupId } : {}),
     ...(groupRemaining !== undefined ? { groupRemaining } : {}),
@@ -1485,8 +1497,9 @@ function readyRecords(state: CompletionCoordinatorState): CompletionRecord[] {
     (record) =>
       !state.consumed.has(record.completionId) &&
       !state.dispatchAttempted.has(record.completionId) &&
-      (record.policy === "each" ||
-        (!groupRecoveryBlocked && groupIsReady(state, record))),
+      (record.status === "error" ||
+        ((record.policy === "each" || !groupRecoveryBlocked) &&
+          groupIsReady(state, record))),
   );
 }
 
@@ -1774,11 +1787,17 @@ export function registerCompletionCoordinator(
         try {
           const record = normalizeRecord(entry.data);
           const icon =
-            record.status === "done"
-              ? "✓"
-              : record.status === "cancelled"
-                ? "○"
-                : "✕";
+            record.presentation === "completed-with-errors"
+              ? "⚠"
+              : record.status === "done"
+                ? "✓"
+                : record.status === "cancelled"
+                  ? "○"
+                  : "✕";
+          const statusLabel =
+            record.presentation === "completed-with-errors"
+              ? "completed with errors"
+              : record.status;
           const identity = record.turnId
             ? `${JSON.stringify(record.sourceId)}, turn ${JSON.stringify(record.turnId)}`
             : JSON.stringify(record.sourceId);
@@ -1797,8 +1816,12 @@ export function registerCompletionCoordinator(
             : "";
           return new Text(
             theme.fg(
-              record.status === "error" ? "error" : "dim",
-              `${formatCompletionMessage(record.label, `${icon} ${record.status}${progress}`)}${details}`,
+              record.presentation === "completed-with-errors"
+                ? "warning"
+                : record.status === "error"
+                  ? "error"
+                  : "dim",
+              `${formatCompletionMessage(record.label, `${icon} ${statusLabel}${progress}`)}${details}`,
             ),
             0,
             0,
@@ -1948,9 +1971,9 @@ function registerCompletionMemberInner(
   if (!state) return;
   const stateKey = ownerKey(state.owner);
   if (
-    failedGroupRecoveryOwners.has(stateKey) ||
-    (recoveringGroupOwners.has(stateKey) && !recovered) ||
-    (recovered && !recoveringGroupOwners.has(stateKey))
+    failedGroupRecoveryOwners().has(stateKey) ||
+    (recoveringGroupOwners().has(stateKey) && !recovered) ||
+    (recovered && !recoveringGroupOwners().has(stateKey))
   ) {
     throw new Error("Completion group recovery is unavailable");
   }
@@ -2017,8 +2040,6 @@ export function sealCompletionGroups(owner?: SessionOwnerToken): void {
 }
 
 /** Restore pending mixed-source barriers before any durable workflow notices. */
-const recoveringGroupOwners = new Set<string>();
-const failedGroupRecoveryOwners = new Set<string>();
 
 export function isCompletionGroupRecoveryBlocked(
   owner?: SessionOwnerToken,
@@ -2026,8 +2047,8 @@ export function isCompletionGroupRecoveryBlocked(
   const resolvedOwner = effectiveOwner(owner);
   return (
     resolvedOwner !== undefined &&
-    (failedGroupRecoveryOwners.has(ownerKey(resolvedOwner)) ||
-      recoveringGroupOwners.has(ownerKey(resolvedOwner)))
+    (failedGroupRecoveryOwners().has(ownerKey(resolvedOwner)) ||
+      recoveringGroupOwners().has(ownerKey(resolvedOwner)))
   );
 }
 
@@ -2041,13 +2062,13 @@ export async function restoreDurableCompletionGroups(
   const directory =
     sessionLedgerFile(owner, "subagentura-completion-groups") + ".groups";
   const key = ownerKey(owner);
-  recoveringGroupOwners.add(key);
+  recoveringGroupOwners().add(key);
   try {
-    failedGroupRecoveryOwners.delete(key);
+    failedGroupRecoveryOwners().delete(key);
     restoreDurableCompletionGroupsSync(owner);
     await discoverAccepted?.();
     if (!hasCompletionGroups(directory)) {
-      failedGroupRecoveryOwners.delete(key);
+      failedGroupRecoveryOwners().delete(key);
       return;
     }
     const groups = await readCompletionGroups(directory);
@@ -2111,14 +2132,14 @@ export async function restoreDurableCompletionGroups(
       }
     }
     reconcileState(state);
-    failedGroupRecoveryOwners.delete(key);
+    failedGroupRecoveryOwners().delete(key);
   } catch (error) {
     // Unknown group membership must not release a barrier, but independent
     // completions do not depend on that membership and can still be delivered.
-    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners().add(key);
     throw error;
   } finally {
-    recoveringGroupOwners.delete(key);
+    recoveringGroupOwners().delete(key);
   }
 }
 
@@ -2154,9 +2175,9 @@ export function restoreDurableCompletionGroupsSync(
       });
     }
     reconcileState(state);
-    failedGroupRecoveryOwners.delete(key);
+    failedGroupRecoveryOwners().delete(key);
   } catch (error) {
-    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners.add(key);
+    if (resolveLiveSessionScope(owner)) failedGroupRecoveryOwners().add(key);
     throw error;
   }
 }
@@ -2207,6 +2228,26 @@ export function registerCompletionExpectations(
     }
   }
   reconcileState(state);
+  // A prior reconciliation may have scanned the ledger before recovery
+  // discovered these intents; match its bounded receipt cache before delivery.
+  for (const expectation of state.fallbackExpectations.values()) {
+    if (
+      !state.sourceConsumptions.some((consumption) =>
+        expectationMatchesConsumption(expectation, consumption),
+      )
+    ) {
+      continue;
+    }
+    const completionId = expectation.completionId;
+    if (state.records.has(completionId)) {
+      state.consumed.add(completionId);
+      state.dispatchAttempted.delete(completionId);
+      state.deferredConsumedIds.delete(completionId);
+      state.fallbackExpectations.delete(completionId);
+    } else {
+      state.deferredConsumedIds.add(completionId);
+    }
+  }
   pruneCoordinatorState(state);
 }
 
@@ -2229,7 +2270,15 @@ export function publishCompletion(
       record.sequence + 1,
     );
   }
-  if (record.policy === "group") {
+  const groupRecoveryBlockedError =
+    record.policy === "group" &&
+    record.status === "error" &&
+    isCompletionGroupRecoveryBlocked(state.owner);
+  if (groupRecoveryBlockedError) {
+    // Keep the terminal member's group identity without writing a guessed snapshot.
+    delete record.groupRemaining;
+    delete record.groupComplete;
+  } else if (record.policy === "group") {
     try {
       const memberKey = completionMemberKey(record.source, record.sourceId);
       let group = state.groups.get(record.groupId!);
@@ -2553,8 +2602,8 @@ export function retireSessionScopedCompletions(
 }
 
 export function clearCompletionCoordinator(owner: SessionOwnerToken): void {
-  recoveringGroupOwners.delete(ownerKey(owner));
-  failedGroupRecoveryOwners.delete(ownerKey(owner));
+  recoveringGroupOwners().delete(ownerKey(owner));
+  failedGroupRecoveryOwners().delete(ownerKey(owner));
   const state = coordinatorRegistry().get(ownerKey(owner));
   if (state?.manifestRetryTimer) clearTimeout(state.manifestRetryTimer);
   coordinatorRegistry().delete(ownerKey(owner));

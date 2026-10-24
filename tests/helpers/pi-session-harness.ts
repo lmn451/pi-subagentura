@@ -1,25 +1,22 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  createCompatibleSessionRuntime,
-  findModel,
-  registerProvider,
-} from "../../src/pi-sdk-compat";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
   type ToolCall,
   type Usage,
+  type TranscriptContext,
+  type Model,
 } from "@earendil-works/pi-ai";
 
 function assistant(text: string, usage?: Usage): AssistantMessage {
@@ -45,12 +42,80 @@ function assistant(text: string, usage?: Usage): AssistantMessage {
 export interface PiSessionHarness {
   session: AgentSession;
   sessionManager: SessionManager;
-  contexts: Context[];
+  contexts: TranscriptContext[];
   completeNextTool(name: string, arguments_: ToolCall["arguments"]): void;
+  thinkingLevels: Array<string | undefined>;
   completeNext(text?: string): void;
+  configureTestAuth(): void;
   failNext(errorMessage?: string): void;
   reload(): Promise<void>;
   dispose(): void;
+}
+
+export async function withIsolatedPiRuntime<T>(
+  run: (paths: { agentDir: string; cwd: string }) => Promise<T>,
+): Promise<T> {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-config-"));
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-cwd-"));
+  const home = mkdtempSync(join(tmpdir(), "pi-subagentura-agent-home-"));
+  mkdirSync(join(agentDir, "sessions"));
+  mkdirSync(join(home, ".config"));
+  const scopedNames = new Set([
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
+    "HOME",
+    "USERPROFILE",
+    "XDG_CONFIG_HOME",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_CONFIG_FILE",
+    "CLOUDSDK_CONFIG",
+    "AZURE_CONFIG_DIR",
+  ]);
+  for (const name of Object.keys(process.env)) {
+    if (
+      /(?:^|_)(?:API_KEY|API_TOKEN|ACCESS_KEY|ACCESS_KEY_ID|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|SECRET|SECRET_ACCESS_KEY|SESSION_TOKEN|TOKEN|CREDENTIALS)$/i.test(
+        name,
+      ) ||
+      name === "GOOGLE_APPLICATION_CREDENTIALS" ||
+      name === "AWS_SHARED_CREDENTIALS_FILE"
+    ) {
+      scopedNames.add(name);
+    }
+  }
+  const previous = new Map<string, string | undefined>();
+  for (const name of scopedNames) {
+    previous.set(name, process.env[name]);
+  }
+
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_SESSION_DIR = join(agentDir, "sessions");
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.XDG_CONFIG_HOME = join(home, ".config");
+  for (const name of scopedNames) {
+    if (
+      name !== "PI_CODING_AGENT_DIR" &&
+      name !== "PI_CODING_AGENT_SESSION_DIR" &&
+      name !== "HOME" &&
+      name !== "USERPROFILE" &&
+      name !== "XDG_CONFIG_HOME"
+    ) {
+      delete process.env[name];
+    }
+  }
+
+  try {
+    return await run({ agentDir, cwd });
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 export async function createPiSessionHarness(
@@ -69,36 +134,41 @@ export async function createPiSessionHarness(
       keepRecentTokens: number;
     };
     assistantUsage?: Usage;
+    nativeModel?: Model<any>;
+    nativeProvider?: unknown;
+    onNativeSessionStart?: (ctx: any) => Promise<void> | void;
     retrySettings?: {
       enabled: boolean;
       maxRetries: number;
       baseDelayMs: number;
       maxAgentDelayMs: number;
     };
+    providerErrorUrl?: string;
+    missingAuth?: boolean;
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
-  const sessionRuntime = await createCompatibleSessionRuntime({
-    agentDir,
-    authStorageData: {
-      "subagentura-faux": { type: "api_key", key: "test" },
-    },
+  const missingAuthEnvVar = `PI_SUBAGENTURA_TEST_MISSING_AUTH_${randomUUID().replaceAll("-", "")}`;
+  const sessionRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: null,
   });
-  const contexts: Context[] = [];
+  const contexts: TranscriptContext[] = [];
+  const thinkingLevels: Array<string | undefined> = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   let toolCallSequence = 0;
   const fauxProvider = {
     api: "subagentura-faux",
-    apiKey: "test",
+    apiKey: options.missingAuth ? `$${missingAuthEnvVar}` : "test",
     baseUrl: "http://127.0.0.1.invalid",
     models: [
       {
         id: "faux-model",
         name: "Faux Model",
         api: "subagentura-faux",
-        reasoning: false,
-        input: ["text"],
+        reasoning: true,
+        input: ["text" as const],
         cost: {
           input: 0,
           output: 0,
@@ -109,18 +179,36 @@ export async function createPiSessionHarness(
         maxTokens: 4_096,
       },
     ],
-    streamSimple: (_model: unknown, context: Context) => {
+    streamSimple: (
+      _model: unknown,
+      context: TranscriptContext,
+      requestOptions?: { reasoning?: string },
+    ) => {
       contexts.push(context);
+      thinkingLevels.push(requestOptions?.reasoning);
       const stream = createAssistantMessageEventStream();
-      pending.push(stream);
+      if (options.providerErrorUrl) {
+        void fetch(options.providerErrorUrl).then(async (response) => {
+          const errorMessage = `HTTP ${response.status}: ${await response.text()}`;
+          const message: AssistantMessage = {
+            ...assistant(""),
+            content: [],
+            stopReason: "error",
+            errorMessage,
+          };
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "error", reason: "error", error: message });
+          stream.end(message);
+        });
+      } else {
+        pending.push(stream);
+      }
       return stream;
     },
   };
   const registerFauxProvider = () =>
-    registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
+    sessionRuntime.registerProvider("subagentura-faux", fauxProvider);
   registerFauxProvider();
-  const model = findModel(sessionRuntime, "subagentura-faux", "faux-model");
-  if (!model) throw new Error("faux model registration failed");
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
@@ -131,6 +219,22 @@ export async function createPiSessionHarness(
       options.compactionSettings!.enabled;
     settingsManager.getCompactionSettings = () => options.compactionSettings!;
   }
+  const extensionFactories = options.nativeProvider
+    ? [
+        {
+          name: "test-native-provider",
+          factory: (pi: any) => {
+            pi.registerProvider(options.nativeProvider);
+            const onNativeSessionStart = options.onNativeSessionStart;
+            if (onNativeSessionStart) {
+              pi.on("session_start", (_event: any, ctx: any) =>
+                onNativeSessionStart(ctx),
+              );
+            }
+          },
+        },
+      ]
+    : [];
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -138,11 +242,12 @@ export async function createPiSessionHarness(
     additionalExtensionPaths: [
       join(options.extensionRoot ?? cwd, "src/subagent.ts"),
     ],
+    extensionFactories,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-  });
+  } as any);
   const previousChild = process.env.PI_SUBAGENTURA_CHILD;
   const previousArtifactDir = process.env.ARTIFACT_DIR;
   if (options.childArtifactDir) {
@@ -160,18 +265,21 @@ export async function createPiSessionHarness(
     if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
     else process.env.ARTIFACT_DIR = previousArtifactDir;
   }
-  const sessionOptions = buildSessionOptions(sessionRuntime, {
+  const model =
+    options.nativeModel ??
+    sessionRuntime.getModel("subagentura-faux", "faux-model");
+  if (!model) throw new Error("test model registration failed");
+  const sessionOptions: Parameters<typeof createAgentSession>[0] = {
     cwd,
     agentDir,
     model,
+    modelRuntime: sessionRuntime,
     sessionManager,
     settingsManager,
     resourceLoader,
     noTools: options.includeTools ? undefined : "all",
-  });
-  const { session } = await createAgentSession(
-    sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-  );
+  };
+  const { session } = await createAgentSession(sessionOptions);
   if (options.bindExtensionLifecycle) {
     await session.bindExtensions({ shutdownHandler: async () => {} });
   }
@@ -179,6 +287,13 @@ export async function createPiSessionHarness(
     session,
     sessionManager,
     contexts,
+    thinkingLevels,
+    configureTestAuth() {
+      sessionRuntime.registerProvider("subagentura-faux", {
+        ...fauxProvider,
+        apiKey: "test",
+      });
+    },
     completeNext(text = "ok") {
       const stream = pending.shift();
       if (!stream) throw new Error("no pending faux provider response");

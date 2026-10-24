@@ -84,14 +84,16 @@ diagnostics or agent-thrown errors.
 
 Schema retries use generic feedback and omit unexpected property names/paths,
 parser details, and other raw diagnostics. Failed workflow status, result,
-run-list, and automatic notification surfaces likewise use generic summaries;
-`list_workflow_runs` keeps safe workflow IDs, names, and statuses while
-redacting diagnostic fields. Recognized historical workflow errors stay
-generic in normal model context and during native manual or automatic
-compaction, including split-turn summaries. Historical legacy agent RPC
-failures are made generic before reaching workers or workflow tool results.
-Redaction operates on sanitized copies of SDK-prepared message arrays; original
-session messages, the local transcript, and session ledger remain local and
+run-list, and automatic notification surfaces likewise use generic summaries.
+`list_workflow_runs` keeps safe workflow IDs, names, statuses, and waiting paths
+while redacting diagnostic fields. Native `structuredContent` uses the same safe
+projection as model-visible workflow result content; it never exposes raw
+diagnostic details. Recognized historical workflow errors stay generic in
+normal model context and during native manual or automatic compaction, including
+split-turn summaries. Historical legacy runner RPC failures receive the generic
+projection during replay without redispatch; the original durable journal stays
+unchanged. Redaction operates on sanitized copies of SDK-prepared message arrays;
+the original session messages, local transcript, and session ledger remain
 unmodified. Raw agent failure text may remain in the local durable journal, but
 is not copied into retry configuration or telemetry.
 
@@ -126,6 +128,18 @@ budget; it does not reserve capacity or limit already-running work. Restart reco
 `resume_workflow({workflowId})` in a live Pi process. See
 [review-source.ts](../examples/workflows/review-source.ts) for a runnable
 definition.
+
+Manual durable result reads are owned by the initiating Pi session. A session
+change while result I/O is pending cannot transfer the consumption receipt.
+Fallback receipts restored before interactive completion expectations are
+reconciled only with the exact completion identity, source, and turn, never an
+unrelated later-turn result.
+
+`cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
+before aborting owned workflow/process work. A failed intent or attempt-marker
+write reports cancellation failure and protects the run and its owned children
+for retry. After the run-level intent is recorded, a retry still repairs each
+per-attempt marker.
 
 ## Creating and resuming workflows
 
@@ -206,7 +220,7 @@ process agents use textual JSON extraction and validation as a fallback.
 | `ralplan-occ.mjs`        | 59.6 KB | Workflow re-implementation of oh-my-claudecode's RALPLAN |
 | `ralplan-from-skill.mjs` | 28.8 KB | Demo: `skill-to-workflow` output for pi-ralplan          |
 
-The demo output of `package-to-skill` is in `skills/ralplan/` — a complete installable skill.
+The generated skill is written to the caller-selected `skillDir`; the repository does not bundle generated skill output.
 
 ## Generic converters
 
@@ -488,8 +502,7 @@ await agent(prompt, { isolation: "in-process", label: "quick-check" });
 1. `launchInteractiveSubagent()` creates a pane via the multiplexer backend
 2. By default (`background: true`) the pane is a detached named window — invisible in the tmux bar
 3. A launch script boots `pi` in that pane with a child-specific system prompt + protocol
-4. The parent polls the artifact directory (`events.ndjson` + `output.md`) awaiting completion
-5. The artifact poller tails the child session log and shows tool activity in a TUI widget
+4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling.
 
 #### TUI widget rows
 

@@ -52,10 +52,6 @@ describe("subagent-artifact CLI", () => {
   });
 
   describe("source", () => {
-    it("starts with a shebang", () => {
-      expect(CLI_SOURCE.startsWith("#!/usr/bin/env node")).toBe(true);
-    });
-
     it("parses as valid JavaScript (node --check)", () => {
       // Strip the shebang (node can't parse it as a file) and write to a
       // temp .mjs file, then `node --check` it.
@@ -76,31 +72,23 @@ describe("subagent-artifact CLI", () => {
     });
   });
 
-  describe("start", () => {
-    it("writes a started event", () => {
-      const r = runCli(tmp, ["start"]);
-      expect(r.status).toBe(0);
+  describe("done", () => {
+    it("writes one explicit v2 completion for repeated done commands", () => {
+      runCli(tmp, ["done", "0"]);
+      runCli(tmp, ["done", "0"]);
       const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
         .trim()
-        .split("\n");
+        .split("\n")
+        .map((line) => JSON.parse(line));
       expect(events).toHaveLength(1);
-      const ev = JSON.parse(events[0]);
-      expect(ev.type).toBe("started");
-      expect(ev.status).toBe("running");
-      expect(typeof ev.ts).toBe("number");
-    });
-  });
-
-  describe("done", () => {
-    it("writes a done event with exit code 0 → status done", () => {
-      runCli(tmp, ["done", "0"]);
-      const ev = JSON.parse(
-        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
-      );
-      expect(ev.type).toBe("completion");
-      expect(ev.outcome).toBe("done");
-      expect(ev.status).toBe("done");
-      expect(ev.exitCode).toBe(0);
+      expect(events[0]).toMatchObject({
+        version: 2,
+        type: "completion",
+        source: "explicit",
+        outcome: "done",
+        status: "done",
+        exitCode: 0,
+      });
     });
 
     it("writes a done event with non-zero exit code → status error", () => {

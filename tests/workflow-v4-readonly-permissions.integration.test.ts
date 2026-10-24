@@ -9,28 +9,23 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
-import type { PiSessionHarness } from "./helpers/pi-session-harness";
-
-import type { normalizeProviderContext } from "../src/pi-sdk-compat";
-
-type ContextNormalizer = typeof normalizeProviderContext;
+import { getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
+import {
+  createPiSessionHarness,
+  type PiSessionHarness,
+} from "./helpers/pi-session-harness";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const roots: string[] = [];
 const harnesses: PiSessionHarness[] = [];
-let normalizeProviderContextForTest: ContextNormalizer | undefined;
 let restoreScopedEnvironment: (() => void) | undefined;
 const READ_ONLY_SOURCE = 'export const source = "SDK_READ_ONLY_SOURCE";\n';
 
-function toolNames(context: Context): string[] {
-  const normalize = normalizeProviderContextForTest;
-  if (!normalize)
-    throw new Error("read-only SDK context normalizer was not loaded");
-  return normalize(context).tools.map((tool) => tool.name);
+function toolNames(context: TranscriptContext): string[] {
+  return getCurrentTools(context.messages).map((tool) => tool.name);
 }
 
-function toolResult(context: Context, name: string) {
+function toolResult(context: TranscriptContext, name: string) {
   const result = [...context.messages]
     .reverse()
     .find((entry) => entry.role === "toolResult" && entry.toolName === name);
@@ -93,12 +88,6 @@ describe("read-only workflow agent SDK permissions", () => {
       }),
       { mode: 0o600 },
     );
-    const [{ normalizeProviderContext }, { createPiSessionHarness }] =
-      await Promise.all([
-        import("../src/pi-sdk-compat"),
-        import("./helpers/pi-session-harness"),
-      ]);
-    normalizeProviderContextForTest = normalizeProviderContext;
     const sourcePath = join(root, "source.ts");
     const forbiddenPath = join(root, "forbidden.txt");
     const mcpControlPath = join(root, "mcp-control.txt");

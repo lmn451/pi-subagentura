@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Context } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  JsonObject,
+  Message,
+  ToolResultMessage,
+  TranscriptContext,
+} from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import {
   E2E_API,
   E2E_MODEL,
@@ -24,11 +31,11 @@ async function events(stream: AsyncIterable<any>): Promise<any[]> {
   return result;
 }
 
-function context(...messages: any[]): Context {
-  return { messages } as Context;
+function context(...messages: Message[]): TranscriptContext {
+  return normalizeContext({ messages });
 }
 
-function assistantTool(id: string, marker: string) {
+function assistantTool(id: string, marker: string): AssistantMessage {
   return {
     role: "assistant",
     content: [
@@ -39,11 +46,23 @@ function assistantTool(id: string, marker: string) {
         arguments: { task: marker },
       },
     ],
+    api: E2E_API,
+    provider: E2E_PROVIDER,
+    model: E2E_MODEL,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
     timestamp: 0,
   };
 }
 
-function toolResult(id: string) {
+function toolResult(id: string): ToolResultMessage {
   return {
     role: "toolResult",
     toolCallId: id,
@@ -115,7 +134,7 @@ describe("scripted terminal provider contract", () => {
     const initial = await events(
       config.streamSimple(
         model,
-        context({ role: "user", content: "[E2E:SYNC_ISOLATED]" }),
+        context({ role: "user", content: "[E2E:SYNC_ISOLATED]", timestamp: 0 }),
       ),
     );
     expect(initial.map((event) => event.type)).toEqual([
@@ -137,7 +156,7 @@ describe("scripted terminal provider contract", () => {
       config.streamSimple(
         model,
         context(
-          { role: "user", content: "[E2E:SYNC_ISOLATED]" },
+          { role: "user", content: "[E2E:SYNC_ISOLATED]", timestamp: 0 },
           assistantTool(id, "[E2E:SYNC_ISOLATED]"),
           toolResult(id),
         ),
@@ -156,7 +175,11 @@ describe("scripted terminal provider contract", () => {
     const controller = new AbortController();
     const stream = config.streamSimple(
       model,
-      context({ role: "user", content: "[E2E:CHILD_SYNC_CONTEXT]" }),
+      context({
+        role: "user",
+        content: "[E2E:CHILD_SYNC_CONTEXT]",
+        timestamp: 0,
+      }),
       { signal: controller.signal },
     );
     // Poll for the gate-wait state instead of sleeping: this tree has no fixed
@@ -190,8 +213,8 @@ describe("scripted terminal provider contract", () => {
     const stream = config.streamSimple(
       model,
       context(
-        { role: "user", content: "old [E2E:SYNC_CONTEXT]" },
-        { role: "user", content: "new [E2E:SYNC_ISOLATED]" },
+        { role: "user", content: "old [E2E:SYNC_CONTEXT]", timestamp: 0 },
+        { role: "user", content: "new [E2E:SYNC_ISOLATED]", timestamp: 0 },
       ),
     );
     const result = await events(stream);
@@ -254,7 +277,7 @@ describe("scripted terminal provider contract", () => {
               isError: false,
               timestamp: 0,
             },
-            { role: "user", content: route.marker },
+            { role: "user", content: route.marker, timestamp: 0 },
           ),
         ),
       );
@@ -277,7 +300,7 @@ describe("scripted terminal provider contract", () => {
       marker:
         | "[E2E:INTERACTIVE_FOLLOWUP_PARENT]"
         | "[E2E:INTERACTIVE_CANCEL_PARENT]",
-      details: Record<string, unknown>,
+      details: JsonObject,
     ) => {
       const result = await events(
         config.streamSimple(
@@ -297,7 +320,7 @@ describe("scripted terminal provider contract", () => {
               isError: false,
               timestamp: 0,
             },
-            { role: "user", content: marker },
+            { role: "user", content: marker, timestamp: 0 },
           ),
         ),
       );
@@ -324,7 +347,7 @@ describe("scripted terminal provider contract", () => {
     const result = await events(
       config.streamSimple(
         model,
-        context({ role: "user", content: "[E2E:ERROR]" }),
+        context({ role: "user", content: "[E2E:ERROR]", timestamp: 0 }),
       ),
     );
     expect(result.map((event) => event.type)).toEqual(["start", "error"]);
@@ -336,7 +359,11 @@ describe("scripted terminal provider contract", () => {
     const result = await events(
       config.streamSimple(
         model,
-        context({ role: "user", content: "[E2E:MISSPELLED_ROUTE]" }),
+        context({
+          role: "user",
+          content: "[E2E:MISSPELLED_ROUTE]",
+          timestamp: 0,
+        }),
       ),
     );
 

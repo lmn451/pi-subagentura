@@ -42,15 +42,6 @@ function collectErrorMessages(schema: XSchema, value: unknown): string[] {
   return errs.map((e: { message: string }) => e.message);
 }
 
-/** Reproduce Pi 0.80.6's Anthropic convertTools top-level schema projection. */
-function piAnthropicInputSchema(schema: any) {
-  return {
-    type: "object",
-    properties: schema.properties ?? {},
-    required: schema.required ?? [],
-  };
-}
-
 // ---------------------------------------------------------------------------
 // BaseParams
 // ---------------------------------------------------------------------------
@@ -191,52 +182,13 @@ describe("BaseParams", () => {
     expect(check(BaseParams)({ task: "t", async: null })).toBe(false);
   });
 
-  /* ---------- optional `notifyOnComplete` (union "notify" | "inject") ---------- */
-
-  it("accepts missing notifyOnComplete", () => {
-    expect(check(BaseParams)({ task: "t" })).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'notify'", () => {
-    expect(
-      check(BaseParams)({ task: "t", notifyOnComplete: "notify" as const }),
-    ).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'inject'", () => {
-    expect(
-      check(BaseParams)({ task: "t", notifyOnComplete: "inject" as const }),
-    ).toBe(true);
-  });
-
-  it("rejects notifyOnComplete 'push'", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: "push" })).toBe(
+  it("rejects deprecated completion controls", () => {
+    expect(check(BaseParams)({ task: "t", notifyOnComplete: "inject" })).toBe(
       false,
     );
-  });
-
-  it("rejects notifyOnComplete empty string", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: "" })).toBe(false);
-  });
-
-  it("rejects notifyOnComplete number", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: 0 })).toBe(false);
-  });
-
-  it("rejects notifyOnComplete boolean", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: true })).toBe(
+    expect(check(BaseParams)({ task: "t", triggerTurnOnComplete: true })).toBe(
       false,
     );
-  });
-
-  it("produces meaningful errors for invalid notifyOnComplete", () => {
-    const msgs = collectErrorMessages(BaseParams, {
-      task: "t",
-      notifyOnComplete: "bad",
-    });
-    expect(
-      msgs.some((m) => /notify|inject|constant|equal|anyOf/i.test(m)),
-    ).toBe(true);
   });
 
   /* ---------- optional `maxAge` (integer milliseconds) ---------- */
@@ -408,8 +360,6 @@ describe("InteractiveParams", () => {
       routingDescription: "Debug the memory leak",
       routingAliases: ["memory", "leak"],
       background: false,
-      notifyOnComplete: "inject" as const,
-      triggerTurnOnComplete: true,
       completionPolicy: "group" as const,
       completionGroupId: "review-shards",
     };
@@ -609,37 +559,6 @@ describe("InteractiveParams", () => {
     expect(variants[2].properties).toEqual({});
   });
 
-  it("exposes the full model-visible shape through Pi's Anthropic conversion", () => {
-    const providerSchema = piAnthropicInputSchema(InteractiveParams);
-
-    expect(providerSchema.required).toEqual(["task"]);
-    expect(Object.keys(providerSchema.properties).sort()).toEqual(
-      [
-        "background",
-        "completionGroupId",
-        "completionPolicy",
-        "context",
-        "cwd",
-        "includeContext",
-        "model",
-        "mux",
-        "name",
-        "notifyOnComplete",
-        "persona",
-        "routingAliases",
-        "routingDescription",
-        "task",
-        "thinkingLevel",
-        "triggerTurnOnComplete",
-      ].sort(),
-    );
-    expect(providerSchema.properties.includeContext.type).toBe("boolean");
-    expect(providerSchema.properties.context.type).toBe("string");
-    expect(providerSchema.properties.routingAliases.description).toContain(
-      "Requires routingDescription",
-    );
-  });
-
   /* ---------- optional initial routing metadata ---------- */
 
   it("accepts coordinated completion policies and validates group identifiers", () => {
@@ -740,43 +659,13 @@ describe("InteractiveParams", () => {
     );
   });
 
-  /* ---------- optional `notifyOnComplete` (union "notify" | "inject") ---------- */
-
-  it("accepts missing notifyOnComplete", () => {
-    expect(check(InteractiveParams)({ task: "t" })).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'notify'", () => {
+  it("rejects deprecated completion controls", () => {
     expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "notify" as const,
-      }),
-    ).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'inject'", () => {
-    expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "inject" as const,
-      }),
-    ).toBe(true);
-  });
-
-  it("rejects notifyOnComplete 'notify-inject'", () => {
-    expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "notify-inject",
-      }),
+      check(InteractiveParams)({ task: "t", notifyOnComplete: "inject" }),
     ).toBe(false);
-  });
-
-  it("rejects notifyOnComplete number", () => {
-    expect(check(InteractiveParams)({ task: "t", notifyOnComplete: 1 })).toBe(
-      false,
-    );
+    expect(
+      check(InteractiveParams)({ task: "t", triggerTurnOnComplete: true }),
+    ).toBe(false);
   });
 
   /* ---------- optional `mux` (auto | tmux | zellij | herdr) ---------- */
@@ -868,16 +757,13 @@ describe("Parse (decoding)", () => {
     expect(result).toEqual(value);
   });
 
-  it("BaseParams.Parse passes through unknown properties", () => {
-    const result = parse(BaseParams)({
-      task: "hello",
-      extraField: "should not be removed",
-    });
-    expect(result).toHaveProperty("extraField");
-    expect(result).toMatchObject({
-      task: "hello",
-      extraField: "should not be removed",
-    });
+  it("BaseParams.Parse rejects unknown properties", () => {
+    expect(() =>
+      parse(BaseParams)({
+        task: "hello",
+        extraField: "should be rejected",
+      }),
+    ).toThrow();
   });
 
   it("BaseParams.Parse throws on invalid input", () => {

@@ -17,10 +17,13 @@ import {
   workflowJobRegistry,
   type WorkflowJobState,
 } from "../src/workflow-jobs";
+import { clearSessionScopes, sessionOwner } from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 describe("async workflow rejection accounting", () => {
   afterEach(() => {
     workflowJobRegistry.clear();
+    clearSessionScopes();
     vi.clearAllMocks();
   });
 
@@ -51,6 +54,7 @@ describe("async workflow rejection accounting", () => {
         }
       | undefined;
 
+    const scope = createTestSessionScope();
     const job = startWorkflowJob(
       "priced-failure",
       `export const meta = { name: "priced-failure", description: "d" };\nthrow new Error("boom");`,
@@ -70,6 +74,7 @@ describe("async workflow rejection accounting", () => {
         };
         return true;
       },
+      sessionOwner(scope),
     );
 
     job.abort.abort(new Error("cancelled by test"));
@@ -91,6 +96,7 @@ describe("async workflow rejection accounting", () => {
       { cancelled: true, cancelledCount: 2 },
     );
     mockRunWorkflow.mockRejectedValueOnce(failure);
+    const scope = createTestSessionScope();
     const job = startWorkflowJob(
       "nested-cancel",
       `export const meta = { name: "nested-cancel", description: "d" };\nreturn "unused";`,
@@ -99,6 +105,9 @@ describe("async workflow rejection accounting", () => {
           throw new Error("mocked runWorkflow should own execution");
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(scope),
     );
     await expect(job.promise).rejects.toBe(failure);
     expect(job.status).toBe("cancelled");

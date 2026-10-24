@@ -11,6 +11,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { READ_ONLY_WORKFLOW_FLAG } from "./agent-capabilities";
+import { debugLog } from "./helpers";
 import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
@@ -382,6 +383,76 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     type: "boolean",
     default: false,
   });
+  let startupAgentStarted = false;
+  pi.on("session_start", (event, ctx) => {
+    const model = ctx.model;
+    if (event.reason !== "startup" || !model) return;
+    void ctx.modelRegistry
+      .getApiKeyAndHeaders(model)
+      .then((auth) => {
+        if (startupAgentStarted) return;
+        const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+          getRegisteredNativeProvider?: (provider: string) => unknown;
+        };
+        const isNativeProvider = Boolean(
+          registry.getRegisteredNativeProvider?.(model.provider),
+        );
+        // Legacy fallbacks can expose undefined auth fields, so require
+        // actual request config before trusting a stale auth-status snapshot.
+        const requestAuth = auth as typeof auth & {
+          baseUrl?: string;
+        };
+        const hasResolvedRequestConfig =
+          auth.ok &&
+          Boolean(
+            auth.apiKey ||
+            requestAuth.baseUrl ||
+            Object.keys(auth.headers ?? {}).length ||
+            Object.keys(auth.env ?? {}).length,
+          );
+        const missingLegacyAuth =
+          !isNativeProvider &&
+          typeof registry.hasConfiguredAuth === "function" &&
+          !registry.hasConfiguredAuth(model) &&
+          !hasResolvedRequestConfig;
+        if (auth.ok && !missingLegacyAuth) return;
+        if (!auth.ok) {
+          const missingAuthError =
+            missingLegacyAuth ||
+            /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:missing|required)\s+(?:api key|credentials?|authentication|auth)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:api key|credentials?)(?:\s+(?:is|are|was|were))?\s+(?:missing|not found|not configured|not provided|not set|unset|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\b(?:authentication|auth)(?:\s+(?:is|are|was|were))?\s+(?:missing|not configured|not provided|required)\b/i.test(
+              auth.error,
+            ) ||
+            /\bno\s+(?:authentication|auth)\s+(?:configured|available|provided|set)\b/i.test(
+              auth.error,
+            );
+          if (!missingAuthError) {
+            debugLog("warn", "child_startup_auth_resolution_unavailable");
+            return;
+          }
+        }
+        const message = "Selected model has no configured authentication.";
+        appendCompletionEvent(art, {
+          turnId: "process",
+          outcome: "error",
+          source: "explicit",
+          exitCode: 1,
+          message,
+          errorMessage: message,
+        });
+      })
+      .catch(() => {
+        debugLog("warn", "child_startup_auth_check_failed");
+      });
+  });
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,
@@ -431,6 +502,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
+    startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
       startedAt: Date.now(),
@@ -451,8 +523,8 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
     deferredBind.unref();
   });
-  // In createAgentSession 0.80.6, the first turn_start can precede persistence
-  // of the user message. This is the earliest guaranteed pre-model fallback.
+  // The first turn_start can precede persistence of the user message.
+  // before_provider_request is the earliest guaranteed pre-model fallback.
   pi.on("before_provider_request", (_event, ctx) => {
     bindPersistedTurn(ctx, Date.now());
   });

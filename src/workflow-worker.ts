@@ -8,7 +8,6 @@ import {
   eventLogEndOffset,
   isTurnTerminal,
   readEventBatch,
-  readOutput,
   readOutputForTurnId,
   type SubagentArtifact,
   type SubagentEvent,
@@ -71,6 +70,12 @@ import {
 } from "./interactive-tmux";
 import type { PaneLiveness } from "./multiplexer-contracts";
 import type { CancellationSnapshotReceipt } from "./cancellation-snapshots";
+import {
+  beginRuntimeFailureEpisode,
+  clearRuntimeFailureEpisode,
+  runtimeFailureDedupeKey,
+} from "./telemetry-runtime";
+import { captureTelemetry, type TelemetrySession } from "./telemetry";
 
 // ── Engine (shared across nested workflows) ──────────────────────────
 
@@ -1315,10 +1320,21 @@ function requestInteractiveCancellation(
   try {
     const cancelled = cancelInteractiveSubagent(state.id, "workflow", state);
     if (cancelled?.cancellationSnapshot) {
-      onCancellationSnapshot?.(cancelled.cancellationSnapshot);
+      try {
+        onCancellationSnapshot?.(cancelled.cancellationSnapshot);
+      } catch {
+        /* best effort */
+      }
     }
-  } catch {
-    /* best effort */
+  } catch (error) {
+    if (state.cancellationSnapshot) {
+      try {
+        onCancellationSnapshot?.(state.cancellationSnapshot);
+      } catch {
+        /* best effort */
+      }
+    }
+    throw error;
   }
 }
 
@@ -1330,11 +1346,41 @@ function abortedInteractiveResult(usage: Usage): SubagentResult {
     errorMessage: "aborted",
   };
 }
+function reportMuxProbeRuntimeFailure(
+  state: InteractiveSubagentState,
+  telemetry: TelemetrySession | undefined,
+): void {
+  if (
+    !telemetry ||
+    !telemetry.enabled ||
+    !telemetry.active ||
+    !state.telemetryEligible ||
+    state.telemetryCorrelationId !== telemetry.correlationId
+  ) {
+    return;
+  }
+  const episodeId = beginRuntimeFailureEpisode(state.artifactDir, "mux_probe");
+  if (episodeId === undefined) return;
+  captureTelemetry(
+    telemetry,
+    {
+      event: "runtime_failure",
+      error_category: "mux",
+      error_stage: "polling",
+      failure_kind: "mux_probe",
+      execution: "interactive",
+      mux: state.mux,
+      reporter: "workflow_waiter",
+      impact: "blocked",
+    },
+    { dedupeKey: runtimeFailureDedupeKey("mux_probe", episodeId) },
+  );
+}
 
 /**
  * Await a process-backed sub-agent's owned terminal artifact event, then read the
- * matching immutable `outputs/<eventId>.md` snapshot by turnId. Mutable output.md
- * remains legacy/staging fallback only. Honors abort and dead-pane detection.
+ * matching immutable `outputs/<eventId>.md` snapshot by turnId. Honors abort and
+ * dead-pane detection.
  */
 export async function awaitInteractiveResult(
   state: InteractiveSubagentState,
@@ -1343,6 +1389,7 @@ export async function awaitInteractiveResult(
   onCancellationSnapshot?: (receipt: CancellationSnapshotReceipt) => void,
   /** Durable callers cancel through the exact one-use child supervisor. */
   requestCancellation?: () => void,
+  telemetry?: TelemetrySession,
 ): Promise<SubagentResult> {
   const art = artifactFor(state);
   let deadTicks = 0;
@@ -1354,6 +1401,7 @@ export async function awaitInteractiveResult(
   };
   let cancellationRequested = false;
   let cancellationError: unknown;
+  let hasCancellationError = false;
   const requestCancellationOnce = () => {
     if (cancellationRequested) return;
     cancellationRequested = true;
@@ -1361,9 +1409,36 @@ export async function awaitInteractiveResult(
       try {
         requestCancellation();
       } catch (error) {
-        cancellationError = error;
+        if (!hasCancellationError) {
+          cancellationError = error;
+          hasCancellationError = true;
+        }
       }
-    } else requestInteractiveCancellation(state, onCancellationSnapshot);
+    }
+    const durableInterrupt =
+      (signal?.reason as { source?: string } | undefined)?.source ===
+      "durable_interrupt";
+    if (!durableInterrupt) {
+      try {
+        requestInteractiveCancellation(state, onCancellationSnapshot);
+      } catch (error) {
+        if (!hasCancellationError) {
+          cancellationError = error;
+          hasCancellationError = true;
+        }
+      }
+    }
+  };
+  const settleCancellationError = () => {
+    if (!hasCancellationError) return;
+    if (requestCancellation) throw cancellationError;
+    debugLog("warn", "interactive_cancel_cleanup_failed", {
+      agentId: state.id,
+      error:
+        cancellationError instanceof Error
+          ? cancellationError.message
+          : String(cancellationError),
+    });
   };
   const onAbort = () => requestCancellationOnce();
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -1373,7 +1448,7 @@ export async function awaitInteractiveResult(
       let terminal: TurnTerminalEvent | null;
       if (signal?.aborted) {
         requestCancellationOnce();
-        if (cancellationError) throw cancellationError;
+        settleCancellationError();
         const cancellationUsage = await parseUsageFromSessionFile(
           state.sessionFile,
         );
@@ -1384,38 +1459,15 @@ export async function awaitInteractiveResult(
         const usage = await parseUsageFromSessionFile(state.sessionFile);
         if (signal?.aborted) {
           requestCancellationOnce();
+          settleCancellationError();
           return abortedInteractiveResult(usage);
         }
-        switch (terminal.type) {
-          case "completion":
-            switch (terminal.outcome) {
-              case "done":
-                return {
-                  isError: false,
-                  output:
-                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                  usage,
-                  ...(state.model !== undefined ? { model: state.model } : {}),
-                };
-              case "error":
-              case "cancelled":
-                return {
-                  isError: true,
-                  output:
-                    readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
-                  usage,
-                  errorMessage:
-                    terminal.errorMessage ??
-                    terminal.message ??
-                    `interactive sub-agent ${terminal.outcome}`,
-                };
-              default:
-                return assertNever(terminal.outcome);
-            }
+        switch (terminal.outcome) {
           case "done":
             return {
               isError: false,
-              output: readOutput(art) ?? "(no output)",
+              output:
+                readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
               usage,
               ...(state.model !== undefined ? { model: state.model } : {}),
             };
@@ -1423,13 +1475,16 @@ export async function awaitInteractiveResult(
           case "cancelled":
             return {
               isError: true,
-              output: readOutput(art) ?? "(no output)",
+              output:
+                readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
               usage,
               errorMessage:
-                terminal.message ?? `interactive sub-agent ${terminal.type}`,
+                terminal.errorMessage ??
+                terminal.message ??
+                `interactive sub-agent ${terminal.outcome}`,
             };
           default:
-            return assertNever(terminal);
+            return assertNever(terminal.outcome);
         }
       }
       // A dead pane is only confirmed by a successful probe. Probe failures are
@@ -1441,6 +1496,7 @@ export async function awaitInteractiveResult(
         liveness = "unknown";
       }
       if (liveness === "dead") {
+        clearRuntimeFailureEpisode(state.artifactDir, "mux_probe");
         deadTicks++;
         muxProbeFailureTicks = 0;
         debugLog("warn", "interactive_dead_pane", {
@@ -1448,10 +1504,11 @@ export async function awaitInteractiveResult(
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
         });
         if (deadTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-          const output = readOutput(art) ?? "(no output)";
+          const output = "(no output)";
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
           return {
@@ -1469,12 +1526,15 @@ export async function awaitInteractiveResult(
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
         });
         if (muxProbeFailureTicks >= INTERACTIVE_DEAD_GRACE_TICKS) {
-          const output = readOutput(art) ?? "(no output)";
+          const output = "(no output)";
           const usage = await parseUsageFromSessionFile(state.sessionFile);
           if (signal?.aborted) {
             requestCancellationOnce();
+            settleCancellationError();
             return abortedInteractiveResult(usage);
           }
+          reportMuxProbeRuntimeFailure(state, telemetry);
+
           return attachWorkflowFailure(
             {
               isError: true,
@@ -1492,6 +1552,7 @@ export async function awaitInteractiveResult(
       } else {
         deadTicks = 0;
         muxProbeFailureTicks = 0;
+        clearRuntimeFailureEpisode(state.artifactDir, "mux_probe");
       }
       await new Promise<void>((resolve) => {
         let settled = false;

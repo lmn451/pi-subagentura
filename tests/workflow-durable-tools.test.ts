@@ -16,6 +16,7 @@ import {
   registerDurableWorkflowTools,
   restoreDurableWorkflowRuns,
 } from "../src/workflow-durable-tools";
+import { registerWorkflowTool } from "../src/workflow-tool";
 import {
   registerSessionScope,
   sessionOwner,
@@ -32,17 +33,16 @@ import {
   sealCompletionGroups,
   clearCompletionCoordinator,
   restoreDurableCompletionGroups,
-  restoreDurableCompletionGroupsSync,
   publishCompletion,
   prepareCompletionManifest,
 } from "../src/completion-coordinator";
 import { zeroUsage } from "../src/usage";
-import type { WorkflowAgentRunner } from "../src/workflow-core";
 import {
   decodeRunValue,
   encodeRunValue,
   WorkflowRunStore,
 } from "../src/workflow-run-store";
+import type { WorkflowAgentRunner } from "../src/workflow-core";
 
 let root: string;
 beforeEach(async () => {
@@ -243,6 +243,240 @@ describe("durable public tools", () => {
     await expect(
       WorkflowRunStore.list(scope, { requireComplete: true }),
     ).rejects.toThrow("exceeds 1,000 runs");
+  });
+
+  it("restores grouped workflow errors while holding safe terminals behind corrupt group state", async () => {
+    const { pi, scope, ctx, tools } = setup();
+    const owner = sessionOwner(scope);
+    scope.parentStreaming = true;
+    const runScope = { cwd: root, sessionId: "same-parent", root };
+    const stores: WorkflowRunStore[] = [];
+    const listRuns = WorkflowRunStore.list.bind(WorkflowRunStore);
+    const inspectRun = WorkflowRunStore.inspect.bind(WorkflowRunStore);
+    const listSpy = vi
+      .spyOn(WorkflowRunStore, "list")
+      .mockImplementation((requestedScope) =>
+        listRuns({ ...requestedScope, root }),
+      );
+    const inspectSpy = vi
+      .spyOn(WorkflowRunStore, "inspect")
+      .mockImplementation((requestedScope, id) =>
+        inspectRun({ ...requestedScope, root }, id),
+      );
+    const groupsDirectory =
+      sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
+      ".groups";
+    const invalidSnapshotPath = join(groupsDirectory, "a".repeat(64) + ".json");
+
+    try {
+      await mkdir(groupsDirectory, { recursive: true });
+      await writeFile(invalidSnapshotPath, "broken");
+      const privateErrorMarker = "PRIVATE_GROUP_WORKFLOW_DIAGNOSTIC";
+
+      const invalidSnapshot = await readFile(invalidSnapshotPath, "utf8");
+      const persistTerminal = async (
+        name: string,
+        status: "error" | "done" | "cancelled",
+      ) => {
+        const store = await WorkflowRunStore.create(runScope, {
+          script: `export const meta={name:${JSON.stringify(name)},description:"d"}; return "unused";`,
+          args: encodeRunValue(undefined),
+          budgetTotal: 100,
+        });
+        stores.push(store);
+        await store.append("accepted", {});
+        await store.append("delivery", {
+          completion: { policy: "group", groupId: "g" },
+        });
+        if (status === "cancelled") {
+          await store.append("cancelled", {
+            status,
+            completedAt: Date.now(),
+          });
+        } else {
+          await store.append("terminal", {
+            status,
+            completedAt: Date.now(),
+            ...(status === "error"
+              ? { error: privateErrorMarker }
+              : { result: encodeRunValue({ errorCount: 0 }) }),
+          });
+        }
+        await store.close();
+        return store.id;
+      };
+      const errorId = await persistTerminal("failed", "error");
+      const successId = await persistTerminal("successful", "done");
+      const cancelledId = await persistTerminal("cancelled", "cancelled");
+
+      expect(prepareCompletionManifest(owner)).toBeUndefined();
+      registerWorkflowTool(pi, scope);
+      await restoreDurableWorkflowRuns(pi, owner, ctx);
+
+      const manifest = prepareCompletionManifest(owner);
+      expect(manifest?.details.completionIds).toEqual([`workflow:${errorId}`]);
+      const manifestRecords = manifest!.content
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const errorRecord = manifestRecords.find(
+        (record) => record.source === "workflow" && record.sourceId === errorId,
+      );
+      expect(errorRecord).toMatchObject({
+        completionId: `workflow:${errorId}`,
+        status: "error",
+      });
+      expect(manifestRecords).not.toContainEqual(
+        expect.objectContaining({
+          source: "workflow",
+          sourceId: successId,
+        }),
+      );
+      expect(manifestRecords).not.toContainEqual(
+        expect.objectContaining({
+          source: "workflow",
+          sourceId: cancelledId,
+        }),
+      );
+
+      const resultTool = tools.get("get_workflow_result");
+      expect(resultTool).toBeDefined();
+      const errorResult = await resultTool.execute(
+        "result-call",
+        { workflowId: errorRecord!.sourceId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(errorResult.structuredContent).toMatchObject({
+        status: "error",
+        workflowId: errorId,
+      });
+      expect(JSON.stringify(errorResult.structuredContent)).not.toContain(
+        privateErrorMarker,
+      );
+      expect(await readFile(invalidSnapshotPath, "utf8")).toBe(invalidSnapshot);
+    } finally {
+      listSpy.mockRestore();
+      inspectSpy.mockRestore();
+      clearCompletionCoordinator(owner);
+      await Promise.all(stores.map((store) => store.close()));
+      await Promise.all(
+        stores.map((store) =>
+          rm(store.directory, { recursive: true, force: true }),
+        ),
+      );
+    }
+  });
+  it("does not let a stale durable result read consume a replacement generation's completion", async () => {
+    const { pi, scope, ctx } = setup();
+    const oldOwner = sessionOwner(scope);
+    let currentOwner = oldOwner;
+    const runScope = { cwd: root, sessionId: "same-parent", root };
+    const realList = WorkflowRunStore.list.bind(WorkflowRunStore);
+    const realInspect = WorkflowRunStore.inspect.bind(WorkflowRunStore);
+    const listSpy = vi
+      .spyOn(WorkflowRunStore, "list")
+      .mockImplementation((requestedScope) =>
+        realList({ ...requestedScope, root }),
+      );
+    let pauseNextInspect = true;
+    const inspectPaused = Promise.withResolvers<void>();
+    const inspectBarrier = Promise.withResolvers<void>();
+    const inspectSpy = vi
+      .spyOn(WorkflowRunStore, "inspect")
+      .mockImplementation(async (requestedScope, id) => {
+        if (pauseNextInspect) {
+          pauseNextInspect = false;
+          inspectPaused.resolve();
+          await inspectBarrier.promise;
+        }
+        return realInspect({ ...requestedScope, root }, id);
+      });
+    let store: WorkflowRunStore | undefined;
+    let pendingRead: Promise<any> | undefined;
+    try {
+      const createdStore = await WorkflowRunStore.create(runScope, {
+        script:
+          'export const meta={name:"generation-fence",description:"d"}; return "unused";',
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+      });
+      store = createdStore;
+      await createdStore.append("accepted", {});
+      await createdStore.append("delivery", {
+        completion: { policy: "each" },
+      });
+      await createdStore.append("terminal", {
+        status: "done",
+        result: encodeRunValue({
+          result: "done",
+          agentsSpawned: 0,
+          errorCount: 0,
+        }),
+        completedAt: Date.now(),
+      });
+      await createdStore.close();
+
+      const api = registerDurableWorkflowTools(
+        pi,
+        () => sessionOwner(scope),
+        () => vi.fn(),
+        () => false,
+        root,
+      );
+      pendingRead = api.inspect(createdStore.id, ctx, true);
+      await inspectPaused.promise;
+
+      clearCompletionCoordinator(oldOwner);
+      scope.generation++;
+      scope.parentStreaming = true;
+      currentOwner = sessionOwner(scope);
+      registerCompletionCoordinator(pi, scope);
+      await restoreDurableWorkflowRuns(pi, currentOwner, ctx);
+
+      inspectBarrier.resolve();
+      const result = await pendingRead;
+      expect(result.details.status).toBe("done");
+
+      let receipts = "";
+      try {
+        receipts = await readFile(
+          sessionLedgerPath(
+            root,
+            "same-parent",
+            "subagentura-completion-consumed",
+          ),
+          "utf8",
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const receiptRecords = receipts
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(receiptRecords).not.toContainEqual(
+        expect.objectContaining({
+          source: "workflow",
+          sourceId: createdStore.id,
+        }),
+      );
+      const manifest = prepareCompletionManifest(currentOwner);
+      expect(manifest?.details.completionIds).toEqual([
+        `workflow:${createdStore.id}`,
+      ]);
+      expect(manifest?.content).toContain('"status":"done"');
+    } finally {
+      inspectBarrier.resolve();
+      await pendingRead?.catch(() => undefined);
+      listSpy.mockRestore();
+      inspectSpy.mockRestore();
+      clearCompletionCoordinator(oldOwner);
+      clearCompletionCoordinator(currentOwner);
+      await store?.close();
+      if (store) await rm(store.directory, { recursive: true, force: true });
+    }
   });
 
   it("stops completed durable attempt wrappers instead of retaining idle children", async () => {
@@ -681,7 +915,7 @@ describe("durable public tools", () => {
   });
 
   it("restores unfinished mixed completion barriers before a durable aggregate", async () => {
-    const { pi, scope } = setup();
+    const { scope } = setup();
     const id = "wfd_" + "a".repeat(32);
     const oldOwner = sessionOwner(scope);
     registerCompletionMember("interactive", "peer", "group", "mixed", oldOwner);
