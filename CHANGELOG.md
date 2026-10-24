@@ -21,9 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compatibility default; no daemon, remote execution, VM snapshots, or
   exactly-once external-side-effect guarantee is introduced.
 - Durable authoring preflight via `save_workflow({ requireDurable: true })`,
-  saved-definition readiness and source digests, and durable execution by default
-  for compatible `/workflows` selections. `/workflow <task>` generates stable
-  IDs, validates before saving, and requests a durable background run.
+  saved-definition readiness and source digests. `/workflows` selections and
+  `/workflow <task>` authoring run session-scoped by default; durable execution
+  requires an explicit request for persisted restart recovery.
 - Add schema-backed structured results to 11 read-only tools, preserving human
   content/details while exposing explicit machine-readable states and exact
   terminal output.
