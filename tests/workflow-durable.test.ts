@@ -145,6 +145,34 @@ describe("durable workflow journal", () => {
     ).toEqual(data);
   });
 
+  it("retries cancellation after a committed V4 node omits undefined fields on disk", async () => {
+    const { scope, store } = await fixture("return 1;");
+    await store.append("v4.step", {
+      nodeId: "step",
+      completedAt: undefined,
+      error: undefined,
+    });
+    const file = (
+      store as unknown as {
+        file: import("node:fs/promises").FileHandle;
+      }
+    ).file;
+    vi.spyOn(file, "writeFile").mockRejectedValueOnce(
+      new Error("injected cancellation journal failure"),
+    );
+    const cancelled = { status: "cancelled", completedAt: 3 };
+    await expect(store.append("cancelled", cancelled)).rejects.toThrow(
+      "injected cancellation journal failure",
+    );
+    await expect(store.append("cancelled", cancelled)).resolves.toBeUndefined();
+    expect(
+      store.events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(
+      (await WorkflowRunStore.inspect(scope, store.id))?.at(-1)?.data,
+    ).toEqual(cancelled);
+  });
+
   it("reconciles a complete real append after fsync fails without duplicating it", async () => {
     const { scope, store } = await fixture("return 1;");
     const file = (
