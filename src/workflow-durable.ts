@@ -29,6 +29,8 @@ export interface WorkflowRpcResponse {
   tokensDelta: number;
 }
 
+const REPLAYED_AGENT_FAILURE = "Agent execution failed.";
+
 export interface DurableAttemptContext {
   /** Stable within this run, including schema repair attempt number. */
   key: string;
@@ -194,7 +196,12 @@ export class DurableWorkflow {
       if (!pending?.durable) return;
       this.pending.delete(response.id);
       this.responseIndex++;
-      this.send(decodeRunValue(response.value));
+      const value = decodeRunValue<WorkflowRpcResponse>(response.value);
+      this.send(
+        pending.request.method === "agent" && !value.ok
+          ? { ...value, error: REPLAYED_AGENT_FAILURE }
+          : value,
+      );
     }
     if (this.requestIndex < this.requests.length) return;
     for (const [id, pending] of this.pending) {
@@ -362,7 +369,7 @@ export class DurableWorkflow {
         ? attachWorkflowFailure(result, outcome.failure)
         : result;
     }
-    const error = Object.assign(new Error(outcome.error), {
+    const error = Object.assign(new Error(REPLAYED_AGENT_FAILURE), {
       usage: outcome.usage,
     });
     throw outcome.failure

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, appendFile, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  appendFile,
+  readFile,
+  writeFile,
+  open,
+  readdir,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -15,7 +23,11 @@ import {
 } from "../src/workflow-run-store";
 import { runWorkflow } from "../src/workflow-worker";
 import { zeroUsage } from "../src/usage";
-import type { WorkflowAgentRunner } from "../src/workflow-core";
+import {
+  WorkflowFailureError,
+  workflowFailureClassification,
+  type WorkflowAgentRunner,
+} from "../src/workflow-core";
 
 const roots: string[] = [];
 const stores: WorkflowRunStore[] = [];
@@ -68,6 +80,37 @@ async function execute(
 }
 
 describe("durable workflow journal", () => {
+  it("does not expose a run before newly created store directories are synced", async () => {
+    const root = await mkdtemp(join(tmpdir(), "workflow-store-sync-"));
+    roots.push(root);
+    const scope = { root, cwd: root, sessionId: "fresh-parent" };
+    const handle = await open(root, "r");
+    const syncSpy = vi.spyOn(Object.getPrototypeOf(handle), "sync");
+    syncSpy.mockRejectedValueOnce(new Error("injected directory sync failure"));
+    try {
+      await expect(
+        WorkflowRunStore.create(scope, {
+          script: script('return "unused";'),
+          args: encodeRunValue(undefined),
+          budgetTotal: 100,
+        }),
+      ).rejects.toThrow("directory sync failure");
+      expect(await readdir(join(root, "v1"))).toHaveLength(0);
+    } finally {
+      syncSpy.mockRestore();
+      await handle.close();
+    }
+
+    const retry = await WorkflowRunStore.create(scope, {
+      script: script('return "unused";'),
+      args: encodeRunValue(undefined),
+      budgetTotal: 100,
+    });
+    stores.push(retry);
+    expect(await WorkflowRunStore.list(scope)).toEqual([retry.id]);
+    await retry.close();
+  });
+
   it("retries a real append failure after confirming no bytes were written", async () => {
     const { scope, store } = await fixture("return 1;");
     const path = join(store.directory, "journal.ndjson");
@@ -335,6 +378,92 @@ describe("durable workflow journal", () => {
     const reopened = await WorkflowRunStore.resume(scope, store.id);
     stores.push(reopened);
     expect(await execute(reopened, vi.fn())).toEqual(first);
+  });
+
+  it("projects historical agent RPC failures without changing the journal", async () => {
+    const diagnostic = "private provider endpoint and credential detail";
+    const classification = {
+      errorCategory: "provider" as const,
+      errorStage: "provider" as const,
+    };
+    const { scope, store } = await fixture(
+      'try { await agent("work", {id:"work"}); } catch (error) { return error.message; } return "unreachable";',
+    );
+    const first = await execute(store, async () => {
+      throw new WorkflowFailureError(diagnostic, classification);
+    });
+    expect(first.result).toBe(diagnostic);
+    await store.close();
+    const path = join(store.directory, "journal.ndjson");
+    const journalBeforeReplay = await readFile(path);
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(reopened);
+
+    const runner = vi.fn(async () => {
+      throw new Error("historical agent RPC was redispatched");
+    });
+    const replayed = await execute(reopened, runner);
+
+    expect(replayed.result).toBe("Agent execution failed.");
+    expect(replayed.result).not.toContain(diagnostic);
+    expect(replayed.failure).toEqual(classification);
+    expect(replayed.errorCount).toBe(first.errorCount);
+    expect(runner).not.toHaveBeenCalled();
+    expect(await readFile(path)).toEqual(journalBeforeReplay);
+  });
+
+  it("preserves non-agent RPC replay errors", async () => {
+    const { scope, store } = await fixture(
+      'try { await workflow("missing", undefined, {id:"nested"}); } catch (error) { return error.message; } return "unreachable";',
+    );
+    const loadWorkflow = () => null;
+    const first = await execute(store, vi.fn(), { loadWorkflow });
+    expect(typeof first.result).toBe("string");
+    await store.close();
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(reopened);
+    const runner = vi.fn();
+    const replayed = await execute(reopened, runner, { loadWorkflow });
+    expect(replayed.result).toBe(first.result);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("projects an interrupted committed agent outcome without calling its runner again", async () => {
+    const diagnostic = "private transport response body";
+    const classification = {
+      errorCategory: "transport" as const,
+      errorStage: "turn" as const,
+    };
+    const { scope, store } = await fixture(
+      'return await agent("work", {id:"work"});',
+    );
+    const request = { prompt: "work", isolation: "in-process" as const };
+    const first = new DurableWorkflow(store);
+    await expect(
+      first.runAttempt(1, 1, request, async () => {
+        throw new WorkflowFailureError(diagnostic, classification);
+      }),
+    ).rejects.toThrow(diagnostic);
+    await store.close();
+    const path = join(store.directory, "journal.ndjson");
+    const journalBeforeReplay = await readFile(path);
+    const reopened = await WorkflowRunStore.resume(scope, store.id);
+    stores.push(reopened);
+    const replay = new DurableWorkflow(reopened);
+    const runner = vi.fn(async () => ok("must not run"));
+
+    const replayedError = await replay
+      .runAttempt(1, 1, request, runner)
+      .catch((error) => error);
+    expect(replayedError).toMatchObject({
+      message: "Agent execution failed.",
+      usage: undefined,
+    });
+    expect(workflowFailureClassification(replayedError)).toEqual(
+      classification,
+    );
+    expect(runner).not.toHaveBeenCalled();
+    expect(await readFile(path)).toEqual(journalBeforeReplay);
   });
 
   it("drains an unawaited nested workflow before completing the root", async () => {

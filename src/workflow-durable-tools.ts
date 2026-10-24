@@ -52,6 +52,17 @@ function terminal(events: RunEvent[]) {
   );
 }
 
+const WorkflowRunListOutputSchema = Type.Object({
+  status: Type.Literal("ok"),
+  runs: Type.Array(
+    Type.Object({
+      workflowId: Type.String(),
+      name: Type.Optional(Type.String()),
+      status: Type.String(),
+    }),
+  ),
+});
+
 export function durableRunSummary(id: string, events: RunEvent[]) {
   const end = terminal(events);
   const interrupted = events.findLast(
@@ -86,6 +97,12 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
     cancellationRequested:
       end?.kind === "cancelled" || end?.data.status === "cancelled",
   };
+}
+
+function durableRunListSummary(id: string, events: RunEvent[]) {
+  const summary = durableRunSummary(id, events);
+  delete summary.error;
+  return summary;
 }
 
 export function registerDurableWorkflowTools(
@@ -495,8 +512,9 @@ export function registerDurableWorkflowTools(
     name: "list_workflow_runs",
     label: "Workflow Runs",
     description:
-      "List persisted durable runs belonging to this exact Pi session and working directory. Does not resume work.",
+      "List persisted durable runs belonging to this exact Pi session and working directory. Unreadable journals are reported as unavailable without hiding other runs. Does not resume or repair work.",
     parameters: Type.Object({}),
+    outputSchema: WorkflowRunListOutputSchema,
     async execute(
       _id: string,
       _params: any,
@@ -510,27 +528,44 @@ export function registerDurableWorkflowTools(
         const ids = await WorkflowRunStore.list(runScope);
         const runs = [];
         for (const id of ids) {
-          const events = await WorkflowRunStore.inspect(runScope, id);
-          if (events)
+          try {
+            const events = await WorkflowRunStore.inspect(runScope, id);
+            if (!events) {
+              runs.push({ workflowId: id, status: "unavailable" });
+              continue;
+            }
             runs.push({
-              ...durableRunSummary(id, events),
+              ...durableRunListSummary(id, events),
               ...(getWorkflowJobForOwner(id, listOwner)?.status === "running"
                 ? { status: "running" }
                 : {}),
             });
+          } catch {
+            runs.push({ workflowId: id, status: "unavailable" });
+          }
         }
+        const structuredRuns = runs.map(({ workflowId, name, status }) => ({
+          workflowId,
+          ...(typeof name === "string" ? { name } : {}),
+          status,
+        }));
         return {
           content: [
             {
               type: "text",
               text: runs.length
                 ? runs
-                    .map((r) => `${r.workflowId} ${r.name}: ${r.status}`)
+                    .map((r) =>
+                      r.status === "unavailable"
+                        ? `${r.workflowId}: unavailable`
+                        : `${r.workflowId} ${r.name}: ${r.status}`,
+                    )
                     .join("\n")
                 : "No durable workflow runs in this Pi session.",
             },
           ],
           details: { runs },
+          structuredContent: { status: "ok", runs: structuredRuns },
         };
       } catch (error) {
         return failure(error);

@@ -78,9 +78,11 @@ multiple model calls per outer attempt. All calls retain workflow resource caps.
 ## Recovery and observation
 
 Use `list_workflow_runs`, `get_workflow_status`, and `get_workflow_result` for
-persisted runs; `resume_workflow({workflowId})` explicitly continues an interrupted
-run. Use `async:false` on resume when you need its result immediately. Terminal
-runs do not resume; rerunning a saved definition creates a new run.
+persisted runs; an unreadable run is listed as unavailable without hiding other
+valid runs or exposing its diagnostic. `resume_workflow({workflowId})` explicitly
+continues an interrupted run. Use `async:false` on resume when you need its result
+immediately. Terminal runs do not resume; rerunning a saved definition creates a
+new run.
 
 Recovery requires the same host, canonical working directory, Pi session id,
 and Node major version. It re-executes the immutable program from the beginning,
@@ -115,7 +117,9 @@ suppresses unrelated later-turn completions.
 Recovery never imports another session's runs. If persisted completion-group
 recovery is unavailable, group errors remain eligible for delivery under the
 ordinary parent-turn rules. Their mixed-source membership is preserved, and
-successful or cancelled members remain behind the group barrier. Independent
+successful or cancelled members remain behind the group barrier. Once the
+authoritative snapshot is repaired, only its validated members count toward the
+barrier; previously delivered terminal errors are reconciled once. Independent
 completions remain deliverable.
 
 ## Failure and cancellation contract
@@ -161,6 +165,14 @@ Runs live beneath `~/.pi-subagentura/workflow-runs/v1/<scope-hash>/wfd_<id>/`.
 Directories are mode 0700 and files 0600. Journals contain private source,
 arguments, prompts, and outputs; do not commit them or share them as telemetry.
 The format is new and does not import the removed experimental plan store.
+
+Run creation syncs newly created store directories top-down before accepting
+the run. A directory sync failure blocks creation. Run listings isolate an
+unreadable journal as unavailable while retaining other safe run summaries;
+they do not rewrite damaged data. Historical failed agent RPCs replay a generic
+failure message without redispatch, while preserving the original response and
+closed failure classification in the journal. Non-agent RPC replay retains its
+recorded failure meaning.
 
 Writes are serialized and fsynced before acknowledging a response to the
 worker. Response offers establish the worker's exact request frontier before
