@@ -55,7 +55,7 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
-    openSync: vi.fn((...args: any[]) => {
+    openSync: vi.fn((...args: Parameters<typeof actual.openSync>) => {
       const descriptor = actual.openSync(...args);
       if (args[0] === groupDirectorySyncFault.path && args[1] === "r")
         groupDirectorySyncFault.descriptor = descriptor;

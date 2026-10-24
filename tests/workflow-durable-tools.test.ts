@@ -67,21 +67,22 @@ function setup() {
       entries.push({ type: "custom", customType, data }),
     sendMessage: vi.fn(),
   };
+  const sessionManager = {
+    getSessionId: () => "same-parent",
+    getSessionDir: () => root,
+    getEntries: () => entries,
+  };
   const scope = registerSessionScope({
     id: 1,
     generation: 1,
     lifecycle: "started",
     pi,
     cwd: root,
-    sessionManager: {
-      getSessionId: () => "same-parent",
-      getSessionDir: () => root,
-      getEntries: () => entries,
-    },
+    sessionManager,
   });
   registerCompletionCoordinator(pi, scope);
   const ctx = { cwd: root, sessionManager: scope.sessionManager };
-  return { pi, scope, ctx, tools, entries };
+  return { pi, scope, ctx, tools, entries, sessionManager };
 }
 
 describe("durable public tools", () => {
@@ -140,10 +141,10 @@ describe("durable public tools", () => {
   });
 
   it("restores grouped workflow errors while holding safe terminals behind corrupt group state", async () => {
-    const { pi, scope, ctx, tools, entries } = setup();
+    const { pi, scope, ctx, tools, entries, sessionManager } = setup();
     const owner = sessionOwner(scope);
     scope.parentStreaming = true;
-    scope.sessionManager.getEntries = () => [];
+    sessionManager.getEntries = () => [];
     const runScope = { cwd: root, sessionId: "same-parent", root };
     const stores: WorkflowRunStore[] = [];
     const listRuns = WorkflowRunStore.list.bind(WorkflowRunStore);
@@ -307,9 +308,9 @@ describe("durable public tools", () => {
   });
 
   it("counts a blocked error once after sync group recovery validates its membership", async () => {
-    const { scope } = setup();
+    const { scope, sessionManager } = setup();
     const owner = sessionOwner(scope);
-    scope.sessionManager.getEntries = () => [];
+    sessionManager.getEntries = () => [];
     const directory =
       sessionLedgerPath(root, "same-parent", "subagentura-completion-groups") +
       ".groups";
