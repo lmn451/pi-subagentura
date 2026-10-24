@@ -1,4 +1,10 @@
 import { randomBytes } from "node:crypto";
+import {
+  encodeRunValue,
+  requiresWorkflowRecovery,
+  type WorkflowRunStore,
+} from "./workflow-run-store";
+import { stopDurableProcessAttempts } from "./workflow-durable-process";
 import { debugLog } from "./helpers";
 import {
   isSessionOwnerLive,
@@ -244,6 +250,8 @@ function emitWorkflowCompletedTelemetry(
 export type WorkflowJobStatus = "running" | "done" | "error" | "cancelled";
 
 export interface WorkflowJobState {
+  durable?: RunWorkflowOptions["durable"];
+  durableInterrupted?: boolean;
   id: string;
   name: string;
   status: WorkflowJobStatus;
@@ -365,6 +373,16 @@ export function cleanupWorkflowJobsForOwner(
   for (const [id, job] of workflowJobRegistry) {
     if (!workflowJobBelongsToOwner(job, owner)) continue;
     job.suppressCompletionNotification = true;
+    if (
+      job.durable &&
+      job.status === "running" &&
+      terminalReason !== "fresh_session"
+    ) {
+      job.durableInterrupted = true;
+      job.abort.abort({ source: "durable_interrupt" });
+      workflowJobRegistry.delete(id);
+      continue;
+    }
     if (job.status === "running" || job.status === "cancelled") {
       cancelWorkflowJob(job, terminalReason);
     }
@@ -409,6 +427,28 @@ export function cancelWorkflowJob(
   } else {
     normalizeCancelledWorkflowState(job);
   }
+}
+
+/**
+ * Persist explicit durable cancellation before stopping any attempt or aborting
+ * its live controller. Retrying this operation also retries per-attempt markers
+ * after the run-level cancellation event is already present.
+ */
+export async function requestDurableWorkflowCancellation(
+  store: WorkflowRunStore,
+  job?: WorkflowJobState,
+  options?: { suppressCompletionNotification?: boolean },
+): Promise<void> {
+  if (!store.events.some((event) => event.kind === "cancelled")) {
+    await store.append("cancelled", {
+      status: "cancelled",
+      completedAt: Date.now(),
+    });
+  }
+  await stopDurableProcessAttempts(store.directory);
+  if (job && options?.suppressCompletionNotification)
+    job.suppressCompletionNotification = true;
+  if (job) cancelWorkflowJob(job, "explicit_cancel");
 }
 
 /** Roll back a just-created workflow whose completion registration failed. */
@@ -471,6 +511,7 @@ export function startWorkflowJob(
   owner?: SessionOwnerToken,
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
+  durableId?: string,
 ): WorkflowJobState {
   if (!owner) {
     throw new Error("Workflow jobs require an owner from a live session.");
@@ -517,7 +558,7 @@ export function startWorkflowJob(
   }
 
   const id: WorkflowId = asStringIdentifier<"workflow">(
-    `wf_${randomBytes(5).toString("hex")}`,
+    durableId ?? `wf_${randomBytes(5).toString("hex")}`,
   );
   const defaultAsync = executionMode === "async";
   const defaultCompletionPolicy: TelemetryCompletionPolicy = defaultAsync
@@ -550,6 +591,7 @@ export function startWorkflowJob(
   if (externalSignal?.aborted) abort.abort(externalSignal.reason);
   else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
   const state: WorkflowJobState = {
+    durable: opts.durable,
     id,
     name,
     status: "running",
@@ -576,7 +618,7 @@ export function startWorkflowJob(
     parentSessionOwner,
     telemetry,
   };
-  emitWorkflowStartedTelemetry(state);
+  if (!opts.durable?.replaying) emitWorkflowStartedTelemetry(state);
   const liveUsageByAgent = new Map<number, WorkflowUsage>();
   state.promise = runWorkflow(script, {
     ...opts,
@@ -618,7 +660,17 @@ export function startWorkflowJob(
       (state.cancellationSnapshots ??= []).push(receipt);
     },
   })
-    .then((r) => {
+    .then(async (r) => {
+      if (state.durable) {
+        if (state.durableInterrupted || abort.signal.aborted)
+          throw new Error("Workflow interrupted before result commit.");
+        await stopDurableProcessAttempts(state.durable.store.directory);
+        await state.durable.store.append("terminal", {
+          status: "done",
+          result: encodeRunValue(r),
+          completedAt: Date.now(),
+        });
+      }
       if (state.status === "running") state.status = "done";
       state.result = r;
       state.snapshot.cancelledCount = r.cancelledCount ?? 0;
@@ -630,12 +682,31 @@ export function startWorkflowJob(
       invokeWorkflowCompletionHook(state);
       return r;
     })
-    .catch((err) => {
+    .catch(async (err) => {
+      if (state.durable && requiresWorkflowRecovery(err)) {
+        state.durableInterrupted = true;
+        state.suppressCompletionNotification = true;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const timedOut = isWorkflowWallTimeout(err);
       if (timedOut) state.telemetryTerminalReason = "timeout";
       state.status = abort.signal.aborted ? "cancelled" : "error";
       state.error = msg;
+      if (state.durable) {
+        state.durable.stop();
+        await state.durable.drain();
+        if (!state.durableInterrupted)
+          await stopDurableProcessAttempts(state.durable.store.directory);
+        await state.durable.store.append(
+          state.durableInterrupted ? "interrupted" : "terminal",
+          {
+            status: state.durableInterrupted ? "interrupted" : state.status,
+            error: msg,
+            usage: state.durable.usage(),
+            completedAt: Date.now(),
+          },
+        );
+      }
       if (state.status !== "cancelled") {
         state.telemetryFailure =
           workflowFailureForError(err) ??
@@ -650,11 +721,20 @@ export function startWorkflowJob(
       state.snapshot.liveUsage = undefined;
       liveUsageByAgent.clear();
       if (state.status === "cancelled") normalizeCancelledWorkflowState(state);
-      emitWorkflowCompletedTelemetry(state, undefined);
+      if (!state.durableInterrupted)
+        emitWorkflowCompletedTelemetry(state, undefined);
       invokeWorkflowCompletionHook(state);
       throw err;
     })
-    .finally(() => {
+    .finally(async () => {
+      if (state.durable) {
+        state.durable.stop();
+        try {
+          await state.durable.drain();
+        } finally {
+          await state.durable.store.close();
+        }
+      }
       externalSignal?.removeEventListener("abort", forwardAbort);
       // A sync workflow returns its result inline. Retaining the terminal job
       // would let get_workflow_result re-serve that result and would leave a dead

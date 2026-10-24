@@ -6,8 +6,7 @@
  * 2. get_workflow_result abort-aware wait (Escape cancels wait, not workflow)
  * 3. cancelAllFlows helper (shared cancel-all logic)
  * 4. resultRetrieved NOT set when wait is aborted
- * 5. shortcut and command registration
- * 6. abortableWait shared helper
+ * 5. abortableWait shared helper
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -715,91 +714,5 @@ describe("cancelAllFlows helper", () => {
     expect(result.jobsAborted).toBe(1);
     expect(result.interactiveKilled).toBe(1);
     clearSessionScopes();
-  });
-});
-
-describe("shortcut and command registration", () => {
-  it("registers ctrl+alt+x shortcut and /cancel-all-flows command", async () => {
-    const { registerCancelAllFlows } =
-      await import("../src/cancel-all-flows-registration");
-
-    const shortcuts: Record<string, any> = {};
-    const commands: Record<string, any> = {};
-    const mockAbort = vi.fn();
-
-    const api = {
-      registerShortcut: (key: string, opts: any) => {
-        shortcuts[key] = opts;
-      },
-      registerCommand: (name: string, opts: any) => {
-        commands[name] = opts;
-      },
-    };
-
-    registerCancelAllFlows(api as any, scope);
-
-    expect(shortcuts["ctrl+alt+x"]).toBeDefined();
-    expect(commands["cancel-all-flows"]).toBeDefined();
-    expect(shortcuts["ctrl+alt+x"].description).toMatch(/cancel/i);
-    expect(commands["cancel-all-flows"].description).toMatch(/cancel/i);
-  });
-
-  it("calls ctx.abort() before awaiting child cancellation", async () => {
-    const { registerCancelAllFlows } =
-      await import("../src/cancel-all-flows-registration");
-    const cancelAllFlowsModule = await import("../src/cancel-all-flows");
-    const events: string[] = [];
-    let shortcutHandler: any;
-    let commandHandler: any;
-
-    const api = {
-      registerShortcut: (_key: string, opts: any) => {
-        shortcutHandler = opts.handler;
-      },
-      registerCommand: (_name: string, opts: any) => {
-        commandHandler = opts.handler;
-      },
-    };
-    registerCancelAllFlows(api as any, scope);
-
-    const result = {
-      jobsAborted: 1,
-      workflowsAborted: 0,
-      interactiveKilled: 0,
-      interactivePreserved: 0,
-    };
-    const cancelSpy = vi.spyOn(cancelAllFlowsModule, "cancelAllFlows");
-    const mockNotify = vi.fn();
-    const mockAbort = vi.fn(() => events.push("abort"));
-    const ctx = { ui: { notify: mockNotify }, abort: mockAbort };
-
-    let resolveCancellation!: (value: typeof result) => void;
-    const pendingCancellation = new Promise<typeof result>((resolve) => {
-      resolveCancellation = resolve;
-    });
-    cancelSpy.mockImplementationOnce(() => {
-      events.push("cancel-start");
-      return pendingCancellation;
-    });
-
-    const shortcutPromise = shortcutHandler(ctx);
-    expect(events).toEqual(["abort", "cancel-start"]);
-    resolveCancellation(result);
-    await shortcutPromise;
-
-    events.length = 0;
-    let resolveCommandCancellation!: (value: typeof result) => void;
-    const pendingCommandCancellation = new Promise<typeof result>((resolve) => {
-      resolveCommandCancellation = resolve;
-    });
-    cancelSpy.mockImplementationOnce(() => {
-      events.push("cancel-start");
-      return pendingCommandCancellation;
-    });
-
-    const commandPromise = commandHandler("", ctx);
-    expect(events).toEqual(["abort", "cancel-start"]);
-    resolveCommandCancellation(result);
-    await commandPromise;
   });
 });

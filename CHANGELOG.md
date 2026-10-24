@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Explicit bounded `retry()` workflow primitive, independent of existing
+  three-attempt schema repair, with typed attempt numbers and cancellation guards.
+- Opt-in durable code workflows: private request/response and agent-attempt
+  journals, stable operation ids, manual same-session recovery, persisted
+  results/cancellation, source inspection, and run listing. Root definitions,
+  arguments, effective settings, and nested definitions are recorded; parallel
+  response ordering and worker-visible budget deltas replay without new agent calls.
+- One-use process attempt supervisors and persisted unfinished completion
+  barriers for durable workflows. Existing non-durable execution remains the
+  compatibility default; no daemon, remote execution, VM snapshots, or
+  exactly-once external-side-effect guarantee is introduced.
+- Durable authoring preflight via `save_workflow({ requireDurable: true })`,
+  saved-definition readiness and source digests. `/workflows` selections and
+  `/workflow <task>` authoring run session-scoped by default; durable execution
+  requires an explicit request for persisted restart recovery.
+- Add schema-backed structured results to 11 read-only tools, preserving human
+  content/details while exposing explicit machine-readable states and exact
+  terminal output.
+- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
+  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+
 ### Changed
 
 - Keep transient mux-liveness uncertainty in local debug logs; anonymous
@@ -17,27 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcomes, mode-aware adoption and busiest-tree concentration, schema/provenance
   and unknown coverage, diagnostic event units, and workflow lifecycle window
   coverage. Window totals remain coverage diagnostics, not matched workflows.
-
-### Fixed
-
-- Reject new workflows during session teardown and replacement setup, including
-  lifecycle changes inside options builders, while retaining terminal telemetry
-  for already accepted work.
-
-### Breaking
-
-- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
-
-### Added
-
-- Add schema-backed structured results to 11 read-only tools, preserving human
-  content/details while exposing explicit machine-readable states and exact
-  terminal output.
-- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
-  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
-
-### Changed
-
 - Remove the unused Pi server peer/dev/test-install dependency and legacy SDK
   compatibility code, including `src/pi-sdk-compat.ts`, obsolete runtime
   branches, wrappers, and aliases. Child sessions use `ModelRuntime` with copied
@@ -50,6 +52,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Check tool definitions, session/context projections, model resolution, and
   result callbacks against public Pi SDK types instead of local SDK-shaped
   interfaces and broad casts; retain extension-owned state and result protocols.
+
+### Fixed
+
+- Reject new workflows during session teardown and replacement setup, including
+  lifecycle changes inside options builders, while retaining terminal telemetry
+  for already accepted work.
+- A failed durable completion-group recovery no longer suppresses independent
+  completions. Group errors remain eligible under ordinary parent-turn rules
+  without discarding mixed-source membership; successful and cancelled members
+  remain behind the group barrier. After repair, terminal errors count once only
+  when included in the validated authoritative group snapshot.
+- Reconcile fallback result-consumption receipts with completion expectations
+  restored later; receipts consume only their matching completion and do not
+  suppress unrelated later-turn completions.
+- Bind durable manual result-consumption receipts to the initiating session owner.
+- Persist durable cancellation before cancel-all aborts owned work. Failed writes
+  keep the affected workflow protected and retryable rather than counted as
+  aborted; both cancel-all entry points leave the foreground tool signal active
+  until all durable cancellation intents and attempt markers succeed.
+- Route inherited native-tool aborts for synchronous durable starts and resumes
+  through the same persistence-first cancellation path. Failed intent writes
+  leave owned work active and retryable; aborts observed after a terminal event
+  is committed preserve that result. An abort during the final journal write can
+  still append cancellation after the terminal event and make inspection report
+  cancelled; atomic ordering is deferred to pi-durable.
+- Retrying durable cancellation reissues per-attempt markers even after the
+  run-level cancellation intent is already recorded.
+- Preserve enabled cancellation snapshot receipts for durable process attempts
+  without treating persisted mux pane ids as authority to kill panes.
+- Preserve persisted child token/cost usage and forward the actual cancellation
+  snapshot receipt when best-effort non-durable interactive artifact or pane
+  termination cleanup fails. Durable cancellation errors remain explicit.
+- Recover a failed durable journal append only after verifying its on-disk
+  state; complete writes are synced once, while partial or ambiguous tails stay
+  blocked without rewriting journal history.
+- Sync each newly created durable run-store directory entry before accepting a
+  run; a failed sync blocks creation and remains retryable.
+- Keep valid durable run listings visible when an unrelated journal is
+  unreadable, report only its safe ID and unavailable status, and leave its bytes
+  untouched.
+- Replay failed historical agent RPCs with a generic error while preserving
+  their stored response, failure classification, and no-redispatch behavior;
+  non-agent RPC replay errors retain their recorded meaning.
+
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
 
 ## [4.0.1] - 2026-10-18
 

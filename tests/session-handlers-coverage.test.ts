@@ -149,6 +149,23 @@ function startSession(
   return ctx;
 }
 
+async function startSessionAndWait(
+  registration: HandlerRegistration,
+  root: string,
+  sessionId: string,
+  ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+  reason = "startup",
+) {
+  const sessionManager = {
+    getSessionId: () => sessionId,
+    getEntries: () => [],
+    getBranch: () => [],
+  };
+  const ctx = { cwd: root, ui, sessionManager };
+  await registration.handlers.get("session_start")![0]({ reason }, ctx);
+  return ctx;
+}
+
 function ownedJob(scope: SessionScope, id: string) {
   const abort = vi.fn().mockResolvedValue(undefined);
   // The lifecycle path only calls abort; constructing a real AgentSession would
@@ -1083,7 +1100,7 @@ describe("session handler lifecycle callbacks", () => {
         "orchestratorv2",
         telemetryEnabled,
       );
-      const ctx = startSession(registration, root, "session-a");
+      const ctx = await startSessionAndWait(registration, root, "session-a");
       const { sessionScope: scope, handlers } = registration;
       const oldOwner = sessionOwner(scope);
       const oldCorrelationId = scope.telemetry?.correlationId;
@@ -1231,7 +1248,7 @@ describe("session handler lifecycle callbacks", () => {
         "orchestratorv2",
         true,
       );
-      const ctx = startSession(registration, root, "session-a");
+      const ctx = await startSessionAndWait(registration, root, "session-a");
       const oldOwner = sessionOwner(registration.sessionScope);
       const runner = vi.fn(async () => successfulWorkflowAgentResult("orphan"));
       const builder = vi.fn(() => {

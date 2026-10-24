@@ -4,13 +4,14 @@ import {
   appendFileSync,
   fsyncSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   clearSessionScopes,
@@ -33,6 +34,8 @@ import {
   registerCompletionExpectations,
   registerCompletionMember,
   reserveCompletionGroup,
+  restoreDurableCompletionGroups,
+  restoreDurableCompletionGroupsSync,
   retireSessionScopedCompletions,
   resolveCompletionPolicy,
   sealCompletionGroups,
@@ -40,11 +43,35 @@ import {
   type CompletionRecord,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
+import { readCompletionGroupsSync } from "../src/completion-group-store";
 import { createTelemetrySession } from "../src/telemetry";
 
+const groupDirectorySyncFault = vi.hoisted(() => ({
+  path: "",
+  descriptor: -1,
+  fail: false,
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync) };
+  return {
+    ...actual,
+    openSync: vi.fn((...args: Parameters<typeof actual.openSync>) => {
+      const descriptor = actual.openSync(...args);
+      if (args[0] === groupDirectorySyncFault.path && args[1] === "r")
+        groupDirectorySyncFault.descriptor = descriptor;
+      return descriptor;
+    }),
+    fsyncSync: vi.fn((descriptor: number) => {
+      if (
+        groupDirectorySyncFault.fail &&
+        descriptor === groupDirectorySyncFault.descriptor
+      ) {
+        groupDirectorySyncFault.fail = false;
+        throw new Error("completion group parent sync failed");
+      }
+      return actual.fsyncSync(descriptor);
+    }),
+  };
 });
 const coordinatorLedgerRoots: string[] = [];
 
@@ -142,6 +169,9 @@ describe("completion coordinator", () => {
   });
 
   afterEach(() => {
+    groupDirectorySyncFault.path = "";
+    groupDirectorySyncFault.descriptor = -1;
+    groupDirectorySyncFault.fail = false;
     if (scope) clearCompletionCoordinator(sessionOwner(scope));
     clearSessionScopes();
     vi.unstubAllGlobals();
@@ -604,6 +634,109 @@ describe("completion coordinator", () => {
     expect(manifests(setupResult.pi)).toHaveLength(0);
   });
 
+  it("restores consumed durable peers before releasing a remaining group member", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "durable-recovery" };
+    registerCompletionMember(
+      "workflow",
+      "wfd_a",
+      "group",
+      group.groupId,
+      owner,
+    );
+    registerCompletionMember(
+      "workflow",
+      "wfd_b",
+      "group",
+      group.groupId,
+      owner,
+    );
+    sealCompletionGroups(owner);
+
+    publishCompletion(
+      record("a", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_a",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    expect(
+      consumeCompletionSource(
+        setupResult.pi as never,
+        { source: "workflow", sourceId: "wfd_a" },
+        owner,
+      ),
+    ).toBe(true);
+    clearCompletionCoordinator(owner);
+    await restoreDurableCompletionGroups(owner);
+
+    publishCompletion(
+      record("b", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_b",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    const manifest = prepareCompletionManifest(owner);
+    expect(manifest?.details.completionIds).toEqual(["completion-b"]);
+  });
+
+  it("does not rewrite a failed group snapshot during later parent settlement", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const group = { policy: "group" as const, groupId: "failed-settle" };
+    registerCompletionMember(
+      "workflow",
+      "wfd_a",
+      "group",
+      group.groupId,
+      owner,
+    );
+    registerCompletionMember(
+      "workflow",
+      "wfd_b",
+      "group",
+      group.groupId,
+      owner,
+    );
+    sealCompletionGroups(owner);
+    publishCompletion(
+      record("wfd_a", {
+        ...group,
+        source: "workflow",
+        sourceId: "wfd_a",
+        turnId: undefined,
+      }),
+      owner,
+    );
+    consumeCompletionSource(
+      setupResult.pi as never,
+      { source: "workflow", sourceId: "wfd_a" },
+      owner,
+    );
+    clearCompletionCoordinator(owner);
+    registerCompletionCoordinator(setupResult.pi as never, scope);
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    const [name] = readdirSync(directory);
+    const snapshot = join(directory, name!);
+    writeFileSync(snapshot, "corrupt-snapshot");
+    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
+    sealCompletionGroups(owner);
+    expect(readFileSync(snapshot, "utf8")).toBe("corrupt-snapshot");
+  });
+
   it("attaches ready references to a natural turn instead of auto-triggering", () => {
     const setupResult = setup();
     scope = setupResult.scope;
@@ -714,6 +847,31 @@ describe("completion coordinator", () => {
     ).toThrow(/full/);
   });
 
+  it("retries durable group registration after syncing a newly created directory fails", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const groupId = "directory-sync-retry";
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    groupDirectorySyncFault.path = dirname(directory);
+    groupDirectorySyncFault.fail = true;
+
+    expect(() =>
+      registerCompletionMember("workflow", "wfd_a", "group", groupId, owner),
+    ).toThrow("parent sync failed");
+    expect(readCompletionGroupsSync(directory)).toEqual([]);
+
+    registerCompletionMember("workflow", "wfd_a", "group", groupId, owner);
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      { version: 1, groupId, members: ["workflow:wfd_a"], sealed: false },
+    ]);
+  });
+
   it("rejects new work before launching into a sealed group", () => {
     const setupResult = setup();
     scope = setupResult.scope;
@@ -729,6 +887,70 @@ describe("completion coordinator", () => {
     expect(() =>
       assertCompletionGroupOpen("group", "sealed-group", sessionOwner(scope)),
     ).toThrow(/sealed/);
+  });
+
+  it("keeps an existing group closed when seal persistence fails", () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const groupId = "seal-write-failure";
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    registerCompletionMember("workflow", "wfd_prior", "group", groupId, owner);
+    groupDirectorySyncFault.path = dirname(directory);
+    groupDirectorySyncFault.fail = true;
+
+    expect(() => sealCompletionGroups(owner)).toThrow(
+      "completion group parent sync failed",
+    );
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      {
+        version: 1,
+        groupId,
+        members: ["workflow:wfd_prior"],
+        sealed: false,
+      },
+    ]);
+    publishCompletion(
+      record("wfd_prior", {
+        source: "workflow",
+        policy: "group",
+        groupId,
+      }),
+      owner,
+    );
+    expect(prepareCompletionManifest(owner)).toBeUndefined();
+    markCompletionTurnStarting(owner);
+    expect(() => reserveCompletionGroup("group", groupId, owner)).toThrow(
+      /sealed/,
+    );
+    expect(() => assertCompletionGroupOpen("group", groupId, owner)).toThrow(
+      /sealed/,
+    );
+    expect(() =>
+      registerCompletionMember("workflow", "wfd_late", "group", groupId, owner),
+    ).toThrow(/sealed/);
+    expect(readCompletionGroupsSync(directory)).toEqual([
+      {
+        version: 1,
+        groupId,
+        members: ["workflow:wfd_prior"],
+        sealed: false,
+      },
+    ]);
+    expect(() =>
+      registerCompletionMember(
+        "workflow",
+        "wfd_new_turn",
+        "group",
+        "new-turn-group",
+        owner,
+      ),
+    ).not.toThrow();
   });
 
   it("reopens only new-group admission for the next parent turn", () => {
@@ -941,6 +1163,27 @@ describe("completion coordinator", () => {
     expect(reservations).toHaveLength(32);
     expect(() => reserveCompletionGroup("group", "reserved", owner)).toThrow(
       /full/,
+    );
+  });
+
+  it("rejects new group authority while recovery is unavailable", async () => {
+    const setupResult = setup();
+    scope = setupResult.scope;
+    const owner = sessionOwner(scope);
+    const directory =
+      sessionLedgerPath(
+        setupResult.ledgerRoot,
+        "parent-session",
+        "subagentura-completion-groups",
+      ) + ".groups";
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "a".repeat(64) + ".json"), "broken");
+    await expect(restoreDurableCompletionGroups(owner)).rejects.toThrow();
+    expect(() => reserveCompletionGroup("group", "fresh", owner)).toThrow(
+      "Completion group recovery is unavailable",
+    );
+    expect(() => assertCompletionGroupOpen("group", "fresh", owner)).toThrow(
+      "Completion group recovery is unavailable",
     );
   });
 

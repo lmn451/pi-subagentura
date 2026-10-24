@@ -1,0 +1,204 @@
+# Code workflow runtime
+
+A workflow is trusted agent-authored JavaScript with ESM-style literal `meta`
+exports. Its executable body owns control flow and intermediate values. The
+runtime is neither Orchestratorv2's interactive router nor a declarative todo
+engine. Imports, `require`, filesystem APIs, current time, and randomness are
+not script globals. The VM is a determinism aid, **not a security boundary**.
+
+## Definitions and runs are different
+
+`save_workflow` stores a reusable definition. `inspect_workflow` reads/parses it
+without running agents. `workflow({name, args})` executes that definition with
+the existing session-scoped behavior. Async remains the default; `async:false`
+waits for the result. Saving a definition or running asynchronously does not
+imply durability.
+
+`save_workflow({name, script, requireDurable:true})` also checks explicit operation
+IDs and the current saved child definitions before writing. An incompatible
+script is rejected without replacing the existing file. `list_workflows` exposes
+`durableReady` and a SHA-256 `definitionDigest` of the root source. Readiness is a
+conservative static check: direct calls, explicit option objects, and literal
+nested workflow names are required; computed IDs are checked for validity and
+uniqueness at runtime. Explicit `workflow({durable:true})` execution retains the
+runtime's support for computed names and options.
+
+`/workflow <task>` asks the parent to generate a reusable script and start it
+asynchronously, session-scoped by default. Use `requireDurable:true` while saving
+and `durable:true` while running only when the user's task explicitly requests
+persisted restart recovery. `/workflows` labels saved definitions as
+`durable-ready` or `session-scoped`; those labels report capability and do not
+choose the execution mode. Selecting a saved definition with `/workflows` runs
+it session-scoped. To persist a saved definition's run, explicitly call
+`workflow({name, args, durable:true})`. A failed durable start reports its error
+without falling back to a session-scoped execution. Session-scoped process agents
+may fall back to in-process execution when no multiplexer is available; durable
+process attempts fail closed instead. Direct tool calls without `durable:true`
+keep their existing behavior.
+
+`workflow({name, args, durable:true})` creates a separately persisted run. It
+captures the root source, arguments, cwd, model default, concurrency, output
+budget, and absolute wall deadline. Named nested sources are committed before
+the script can receive them; later edits/deletions do not change replay.
+
+Durable runs require explicit operation identities:
+
+```js
+const reviews = await parallel(
+  args.files.map(
+    (file) => () =>
+      retry((n) => agent(`Review ${file}`, { id: `review/${file}/${n}` }), {
+        attempts: 2,
+      }),
+  ),
+);
+return await workflow(args.summarizer, { reviews }, { id: "summary" });
+```
+
+Ids are unique within each definition invocation, 1–128 safe characters
+(`A-Z`, `a-z`, digits, `.`, `_`, `:`, `/`, `-`; start alphanumeric). Map unsafe
+file names to stable input indices if necessary. The nested call id namespaces
+its children. Duplicate ids fail, even if the prompts match. Helpers, loops,
+maps, computed saved names, parallel fan-out, streaming pipelines, and one level
+of nesting remain ordinary executable code—not a static graph compiler.
+
+## Retry is explicit
+
+`retry(work, {attempts:3, retryOnNull:true})` invokes `work(attempt)` with a
+one-based attempt number. Total attempts must be an integer from 1 through 10.
+Thrown failures and `null` retry by default; `false`, zero, and empty strings do
+not. Exhaustion returns the last `null` or throws the last exception. Cancellation
+never retries. No implicit backoff or provider retry policy is added.
+
+Separately, `agent(prompt, {schema})` already performs up to **three total
+attempts** to repair invalid structured output. Ordinary agent errors are not
+schema-retried. Combining outer retry with schema repair can therefore cause
+multiple model calls per outer attempt. All calls retain workflow resource caps.
+
+## Recovery and observation
+
+Use `list_workflow_runs`, `get_workflow_status`, and `get_workflow_result` for
+persisted runs; an unreadable run is listed as unavailable without hiding other
+valid runs or exposing its diagnostic. `resume_workflow({workflowId})` explicitly
+continues an interrupted run. Use `async:false` on resume when you need its result
+immediately. Terminal runs do not resume; rerunning a saved definition creates a
+new run.
+
+Durable workflow members can share persisted completion groups with other
+completion sources. If group recovery is unavailable, terminal errors remain
+eligible under their original group identity; successful and cancelled members
+stay gated. Recovery does not infer membership from records while the
+authoritative snapshot is unavailable. After repair, only validated snapshot
+members count toward readiness, and a retained terminal error counts once.
+
+Recovery requires the same host, canonical working directory, Pi session id,
+and Node major version. It re-executes the immutable program from the beginning,
+validates request identity, and delivers committed responses in their recorded
+global order, including nested loads and output-token deltas. It does not
+serialize VM stacks or closures. Divergence terminates the host worker and
+cannot be hidden with `try/catch`, `parallel()`'s null handling, or `retry()`.
+
+A live process-backed attempt is adopted from its private manifest and immutable
+artifact stream; the launch wrapper has a one-use start receipt. A cancelled
+attempt cannot be started by a delayed launch. Durable process launch errors do
+not fall back to a second in-process agent. Already-started process children may
+continue while the parent is absent, but **no new orchestration runs without Pi**.
+Continuity transitions interrupt the controller; `new`/`fork` cancel owned work.
+Terminal durable runs stop their attempt wrappers; they do not retain idle
+children as reusable interactive conversations. A persisted launch without a
+verified start receipt is an explicit recovery-required state, not permission
+to send another command to an old pane. Inspect the queued launch or cancel
+the run before replacing it. A crash before pane identity was persisted can
+leave an idle, unstarted pane requiring manual cleanup; it cannot start agent
+work because dispatch follows manifest persistence.
+
+The parent receives phase/counter updates and a final result reference, not
+intermediate prompts and answers. Durable aggregates use the current completion
+coordinator, including its ordinary parent-turn dispatch rules, group barriers,
+and persisted result-consumption receipts. Manual durable result consumption is
+recorded against the initiating owner; a replacement session does not inherit
+that receipt. Fallback receipts are reconciled when completion expectations are
+restored later; each receipt applies only to its matching completion and never
+suppresses unrelated later-turn completions.
+
+Recovery never imports another session's runs. If persisted completion-group
+recovery is unavailable, group errors remain eligible for delivery under the
+ordinary parent-turn rules. Their mixed-source membership is preserved, and
+successful or cancelled members remain behind the group barrier. Once the
+authoritative snapshot is repaired, only its validated members count toward the
+barrier; previously delivered terminal errors are reconciled once. Independent
+completions remain deliverable.
+
+## Failure and cancellation contract
+
+- Committed agent outcomes replay without another agent call. An interrupted
+  in-process call or a crash after an external action but before its outcome is
+  committed can repeat work. There is **no exactly-once side-effect guarantee**.
+  Use read-only agents or application-level idempotency for irreversible work.
+- Usage is recorded, not inferred from model prose. Uncommitted attempts can
+  leave unknown usage; recovered totals are lower bounds, not billing guarantees.
+- For non-durable process-backed cancellation, interactive artifact and
+  pane-termination cleanup are best effort. A cleanup failure does not discard
+  usage already persisted in the child Pi session file, including token and cost
+  fields; the actual cancellation snapshot receipt is forwarded when captured.
+  Durable cancellation intent or attempt-marker write failures remain explicit
+  errors rather than being downgraded to best-effort cancellation.
+- `cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
+  before aborting owned work. When snapshots are enabled, cancel-all captures
+  receipts for owned work, including durable process attempts, before aborting.
+  A failed intent or attempt-marker write reports the workflow as failed to
+  cancel and keeps its owned in-process/process-backed work protected and
+  retryable. Both cancel-all entry points abort their foreground tool signal
+  only after all durable cancellations succeed; if no durable workflow is
+  present the normal foreground abort still occurs. Retrying after the run-level
+  intent is recorded still retries the per-attempt markers.
+- A native abort observed after a terminal event is committed preserves that
+  result. If cancellation is requested while the final journal write is still
+  in flight, cancellation can be appended after the terminal event and
+  inspection can report `cancelled`; atomic ordering for this race is deferred
+  to pi-durable.
+- Process wrappers consume the exact attempt's cancellation marker and
+  terminate their child process group. A persisted pane id alone never
+  authorizes killing a recovered pane.
+  Cancellation cannot undo earlier writes, remote requests, or independently
+  detached descendants. Inspect cancellation state rather than assuming every
+  external effect has stopped immediately.
+- A live controller lock is never stolen on a timer. Unknown ownership,
+  malformed state, storage failures, and complete corrupt journal records fail
+  closed. Resume rejects an incomplete final journal line and preserves its
+  bytes for inspection; it never truncates an ambiguous append.
+  A crash while acquiring the short `claim.json` lock needs operator inspection
+  of the dead controller before removing that exact claim file; do not delete
+  a live owner's files or guess from timestamps.
+
+## Storage and limits
+
+Runs live beneath `~/.pi-subagentura/workflow-runs/v1/<scope-hash>/wfd_<id>/`.
+Directories are mode 0700 and files 0600. Journals contain private source,
+arguments, prompts, and outputs; do not commit them or share them as telemetry.
+The format is new and does not import the removed experimental plan store.
+
+Run creation syncs newly created store directories top-down before accepting
+the run. A directory sync failure blocks creation. Run listings isolate an
+unreadable journal as unavailable while retaining other safe run summaries;
+they do not rewrite damaged data. Historical failed agent RPCs replay a generic
+failure message without redispatch, while preserving the original response and
+closed failure classification in the journal. Non-agent RPC replay retains its
+recorded failure meaning.
+
+Writes are serialized and fsynced before acknowledging a response to the
+worker. Response offers establish the worker's exact request frontier before
+the response is committed and released. Attempt manifests precede command
+dispatch. The runtime retains the existing 1,000-agent and 4,096-item caps and
+adds an 8,192-operation transcript cap, a 2 MiB serialized-value limit, and a
+256 MiB journal limit. The default budget remains 100 billion completed output
+tokens and the wall deadline remains 100 hours; choose a practical lower budget.
+
+If an append or its fsync fails, the next write verifies the journal against
+the last committed prefix. It syncs an exact complete pending line or retries
+only when the file still ends at that prefix. Partial, corrupt, or unexpected
+tails remain blocked for explicit recovery; committed bytes are never rewritten.
+
+Runs are local and manually recoverable, not remote jobs. There is no daemon,
+always-on coordinator, automatic recovery loop, declarative plan surface, or
+transaction with agent-controlled external systems.

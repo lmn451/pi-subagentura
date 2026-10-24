@@ -5,6 +5,10 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
+See [README workflow usage](../README.md#reusable-workflows) for command defaults
+and [the runtime contract](../WORKFLOW_RUNTIME.md) for durable execution,
+recovery, cancellation, and result-consumption behavior.
+
 This project ships several `.mjs` workflow scripts under
 `examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`
 tool. Two are **generic converters**; the rest are **concrete instantiations**
@@ -362,12 +366,12 @@ The `list_subagent_artifacts` tool lists all known sub-agents (including past on
 
 #### Backend support
 
-| Backend    | `createPane` behavior                                                                        | Available outside mux?                                           |
-| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset |
-| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached |
-| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                        |
-| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — falls back to in-process                                   |
+| Backend    | `createPane` behavior                                                                        | Available outside mux?                                                       |
+| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset             |
+| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached             |
+| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                                    |
+| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — non-durable runs may fall back to in-process; durable runs fail closed |
 
 ### Scaling
 

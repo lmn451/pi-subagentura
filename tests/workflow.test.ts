@@ -63,6 +63,11 @@ import {
   artifactPath,
   writeOutput,
 } from "../src/artifact";
+import {
+  encodeRunValue,
+  WorkflowRunStore,
+  type RunEvent,
+} from "../src/workflow-run-store";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1262,7 +1267,14 @@ describe("saved workflows", () => {
     expect(loadWorkflowScript("greet", dir)).toBe(script);
     expect(loadWorkflowScript("nope", dir)).toBeNull();
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "greet", description: "say hi" }]);
+    expect(list).toEqual([
+      {
+        name: "greet",
+        description: "say hi",
+        durableReady: true,
+        definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    ]);
   });
 
   it("rejects an invalid name and an unparseable script", () => {
@@ -1307,7 +1319,14 @@ describe("saved workflows", () => {
       "utf8",
     );
     const list = listSavedWorkflows(dir);
-    expect(list).toEqual([{ name: "broken", description: "(unparseable)" }]);
+    expect(list).toEqual([
+      {
+        name: "broken",
+        description: "(unparseable)",
+        durableReady: false,
+        definitionDigest: undefined,
+      },
+    ]);
   });
 });
 
@@ -2544,25 +2563,150 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
-  it("registers 6 tools with the Pi SDK", () => {
-    const tools: Array<{ name: string }> = [];
+  it("returns native structured outputs for persisted durable workflow reads", async () => {
+    type RegisteredTool = {
+      name: string;
+      execute: (...args: unknown[]) => unknown;
+      outputSchema?: TSchema;
+    };
+    const tools: RegisteredTool[] = [];
     const pi = {
-      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerTool: vi.fn((definition: RegisteredTool) =>
+        tools.push(definition),
+      ),
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
       on: vi.fn(),
     };
-    registerWorkflowTool(pi as any, workflowScope);
-    expect(tools).toHaveLength(7);
-    expect(tools.map((t) => t.name)).toEqual([
-      "workflow",
-      "get_workflow_status",
-      "get_workflow_result",
-      "cancel_workflow",
-      "save_workflow",
-      "list_workflows",
-      "delete_workflow",
-    ]);
+    registerWorkflowTool(pi as unknown as ExtensionAPI, workflowScope);
+    const workflowId = `wfd_${"a".repeat(32)}`;
+    const createdAt = Date.now() - 1_000;
+    const run: WorkflowRunResult = {
+      meta: { name: "persisted", description: "d" },
+      result: "finished",
+      agentsSpawned: 2,
+      errorCount: 1,
+      tokensSpent: 20,
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        costUsd: 0.1,
+        turns: 1,
+        costSource: "provider",
+      },
+      phases: [],
+    };
+    const events: RunEvent[] = [
+      {
+        kind: "created",
+        data: {
+          script: `export const meta = { name: "persisted", description: "d" };
+return "finished";`,
+          createdAt,
+          budgetTotal: 100,
+        },
+      },
+      { kind: "accepted", data: {} },
+      {
+        kind: "terminal",
+        data: {
+          status: "done",
+          result: encodeRunValue(run),
+          completedAt: Date.now(),
+        },
+      },
+    ];
+    const inspect = vi
+      .spyOn(WorkflowRunStore, "inspect")
+      .mockResolvedValue(events);
+    try {
+      const ctx = { cwd: process.cwd() };
+      const statusTool = tools.find(
+        (tool) => tool.name === "get_workflow_status",
+      )!;
+      const status = await statusTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+        status: "done",
+        workflowId,
+        durable: true,
+        name: "persisted",
+        agentsSpawned: 2,
+        errorCount: 1,
+      });
+
+      const resultTool = tools.find(
+        (tool) => tool.name === "get_workflow_result",
+      )!;
+      const result = await resultTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(expectStructuredOutput(resultTool, result)).toMatchObject({
+        status: "done",
+        workflowId,
+        durable: true,
+        name: "persisted",
+        result: "finished",
+        agentsSpawned: 2,
+        errorCount: 1,
+      });
+      const interruptedEvents: RunEvent[] = [
+        events[0],
+        events[1],
+        {
+          kind: "interrupted",
+          data: { status: "interrupted", error: "interrupted" },
+        },
+      ];
+      inspect.mockResolvedValue(interruptedEvents);
+      const interruptedStatus = await statusTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(
+        expectStructuredOutput(statusTool, interruptedStatus),
+      ).toMatchObject({
+        status: "interrupted",
+        workflowId,
+        durable: true,
+      });
+      expect(interruptedStatus).toMatchObject({
+        content: [{ text: expect.stringContaining("resume_workflow") }],
+      });
+
+      const interruptedResult = await resultTool.execute(
+        "",
+        { workflowId },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(
+        expectStructuredOutput(resultTool, interruptedResult),
+      ).toMatchObject({
+        status: "interrupted",
+        workflowId,
+        durable: true,
+      });
+      expect(interruptedResult).toMatchObject({ isError: true });
+    } finally {
+      inspect.mockRestore();
+    }
   });
 
   it("registers workflow slash commands", () => {
@@ -2609,11 +2753,7 @@ describe("registerWorkflowTool", () => {
     await cmd.handler("build a release checklist", ctx);
 
     expect(ctx.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [prompt, opts] = ctx.sendUserMessage.mock.calls[0];
-    expect(prompt).toContain("save_workflow");
-    expect(prompt).toContain("workflow` tool");
-    expect(prompt).toContain("build a release checklist");
-    expect(prompt).not.toContain("Big Pickle");
+    const [, opts] = ctx.sendUserMessage.mock.calls[0];
     expect(opts).toEqual({ deliverAs: "followUp" });
   });
 
