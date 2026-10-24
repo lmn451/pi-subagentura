@@ -83,8 +83,10 @@ pi --orchestrator
 /workflow-tree
 ```
 
-`/workflow` asks the parent to create, validate, save, and immediately start a
-durable reusable workflow. `/workflows` labels saved scripts as `durable-ready`
+`/workflow` asks the parent to create, validate, save, and immediately start an
+asynchronous session-scoped reusable workflow by default. If the task explicitly
+requests restart recovery, the parent can opt in with `durable: true`.
+`/workflows` labels saved scripts as `durable-ready`
 or `session-scoped`; selecting one runs it session-scoped by default. Use an
 explicit `durable: true` argument to the `workflow` tool to persist a saved
 workflow run.
@@ -109,11 +111,12 @@ of injected orchestration primitives:
 
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
-agent tools. Workflow agents default to separate Pi processes in tmux, Zellij,
-or Herdr, so they are observable and attachable; when no multiplexer is
-available, the runtime falls back to in-process execution. Intermediate agent
-results stay in workflow variables outside the parent model context. Only the
-workflow completion enters coordinated parent delivery; the retained final
+agent tools. Session-scoped workflow agents default to separate Pi processes in
+tmux, Zellij, or Herdr, so they are observable and attachable; when no
+multiplexer is available, the runtime falls back to in-process execution.
+Durable process attempts fail closed rather than falling back. Intermediate
+agent results stay in workflow variables outside the parent model context. Only
+the workflow completion enters coordinated parent delivery; the retained final
 result is available through `get_workflow_result`.
 
 An omitted workflow `budget` defaults to the finite `100_000_000_000` completed

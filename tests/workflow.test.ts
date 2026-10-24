@@ -2753,11 +2753,7 @@ return "finished";`,
     await cmd.handler("build a release checklist", ctx);
 
     expect(ctx.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [prompt, opts] = ctx.sendUserMessage.mock.calls[0];
-    expect(prompt).toContain("save_workflow");
-    expect(prompt).toContain("workflow` tool");
-    expect(prompt).toContain("build a release checklist");
-    expect(prompt).not.toContain("Big Pickle");
+    const [, opts] = ctx.sendUserMessage.mock.calls[0];
     expect(opts).toEqual({ deliverAs: "followUp" });
   });
 

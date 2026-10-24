@@ -235,13 +235,14 @@ describe("durable workflow authoring", () => {
     await expect(job.promise).resolves.toMatchObject({ result: "legacy" });
   });
 
-  it("emits a durable authoring request without executing a workflow itself", async () => {
+  it("forwards workflow creation requests without starting a run itself", async () => {
     const { commands, ctx, pi } = setup();
     await commands.get("workflow").handler("review my changes", ctx);
-    const prompt = pi.sendUserMessage.mock.calls[0][0];
-    expect(prompt).toContain("requireDurable: true");
-    expect(prompt).toContain("durable: true");
-    expect(prompt).toContain("stable");
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(pi.sendUserMessage.mock.calls[0][1]).toEqual({
+      deliverAs: "followUp",
+    });
     expect(fixture.run).not.toHaveBeenCalled();
+    expect(workflowJobRegistry.size).toBe(0);
   });
 });

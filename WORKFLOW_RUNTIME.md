@@ -23,14 +23,18 @@ nested workflow names are required; computed IDs are checked for validity and
 uniqueness at runtime. Explicit `workflow({durable:true})` execution retains the
 runtime's support for computed names and options.
 
-`/workflow <task>` asks the parent to generate stable IDs, save with
-`requireDurable:true`, and explicitly start with `durable:true`. `/workflows`
-labels saved definitions as `durable-ready` or `session-scoped`; those labels
-report capability and do not choose the execution mode. Selecting a saved
-definition with `/workflows` runs it session-scoped. To persist a saved
-definition's run, explicitly call `workflow({name, args, durable:true})`. A
-failed durable start reports its error without falling back to a session-scoped
-execution. Direct tool calls without `durable:true` keep their existing behavior.
+`/workflow <task>` asks the parent to generate a reusable script and start it
+asynchronously, session-scoped by default. Use `requireDurable:true` while saving
+and `durable:true` while running only when the user's task explicitly requests
+persisted restart recovery. `/workflows` labels saved definitions as
+`durable-ready` or `session-scoped`; those labels report capability and do not
+choose the execution mode. Selecting a saved definition with `/workflows` runs
+it session-scoped. To persist a saved definition's run, explicitly call
+`workflow({name, args, durable:true})`. A failed durable start reports its error
+without falling back to a session-scoped execution. Session-scoped process agents
+may fall back to in-process execution when no multiplexer is available; durable
+process attempts fail closed instead. Direct tool calls without `durable:true`
+keep their existing behavior.
 
 `workflow({name, args, durable:true})` creates a separately persisted run. It
 captures the root source, arguments, cwd, model default, concurrency, output
