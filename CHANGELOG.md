@@ -73,7 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until all durable cancellation intents and attempt markers succeed.
 - Route inherited native-tool aborts for synchronous durable starts and resumes
   through the same persistence-first cancellation path. Failed intent writes
-  leave owned work active and retryable; late aborts preserve committed results.
+  leave owned work active and retryable; aborts observed after a terminal event
+  is committed preserve that result. An abort during the final journal write can
+  still append cancellation after the terminal event and make inspection report
+  cancelled; atomic ordering is deferred to pi-durable.
 - Retrying durable cancellation reissues per-attempt markers even after the
   run-level cancellation intent is already recorded.
 - Preserve enabled cancellation snapshot receipts for durable process attempts

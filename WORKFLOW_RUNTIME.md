@@ -152,6 +152,11 @@ completions remain deliverable.
   only after all durable cancellations succeed; if no durable workflow is
   present the normal foreground abort still occurs. Retrying after the run-level
   intent is recorded still retries the per-attempt markers.
+- A native abort observed after a terminal event is committed preserves that
+  result. If cancellation is requested while the final journal write is still
+  in flight, cancellation can be appended after the terminal event and
+  inspection can report `cancelled`; atomic ordering for this race is deferred
+  to pi-durable.
 - Process wrappers consume the exact attempt's cancellation marker and
   terminate their child process group. A persisted pane id alone never
   authorizes killing a recovered pane.
