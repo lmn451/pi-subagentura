@@ -13,7 +13,9 @@ if (marker) {
       const content = Buffer.isBuffer(data) ? data.toString("utf8") : "";
       try {
         if (JSON.parse(content).kind === "cancelled") {
-          return Promise.reject(new Error("Injected cancellation journal failure."));
+          return Promise.reject(
+            new Error("Injected cancellation journal failure."),
+          );
         }
       } catch {
         // Other writes and non-journal payloads pass through unchanged.

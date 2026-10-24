@@ -68,7 +68,8 @@ export const scenarios = {
     name: "durable-cancel-sync",
     marker: "[E2E:DURABLE_CANCEL_SYNC]",
     gate: null,
-    prompt: "[E2E:DURABLE_CANCEL_SYNC] Start the synchronous durable cancellation fixture.",
+    prompt:
+      "[E2E:DURABLE_CANCEL_SYNC] Start the synchronous durable cancellation fixture.",
     expected: "",
   },
   "process-workflow": {
