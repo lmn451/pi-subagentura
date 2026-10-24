@@ -458,6 +458,28 @@ export function cancelWorkflowJob(
   }
 }
 
+/**
+ * Persist explicit durable cancellation before stopping any attempt or aborting
+ * its live controller. Retrying this operation also retries per-attempt markers
+ * after the run-level cancellation event is already present.
+ */
+export async function requestDurableWorkflowCancellation(
+  store: WorkflowRunStore,
+  job?: WorkflowJobState,
+  options?: { suppressCompletionNotification?: boolean },
+): Promise<void> {
+  if (!store.events.some((event) => event.kind === "cancelled")) {
+    await store.append("cancelled", {
+      status: "cancelled",
+      completedAt: Date.now(),
+    });
+  }
+  await stopDurableProcessAttempts(store.directory);
+  if (job && options?.suppressCompletionNotification)
+    job.suppressCompletionNotification = true;
+  if (job) cancelWorkflowJob(job, "explicit_cancel");
+}
+
 /** Roll back a just-created workflow whose completion registration failed. */
 export function discardWorkflowJob(job: WorkflowJobState): void {
   job.suppressCompletionNotification = true;
