@@ -963,6 +963,101 @@ describe("durable cancellation regressions", () => {
     ).toBe(true);
   });
 
+  it("keeps the live writer lease until a cancelled controller drains", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    const agentStarted = deferred<void>();
+    const abortObserved = deferred<void>();
+    const allowDrain = deferred<void>();
+    const runner: WorkflowAgentRunner = async ({ signal }) => {
+      agentStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            abortObserved.resolve();
+            void allowDrain.promise.then(() =>
+              reject(new Error("drained after cancellation")),
+            );
+          },
+          { once: true },
+        );
+      });
+    };
+    const api = durableTools(runner);
+    const id = await startDurableRun(api);
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted.promise;
+    const cancel = getTool("cancel_workflow");
+    const result = await cancel.execute(
+      "cancel-live-writer",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.details.status).toBe("cancelled");
+    await abortObserved.promise;
+    await expect(
+      WorkflowRunStore.resume(harness.runScope, id),
+    ).rejects.toThrow();
+    allowDrain.resolve();
+    await Promise.allSettled([job.promise]);
+    const resumed = await WorkflowRunStore.resume(harness.runScope, id);
+    await resumed.close();
+  });
+
+  it("projects a later legacy success after an earlier cancellation intent", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    const store = await WorkflowRunStore.create(
+      { cwd: root, sessionId: harness.runScope.sessionId },
+      {
+        script: DURABLE_SCRIPT,
+        args: encodeRunValue(undefined),
+        budgetTotal: 100,
+      },
+    );
+    await store.append("accepted", {});
+    await store.append("cancelled", {
+      status: "cancelled",
+      completedAt: 10,
+    });
+    await store.append("terminal", {
+      status: "done",
+      result: encodeRunValue({ result: "committed" }),
+      completedAt: 9,
+    });
+    const id = store.id;
+    await store.close();
+
+    const status = await getTool("get_workflow_status").execute(
+      "legacy-status",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(status.details.status).toBe("done");
+    const result = await getTool("get_workflow_result").execute(
+      "legacy-result",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.details.status).toBe("done");
+    expect(result.content?.[0]?.text).toBe("committed");
+    const listed = await getTool("list_workflow_runs").execute(
+      "legacy-list",
+      {},
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(listed.details.runs).toContainEqual(
+      expect.objectContaining({ workflowId: id, status: "done" }),
+    );
+  });
+
   it("publishes normal completion if cancel-all cannot persist an attempt marker", async () => {
     const agentStarted = deferred<void>();
     const finishAgent = deferred<Awaited<ReturnType<WorkflowAgentRunner>>>();
