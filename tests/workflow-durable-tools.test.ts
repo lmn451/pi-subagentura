@@ -91,6 +91,68 @@ function setup() {
 }
 
 describe("durable public tools", () => {
+  it("commits inherited synchronous cancellation before aborting provider work", async () => {
+    const { pi, scope, ctx } = setup();
+    const inherited = new AbortController();
+    let providerSignal: AbortSignal | undefined;
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    let finishProvider!: () => void;
+    const providerResult = new Promise<void>((resolve) => {
+      finishProvider = resolve;
+    });
+    const updates: any[] = [];
+    let reportCancellationFailure!: () => void;
+    const cancellationFailureReported = new Promise<void>((resolve) => {
+      reportCancellationFailure = resolve;
+    });
+    const api = registerDurableWorkflowTools(
+      pi,
+      () => sessionOwner(scope),
+      () => async ({ signal }) => {
+        providerSignal = signal;
+        releaseProvider();
+        await providerResult;
+        if (signal?.aborted) throw new Error("provider aborted");
+        return { isError: false, output: "done", usage: zeroUsage() };
+      },
+      () => true,
+      root,
+    );
+    const execution = api.run(
+      {
+        script:
+          'export const meta={name:"inherited-cancel",description:"d"}; return await agent("wait");',
+        async: false,
+      },
+      inherited.signal,
+      (update) => {
+        updates.push(update);
+        if (JSON.stringify(update).includes("could not be saved"))
+          reportCancellationFailure();
+      },
+      ctx,
+    );
+    await providerStarted;
+    const job = [...workflowJobRegistry.values()].at(-1)!;
+    const originalAppend = WorkflowRunStore.prototype.append;
+    const append = vi.spyOn(WorkflowRunStore.prototype, "append");
+    append.mockImplementation(async function (kind: any, ...args: any[]) {
+      if (kind === "cancelled") throw new Error("private append failure");
+      return originalAppend.call(this, kind, ...args);
+    });
+    inherited.abort();
+    await cancellationFailureReported;
+    expect(providerSignal?.aborted).toBe(false);
+    expect(job.status).toBe("running");
+    expect(JSON.stringify(updates)).not.toContain("private append failure");
+    append.mockRestore();
+    finishProvider();
+    await expect(execution).resolves.toMatchObject({ details: { status: "done" } });
+  });
+
   it("keeps independent completions deliverable after group recovery fails while holding groups closed", async () => {
     const { scope } = setup();
     const owner = sessionOwner(scope);

@@ -581,6 +581,7 @@ export function registerDurableWorkflowTools(
         runnerCompletion,
         workflowOwner,
       );
+      const synchronousCancellation = new AbortController();
       const workflowOptions: RunWorkflowOptions = {
         workflowId: store.id,
         args: decodeRunValue(definition.args),
@@ -602,14 +603,20 @@ export function registerDurableWorkflowTools(
             model: request.model ?? definition.defaultModel,
           }),
         loadWorkflow: loadWorkflowScript,
-        signal: runAsync ? undefined : signal,
+        signal: runAsync ? undefined : synchronousCancellation.signal,
         requestInput: runAsync
           ? undefined
           : async (request, stepSignal) => {
-              if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
+              if (
+                !isSessionOwnerLive(workflowOwner) ||
+                stepSignal?.aborted
+              )
                 throw new Error("Workflow input was interrupted.");
               const value = await queuedInput(ctx, request, stepSignal);
-              if (!isSessionOwnerLive(workflowOwner) || signal?.aborted)
+              if (
+                !isSessionOwnerLive(workflowOwner) ||
+                stepSignal?.aborted
+              )
                 throw new Error("Workflow input was interrupted.");
               return value;
             },
@@ -690,6 +697,30 @@ export function registerDurableWorkflowTools(
           }
         }
         throw error;
+      }
+      const inheritedAbort = () => {
+        if (runAsync) return;
+        void withWorkflowTerminalTransition(job, async () => {
+          await requestDurableWorkflowCancellation(store!, job);
+        }).catch(() => {
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: "Workflow cancellation could not be saved. The workflow remains active; retry cancellation.",
+              },
+            ],
+            details: { status: "running", workflowId: job.id },
+          });
+        });
+      };
+      if (!runAsync && signal) {
+        signal.addEventListener("abort", inheritedAbort, { once: true });
+        void job.promise.then(
+          () => signal.removeEventListener("abort", inheritedAbort),
+          () => signal.removeEventListener("abort", inheritedAbort),
+        );
+        if (signal.aborted) inheritedAbort();
       }
       job.completionPolicy = completion.policy;
       job.completionGroupId = completion.groupId;
