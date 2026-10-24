@@ -57,8 +57,8 @@ function setup() {
 }
 
 const meta = 'export const meta={name:"review",description:"Review work"};';
-const ready = `${meta} return await agent("review", {id:"review"});`;
-const legacy = `${meta} return await agent("review");`;
+const ready = `${meta} const unused=()=>agent("review", {id:"review"}); return "done";`;
+const legacy = `${meta} const unused=()=>agent("review"); return "legacy";`;
 
 beforeEach(() => {
   fixture.dir = mkdtempSync(join(tmpdir(), "workflow-authoring-"));
@@ -114,13 +114,37 @@ describe("durable workflow authoring", () => {
     expect(response.content[0].text).toContain("session-scoped");
   });
 
-  it("starts a compatible saved definition through the durable runner with explicit args", async () => {
+  it("runs a durable-ready saved definition session-scoped by default", async () => {
     writeFileSync(join(fixture.dir, "ready.js"), ready);
-    const { commands, ctx } = setup();
+    const { commands, ctx, pi } = setup(true);
     await commands.get("workflows").handler('ready {"topic":"storage"}', ctx);
+    expect(fixture.run).not.toHaveBeenCalled();
+    const job = [...workflowJobRegistry.values()][0];
+    expect(job).toBeDefined();
+    await expect(job.promise).resolves.toMatchObject({ result: "done" });
+    expect(pi.sendMessage.mock.calls[0][0].content).toContain(
+      "Session-scoped run.",
+    );
+  });
+
+  it("keeps an explicitly durable workflow tool call durable", async () => {
+    writeFileSync(join(fixture.dir, "ready.js"), ready);
+    const { tools, ctx } = setup(true);
+    await tools.get("workflow").execute(
+      "durable-explicit",
+      {
+        name: "ready",
+        args: { topic: "storage" },
+        durable: true,
+        async: true,
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     expect(fixture.run).toHaveBeenCalledWith(
       expect.objectContaining({
-        script: ready,
+        name: "ready",
         args: { topic: "storage" },
         durable: true,
         async: true,
@@ -128,9 +152,20 @@ describe("durable workflow authoring", () => {
       undefined,
       undefined,
       ctx,
-      "saved_command",
     );
-    expect(workflowJobRegistry.size).toBe(0);
+  });
+
+  it("runs a picker-selected durable-ready definition session-scoped by default", async () => {
+    writeFileSync(join(fixture.dir, "ready.js"), ready);
+    const { commands, ctx } = setup(true);
+    ctx.ui.select = vi.fn(
+      async (_prompt: string, choices: string[]) => choices[0],
+    );
+    await commands.get("workflows").handler("", ctx);
+    expect(fixture.run).not.toHaveBeenCalled();
+    const job = [...workflowJobRegistry.values()][0];
+    expect(job).toBeDefined();
+    await expect(job.promise).resolves.toMatchObject({ result: "done" });
   });
 
   it("keeps a nested workflow session-scoped when its saved child is incompatible", async () => {
@@ -168,24 +203,31 @@ describe("durable workflow authoring", () => {
     expect((await job.promise).result).toBe("done");
   });
 
-  it("reports durable startup failure without silently starting a session-scoped run", async () => {
+  it("reports an explicitly durable startup failure without falling back", async () => {
     writeFileSync(join(fixture.dir, "ready.js"), ready);
     fixture.run.mockResolvedValue({
       isError: true,
       content: [{ type: "text", text: "Storage unavailable" }],
     });
-    const { commands, ctx, pi } = setup();
-    await commands.get("workflows").handler("ready {}", ctx);
-    expect(pi.sendMessage.mock.calls[0][0].content).toContain(
-      "Storage unavailable",
-    );
+    const { tools, ctx } = setup(true);
+    const result = await tools
+      .get("workflow")
+      .execute(
+        "durable-failure",
+        { name: "ready", durable: true, async: true },
+        undefined,
+        undefined,
+        ctx,
+      );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Storage unavailable");
     expect(workflowJobRegistry.size).toBe(0);
   });
 
-  it("does not downgrade a durable selection changed while the user enters args", async () => {
+  it("does not let readiness changes select durable mode while entering args", async () => {
     const file = join(fixture.dir, "ready.js");
     writeFileSync(file, ready);
-    const { commands, ctx, pi } = setup();
+    const { commands, ctx } = setup(true);
     Object.assign(ctx.ui, {
       editor: async () => {
         writeFileSync(file, legacy);
@@ -194,10 +236,9 @@ describe("durable workflow authoring", () => {
     });
     await commands.get("workflows").handler("ready", ctx);
     expect(fixture.run).not.toHaveBeenCalled();
-    expect(workflowJobRegistry.size).toBe(0);
-    expect(pi.sendMessage.mock.calls[0][0].content).toContain(
-      "no longer durable-ready",
-    );
+    const job = [...workflowJobRegistry.values()][0];
+    expect(job).toBeDefined();
+    await expect(job.promise).resolves.toMatchObject({ result: "legacy" });
   });
 
   it("forwards the original task without saving or running a workflow", async () => {

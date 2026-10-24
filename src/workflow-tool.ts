@@ -1962,30 +1962,10 @@ export function registerWorkflowTool(
       name: string,
       argsValue: unknown,
       ctx: ExtensionCommandContext,
-      requireDurable: boolean,
     ) => {
       const script = loadWorkflowScript(name);
       if (!script) throw new Error(`No saved workflow named "${name}".`);
       const meta = parseWorkflow(script).meta;
-      const { durableReady } = inspectSavedWorkflow(script);
-      if (requireDurable && !durableReady)
-        throw new Error(
-          `Workflow "${name}" is no longer durable-ready. Inspect the changed definition before starting it again.`,
-        );
-      if (durableReady) {
-        const result = await durableTools.run(
-          { script, args: argsValue, durable: true, async: true },
-          undefined,
-          undefined,
-          ctx,
-          "saved_command",
-        );
-        if (result.isError)
-          throw new Error(
-            result.content?.[0]?.text ?? "Durable workflow did not start.",
-          );
-        return { id: result.details.workflowId as string, meta, durable: true };
-      }
       const workflowOwner = owner();
       if (!workflowOwner || !isSessionOwnerLive(workflowOwner)) {
         throw new Error(
@@ -2029,7 +2009,7 @@ export function registerWorkflowTool(
         },
       );
       configureWorkflowCompletion(job, commandCompletion, workflowOwner);
-      return { id: job.id, meta, durable: false };
+      return { id: job.id, meta };
     };
 
     const selectSavedWorkflow = async (
@@ -2094,12 +2074,7 @@ export function registerWorkflowTool(
       // If name was provided inline, try run it directly
       const inlineName = parsed.name;
       if (inlineName) {
-        await runNamedWorkflow(
-          inlineName,
-          parsed,
-          ctx,
-          items.find((item) => item.name === inlineName)?.durableReady ?? false,
-        );
+        await runNamedWorkflow(inlineName, parsed, ctx);
         return;
       }
 
@@ -2113,19 +2088,13 @@ export function registerWorkflowTool(
         return;
       }
 
-      await runNamedWorkflow(
-        action.name,
-        parsed,
-        ctx,
-        items.find((item) => item.name === action.name)?.durableReady ?? false,
-      );
+      await runNamedWorkflow(action.name, parsed, ctx);
     };
 
     async function runNamedWorkflow(
       name: string,
       parsed: { name: string | null; argsJson: string | null },
       ctx: ExtensionCommandContext,
-      requireDurable: boolean,
     ) {
       const items = listSavedWorkflows();
       const known = items.some((w) => w.name === name);
@@ -2140,17 +2109,14 @@ export function registerWorkflowTool(
           ? parseArgsJson(parsed.argsJson)
           : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
-        const { id, meta, durable } = await startSavedWorkflowFromCommand(
+        const { id, meta } = await startSavedWorkflowFromCommand(
           name,
           argsValue,
           ctx,
-          requireDurable,
         );
         const text =
           `Workflow "${meta.name}" started in background as ${id}. ` +
-          (durable
-            ? "Durable run: after interruption use resume_workflow in the same Pi session and cwd. "
-            : `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} `) +
+          `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} ` +
           "Use /workflow-status to inspect running jobs.";
         ctx.ui.notify(`Started workflow ${meta.name}.`);
         sendCommandMessage(text);

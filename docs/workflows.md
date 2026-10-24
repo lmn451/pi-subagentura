@@ -152,11 +152,10 @@ running agents, so the parent can confirm it matches the reviewed source before
 launch.
 
 `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts and
-starts compatible scripts durably by default. The `list_workflows` tool returns
+starts compatible scripts session-scoped by default. The `list_workflows` tool returns
 readiness and a SHA-256 source digest. Use `resume_workflow({workflowId})` from
 a live Pi process in the same project after interruption; recovery is manual. A
-direct V4 `workflow` call is durable by default, while legacy `.mjs` calls
-require `durable: true` to opt in.
+direct V4 or legacy `.mjs` `workflow` call requires `durable: true` to opt in.
 
 ## Legacy `.mjs` workflow scripts
 
@@ -552,3 +551,5 @@ For a typical machine (8–16 cores): ~2–4 process-backed agents run in parall
 | Mouse-clickable controls for widget rows      | Deferred                       |
 | Full per-agent tool-call history tree         | Deferred                       |
 | Strong progress-event rate limiting           | Deferred                       |
+
+`/workflow <task>` creates a reusable script with stable operation IDs, validates it with `save_workflow({requireDurable:true})`, and explicitly starts a durable background run. `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts; the label reports capability, and selecting a script runs it session-scoped. To persist a saved script's run, explicitly call `workflow({name, args, durable:true})`. Static readiness does not guarantee that every runtime input will produce unique operation IDs.
