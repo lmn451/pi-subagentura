@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [5.0.0] - 2026-10-24
+## [4.1.0] - 2026-10-25
 
 ### Changed
 
@@ -454,8 +454,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v5.0.0...HEAD
-[5.0.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v5.0.0
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
