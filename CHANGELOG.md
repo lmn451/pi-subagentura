@@ -46,20 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not an OS or path sandbox.
 - Explicitly exclude MCP function and resource tools on newer Pi SDKs that
   retain MCP tools despite a positive tool allowlist.
-- Add schema-backed structured results to 11 read-only tools, preserving human
-  content/details while exposing explicit machine-readable states and exact
-  terminal output.
-- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
-  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
 
 ### Changed
 
 - Require Node.js 24.12 or newer for native erasable TypeScript workflow
   syntax. The workflow worker pins Effect 4 internally; Effect remains outside
   the public workflow API.
-- Use native Pi SDK APIs with peers `>=1.2.0` and development/lock version
-  `1.4.0`; no pi-server dependency, SDK compatibility adapter, shim, or
-  compatibility re-export is used.
 - `/workflow <task>` defaults to session-scoped authoring, preferring the typed
   V4 API when its step APIs fit and using legacy `.mjs` only when simpler. The
   parent assesses feasibility, semantically reviews the exact source, then
@@ -101,11 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Forward the actual process cancellation snapshot and never kill a recovered
   pane on the authority of a persisted pane ID alone.
 - Handle promptless Pi custom agent-start events in completion coordination.
-- Retain terminal fixture gate routing for async children and workflow agents
-  under strict known-marker validation.
 - V4 timeouts that are collected or caught remain handled when cancellation
   acknowledgement settles later, and nested calls preserve structured error
   categories.
+- Wait for queued V4 step-state writes before closing the journal, so workflow
+  shutdown cannot overtake an in-flight state save.
 - Recovery charges committed output usage once globally while retaining per-step
   attribution, preserves logical schema-error counts, and enforces step budgets
   on settled failed attempts as well as successes without retrying budget
@@ -130,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep historical workflow diagnostics generic during native compaction and legacy
   RPC replay without hiding safe workflow-list IDs, names, or statuses.
 
-## [3.6.4] - 2026-10-03
+## [4.1.0] - 2026-10-25
 
 ### Changed
 
@@ -142,6 +134,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcomes, mode-aware adoption and busiest-tree concentration, schema/provenance
   and unknown coverage, diagnostic event units, and workflow lifecycle window
   coverage. Window totals remain coverage diagnostics, not matched workflows.
+- Remove the bundled RALPLAN skill.
+- Add the `herdr` keyword for npm package discovery.
+
+### Fixed
+
+- Reject new workflows during session teardown and replacement setup, including
+  lifecycle changes inside options builders, while retaining terminal telemetry
+  for already accepted work.
+
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
+
+### Added
+
+- Add schema-backed structured results to 11 read-only tools, preserving human
+  content/details while exposing explicit machine-readable states and exact
+  terminal output.
+- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
+  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+- Expand the bundled debug skill with guidance for safe state recovery.
+
+### Changed
+
 - Remove the unused Pi server peer/dev/test-install dependency and legacy SDK
   compatibility code, including `src/pi-sdk-compat.ts`, obsolete runtime
   branches, wrappers, and aliases. Child sessions use `ModelRuntime` with copied
@@ -154,53 +170,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Check tool definitions, session/context projections, model resolution, and
   result callbacks against public Pi SDK types instead of local SDK-shaped
   interfaces and broad casts; retain extension-owned state and result protocols.
-
-### Fixed
-
-- Reject new workflows during session teardown and replacement setup, including
-  lifecycle changes inside options builders, while retaining terminal telemetry
-  for already accepted work.
-- A failed durable completion-group recovery no longer suppresses independent
-  completions. Group errors remain eligible under ordinary parent-turn rules
-  without discarding mixed-source membership; successful and cancelled members
-  remain behind the group barrier. After repair, terminal errors count once only
-  when included in the validated authoritative group snapshot.
-- Reconcile fallback result-consumption receipts with completion expectations
-  restored later; receipts consume only their matching completion and do not
-  suppress unrelated later-turn completions.
-- Bind durable manual result-consumption receipts to the initiating session owner.
-- Persist durable cancellation before cancel-all aborts owned work. Failed writes
-  keep the affected workflow protected and retryable rather than counted as
-  aborted; both cancel-all entry points leave the foreground tool signal active
-  until all durable cancellation intents and attempt markers succeed.
-- Route inherited native-tool aborts for synchronous durable starts and resumes
-  through the same persistence-first cancellation path. Failed intent writes
-  leave owned work active and retryable; aborts observed after a terminal event
-  is committed preserve that result. An abort during the final journal write can
-  still append cancellation after the terminal event and make inspection report
-  cancelled; atomic ordering is deferred to pi-durable.
-- Retrying durable cancellation reissues per-attempt markers even after the
-  run-level cancellation intent is already recorded.
-- Preserve enabled cancellation snapshot receipts for durable process attempts
-  without treating persisted mux pane ids as authority to kill panes.
-- Preserve persisted child token/cost usage and forward the actual cancellation
-  snapshot receipt when best-effort non-durable interactive artifact or pane
-  termination cleanup fails. Durable cancellation errors remain explicit.
-- Recover a failed durable journal append only after verifying its on-disk
-  state; complete writes are synced once, while partial or ambiguous tails stay
-  blocked without rewriting journal history.
-- Sync each newly created durable run-store directory entry before accepting a
-  run; a failed sync blocks creation and remains retryable.
-- Keep valid durable run listings visible when an unrelated journal is
-  unreadable, report only its safe ID and unavailable status, and leave its bytes
-  untouched.
-- Replay failed historical agent RPCs with a generic error while preserving
-  their stored response, failure classification, and no-redispatch behavior;
-  non-agent RPC replay errors retain their recorded meaning.
-
-### Breaking
-
-- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
 
 ## [4.0.1] - 2026-10-18
 
@@ -243,9 +212,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Corrected opt-in parent context inheritance to use Pi's canonical session
-  projection when available, preserve omission and replacement edits, and fall
-  back on older supported SDKs.
 - Attribute mux-probe observations to the selected backend and reporter, sharing
   pane-level outage episode authority across poller and workflow waiter so
   workflow settlement does not count the same observation again.
@@ -603,7 +569,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5

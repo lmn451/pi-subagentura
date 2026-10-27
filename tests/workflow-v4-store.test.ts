@@ -13,7 +13,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "workflow-v4-store-"));
 });
 afterEach(async () => {
-  for (const state of steps.splice(0)) state.close();
+  for (const state of steps.splice(0)) await state.close();
   for (const store of stores.splice(0)) await store.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -37,7 +37,7 @@ describe("v4 step journal", () => {
       path: ["review"],
       value: { ok: true },
     });
-    state.close();
+    await state.close();
     await store.close();
     const recovered = await WorkflowRunStore.resume(scope, store.id);
     stores.push(recovered);
@@ -57,7 +57,7 @@ describe("v4 step journal", () => {
     ).toMatchObject({ reuse: false });
     expect(fresh.snapshot()[0]).not.toHaveProperty("output");
     expect(fresh.snapshot()[0]).not.toHaveProperty("input");
-    fresh.close();
+    await fresh.close();
     const changed = new WorkflowV4Store(script + "\n// changed", recovered);
     steps.push(changed);
     expect(
@@ -66,6 +66,42 @@ describe("v4 step journal", () => {
         input: { file: "two" },
       }),
     ).toMatchObject({ reuse: false });
+  });
+
+  it("waits for serialized state writes before closing", async () => {
+    const { state, store } = await setup();
+    const originalAppend = store.append.bind(store);
+    const appendStarted = Promise.withResolvers<void>();
+    const releaseAppend = Promise.withResolvers<void>();
+    store.append = (kind, data) => {
+      if (kind === "v4.step") {
+        appendStarted.resolve();
+        return releaseAppend.promise.then(() => originalAppend(kind, data));
+      }
+      return originalAppend(kind, data);
+    };
+    const pending = state.request("step.enter", {
+      path: ["pending"],
+      kind: "step",
+    });
+    await appendStarted.promise;
+    let closeSettled = false;
+    const closing = state.close().then(() => {
+      closeSettled = true;
+    });
+    try {
+      await Promise.resolve();
+      expect(closeSettled).toBe(false);
+    } finally {
+      releaseAppend.resolve();
+    }
+    await pending;
+    await closing;
+    expect(closeSettled).toBe(true);
+    expect(store.events.at(-1)).toMatchObject({
+      kind: "v4.step",
+      data: { path: ["pending"], status: "running" },
+    });
   });
 
   it("retains waiting questions and persists an answer before releasing execution", async () => {
@@ -85,7 +121,7 @@ describe("v4 step journal", () => {
     await state.answer(["approve"], true);
     await expect(pending).resolves.toBe(true);
     expect(store.events.at(-1)?.data.answer).toBe(true);
-    state.close();
+    await state.close();
     await store.close();
     const recovered = await WorkflowRunStore.resume(scope, store.id);
     stores.push(recovered);
@@ -217,6 +253,23 @@ describe("v4 step journal", () => {
     ).toBe("waiting_for_input");
   });
 
+  it("keeps cancelled steps retired when a queued success follows", () => {
+    const events = [
+      {
+        kind: "v4.step",
+        data: {
+          path: ["approval"],
+          status: "running",
+          input: "private",
+          policy: "private",
+        },
+      },
+      { kind: "cancelled", data: { status: "cancelled" } },
+      { kind: "terminal", data: { status: "done" } },
+    ];
+
+    expect(workflowV4Steps(events)[0].status).toBe("cancelled");
+  });
   it("publishes a live store snapshot with terminal active steps retired", async () => {
     const { store, state } = await setup();
     await state.request("step.enter", { path: ["approval"], kind: "ask" });
@@ -227,6 +280,13 @@ describe("v4 step journal", () => {
     expect(state.snapshot()[0].status).toBe("cancelled");
   });
 
+  it("keeps the live snapshot cancelled when queued success follows", async () => {
+    const { store, state } = await setup();
+    await state.request("step.enter", { path: ["approval"], kind: "ask" });
+    await store.append("cancelled", { status: "cancelled" });
+    await store.append("terminal", { status: "done" });
+    expect(state.snapshot()[0].status).toBe("cancelled");
+  });
   it("changes agent idempotency identity when step inputs or policy change", async () => {
     const { state } = await setup();
     const first = await state.request("step.enter", {

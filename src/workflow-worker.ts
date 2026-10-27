@@ -298,7 +298,7 @@ export async function runWorkflow(
     }
     throw executionError;
   } finally {
-    engine.v4?.close();
+    if (engine.v4) await engine.v4.close();
     opts.signal?.removeEventListener("abort", forwardAbort);
   }
 }

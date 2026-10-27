@@ -1410,7 +1410,7 @@ describe("v4 workflow public tools", () => {
     const waiting = getLiveWorkflowV4Store(workflowId)!
       .snapshot()
       .find((step) => step.status === "waiting_for_input")!;
-    getLiveWorkflowV4Store(workflowId)!.close();
+    await getLiveWorkflowV4Store(workflowId)!.close();
     await expect(interruptedRun).rejects.toThrow();
     durable.stop();
     await durable.drain();

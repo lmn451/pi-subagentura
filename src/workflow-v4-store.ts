@@ -88,9 +88,9 @@ export function workflowV4Steps(
   for (const event of events) {
     if (event.kind === "v4.step") nodes.set(key(event.data.path), event.data);
   }
-  const terminal = events.findLast(
-    (event) => event.kind === "cancelled" || event.kind === "terminal",
-  );
+  const terminal =
+    events.findLast((event) => event.kind === "cancelled") ??
+    events.findLast((event) => event.kind === "terminal");
   const terminalStatus =
     terminal?.data.status ??
     (terminal?.kind === "cancelled" ? "cancelled" : undefined);
@@ -618,13 +618,14 @@ export class WorkflowV4Store {
     return item.ref.type === "text" ? content : JSON.parse(content);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.closed = true;
     for (const waiter of this.waiters.values())
       waiter.reject(new Error("Workflow interrupted."));
     this.waiters.clear();
     const liveId = liveStoreIds.get(this);
     if (liveId && liveStores.get(liveId) === this) liveStores.delete(liveId);
+    await this.tail;
   }
 }
 

@@ -61,10 +61,10 @@ afterEach(async () => {
         }),
       );
     }
-    run.state.close();
+    await run.state.close();
   }
   await Promise.all(running.map((run) => run.settled));
-  for (const state of stepStores.splice(0)) state.close();
+  for (const state of stepStores.splice(0)) await state.close();
   for (const store of stores.splice(0)) await store.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -147,7 +147,7 @@ async function durablyInterrupt(
       source: "durable_interrupt",
     }),
   );
-  state.close();
+  await state.close();
   try {
     await running;
   } finally {
@@ -157,6 +157,24 @@ async function durablyInterrupt(
     });
     await store.close();
   }
+}
+
+function waitForWorkflowTransition<T>(
+  transition: Promise<T>,
+  running: Promise<unknown>,
+  description: string,
+): Promise<T> {
+  return Promise.race([
+    transition,
+    running.then(
+      () => {
+        throw new Error(`Workflow completed before ${description}.`);
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
 }
 
 describe("v4 durable policy recovery", () => {
@@ -223,6 +241,7 @@ describe("v4 durable policy recovery", () => {
 
     const firstDurable = new DurableWorkflow(store);
     const firstController = new AbortController();
+    const firstGateWaiting = Promise.withResolvers<void>();
     const firstRun = runWorkflow(vmScript, {
       args: {},
       cwd: root,
@@ -230,6 +249,16 @@ describe("v4 durable policy recovery", () => {
       durable: firstDurable,
       runAgent,
       signal: firstController.signal,
+      onStep: (steps) => {
+        if (
+          steps.some(
+            (step) =>
+              step.path.join("/") === "approval" &&
+              step.status === "waiting_for_input",
+          )
+        )
+          firstGateWaiting.resolve();
+      },
     });
     const firstSettled = firstRun.then(
       () => undefined,
@@ -237,8 +266,10 @@ describe("v4 durable policy recovery", () => {
     );
     let firstCapture: ErrorSummary | undefined;
     try {
-      await vi.waitFor(() =>
-        expect(gateWaitingCount(store.events)).toBeGreaterThan(0),
+      await waitForWorkflowTransition(
+        firstGateWaiting.promise,
+        firstRun,
+        "the initial approval gate",
       );
       firstCapture = checkpointValue(store.events);
       expect(firstCapture).toBeDefined();
@@ -266,6 +297,7 @@ describe("v4 durable policy recovery", () => {
     stores.push(resumedStore);
     const resumedDurable = new DurableWorkflow(resumedStore);
     const resumedController = new AbortController();
+    const resumedGateWaiting = Promise.withResolvers<void>();
     const resumedRun = runWorkflow(vmScript, {
       args: {},
       cwd: root,
@@ -273,14 +305,27 @@ describe("v4 durable policy recovery", () => {
       durable: resumedDurable,
       runAgent,
       signal: resumedController.signal,
+      onStep: (steps) => {
+        if (
+          gateWaitingCount(resumedStore.events) > 1 &&
+          steps.some(
+            (step) =>
+              step.path.join("/") === "approval" &&
+              step.status === "waiting_for_input",
+          )
+        )
+          resumedGateWaiting.resolve();
+      },
     });
     const resumedSettled = resumedRun.then(
       () => undefined,
       () => undefined,
     );
     try {
-      await vi.waitFor(() =>
-        expect(gateWaitingCount(resumedStore.events)).toBeGreaterThan(1),
+      await waitForWorkflowTransition(
+        resumedGateWaiting.promise,
+        resumedRun,
+        "the resumed approval gate",
       );
       const live = getLiveWorkflowV4Store(resumedStore.id);
       expect(live?.getStep(["approval"])).toMatchObject({

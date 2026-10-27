@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,26 @@ import {
 } from "../src/workflow-run-store";
 import { zeroUsage } from "../src/usage";
 import type { WorkflowAgentRunner } from "../src/workflow-core";
+
+// Worker-thread integration setup is asynchronous; short deadlines are tested directly.
+const WORKER_TIMEOUT_MS = 2_000;
+
+function waitForCallback<T>(
+  started: Promise<T>,
+  running: Promise<unknown>,
+): Promise<T> {
+  return Promise.race([
+    started,
+    running.then(
+      () => {
+        throw new Error("Workflow completed before the callback started.");
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
+}
 
 const roots: string[] = [];
 const stores: WorkflowRunStore[] = [];
@@ -29,7 +49,7 @@ describe("v4 workflow step cancellation", () => {
         async run(ctx) {
           let timedOut = false;
           try {
-            await ctx.step("timed", { timeout: 150 }, () =>
+            await ctx.step("timed", { timeout: ${WORKER_TIMEOUT_MS} }, () =>
               ctx.ask("approval", { prompt: "Continue?" }));
           } catch (error) {
             timedOut = error?.category === "timeout";
@@ -50,35 +70,45 @@ describe("v4 workflow step cancellation", () => {
       output: "unused",
       usage: { ...zeroUsage() },
     });
-    let inputSignal: AbortSignal | undefined;
+    const inputStarted = Promise.withResolvers<AbortSignal | undefined>();
     const running = runWorkflow(script, {
       durable,
       runAgent: runner,
-      requestInput: (_request, signal?: AbortSignal) =>
-        new Promise((_resolve, reject) => {
-          inputSignal = signal;
-          signal?.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
-          });
-        }),
+      requestInput: (_request, signal?: AbortSignal) => {
+        inputStarted.resolve(signal);
+        const { promise, reject } = Promise.withResolvers<unknown>();
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+        return promise;
+      },
     });
 
-    await vi.waitFor(() => expect(inputSignal).toBeInstanceOf(AbortSignal));
-    await expect(running).resolves.toMatchObject({
-      result: { timedOut: true, after: "continued" },
-    });
-    expect(inputSignal?.aborted).toBe(true);
-    const approvalStates = store.events.filter(
-      (event) =>
-        event.kind === "v4.step" &&
-        event.data.path.join("/") === "timed/approval",
-    );
-    expect(
-      approvalStates.some((event) => event.data.status === "waiting_for_input"),
-    ).toBe(true);
-    expect(approvalStates.at(-1)?.data.status).not.toBe("waiting_for_input");
-    durable.stop();
-    await durable.drain();
+    try {
+      const inputSignal = await waitForCallback(inputStarted.promise, running);
+      expect(inputSignal).toBeInstanceOf(AbortSignal);
+      await expect(running).resolves.toMatchObject({
+        result: { timedOut: true, after: "continued" },
+      });
+      expect(inputSignal?.aborted).toBe(true);
+      const approvalStates = store.events.filter(
+        (event) =>
+          event.kind === "v4.step" &&
+          event.data.path.join("/") === "timed/approval",
+      );
+      expect(
+        approvalStates.some(
+          (event) => event.data.status === "waiting_for_input",
+        ),
+      ).toBe(true);
+      expect(approvalStates.at(-1)?.data.status).not.toBe("waiting_for_input");
+    } finally {
+      // The readiness race/assertion reports failures; this only settles the run
+      // before fixture teardown.
+      await running.catch(() => {});
+      durable.stop();
+      await durable.drain();
+    }
   });
 
   it("collects a timed out agent step after its cancelled runner settles", async () => {
@@ -87,15 +117,17 @@ describe("v4 workflow step cancellation", () => {
         async run(ctx) {
           return await ctx.agent("slow-agent", {
             prompt: "wait for cancellation",
-            timeout: 50,
+            timeout: ${WORKER_TIMEOUT_MS},
             failure: "collect",
           });
         } });`;
     let agentSignal: AbortSignal | undefined;
+    const agentStarted = Promise.withResolvers<AbortSignal>();
     let settledAfterCancellation = false;
     const runner: WorkflowAgentRunner = async ({ signal }) => {
       if (!signal) throw new Error("Expected an agent abort signal.");
       agentSignal = signal;
+      agentStarted.resolve(signal);
       if (!signal.aborted) {
         const { promise, resolve } = Promise.withResolvers<void>();
         signal.addEventListener("abort", () => resolve(), { once: true });
@@ -116,20 +148,26 @@ describe("v4 workflow step cancellation", () => {
     };
     const running = runWorkflow(script, { runAgent: runner });
 
-    await vi.waitFor(() => expect(agentSignal).toBeInstanceOf(AbortSignal));
-    await expect(running).resolves.toMatchObject({
-      result: {
-        ok: false,
-        error: {
-          category: "timeout",
-          stage: "workflow",
-          path: ["slow-agent"],
+    try {
+      await waitForCallback(agentStarted.promise, running);
+      await expect(running).resolves.toMatchObject({
+        result: {
+          ok: false,
+          error: {
+            category: "timeout",
+            stage: "workflow",
+            path: ["slow-agent"],
+          },
         },
-      },
-      cancelledCount: 1,
-    });
-    expect(agentSignal?.aborted).toBe(true);
-    expect(settledAfterCancellation).toBe(true);
+        cancelledCount: 1,
+      });
+      expect(agentSignal?.aborted).toBe(true);
+      expect(settledAfterCancellation).toBe(true);
+    } finally {
+      // The readiness race/assertion reports failures; this only settles the run
+      // before fixture teardown.
+      await running.catch(() => {});
+    }
   });
 
   it("allows an ordinary try/catch to recover a rejected agent call", async () => {
@@ -188,7 +226,7 @@ describe("v4 workflow step cancellation", () => {
       export default defineWorkflow({ name: "nested-timeout-parent", version: 1,
         async run(ctx) {
           return await ctx.workflow("child", {}, {
-            timeout: 50,
+            timeout: ${WORKER_TIMEOUT_MS},
             failure: "collect",
           });
         } });`;
@@ -217,9 +255,11 @@ describe("v4 workflow step cancellation", () => {
     const durable = new DurableWorkflow(store);
     let agentSignal: AbortSignal | undefined;
     let settledAfterCancellation = false;
+    const agentStarted = Promise.withResolvers<AbortSignal>();
     const runner: WorkflowAgentRunner = async ({ signal }) => {
       if (!signal) throw new Error("Expected an agent abort signal.");
       agentSignal = signal;
+      agentStarted.resolve(signal);
       if (!signal.aborted) {
         const { promise, resolve } = Promise.withResolvers<void>();
         signal.addEventListener("abort", () => resolve(), { once: true });
@@ -245,7 +285,7 @@ describe("v4 workflow step cancellation", () => {
     });
 
     try {
-      await vi.waitFor(() => expect(agentSignal).toBeInstanceOf(AbortSignal));
+      await waitForCallback(agentStarted.promise, running);
       await expect(running).resolves.toMatchObject({
         result: {
           ok: false,
@@ -265,6 +305,9 @@ describe("v4 workflow step cancellation", () => {
       );
       expect(childStates.at(-1)?.data.status).toBe("cancelled");
     } finally {
+      // The readiness race/assertion reports failures; this only settles the run
+      // before fixture teardown.
+      await running.catch(() => {});
       durable.stop();
       await durable.drain();
     }
@@ -275,7 +318,7 @@ describe("v4 workflow step cancellation", () => {
       export default defineWorkflow({ name: "legacy-descendant-timeout", version: 1,
         async run(ctx) {
           return await ctx.workflow("legacy-child", {}, {
-            timeout: 50,
+            timeout: ${WORKER_TIMEOUT_MS},
             failure: "collect",
           });
         } });`;
@@ -283,10 +326,12 @@ describe("v4 workflow step cancellation", () => {
       `export const meta = { name: "legacy-child", description: "d" };\n` +
       `return await agent("slow");`;
     let agentSignal: AbortSignal | undefined;
+    const agentStarted = Promise.withResolvers<AbortSignal>();
     let settledAfterCancellation = false;
     const runner: WorkflowAgentRunner = async ({ signal }) => {
       if (!signal) throw new Error("Expected an agent abort signal.");
       agentSignal = signal;
+      agentStarted.resolve(signal);
       if (!signal.aborted) {
         const { promise, resolve } = Promise.withResolvers<void>();
         signal.addEventListener("abort", () => resolve(), { once: true });
@@ -310,20 +355,26 @@ describe("v4 workflow step cancellation", () => {
       runAgent: runner,
     });
 
-    await vi.waitFor(() => expect(agentSignal).toBeInstanceOf(AbortSignal));
-    await expect(running).resolves.toMatchObject({
-      result: {
-        ok: false,
-        error: {
-          category: "timeout",
-          stage: "workflow",
-          path: ["legacy-child"],
+    try {
+      await waitForCallback(agentStarted.promise, running);
+      await expect(running).resolves.toMatchObject({
+        result: {
+          ok: false,
+          error: {
+            category: "timeout",
+            stage: "workflow",
+            path: ["legacy-child"],
+          },
         },
-      },
-      cancelledCount: 1,
-    });
-    expect(agentSignal?.aborted).toBe(true);
-    expect(settledAfterCancellation).toBe(true);
+        cancelledCount: 1,
+      });
+      expect(agentSignal?.aborted).toBe(true);
+      expect(settledAfterCancellation).toBe(true);
+    } finally {
+      // The readiness race/assertion reports failures; this only settles the run
+      // before fixture teardown.
+      await running.catch(() => {});
+    }
   });
 
   it("preserves a nested budget failure without retrying or double spending", async () => {

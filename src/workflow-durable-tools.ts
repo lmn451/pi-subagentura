@@ -874,7 +874,7 @@ export function registerDurableWorkflowTools(
           throw new Error("Workflow input was dismissed or interrupted.");
         await state.answer(params.path, answer, step.attempt);
         if (local) {
-          local.close();
+          await local.close();
           await opened!.close();
           opened = undefined;
           return run(
@@ -896,7 +896,7 @@ export function registerDurableWorkflowTools(
       } catch (error) {
         return failure(error);
       } finally {
-        local?.close();
+        if (local) await local.close();
         await opened?.close();
       }
     },

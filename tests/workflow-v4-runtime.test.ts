@@ -433,7 +433,7 @@ describe("v4 workflow runtime", () => {
         attempt: 1,
       });
     } finally {
-      state.close();
+      await state.close();
     }
   });
 
@@ -782,7 +782,7 @@ describe("v4 workflow runtime", () => {
       await expect(run(null)).resolves.toBe("default result");
       expect(agent).toHaveBeenCalledTimes(2);
     } finally {
-      state.close();
+      await state.close();
     }
   });
 
@@ -824,7 +824,7 @@ describe("v4 workflow runtime", () => {
         await expect(run(secondOptions)).resolves.toBe("agent-result-2");
         expect(agent).toHaveBeenCalledTimes(2);
       } finally {
-        state.close();
+        await state.close();
       }
     },
   );
@@ -865,7 +865,7 @@ describe("v4 workflow runtime", () => {
         isolation: "process",
       });
     } finally {
-      state.close();
+      await state.close();
     }
   });
 
@@ -953,7 +953,7 @@ describe("v4 workflow runtime", () => {
       );
     } finally {
       releaseEntry.resolve();
-      state.close();
+      await state.close();
     }
   });
 
@@ -982,37 +982,64 @@ describe("v4 workflow runtime", () => {
       expect(agent).not.toHaveBeenCalled();
       expect(state.snapshot()).toEqual([]);
     } finally {
-      state.close();
+      await state.close();
     }
   });
 
   it("records timeout/cancellation outcomes and does not retry cancellation", async () => {
     const bridge = makeBridge();
     let calls = 0;
-    await expect(
-      runWorkflowDefinition(
+    let stepSignal: AbortSignal | undefined;
+    let settledAfterCancellation = false;
+    const started = Promise.withResolvers<void>();
+    const settled = Promise.withResolvers<void>();
+    vi.useFakeTimers();
+    try {
+      const running = runWorkflowDefinition(
         definition((ctx) =>
           ctx.step(
             "slow",
-            {
-              policy: { timeout: "0.005 seconds" },
-            },
-            async () => {
+            { policy: { timeout: 50 } },
+            async (signal: AbortSignal) => {
               calls++;
-              return new Promise(() => {});
+              stepSignal = signal;
+              started.resolve();
+              const aborted = Promise.withResolvers<void>();
+              if (signal.aborted) aborted.resolve();
+              else
+                signal.addEventListener("abort", () => aborted.resolve(), {
+                  once: true,
+                });
+              await aborted.promise;
+              const late = Promise.withResolvers<void>();
+              setTimeout(late.resolve, 150);
+              await late.promise;
+              settledAfterCancellation = true;
+              settled.resolve();
+              return "late";
             },
           ),
         ),
         {},
         bridge,
-      ),
-    ).rejects.toBeInstanceOf(WorkflowTimeoutError);
-    expect(calls).toBe(1);
-    expect(
-      bridge.events.find(({ action }: StepEvent) => action === "step.fail")
-        ?.payload.error.category,
-    ).toBe("timeout");
-
+      );
+      await started.promise;
+      const timedOut =
+        expect(running).rejects.toBeInstanceOf(WorkflowTimeoutError);
+      await vi.advanceTimersByTimeAsync(50);
+      await timedOut;
+      expect(calls).toBe(1);
+      expect(stepSignal?.aborted).toBe(true);
+      expect(
+        bridge.events.find(({ action }: StepEvent) => action === "step.fail")
+          ?.payload.error.category,
+      ).toBe("timeout");
+      await vi.advanceTimersByTimeAsync(150);
+      await settled.promise;
+      expect(settledAfterCancellation).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
     const abort = new AbortController();
     const cancelledBridge = makeBridge({ signal: abort.signal });
     await expect(
