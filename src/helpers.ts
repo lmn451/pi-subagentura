@@ -18,6 +18,7 @@ import type {
 
 import {
   createAgentSession,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
@@ -25,12 +26,6 @@ import {
   type ExtensionAPI,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  copyProviderConfig,
-  createCompatibleSessionRuntime,
-  type CompatibleSessionRuntime,
-} from "./pi-sdk-compat";
 import {
   createWorkflowStructuredOutputTool,
   type WorkflowStructuredOutputCapture,
@@ -969,9 +964,9 @@ export async function startSubagentJob(
   }
 
   const jobId = generateJobId();
-  let sessionRuntime: CompatibleSessionRuntime;
+  let sessionRuntime: ModelRuntime;
   try {
-    sessionRuntime = await createCompatibleSessionRuntime();
+    sessionRuntime = await ModelRuntime.create();
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
   }
@@ -986,11 +981,17 @@ export async function startSubagentJob(
       parentModelRegistry,
     );
     if (targetModel) {
-      copyProviderConfig(
-        sessionRuntime,
-        parentModelRegistry,
+      const providerConfig = parentModelRegistry?.getRegisteredProviderConfig(
         targetModel.provider,
       );
+      if (providerConfig) {
+        sessionRuntime.registerProvider(targetModel.provider, providerConfig);
+      } else {
+        const provider = parentModelRegistry?.getRegisteredNativeProvider(
+          targetModel.provider,
+        );
+        if (provider) sessionRuntime.registerNativeProvider(provider);
+      }
     }
   } catch (error) {
     throw annotateSpawnFailure(error, "model_resolution");
@@ -1079,7 +1080,8 @@ export async function startSubagentJob(
 
   let session: AgentSession;
   try {
-    const sessionOptions = buildSessionOptions(sessionRuntime, {
+    const sessionOptions = {
+      modelRuntime: sessionRuntime,
       sessionManager: SessionManager.inMemory(),
       model: targetModel,
       cwd,
@@ -1098,12 +1100,8 @@ export async function startSubagentJob(
             excludeTools: [...READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES],
           }
         : {}),
-    });
-    session = (
-      await createAgentSession(
-        sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
-      )
-    ).session;
+    };
+    session = (await createAgentSession(sessionOptions)).session;
   } catch (error) {
     throw annotateSpawnFailure(error, "session_creation");
   }

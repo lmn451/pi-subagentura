@@ -20,7 +20,10 @@ import {
   type JobState,
   type StartSubagentJobResult,
 } from "./helpers";
-import { launchInteractiveSubagent } from "./interactive-tmux";
+import {
+  launchInteractiveSubagent,
+  registerInteractiveSubagentState,
+} from "./interactive-tmux";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
