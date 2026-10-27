@@ -14,6 +14,7 @@ import { cancelInteractiveSubagent } from "./interactive-tmux";
 import {
   cancelWorkflowJob,
   normalizeCancelledWorkflowState,
+  requestDurableWorkflowCancellation,
   workflowJobsForOwner,
 } from "./workflow-jobs";
 import {
@@ -32,6 +33,7 @@ export interface CancelAllResult {
   workflowsAborted: number;
   interactiveKilled: number;
   interactivePreserved: number;
+  workflowsFailed: number;
   snapshots?: CancellationSnapshotReceipt[];
 }
 
@@ -43,6 +45,7 @@ export async function cancelAllFlows(
     workflowsAborted: 0,
     interactiveKilled: 0,
     interactivePreserved: 0,
+    workflowsFailed: 0,
     snapshots: [],
   };
   const snapshots = result.snapshots;
@@ -101,7 +104,35 @@ export async function cancelAllFlows(
     });
     addSnapshot(job.cancellationSnapshot);
   }
+  const failedWorkflowIds = new Set<string>();
+  for (const workflow of workflowJobsForOwner(owner)) {
+    if (workflow.status === "running") {
+      try {
+        if (workflow.durable) {
+          await requestDurableWorkflowCancellation(
+            workflow.durable.store,
+            workflow,
+            { suppressCompletionNotification: true },
+          );
+        } else {
+          workflow.suppressCompletionNotification = true;
+          cancelWorkflowJob(workflow, "explicit_cancel");
+        }
+        result.workflowsAborted++;
+      } catch {
+        failedWorkflowIds.add(workflow.id);
+        result.workflowsFailed++;
+      }
+    }
+    if (workflow.status === "cancelled") {
+      normalizeCancelledWorkflowState(workflow);
+      for (const receipt of workflow.cancellationSnapshots ?? []) {
+        addSnapshot(receipt);
+      }
+    }
+  }
   for (const job of jobs) {
+    if (job.workflowId && failedWorkflowIds.has(job.workflowId)) continue;
     try {
       // Prefer the controller so the abort handler cascades to descendants;
       // fall back to a direct session abort for jobs spawned without one.
@@ -117,25 +148,10 @@ export async function cancelAllFlows(
   }
 
   // 2. Abort all running workflows
-  for (const workflow of workflowJobsForOwner(owner)) {
-    if (workflow.status === "running") {
-      // Cancel-all owns the aggregate notification, so retain the existing
-      // suppression while routing state changes through the shared helper.
-      workflow.suppressCompletionNotification = true;
-      cancelWorkflowJob(workflow, "explicit_cancel");
-      result.workflowsAborted++;
-    }
-    if (workflow.status === "cancelled") {
-      normalizeCancelledWorkflowState(workflow);
-      for (const receipt of workflow.cancellationSnapshots ?? []) {
-        addSnapshot(receipt);
-      }
-    }
-  }
-
   // 3. Kill active interactive agents; preserve confirmed-idle ones
   for (const state of interactiveStates) {
     if (state.status === "running" || state.status === "unknown") {
+      if (state.workflowId && failedWorkflowIds.has(state.workflowId)) continue;
       try {
         const cancelled = cancelInteractiveSubagent(
           state.id,

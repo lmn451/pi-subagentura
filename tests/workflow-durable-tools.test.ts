@@ -704,47 +704,74 @@ describe("durable public tools", () => {
       });
       await createdStore.append("terminal", {
         status: "done",
-        policy: "group",
-        groupId: "retry",
-        references: [{ label: "result", value: "result" }],
-        completedAt: 1,
-      },
-      owner,
-    );
-    sealCompletionGroups(owner);
-    await expect(
-      restoreDurableCompletionGroups(owner, undefined, async () => {
-        throw new Error("temporary journal failure");
-      }),
-    ).rejects.toThrow("temporary journal failure");
-    await restoreDurableCompletionGroups(owner, undefined, async () => {
-      registerRecoveredCompletionMember(
-        "workflow",
-        "recovered-run",
-        "group",
-        "retry",
-        owner,
+        result: encodeRunValue({
+          result: "done",
+          agentsSpawned: 0,
+          errorCount: 0,
+        }),
+        completedAt: Date.now(),
+      });
+      await createdStore.close();
+
+      const api = registerDurableWorkflowTools(
+        pi,
+        () => currentOwner,
+        () => vi.fn(),
+        () => false,
+        root,
       );
-    });
-    publishCompletion(
-      {
-        schemaVersion: 1,
-        completionId: "workflow:recovered-run",
-        source: "workflow",
-        sourceId: "recovered-run",
-        label: "recovered",
-        status: "done",
-        policy: "group",
-        groupId: "retry",
-        references: [{ label: "result", value: "result" }],
-        completedAt: 1,
-      },
-      owner,
-    );
-    expect(prepareCompletionManifest(owner)!.details.completionIds).toEqual(
-      expect.arrayContaining(["interactive:peer", "workflow:recovered-run"]),
-    );
-    clearCompletionCoordinator(owner);
+      pendingRead = api.inspect(createdStore.id, ctx, true);
+      await inspectPaused.promise;
+
+      clearCompletionCoordinator(oldOwner);
+      scope.generation++;
+      scope.parentStreaming = true;
+      currentOwner = sessionOwner(scope);
+      registerCompletionCoordinator(pi, scope);
+      await restoreDurableWorkflowRuns(pi, currentOwner, ctx);
+
+      inspectBarrier.resolve();
+      const result = await pendingRead;
+      expect(result.details.status).toBe("done");
+
+      let receipts = "";
+      try {
+        receipts = await readFile(
+          sessionLedgerPath(
+            root,
+            "same-parent",
+            "subagentura-completion-consumed",
+          ),
+          "utf8",
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const receiptRecords = receipts
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(receiptRecords).not.toContainEqual(
+        expect.objectContaining({
+          source: "workflow",
+          sourceId: createdStore.id,
+        }),
+      );
+      const manifest = prepareCompletionManifest(currentOwner);
+      expect(manifest?.details.completionIds).toEqual([
+        `workflow:${createdStore.id}`,
+      ]);
+      expect(manifest?.content).toContain('"status":"done"');
+    } finally {
+      inspectBarrier.resolve();
+      await pendingRead?.catch(() => undefined);
+      listSpy.mockRestore();
+      inspectSpy.mockRestore();
+      clearCompletionCoordinator(oldOwner);
+      clearCompletionCoordinator(currentOwner);
+      await store?.close();
+      if (store) await rm(store.directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects a truncated durable recovery scan above the list limit", async () => {

@@ -41,7 +41,11 @@ export function registerCancelAllFlows(
       handler: async (ctx) => {
         const result = await cancelAllFlows(owner());
         // A failed durable intent must leave the foreground run alive for retry.
-        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
+        if (
+          result.workflowsFailed === 0 &&
+          result.workflowsAborted === 0 &&
+          typeof ctx.abort === "function"
+        ) {
           ctx.abort();
         }
         const parts: string[] = [];
@@ -52,6 +56,8 @@ export function registerCancelAllFlows(
           parts.push(`${result.interactiveKilled} interactive agent(s)`);
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
+        if (result.workflowsFailed > 0)
+          parts.push(`Failed to cancel ${result.workflowsFailed} workflow(s). Retry`);
 
         if (parts.length === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
@@ -76,7 +82,11 @@ export function registerCancelAllFlows(
       handler: async (_args, ctx) => {
         const result = await cancelAllFlows(owner());
         // A failed durable intent must leave the foreground run alive for retry.
-        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
+        if (
+          result.workflowsFailed === 0 &&
+          result.workflowsAborted === 0 &&
+          typeof ctx.abort === "function"
+        ) {
           ctx.abort();
         }
         const parts: string[] = [];
@@ -87,6 +97,8 @@ export function registerCancelAllFlows(
           parts.push(`${result.interactiveKilled} interactive agent(s)`);
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
+        if (result.workflowsFailed > 0)
+          parts.push(`Failed to cancel ${result.workflowsFailed} workflow(s). Retry`);
 
         if (parts.length === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
