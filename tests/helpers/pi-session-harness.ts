@@ -1,16 +1,11 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import {
-  buildSessionOptions,
-  createCompatibleSessionRuntime,
-  findModel,
-  registerProvider,
-} from "../../src/pi-sdk-compat";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,25 +73,32 @@ export async function createPiSessionHarness(
   } = {},
 ): Promise<PiSessionHarness> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-subagentura-session-"));
-  const sessionRuntime = await createCompatibleSessionRuntime({
-    agentDir,
-    authStorageData: {
-      "subagentura-faux": { type: "api_key", key: "test" },
-    },
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: null,
+    allowModelNetwork: false,
+    refreshOnCreate: false,
   });
   const contexts: Context[] = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
   let toolCallSequence = 0;
   const fauxProvider = {
-    api: "subagentura-faux",
-    apiKey: "test",
-    baseUrl: "http://127.0.0.1.invalid",
-    models: [
+    id: "subagentura-faux",
+    name: "Subagentura faux provider",
+    auth: {
+      apiKey: {
+        name: "Faux test key",
+        resolve: async () => ({ auth: { apiKey: "test" } }),
+      },
+    },
+    getModels: () => [
       {
         id: "faux-model",
         name: "Faux Model",
-        api: "subagentura-faux",
+        api: "openai-completions",
+        provider: "subagentura-faux",
+        baseUrl: "http://127.0.0.1.invalid/v1",
         reasoning: false,
         input: ["text"],
         cost: {
@@ -109,6 +111,12 @@ export async function createPiSessionHarness(
         maxTokens: 4_096,
       },
     ],
+    stream: (_model: unknown, context: Context) => {
+      contexts.push(context);
+      const stream = createAssistantMessageEventStream();
+      pending.push(stream);
+      return stream;
+    },
     streamSimple: (_model: unknown, context: Context) => {
       contexts.push(context);
       const stream = createAssistantMessageEventStream();
@@ -116,10 +124,8 @@ export async function createPiSessionHarness(
       return stream;
     },
   };
-  const registerFauxProvider = () =>
-    registerProvider(sessionRuntime, "subagentura-faux", fauxProvider);
-  registerFauxProvider();
-  const model = findModel(sessionRuntime, "subagentura-faux", "faux-model");
+  modelRuntime.registerNativeProvider(fauxProvider);
+  const model = modelRuntime.getModel("subagentura-faux", "faux-model");
   if (!model) throw new Error("faux model registration failed");
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -160,15 +166,16 @@ export async function createPiSessionHarness(
     if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
     else process.env.ARTIFACT_DIR = previousArtifactDir;
   }
-  const sessionOptions = buildSessionOptions(sessionRuntime, {
+  const sessionOptions = {
     cwd,
     agentDir,
+    modelRuntime,
     model,
     sessionManager,
     settingsManager,
     resourceLoader,
     noTools: options.includeTools ? undefined : "all",
-  });
+  };
   const { session } = await createAgentSession(
     sessionOptions as unknown as Parameters<typeof createAgentSession>[0],
   );

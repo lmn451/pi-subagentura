@@ -25,6 +25,7 @@ import {
   WorkflowJobCapacityError,
   type WorkflowJobState,
   getWorkflowJobForOwner,
+  withWorkflowTerminalTransition,
 } from "./workflow-jobs";
 import {
   resolveLiveSessionScope,

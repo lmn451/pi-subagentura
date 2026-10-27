@@ -699,8 +699,14 @@ export function startWorkflowJob(
           const terminal = state.durable!.store.events.findLast((event) =>
             ["cancelled", "rejected", "terminal"].includes(event.kind),
           );
-          if (terminal) {
-            if (terminal.data.status === "done") return;
+          if (terminal?.data.status === "done") return;
+          if (
+            terminal &&
+            !(
+              terminal.kind === "cancelled" &&
+              !state.durable!.stepBased
+            )
+          ) {
             throw new Error("Workflow interrupted before result commit.");
           }
           if (state.durableInterrupted || abort.signal.aborted)

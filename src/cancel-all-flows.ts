@@ -88,8 +88,6 @@ export async function cancelAllFlows(
     reason: "cancel-all-flows aborted every running flow",
   };
   for (const job of jobs) {
-    const cancellationAt = Date.now();
-    job.cancellation = { ...jobCancellation, at: cancellationAt };
     job.cancellationSnapshot = snapshotInProcessSession({
       kind: "in-process",
       jobId: job.id,
@@ -133,6 +131,7 @@ export async function cancelAllFlows(
   }
   for (const job of jobs) {
     if (job.workflowId && failedWorkflowIds.has(job.workflowId)) continue;
+    job.cancellation = { ...jobCancellation, at: Date.now() };
     try {
       // Prefer the controller so the abort handler cascades to descendants;
       // fall back to a direct session abort for jobs spawned without one.
