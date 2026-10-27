@@ -217,6 +217,24 @@ describe("v4 step journal", () => {
     ).toBe("waiting_for_input");
   });
 
+  it("keeps cancelled steps retired when a queued success follows", () => {
+    const events = [
+      {
+        kind: "v4.step",
+        data: {
+          path: ["approval"],
+          status: "running",
+          input: "private",
+          policy: "private",
+        },
+      },
+      { kind: "cancelled", data: { status: "cancelled" } },
+      { kind: "terminal", data: { status: "done" } },
+    ];
+
+    expect(workflowV4Steps(events)[0].status).toBe("cancelled");
+  });
+
   it("publishes a live store snapshot with terminal active steps retired", async () => {
     const { store, state } = await setup();
     await state.request("step.enter", { path: ["approval"], kind: "ask" });
@@ -224,6 +242,14 @@ describe("v4 step journal", () => {
       status: "cancelled",
       completedAt: Date.now(),
     });
+    expect(state.snapshot()[0].status).toBe("cancelled");
+  });
+
+  it("keeps the live snapshot cancelled when queued success follows", async () => {
+    const { store, state } = await setup();
+    await state.request("step.enter", { path: ["approval"], kind: "ask" });
+    await store.append("cancelled", { status: "cancelled" });
+    await store.append("terminal", { status: "done" });
     expect(state.snapshot()[0].status).toBe("cancelled");
   });
 

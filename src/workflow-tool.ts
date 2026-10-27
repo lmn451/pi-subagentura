@@ -961,7 +961,7 @@ export function registerWorkflowTool(
       durable: Type.Optional(
         Type.Boolean({
           description:
-            "Persist this run for explicit restart recovery in the same host/cwd. Defaults true for v4 definitions; legacy runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
+            "Persist this run for explicit restart recovery in the same host/cwd. Persistence is enabled only with durable:true; legacy runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
         }),
       ),
       script: Type.Optional(
@@ -1080,26 +1080,6 @@ export function registerWorkflowTool(
         };
       }
 
-      try {
-        if (
-          parseWorkflow(script).format === "definition" &&
-          params.durable !== false
-        )
-          return durableTools.run(
-            { ...params, script, durable: true },
-            signal,
-            onUpdate,
-            ctx,
-          );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: `Workflow not run: ${message}` }],
-          details: { status: "error", error: message },
-          isError: true,
-        };
-      }
-
       // Resolved here, inside the tool call, while the caller's orchestration
       // context and session manager are both still reachable. The guard above
       // refuses a workflow started from inside an in-process sub-agent (issue
@@ -1112,7 +1092,7 @@ export function registerWorkflowTool(
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
-        ...(params.durable === false && params.async === false
+        ...(params.async === false
           ? {
               requestInput: async (
                 request: unknown,

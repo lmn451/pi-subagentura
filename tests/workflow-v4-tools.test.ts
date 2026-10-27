@@ -156,6 +156,30 @@ async function executeTool(
 }
 
 describe("v4 workflow public tools", () => {
+  it.each([undefined, false])(
+    "keeps V4 execution session-scoped when durable is %s",
+    async (durable) => {
+      const current = setup(1, `memory-default-${durable ?? "omitted"}`);
+      registerWorkflowTool(current.pi, current.scope);
+      const result = await executeTool(
+        current.tools,
+        "workflow",
+        {
+          script: definition("memory-default", 'return { saved: false };'),
+          async: false,
+          ...(durable === undefined ? {} : { durable }),
+        },
+        current.ctx,
+      );
+
+      expect(result.details.status).toBe("done");
+      expect(result.content[0].text).toContain('"saved":false');
+      expect(
+        await WorkflowRunStore.list({ cwd: root, sessionId: "workflow-v4", root }),
+      ).toEqual([]);
+    },
+  );
+
   it("keeps cancellation retryable after marker persistence fails", async () => {
     const current = setup(1, "cancel-retry-owner");
     let agentStarted!: () => void;

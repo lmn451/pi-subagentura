@@ -815,8 +815,8 @@ It selects inline versus saved source, foreground versus background, owner ident
 `src/workflow-worker.ts` is the host engine and worker RPC server.
 `src/workflow-worker-thread.mjs` evaluates the script and owns DSL calls.
 `src/workflow-jobs.ts` owns background workflow state.
-Durable legacy runs are opt-in; V4 definition workflows use project-scoped
-durable runs by default unless `durable: false` is set. Both use
+Durable legacy and V4 definition runs require `durable: true`; omitted or false
+uses the in-memory engine. Persisted runs use
 `workflow-run-store.ts` journals,
 `workflow-durable.ts` replay/dispatch coordination,
 `workflow-durable-process.ts` process-attempt recovery, and

@@ -73,8 +73,8 @@ reuse an incompatible result or adopt an attempt with a different policy.
 Recovery preserves the recorded policy. The normal workflow step records remain
 the progress source; this adds no separate ledger or scheduler.
 
-V4 definitions use project-scoped durable storage by default. Pass
-`durable: false` for a non-durable run. Completed durable steps are reused only
+V4 definitions use the in-memory engine by default. Pass `durable: true` to
+opt into project-scoped durable storage. Completed durable steps are reused only
 when source definition, stable path, inputs, and policy remain compatible. A
 changed source hash causes the step to run again. `persist: false` omits a step
 output from durable storage; `cache: false` and `resume: false` disable reuse.

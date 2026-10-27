@@ -112,8 +112,8 @@ export default defineWorkflow({
 ```
 
 Pass this module source to `workflow({script, args})` or save it with
-`save_workflow`. V4 definitions use project-scoped durable storage by default;
-pass `durable: false` to run one without durable recovery. Use the durable run
+`save_workflow`. V4 definitions use the in-memory engine by default; pass
+`durable: true` to opt into project-scoped durable storage. Use the durable run
 tools to list, inspect, cancel, retrieve, or resume a persisted run. Resume is
 manual: a live Pi process must call `resume_workflow`; there is no daemon.
 Recovery re-executes the same source from the beginning and reuses a completed
@@ -163,10 +163,9 @@ step summary. Legacy `.mjs` workflows still cannot pause for interactive input.
 
 `save_workflow` stores a reusable definition. `inspect_workflow` reads/parses it
 without running agents. `workflow({name, args})` executes that definition;
-legacy `.mjs` definitions use the existing session-scoped behavior by default,
-while V4 typed definitions use project-scoped durability unless
-`durable:false` is passed. Async remains the default; `async:false` waits for
-the result. Saving a definition alone does not start a run.
+both legacy `.mjs` and V4 typed definitions use the in-memory engine unless
+`durable:true` is passed. Async remains the default; `async:false` waits for the
+result. Saving a definition alone does not start a run.
 
 `save_workflow({name, script, requireDurable:true})` checks V4 definition
 syntax before writing. For legacy `.mjs`, it also checks statically visible

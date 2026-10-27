@@ -90,8 +90,8 @@ Failed/unknown aspects never pass. After review, the workflow optionally asks
 whether to save the report as a run artifact; it never asks for permission to run
 the read-only review.
 
-V4 definitions are durable by default and use project-scoped run storage; set
-`durable: false` for an in-memory invocation. They support Node's erasable
+V4 definitions use the in-memory engine by default; pass `durable: true` to
+opt into project-scoped run storage. They support Node's erasable
 TypeScript syntax, but the workflow runner does not type-check it. Runtime
 imports must be named `defineWorkflow` / `schema` imports from
 `pi-subagentura/workflow`; other runtime imports are rejected. Node.js 24.12 or
@@ -266,8 +266,8 @@ bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, the
 run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
 durable: true})`. Use `async: false` for an immediate result. After an
 interruption, use `resume_workflow({workflowId})` in the same project. This
-legacy `.mjs` example opts into durability; V4 definitions are durable by
-default unless `durable: false` is supplied.
+legacy `.mjs` example opts into durability; V4 definitions use the in-memory
+engine by default and persist only when `durable: true` is supplied.
 
 `retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
 and `null`, but never cancellation. Every attempt may repeat agent side effects;
