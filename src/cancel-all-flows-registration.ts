@@ -53,7 +53,9 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
         if (result.workflowsFailed > 0)
-          parts.push(`Failed to cancel ${result.workflowsFailed} workflow(s). Retry`);
+          parts.push(
+            `Failed to cancel ${result.workflowsFailed} workflow(s). Retry`,
+          );
 
         if (parts.length === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
@@ -90,7 +92,9 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
         if (result.workflowsFailed > 0)
-          parts.push(`Failed to cancel ${result.workflowsFailed} workflow(s). Retry`);
+          parts.push(
+            `Failed to cancel ${result.workflowsFailed} workflow(s). Retry`,
+          );
 
         if (parts.length === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");

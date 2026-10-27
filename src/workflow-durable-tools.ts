@@ -219,9 +219,10 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
       ? "lower_bound"
       : "recorded",
     currentPhase: progress?.phase,
-    error: end?.data.error || interrupted?.data.error
-      ? safeWorkflowDiagnosticMessage()
-      : undefined,
+    error:
+      end?.data.error || interrupted?.data.error
+        ? safeWorkflowDiagnosticMessage()
+        : undefined,
     cancellationRequested:
       end?.kind === "cancelled" || end?.data.status === "cancelled",
   };
@@ -246,11 +247,7 @@ export function registerDurableWorkflowTools(
   /** Private fixture root; production callers use the user-owned run store. */
   storeRoot?: string,
 ) {
-  function scope(
-    ctx?: any,
-    project = false,
-    ownerToken = owner(),
-  ): RunScope {
+  function scope(ctx?: any, project = false, ownerToken = owner()): RunScope {
     const live = resolveLiveSessionScope(ownerToken);
     const cwd = ctx?.cwd ?? live?.cwd;
     const sessionId =

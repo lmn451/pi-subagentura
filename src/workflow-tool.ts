@@ -516,30 +516,30 @@ export function registerWorkflowTool(
           state =
             durableProcess?.previous ??
             launchInteractiveSubagent({
-            wrapCommand: durableProcess?.wrapCommand,
-            beforeDispatch: durableProcess?.beforeDispatch,
-            name: (label || "wf-agent").slice(0, 40),
-            task: prompt,
-            persona,
-            model,
-            cwd: ctx.cwd,
-            contextText: null,
-            background: true,
-            thinkingLevel,
-            supervisorOwner,
-            sessionScope: childScope,
-            spawnTreeContext: childScope?.spawnTreeContext,
-            workflowId: ownedWorkflowId,
-            completionOwner: "workflow",
-            completionPolicy: "each",
-            telemetryInvocationSource: "workflow",
-            telemetryAsync: workflowAsync,
-            telemetryCompletionPolicy,
-            spawnRequestedAt: launchRequestedAt,
-            onSpawnFailure: (failure) => {
-              initialFailure = failure;
-            },
-            ...(readOnly === true ? { readOnly: true } : {}),
+              wrapCommand: durableProcess?.wrapCommand,
+              beforeDispatch: durableProcess?.beforeDispatch,
+              name: (label || "wf-agent").slice(0, 40),
+              task: prompt,
+              persona,
+              model,
+              cwd: ctx.cwd,
+              contextText: null,
+              background: true,
+              thinkingLevel,
+              supervisorOwner,
+              sessionScope: childScope,
+              spawnTreeContext: childScope?.spawnTreeContext,
+              workflowId: ownedWorkflowId,
+              completionOwner: "workflow",
+              completionPolicy: "each",
+              telemetryInvocationSource: "workflow",
+              telemetryAsync: workflowAsync,
+              telemetryCompletionPolicy,
+              spawnRequestedAt: launchRequestedAt,
+              onSpawnFailure: (failure) => {
+                initialFailure = failure;
+              },
+              ...(readOnly === true ? { readOnly: true } : {}),
             });
         } catch (err) {
           if (durableAttempt)

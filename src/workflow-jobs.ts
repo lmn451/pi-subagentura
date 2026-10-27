@@ -702,10 +702,7 @@ export function startWorkflowJob(
           if (terminal?.data.status === "done") return;
           if (
             terminal &&
-            !(
-              terminal.kind === "cancelled" &&
-              !state.durable!.stepBased
-            )
+            !(terminal.kind === "cancelled" && !state.durable!.stepBased)
           ) {
             throw new Error("Workflow interrupted before result commit.");
           }

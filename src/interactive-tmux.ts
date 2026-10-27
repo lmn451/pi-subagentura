@@ -1363,16 +1363,10 @@ export async function getInteractivePaneLivenessDiagnosticAsync(
 ): Promise<PaneLivenessDiagnostic> {
   const mux = getMuxForState(state);
   if (mux.getPaneLivenessDiagnosticAsync) {
-    return mux.getPaneLivenessDiagnosticAsync(
-      state.paneId,
-      state.muxSession,
-    );
+    return mux.getPaneLivenessDiagnosticAsync(state.paneId, state.muxSession);
   }
   return {
-    liveness: await mux.getPaneLivenessAsync(
-      state.paneId,
-      state.muxSession,
-    ),
+    liveness: await mux.getPaneLivenessAsync(state.paneId, state.muxSession),
   };
 }
 

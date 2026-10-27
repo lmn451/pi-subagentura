@@ -552,4 +552,5 @@ For a typical machine (8–16 cores): ~2–4 process-backed agents run in parall
 | Full per-agent tool-call history tree         | Deferred                       |
 | Strong progress-event rate limiting           | Deferred                       |
 
-`/workflow <task>` creates a reusable script with stable operation IDs, validates it with `save_workflow({requireDurable:true})`, and explicitly starts a durable background run. `/workflows` shows `durable-ready` or `session-scoped` beside saved scripts; the label reports capability, and selecting a script runs it session-scoped. To persist a saved script's run, explicitly call `workflow({name, args, durable:true})`. Static readiness does not guarantee that every runtime input will produce unique operation IDs.
+For saved workflow execution defaults, durable opt-in, and readiness semantics,
+see the [workflow runtime contract](../WORKFLOW_RUNTIME.md#definitions-and-runs-are-different).
