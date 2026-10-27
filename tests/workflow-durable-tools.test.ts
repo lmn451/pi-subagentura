@@ -17,6 +17,7 @@ import {
   registerDurableWorkflowTools,
   restoreDurableWorkflowRuns,
 } from "../src/workflow-durable-tools";
+import { registerWorkflowTool } from "../src/workflow-tool";
 import {
   registerSessionScope,
   sessionOwner,
@@ -471,7 +472,7 @@ describe("durable public tools", () => {
       expect(errorResult.structuredContent).toMatchObject({
         status: "error",
         workflowId: errorId,
-        error: "workflow failed",
+        error: "Workflow failed; diagnostic details are available only locally.",
       });
 
       await rm(invalidSnapshotPath);

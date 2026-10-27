@@ -41,11 +41,7 @@ export function registerCancelAllFlows(
       handler: async (ctx) => {
         const result = await cancelAllFlows(owner());
         // A failed durable intent must leave the foreground run alive for retry.
-        if (
-          result.workflowsFailed === 0 &&
-          result.workflowsAborted === 0 &&
-          typeof ctx.abort === "function"
-        ) {
+        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
           ctx.abort();
         }
         const parts: string[] = [];
@@ -82,11 +78,7 @@ export function registerCancelAllFlows(
       handler: async (_args, ctx) => {
         const result = await cancelAllFlows(owner());
         // A failed durable intent must leave the foreground run alive for retry.
-        if (
-          result.workflowsFailed === 0 &&
-          result.workflowsAborted === 0 &&
-          typeof ctx.abort === "function"
-        ) {
+        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
           ctx.abort();
         }
         const parts: string[] = [];

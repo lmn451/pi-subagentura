@@ -25,6 +25,7 @@ import {
   WorkflowJobCapacityError,
   type WorkflowJobState,
   getWorkflowJobForOwner,
+  requestDurableWorkflowCancellation,
   withWorkflowTerminalTransition,
 } from "./workflow-jobs";
 import {
@@ -48,6 +49,11 @@ import { getOrchestrationContext } from "./orchestration-context";
 import { renderProgress } from "./workflow-ui";
 import { stringify } from "./workflow-worker";
 import { completionDisplayLabel } from "./completion-presentation";
+import {
+  modelSafeWorkflowErrorMessage,
+  safeWorkflowDiagnosticMessage,
+  sanitizeWorkflowDiagnosticDetails,
+} from "./workflow-disclosure";
 import {
   getLiveWorkflowV4Store,
   WorkflowV4Store,
@@ -182,11 +188,13 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
   const result = end?.data.result
     ? decodeRunValue<WorkflowRunResult>(end.data.result)
     : undefined;
-  const steps = workflowV4Steps(events);
+  const steps = sanitizeWorkflowDiagnosticDetails(workflowV4Steps(events));
   const allWaiting = workflowV4Steps(events, Infinity).filter(
     (step) => step.status === "waiting_for_input",
   );
-  const waiting = allWaiting.slice(0, MAX_WAITING_INPUT_ACTIONS);
+  const waiting = sanitizeWorkflowDiagnosticDetails(
+    allWaiting.slice(0, MAX_WAITING_INPUT_ACTIONS),
+  );
   const waitingRemainderCount = allWaiting.length - waiting.length;
   return {
     workflowId: id,
@@ -211,7 +219,9 @@ export function durableRunSummary(id: string, events: RunEvent[]) {
       ? "lower_bound"
       : "recorded",
     currentPhase: progress?.phase,
-    error: end ? end.data.error : interrupted?.data.error,
+    error: end?.data.error || interrupted?.data.error
+      ? safeWorkflowDiagnosticMessage()
+      : undefined,
     cancellationRequested:
       end?.kind === "cancelled" || end?.data.status === "cancelled",
   };
@@ -308,11 +318,12 @@ export function registerDurableWorkflowTools(
     id: string,
     ctx?: any,
     result = false,
+    inspectionOwner: SessionOwnerToken | undefined = owner(),
   ): Promise<any | undefined> {
     if (!id.startsWith("wfd_")) return undefined;
     try {
       const events = await WorkflowRunStore.inspect(
-        await lookupScope(id, ctx),
+        await lookupScope(id, ctx, inspectionOwner),
         id,
       );
       if (!events) return undefined;
@@ -336,13 +347,70 @@ export function registerDurableWorkflowTools(
         consumeCompletionSource(
           pi,
           { source: "workflow", sourceId: id },
-          owner(),
+          inspectionOwner,
         );
       }
       const run =
         result && end?.data.result
           ? decodeRunValue<WorkflowRunResult>(end.data.result)
           : undefined;
+      const elapsedAt = details.completedAt ?? Date.now();
+      const elapsedMs =
+        Number.isFinite(details.createdAt) &&
+        details.createdAt >= 0 &&
+        Number.isFinite(elapsedAt) &&
+        elapsedAt >= details.createdAt
+          ? elapsedAt - details.createdAt
+          : undefined;
+      const structuredContent = result
+        ? {
+            status: details.status,
+            workflowId: id,
+            durable: true,
+            name: details.name,
+            presentationStatus: details.status,
+            ...(run
+              ? {
+                  result:
+                    typeof run.result === "string"
+                      ? run.result
+                      : stringify(run.result),
+                  agentsSpawned: run.agentsSpawned,
+                  errorCount: run.errorCount,
+                }
+              : {}),
+            ...(details.agentsSpawned === undefined
+              ? {}
+              : { agentsSpawned: details.agentsSpawned }),
+            ...(details.errorCount === undefined
+              ? {}
+              : { errorCount: details.errorCount }),
+            ...(details.usage === undefined ? {} : { usage: details.usage }),
+            ...(typeof events[0].data.budgetTotal === "number"
+              ? { budgetTotal: events[0].data.budgetTotal }
+              : {}),
+            ...(details.error === undefined ? {} : { error: details.error }),
+          }
+        : {
+            status: details.status,
+            workflowId: id,
+            durable: true,
+            name: details.name,
+            presentationStatus: details.status,
+            ...(elapsedMs === undefined ? {} : { elapsedMs }),
+            agentsSpawned: details.agentsSpawned,
+            ...(details.errorCount === undefined
+              ? {}
+              : { errorCount: details.errorCount }),
+            ...(details.usage === undefined ? {} : { usage: details.usage }),
+            ...(typeof events[0].data.budgetTotal === "number"
+              ? { budgetTotal: events[0].data.budgetTotal }
+              : {}),
+            ...(details.currentPhase === undefined
+              ? {}
+              : { currentPhase: details.currentPhase }),
+            ...(details.error === undefined ? {} : { error: details.error }),
+          };
       return {
         content: [
           {
@@ -354,14 +422,24 @@ export function registerDurableWorkflowTools(
         ],
         details: visibleDetails,
         ...(result && details.status !== "done" ? { isError: true } : {}),
+        structuredContent,
       };
     } catch (error) {
-      return failure(error);
+      const failed = failure(error);
+      return {
+        ...failed,
+        structuredContent: {
+          status: "error",
+          workflowId: id,
+          durable: true,
+          error: failed.details.error,
+        },
+      };
     }
   }
 
   function failure(error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = modelSafeWorkflowErrorMessage(error);
     return {
       content: [{ type: "text", text: `Workflow not run: ${message}` }],
       details: { status: "error", error: message },

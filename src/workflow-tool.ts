@@ -349,21 +349,24 @@ async function persistDurableCancellation(
   job: WorkflowJobState,
 ): Promise<boolean> {
   if (!job.durable) return false;
-  const isTerminal = () =>
-    job.durable!.store.events.some((event) =>
+  const terminal = () =>
+    job.durable!.store.events.findLast((event) =>
       ["cancelled", "rejected", "terminal"].includes(event.kind),
     );
-  if (isTerminal()) return false;
-  await stopDurableProcessAttempts(job.durable.store.directory);
-  await job.durable.store.flush();
-  if (!isTerminal()) {
+  const priorTerminal = terminal();
+  if (priorTerminal && priorTerminal.data.status !== "cancelled") return false;
+  if (!priorTerminal) {
+    await job.durable.store.flush();
     await job.durable.store.append("cancelled", {
       status: "cancelled",
       completedAt: Date.now(),
     });
-    return true;
   }
-  return false;
+  // A retry after marker failure must finish attempt cleanup even though the
+  // cancellation intent is already durable.
+  await stopDurableProcessAttempts(job.durable.store.directory);
+  await job.durable.store.flush();
+  return !priorTerminal;
 }
 
 function durableTerminalStatus(job: WorkflowJobState): string | undefined {
@@ -1741,7 +1744,7 @@ export function registerWorkflowTool(
       try {
         await withWorkflowTerminalTransition(st, async () => {
           const terminal = durableTerminalStatus(st);
-          if (terminal) return;
+          if (terminal && terminal !== "cancelled") return;
           await persistDurableCancellation(st);
           const status = durableTerminalStatus(st);
           if (status && status !== "cancelled") return;

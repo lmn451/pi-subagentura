@@ -931,7 +931,10 @@ describe("durable cancellation regressions", () => {
         undefined,
         harness.ctx,
       ),
-    ).rejects.toThrow("injected attempt cancellation write failure");
+    ).resolves.toMatchObject({
+      isError: true,
+      details: { status: "running", workflowId: id },
+    });
     expect(fsFault.failures).toBe(1);
     expect(job.abort.signal.aborted).toBe(false);
     expect(job.status).toBe("running");

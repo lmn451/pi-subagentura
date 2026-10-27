@@ -766,6 +766,16 @@ export function startWorkflowJob(
             ["cancelled", "rejected", "terminal"].includes(event.kind),
           );
           if (terminal) {
+            if (
+              terminal.kind === "cancelled" &&
+              !state.durable!.stepBased &&
+              terminal.data.status === "cancelled"
+            ) {
+              await state.durable!.store.append("terminal", {
+                status: "cancelled",
+                completedAt: Date.now(),
+              });
+            }
             state.status =
               terminal.data.status === "done"
                 ? "done"
