@@ -312,7 +312,7 @@ describe("WorkflowTreeComponent", () => {
     expect(done).toHaveBeenCalledTimes(2);
   });
 
-  it("cancels the selected running workflow with c", () => {
+  it("cancels the selected running workflow with c", async () => {
     const job = makeJob({
       snapshot: {
         ...makeJob().snapshot,
@@ -330,6 +330,7 @@ describe("WorkflowTreeComponent", () => {
     });
 
     component.handleInput("c");
+    await vi.waitFor(() => expect(job.status).toBe("cancelled"));
 
     expect(abortSpy).toHaveBeenCalledTimes(1);
     expect(job.status).toBe("cancelled");
@@ -342,6 +343,60 @@ describe("WorkflowTreeComponent", () => {
       kind: "cancel",
       workflowId: "wf_test",
     });
+  });
+
+  it("keeps durable work active after intent failure and commits before retry abort", async () => {
+    const job = makeJob();
+    const events: Array<{ kind: string; data: { status: string } }> = [];
+    let failAppend = true;
+    const append = vi.fn(async (kind: string, data: { status: string }) => {
+      if (failAppend) {
+        failAppend = false;
+        throw new Error("intent storage unavailable");
+      }
+      events.push({ kind, data });
+    });
+    job.durable = {
+      store: { events, append, directory: "/missing-workflow-tree-test" },
+    } as any;
+    const abortSpy = vi.spyOn(job.abort, "abort").mockImplementation(() => {
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: "cancelled",
+        data: { status: "cancelled" },
+      });
+    });
+    workflowJobRegistry.set(job.id, job);
+    const done = vi.fn();
+    const notify = vi.fn();
+    const component = new WorkflowTreeComponent({
+      done,
+      notify,
+      owner: sessionOwner(scope),
+    });
+
+    component.handleInput("c");
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        "Could not cancel workflow wf_test: intent storage unavailable",
+      ),
+    );
+
+    expect(job.status).toBe("running");
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(done).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(
+      "Could not cancel workflow wf_test: intent storage unavailable",
+    );
+
+    component.handleInput("c");
+    await vi.waitFor(() => expect(job.status).toBe("cancelled"));
+
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(abortSpy).toHaveBeenCalledTimes(1);
+    expect(job.status).toBe("cancelled");
+    expect(done).toHaveBeenCalledWith({ kind: "cancel", workflowId: "wf_test" });
+    expect(notify).toHaveBeenLastCalledWith("Cancelled workflow wf_test.");
   });
 
   it("does not cancel a terminal workflow", () => {
@@ -384,7 +439,7 @@ describe("WorkflowTreeComponent", () => {
     );
   });
 
-  it("keeps peer rows out of rendering, selection, and cancellation", () => {
+  it("keeps peer rows out of rendering, selection, and cancellation", async () => {
     const peerScope = createTestSessionScope();
     const peerJob = makeJob({
       id: "wf_peer",
@@ -405,6 +460,7 @@ describe("WorkflowTreeComponent", () => {
     expect(component.render(120).join("\n")).toContain("▶ ▸ owned-only");
     component.handleInput("j");
     component.handleInput("c");
+    await vi.waitFor(() => expect(owned.status).toBe("cancelled"));
 
     expect(ownedAbort).toHaveBeenCalledOnce();
     expect(owned.status).toBe("cancelled");

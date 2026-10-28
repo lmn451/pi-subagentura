@@ -2,6 +2,8 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
   cancelWorkflowJob,
   getWorkflowCompletionPresentation,
+  requestDurableWorkflowCancellation,
+  withWorkflowTerminalTransition,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -114,7 +116,7 @@ export class WorkflowTreeComponent {
       return;
     }
     if (data === "c") {
-      this.cancel(selected);
+      void this.cancel(selected);
     }
   }
 
@@ -146,23 +148,59 @@ export class WorkflowTreeComponent {
     this.changed();
   }
 
-  private cancel(job: WorkflowJobState): void {
+  private async cancel(job: WorkflowJobState): Promise<void> {
     if (job.status !== "running") {
       this.opts.notify?.(
         `Workflow ${job.id} is ${job.status}; nothing to cancel.`,
       );
       return;
     }
-    cancelWorkflowJob(job, "explicit_cancel");
-    this.opts.notify?.(`Cancelled workflow ${job.id}.`);
-    this.changed();
-    this.opts.done({ kind: "cancel", workflowId: job.id });
+    try {
+      const cancelled = await cancelWorkflowTreeJob(job);
+      if (!cancelled) {
+        this.opts.notify?.(
+          `Workflow ${job.id} finished before cancellation; nothing was cancelled.`,
+        );
+        return;
+      }
+      this.opts.notify?.(`Cancelled workflow ${job.id}.`);
+      this.changed();
+      this.opts.done({ kind: "cancel", workflowId: job.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.opts.notify?.(`Could not cancel workflow ${job.id}: ${message}`);
+    }
   }
 
   private changed(): void {
     this.invalidate();
     this.opts.requestRender?.();
   }
+}
+
+export async function cancelWorkflowTreeJob(
+  job: WorkflowJobState,
+): Promise<boolean> {
+  let cancelled = false;
+  await withWorkflowTerminalTransition(job, async () => {
+    if (job.status === "done" || job.status === "error") return;
+    const terminal = job.durable?.store.events.findLast((event) =>
+      ["cancelled", "rejected", "terminal"].includes(event.kind),
+    );
+    const terminalStatus =
+      terminal?.data.status ??
+      (terminal?.kind === "cancelled"
+        ? "cancelled"
+        : terminal?.kind === "rejected"
+          ? "rejected"
+          : undefined);
+    if (terminalStatus && terminalStatus !== "cancelled") return;
+    if (job.durable)
+      await requestDurableWorkflowCancellation(job.durable.store, job);
+    else if (job.status === "running") cancelWorkflowJob(job, "explicit_cancel");
+    cancelled = job.status === "cancelled";
+  });
+  return cancelled;
 }
 
 export async function showWorkflowTree(
