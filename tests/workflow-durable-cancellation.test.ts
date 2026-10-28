@@ -29,7 +29,10 @@ import { WorkflowRunStore, encodeRunValue } from "../src/workflow-run-store";
 import type { RunScope } from "../src/workflow-run-store";
 import type { RunEvent } from "../src/workflow-run-store";
 import { registerWorkflowTool } from "../src/workflow-tool";
-import { workflowJobRegistry } from "../src/workflow-jobs";
+import {
+  workflowJobRegistry,
+  withWorkflowTerminalTransition,
+} from "../src/workflow-jobs";
 import { clearSessionScopes, sessionOwner } from "../src/session-scope";
 import type { SessionScope } from "../src/session-scope";
 import { createTestSessionScope } from "./session-scope-fixture";
@@ -952,6 +955,63 @@ describe("durable cancellation regressions", () => {
     expect(
       afterRetry?.filter((event) => event.kind === "cancelled"),
     ).toHaveLength(1);
+  });
+
+  it("only reports one cancellation for queued public cancel requests", async () => {
+    registerWorkflowTool(harness.pi, harness.scope);
+    const agentStarted = deferred<void>();
+    const runner: WorkflowAgentRunner = async ({ signal }) => {
+      agentStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new Error("live durable agent cancelled")),
+          { once: true },
+        );
+      });
+    };
+    const id = await startDurableRun(durableTools(runner));
+    const job = workflowJobRegistry.get(id)!;
+    await agentStarted.promise;
+    const abortSpy = vi.spyOn(job.abort, "abort");
+    const cancel = getTool("cancel_workflow");
+    let releaseLock!: () => void;
+    let enterLock!: () => void;
+    const lockEntered = new Promise<void>((resolve) => (enterLock = resolve));
+    const held = withWorkflowTerminalTransition(job, async () => {
+      enterLock();
+      await new Promise<void>((resolve) => (releaseLock = resolve));
+    });
+    await lockEntered;
+    const first = cancel.execute(
+      "queued-cancel-one",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    const second = cancel.execute(
+      "queued-cancel-two",
+      { workflowId: id },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    releaseLock();
+    await held;
+    const results = await Promise.all([first, second]);
+
+    expect(
+      results.filter((result) => result.details.cancelled === true),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.details.cancelled === false),
+    ).toHaveLength(1);
+    expect(abortSpy).toHaveBeenCalledTimes(1);
+    expect(job.status).toBe("cancelled");
+    await Promise.allSettled([job.promise]);
+    const events = await WorkflowRunStore.inspect(harness.runScope, id);
+    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(1);
   });
 
   it("keeps the live writer lease until a cancelled controller drains", async () => {

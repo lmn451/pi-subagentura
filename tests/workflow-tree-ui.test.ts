@@ -10,6 +10,7 @@ import {
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
+import { withWorkflowTerminalTransition } from "../src/workflow-jobs";
 import { createTestSessionScope } from "./session-scope-fixture";
 
 let scope: SessionScope;
@@ -397,6 +398,49 @@ describe("WorkflowTreeComponent", () => {
     expect(job.status).toBe("cancelled");
     expect(done).toHaveBeenCalledWith({ kind: "cancel", workflowId: "wf_test" });
     expect(notify).toHaveBeenLastCalledWith("Cancelled workflow wf_test.");
+  });
+
+  it("reports only one cancellation for queued tree requests", async () => {
+    const job = makeJob();
+    const events: Array<{ kind: string; data: { status: string } }> = [];
+    job.durable = {
+      store: {
+        events,
+        append: async (kind: string, data: { status: string }) => {
+          events.push({ kind, data });
+        },
+        directory: "/missing-workflow-tree-test",
+      },
+    } as any;
+    workflowJobRegistry.set(job.id, job);
+    let releaseLock!: () => void;
+    let enterLock!: () => void;
+    const lockEntered = new Promise<void>((resolve) => (enterLock = resolve));
+    const held = withWorkflowTerminalTransition(job, async () => {
+      enterLock();
+      await new Promise<void>((resolve) => (releaseLock = resolve));
+    });
+    await lockEntered;
+    const done = vi.fn();
+    const notify = vi.fn();
+    const component = new WorkflowTreeComponent({
+      done,
+      notify,
+      owner: sessionOwner(scope),
+    });
+
+    component.handleInput("c");
+    component.handleInput("c");
+    releaseLock();
+    await held;
+    await vi.waitFor(() => expect(job.status).toBe("cancelled"));
+
+    expect(
+      events.filter((event) => event.kind === "cancelled"),
+    ).toHaveLength(1);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith("Cancelled workflow wf_test.");
   });
 
   it("does not cancel a terminal workflow", () => {

@@ -483,6 +483,43 @@ export async function requestDurableWorkflowCancellation(
   if (job) cancelWorkflowJob(job, "explicit_cancel");
 }
 
+export type WorkflowCancellationOutcome =
+  | "cancelled"
+  | "already_cancelled"
+  | "terminal";
+
+export function durableWorkflowTerminalStatus(
+  job: WorkflowJobState,
+): string | undefined {
+  const event = job.durable?.store.events.findLast((candidate) =>
+    ["cancelled", "rejected", "terminal"].includes(candidate.kind),
+  );
+  if (!event) return undefined;
+  return (
+    event.data.status ??
+    (event.kind === "cancelled"
+      ? "cancelled"
+      : event.kind === "rejected"
+        ? "rejected"
+        : undefined)
+  );
+}
+
+export async function cancelWorkflowJobOnce(
+  job: WorkflowJobState,
+): Promise<WorkflowCancellationOutcome> {
+  return withWorkflowTerminalTransition(job, async () => {
+    const terminal = durableWorkflowTerminalStatus(job);
+    if (terminal && terminal !== "cancelled") return "terminal";
+    if (job.status === "cancelled") return "already_cancelled";
+    if (job.status !== "running") return "terminal";
+    if (job.durable)
+      await requestDurableWorkflowCancellation(job.durable.store, job);
+    else cancelWorkflowJob(job, "explicit_cancel");
+    return job.status === "cancelled" ? "cancelled" : "terminal";
+  });
+}
+
 /** Roll back a just-created workflow whose completion registration failed. */
 export function discardWorkflowJob(job: WorkflowJobState): void {
   job.suppressCompletionNotification = true;

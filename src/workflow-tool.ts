@@ -45,14 +45,13 @@ import {
   workflowUsageFromUsage,
 } from "./workflow-core";
 import {
-  cancelWorkflowJob,
+  cancelWorkflowJobOnce,
   discardWorkflowJob,
+  durableWorkflowTerminalStatus,
   getWorkflowCompletionPresentation,
   getWorkflowJobForOwner,
   normalizeCancelledWorkflowState,
-  requestDurableWorkflowCancellation,
   startWorkflowJob,
-  withWorkflowTerminalTransition,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -362,21 +361,6 @@ function emitWorkflowResultReadTelemetry(
         : { read_latency_ms: readLatencyMs }),
     },
     { allowInactive: true },
-  );
-}
-
-function durableTerminalStatus(job: WorkflowJobState): string | undefined {
-  const event = job.durable?.store.events.findLast((candidate) =>
-    ["cancelled", "rejected", "terminal"].includes(candidate.kind),
-  );
-  if (!event) return undefined;
-  return (
-    event.data.status ??
-    (event.kind === "cancelled"
-      ? "cancelled"
-      : event.kind === "rejected"
-        ? "rejected"
-        : undefined)
   );
 }
 
@@ -1703,30 +1687,23 @@ export function registerWorkflowTool(
           isError: true,
         };
       }
-      if (st.status === "cancelled") {
-        try {
-          await withWorkflowTerminalTransition(st, async () => {
-            const terminal = durableTerminalStatus(st);
-            if (terminal && terminal !== "cancelled") return;
-            if (st.durable)
-              await requestDurableWorkflowCancellation(st.durable.store, st);
-            else cancelWorkflowJob(st, "explicit_cancel");
-          });
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: error instanceof Error ? error.message : String(error),
-              },
-            ],
-            details: { status: "cancelled", workflowId: st.id },
-            isError: true,
-          };
-        }
-        const durableStatus = durableTerminalStatus(st);
-        if (durableStatus && durableStatus !== "cancelled")
-          return cancellationRaceResponse(st, durableStatus);
+      let outcome: Awaited<ReturnType<typeof cancelWorkflowJobOnce>>;
+      try {
+        outcome = await cancelWorkflowJobOnce(st);
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
+          details: { status: st.status, workflowId: st.id },
+          isError: true,
+        };
+      }
+      const durableStatus = durableWorkflowTerminalStatus(st);
+      if (outcome === "already_cancelled") {
         if (cancellationSnapshotsEnabled()) {
           await waitForCancellationReceipts(st);
           normalizeCancelledWorkflowState(st);
@@ -1738,50 +1715,19 @@ export function registerWorkflowTool(
           details: {
             status: "cancelled",
             workflowId: st.id,
-            cancelled: true,
+            cancelled: false,
             snapshots: [...(st.cancellationSnapshots ?? [])],
           },
         };
       }
-      if (st.status !== "running") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Workflow ${st.id} is already ${st.status}; nothing was cancelled.`,
-            },
-          ],
-          details: {
-            status: st.status,
-            workflowId: st.id,
-            cancelled: false,
-          },
-        };
-      }
-      try {
-        await withWorkflowTerminalTransition(st, async () => {
-          const terminal = durableTerminalStatus(st);
-          if (terminal && terminal !== "cancelled") return;
-          if (st.durable)
-            await requestDurableWorkflowCancellation(st.durable.store, st);
-          else cancelWorkflowJob(st, "explicit_cancel");
-        });
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: error instanceof Error ? error.message : String(error),
-            },
-          ],
-          details: { status: "running", workflowId: st.id },
-          isError: true,
-        };
-      }
-      const durableStatus = durableTerminalStatus(st);
+      if (outcome === "terminal")
+        return cancellationRaceResponse(
+          st,
+          durableStatus ?? String(st.status),
+        );
       if (durableStatus && durableStatus !== "cancelled")
         return cancellationRaceResponse(st, durableStatus);
-      const finalStatus = durableTerminalStatus(st) ?? String(st.status);
+      const finalStatus = durableWorkflowTerminalStatus(st) ?? String(st.status);
       if (finalStatus !== "cancelled") {
         return cancellationRaceResponse(st, finalStatus);
       }

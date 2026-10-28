@@ -1,9 +1,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
-  cancelWorkflowJob,
+  cancelWorkflowJobOnce,
   getWorkflowCompletionPresentation,
-  requestDurableWorkflowCancellation,
-  withWorkflowTerminalTransition,
   workflowJobsForOwner,
   type WorkflowJobState,
 } from "./workflow-jobs";
@@ -156,8 +154,9 @@ export class WorkflowTreeComponent {
       return;
     }
     try {
-      const cancelled = await cancelWorkflowTreeJob(job);
-      if (!cancelled) {
+      const outcome = await cancelWorkflowJobOnce(job);
+      if (outcome === "already_cancelled") return;
+      if (outcome === "terminal") {
         this.opts.notify?.(
           `Workflow ${job.id} finished before cancellation; nothing was cancelled.`,
         );
@@ -176,31 +175,6 @@ export class WorkflowTreeComponent {
     this.invalidate();
     this.opts.requestRender?.();
   }
-}
-
-export async function cancelWorkflowTreeJob(
-  job: WorkflowJobState,
-): Promise<boolean> {
-  let cancelled = false;
-  await withWorkflowTerminalTransition(job, async () => {
-    if (job.status === "done" || job.status === "error") return;
-    const terminal = job.durable?.store.events.findLast((event) =>
-      ["cancelled", "rejected", "terminal"].includes(event.kind),
-    );
-    const terminalStatus =
-      terminal?.data.status ??
-      (terminal?.kind === "cancelled"
-        ? "cancelled"
-        : terminal?.kind === "rejected"
-          ? "rejected"
-          : undefined);
-    if (terminalStatus && terminalStatus !== "cancelled") return;
-    if (job.durable)
-      await requestDurableWorkflowCancellation(job.durable.store, job);
-    else if (job.status === "running") cancelWorkflowJob(job, "explicit_cancel");
-    cancelled = job.status === "cancelled";
-  });
-  return cancelled;
 }
 
 export async function showWorkflowTree(
