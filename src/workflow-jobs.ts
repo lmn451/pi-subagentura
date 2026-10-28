@@ -488,6 +488,10 @@ export type WorkflowCancellationOutcome =
   | "already_cancelled"
   | "terminal";
 
+function workflowJobStatus(job: WorkflowJobState): WorkflowJobStatus {
+  return job.status;
+}
+
 export function durableWorkflowTerminalStatus(
   job: WorkflowJobState,
 ): string | undefined {
@@ -516,7 +520,7 @@ export async function cancelWorkflowJobOnce(
     if (job.durable)
       await requestDurableWorkflowCancellation(job.durable.store, job);
     else cancelWorkflowJob(job, "explicit_cancel");
-    return job.status === "cancelled" ? "cancelled" : "terminal";
+    return workflowJobStatus(job) === "cancelled" ? "cancelled" : "terminal";
   });
 }
 

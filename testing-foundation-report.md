@@ -8,8 +8,9 @@ mutation-testing pilot. Work remains isolated in
 `feat/property-mutation-testing`. The parent worktree was not modified.
 
 The implementation adds `fast-check@^4.9.0` and
-`@stryker-mutator/core@^10.0.0` as development dependencies. The package now
-requires Node.js 22.23.2 or newer, the current official Node 22 LTS patch.
+`@stryker-mutator/core@^10.0.0` as development dependencies. At the time of this
+report, the package required Node.js 22.23.2 or newer, the current official
+Node 22 LTS patch; the current minimum is declared in `package.json`.
 
 ## Vitest 5 migration review
 
@@ -150,17 +151,17 @@ TypeScript transpilation.
 
 All requested checks pass:
 
-| Command                  | Result                                                 |
-| ------------------------ | ------------------------------------------------------ |
-| `npm run typecheck`      | Passed                                                 |
-| Node 22.23.2 smoke       | Typecheck, properties, extension load, and pack passed |
-| `npm test`               | 78 files, 1,752 tests passed                           |
-| `npm run test:random`    | Seed 424242; 78 files, 1,752 tests passed              |
-| `npm run format:check`   | Passed                                                 |
-| `npm run pack:check`     | Passed; `pi-subagentura-3.4.2.tgz` dry run             |
-| `npm run test:property`  | 2 files, 10 tests passed                               |
-| `npm run mutation:pilot` | 22 mutants; 21 killed, 1 equivalent survivor; 95.45%   |
-| `git diff --check`       | Passed                                                 |
+| Command                       | Result                                                 |
+| ----------------------------- | ------------------------------------------------------ |
+| `npm run typecheck`           | Passed                                                 |
+| Historical Node 22.23.2 smoke | Typecheck, properties, extension load, and pack passed |
+| `npm test`                    | 78 files, 1,752 tests passed                           |
+| `npm run test:random`         | Seed 424242; 78 files, 1,752 tests passed              |
+| `npm run format:check`        | Passed                                                 |
+| `npm run pack:check`          | Passed; `pi-subagentura-3.4.2.tgz` dry run             |
+| `npm run test:property`       | 2 files, 10 tests passed                               |
+| `npm run mutation:pilot`      | 22 mutants; 21 killed, 1 equivalent survivor; 95.45%   |
+| `git diff --check`            | Passed                                                 |
 
 ## Audit findings
 

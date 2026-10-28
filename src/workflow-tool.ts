@@ -1721,13 +1721,11 @@ export function registerWorkflowTool(
         };
       }
       if (outcome === "terminal")
-        return cancellationRaceResponse(
-          st,
-          durableStatus ?? String(st.status),
-        );
+        return cancellationRaceResponse(st, durableStatus ?? String(st.status));
       if (durableStatus && durableStatus !== "cancelled")
         return cancellationRaceResponse(st, durableStatus);
-      const finalStatus = durableWorkflowTerminalStatus(st) ?? String(st.status);
+      const finalStatus =
+        durableWorkflowTerminalStatus(st) ?? String(st.status);
       if (finalStatus !== "cancelled") {
         return cancellationRaceResponse(st, finalStatus);
       }
