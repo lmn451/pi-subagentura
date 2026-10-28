@@ -396,7 +396,10 @@ describe("WorkflowTreeComponent", () => {
     expect(append).toHaveBeenCalledTimes(2);
     expect(abortSpy).toHaveBeenCalledTimes(1);
     expect(job.status).toBe("cancelled");
-    expect(done).toHaveBeenCalledWith({ kind: "cancel", workflowId: "wf_test" });
+    expect(done).toHaveBeenCalledWith({
+      kind: "cancel",
+      workflowId: "wf_test",
+    });
     expect(notify).toHaveBeenLastCalledWith("Cancelled workflow wf_test.");
   });
 
@@ -435,9 +438,9 @@ describe("WorkflowTreeComponent", () => {
     await held;
     await vi.waitFor(() => expect(job.status).toBe("cancelled"));
 
-    expect(
-      events.filter((event) => event.kind === "cancelled"),
-    ).toHaveLength(1);
+    expect(events.filter((event) => event.kind === "cancelled")).toHaveLength(
+      1,
+    );
     expect(done).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith("Cancelled workflow wf_test.");

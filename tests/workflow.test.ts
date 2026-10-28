@@ -3069,7 +3069,7 @@ return "finished";`,
     expect(repeated.details).toMatchObject({
       status: "cancelled",
       workflowId: job.id,
-      cancelled: true,
+      cancelled: false,
     });
     expect(repeated.content[0].text).toContain("already cancelled");
     workflowJobRegistry.delete(job.id);

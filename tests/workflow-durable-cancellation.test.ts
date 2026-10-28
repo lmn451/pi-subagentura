@@ -1011,7 +1011,9 @@ describe("durable cancellation regressions", () => {
     expect(job.status).toBe("cancelled");
     await Promise.allSettled([job.promise]);
     const events = await WorkflowRunStore.inspect(harness.runScope, id);
-    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(1);
+    expect(events?.filter((event) => event.kind === "cancelled")).toHaveLength(
+      1,
+    );
   });
 
   it("keeps the live writer lease until a cancelled controller drains", async () => {
