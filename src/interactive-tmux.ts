@@ -43,6 +43,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -62,8 +63,8 @@ import {
   type ParentCancellationOrigin,
   removeInteractiveState,
 } from "./artifact";
-import { acknowledgeDeliveryWithoutDispatch, deliveryIdFor } from "./delivery";
 import type { CompletionPolicy } from "./completion-coordinator";
+import { clearRuntimeFailureEpisodes } from "./telemetry-runtime";
 import {
   type CapturePaneOptions,
   type CapturePaneResult,
@@ -296,30 +297,10 @@ export interface InteractiveSubagentState {
   pendingDeliveries?: PersistedDeliveryIntent[];
   deliveryReceipts?: string[];
   lifecycle?: PersistedLifecycleFold;
-  /** @deprecated Legacy v1 timestamp cursor retained for API compatibility. */
-  lastDeliveredEventTs?: number;
-  /** Byte offset through which session JSONL bytes were fed to the parser. */
-  lastDeliveredSessionByte?: number;
-  /** Start of the parser's current incomplete line, if one exists. */
-  sessionPartialLineStart?: number;
-  /** Persisted pre-reload cursor used once for truncation detection. */
-  sessionObservedByteCursor?: number;
   /** Most recent tool_activity summary, for the TUI widget. */
   lastToolSummary?: string;
   lastToolName?: string;
   lastActivityAt?: number;
-  /** @deprecated Legacy session metadata retained for API compatibility. */
-  lastStopReason?: "stop" | "length" | "error" | "aborted";
-  /** @deprecated Legacy session metadata retained for API compatibility. */
-  lastStopReasonAt?: number;
-  /** @deprecated Legacy protocol field retained for API compatibility. */
-  autoDoneForTurnAt?: number;
-  /** @deprecated Legacy session metadata retained for API compatibility. */
-  lastStopText?: string;
-  /** Deprecated legacy pointer/output delivery mode. */
-  notifyOnComplete?: "notify" | "inject";
-  /** Deprecated legacy parent-turn trigger override. */
-  triggerTurnOnComplete?: boolean;
   /** Coordinated default: independent readiness or an explicit group barrier. */
   completionPolicy?: CompletionPolicy;
   /** Durable tombstone for a spawn that failed completion registration. */
@@ -327,29 +308,7 @@ export interface InteractiveSubagentState {
   completionTombstoneAt?: number;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
-  /** @deprecated Legacy v1 inject cursor retained for API compatibility. */
-  lastInjectedEventTs?: number;
-  /** @deprecated Legacy v1 snapshot cursor retained for API compatibility. */
-  lastSnapshotEventTs?: number;
-  /** @deprecated Legacy protocol field retained for API compatibility. */
-  injected?: boolean;
 }
-
-declare global {
-  var __piSubagenturaInteractiveRegistry:
-    | Map<string, InteractiveSubagentState>
-    | undefined;
-}
-
-if (!globalThis.__piSubagenturaInteractiveRegistry) {
-  globalThis.__piSubagenturaInteractiveRegistry = new Map<
-    string,
-    InteractiveSubagentState
-  >();
-}
-
-export const interactiveSubagentRegistry =
-  globalThis.__piSubagenturaInteractiveRegistry!;
 
 interface InteractiveCreatedTelemetry {
   readonly session: TelemetrySession;
@@ -367,35 +326,32 @@ const interactiveCreatedTelemetry = new WeakMap<
   InteractiveSubagentState,
   InteractiveCreatedTelemetry
 >();
-/** Insert a state into its authoritative session map and the legacy aggregate index. */
+/** Insert a state into its authoritative session map. */
 export function registerInteractiveSubagentState(
   state: InteractiveSubagentState,
   scope?: SessionScope,
 ): void {
-  if (scope) {
-    state.sessionOwner = sessionOwner(scope);
-    scope.interactiveStates.set(state.id, state);
-  }
-  interactiveSubagentRegistry.set(state.id, state);
+  if (!scope) return;
+  state.sessionOwner = sessionOwner(scope);
+  scope.interactiveStates.set(state.id, state);
 }
 
-/** Remove the same state object from every registry that currently indexes it. */
+/** Remove the same state object from its owning session registry. */
 export function removeInteractiveSubagentState(
   state: InteractiveSubagentState,
 ): boolean {
-  let removed = false;
-  if (interactiveSubagentRegistry.get(state.id) === state) {
-    removed = interactiveSubagentRegistry.delete(state.id);
-  }
   const owner = state.sessionOwner;
-  if (owner) {
-    const scope = findSessionScope(owner.id);
-    if (scope?.interactiveStates.get(state.id) === state) {
-      scope.interactiveStates.delete(state.id);
-      removed = true;
-    }
+  if (!owner) return false;
+  const scope = findSessionScope(owner.id);
+  if (
+    scope?.generation !== owner.generation ||
+    scope.interactiveStates.get(state.id) !== state
+  ) {
+    return false;
   }
-  return removed;
+  scope.interactiveStates.delete(state.id);
+  clearRuntimeFailureEpisodes(state.artifactDir);
+  return true;
 }
 
 /**
@@ -525,7 +481,6 @@ export function writeLaunchScript(
 
   // 2. Write the launch script. The script:
   //    - exports ARTIFACT_DIR so the child inherits it;
-  //    - calls `cli.mjs start` to record the started event;
   //    - traps EXIT to record process exit and, when needed, one lock-protected completion;
   //    - also writes the @pi-exit-code pane option for the readPaneExitCode
   //      fallback when the selected backend is tmux.
@@ -545,7 +500,6 @@ export function writeLaunchScript(
     ),
     // Single-quote the helper path like every other interpolated path in this
     // script; a double-quoted path still expands $, `` and \ inside it.
-    `${escape(cliPath)} start`,
     "on_exit() {",
     "    rc=$?",
     "    trap - EXIT",
@@ -597,7 +551,7 @@ export function captureInteractiveSpawnFailure(params: {
     async: params.async ?? true,
     depth,
     depth_bucket: telemetryDepthBucket(params.depth),
-    completion_policy: params.completionPolicy ?? "legacy",
+    completion_policy: params.completionPolicy ?? "each",
     failure_stage: params.stage,
     failure_operation: params.operation,
     spawn_duration_ms: duration,
@@ -625,7 +579,7 @@ export function captureInteractiveSubagentCreatedTelemetry(
     async: state.telemetryAsync ?? true,
     depth: state.telemetryDepth,
     depth_bucket: state.telemetryDepthBucket ?? "unknown",
-    completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+    completion_policy: state.telemetryCompletionPolicy ?? "each",
     spawn_duration_ms: Date.now() - pending.spawnStartedAt,
   });
 }
@@ -639,11 +593,7 @@ export function launchInteractiveSubagent(params: {
   contextText?: string | null;
   /** Spawn in a detached named window (invisible) instead of a visible split. */
   background?: boolean;
-  /** Deprecated legacy pointer/output delivery mode. */
-  notifyOnComplete?: "notify" | "inject";
-  /** Deprecated legacy parent-turn trigger override. */
-  triggerTurnOnComplete?: boolean;
-  /** Coordinated default: independent readiness or an explicit group barrier. */
+  /** Coordinated completion policy registered with the parent session. */
   completionPolicy?: CompletionPolicy;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
@@ -680,11 +630,18 @@ export function launchInteractiveSubagent(params: {
   telemetryAsync?: boolean;
   /** Aggregate policy attributed to workflow-owned child execution. */
   telemetryCompletionPolicy?: TelemetryCompletionPolicy;
-  /** Hold `agent_created` until coordinated completion registration succeeds. */
+  /** Defer agent_created until the caller finishes completion registration. */
   deferAgentCreatedTelemetry?: boolean;
+  /** Report the closed launch failure to the logical-launch owner. */
+  onSpawnFailure?: (failure: {
+    stage: TelemetrySpawnFailureStage;
+    mux?: TelemetrySpawnFailureMux;
+    operation?: TelemetrySpawnFailureOperation;
+  }) => void;
   /** Caller-observed attempt start; direct callers default to launcher entry. */
   spawnRequestedAt?: number;
 }): InteractiveSubagentState {
+  const completionPolicy = params.completionPolicy ?? "each";
   const spawnStartedAt = params.spawnRequestedAt ?? Date.now();
   let spawnFailureReported = false;
   let nextDepth: number | undefined;
@@ -695,6 +652,12 @@ export function launchInteractiveSubagent(params: {
   ): void => {
     if (spawnFailureReported) return;
     spawnFailureReported = true;
+    const failure = { stage, mux, operation };
+    try {
+      params.onSpawnFailure?.(failure);
+    } catch {
+      // Logical telemetry must never change launch behavior.
+    }
     captureInteractiveSpawnFailure({
       telemetry:
         params.sessionScope?.telemetry ??
@@ -706,8 +669,7 @@ export function launchInteractiveSubagent(params: {
       invocationSource: params.telemetryInvocationSource,
       async: params.telemetryAsync,
       depth: nextDepth,
-      completionPolicy:
-        params.telemetryCompletionPolicy ?? params.completionPolicy ?? "legacy",
+      completionPolicy: params.telemetryCompletionPolicy ?? completionPolicy,
       model: params.model,
     });
   };
@@ -738,6 +700,23 @@ export function launchInteractiveSubagent(params: {
     throw new Error(
       `working cwd exceeds ${MAX_PERSISTED_WORKING_CWD_BYTES} bytes or contains NUL`,
     );
+  }
+  let workingDirectoryStat: ReturnType<typeof statSync>;
+  try {
+    workingDirectoryStat = statSync(cwd);
+  } catch (error) {
+    reportSpawnFailure("context", undefined, "cwd_validation");
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    throw new Error(
+      missing
+        ? `working directory does not exist: ${cwd}`
+        : `working directory cannot be accessed: ${cwd}`,
+      { cause: error },
+    );
+  }
+  if (!workingDirectoryStat.isDirectory()) {
+    reportSpawnFailure("context", undefined, "cwd_validation");
+    throw new Error(`working directory is not a directory: ${cwd}`);
   }
   let stateCwd: string;
   try {
@@ -781,8 +760,20 @@ export function launchInteractiveSubagent(params: {
     );
     throw error;
   }
-  const liveScope =
-    params.sessionScope ?? resolveLiveSessionScope(params.supervisorOwner);
+  const ownerScope = resolveLiveSessionScope(params.supervisorOwner);
+  const liveScope = params.sessionScope
+    ? resolveLiveSessionScope(sessionOwner(params.sessionScope))
+    : ownerScope;
+  if (
+    !liveScope ||
+    (params.sessionScope && liveScope !== params.sessionScope) ||
+    (params.supervisorOwner && liveScope !== ownerScope)
+  ) {
+    reportSpawnFailure("registration", undefined, "completion_registration");
+    throw new Error(
+      "interactive sub-agent spawn requires a live session scope",
+    );
+  }
   if (rootId && nextDepth > effectiveMaxDepth) {
     reportSpawnFailure("depth_limit");
     throw new Error(
@@ -928,7 +919,7 @@ export function launchInteractiveSubagent(params: {
         completionPolicy:
           params.telemetryCompletionPolicy ??
           params.completionPolicy ??
-          ("legacy" as const),
+          ("each" as const),
         model: sanitizeTelemetryModel(params.model),
       };
     } catch (error) {
@@ -985,15 +976,10 @@ export function launchInteractiveSubagent(params: {
         artifactDir: paths.artifactDir,
         sessionFile: paths.sessionFile,
         workingCwd: cwd,
-        notifyOnComplete: params.completionPolicy
-          ? undefined
-          : (params.notifyOnComplete ?? "inject"),
-        triggerTurnOnComplete: params.triggerTurnOnComplete,
-        completionPolicy: params.completionPolicy,
+        completionPolicy,
         completionGroupId: params.completionGroupId,
         parentSessionId: params.parentSessionId,
         eventByteCursor: 0,
-        sessionByteCursor: 0,
         pendingDeliveries: [],
         deliveryReceipts: [],
         ...(telemetryMetadata ? { telemetry: telemetryMetadata } : {}),
@@ -1173,11 +1159,7 @@ export function launchInteractiveSubagent(params: {
     selectPaneCommand: attach.focusCommand,
     launchScriptFile: paths.launchScriptFile,
     artifactDir: paths.artifactDir,
-    notifyOnComplete: params.completionPolicy
-      ? undefined
-      : (params.notifyOnComplete ?? "inject"),
-    triggerTurnOnComplete: params.triggerTurnOnComplete,
-    completionPolicy: params.completionPolicy,
+    completionPolicy,
     completionGroupId: params.completionGroupId,
     parentSessionId: params.parentSessionId,
     supervisorOwner: params.supervisorOwner,
@@ -1484,9 +1466,8 @@ export function cancelInteractiveSubagent(
 ): InteractiveSubagentState | undefined {
   const snapshotSource =
     source === "supervisor" ? "cancel_interactive_subagent" : source;
-  const state =
-    ownedState?.id === id ? ownedState : interactiveSubagentRegistry.get(id);
-  if (!state) return undefined;
+  if (!ownedState || ownedState.id !== id) return undefined;
+  const state = ownedState;
 
   const snapshot = snapshotInteractiveContext({
     kind: "interactive",
@@ -1526,7 +1507,6 @@ export function cancelInteractiveSubagent(
 function appendCancellation(
   state: InteractiveSubagentState,
   context: ParentCancellationContext,
-  acknowledgeDelivery = true,
 ): void {
   let turnId = "process";
   try {
@@ -1559,19 +1539,6 @@ function appendCancellation(
     });
   }
   if (!completion) return;
-  if (state.completionPolicy) return;
-  if (!acknowledgeDelivery) return;
-  const mode = state.notifyOnComplete ?? "inject";
-  const deliveryId = deliveryIdFor({
-    parentSessionId: state.parentSessionId ?? "pi",
-    subagentId: state.id,
-    turnId,
-    mode,
-  });
-  // The parent initiated this terminal path, so the cancel tool result or session
-  // transition already accounts for it. Persist a synthetic receipt before pane
-  // teardown so polling or rehydrate cannot inject a duplicate completion.
-  acknowledgeDeliveryWithoutDispatch(state, deliveryId);
 }
 
 /**
@@ -1600,7 +1567,7 @@ export function cancelInteractiveDescendantByState(
   }
   retireLineageBootstraps(state.artifactDir);
   try {
-    appendCancellation(state, { origin: "supervisor_descendant" }, false);
+    appendCancellation(state, { origin: "supervisor_descendant" });
   } finally {
     state.status = "cancelled";
     const mux = getMuxForState(state);
@@ -1675,13 +1642,7 @@ export function cancelInteractiveSubagentByState(
   // Does NOT update state.status — see JSDoc point 2.
 }
 
-/**
- * Pure status-decision matrix used by both `pruneDeadInteractiveSubagents` (here) and the
- * artifact poller in `subagent.ts`. Pulled out so the rules are testable without a live tmux.
- *
- * Semantics: a `done` event means "this turn is finished" — the child's REPL stays open and the
- * child is ready for a follow-up prompt. Only `error` / pane-dead / `cancelled` are terminal.
- */
+/** Pure status-decision matrix shared by pruning and the artifact poller. */
 export function deriveInteractiveSubagentStatus(
   lastEvent: SubagentEvent | null,
   paneAlive: boolean,
@@ -1693,17 +1654,8 @@ export function deriveInteractiveSubagentStatus(
     case "completion":
       if (lastEvent.outcome === "cancelled") return "cancelled";
       return paneAlive ? "idle" : "exited";
-    case "cancelled":
-      return "cancelled";
-    case "error":
-      // child declared it unrecoverable; terminal
-      return "exited";
-    case "done":
-      return paneAlive ? "idle" : "exited";
-    case "started":
     case "tool_activity":
     case "turn_started":
-      // Non-terminal activity events: still running if pane is alive.
       return paneAlive ? "running" : "unknown";
     default:
       return assertNever(lastEvent);
@@ -1736,7 +1688,6 @@ export function foldInteractiveLifecycle(
       lifecycle.completionOutcome = undefined;
       lifecycle.completionSource = undefined;
       lifecycle.completionExitCode = undefined;
-      lifecycle.legacyTerminal = undefined;
       return;
     }
     case "completion": {
@@ -1752,18 +1703,6 @@ export function foldInteractiveLifecycle(
         lifecycle.completionSource = event.source;
         lifecycle.completionExitCode = event.exitCode;
       }
-      return;
-    }
-    case "started": {
-      lifecycle.legacyTerminal = undefined;
-      return;
-    }
-    case "done":
-    case "error":
-    case "cancelled": {
-      lifecycle.legacyTerminal = event.status;
-      lifecycle.completionExitCode =
-        "exitCode" in event ? event.exitCode : undefined;
       return;
     }
     case "tool_activity":
@@ -1789,36 +1728,18 @@ export function deriveInteractiveSubagentStatusFromLifecycle(
     if (paneLiveness === "alive") return "idle";
     return paneLiveness === "dead" ? "exited" : "unknown";
   }
-  if (lifecycle.legacyTerminal) {
-    if (lifecycle.legacyTerminal === "cancelled") return "cancelled";
-    if (lifecycle.legacyTerminal === "error") return "exited";
-    if (paneLiveness === "alive") return "idle";
-    return paneLiveness === "dead" ? "exited" : "unknown";
-  }
   if (paneLiveness === "alive") return "running";
   if (paneLiveness === "unknown") return "unknown";
-  // Keep the legacy boolean helper's no-event result stable; tri-state
-  // consumers can distinguish confirmed death and transition to exited.
   return typeof paneState === "boolean" ? "unknown" : "exited";
 }
 
 /**
- * Update registry status for every tracked sub-agent based on the artifact's
- * last event and pane liveness (via the mux that created each pane).
- * Idempotent — safe to call on every poll tick.
- *
- * Follow-up support: a `done` event with a live pane is the "idle" state,
- * NOT exited. The child is between turns, REPL is open, and
- * `send_interactive_subagent_message` will accept more prompts. Only when
- * the pane is actually gone (or the child called `error`) is the sub-agent
- * terminal.
- *
- * Edge case: if the pane is dead and no `done` event was recorded (mux died
- * before the launch trap could write it), fall back to the session-file
- * existence check — same heuristic as before.
+ * Update registry status for tracked sub-agents based on artifact lifecycle
+ * and pane liveness. A live pane after a protocol-v2 completion is idle and
+ * can accept another prompt.
  */
 export function pruneDeadInteractiveSubagents(
-  states: Iterable<InteractiveSubagentState> = interactiveSubagentRegistry.values(),
+  states: Iterable<InteractiveSubagentState> = [],
 ): void {
   for (const state of states) {
     if (

@@ -3,12 +3,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  jobRegistry,
   registerInProcessJob,
   type JobState,
+  type SubagentResult,
 } from "../src/helpers";
 import {
-  interactiveSubagentRegistry,
   registerInteractiveSubagentState,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
@@ -27,7 +26,12 @@ import {
   writeLineageBootstrap,
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
-import { workflowJobRegistry } from "../src/workflow-jobs";
+import {
+  cancelWorkflowJob,
+  startWorkflowJob,
+  workflowJobRegistry,
+  type WorkflowJobState,
+} from "../src/workflow-jobs";
 import {
   appendInteractiveState,
   appendEvent,
@@ -45,11 +49,45 @@ import {
   advanceSessionScopeGeneration,
   clearSessionScopes,
   getSessionScopes,
+  isSessionOwnerLive,
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
 import { publishCompletion } from "../src/completion-coordinator";
-import { createTelemetrySession } from "../src/telemetry";
+import {
+  createTelemetrySession,
+  TELEMETRY_ORIGIN_ENV,
+  type TelemetryPayload,
+} from "../src/telemetry";
+const originalTelemetryOrigin = process.env[TELEMETRY_ORIGIN_ENV];
+
+function successfulWorkflowAgentResult(output: string): SubagentResult {
+  return {
+    isError: false,
+    output,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
+    },
+  };
+}
+
+async function drainWorkflowJob(
+  job: WorkflowJobState | undefined,
+): Promise<void> {
+  if (!job) return;
+  if (job.status === "running") cancelWorkflowJob(job, "explicit_cancel");
+  try {
+    await job.promise;
+  } catch {
+    /* Expected when draining a canceled job. */
+  }
+  workflowJobRegistry.delete(job.id);
+}
 
 interface HandlerRegistration {
   handlers: Map<string, Function[]>;
@@ -189,28 +227,27 @@ describe("session handler lifecycle callbacks", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     root = mkdtempSync(join(tmpdir(), "pi-subagentura-session-handlers-"));
-    jobRegistry.clear();
     workflowJobRegistry.clear();
-    interactiveSubagentRegistry.clear();
     clearSessionScopes();
     const globalState = globalThis as any;
     globalState.__piSubagenturaInteractivePollerHandle = undefined;
-    globalState.__piSubagenturaPiRef = undefined;
-    globalState.__piSubagenturaUi = undefined;
-    globalState.__piSubagenturaSessionManager = undefined;
-    globalState.__piSubagenturaParentStreaming = false;
+    delete process.env[TELEMETRY_ORIGIN_ENV];
   });
 
   afterEach(() => {
     const handle = (globalThis as any).__piSubagenturaInteractivePollerHandle;
     clearInterval(handle);
+    vi.unstubAllGlobals();
     vi.useRealTimers();
-    jobRegistry.clear();
     workflowJobRegistry.clear();
-    interactiveSubagentRegistry.clear();
     clearSessionScopes();
     __setTmuxMultiplexer(undefined);
     resetRuntimeSpawnTreeContextForTests();
+    if (originalTelemetryOrigin === undefined) {
+      delete process.env[TELEMETRY_ORIGIN_ENV];
+    } else {
+      process.env[TELEMETRY_ORIGIN_ENV] = originalTelemetryOrigin;
+    }
     delete process.env[LINEAGE_BOOTSTRAP_ENV];
     rmSync(root, { recursive: true, force: true });
   });
@@ -424,6 +461,62 @@ describe("session handler lifecycle callbacks", () => {
         telemetry: { correlationId, mode: "orchestrator_v2" },
       });
     });
+    it("restores persisted traffic origin unless an explicit current marker overrides it", () => {
+      process.env[TELEMETRY_ORIGIN_ENV] = " Usage ";
+      const initial = registerHandlers(undefined, true, "orchestratorv2", true);
+      startSession(initial, root, "session-a");
+      const correlationId = initial.sessionScope.telemetry?.correlationId;
+      expect(initial.sessionScope.telemetry?.trafficOrigin).toBe("usage");
+      expect(loadInteractiveStates(root)?.telemetry?.trafficOrigin).toBe(
+        "usage",
+      );
+      expect(initial.sessionScope.spawnTreeContext?.telemetryOrigin).toBe(
+        "usage",
+      );
+
+      delete process.env[TELEMETRY_ORIGIN_ENV];
+      const restored = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      startSession(restored, root, "session-a");
+      expect(restored.sessionScope.telemetry?.correlationId).toBe(
+        correlationId,
+      );
+      expect(restored.sessionScope.telemetry?.trafficOrigin).toBe("usage");
+      process.env[TELEMETRY_ORIGIN_ENV] = "";
+      const empty = registerHandlers(undefined, true, "orchestratorv2", true);
+      startSession(empty, root, "session-a");
+      expect(empty.sessionScope.telemetry?.trafficOrigin).toBe("unknown");
+      expect(loadInteractiveStates(root)?.telemetry?.trafficOrigin).toBe(
+        "unknown",
+      );
+
+      process.env[TELEMETRY_ORIGIN_ENV] = "development";
+      const overridden = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      startSession(overridden, root, "session-a");
+      expect(overridden.sessionScope.telemetry?.correlationId).toBe(
+        correlationId,
+      );
+      expect(overridden.sessionScope.telemetry?.trafficOrigin).toBe(
+        "development",
+      );
+
+      process.env[TELEMETRY_ORIGIN_ENV] = "private origin";
+      const invalid = registerHandlers(undefined, true, "orchestratorv2", true);
+      startSession(invalid, root, "session-a");
+      expect(invalid.sessionScope.telemetry?.trafficOrigin).toBe("unknown");
+      expect(loadInteractiveStates(root)?.telemetry?.trafficOrigin).toBe(
+        "unknown",
+      );
+    });
 
     it("reports recovery failures without sending exception text or stopping startup", () => {
       const registration = registerHandlers(
@@ -634,6 +727,7 @@ describe("session handler lifecycle callbacks", () => {
         8,
         childCorrelation,
         "orchestrator",
+        "development",
       ),
       "child-agent",
       join(root, "child-agent"),
@@ -645,11 +739,51 @@ describe("session handler lifecycle callbacks", () => {
     expect(registration.sessionScope.telemetry).toMatchObject({
       correlationId: childCorrelation,
       mode: "orchestrator",
+      trafficOrigin: "development",
     });
     expect(loadInteractiveStates(root)).toMatchObject({
       parent: "root-session",
       telemetry: { correlationId: rootCorrelation },
     });
+  });
+  it("propagates an explicit current origin into a child lineage", () => {
+    const initial = createDescendantSpawnTreeContext(
+      createRootSpawnTreeContext(
+        "origin-root",
+        root,
+        false,
+        false,
+        8,
+        "66666666-6666-4666-8666-666666666666",
+        "straight",
+        "usage",
+      ),
+      "child-agent",
+      join(root, "child-agent"),
+    );
+    process.env[TELEMETRY_ORIGIN_ENV] = "development";
+    const registration = registerHandlers(
+      initial,
+      false,
+      "orchestratorv2",
+      false,
+    );
+
+    startSession(registration, root, "child-session");
+
+    expect(registration.sessionScope.telemetry?.trafficOrigin).toBe(
+      "development",
+    );
+    expect(registration.sessionScope.spawnTreeContext?.telemetryOrigin).toBe(
+      "development",
+    );
+    expect(
+      createDescendantSpawnTreeContext(
+        registration.sessionScope.spawnTreeContext!,
+        "grandchild-agent",
+        join(root, "grandchild-agent"),
+      ).telemetryOrigin,
+    ).toBe("development");
   });
 
   it("clears descendant authority on a fresh child session", () => {
@@ -710,7 +844,7 @@ describe("session handler lifecycle callbacks", () => {
     expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBeUndefined();
   });
 
-  it("acknowledges only the marked wake run after it settles", () => {
+  it("starts and acknowledges only the native custom completion wake", () => {
     const registration = registerHandlers();
     startSession(registration, root, "session-a");
     const { handlers, pi } = registration;
@@ -724,23 +858,133 @@ describe("session handler lifecycle callbacks", () => {
       },
       { deliverAs: "followUp", triggerTurn: true, parentStreaming: false },
     );
-    const wakePrompt = pi.sendUserMessage.mock.calls[0][0];
 
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+    const [completionMessage, completionOptions] = pi.sendMessage.mock.calls[0];
+    const [wakeMessage, wakeOptions] = pi.sendMessage.mock.calls[1];
+    expect(completionOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: false,
+    });
+    expect(completionMessage.customType).toBe("subagent-notify");
+    expect(wakeOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(wakeMessage).toMatchObject({
+      customType: "orchestratorv2-completion-wakeup",
+      display: false,
+    });
+    const wakeId = wakeMessage.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    expect(completionMessage.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY]).toBe(
+      wakeId,
+    );
+    const requestOrder = pi.appendEntry.mock.invocationCallOrder[0];
+    const completionOrder = pi.sendMessage.mock.invocationCallOrder[0];
+    const wakeOrder = pi.sendMessage.mock.invocationCallOrder[1];
+    expect(requestOrder).toBeLessThan(completionOrder);
+    expect(completionOrder).toBeLessThan(wakeOrder);
+
+    handlers.get("before_agent_start")![0]({
+      messageType: "user",
+      prompt: `Please handle the completion ${wakeId}`,
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({ prompt: `${wakePrompt} extra` });
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: {
+        customType: "unrelated",
+        content: `An unrelated message mentions completion id ${wakeId}.`,
+        display: false,
+        details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+      },
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({ prompt: wakePrompt });
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: wakeMessage,
+    });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenLastCalledWith(
       ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
-      expect.objectContaining({ state: "acknowledged" }),
+      expect.objectContaining({ state: "acknowledged", wakeIds: [wakeId] }),
+    );
+  });
+
+  it("recovers a durable requested wake through a native custom turn", () => {
+    const registration = registerHandlers();
+    const { handlers, pi } = registration;
+    const branch: unknown[] = [];
+    const sessionManager = {
+      getSessionId: () => "session-a",
+      getEntries: () => [],
+      getBranch: () => branch,
+    };
+    const ctx = {
+      cwd: root,
+      ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+      sessionManager,
+    };
+    handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+
+    sendCompletionTurn(
+      pi,
+      {
+        customType: "subagent-notify",
+        content: "completion",
+        display: true,
+      },
+      { deliverAs: "followUp", triggerTurn: true, parentStreaming: false },
+    );
+    const originalMessage = pi.sendMessage.mock.calls[0][0];
+    const originalWake = pi.sendMessage.mock.calls[1][0];
+    const request = pi.appendEntry.mock.calls[0][1];
+    const wakeId = originalWake.details[ORCHESTRATOR_V2_WAKE_DETAIL_KEY];
+    branch.push(
+      {
+        type: "custom",
+        customType: ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
+        data: request,
+      },
+      {
+        type: "custom_message",
+        customType: originalMessage.customType,
+        details: originalMessage.details,
+      },
+    );
+
+    handlers.get("session_start")![0]({ reason: "reload" }, ctx);
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledTimes(3);
+    const [recoveredMessage, recoveredOptions] = pi.sendMessage.mock.calls[2];
+    expect(recoveredOptions).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(recoveredMessage).toMatchObject({
+      customType: "orchestratorv2-completion-wakeup",
+      details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+    });
+    expect(pi.appendEntry).toHaveBeenCalledOnce();
+
+    handlers.get("before_agent_start")![0]({
+      messageType: "custom",
+      message: recoveredMessage,
+    });
+    handlers.get("agent_start")![0]();
+    handlers.get("agent_settled")![0]();
+    expect(pi.appendEntry).toHaveBeenLastCalledWith(
+      ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
+      expect.objectContaining({ state: "acknowledged", wakeIds: [wakeId] }),
     );
   });
 
@@ -785,7 +1029,11 @@ describe("session handler lifecycle callbacks", () => {
 
     registration.handlers.get("session_start")![0]({ reason: "reload" }, ctx);
 
-    expect(registration.pi.sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(registration.pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(registration.pi.sendMessage).toHaveBeenCalledTimes(3);
+    expect(registration.pi.sendMessage.mock.calls[2][1]).toMatchObject({
+      triggerTurn: true,
+    });
     expect(vi.getTimerCount()).toBe(timersBeforeWake + 1);
     registration.handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
     expect(vi.getTimerCount()).toBe(0);
@@ -798,11 +1046,9 @@ describe("session handler lifecycle callbacks", () => {
 
     handlers.get("agent_start")![0]();
     expect(scope.parentStreaming).toBe(true);
-    expect((globalThis as any).__piSubagenturaParentStreaming).toBe(true);
 
     handlers.get("agent_settled")![0]();
     expect(scope.parentStreaming).toBe(false);
-    expect((globalThis as any).__piSubagenturaParentStreaming).toBe(false);
 
     const { abort } = ownedJob(scope, "job-a");
     const workflow = ownedWorkflow(scope, "workflow-a");
@@ -812,10 +1058,213 @@ describe("session handler lifecycle callbacks", () => {
     expect(workflow.abort.signal.aborted).toBe(true);
     expect(scope.lifecycle).toBe("shutdown");
     expect(scope.inProcessJobs.size).toBe(0);
-    expect(jobRegistry.size).toBe(0);
     expect(workflowJobRegistry.size).toBe(0);
     expect(getSessionScopes()).toEqual([]);
-    expect((globalThis as any).__piSubagenturaPiRef).toBeUndefined();
+  });
+
+  it.each([
+    ["session_shutdown", true],
+    ["replacement session_start", false],
+  ] as const)(
+    "closes workflow admission during %s independently of telemetry=%s",
+    async (lifecycle, telemetryEnabled) => {
+      const captured: TelemetryPayload[] = [];
+      process.env[TELEMETRY_ORIGIN_ENV] = "development";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        telemetryEnabled,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      const { sessionScope: scope, handlers } = registration;
+      const oldOwner = sessionOwner(scope);
+      const oldCorrelationId = scope.telemetry?.correlationId;
+      let ownerLiveDuringAbort = false;
+      let originalJob: WorkflowJobState | undefined;
+      let nestedJob: WorkflowJobState | undefined;
+      let newGenerationJob: WorkflowJobState | undefined;
+      try {
+        const original = startWorkflowJob(
+          "teardown-reentrancy",
+          'export const meta = { name: "teardown-reentrancy", description: "d" }; return await agent("blocked");',
+          {
+            runAgent: ({ signal }) => {
+              const { promise, reject } =
+                Promise.withResolvers<SubagentResult>();
+              const rejectAbort = () =>
+                reject(signal?.reason ?? new Error("aborted"));
+              if (signal?.aborted) rejectAbort();
+              else
+                signal?.addEventListener("abort", rejectAbort, { once: true });
+              return promise;
+            },
+          },
+          undefined,
+          undefined,
+          oldOwner,
+        );
+        originalJob = original;
+        const nestedBuilder = vi.fn(() => ({
+          runAgent: async () => successfulWorkflowAgentResult("orphan"),
+        }));
+        let nestedError: unknown;
+        const reentrantAttempt = vi.fn(() => {
+          ownerLiveDuringAbort = isSessionOwnerLive(oldOwner);
+          try {
+            nestedJob = startWorkflowJob(
+              "nested-teardown-workflow",
+              'export const meta = { name: "nested", description: "d" }; return "orphan";',
+              nestedBuilder,
+              undefined,
+              undefined,
+              oldOwner,
+            );
+          } catch (error) {
+            nestedError = error;
+          }
+        });
+        original.abort.signal.addEventListener("abort", reentrantAttempt, {
+          once: true,
+        });
+
+        if (lifecycle === "session_shutdown") {
+          handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+        } else {
+          handlers.get("session_start")![0]({ reason: "new" }, ctx);
+        }
+
+        expect(reentrantAttempt).toHaveBeenCalledOnce();
+        expect(ownerLiveDuringAbort).toBe(true);
+        expect(nestedError).toBeInstanceOf(Error);
+        expect(nestedBuilder).not.toHaveBeenCalled();
+        expect(workflowJobRegistry.size).toBe(0);
+        await expect(original.promise).rejects.toBeDefined();
+
+        const workflowEvents = captured.filter(({ event }) =>
+          [
+            "pi_subagentura_workflow_started",
+            "pi_subagentura_workflow_completed",
+          ].includes(event),
+        );
+        if (telemetryEnabled) {
+          expect(workflowEvents).toHaveLength(2);
+          expect(workflowEvents).toEqual([
+            expect.objectContaining({
+              event: "pi_subagentura_workflow_started",
+              distinct_id: oldCorrelationId,
+            }),
+            expect.objectContaining({
+              event: "pi_subagentura_workflow_completed",
+              distinct_id: oldCorrelationId,
+              properties: expect.objectContaining({
+                status: "cancelled",
+              }),
+            }),
+          ]);
+        } else {
+          expect(workflowEvents).toEqual([]);
+        }
+
+        if (lifecycle === "replacement session_start") {
+          const newOwner = sessionOwner(scope);
+          expect(newOwner.generation).not.toBe(oldOwner.generation);
+          const newGeneration = startWorkflowJob(
+            "new-generation",
+            'export const meta = { name: "new-generation", description: "d" }; return "ok";',
+            {
+              runAgent: async () => successfulWorkflowAgentResult("ok"),
+            },
+            undefined,
+            undefined,
+            newOwner,
+          );
+          newGenerationJob = newGeneration;
+          await newGeneration.promise;
+        } else {
+          const afterShutdownBuilder = vi.fn(() => ({
+            runAgent: async () => successfulWorkflowAgentResult("orphan"),
+          }));
+          expect(() =>
+            startWorkflowJob(
+              "after-shutdown",
+              'export const meta = { name: "after-shutdown", description: "d" }; return "orphan";',
+              afterShutdownBuilder,
+              undefined,
+              undefined,
+              oldOwner,
+            ),
+          ).toThrow(Error);
+          expect(afterShutdownBuilder).not.toHaveBeenCalled();
+        }
+      } finally {
+        await drainWorkflowJob(originalJob);
+        await drainWorkflowJob(nestedJob);
+        await drainWorkflowJob(newGenerationJob);
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("revalidates workflow admission after an options builder runs lifecycle handling", async () => {
+    let builderJob: WorkflowJobState | undefined;
+    try {
+      const captured: TelemetryPayload[] = [];
+      process.env[TELEMETRY_ORIGIN_ENV] = "development";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          captured.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 200 });
+        }),
+      );
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        true,
+      );
+      const ctx = startSession(registration, root, "session-a");
+      const oldOwner = sessionOwner(registration.sessionScope);
+      const runner = vi.fn(async () => successfulWorkflowAgentResult("orphan"));
+      const builder = vi.fn(() => {
+        registration.handlers.get("session_start")![0]({ reason: "new" }, ctx);
+        return { runAgent: runner };
+      });
+
+      expect(() => {
+        builderJob = startWorkflowJob(
+          "builder-reentrancy",
+          'export const meta = { name: "builder-reentrancy", description: "d" }; return "orphan";',
+          builder,
+          undefined,
+          undefined,
+          oldOwner,
+        );
+      }).toThrow(Error);
+
+      expect(builder).toHaveBeenCalledOnce();
+      expect(runner).not.toHaveBeenCalled();
+      expect(workflowJobRegistry.size).toBe(0);
+      expect(
+        captured.filter(({ event }) =>
+          [
+            "pi_subagentura_workflow_started",
+            "pi_subagentura_workflow_completed",
+          ].includes(event),
+        ),
+      ).toEqual([]);
+    } finally {
+      await drainWorkflowJob(builderJob);
+      vi.unstubAllGlobals();
+    }
   });
   it.each(["new", "fork"] as const)(
     "classifies workflow cleanup as fresh_session for %s",
@@ -937,7 +1386,6 @@ describe("session handler lifecycle callbacks", () => {
           sessionFile: state.sessionFile,
           parentSessionId: "session-a",
           eventByteCursor: eventLogEndOffset(art),
-          sessionByteCursor: 0,
           pendingDeliveries: [],
           deliveryReceipts: [],
           telemetry: {
@@ -1055,14 +1503,16 @@ describe("session handler lifecycle callbacks", () => {
     expect(getSessionScopes()).toEqual([surviving.sessionScope]);
     expect(removedJob.abort).toHaveBeenCalledOnce();
     expect(survivingJob.abort).not.toHaveBeenCalled();
-    expect(jobRegistry.get(survivingJob.job.id)).toBe(survivingJob.job);
+    expect(surviving.sessionScope.inProcessJobs.get(survivingJob.job.id)).toBe(
+      survivingJob.job,
+    );
     expect(workflowJobRegistry.get(survivingWorkflow.workflow.id)).toBe(
       survivingWorkflow.workflow,
     );
     expect(survivingWorkflow.abort.signal.aborted).toBe(false);
-    expect(interactiveSubagentRegistry.get(survivingState.id)).toBe(
-      survivingState,
-    );
+    expect(
+      surviving.sessionScope.interactiveStates.get(survivingState.id),
+    ).toBe(survivingState);
     expect(
       (globalThis as any).__piSubagenturaInteractivePollerHandle,
     ).toBeDefined();
@@ -1105,19 +1555,19 @@ describe("session handler lifecycle callbacks", () => {
     );
     expect(a.sessionScope.lifecycle).toBe("started");
     expect(aJob.abort).not.toHaveBeenCalled();
-    expect(jobRegistry.get(aJob.job.id)).toBe(aJob.job);
+    expect(a.sessionScope.inProcessJobs.get(aJob.job.id)).toBe(aJob.job);
     expect(aWorkflow.abort.signal.aborted).toBe(false);
     expect(workflowJobRegistry.get(aWorkflow.workflow.id)).toBe(
       aWorkflow.workflow,
     );
-    expect(interactiveSubagentRegistry.get(aState.id)).toBe(aState);
+    expect(a.sessionScope.interactiveStates.get(aState.id)).toBe(aState);
 
     expect(b.sessionScope.lifecycle).toBe("started");
     expect(b.sessionScope.generation).toBe(bGeneration + 1);
     expect(bJob.abort).toHaveBeenCalledOnce();
     expect(bWorkflow.abort.signal.aborted).toBe(true);
-    expect(jobRegistry.has(bJob.job.id)).toBe(false);
-    expect(interactiveSubagentRegistry.has("state-b-old")).toBe(false);
+    expect(b.sessionScope.inProcessJobs.has(bJob.job.id)).toBe(false);
+    expect(b.sessionScope.interactiveStates.has("state-b-old")).toBe(false);
     expect(getSessionScopes()).toEqual([a.sessionScope, b.sessionScope]);
   });
 
@@ -1380,7 +1830,14 @@ describe("session handler lifecycle callbacks", () => {
       parentSessionId: string,
     ) => {
       const artifact = artifactPath(root, id);
-      appendEvent(artifact, { ts: 1, type: "started", status: "running" });
+      appendEvent(artifact, {
+        version: 2,
+        eventId: `start-${id}`,
+        turnId: `turn-${id}`,
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      });
       const state = {
         id,
         paneId: `%${id}`,

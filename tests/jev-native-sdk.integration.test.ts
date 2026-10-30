@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { createCompatibleSessionRuntime } from "../src/pi-sdk-compat";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createRoutingEngine } from "../src/routing-factory";
 import type { RoutingInput } from "../src/routing-engine";
 
@@ -41,11 +40,14 @@ beforeEach(async () => {
   // Stub transport before runtime creation; never use real credentials or HTTP.
   fetch.mockReset().mockRejectedValue(new Error("unexpected network"));
   vi.stubGlobal("fetch", fetch);
-  const runtime = await createCompatibleSessionRuntime({ agentDir });
-  if (runtime.kind !== "modern") throw new Error("native runtime required");
-  registry = new ModelRegistry(runtime.modelRuntime as never);
+  const runtime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: null,
+  });
+  registry = new ModelRegistry(runtime);
   registry.registerProvider("openrouter", { apiKey: "synthetic-sdk-test-key" });
   registry.registerProvider("typesafe", { apiKey: "synthetic-sdk-test-key" });
+  registry.registerProvider("openai", { apiKey: "synthetic-sdk-test-key" });
   fetch.mockClear();
 });
 
@@ -55,8 +57,70 @@ afterEach(() => {
   agentDir = undefined;
 });
 
-// The minimum SDK intentionally lacks classifiers; CI's latest leg runs these.
+// Exercise the real SDK adapter with deterministic, stubbed transport.
 describe.skipIf(!hasNativeClassifier)("routing through Pi's native SDK", () => {
+  it("routes through the OpenAI Decisions adapter using Luna", async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({
+        answers: [
+          {
+            name: "route",
+            type: "choice",
+            choice: "candidate_0",
+            probabilities: [
+              { value: "candidate_0", probability: 0.9 },
+              { value: "candidate_1", probability: 0.05 },
+              { value: "none", probability: 0.05 },
+            ],
+            confidence: 0.95,
+          },
+        ],
+        usage: { input_tokens: 20, output_tokens: 3 },
+      }),
+    );
+    const onUsage = vi.fn();
+    const engine = createRoutingEngine({
+      env: {
+        ...env,
+        PI_ORCHESTRATOR_ROUTER_PROVIDER: "openai",
+        PI_ORCHESTRATOR_ROUTER_MODEL: "gpt-6-luna",
+      },
+      modelRegistry: registry,
+      onUsage,
+    });
+    expect(engine).toBeDefined();
+    await expect(engine!.decide(input)).resolves.toMatchObject({
+      kind: "match",
+      childId: "child-api",
+      evidence: { confidence: 0.95, margin: 0.85 },
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, request] = fetch.mock.calls[0];
+    expect(new URL(String(url)).pathname).toBe("/v1/decisions");
+    expect(new Headers(request?.headers).get("authorization")).toBe(
+      "Bearer synthetic-sdk-test-key",
+    );
+    const payload = JSON.parse(String(request?.body));
+    expect(payload.model).toBe("gpt-6-luna");
+    expect(JSON.parse(payload.input).task).toBe(input.task);
+    expect(payload.questions).toEqual([
+      expect.objectContaining({
+        type: "choice",
+        name: "route",
+        choices: [
+          expect.objectContaining({ value: "candidate_0" }),
+          expect.objectContaining({ value: "candidate_1" }),
+          expect.objectContaining({ value: "none" }),
+        ],
+      }),
+    ]);
+    expect(request?.body).not.toContain("child-api");
+    expect(request?.signal).toBeInstanceOf(AbortSignal);
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ input: 20, output: 3, totalTokens: 23 }),
+    );
+  });
+
   it.each([
     ["openrouter", "~typesafe/jev-latest"],
     ["typesafe", "jev-latest"],

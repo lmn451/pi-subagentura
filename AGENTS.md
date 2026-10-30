@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 0.80.6. CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `is-path-inside`, and `ndjson`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 1.2.0 (development pin 1.4.0). CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, and `is-path-inside`. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
@@ -34,22 +34,22 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/tools/in-process.ts`                              | `subagent_with_context`, `subagent_isolated`, async job management tools (`get_subagent_status`, `get_subagent_result`, `cancel_subagent`, `prune_subagent_jobs`), and `list_available_models`.                   |
 | `src/tools/interactive.ts`                             | Interactive sub-agent tools (`subagent_interactive`, `get_interactive_subagent_status`, `cancel_interactive_subagent`, `send_interactive_subagent_message`, `list_subagent_artifacts`, `read_subagent_artifact`). |
 | `src/session-handlers.ts`                              | `session_start`/`session_shutdown` handlers; poller interval setup/teardown on extension load/reload/shutdown.                                                                                                    |
-| `src/artifact-poller.ts`                               | Per-tick byte-ordered artifact walk, legacy session-JSONL tail-reading, durable delivery enqueue, and UI activity updates.                                                                                        |
+| `src/artifact-poller.ts`                               | Per-tick byte-ordered v2 artifact walk, coordinated delivery enqueue, and UI activity updates.                                                                                                                    |
 | `src/rehydrate.ts`                                     | Reconstruct persisted cursors, queues, and delivery receipts on session start/reload/resume.                                                                                                                      |
 | `src/helpers.ts`                                       | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `formatUsage`, job registry and cleanup.                                                                                              |
-| `src/artifact.ts`                                      | Versioned artifact protocol, immutable `outputs/<eventId>.md`, byte readers, mixed-v1 compatibility, and state-v2 helpers.                                                                                        |
+| `src/artifact.ts`                                      | Protocol-v2 artifacts, immutable `outputs/<eventId>.md`, byte readers, and current state-v2 helpers.                                                                                                              |
 | `src/child-protocol.ts`                                | Child-only Pi lifecycle hooks selected by `PI_SUBAGENTURA_CHILD=1`.                                                                                                                                               |
-| `src/delivery.ts`                                      | Bounded durable trigger-aware delivery queue and deterministic delivery IDs.                                                                                                                                      |
-| `src/completion-coordinator.ts`                        | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and triggered parent continuation.                                                                      |
+| `src/delivery.ts`                                      | Bounded durable coordinated delivery queue and deterministic delivery IDs.                                                                                                                                        |
+| `src/completion-coordinator.ts`                        | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and parent continuation.                                                                                |
 | `src/interactive-tmux.ts`                              | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
 | `src/multiplexer{,-contracts,-tmux,-zellij,-herdr}.ts` | Dependency-light mux contracts/helpers, pluggable tmux/Zellij/Herdr backends, and runtime backend selection.                                                                                                      |
 | `src/usage.ts`                                         | SDK-free usage normalization and aggregation primitives shared by workflow and Pi helpers.                                                                                                                        |
 | `src/subagent-artifact-cli.ts`                         | Tiny `cli.mjs` wrapper called by the child: `cli.mjs done N` / `cli.mjs error "msg"`.                                                                                                                             |
-| `src/notifications.ts`                                 | Upgrade-only legacy in-process delivery broker and output sanitization.                                                                                                                                           |
+| `src/notifications.ts`                                 | Shared output sanitization and v2 completion classification.                                                                                                                                                      |
 | `src/rendering.ts`                                     | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
 | `src/schemas.ts`                                       | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
 | `src/workflow*.ts`                                     | Workflow tool/core/worker/job/UI modules. Worker execution is isolated from the parent thread but the VM is not a security boundary.                                                                              |
-| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-level state (interactive sub-agent registry, mux mock, etc.).                                                                                                  |
+| `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-local state; session scopes and mux test state have separate cleanup.                                                                                          |
 
 ## Code conventions
 
@@ -96,43 +96,9 @@ invalid candidate, and continue to the next applicable scope or default.
 
 ### Telemetry schema invariants
 
-- Schema v4 shipped in the 3.6.2 release; schema v5 adds the optional closed
-  `failure_operation` dimension. `TELEMETRY_SCHEMA_VERSION` in
-  `src/telemetry.ts` is the source of truth for the current schema; when
-  documenting telemetry, attribute schema changes to the release that shipped
-  them (per CHANGELOG.md) rather than restating a release status that can go
-  stale.
-- Telemetry dimensions are closed enums. Use only the literals in the schema
-  (and `unknown` only where that field permits it); never forward arbitrary
-  strings. Counts remain bounded and duration/latency numbers remain rounded
-  to the existing `0..30`-day representation.
-- Diagnostic fields are status-scoped: `task_completed` carries
-  `error_category` and `error_stage` only for errors, `agent_stop_reason`
-  (`error` or `aborted`) for errors or cancellations, and `exit_code_bucket`
-  only when `terminal_reason` is `process_exit`; `workflow_completed` carries
-  `error_category` and `error_stage` only for `error` or `partial` status.
-  `runtime_failure` carries only its closed category, stage, and failure kind.
-- Failures and content are never raw telemetry. Report only closed
-  `failure_stage`, `failure_operation`, `terminal_reason`, result-outcome,
-  error-category, and error-stage values; error counts use bounded buckets.
-  Invalid categories map to `unknown`; invalid stages, operations, stop
-  reasons, exit buckets, and failure kinds are omitted. Cancellation is not an
-  error, and runtime failures are reported once per failure episode rather than
-  once per poll.
-- Never send exception text or stacks, prompts, tasks, personas, tool
-  arguments, message content, outputs, paths, or agent/job/workflow/session
-  identifiers.
-- The workflow runner is the sole owner of the aggregate lifecycle pair:
-  exactly one `workflow_started` and one `workflow_completed` for an accepted
-  invocation. Child agent/task records must not emit duplicate workflow
-  lifecycle aggregates.
-- Elapsed values may subtract only Unix-ms timestamps from the same event clock
-  domain. Copy terminal event `ts` into optional `JobState.completedAt?`,
-  `WorkflowJobState.completedAt?`, and `PersistedDeliveryIntent.completedAt?`;
-  never mix monotonic/process-local readings with persisted or child event
-  timestamps. If timestamps are unavailable or untrustworthy, omit the numeric
-  value and emit the matching `unknown` bucket. Batch delivery latency is the
-  maximum known completion age in that batch.
+The authoritative schema, privacy, provenance, attribution, and reporting
+contracts are maintained in [docs/telemetry.md](./docs/telemetry.md). Keep
+implementation aligned with that reference and `src/telemetry.ts`.
 
 ### Physical byte order is authoritative
 
@@ -172,8 +138,10 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 The coordinated async default is `completionPolicy="each"`; grouped work must
 use `completionPolicy="group"` and a bounded explicit `completionGroupId`.
 Registration happens at spawn. Every parent `agent_settled` seals its registered
-groups, and a group becomes ready only after all members are terminal. `error`
-and `cancelled` are terminal; late members are rejected.
+groups, and a group itself becomes ready only after all members are terminal.
+Error records bypass the group barrier for delivery before the group is ready;
+this does not complete the group. Successful and `cancelled` records remain
+gated until the group is ready. Late members are rejected.
 
 Each parent-visible standalone terminal record and each background workflow
 aggregate appends
@@ -204,12 +172,6 @@ never spin while storage remains unavailable. Keep groups bounded to 32
 `source:sourceId` members, 512 groups per parent session, and safe 1–128 character
 IDs. A source satisfies a group once; later turns are independent `each` records.
 
-`notifyOnComplete` and `triggerTurnOnComplete` remain accepted only as deprecated
-compatibility inputs. Both map to coordinated `each` delivery; they must never
-restore full-output injection or independent trigger timing. Reject either field
-when `completionPolicy` or `completionGroupId` is also present. The legacy broker
-exists only to drain persisted pre-coordinator state and support internal tests.
-
 ### Background workflows are parent-session scoped
 
 Background workflow jobs and in-process async sub-agent jobs do **not** survive
@@ -239,7 +201,8 @@ groups before polling.
 
 **Crash-safe ordering at both write sites:**
 
-- **Spawn** — write the state file BEFORE `interactiveSubagentRegistry.set`.
+- **Spawn** — write the state file BEFORE registering the child in its owning
+  `SessionScope.interactiveStates` map.
   A crash between the two is recoverable on next reload.
   A crash before the write leaves no zombie.
 - **Poll enqueue** — persist the delivery intent before advancing the artifact
@@ -294,8 +257,13 @@ remain process/session scoped and are retired rather than rehydrated.
 - If a rehydrated entry's pane is dead, `deriveInteractiveSubagentStatus`
   sets `status="exited"` or `status="unknown"`; registry entry is retained
   so `list_subagent_artifacts` can still surface it before the next cleanup.
-- The schema is versioned (`schemaVersion: 2`) with explicit v1 migration so
-  coexist with older state files on upgrades.
+- The schema is versioned (`schemaVersion: 2`). Unsupported older or removed-field
+  state is preserved, not migrated or rewritten; runtime operations requiring
+  unsupported state fail closed.
+
+### Debug-skill trigger
+
+When Pi exposes the repository's `pi-subagentura-debug` skill, explicitly load it (`/skill:pi-subagentura-debug`) before diagnosing relevant errors. This includes unsupported schema or removed-field errors and read/write/rehydration failures for `.pi/subagentura-state.json`, `subagent_interactive` launch failures even when no pane was created, multiplexer failures, and missing artifacts or completion. This is prompt guidance for the agent, not runtime error interception; if the host does not expose the skill, use the repository documentation and do not claim it was automatically invoked.
 
 ## Git
 
@@ -333,19 +301,18 @@ src/
   session-handlers.ts              # session_start/shutdown handlers, poller setup
   artifact-poller.ts               # byte-ordered event fold, durable enqueue, activity UI
   child-protocol.ts                # child-only Pi lifecycle hooks and completion writer
-  delivery.ts                      # bounded delivery broker and receipt reconciliation
+  delivery.ts                      # bounded coordinated-delivery queue and receipt reconciliation
   completion-coordinator.ts         # TUI notices, barriers, manifests, consumption
   rehydrate.ts                     # restore persisted cursors, queues, and receipts
   helpers.ts                       # startSubagentJob, resolveModel, job registry
-  artifact.ts                      # v2 events, immutable outputs, state migration
+  artifact.ts                      # v2-only events, immutable outputs, current state schema
   interactive-tmux.ts              # InteractiveSubagentState, registry, mux dispatch
   multiplexer{,-contracts,-tmux,-zellij,-herdr}.ts # mux contracts/helpers and backends (tmux + Zellij + Herdr)
   subagent-artifact-cli.ts         # cli.mjs wrapper
-  notifications.ts                 # upgrade-only legacy completion broker
+  notifications.ts                 # shared output sanitization and completion classification
   rendering.ts                     # TUI render helpers
   schemas.ts                       # TypeBox tool-param schemas
   workflow.ts                      # Internal workflow barrel and registration re-export
-  ndjson.d.ts                      # ambient types for the ndjson dep
   usage.ts                         # SDK-free usage normalization and aggregation
 
 tests/

@@ -4,12 +4,16 @@ import {
   type ConfirmationToken,
 } from "../identifier-types";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { registerToolWithDefaultGuidance } from "../tool-guidance";
 import { Type } from "typebox";
 import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
   MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES,
   MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES,
+  MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS,
+  MAX_ORCHESTRATOR_AGENT_NAME_BYTES,
+  MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES,
   appendOrchestratorRoutingAuthorityEntry,
   listOrchestratorRoutingEntries,
   loadOrchestratorAgentRegistryView,
@@ -62,6 +66,85 @@ const pendingConfirmations = new WeakMap<
 >();
 
 const ListOrchestratorAgentsParams = Type.Object({});
+
+const OrchestratorAgentOutputSchema = Type.Object({
+  childId: Type.String(),
+  name: Type.Optional(
+    Type.String({ maxLength: MAX_ORCHESTRATOR_AGENT_NAME_BYTES }),
+  ),
+  description: Type.Optional(
+    Type.String({ maxLength: MAX_ORCHESTRATOR_ROUTING_DESCRIPTION_BYTES }),
+  ),
+  aliases: Type.Optional(
+    Type.Array(
+      Type.String({ maxLength: MAX_ORCHESTRATOR_ROUTING_ALIAS_BYTES }),
+      { maxItems: MAX_ORCHESTRATOR_ROUTING_ALIASES },
+    ),
+  ),
+  provenance: Type.Optional(
+    Type.Union([Type.Literal("user"), Type.Literal("orchestratorv2")]),
+  ),
+  updatedAt: Type.Optional(Type.String({ maxLength: 64 })),
+  taskPreview: Type.Optional(
+    Type.String({ maxLength: MAX_ORCHESTRATOR_TASK_PREVIEW_BYTES }),
+  ),
+  status: Type.Union([
+    Type.Literal("running"),
+    Type.Literal("idle"),
+    Type.Literal("cancelled"),
+    Type.Literal("exited"),
+    Type.Literal("unknown"),
+  ]),
+  liveness: Type.Union([
+    Type.Literal("alive"),
+    Type.Literal("dead"),
+    Type.Literal("unknown"),
+  ]),
+  stale: Type.Boolean(),
+  attachable: Type.Boolean(),
+  actionable: Type.Boolean(),
+  reason: Type.Optional(
+    Type.Union([
+      Type.Literal("runtime_missing"),
+      Type.Literal("pane_dead"),
+      Type.Literal("pane_liveness_unknown"),
+      Type.Literal("runtime_cancelled"),
+      Type.Literal("runtime_exited"),
+      Type.Literal("runtime_status_unknown"),
+      Type.Literal("workflow_owned"),
+      Type.Literal("routing_metadata_missing"),
+      Type.Literal("routing_metadata_untrusted"),
+    ]),
+  ),
+  attachCommand: Type.Optional(Type.String()),
+  focusCommand: Type.Optional(Type.String()),
+  artifactDir: Type.Optional(Type.String()),
+  sessionFile: Type.Optional(Type.String()),
+});
+const ListOrchestratorAgentsOutputSchema = Type.Union([
+  Type.Object({
+    status: Type.Literal("ok"),
+    routingMetadataStatus: Type.Union([
+      Type.Literal("missing"),
+      Type.Literal("empty"),
+      Type.Literal("loaded"),
+      Type.Literal("malformed"),
+      Type.Literal("unsupported"),
+      Type.Literal("unreadable"),
+    ]),
+    total: Type.Number(),
+    omitted: Type.Number(),
+    agents: Type.Array(OrchestratorAgentOutputSchema, {
+      maxItems: MAX_ORCHESTRATOR_AGENT_VIEW_ITEMS,
+    }),
+    routingMetadataError: Type.Optional(Type.String()),
+  }),
+  Type.Object({ status: Type.Literal("session_unavailable") }),
+  Type.Object({
+    status: Type.Literal("routing_metadata_error"),
+    error: Type.String(),
+  }),
+]);
 
 const UpdateOrchestratorAgentDescriptionParams = Type.Object({
   childId: Type.String({
@@ -128,9 +211,21 @@ export function registerOrchestratorTools(
     description:
       "List the bounded Orchestratorv2 routing overlay joined to this parent session's current interactive runtimes. Returns metadata, status, liveness, attach/focus commands, and artifact pointers without child transcripts or output.",
     parameters: ListOrchestratorAgentsParams,
-    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+    outputSchema: ListOrchestratorAgentsOutputSchema,
+    async execute(
+      _toolCallId,
+      _params,
+      signal,
+      _onUpdate,
+      ctx,
+    ): Promise<AgentToolResult<unknown>> {
       const scope = resolveToolSessionScope(toolToken);
-      if (!scope) return sessionUnavailableResult();
+      if (!scope) {
+        return {
+          ...sessionUnavailableResult(),
+          structuredContent: { status: "session_unavailable" },
+        };
+      }
       try {
         const projection = await loadOrchestratorAgentRegistryView(
           ctx.cwd,
@@ -140,6 +235,60 @@ export function registerOrchestratorTools(
             authorityEntries: parentBranchEntries(ctx),
           },
         );
+        const agents = projection.agents.map((agent) => {
+          const structuredAgent: Record<string, string | boolean | string[]> = {
+            childId: agent.childId,
+            status: agent.status,
+            liveness: agent.liveness,
+            stale: agent.stale,
+            attachable: agent.attachable,
+            actionable: agent.actionable,
+          };
+          if (agent.name !== undefined) structuredAgent.name = agent.name;
+          if (agent.description !== undefined) {
+            structuredAgent.description = agent.description;
+          }
+          if (agent.aliases !== undefined) {
+            structuredAgent.aliases = agent.aliases;
+          }
+          if (agent.provenance !== undefined) {
+            structuredAgent.provenance = agent.provenance;
+          }
+          if (agent.updatedAt !== undefined) {
+            structuredAgent.updatedAt = agent.updatedAt;
+          }
+          if (agent.taskPreview !== undefined) {
+            structuredAgent.taskPreview = agent.taskPreview;
+          }
+          if (agent.reason !== undefined) structuredAgent.reason = agent.reason;
+          if (agent.attachCommand !== undefined) {
+            structuredAgent.attachCommand = agent.attachCommand;
+          }
+          if (agent.focusCommand !== undefined) {
+            structuredAgent.focusCommand = agent.focusCommand;
+          }
+          if (agent.artifactDir !== undefined) {
+            structuredAgent.artifactDir = agent.artifactDir;
+          }
+          if (agent.sessionFile !== undefined) {
+            structuredAgent.sessionFile = agent.sessionFile;
+          }
+          return structuredAgent;
+        });
+        const structuredContent: Record<
+          string,
+          string | number | Record<string, string | boolean | string[]>[]
+        > = {
+          status: "ok",
+          routingMetadataStatus: projection.routingMetadataStatus,
+          total: projection.total,
+          omitted: projection.omitted,
+          agents,
+        };
+        if (projection.routingMetadataError !== undefined) {
+          structuredContent.routingMetadataError =
+            projection.routingMetadataError;
+        }
         return {
           content: [
             {
@@ -148,9 +297,17 @@ export function registerOrchestratorTools(
             },
           ],
           details: { status: "ok", ...projection },
+          structuredContent,
         };
       } catch (error) {
-        return routingErrorResult(error);
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          ...routingErrorResult(error),
+          structuredContent: {
+            status: "routing_metadata_error",
+            error: message,
+          },
+        };
       }
     },
   });

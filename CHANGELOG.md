@@ -9,16 +9,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add optional Orchestratorv2 child selection through Pi's native classifier
+  API, with bounded inputs, fail-closed selection, and usage accounting.
+
+## [4.1.0] - 2026-10-25
+
+### Changed
+
+- Keep transient mux-liveness uncertainty in local debug logs; anonymous
+  `mux_probe` runtime failures now report only when a workflow waiter exhausts
+  its grace and is blocked, with `impact=blocked`. Shared pane-episode dedupe
+  remains; other runtime failures and liveness/artifact handling are unchanged.
+- Expand the published PostHog SQL insights with separate launch/task/workflow
+  outcomes, mode-aware adoption and busiest-tree concentration, schema/provenance
+  and unknown coverage, diagnostic event units, and workflow lifecycle window
+  coverage. Window totals remain coverage diagnostics, not matched workflows.
+- Remove the bundled RALPLAN skill.
+- Add the `herdr` keyword for npm package discovery.
+
+### Fixed
+
+- Reject new workflows during session teardown and replacement setup, including
+  lifecycle changes inside options builders, while retaining terminal telemetry
+  for already accepted work.
+
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
+
+### Added
+
+- Add schema-backed structured results to 11 read-only tools, preserving human
+  content/details while exposing explicit machine-readable states and exact
+  terminal output.
+- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
+  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+- Expand the bundled debug skill with guidance for safe state recovery.
+
+### Changed
+
+- Remove the unused Pi server peer/dev/test-install dependency and legacy SDK
+  compatibility code, including `src/pi-sdk-compat.ts`, obsolete runtime
+  branches, wrappers, and aliases. Child sessions use `ModelRuntime` with copied
+  extension-added custom/native provider registrations; inherited context uses
+  `buildSessionProjection().messages` directly.
+- Replace synthetic user wake messages with a manifest-first native custom
+  wake; preserve the existing request/acknowledgement ledger schema.
+- Rename the minimum SDK CI check to `Test (Pi 1.2.0)` and keep required check
+  names synchronized with the repository ruleset.
+- Check tool definitions, session/context projections, model resolution, and
+  result callbacks against public Pi SDK types instead of local SDK-shaped
+  interfaces and broad casts; retain extension-owned state and result protocols.
+
+## [4.0.1] - 2026-10-18
+
+### Fixed
+
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
+
+## [4.0.0] - 2026-10-16
+
+### Added
+
+- Telemetry schema v6 records one logical child-launch resolution, separating
+  direct acceptance, automatic fallback recovery, rejection, and cancellation
+  from technical spawn attempts and terminal task outcomes.
+- Closed traffic provenance distinguishes explicitly classified usage and
+  development from unknown traffic, survives child bootstrap and recovery, and
+  suppresses normal capture for test-marked runs without weakening other opt-outs.
+- Published PostHog report queries define reliability, feature volume versus
+  logical-session reach, and provenance/schema/unknown-data coverage.
+
+### Breaking
+
+- Breaking: This major release makes protocol-v2 the only interactive runtime.
+  It removes protocol-v1 event/state migration, synthetic identities, numeric
+  snapshot readers, and child session-log tailing. Existing unsupported legacy
+  artifacts and state are preserved unchanged, but are not read or migrated.
+  Before upgrading, finish or cancel agents that depend on legacy state; use
+  fresh compatible sessions after the upgrade.
+- Breaking: Remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
+  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
+  now uses the coordinated `each`/`group` protocol only.
+
+### Changed
+
+- Removed obsolete aggregate indexes and active-session compatibility helpers for
+  in-process jobs and interactive sub-agent state. Runtime state now requires an
+  exact live `SessionScope` owner; ownerless and stale-owner operations fail closed.
+- Removed the unused `ndjson` runtime dependency after removing session-log parsing.
+
+### Fixed
+
+- Attribute mux-probe observations to the selected backend and reporter, sharing
+  pane-level outage episode authority across poller and workflow waiter so
+  workflow settlement does not count the same observation again.
+- Mark missing inherited history as an explicit rejected tool result and
+  live-child routing-metadata persistence warnings as degraded operation results.
+- Preserve a known initial mux when shutdown prevents a prepared workflow
+  fallback from starting, keeping its logical outcome cancelled rather than
+  accepted.
+- Prevent ordinary Vitest fixtures from sending telemetry to PostHog: reject
+  unmocked capture attempts visibly and keep intentional telemetry assertions
+  isolated behind in-memory collectors.
+- Drain coordinated completion queues when an independent intent carries stale
+  group metadata, without blocking later deliveries.
+- Preserve early child-process failure snapshots by letting Pi lifecycle hooks,
+  rather than the launch wrapper, establish agent turns.
+- Reject removed lifecycle and cutover state fields before mutation, preserving
+  unsupported state files byte-for-byte.
+- Return active-turn staging output for default artifact reads, even after an
+  earlier turn completes or `since` filters out all events, without consuming
+  that earlier completion.
+- Restore interactive activity rows from protocol-v2 tool events in physical
+  byte order, including tool-name fallback for missing or non-visible summaries.
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
+- Record a process-level error completion for missing selected-model authentication
+  during child session startup, so pre-run failures become reportable while the
+  child REPL remains available for `/login` and a later turn.
+- Include a bounded, explicitly untrusted terminal error diagnostic in interactive
+  artifact reads, including for empty snapshots; diagnostic credentials are not
+  redacted.
+
+## [3.6.5] - 2026-10-14
+
+### Added
+
 - Added opt-in local diagnostics for unknown mux liveness, logged once per
   tracked pane per outage. Herdr reports only closed timeout, command-error,
   or malformed-response reasons; anonymous telemetry is unchanged.
 - Added telemetry schema v5's optional closed `failure_operation` dimension to
   distinguish interactive spawn preparation, persistence, and registration
   failures without collecting exception text or user data.
-- Added optional Orchestratorv2 child selection through Pi's native classifier
-  API (Pi ≥ 0.99.0), with Pi-managed authentication, explicit opt-in, bounded
-  payloads, fail-closed selection, and usage accounting. Unavailable native
-  classification disables the advisor; no direct HTTP adapters or fallbacks.
+- Show supplied pi-subagentura tool arguments as JSON when tool output is
+  expanded with Pi's default Ctrl+O shortcut, retaining compact call summaries
+  when collapsed.
+- Record pi-subagentura tool names and full arguments in `extension_tool_call`
+  events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
+- Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
+  artifact diagnostics.
 
 ### Fixed
 
@@ -27,6 +158,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   episode; a later unknown result may report a new one.
 - Render coordinated workflow completion notices with resolved agent errors
   as “completed with errors” while retaining the internal error status.
+- Reject missing or non-directory interactive child working directories before
+  creating a multiplexer pane.
 
 ## [3.6.4] - 2026-10-03
 
@@ -326,7 +459,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v3.6.2...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
+[4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
+[4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
+[3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
 [3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2
 [3.6.1]: https://github.com/lmn451/pi-subagentura/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/lmn451/pi-subagentura/compare/v3.5.0...v3.6.0

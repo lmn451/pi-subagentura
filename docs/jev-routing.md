@@ -16,7 +16,7 @@ attach, reserve children, or change their responsibilities.
 
 ## Enable
 
-Routing requires Pi **0.99.0 or newer**, a catalog classifier with configured
+Routing requires Pi **1.2.0 or newer**, a catalog classifier with configured
 provider authentication, and both explicit opt-ins:
 
 ```bash
@@ -42,6 +42,13 @@ pi --orchestratorv2
 Provider/model selection does not authenticate the provider. Use Pi's normal
 configuration for TypeSafe, another Jev provider, or a llama.cpp classifier.
 Changing the provider does not automatically change the model ID.
+
+To use OpenAI's Decisions API with Pi 1.4.0 or another version whose catalog
+includes `gpt-6-luna`, set `PI_ORCHESTRATOR_ROUTER_PROVIDER=openai` and
+`PI_ORCHESTRATOR_ROUTER_MODEL=gpt-6-luna`. OpenAI requires an API key; Pi's
+ChatGPT OAuth login does not authorize Decisions API requests. A stored OpenAI
+login can take precedence over `OPENAI_API_KEY`; consult Pi's model documentation.
+The provider can charge for classification requests.
 
 If the host lacks the classifier APIs, the configured model is absent, or
 provider authentication is not configured, advisor registration and guidance are
@@ -151,11 +158,11 @@ thresholds. Switching to TypeSafe requires both `typesafe` and `jev-latest` IDs
 plus its own authentication; it does not guarantee free service.
 
 Unit tests mock Pi's classifier registry. Native-SDK integration tests exercise
-the real catalog, authentication resolution, System One transport, answer parsing,
-usage, and HTTP 402 handling with synthetic credentials and a stubbed HTTP
-response. A real-session test checks advisor registration after startup and
-reload. Classifier-specific integration cases skip on pre-classifier SDKs and run
-on CI's latest SDK leg. None requires live provider credentials or paid requests.
+the real catalog, authentication resolution, System One and OpenAI Decisions
+transports, answer parsing, usage, and HTTP 402 handling with synthetic
+credentials and stubbed HTTP responses. A real-session test checks advisor
+registration after startup and reload. None requires live provider credentials
+or paid requests.
 
 These tests do not establish live service availability or routing accuracy.
 Evaluate labeled requests before tuning thresholds, including overlapping

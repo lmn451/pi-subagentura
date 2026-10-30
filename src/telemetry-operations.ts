@@ -34,6 +34,8 @@ function resultStatus(result: unknown): TelemetryOperationResultStatus {
       return "ok";
     case "started":
       return "started";
+    case "degraded":
+      return "degraded";
     case "running":
     case "idle":
       return "running";

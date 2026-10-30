@@ -9,15 +9,16 @@ export default defineConfig({
     // tmux server plus a real Pi process down inside afterEach. Left at the 10s
     // default, a genuine failure can surface as a confusing hook timeout.
     hookTimeout: 30_000,
+    sequence: { setupFiles: "list" },
     setupFiles: [
+      "./tests/setup-telemetry-fetch-sentinel.ts",
       "./tests/setup-lineage-env.ts",
       "./tests/setup-routing-env.ts",
+      "./tests/setup-telemetry-network.ts",
     ],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      // Compatibility branches are exercised by the baseline/latest SDK matrix.
-      exclude: ["src/ndjson.d.ts", "src/pi-sdk-compat.ts"],
       thresholds: {
         statements: 71,
         branches: 64,

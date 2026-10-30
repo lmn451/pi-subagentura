@@ -20,6 +20,7 @@ import {
   parseSpawnTreeContext,
   writeLineageBootstrap,
 } from "../src/spawn-tree-context";
+import { TELEMETRY_ORIGIN_ENV } from "../src/telemetry";
 
 const tempDirs: string[] = [];
 
@@ -32,6 +33,7 @@ function tempDir(): string {
 afterEach(() => {
   resetRuntimeSpawnTreeContextForTests();
   delete process.env[LINEAGE_BOOTSTRAP_ENV];
+  delete process.env[TELEMETRY_ORIGIN_ENV];
   delete process.env.PI_SUBAGENTURA_AGENT_ID;
   delete process.env.PI_SUBAGENTURA_ROOT_ID;
   delete process.env.PI_SUBAGENTURA_LINEAGE_SESSION_ROOT;
@@ -87,6 +89,35 @@ describe("explicit lineage context", () => {
     expect(existsSync(bootstrapPath)).toBe(false);
     expect(process.env[LINEAGE_BOOTSTRAP_ENV]).toBeUndefined();
     expect(acquireRuntimeSpawnTreeContext(artifactDir)).toBe(acquired);
+  });
+  it("inherits the closed traffic origin through descendant bootstrap", () => {
+    const root = tempDir();
+    const artifactDir = join(root, "child-agent");
+    process.env[TELEMETRY_ORIGIN_ENV] = "usage";
+    const parent = createRootSpawnTreeContext("root-session", root);
+    const child = createDescendantSpawnTreeContext(
+      parent,
+      "child-agent",
+      artifactDir,
+    );
+    const bootstrapPath = writeLineageBootstrap(artifactDir, child);
+    process.env[LINEAGE_BOOTSTRAP_ENV] = bootstrapPath;
+    process.env[TELEMETRY_ORIGIN_ENV] = "development";
+
+    const acquired = acquireRuntimeSpawnTreeContext(artifactDir);
+
+    expect(acquired?.telemetryOrigin).toBe("usage");
+  });
+
+  it("maps invalid and legacy traffic origins to unknown", () => {
+    const root = tempDir();
+    process.env[TELEMETRY_ORIGIN_ENV] = "private origin";
+    const context = createRootSpawnTreeContext("root-session", root);
+    expect(context.telemetryOrigin).toBe("unknown");
+
+    const legacy: Record<string, unknown> = { ...context };
+    delete legacy.telemetryOrigin;
+    expect(parseSpawnTreeContext(legacy).telemetryOrigin).toBe("unknown");
   });
 
   it("does not recover authority from a bootstrap path inherited after consumption", () => {

@@ -45,17 +45,11 @@ vi.mock("../src/helpers", async (importOriginal) => {
   };
 });
 
-vi.mock("../src/notifications", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/notifications")>();
-  return { ...actual, deliverNotification: vi.fn() };
-});
-
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
   return {
     ...actual,
-    interactiveSubagentRegistry: new Map(),
     isTmuxAvailable: () => false,
     cancelInteractiveSubagent: vi.fn().mockReturnValue(undefined),
   };
@@ -74,19 +68,22 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 // ── Imports ────────────────────────────────────────────────────────────
 
 import type { JobState, SubagentResult } from "../src/helpers";
-import {
-  jobRegistry,
-  registerInProcessJob,
-  scheduleJobCleanup,
-} from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { abortableWait } from "../src/abortable-wait";
-import { deliverNotification } from "../src/notifications";
+import { cancelInteractiveSubagent } from "../src/interactive-tmux";
 import {
-  interactiveSubagentRegistry,
-  cancelInteractiveSubagent,
-} from "../src/interactive-tmux";
-import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
+  clearSessionScopes,
+  registerSessionScope,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
+
+let scope: SessionScope;
+beforeEach(() => {
+  clearSessionScopes();
+  scope = createTestSessionScope();
+});
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -146,7 +143,8 @@ function setupExtension() {
       registeredTools[tool.name] = tool;
     },
   };
-  registerInProcessSubagentTools(api as any);
+  scope.pi = api as any;
+  registerInProcessSubagentTools(api as any, scope);
   return { api, registeredTools };
 }
 
@@ -209,7 +207,7 @@ describe("get_subagent_result abort-aware wait", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    jobRegistry.clear();
+    scope.inProcessJobs.clear();
     api = setupExtension();
     toolDef = getToolDef(api, "get_subagent_result");
   });
@@ -220,7 +218,7 @@ describe("get_subagent_result abort-aware wait", () => {
       id: jobId,
       promise: new Promise<SubagentResult>(() => {}), // never resolves
     });
-    jobRegistry.set(jobId, job);
+    scope.inProcessJobs.set(jobId, job);
 
     const ac = new AbortController();
     ac.abort(); // pre-aborted
@@ -247,7 +245,7 @@ describe("get_subagent_result abort-aware wait", () => {
     });
 
     const job = createJobState({ id: jobId, promise: deferred });
-    jobRegistry.set(jobId, job);
+    scope.inProcessJobs.set(jobId, job);
 
     const ac = new AbortController();
 
@@ -292,7 +290,7 @@ describe("get_subagent_result abort-aware wait", () => {
       id: jobId,
       promise: new Promise<SubagentResult>(() => {}),
     });
-    jobRegistry.set(jobId, job);
+    scope.inProcessJobs.set(jobId, job);
 
     const ac = new AbortController();
     ac.abort();
@@ -326,7 +324,7 @@ describe("get_subagent_result abort-aware wait", () => {
         isError: false,
       }),
     });
-    jobRegistry.set(jobId, job);
+    scope.inProcessJobs.set(jobId, job);
 
     const ac = new AbortController();
     const removeSpy = vi.spyOn(ac.signal, "removeEventListener");
@@ -343,46 +341,6 @@ describe("get_subagent_result abort-aware wait", () => {
     expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
     expect(job.resultRetrieved).toBe(true);
   });
-
-  it("marks an active result wait before settlement notification", async () => {
-    const jobId = "active-result-wait";
-    let resolveJob!: (value: SubagentResult) => void;
-    const jobPromise = new Promise<SubagentResult>((resolve) => {
-      resolveJob = resolve;
-    });
-    mockStartSubagentJob.mockResolvedValue({
-      jobId,
-      jobPromise,
-      session: { abort: vi.fn() },
-      liveStatus: createJobState({ id: jobId }).liveStatus,
-      modelLabel: "test/model",
-    });
-    const spawnTool = getToolDef(api, "subagent_isolated");
-    await spawnTool.execute(
-      "spawn-call",
-      { task: "test", async: true, notifyOnComplete: "inject" },
-      undefined,
-      undefined,
-      mockCtx(),
-    );
-    const wait = toolDef.execute(
-      "result-call",
-      { jobId, wait: true },
-      new AbortController().signal,
-      undefined,
-      mockCtx(),
-    );
-
-    resolveJob({
-      output: "done",
-      usage: createJobState({ id: jobId }).liveStatus.usage,
-      isError: false,
-    });
-    await wait;
-
-    expect(deliverNotification).not.toHaveBeenCalled();
-    expect(jobRegistry.get(jobId)?.resultRetrieved).toBe(true);
-  });
 });
 
 describe("get_workflow_result abort-aware wait", () => {
@@ -398,11 +356,13 @@ describe("get_workflow_result abort-aware wait", () => {
         registeredTools[tool.name] = tool;
       },
     };
-    registerWorkflowTool(api as any);
+    scope.pi = api as any;
+    registerWorkflowTool(api as any, scope);
     const toolDef = registeredTools["get_workflow_result"];
 
     workflowJobRegistry.set("wf-test-1", {
       id: "wf-test-1",
+      parentSessionOwner: sessionOwner(scope),
       status: "running",
       promise: new Promise(() => {}), // never resolves
       abort: new AbortController(),
@@ -433,7 +393,8 @@ describe("get_workflow_result abort-aware wait", () => {
         registeredTools[tool.name] = tool;
       },
     };
-    registerWorkflowTool(api as any);
+    scope.pi = api as any;
+    registerWorkflowTool(api as any, scope);
     const toolDef = registeredTools["get_workflow_result"];
 
     let resolveWf!: (value: any) => void;
@@ -443,6 +404,7 @@ describe("get_workflow_result abort-aware wait", () => {
 
     workflowJobRegistry.set("wf-test-2", {
       id: "wf-test-2",
+      parentSessionOwner: sessionOwner(scope),
       status: "running",
       promise: deferred,
       abort: new AbortController(),
@@ -484,11 +446,13 @@ describe("get_workflow_result abort-aware wait", () => {
         registeredTools[tool.name] = tool;
       },
     };
-    registerWorkflowTool(api as any);
+    scope.pi = api as any;
+    registerWorkflowTool(api as any, scope);
     const toolDef = registeredTools["get_workflow_result"];
 
     workflowJobRegistry.set("wf-test-3", {
       id: "wf-test-3",
+      parentSessionOwner: sessionOwner(scope),
       status: "error",
       promise: Promise.reject(new DOMException("worker crashed", "AbortError")),
       abort: new AbortController(),
@@ -506,8 +470,7 @@ describe("get_workflow_result abort-aware wait", () => {
 
 describe("cancelAllFlows helper", () => {
   beforeEach(() => {
-    jobRegistry.clear();
-    clearSessionScopes();
+    scope.inProcessJobs.clear();
     vi.clearAllMocks();
   });
 
@@ -517,35 +480,39 @@ describe("cancelAllFlows helper", () => {
     const abort1 = vi.fn().mockResolvedValue(undefined);
     const abort2 = vi.fn().mockResolvedValue(undefined);
 
-    jobRegistry.set("job-1", {
+    scope.inProcessJobs.set("job-1", {
       id: "job-1",
       status: "running",
       session: { abort: abort1 },
     } as any);
-    jobRegistry.set("job-2", {
+    scope.inProcessJobs.set("job-2", {
       id: "job-2",
       status: "running",
       session: { abort: abort2 },
     } as any);
-    jobRegistry.set("job-3", {
+    scope.inProcessJobs.set("job-3", {
       id: "job-3",
       status: "done",
       session: { abort: vi.fn() },
     } as any);
 
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     expect(abort1).toHaveBeenCalledOnce();
     expect(abort2).toHaveBeenCalledOnce();
     expect(result.jobsAborted).toBe(2);
 
     // Verify status was set to cancelled (matching per-ID cancel semantics)
-    expect(jobRegistry.get("job-1")!.status).toBe("cancelled");
-    expect(jobRegistry.get("job-2")!.status).toBe("cancelled");
-    expect(jobRegistry.get("job-1")!.completedAt).toEqual(expect.any(Number));
-    expect(jobRegistry.get("job-2")!.completedAt).toEqual(expect.any(Number));
+    expect(scope.inProcessJobs.get("job-1")!.status).toBe("cancelled");
+    expect(scope.inProcessJobs.get("job-2")!.status).toBe("cancelled");
+    expect(scope.inProcessJobs.get("job-1")!.completedAt).toEqual(
+      expect.any(Number),
+    );
+    expect(scope.inProcessJobs.get("job-2")!.completedAt).toEqual(
+      expect.any(Number),
+    );
     // Done job should be untouched
-    expect(jobRegistry.get("job-3")!.status).toBe("done");
+    expect(scope.inProcessJobs.get("job-3")!.status).toBe("done");
   });
 
   it("aborts all running workflows and sets status to cancelled", async () => {
@@ -557,21 +524,24 @@ describe("cancelAllFlows helper", () => {
 
     workflowJobRegistry.set("wf-1", {
       id: "wf-1",
+      parentSessionOwner: sessionOwner(scope),
       status: "running",
       abort: abortCtrl1,
     } as any);
     workflowJobRegistry.set("wf-2", {
       id: "wf-2",
+      parentSessionOwner: sessionOwner(scope),
       status: "running",
       abort: abortCtrl2,
     } as any);
     workflowJobRegistry.set("wf-3", {
       id: "wf-3",
+      parentSessionOwner: sessionOwner(scope),
       status: "done",
       abort: new AbortController(),
     } as any);
 
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     expect(abortCtrl1.signal.aborted).toBe(true);
     expect(abortCtrl2.signal.aborted).toBe(true);
@@ -615,29 +585,32 @@ describe("cancelAllFlows helper", () => {
     });
 
     // Add states directly to the real registry
-    interactiveSubagentRegistry.set("running-1", {
+    scope.interactiveStates.set("running-1", {
       id: "running-1",
+      sessionOwner: sessionOwner(scope),
       status: "running",
       paneId: "pane-1",
       mux: "tmux",
       artifactDir: "/tmp/art1",
     } as any);
-    interactiveSubagentRegistry.set("unknown-1", {
+    scope.interactiveStates.set("unknown-1", {
       id: "unknown-1",
+      sessionOwner: sessionOwner(scope),
       status: "unknown",
       paneId: "pane-unknown",
       mux: "tmux",
       artifactDir: "/tmp/art-unknown",
     } as any);
-    interactiveSubagentRegistry.set("idle-1", {
+    scope.interactiveStates.set("idle-1", {
       id: "idle-1",
+      sessionOwner: sessionOwner(scope),
       status: "idle",
       paneId: "pane-2",
       mux: "tmux",
       artifactDir: "/tmp/art2",
     } as any);
 
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     // Verify cancelInteractiveSubagent was called for running agent
     expect(cancelInteractiveSubagent).toHaveBeenCalledWith(
@@ -655,17 +628,17 @@ describe("cancelAllFlows helper", () => {
     expect(result.interactivePreserved).toBe(1);
 
     // Clean up
-    interactiveSubagentRegistry.clear();
+    scope.interactiveStates.clear();
     vi.mocked(cancelInteractiveSubagent).mockReset();
   });
 
   it("returns zero counts when nothing is running", async () => {
-    jobRegistry.clear();
+    scope.inProcessJobs.clear();
     const { workflowJobRegistry } = await import("../src/workflow-jobs");
     workflowJobRegistry.clear();
 
     const { cancelAllFlows } = await import("../src/cancel-all-flows");
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     expect(result.jobsAborted).toBe(0);
     expect(result.workflowsAborted).toBe(0);
@@ -679,12 +652,14 @@ describe("cancelAllFlows helper", () => {
     clearSessionScopes();
     const scopeA = registerSessionScope({
       ...ownerA,
-      pi: {} as any,
+      pi: {} as SessionScope["pi"],
+      lifecycle: "started",
       sessionManager: { getSessionId: () => "session-a" },
     });
     const scopeB = registerSessionScope({
       ...ownerB,
-      pi: {} as any,
+      pi: {} as SessionScope["pi"],
+      lifecycle: "started",
       sessionManager: { getSessionId: () => "session-b" },
     });
     const abortA = vi.fn();
@@ -699,7 +674,7 @@ describe("cancelAllFlows helper", () => {
         sessionScopeGeneration: ownerA.generation,
       },
     } as any;
-    registerInProcessJob(jobA, ownerA);
+    scopeA.inProcessJobs.set(jobA.id, jobA);
     const jobB = {
       id: "job-b",
       status: "running",
@@ -710,27 +685,19 @@ describe("cancelAllFlows helper", () => {
         sessionScopeGeneration: ownerB.generation,
       },
     } as any;
-    registerInProcessJob(jobB, ownerB);
-    interactiveSubagentRegistry.set("interactive-a", {
+    scopeB.inProcessJobs.set(jobB.id, jobB);
+    scopeA.interactiveStates.set("interactive-a", {
       id: "interactive-a",
       status: "running",
       parentSessionId: "session-a",
     } as any);
-    interactiveSubagentRegistry.set("interactive-b", {
+    scopeB.interactiveStates.set("interactive-b", {
       id: "interactive-b",
       status: "running",
       parentSessionId: "session-b",
     } as any);
-    scopeA.interactiveStates.set(
-      "interactive-a",
-      interactiveSubagentRegistry.get("interactive-a")!,
-    );
-    scopeB.interactiveStates.set(
-      "interactive-b",
-      interactiveSubagentRegistry.get("interactive-b")!,
-    );
-    vi.mocked(cancelInteractiveSubagent).mockImplementation((id: string) =>
-      interactiveSubagentRegistry.get(id),
+    vi.mocked(cancelInteractiveSubagent).mockImplementation(
+      (_id, _origin, state) => state,
     );
 
     const result = await cancelAllFlows(ownerB);
@@ -769,7 +736,7 @@ describe("shortcut and command registration", () => {
       },
     };
 
-    registerCancelAllFlows(api as any);
+    registerCancelAllFlows(api as any, scope);
 
     expect(shortcuts["ctrl+alt+x"]).toBeDefined();
     expect(commands["cancel-all-flows"]).toBeDefined();
@@ -793,7 +760,7 @@ describe("shortcut and command registration", () => {
         commandHandler = opts.handler;
       },
     };
-    registerCancelAllFlows(api as any);
+    registerCancelAllFlows(api as any, scope);
 
     const result = {
       jobsAborted: 1,

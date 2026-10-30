@@ -4,7 +4,10 @@
  * on registration and public exports.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
   hasPersistedTelemetryField,
@@ -15,15 +18,10 @@ import {
 } from "./artifact";
 import {
   updateRunningSubagentFooter,
-  clearSessionParsers,
   clearSessionScopeUiContributions,
   pollArtifactChanges,
 } from "./artifact-poller";
 import { flushDeliveries } from "./delivery";
-import {
-  clearInProcessDeliveries,
-  flushInProcessDeliveries,
-} from "./notifications";
 import { debugLog, removeInProcessJob } from "./helpers";
 import { snapshotInProcessSession } from "./cancellation-snapshots";
 import {
@@ -40,6 +38,7 @@ import {
 } from "./completion-coordinator";
 import {
   createRootSpawnTreeContext,
+  parseSpawnTreeContext,
   releaseRuntimeSpawnTreeContext,
   retireLineageBootstraps,
   type ParsedSpawnTreeContext,
@@ -63,7 +62,6 @@ import {
   removeSessionScope,
   resolveLiveSessionScope,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
@@ -88,6 +86,8 @@ import {
   retireTelemetrySession,
   resolveTelemetryMode,
   type TelemetryTerminalReason,
+  resolveTelemetryTrafficOrigin,
+  TELEMETRY_ORIGIN_ENV,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -150,7 +150,7 @@ function ensureInteractivePoller(globalState: any): void {
 
 function sessionIdForScope(
   scope: SessionScope,
-  fallbackManager?: { getSessionId?: () => string },
+  fallbackManager?: ExtensionContext["sessionManager"],
 ): string | undefined {
   try {
     return (scope.sessionManager ?? fallbackManager)?.getSessionId?.();
@@ -311,7 +311,7 @@ function captureInteractiveLifecycleCancellation(
       async: state.telemetryAsync ?? true,
       depth: state.telemetryDepth,
       depth_bucket: state.telemetryDepthBucket ?? "unknown",
-      completion_policy: state.telemetryCompletionPolicy ?? "legacy",
+      completion_policy: state.telemetryCompletionPolicy ?? "each",
       status: "cancelled",
       terminal_reason: terminalReason,
       // `turnStartedAt` is an event-log `ts`, which the child writes from the
@@ -345,10 +345,7 @@ function cleanupScopeGeneration(
   owner: SessionOwnerToken,
   event: { reason?: string } | undefined,
   lifecycleOrigin: "session_start" | "session_shutdown",
-  ctx?: {
-    cwd?: string;
-    sessionManager?: { getSessionId?: () => string };
-  },
+  ctx?: ExtensionContext,
 ): void {
   const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
@@ -359,7 +356,6 @@ function cleanupScopeGeneration(
       ? "fresh_session"
       : "session_shutdown",
   );
-  clearInProcessDeliveries(owner);
 
   const destroysStandalonePanes =
     event?.reason === "new" || event?.reason === "fork";
@@ -440,26 +436,22 @@ export function registerSessionHandlers(
   );
   const globalState = getGlobalState() as any;
   registerSessionScope(scope);
-  setLegacyActiveSessionRefs(scope);
   registerCompletionCoordinator(pi, scope);
   const flushAfterUiPrompt = (): void => {
     queueMicrotask(() => {
       if (scope.lifecycle !== "started" || scope.uiPromptActive) return;
       const owner = sessionOwner(scope);
       flushDeliveries(pi, scope.ui, owner);
-      flushInProcessDeliveries(owner);
       flushCompletionManifests(owner);
     });
   };
-  (pi as any).on?.("ui_prompt_start", () => {
+  pi.on("ui_prompt_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = true;
-    setLegacyActiveSessionRefs(scope);
   });
-  (pi as any).on?.("ui_prompt_end", () => {
+  pi.on("ui_prompt_end", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = false;
-    setLegacyActiveSessionRefs(scope);
     flushAfterUiPrompt();
   });
   pi.on("input", (event) => {
@@ -471,7 +463,9 @@ export function registerSessionHandlers(
   pi.on("before_agent_start", (event) => {
     if (scope.lifecycle !== "started") return;
     const owner = sessionOwner(scope);
-    markCompletionTurnWakeStarted(pi, event.prompt);
+    if (event.messageType === "custom") {
+      markCompletionTurnWakeStarted(pi, event.message);
+    }
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
     if (message) recordPreparedManifest(scope, message);
@@ -480,20 +474,18 @@ export function registerSessionHandlers(
   pi.on("agent_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.parentStreaming = true;
-    setLegacyActiveSessionRefs(scope);
   });
   pi.on("agent_settled", (_event, ctx) => {
     if (scope.lifecycle !== "started") return;
     settleCompletionTurnWake(pi);
     scope.parentStreaming = false;
     const owner = sessionOwner(scope);
-    setLegacyActiveSessionRefs(scope);
     flushDeliveries(pi, scope.ui, owner);
-    flushInProcessDeliveries(owner);
     settleCompletionParentTurn(owner, ctx?.hasPendingMessages?.() ?? false);
   });
 
   pi.on("session_start", (event, ctx) => {
+    scope.workflowAdmissionClosed = true;
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
@@ -507,7 +499,6 @@ export function registerSessionHandlers(
       const previousOwner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
       closeActiveInteractiveSupervisor(previousOwner);
-      clearSessionParsers(previousOwner);
       cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
       retireSessionScopedCompletions(
         previousOwner,
@@ -542,6 +533,7 @@ export function registerSessionHandlers(
         ? {
             correlationId: scope.spawnTreeContext.telemetrySessionId,
             mode: scope.spawnTreeContext.telemetryMode,
+            trafficOrigin: scope.spawnTreeContext.telemetryOrigin,
           }
         : undefined;
     const recoveredTelemetry = continuityReason
@@ -549,15 +541,27 @@ export function registerSessionHandlers(
         ? {
             correlationId: previousTelemetry.correlationId,
             mode: previousTelemetry.mode,
+            trafficOrigin: previousTelemetry.trafficOrigin,
           }
-        : (persistedTelemetry ??
-          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+        : ((persistedTelemetry
             ? {
-                correlationId: activeSpawnTelemetry.correlationId,
-                mode: activeSpawnTelemetry.mode,
+                ...persistedTelemetry,
+                trafficOrigin:
+                  persistedTelemetry.trafficOrigin ??
+                  resolveTelemetryTrafficOrigin(),
               }
+            : undefined) ??
+          (activeSpawnTelemetry?.correlationId && activeSpawnTelemetry.mode
+            ? activeSpawnTelemetry
             : undefined))
       : undefined;
+    const currentTrafficOrigin = resolveTelemetryTrafficOrigin();
+    const trafficOrigin =
+      process.env[TELEMETRY_ORIGIN_ENV] !== undefined
+        ? currentTrafficOrigin
+        : (recoveredTelemetry?.trafficOrigin ??
+          activeSpawnTelemetry?.trafficOrigin ??
+          currentTrafficOrigin);
     const mode =
       recoveredTelemetry?.mode ??
       (isChild
@@ -569,7 +573,17 @@ export function registerSessionHandlers(
       ),
       mode,
       recoveredTelemetry?.correlationId,
+      trafficOrigin,
     );
+    if (
+      scope.spawnTreeContext?.role === "descendant" &&
+      scope.spawnTreeContext.telemetryOrigin !== scope.telemetry.trafficOrigin
+    ) {
+      scope.spawnTreeContext = parseSpawnTreeContext({
+        ...scope.spawnTreeContext,
+        telemetryOrigin: scope.telemetry.trafficOrigin,
+      });
+    }
     if (!isChild && recoveredTelemetry === undefined) {
       captureTelemetry(scope.telemetry, { event: "session_started" });
     }
@@ -590,6 +604,7 @@ export function registerSessionHandlers(
             ? {
                 correlationId: scope.telemetry.correlationId,
                 mode: scope.telemetry.mode,
+                trafficOrigin: scope.telemetry.trafficOrigin,
               }
             : undefined,
         );
@@ -617,13 +632,13 @@ export function registerSessionHandlers(
         maxDepth,
         scope.telemetry.enabled ? scope.telemetry.correlationId : undefined,
         scope.telemetry.mode,
+        scope.telemetry.trafficOrigin,
       );
     }
     scope.isParentIdle =
       typeof ctx.isIdle === "function" ? ctx.isIdle.bind(ctx) : undefined;
     scope.parentStreaming = false;
     registerSessionScope(scope);
-    setLegacyActiveSessionRefs(scope);
     const hasFooterIdentity =
       orchestratorMode || scope.spawnTreeContext?.orchestratorMode === true;
     if (scope.ui && hasFooterIdentity) {
@@ -692,59 +707,53 @@ export function registerSessionHandlers(
       }
     }
     ensureInteractivePoller(globalState);
+    scope.workflowAdmissionClosed = false;
   });
 
-  (pi as any).on?.(
-    "session_shutdown",
-    (
-      event?: { reason?: string },
-      ctx?: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
-    ) => {
-      if (scope.lifecycle !== "started") return;
+  pi.on("session_shutdown", (event, ctx) => {
+    if (scope.lifecycle !== "started") return;
+    scope.workflowAdmissionClosed = true;
 
-      const owner = sessionOwner(scope);
-      retireTelemetrySession(scope.telemetry);
-      closeActiveInteractiveSupervisor(owner);
-      clearSessionParsers(owner);
-      cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
-      clearFreshChildLineage(scope, event?.reason);
-      retireSessionScopedCompletions(
-        owner,
-        event?.reason === "new" || event?.reason === "fork",
-      );
-      clearCompletionCoordinator(owner);
-      scope.parentStreaming = false;
-      scope.uiPromptActive = false;
-      scope.isParentIdle = undefined;
-      clearCompletionTurnWake(pi);
-      scope.lifecycle = "shutdown";
-      advanceSessionScopeGeneration(scope.id);
-      removeSessionScope(scope.id);
+    const owner = sessionOwner(scope);
+    retireTelemetrySession(scope.telemetry);
+    closeActiveInteractiveSupervisor(owner);
+    cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
+    clearFreshChildLineage(scope, event?.reason);
+    retireSessionScopedCompletions(
+      owner,
+      event?.reason === "new" || event?.reason === "fork",
+    );
+    clearCompletionCoordinator(owner);
+    scope.parentStreaming = false;
+    scope.uiPromptActive = false;
+    scope.isParentIdle = undefined;
+    clearCompletionTurnWake(pi);
+    scope.lifecycle = "shutdown";
+    advanceSessionScopeGeneration(scope.id);
+    removeSessionScope(scope.id);
 
-      const remainingScopes = getStartedSessionScopes();
-      setLegacyActiveSessionRefs(remainingScopes.at(-1));
-      if (remainingScopes.length > 0) return;
+    const remainingScopes = getStartedSessionScopes();
+    if (remainingScopes.length > 0) return;
 
-      const handle = globalState.__piSubagenturaInteractivePollerHandle;
-      if (handle) {
-        try {
-          clearInterval(handle);
-        } catch {
-          /* defensive */
-        }
-        globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    const handle = globalState.__piSubagenturaInteractivePollerHandle;
+    if (handle) {
+      try {
+        clearInterval(handle);
+      } catch {
+        /* defensive */
       }
+      globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    }
 
-      if (event?.reason === "new" && ctx?.cwd) {
-        try {
-          deleteInteractiveStatesFile(ctx.cwd);
-          deleteOrchestratorRoutingFile(ctx.cwd);
-        } catch {
-          /* best effort */
-        }
+    if (event?.reason === "new" && ctx?.cwd) {
+      try {
+        deleteInteractiveStatesFile(ctx.cwd);
+        deleteOrchestratorRoutingFile(ctx.cwd);
+      } catch {
+        /* best effort */
       }
-    },
-  );
+    }
+  });
 
   return scope;
 }

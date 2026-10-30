@@ -24,7 +24,6 @@ import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   type JobState,
   type JobStatus,
-  type NotifyOnComplete,
   type SubagentLiveStatus,
   type SubagentResult,
   type Usage,
@@ -136,9 +135,7 @@ export default function (pi: ExtensionAPI) {
     : undefined;
   if (isChild) {
     registerChildProtocol(pi);
-    if (typeof pi.registerMessageRenderer === "function") {
-      pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
-    }
+    pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
     const sessionScope = registerSessionHandlers(
       pi,
       initialSpawnTreeContext,
@@ -152,7 +149,7 @@ export default function (pi: ExtensionAPI) {
   }
   if (typeof pi.registerMessageRenderer !== "function") {
     throw new Error(
-      "pi-subagentura requires Pi >= 0.80.6 with agent_settled and custom message renderer support",
+      "pi-subagentura requires Pi >= 1.2.0 with agent_settled and custom message renderer support",
     );
   }
   registerExtensionSettings(pi);
@@ -209,7 +206,6 @@ export {
   SubagentLiveStatus,
   ACTIVE_TOOL_DEBOUNCE_MS,
   // ── Async job machinery ──
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneOldestJob,
   pruneCompletedJobs,
@@ -217,12 +213,7 @@ export {
   startSubagentJob,
   type JobState,
   type JobStatus,
-  type NotifyOnComplete,
 } from "./helpers";
-export { getInjectCount, MAX_INJECT } from "./notifications";
-/** @internal Interactive-subagent registry, consumed by session-handlers and tests */
-export { interactiveSubagentRegistry } from "./interactive-tmux";
-/** @internal Inject-count guard; exported for test assertions */
 /** @internal Artifact-change poller; exported for test access */
 export { pollArtifactChanges } from "./artifact-poller";
 /** @internal Interactive-artifact lookup; exported for test access */
