@@ -4,10 +4,12 @@ import type { TelemetrySessionHost } from "./telemetry";
 const MAX_SOURCE_FIELD_LENGTH = 4_096;
 
 function sourceField(value: unknown): string | undefined {
-  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value)) {
+    return undefined;
+  }
+  const trimmed = value.trim();
   return trimmed &&
-    trimmed.length <= MAX_SOURCE_FIELD_LENGTH &&
-    !/[\x00-\x1f\x7f]/.test(trimmed)
+    trimmed.length <= MAX_SOURCE_FIELD_LENGTH
     ? trimmed
     : undefined;
 }

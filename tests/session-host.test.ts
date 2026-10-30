@@ -74,6 +74,20 @@ describe("Orca launch-origin session attribution", () => {
     },
   );
 
+  it.each(Object.entries(launchEnv))(
+    "rejects raw control characters around %s",
+    (key, value) => {
+      for (const wrapped of [`\n${value}`, `${value}\n`, `\t${value}\t`]) {
+        expect(
+          resolveTelemetrySessionHost(
+            { ...launchEnv, [key]: wrapped },
+            "darwin",
+          ),
+        ).toBe("unknown");
+      }
+    },
+  );
+
   it("matches the bundled stamp reader's whitespace normalization and bound", () => {
     const env = Object.fromEntries(
       Object.entries(launchEnv).map(([key, value]) => [key, `  ${value}  `]),
