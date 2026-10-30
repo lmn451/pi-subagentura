@@ -440,6 +440,7 @@ function eligibleCandidates(
     if (!state || !directRuntimeBelongsToScope(state, owner, sessionId)) {
       continue;
     }
+    if (state.status !== agent.status) continue;
     if (
       state.workflowId !== undefined ||
       state.completionOwner === "workflow"

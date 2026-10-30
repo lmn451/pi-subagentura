@@ -127,7 +127,7 @@ describe("orchestrator routing advisor", () => {
       cwd: root,
       sessionManager: { getSessionId: () => "parent-1" },
     });
-    const state = runtimeState(CHILD_A, scope);
+    const state = runtimeState(CHILD_A, scope, { status: "idle" });
     scope.interactiveStates.set(CHILD_A, state);
     const entries = [routingEntry(CHILD_A)];
     upsertOrchestratorRoutingEntry(root, entries[0]);
@@ -166,13 +166,13 @@ describe("orchestrator routing advisor", () => {
             childId: CHILD_A,
             description: `Own ${CHILD_A} responsibility`,
             aliases: [`alias-${CHILD_A.slice(0, 4)}`],
-            status: "running",
+            status: "idle",
           },
         ],
       },
       undefined,
     );
-    expect(state.status).toBe("running");
+    expect(state.status).toBe("idle");
     expect(value.registerTool).toHaveBeenCalledTimes(1);
   });
 
@@ -717,6 +717,74 @@ describe("orchestrator routing advisor", () => {
           ? { kind: "match", childId: CHILD_A }
           : { kind: "error", reason: "state_changed" },
       );
+    },
+  );
+
+  it.each(["cancelled", "exited", "unknown", "idle"] as const)(
+    "rejects status changes to %s after the final routing projection",
+    async (nextStatus) => {
+      const value = api();
+      const scope = registerSessionScope({
+        id: 1,
+        generation: 0,
+        lifecycle: "started",
+        pi: value as never,
+        cwd: root,
+        sessionManager: { getSessionId: () => "parent-1" },
+      });
+      const stateA = runtimeState(CHILD_A, scope);
+      const stateB = runtimeState(CHILD_B, scope);
+      scope.interactiveStates.set(CHILD_A, stateA);
+      scope.interactiveStates.set(CHILD_B, stateB);
+      const entries = [routingEntry(CHILD_A), routingEntry(CHILD_B)];
+      const { promise: finalB, resolve: releaseFinalB } =
+        Promise.withResolvers<"alive">();
+      const { promise: finalBStarted, resolve: signalFinalBStarted } =
+        Promise.withResolvers<void>();
+      const probe = vi
+        .fn()
+        .mockResolvedValueOnce("alive")
+        .mockResolvedValueOnce("alive")
+        .mockResolvedValueOnce("alive")
+        .mockImplementationOnce(() => {
+          signalFinalBStarted();
+          return finalB;
+        });
+      __setTmuxMultiplexer({ getPaneLivenessAsync: probe } as never);
+      registerOrchestratorRouterTool(value as never, scope, {
+        createEngine: () => ({
+          decide: async () => ({
+            kind: "match",
+            childId: CHILD_A,
+            evidence: {
+              confidence: 0.95,
+              topProbability: 0.9,
+              runnerUpProbability: 0.1,
+              margin: 0.8,
+            },
+          }),
+        }),
+      });
+      const pending = tool(value).execute(
+        "route-final-status",
+        { task: "Review the API" },
+        undefined,
+        undefined,
+        context(root, entries),
+      );
+      await finalBStarted;
+      expect(probe).toHaveBeenCalledTimes(4);
+      const macrotaskBarrier = Promise.withResolvers<void>();
+      setImmediate(macrotaskBarrier.resolve);
+      await macrotaskBarrier.promise;
+      stateA.status = nextStatus;
+      releaseFinalB("alive");
+      const result = await pending;
+      expect(stateA.status).toBe(nextStatus);
+      expect(result.details.decision).toEqual({
+        kind: "error",
+        reason: "state_changed",
+      });
     },
   );
 
