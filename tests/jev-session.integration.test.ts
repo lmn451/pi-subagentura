@@ -56,7 +56,7 @@ describe("Jev advisor in a real Pi session", () => {
       const fakeTmux = join(fakeMuxBin, "tmux");
       writeFileSync(
         fakeTmux,
-        '#!/bin/sh\nif [ "$1" = "list-panes" ]; then printf \'%s\\n\' \'%42\'; else exit 0; fi\n',
+        "#!/bin/sh\nif [ \"$1\" = \"list-panes\" ]; then printf '%s\\n' '%42'; else exit 0; fi\n",
       );
       chmodSync(fakeTmux, 0o755);
       previousPath = process.env.PATH;
@@ -73,7 +73,9 @@ describe("Jev advisor in a real Pi session", () => {
       ) as any;
       expect(routeTool).toBeDefined();
 
-      const scope = getSessionScopes().find((candidate) => candidate.cwd === cwd);
+      const scope = getSessionScopes().find(
+        (candidate) => candidate.cwd === cwd,
+      );
       expect(scope).toBeDefined();
       const childId = "0123456789abcdef";
       const entry: OrchestratorRoutingEntry = {
@@ -205,18 +207,16 @@ describe("Jev advisor in a real Pi session", () => {
         "orchestratorv2-routing-authority",
         createOrchestratorRoutingAuthorityEntry(cwd, changedEntry),
       );
-      finishRequest(
-        response("candidate_0", { candidate_0: 0.9, none: 0.1 }),
-      );
+      finishRequest(response("candidate_0", { candidate_0: 0.9, none: 0.1 }));
       const stale = await staleRequest;
       expect(stale.details.decision).toMatchObject({
         kind: "error",
         reason: "state_changed",
       });
       expect(fetch).toHaveBeenCalledTimes(5);
-      expect(
-        scope!.interactiveStates.get(childId)?.parentSessionId,
-      ).toBe(parentSessionId);
+      expect(scope!.interactiveStates.get(childId)?.parentSessionId).toBe(
+        parentSessionId,
+      );
     },
   );
 
