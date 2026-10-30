@@ -208,6 +208,68 @@ describe("subagent_interactive tool lifecycle", () => {
     mockLaunchInteractiveSubagent.mockReturnValue(mockInteractiveState());
   });
 
+  it.each([false, true])(
+    "renders launch failures from the host error context (expanded=%s)",
+    (expanded) => {
+      const toolDef = getInteractiveToolDef(api);
+      const message =
+        "Failed to start interactive sub-agent: unsupported state";
+      const result = {
+        content: [{ type: "text", text: message }],
+        details: { status: "error", error: "unsupported state" },
+      };
+      const theme = { fg: vi.fn((_color: string, text: string) => text) };
+      const rendered = toolDef.renderResult(
+        result,
+        { expanded, isPartial: false },
+        theme,
+        { isError: true },
+      );
+
+      expect(result).not.toHaveProperty("isError");
+      expect(getRenderedText(rendered)).toBe(message);
+      expect(theme.fg).toHaveBeenCalledWith("error", message);
+    },
+  );
+
+  it.each([undefined, { isError: false }])(
+    "preserves legacy launch error rendering with context %j",
+    (context) => {
+      const toolDef = getInteractiveToolDef(api);
+      const message = "Failed to start interactive sub-agent: unavailable mux";
+      const rendered = toolDef.renderResult(
+        {
+          content: [{ type: "text", text: message }],
+          details: { status: "error", error: "unavailable mux" },
+          isError: true,
+        },
+        { expanded: false, isPartial: false },
+        { fg: (_color: string, text: string) => text },
+        context,
+      );
+
+      expect(getRenderedText(rendered)).toBe(message);
+    },
+  );
+
+  it("preserves successful host-shaped launch rendering", () => {
+    const toolDef = getInteractiveToolDef(api);
+    const state = mockInteractiveState();
+    const rendered = toolDef.renderResult(
+      {
+        content: [{ type: "text", text: "Interactive sub-agent started" }],
+        details: { ...state, status: "started", thinkingLevel: "high" },
+      },
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+      { isError: false },
+    );
+
+    expect(getRenderedText(rendered)).toBe(
+      `⚡ Interactive sub-agent ${state.id} — pane ${state.paneId} · thinking: high`,
+    );
+  });
+
   it("describes provider-aware model selection", () => {
     const tool = getInteractiveToolDef(api);
     const modelDescription = tool.parameters.properties.model.description;
