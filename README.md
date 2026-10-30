@@ -14,10 +14,11 @@ Herdr.
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
 clarification when a request is ambiguous or a narrow request has no matching
-owner, and leave repository work to specialists. Inside a verified Orca terminal,
-it uses the installed Orca skills to coordinate Pi terminal tabs instead of native
-children; [see the prompt-only Orca path](#pi-inside-orca-prompt-only-integration).
-Compatibility workflow and in-process tools remain registered.
+owner, and leave repository work to specialists. The shared [Orca interactive
+delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) applies when normal Pi
+parents or interactive children/nested contexts delegate interactively, with or
+without `--orchestratorv2`. Compatibility workflow and in-process tools remain
+registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -292,19 +293,28 @@ verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
 tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate through attachable specialists. Outside Orca, the
-existing native interactive path uses the parent session's authoritative routing
-ledger together with the project-local routing cache.
+directs the parent to delegate through attachable specialists. Its existing
+native interactive path continues to use the parent session's authoritative
+routing ledger and the project-local routing cache inside and outside Orca.
 
-#### Pi inside Orca (prompt-only integration)
+### Interactive delegation inside Orca (prompt-only integration)
 
-Open Pi with `--orchestratorv2` inside an Orca terminal and make the installed
-`orca-cli` and `orchestration` skills available to Pi. The [Orchestratorv2
-prompt](ORCHESTRATOR_V2_SYSTEM_PROMPT.md) defines runtime verification, routing,
-handoff, and lifecycle policy; the installed, version-matched skills own Orca
-command syntax and recovery. This prompt-only integration coordinates Pi
-specialists in Orca terminal tabs and does not add a native Orca backend to
-`subagent_interactive`.
+The shared [Orca interactive system prompt](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+applies to interactive delegation by normal Pi parents and interactive
+children/nested contexts, including Orchestratorv2; it does not require that
+flag. It does not change the legacy `--orchestrator` workflow selection or
+The installed, version-matched `orca-cli` and `orchestration` skills provide
+command syntax and recovery; verify the current Pi/Orca runtime, terminal, and
+workspace before following their guidance. The linked asset is the single
+authoritative Orca coordination guidance and, in a verified Orca runtime, takes
+precedence over any native-only routing-advisor guidance in the Orchestratorv2
+prompt, which continues to govern native routing and lifecycle rules.
+
+Prompt/skill-managed Orca specialists are distinct from pi-subagentura's native
+interactive children. Existing `subagent_interactive` children remain native
+Pi sessions, including inside Orca. The prompt guidance adds no Orca mux/backend
+and creates no native child records, artifacts, receipts, completion/wakeup
+handling, or reload/lifecycle guarantees for Orca specialists.
 
 ### Extension settings
 
