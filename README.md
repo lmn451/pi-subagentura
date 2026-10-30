@@ -412,14 +412,10 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
-An optional native Pi classifier advisor adds `resolve_orchestrator_route` when
-`PI_ORCHESTRATOR_ROUTER=jev` and `--orchestratorv2` are enabled, and the host
-provides a classifier with configured authentication (Pi ≥ 1.2.0). The default
-is `openrouter/~typesafe/jev-latest`, using Pi-managed authentication. There are
-no direct HTTP adapters or fallbacks: unavailable native classification leaves
-the advisor disabled. The parent obtains a recommendation, then sends the
-original task through its existing messaging tool. See
-[Jev routing](docs/jev-routing.md) for setup, data disclosure, and failure behavior.
+An optional native classifier advisor can recommend an existing child; the
+parent still sends the task. See [Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
+for setup and [Jev routing](docs/jev-routing.md) for its configuration and
+failure behavior.
 
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
