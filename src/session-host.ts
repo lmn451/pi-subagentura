@@ -8,8 +8,7 @@ function sourceField(value: unknown): string | undefined {
     return undefined;
   }
   const trimmed = value.trim();
-  return trimmed &&
-    trimmed.length <= MAX_SOURCE_FIELD_LENGTH
+  return trimmed && trimmed.length <= MAX_SOURCE_FIELD_LENGTH
     ? trimmed
     : undefined;
 }

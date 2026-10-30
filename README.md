@@ -299,40 +299,12 @@ ledger together with the project-local routing cache.
 #### Pi inside Orca (prompt-only integration)
 
 Open Pi with `--orchestratorv2` inside an Orca terminal and make the installed
-`orca-cli` and `orchestration` skills available to Pi. The prompt requires loading
-their discovery stubs and version-matched CLI guides before command discovery.
-Those guides own exact syntax and recovery rules; this package does not bundle
-Orca commands or install those skills.
-
-Skill availability or an installed CLI is not proof of an Orca-hosted Pi session.
-The router must verify the runtime caller and current terminal belong to this Pi
-session, with the exact workspace/checkout and host. Ambiguous or unavailable
-proof requires clarification, not a silent fallback or launch. A positively
-non-Orca session keeps the existing native path.
-
-For verified Orca sessions, the prompt directs delegation to Pi specialists in
-other **terminal tabs in the same checkout**, explicitly selecting the terminal
-surface via documented controls. No new worktrees are created unless requested.
-It prefers the parent's model/effort only when supported and verifiable; it does
-not guess launch syntax or silently substitute agents. The skills distinguish
-supervised coordination from ordinary prompts and full ownership handoffs.
-Supervised launches do not require a separate lifecycle decision in advance;
-follow the skills' completion accounting and obtain a decision at settlement
-when needed. Ordinary handoffs end after verified delivery and reporting.
-Preserve visible tabs; destructive cleanup requires user approval.
-
-This is prompt policy, **not a native Orca backend** for `subagent_interactive`.
-Native registries, routing-metadata tools (including the optional classifier
-advisor), context schema, artifact selectors, manifests, completion groups, and
-automatic parent wakeups apply only to native children. Orca specialists instead
-need verified owned runtime identities, explicit responsibilities, real reports,
-and a complete implementation handoff. Stale handles require fresh discovery;
-ambiguous launch/send failures must not cause duplicate launches or dual sends.
-Idle or accepted input is not completion. No automatic Subagentura completion
-delivery or reload recovery is promised for Orca-managed specialists.
-
-The native routing-ledger, artifact, supervisor, and completion details elsewhere
-in this README describe native Subagentura children, not Orca-managed agents.
+`orca-cli` and `orchestration` skills available to Pi. The [Orchestratorv2
+prompt](ORCHESTRATOR_V2_SYSTEM_PROMPT.md) defines runtime verification, routing,
+handoff, and lifecycle policy; the installed, version-matched skills own Orca
+command syntax and recovery. This prompt-only integration coordinates Pi
+specialists in Orca terminal tabs and does not add a native Orca backend to
+`subagent_interactive`.
 
 ### Extension settings
 
@@ -1034,16 +1006,8 @@ arguments, messages, outputs, raw errors, provider responses, paths, and runtime
 agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
 missing completion events do not prove a crash or failed task.
 
-Fresh root-session starts also carry a closed `session_host` value: `orca` when
-complete Orca launch-origin metadata is present, otherwise
-`unknown`. This measures observed Orca-origin **sessions**, not unique people or
-installations, and never changes the actual child-backend `mux` value. No
-persistent installation ID or Orca runtime identifiers are sent. Historical
-events without this field remain unknown; see the telemetry reference for
-detection limits and the session-count query.
-
-The detailed event schema, closed dimensions, recovery behavior, privacy limits,
-measurement caveats, and PostHog report queries live in
+The authoritative event schema, closed dimensions, recovery behavior, privacy
+limits, measurement caveats, and PostHog report queries live in
 [User-impact telemetry and PostHog reports](docs/telemetry.md).
 
 ### Traffic provenance

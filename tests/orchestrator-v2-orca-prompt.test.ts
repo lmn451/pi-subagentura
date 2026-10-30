@@ -109,7 +109,7 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
     expect(orca).toContain("obtain a user decision at settlement when");
     expect(orca).toContain("Ordinary handoffs end after verified delivery");
     expect(orca).toContain("destructive cleanup requires user approval");
-    expect(orca).toContain("do not delete visible tabs");
+    expect(orca).toContain("Do not delete visible tabs by default");
     // Operation syntax belongs to version-matched skills, not a second CLI manual.
     expect(emittedPrompt()).not.toMatch(
       /orca (?:agent launch|terminal send|orchestration worker-start) --/,
