@@ -81,6 +81,7 @@
     "src/multiplexer-herdr.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
+    "src/session-host.ts",
     "src/session-scope.ts",
     "src/settings.ts",
     "src/telemetry.ts",

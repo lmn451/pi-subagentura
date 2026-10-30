@@ -12,10 +12,12 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, or
 Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to route clear work to attachable interactive subagents, ask
-for clarification when a request is ambiguous or a narrow request has no matching
-child, and leave specialist repository work to those children. Compatibility
-workflow and in-process tools remain registered.
+guides the parent to route clear work to attachable specialists, ask for
+clarification when a request is ambiguous or a narrow request has no matching
+owner, and leave repository work to specialists. Inside a verified Orca terminal,
+it uses the installed Orca skills to coordinate Pi terminal tabs instead of native
+children; [see the prompt-only Orca path](#pi-inside-orca-prompt-only-integration).
+Compatibility workflow and in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -290,9 +292,19 @@ verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
 tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate only through attachable interactive children and
-use the parent session's authoritative routing ledger together with the
-project-local routing cache.
+directs the parent to delegate through attachable specialists. Outside Orca, the
+existing native interactive path uses the parent session's authoritative routing
+ledger together with the project-local routing cache.
+
+#### Pi inside Orca (prompt-only integration)
+
+Open Pi with `--orchestratorv2` inside an Orca terminal and make the installed
+`orca-cli` and `orchestration` skills available to Pi. The [Orchestratorv2
+prompt](ORCHESTRATOR_V2_SYSTEM_PROMPT.md) defines runtime verification, routing,
+handoff, and lifecycle policy; the installed, version-matched skills own Orca
+command syntax and recovery. This prompt-only integration coordinates Pi
+specialists in Orca terminal tabs and does not add a native Orca backend to
+`subagent_interactive`.
 
 ### Extension settings
 
@@ -994,8 +1006,8 @@ arguments, messages, outputs, raw errors, provider responses, paths, and runtime
 agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
 missing completion events do not prove a crash or failed task.
 
-The detailed event schema, closed dimensions, recovery behavior, privacy limits,
-measurement caveats, and PostHog report queries live in
+The authoritative event schema, closed dimensions, recovery behavior, privacy
+limits, measurement caveats, and PostHog report queries live in
 [User-impact telemetry and PostHog reports](docs/telemetry.md).
 
 ### Traffic provenance
