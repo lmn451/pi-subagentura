@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add optional Orchestratorv2 child selection through Pi's native classifier
+  API, with bounded inputs, fail-closed selection, and usage accounting.
+
 ## [4.1.0] - 2026-10-25
 
 ### Changed

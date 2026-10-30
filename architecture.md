@@ -213,6 +213,18 @@ the routing-metadata tools `list_orchestrator_agents` and
 enforce a host-level tool allowlist; normal tools remain registered for legacy
 compatibility, while the prompt directs this mode to interactive children.
 
+The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds an advisory
+`resolve_orchestrator_route` tool only in v2 mode when Pi's native classifier API,
+the configured model, and provider authentication are available. There are no
+HTTP adapters or fallback transports. `tools/orchestrator-router.ts` builds
+current candidates from parent authority/runtime state and revalidates authority
+after yielding liveness checks. `system-one-choice.ts` owns bounded Choice
+contexts, redaction, response validation, and deadlines. `jev-routing.ts` uses
+Pi's model registry for classification and request-time authentication;
+`routing-engine.ts` applies confidence and probability-margin policy. Advice
+cannot reserve, send to, create, or attach to a child. See
+[Jev routing](docs/jev-routing.md) for configuration and disclosure.
+
 `src/orchestrator-routing.ts` keeps two related representations:
 
 1. the current parent session branch, whose latest valid
@@ -1109,6 +1121,11 @@ The following table inventories the tracked runtime source modules and companion
 |  57 | `src/identifier-types.ts`                    | Compile-time branded taxonomy for generated identifier domains and trusted-boundary casts                                       | None                                                                                                                                                                                                                                                                                                          |
 |  58 | `src/telemetry-launch.ts`                    | One-shot logical child-launch resolution without persistent request identity                                                    | `telemetry`                                                                                                                                                                                                                                                                                                   |
 |  59 | `src/telemetry-runtime.ts`                   | Shared artifact/failure-kind outage episode claims and process-local dedupe tokens                                              | Type-only `telemetry`                                                                                                                                                                                                                                                                                         |
+|  60 | `src/routing-engine.ts`                      | Advisory routing types, evidence validation, and abstention policy                                                              | None project-internal                                                                                                                                                                                                                                                                                         |
+|  61 | `src/routing-factory.ts`                     | Explicit environment opt-in and native classifier capability gate                                                               | `jev-routing`, `routing-engine`                                                                                                                                                                                                                                                                               |
+|  62 | `src/system-one-choice.ts`                   | Bounded Choice context, redaction, response validation, and deadlines                                                           | `routing-engine`                                                                                                                                                                                                                                                                                              |
+|  63 | `src/jev-routing.ts`                         | Native Pi classifier routing and usage validation; no HTTP fallback                                                             | `routing-engine`, `system-one-choice`; type-only `pi-ai`                                                                                                                                                                                                                                                      |
+|  64 | `src/tools/orchestrator-router.ts`           | Enabled-only advisor with current candidates and state revalidation                                                             | `completion-turn`, `interactive-tmux`, `orchestrator-routing`, `routing-engine`, `routing-factory`, `session-scope`, `tool-guidance`; type-only `pi-ai`                                                                                                                                                       |
 
 ---
 

@@ -424,6 +424,11 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
+An optional native classifier advisor can recommend an existing child; the
+parent still sends the task. See [Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
+for setup and [Jev routing](docs/jev-routing.md) for its configuration and
+failure behavior.
+
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
 to the exact payload, current session generation, and a later user message; a
@@ -462,6 +467,28 @@ nested children without top-level approval. Nested children belong to the
 immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
+
+#### Enable the optional classifier advisor
+
+With pi-subagentura installed on **Pi ≥ 1.2.0** (`pi --version`), set
+`PI_ORCHESTRATOR_ROUTER=jev` and start Pi with `--orchestratorv2`. Configure
+provider authentication through Pi, then ask the parent to use
+`resolve_orchestrator_route` for a clear task whose child owner is ambiguous.
+The classifier recommends an existing child; it does not replace your chat
+model or automatically send work.
+
+For the default OpenRouter Jev classifier, authenticate with `/login openrouter`
+and start Pi with:
+
+```bash
+PI_ORCHESTRATOR_ROUTER=jev pi --orchestratorv2
+```
+
+Only live children with confirmed responsibilities can be recommended; the
+parent still sends the original task through its existing messaging tool. This
+opt-in sends bounded task and responsibility text to the configured provider.
+See [Jev routing](docs/jev-routing.md) for provider choices, configuration,
+payload disclosure, and failure behavior.
 
 ## Cancellation context snapshots (opt-in)
 

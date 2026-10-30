@@ -13,6 +13,7 @@ export default defineConfig({
     setupFiles: [
       "./tests/setup-telemetry-fetch-sentinel.ts",
       "./tests/setup-lineage-env.ts",
+      "./tests/setup-routing-env.ts",
       "./tests/setup-telemetry-network.ts",
     ],
     coverage: {
