@@ -27,73 +27,88 @@ launches, and schema retries can request further child work. Rejected pre-start
 launches need not produce a task completion. Daily start and terminal events are
 not a linked cohort. A runtime success does not measure answer usefulness.
 
-### Child backend versus Orca host
+### Child backend versus terminal host
 
 `mux` attributes the child execution backend, not the application hosting the
 parent. An extension-managed tmux child remains `mux=tmux` even when its parent
-runs in Orca; an in-process child remains `mux=none`. `requested_mux` describes
-the extension launch request, not the host either. For rejected launches, `mux`
-can preserve a selected backend without implying that a child was accepted.
+runs in Orca or Agterm; an in-process child remains `mux=none`. `requested_mux`
+describes the extension launch request, not the host either. For rejected
+launches, `mux` can preserve a selected backend without implying that a child
+was accepted.
 
 Orca integration in Orchestratorv2 is prompt-only. There is no native Orca
-`subagent_interactive` backend, and `orca` is not currently a supported telemetry
-mux value. Commands executed through the Orca CLI are outside the extension's
-child launch/turn instrumentation: do not manufacture `agent_created`,
+`subagent_interactive` backend, and `orca` is not a supported telemetry `mux`
+value. Commands executed through the Orca CLI are outside the extension's child
+launch/turn instrumentation: do not manufacture `agent_created`,
 `agent_launch_resolved`, or task lifecycle records from prompt instructions or
-CLI receipts. Consequently, filtering these reports by `mux=orca` cannot measure
-Orca prompt-path adoption or reliability. Enabling `mode=orchestrator_v2` identifies
+CLI receipts. Filtering these reports by `mux=orca` cannot measure Orca
+prompt-path adoption or reliability. Enabling `mode=orchestrator_v2` identifies
 the extension mode, not proof that the Orca path was used.
+
+Agterm support in Orchestratorv2 is prompt-only terminal control through the
+optional installed `agterm` skill and `agtermctl`; it does not add an Agterm
+child backend. Terminal commands are outside the extension's child launch/turn
+instrumentation, so do not manufacture child or task records from prompt
+instructions or CLI receipts. The Agterm skill's control surface does not
+establish ownership or completion of Pi specialists.
 
 An independently launched Pi instance that loads this extension can report its
 own observed package activity; that does not reconstruct an Orca CLI launch or
 establish an extension-managed parent/child relationship.
 
-Fresh root `session_started` records now include the additive schema-v6
-`session_host` dimension: `orca` or `unknown`. Earlier v6 releases omit it; a
-missing historical value means `unknown`, never non-Orca. This is observed
-**Orca-origin logical sessions**, not unique people, installations, active
-terminals, or proof that a particular prompt/CLI path was used. No persistent
-installation or user identifier is created.
+Fresh root `session_started` records include the additive schema-v6
+`session_host` dimension: `agterm`, `orca`, or `unknown`. Earlier v6 releases may
+omit it; a missing historical value means `unknown`, never a known non-host.
+This is observed host attribution for logical sessions, not unique people,
+installations, active terminals, or proof that a particular prompt/CLI path was
+used. No persistent installation or user identifier is created.
 
-Attribution consumes only the complete, dedicated Orca launch-origin stamp:
+Orca attribution consumes only the complete, dedicated launch-origin stamp:
 `ORCA_RUNTIME_SOURCE_ID`, `ORCA_RUNTIME_SOURCE_INCARNATION`, and
 `ORCA_RUNTIME_SOURCE_PROFILE_PATH`. The Orca 1.4.245 bundled
 `shared/runtime-source-env` contract describes these as which runtime launched
 a process; `stampRuntimeSourceEnv` clears any inherited stamp before setting the
-new source. This implementation matches its trimmed, nonempty, at-most-4096-
-character fields, additionally rejecting control characters and requiring an
-absolute platform-appropriate profile path. The source ID and incarnation are
-opaque local validation inputs, not uploaded identifiers.
+new source. Validation matches its trimmed, nonempty, at-most-4096-character
+fields, additionally rejects control characters, and requires an absolute
+platform-appropriate profile path. The source ID and incarnation are opaque
+local validation inputs, not uploaded identifiers.
 
-This is measurement-only **launch-origin provenance**, not verification of a
-currently-live runtime, current process, foreground terminal, routing,
-cancellation, or security authority. A standalone root Pi inheriting a complete
-stamp can retain that Orca origin and count as another logical session. This
-is an intentional inheritance limitation, not a claim that the process is an
-Orca-managed agent. Native extension-managed children do not emit root starts.
-Reload/resume preserve existing logical-session suppression and do not
+Agterm attribution uses only the exact `AGTERM_ENABLED=1` marker documented by
+[Agterm's installed skill](https://github.com/umputun/agterm/blob/master/plugins/agterm/skills/agterm/SKILL.md).
+The skill specifies this marker for shells spawned by Agterm, including its
+quick terminal; `TERM_PROGRAM=agterm`, `AGTERM_SOCKET`, installed CLI/skill, and
+other loose markers are not sufficient. The marker is inherited by child
+processes, including long-lived processes, so this is an environment observation,
+not verification of a currently live Agterm app or terminal. When a complete
+Orca launch-origin stamp and the Agterm marker coexist, attribution is ambiguous
+and resolves to `unknown`.
+
+These closed labels are measurement-only provenance, not verification of a
+currently-live runtime, foreground terminal, routing, cancellation, or security
+authority. A standalone root Pi can inherit a valid marker and retain that
+observed host attribution. Native extension-managed children do not emit root
+starts. Reload/resume preserve existing logical-session suppression and do not
 reclassify the session.
 
-Installed CLI/skills, worktree paths, `ORCA_AGENT_PANE`, terminal handles, and
-other loose markers do not establish attribution. Older launchers, scrubbed,
-missing, partial, malformed, or oversized stamps produce `unknown`. These
-conservative checks can undercount Orca-origin sessions; `unknown` is not a
-non-Orca population. The stamp is not cryptographic proof against forged
-same-user environment variables.
+Missing, partial, malformed, or oversized Orca stamps and missing or non-exact
+Agterm markers produce `unknown`. These conservative checks can undercount host
+usage; `unknown` is not a non-Agterm or non-Orca population. The Orca stamp and
+Agterm marker are not cryptographic proof against forged same-user environment
+variables.
 
 Only telemetry-enabled fresh roots evaluate this pure environment-to-enum
 classification. It runs no command, runtime probe, app launch, filesystem read,
-or network request on any platform; it neither discovers an installed CLI nor
-uses remote/active-tab defaults. No executable or environment-provided command
-is ever loaded. Existing opt-outs suppress classification as well as capture.
-There is no asynchronous detection or startup delay.
+or network request; it does not discover an installed CLI or use remote or
+active-tab defaults. No executable or environment-provided command is ever
+loaded. Existing opt-outs suppress classification as well as capture. There is
+no asynchronous detection or startup delay.
 
-No raw stamp, handle, host version, path, Orca/Pi identifier, environment value,
-prompt, or argument is uploaded or logged by this detector; only the closed
-host label enters `session_started`. The existing random logical-tree telemetry
-UUID remains the only correlation identifier. Host is not propagated to other
-events or persisted in session state; native Orca backend attribution remains
-deferred.
+No raw stamp, marker, handle, host version, path, Orca/Pi identifier,
+environment value, prompt, or argument is uploaded or logged by this detector;
+only the closed host label enters `session_started`. The existing random
+logical-tree telemetry UUID remains the only correlation identifier. Host is
+not propagated to other events or persisted in session state; native child-backend
+attribution for Orca and Agterm remains deferred.
 
 ### Logical launch resolution
 
@@ -811,9 +826,9 @@ Count observed `session_started` records by the closed host label. Keep schema,
 release, mode, origin, and UTC date filters explicit. Do not apply child `mux`,
 execution, or operation filters: host is emitted only on root session starts.
 Historical missing and unexpected values stay `unknown`. This report measures
-sessions, not people, installations, all active sessions, native Orca launches,
-or verified current foreground agents. Repeated human use can create many
-sessions; continuing sessions without a fresh start in the window are absent.
+sessions, not people, installations, all active sessions, or verified current
+foreground agents. Repeated human use can create many sessions; continuing
+sessions without a fresh start in the window are absent.
 
 ```sql
 SELECT
@@ -821,7 +836,8 @@ SELECT
   coalesce(properties.$lib_version, 'unknown') AS release,
   coalesce(properties.mode, 'unknown') AS mode,
   coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
-  CASE WHEN properties.session_host = 'orca' THEN 'orca'
+  CASE WHEN properties.session_host = 'agterm' THEN 'agterm'
+    WHEN properties.session_host = 'orca' THEN 'orca'
     ELSE 'unknown' END AS session_host,
   count(*) AS observed_session_starts
 FROM events
@@ -831,7 +847,8 @@ ORDER BY schema_version, release, mode, traffic_origin, observed_session_starts 
 ```
 
 No schema filter is hard-coded so historical missing host values remain visible.
-The additive field does not change schema-v6 event meanings or require rewriting
-the existing five reports. Do not call the `orca` share a unique-user share or
-the `unknown` remainder a non-Orca share, and do not use this event-only property
-as a shared filter on the other reports' active-tree denominators.
+The added host label does not change schema-v6 event shape or require rewriting
+the other five reports. Do not call either the `agterm` or `orca` share a
+unique-user share, the `unknown` remainder a non-host share, or use this
+event-only property as a shared filter on the other reports' active-tree
+denominators.

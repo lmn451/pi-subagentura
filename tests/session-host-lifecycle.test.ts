@@ -105,6 +105,7 @@ describe("session host capture lifecycle", () => {
     if (kind === "environment child") vi.stubEnv("PI_SUBAGENTURA_CHILD", "1");
     if (kind === "test origin")
       vi.stubEnv("PI_SUBAGENTURA_TELEMETRY_ORIGIN", "test");
+    if (kind === "telemetry off") vi.stubEnv("AGTERM_ENABLED", "1");
     registration(kind !== "telemetry off", kind !== "explicit child").start();
     expect(resolveTelemetrySessionHost).not.toHaveBeenCalled();
     expect(

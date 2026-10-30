@@ -52,7 +52,7 @@ afterEach(() => {
 });
 
 // The emitted system prompt is an intentional interface, not proof of model behavior.
-describe("Orchestratorv2 emitted Orca prompt contract", () => {
+describe("Orchestratorv2 emitted prompt contract", () => {
   it("emits current caller/terminal proof requirements", () => {
     const surface = section("Execution surface and precedence");
     expect(surface).toContain("skills get orca-cli --json");
@@ -116,6 +116,14 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
     );
   });
 
+  it("defines Agterm as skill-backed terminal control, not an agent backend", () => {
+    const agterm = section("Agterm terminal control");
+    expect(agterm).toContain("installed `agterm` skill");
+    expect(agterm).toContain("not an agent orchestration backend");
+    expect(agterm).toContain("native interactive children");
+    expect(agterm).toContain("verified Orca path");
+  });
+
   it("emits ownership, delivery, and evidence-based completion constraints", () => {
     const orca = section("Orca-managed Pi specialists");
     for (const rule of [
@@ -159,6 +167,7 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
     expect(loadPrompt("orchestrator")).not.toContain(
       "Orca-managed Pi specialists",
     );
+    expect(loadPrompt("orchestrator")).not.toContain("Agterm terminal control");
     expect(loadPrompt("")).toBeUndefined();
   });
 
@@ -193,6 +202,7 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
       );
       expect(packedPrompt).toBe(promptAsset);
       expect(packedPrompt).toContain("## Orca-managed Pi specialists");
+      expect(packedPrompt).toContain("## Agterm terminal control");
       expect(packedReadme).toBe(readme);
     } finally {
       rmSync(directory, { recursive: true, force: true });

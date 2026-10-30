@@ -55,6 +55,7 @@ function stubOrcaHost(present = true): void {
     ORCA_TERMINAL_HANDLE: "private-terminal-handle",
     ORCA_WORKTREE_ID: "private-worktree-id",
     ORCA_APP_VERSION: "private-host-version",
+    AGTERM_ENABLED: undefined,
   })) {
     vi.stubEnv(name, present ? value : undefined);
   }
@@ -102,7 +103,7 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
     },
   );
 
-  it.each(["orca", "unknown", "private-host-id", undefined])(
+  it.each(["orca", "agterm", "unknown", "private-host-id", undefined])(
     "allowlists only session-start host attribution: %s",
     (host) => {
       const session = createTelemetrySession(true);
@@ -114,16 +115,18 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
       } as unknown as TelemetryEvent;
       const properties = buildTelemetryPayload(session, event).properties;
       expect(properties.session_host).toBe(
-        host === "orca" ? "orca" : "unknown",
+        host === "orca" || host === "agterm" ? host : "unknown",
       );
       expect(JSON.stringify(properties)).not.toContain("private");
-      for (const child of lifecycleEvents("tmux")) {
-        expect(
-          buildTelemetryPayload(session, {
-            ...child,
-            session_host: "orca",
-          } as TelemetryEvent).properties,
-        ).not.toHaveProperty("session_host");
+      for (const host of ["orca", "agterm"] as const) {
+        for (const child of lifecycleEvents("tmux")) {
+          expect(
+            buildTelemetryPayload(session, {
+              ...child,
+              session_host: host,
+            } as TelemetryEvent).properties,
+          ).not.toHaveProperty("session_host");
+        }
       }
     },
   );

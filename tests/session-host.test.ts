@@ -16,7 +16,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Orca launch-origin session attribution", () => {
+describe("session host attribution", () => {
   it("recognizes the complete verified launch-origin stamp without terminal metadata", () => {
     expect(resolveTelemetrySessionHost(launchEnv, "darwin")).toBe("orca");
   });
@@ -28,6 +28,33 @@ describe("Orca launch-origin session attribution", () => {
     expect(execFile).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("recognizes Agterm only from its documented enabled marker", () => {
+    expect(resolveTelemetrySessionHost({ AGTERM_ENABLED: "1" }, "darwin")).toBe(
+      "agterm",
+    );
+    expect(
+      resolveTelemetrySessionHost({ TERM_PROGRAM: "agterm" }, "darwin"),
+    ).toBe("unknown");
+  });
+
+  it.each([undefined, "", "0", "true", " 1 ", "1\n"])(
+    "fails closed for non-exact Agterm marker %j",
+    (value) => {
+      expect(
+        resolveTelemetrySessionHost({ AGTERM_ENABLED: value }, "darwin"),
+      ).toBe("unknown");
+    },
+  );
+
+  it("returns unknown when valid Orca and Agterm markers conflict", () => {
+    expect(
+      resolveTelemetrySessionHost(
+        { ...launchEnv, AGTERM_ENABLED: "1" },
+        "darwin",
+      ),
+    ).toBe("unknown");
   });
 
   it.each([
