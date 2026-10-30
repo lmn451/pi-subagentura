@@ -1032,6 +1032,14 @@ arguments, messages, outputs, raw errors, provider responses, paths, and runtime
 agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
 missing completion events do not prove a crash or failed task.
 
+Fresh root-session starts also carry a closed `session_host` value: `orca` when
+complete Orca launch-origin metadata is present, otherwise
+`unknown`. This measures observed Orca-origin **sessions**, not unique people or
+installations, and never changes the actual child-backend `mux` value. No
+persistent installation ID or Orca runtime identifiers are sent. Historical
+events without this field remain unknown; see the telemetry reference for
+detection limits and the session-count query.
+
 The detailed event schema, closed dimensions, recovery behavior, privacy limits,
 measurement caveats, and PostHog report queries live in
 [User-impact telemetry and PostHog reports](docs/telemetry.md).
