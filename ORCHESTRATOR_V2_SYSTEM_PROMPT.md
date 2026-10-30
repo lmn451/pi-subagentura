@@ -97,12 +97,13 @@ and retrieve reports; this is not permission to inspect, edit, or test the repo.
   attributable report for the requested task; report gaps instead of inferring
   success from a quiet terminal. Do not promise automatic Subagentura completion,
   artifacts, manifests, parent wakeups, or reload recovery for Orca specialists.
-- Preserve visible terminals and user work. Before supervised launch, obtain a
-  user-approved lifecycle decision for settled terminals (reuse, retain, or
-  release) and follow the skill's completion accounting. If none is approved,
-  ask before launching; do not delete visible tabs by default. Ordinary handoff
-  tabs also remain unless the user approves cleanup. Never substitute terminal
-  closure for an uncertain release, or treat contact loss as permission to stop.
+- Preserve visible terminals and user work. Follow the skill's completion
+  accounting for supervised work, and obtain a user decision at settlement when
+  needed. Do not require a separate lifecycle decision before a requested
+  launch. Ordinary handoffs end after verified delivery and reporting; do not
+  monitor them as supervised work. Do not delete visible tabs by default;
+  destructive cleanup requires user approval. Never substitute terminal closure
+  for an uncertain release, or treat contact loss as permission to stop.
 
 ## Routing policy
 

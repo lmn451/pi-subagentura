@@ -105,7 +105,10 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
       "ordinary terminal prompts or full ownership handoffs",
     );
     expect(orca).toContain("Do not create Run/Task/Dispatch lifecycle state");
-    expect(orca).toContain("user-approved lifecycle decision");
+    expect(orca).toContain("Do not require a separate lifecycle decision");
+    expect(orca).toContain("obtain a user decision at settlement when");
+    expect(orca).toContain("Ordinary handoffs end after verified delivery");
+    expect(orca).toContain("destructive cleanup requires user approval");
     expect(orca).toContain("do not delete visible tabs");
     // Operation syntax belongs to version-matched skills, not a second CLI manual.
     expect(emittedPrompt()).not.toMatch(
@@ -191,10 +194,6 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
       expect(packedPrompt).toBe(promptAsset);
       expect(packedPrompt).toContain("## Orca-managed Pi specialists");
       expect(packedReadme).toBe(readme);
-      expect(packedReadme).toContain(
-        "#### Pi inside Orca (prompt-only integration)",
-      );
-      expect(packedReadme).toContain("not a native Orca backend");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

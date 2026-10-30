@@ -316,8 +316,10 @@ surface via documented controls. No new worktrees are created unless requested.
 It prefers the parent's model/effort only when supported and verifiable; it does
 not guess launch syntax or silently substitute agents. The skills distinguish
 supervised coordination from ordinary prompts and full ownership handoffs.
-Visible tabs require a user-approved lifecycle decision before deletion;
-supervised launches must settle that decision in advance.
+Supervised launches do not require a separate lifecycle decision in advance;
+follow the skills' completion accounting and obtain a decision at settlement
+when needed. Ordinary handoffs end after verified delivery and reporting.
+Preserve visible tabs; destructive cleanup requires user approval.
 
 This is prompt policy, **not a native Orca backend** for `subagent_interactive`.
 Native registries, routing-metadata tools (including the optional classifier
