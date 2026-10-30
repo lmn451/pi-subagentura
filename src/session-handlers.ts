@@ -84,6 +84,7 @@ import {
   isTelemetryEnabled,
   readExtensionSettings,
 } from "./settings";
+import { resolveTelemetrySessionHost } from "./session-host";
 import {
   captureTelemetry,
   createTelemetrySession,
@@ -91,6 +92,7 @@ import {
   retireTelemetrySession,
   resolveTelemetryMode,
   type TelemetryTerminalReason,
+  type TelemetrySession,
   resolveTelemetryTrafficOrigin,
   TELEMETRY_ORIGIN_ENV,
 } from "./telemetry";
@@ -103,6 +105,14 @@ function logSessionError(event: string, error: unknown): void {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   debugLog("error", event, { error: message });
+}
+
+function captureRootSessionStarted(telemetry: TelemetrySession): void {
+  if (!telemetry.enabled || telemetry.trafficOrigin === "test") return;
+  captureTelemetry(telemetry, {
+    event: "session_started",
+    session_host: resolveTelemetrySessionHost(),
+  });
 }
 
 function recordPreparedManifest(
@@ -599,7 +609,7 @@ export function registerSessionHandlers(
       });
     }
     if (!isChild && recoveredTelemetry === undefined) {
-      captureTelemetry(scope.telemetry, { event: "session_started" });
+      captureRootSessionStarted(scope.telemetry);
     }
     // With telemetry off there is nothing to persist, so touching `.pi/`, the
     // state lock, and the state file would make the opt-out observable. The one

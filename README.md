@@ -12,10 +12,12 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, or
 Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to route clear work to attachable interactive subagents, ask
-for clarification when a request is ambiguous or a narrow request has no matching
-child, and leave specialist repository work to those children. Compatibility
-workflow and in-process tools remain registered.
+guides the parent to route clear work to attachable specialists, ask for
+clarification when a request is ambiguous or a narrow request has no matching
+owner, and leave repository work to specialists. Inside a verified Orca terminal,
+it uses the installed Orca skills to coordinate Pi terminal tabs instead of native
+children; [see the prompt-only Orca path](#pi-inside-orca-prompt-only-integration).
+Compatibility workflow and in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -381,9 +383,19 @@ verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
 tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate only through attachable interactive children and
-use the parent session's authoritative routing ledger together with the
-project-local routing cache.
+directs the parent to delegate through attachable specialists. Outside Orca, the
+existing native interactive path uses the parent session's authoritative routing
+ledger together with the project-local routing cache.
+
+#### Pi inside Orca (prompt-only integration)
+
+Open Pi with `--orchestratorv2` inside an Orca terminal and make the installed
+`orca-cli` and `orchestration` skills available to Pi. The [Orchestratorv2
+prompt](ORCHESTRATOR_V2_SYSTEM_PROMPT.md) defines runtime verification, routing,
+handoff, and lifecycle policy; the installed, version-matched skills own Orca
+command syntax and recovery. This prompt-only integration coordinates Pi
+specialists in Orca terminal tabs and does not add a native Orca backend to
+`subagent_interactive`.
 
 ### Extension settings
 
@@ -504,6 +516,11 @@ workflow runs require explicit recovery; see [the runtime contract](WORKFLOW_RUN
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
+An optional native classifier advisor can recommend an existing child; the
+parent still sends the task. See [Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
+for setup and [Jev routing](docs/jev-routing.md) for its configuration and
+failure behavior.
+
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
 to the exact payload, current session generation, and a later user message; a
@@ -542,6 +559,28 @@ nested children without top-level approval. Nested children belong to the
 immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
+
+#### Enable the optional classifier advisor
+
+With pi-subagentura installed on **Pi ≥ 1.2.0** (`pi --version`), set
+`PI_ORCHESTRATOR_ROUTER=jev` and start Pi with `--orchestratorv2`. Configure
+provider authentication through Pi, then ask the parent to use
+`resolve_orchestrator_route` for a clear task whose child owner is ambiguous.
+The classifier recommends an existing child; it does not replace your chat
+model or automatically send work.
+
+For the default OpenRouter Jev classifier, authenticate with `/login openrouter`
+and start Pi with:
+
+```bash
+PI_ORCHESTRATOR_ROUTER=jev pi --orchestratorv2
+```
+
+Only live children with confirmed responsibilities can be recommended; the
+parent still sends the original task through its existing messaging tool. This
+opt-in sends bounded task and responsibility text to the configured provider.
+See [Jev routing](docs/jev-routing.md) for provider choices, configuration,
+payload disclosure, and failure behavior.
 
 ## Cancellation context snapshots (opt-in)
 
@@ -1092,8 +1131,8 @@ arguments, messages, outputs, raw errors, provider responses, paths, and runtime
 agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
 missing completion events do not prove a crash or failed task.
 
-The detailed event schema, closed dimensions, recovery behavior, privacy limits,
-measurement caveats, and PostHog report queries live in
+The authoritative event schema, closed dimensions, recovery behavior, privacy
+limits, measurement caveats, and PostHog report queries live in
 [User-impact telemetry and PostHog reports](docs/telemetry.md).
 
 ### Traffic provenance

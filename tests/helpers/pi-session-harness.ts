@@ -212,7 +212,10 @@ export async function createPiSessionHarness(
   const sessionManager = options.sessionManager ?? SessionManager.inMemory();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   if (options.retrySettings) {
-    settingsManager.getRetrySettings = () => options.retrySettings!;
+    settingsManager.getRetrySettings = () => ({
+      ...options.retrySettings!,
+      maxAgentDelayMs: 0,
+    });
   }
   if (options.compactionSettings) {
     settingsManager.getCompactionEnabled = () =>

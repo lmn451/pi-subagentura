@@ -21,11 +21,14 @@ import {
   validateOrchestratorRoutingEntryInput,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
+import { isOrchestratorV2Enabled } from "../completion-turn";
+import { isRoutingConfigured } from "../routing-factory";
 import {
   resolveToolSessionScope,
   type SessionScope,
   type SessionToolToken,
 } from "../session-scope";
+import { registerOrchestratorRouterTool } from "./orchestrator-router";
 
 const CHILD_ID_PATTERN = "^(?:[a-f0-9]{8}|[a-f0-9]{16})$";
 const CONFIRMATION_TOKEN_PREFIX = "orchestrator-confirm:";
@@ -188,6 +191,17 @@ export function registerOrchestratorTools(
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
     : undefined;
+  let routerRegistered = false;
+  const registerRouterWhenEnabled = (
+    _event: unknown,
+    ctx: { modelRegistry?: unknown },
+  ): void => {
+    if (routerRegistered) return;
+    if (!isOrchestratorV2Enabled(pi)) return;
+    routerRegistered = registerOrchestratorRouterTool(pi, registrationScope, {
+      modelRegistry: ctx?.modelRegistry,
+    });
+  };
   registerToolWithDefaultGuidance(pi, {
     name: "list_orchestrator_agents",
     label: "List Orchestrator Agents",
@@ -399,6 +413,13 @@ export function registerOrchestratorTools(
       }
     },
   });
+
+  // Classifier capabilities and late-bound CLI flags are available through
+  // lifecycle contexts, not the extension factory. Retry after login/catalog changes.
+  if (isRoutingConfigured() && typeof pi.on === "function") {
+    pi.on("session_start", registerRouterWhenEnabled);
+    pi.on("before_agent_start", registerRouterWhenEnabled);
+  }
 }
 
 function confirmationMap(

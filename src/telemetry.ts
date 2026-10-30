@@ -21,6 +21,7 @@ const MAX_TELEMETRY_DEPTH = 64;
 const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
+export type TelemetrySessionHost = "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
 export type TelemetryTrafficOrigin =
@@ -217,6 +218,7 @@ export const TELEMETRY_OPERATION_NAMES = {
     "list_subagent_artifacts",
     "list_orchestrator_agents",
     "update_orchestrator_agent_description",
+    "resolve_orchestrator_route",
     "workflow",
     "get_workflow_status",
     "resume_workflow",
@@ -296,7 +298,7 @@ type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
 };
 
 export type TelemetryEvent =
-  | { event: "session_started" }
+  | { event: "session_started"; session_host?: TelemetrySessionHost }
   | {
       event: "session_setup_failed";
       failure_stage: TelemetrySessionFailureStage;
@@ -979,7 +981,10 @@ export function buildTelemetryPayload(
   let properties: TelemetryPayload["properties"];
   switch (event.event) {
     case "session_started":
-      properties = common;
+      properties = {
+        ...common,
+        session_host: event.session_host === "orca" ? "orca" : "unknown",
+      };
       break;
     case "session_setup_failed":
       properties = { ...common, failure_stage: event.failure_stage };

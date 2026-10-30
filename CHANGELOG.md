@@ -121,6 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process-exit signal diagnostics using host-native signal numbers.
 - Keep historical workflow diagnostics generic during native compaction and legacy
   RPC replay without hiding safe workflow-list IDs, names, or statuses.
+- Add optional Orchestratorv2 child selection through Pi's native classifier
+  API, with bounded inputs, fail-closed selection, and usage accounting.
 
 ## [4.1.0] - 2026-10-25
 

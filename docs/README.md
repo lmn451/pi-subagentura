@@ -20,6 +20,7 @@ published injector.
 | [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools           |
 | [telemetry.md](./telemetry.md)                                                     | Telemetry contract, privacy, and PostHog report definitions            |
 | [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                            |
+| [jev-routing.md](./jev-routing.md)                                                 | Optional Jev candidate selection, configuration, and external payload  |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters |
 | [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                     | Protocol-v1 compatibility removal status and user-data behavior        |
 
