@@ -12,10 +12,12 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, or
 Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to route clear work to attachable interactive subagents, ask
-for clarification when a request is ambiguous or a narrow request has no matching
-child, and leave specialist repository work to those children. Compatibility
-workflow and in-process tools remain registered.
+guides the parent to route clear work to attachable specialists, ask for
+clarification when a request is ambiguous or a narrow request has no matching
+owner, and leave repository work to specialists. Inside a verified Orca terminal,
+it uses the installed Orca skills to coordinate Pi terminal tabs instead of native
+children; [see the prompt-only Orca path](#pi-inside-orca-prompt-only-integration).
+Compatibility workflow and in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -290,9 +292,45 @@ verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
 tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate only through attachable interactive children and
-use the parent session's authoritative routing ledger together with the
-project-local routing cache.
+directs the parent to delegate through attachable specialists. Outside Orca, the
+existing native interactive path uses the parent session's authoritative routing
+ledger together with the project-local routing cache.
+
+#### Pi inside Orca (prompt-only integration)
+
+Open Pi with `--orchestratorv2` inside an Orca terminal and make the installed
+`orca-cli` and `orchestration` skills available to Pi. The prompt requires loading
+their discovery stubs and version-matched CLI guides before command discovery.
+Those guides own exact syntax and recovery rules; this package does not bundle
+Orca commands or install those skills.
+
+Skill availability or an installed CLI is not proof of an Orca-hosted Pi session.
+The router must verify the runtime caller and current terminal belong to this Pi
+session, with the exact workspace/checkout and host. Ambiguous or unavailable
+proof requires clarification, not a silent fallback or launch. A positively
+non-Orca session keeps the existing native path.
+
+For verified Orca sessions, the prompt directs delegation to Pi specialists in
+other **terminal tabs in the same checkout**, explicitly selecting the terminal
+surface via documented controls. No new worktrees are created unless requested.
+It prefers the parent's model/effort only when supported and verifiable; it does
+not guess launch syntax or silently substitute agents. The skills distinguish
+supervised coordination from ordinary prompts and full ownership handoffs.
+Visible tabs require a user-approved lifecycle decision before deletion;
+supervised launches must settle that decision in advance.
+
+This is prompt policy, **not a native Orca backend** for `subagent_interactive`.
+Native registries, routing-metadata tools (including the optional classifier
+advisor), context schema, artifact selectors, manifests, completion groups, and
+automatic parent wakeups apply only to native children. Orca specialists instead
+need verified owned runtime identities, explicit responsibilities, real reports,
+and a complete implementation handoff. Stale handles require fresh discovery;
+ambiguous launch/send failures must not cause duplicate launches or dual sends.
+Idle or accepted input is not completion. No automatic Subagentura completion
+delivery or reload recovery is promised for Orca-managed specialists.
+
+The native routing-ledger, artifact, supervisor, and completion details elsewhere
+in this README describe native Subagentura children, not Orca-managed agents.
 
 ### Extension settings
 
