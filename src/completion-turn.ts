@@ -58,16 +58,6 @@ const ORCHESTRATOR_V2_WAKE_MESSAGE_CONTENT =
   "the active thin-router policy: route or surface them without performing " +
   "specialist work.";
 
-export function isOrchestratorV2WakeupMessage(value: string): boolean {
-  const prefix =
-    "[Orchestratorv2 coordinator wakeup] One or more completion events were " +
-    "delivered immediately before this extension-generated message. Apply the " +
-    "active thin-router policy: route or surface them without performing " +
-    "specialist work.";
-  const match = value.match(/\[orchestratorv2-wake-id:([^\]]+)\]/);
-  return value.includes(prefix) && match !== null && isWakeId(match[1]);
-}
-
 /** Delay between a wake request and a retry when no matching run starts. */
 export const ORCHESTRATOR_V2_WAKE_WATCHDOG_DELAY_MS = 30_000;
 /** Maximum automatic wake requests in one bounded retry cycle. */

@@ -654,73 +654,56 @@ describe("Orchestratorv2 metadata tools", () => {
     expect(replay.details.status).toBe("confirmation_invalid");
   });
 
-  it.each(["native", "legacy"])(
-    "accepts user confirmation before a %s coordinator wake",
-    async (kind) => {
-      const api = mockApi();
-      const scope = startedScope(api, 1, "parent-a");
-      registerState(scope, CHILD_A);
-      registerOrchestratorTools(api as never, scope);
-      const update = tool(api, "update_orchestrator_agent_description");
-      const params = {
-        childId: CHILD_A,
-        description: "Own authentication",
-        provenance: "user" as const,
-      };
-      const requested = await update.execute(
-        "request",
-        { ...params, confirmed: false },
-        undefined,
-        undefined,
-        toolContext(root, "user-1", "Make the change"),
-      );
-      const confirmationToken = requested.details.confirmationToken;
-      const branch = [
-        {
-          id: "user-1",
-          type: "message",
-          message: { role: "user", content: "Make the change" },
+  it("accepts user confirmation before a native coordinator wake", async () => {
+    const api = mockApi();
+    const scope = startedScope(api, 1, "parent-a");
+    registerState(scope, CHILD_A);
+    registerOrchestratorTools(api as never, scope);
+    const update = tool(api, "update_orchestrator_agent_description");
+    const params = {
+      childId: CHILD_A,
+      description: "Own authentication",
+      provenance: "user" as const,
+    };
+    const requested = await update.execute(
+      "request",
+      { ...params, confirmed: false },
+      undefined,
+      undefined,
+      toolContext(root, "user-1", "Make the change"),
+    );
+    const confirmationToken = requested.details.confirmationToken;
+    const branch = [
+      {
+        id: "user-1",
+        type: "message",
+        message: { role: "user", content: "Make the change" },
+      },
+      {
+        id: "user-2",
+        type: "message",
+        message: { role: "user", content: `Confirm ${confirmationToken}` },
+      },
+      {
+        id: "completion-pointer",
+        type: "custom_message",
+        details: {
+          [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]:
+            "12345678-1234-1234-9234-123456789abc",
         },
-        {
-          id: "user-2",
-          type: "message",
-          message: { role: "user", content: `Confirm ${confirmationToken}` },
-        },
-        ...(kind === "native"
-          ? [
-              {
-                id: "completion-pointer",
-                type: "custom_message",
-                details: {
-                  [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]:
-                    "12345678-1234-1234-9234-123456789abc",
-                },
-              },
-            ]
-          : [
-              {
-                id: "legacy-wake",
-                type: "message",
-                message: {
-                  role: "user",
-                  content:
-                    "[Orchestratorv2 coordinator wakeup] One or more completion events were delivered immediately before this extension-generated message. Apply the active thin-router policy: route or surface them without performing specialist work.\n[orchestratorv2-wake-id:12345678-1234-1234-9234-123456789abc]",
-                },
-              },
-            ]),
-      ];
+      },
+    ];
 
-      const result = await update.execute(
-        "confirmed",
-        { ...params, confirmed: true, confirmationToken },
-        undefined,
-        undefined,
-        { cwd: root, sessionManager: { getBranch: () => branch } },
-      );
+    const result = await update.execute(
+      "confirmed",
+      { ...params, confirmed: true, confirmationToken },
+      undefined,
+      undefined,
+      { cwd: root, sessionManager: { getBranch: () => branch } },
+    );
 
-      expect(result.details.status).toBe("updated");
-    },
-  );
+    expect(result.details.status).toBe("updated");
+  });
 
   it("rejects confirmation when a later user submits wake-shaped text", async () => {
     const api = mockApi();

@@ -1,10 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import {
-  isOrchestratorV2Enabled,
-  isOrchestratorV2WakeupMessage,
-} from "../completion-turn";
+import { isOrchestratorV2Enabled } from "../completion-turn";
 import {
   createRoutingEngine,
   isRoutingConfigured,
@@ -403,13 +400,6 @@ function latestUserRequestIdentity(
     if (record.type !== "message" || typeof record.id !== "string") continue;
     if (!record.message || typeof record.message !== "object") continue;
     if ((record.message as { role?: unknown }).role !== "user") continue;
-    if (
-      isOrchestratorV2WakeupMessage(
-        textContent((record.message as { content?: unknown }).content),
-      )
-    ) {
-      continue;
-    }
     return { id: record.id };
   }
   return undefined;

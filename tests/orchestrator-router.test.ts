@@ -324,6 +324,7 @@ describe("orchestrator routing advisor", () => {
     upsertOrchestratorRoutingEntry(root, entries[0]);
     const sessionContext = context(root, entries);
     const branch = sessionContext.sessionManager.getBranch();
+    sessionContext.sessionManager.getBranch = () => branch;
     registerOrchestratorRouterTool(value as never, scope, {
       createEngine: () => ({
         decide: async () => {

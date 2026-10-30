@@ -21,10 +21,7 @@ import {
   validateOrchestratorRoutingEntryInput,
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
-import {
-  isOrchestratorV2Enabled,
-  isOrchestratorV2WakeupMessage,
-} from "../completion-turn";
+import { isOrchestratorV2Enabled } from "../completion-turn";
 import { isRoutingConfigured } from "../routing-factory";
 import {
   resolveToolSessionScope,
@@ -552,7 +549,6 @@ function latestUserMessage(
     const userMessage = message as { role?: unknown; content?: unknown };
     if (userMessage.role !== "user") continue;
     const text = textContent(userMessage.content);
-    if (isOrchestratorV2WakeupMessage(text)) continue;
     return { id: record.id, text };
   }
   return undefined;
