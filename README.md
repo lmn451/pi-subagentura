@@ -300,21 +300,10 @@ routing ledger and the project-local routing cache inside and outside Orca.
 ### Interactive delegation inside Orca (prompt-only integration)
 
 The shared [Orca interactive system prompt](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
-applies to interactive delegation by normal Pi parents and interactive
-children/nested contexts, including Orchestratorv2; it does not require that
-flag. It does not change the legacy `--orchestrator` workflow selection or
-The installed, version-matched `orca-cli` and `orchestration` skills provide
-command syntax and recovery; verify the current Pi/Orca runtime, terminal, and
-workspace before following their guidance. The linked asset is the single
-authoritative Orca coordination guidance and, in a verified Orca runtime, takes
-precedence over any native-only routing-advisor guidance in the Orchestratorv2
-prompt, which continues to govern native routing and lifecycle rules.
-
-Prompt/skill-managed Orca specialists are distinct from pi-subagentura's native
-interactive children. Existing `subagent_interactive` children remain native
-Pi sessions, including inside Orca. The prompt guidance adds no Orca mux/backend
-and creates no native child records, artifacts, receipts, completion/wakeup
-handling, or reload/lifecycle guarantees for Orca specialists.
+guides interactive delegation by normal Pi parents, Orchestratorv2, and
+interactive children/nested contexts. It is prompt/skill-based; it does not
+change legacy workflow selection or add an Orca backend. The linked prompt is
+the authority for verification, coordination, and native-versus-Orca handling.
 
 ### Extension settings
 

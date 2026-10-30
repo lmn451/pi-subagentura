@@ -35,7 +35,8 @@ runs in Orca; an in-process child remains `mux=none`. `requested_mux` describes
 the extension launch request, not the host either. For rejected launches, `mux`
 can preserve a selected backend without implying that a child was accepted.
 
-Orca integration in Orchestratorv2 is prompt-only. There is no native Orca
+Orca interactive delegation across normal parents, Orchestratorv2, and
+interactive children is prompt/skill-only. There is no native Orca
 `subagent_interactive` backend, and `orca` is not currently a supported telemetry
 mux value. Commands executed through the Orca CLI are outside the extension's
 child launch/turn instrumentation: do not manufacture `agent_created`,
