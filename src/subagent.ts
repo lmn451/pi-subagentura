@@ -108,10 +108,10 @@ On kind="match", use the returned childId as the id of
 send_interactive_subagent_message and send the original task. The recommendation
 does not expand the child's responsibility or permissions. If the send fails
 because the child is unavailable, surface that state instead of replacing it.
-On kind="no_match", apply the existing orchestrator policy: ask, create a child,
-handle the task, or fail as appropriate. Do not treat no_match as a clarification
-request by itself. In particular, reason="none" means no existing child owns the
-task; low confidence and ambiguity mean that the advisor cannot safely select one.
+On kind="no_match" with reason="new_child_recommended", consider creating a child
+under the existing orchestrator policy; the recommendation does not authorize or
+mandate spawning. On low_confidence or ambiguous, abstain and apply the existing
+policy without treating the result as a new-child recommendation.
 On kind="error", do not send a task based on the advisor; follow the existing
 fallback policy. On kind="cancelled", stop routing that request and do not send
 a task or ask a follow-up about it.

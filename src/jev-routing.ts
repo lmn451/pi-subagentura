@@ -160,7 +160,7 @@ async function decideNative(
   });
   if (prepared.kind !== "ready") {
     return prepared.kind === "no_candidates"
-      ? { kind: "no_match", reason: "none" }
+      ? { kind: "no_match", reason: "new_child_recommended" }
       : { kind: "error", reason: prepared.kind };
   }
   const context = buildSystemOneChoicePayload(prepared.input, [

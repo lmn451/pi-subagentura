@@ -108,11 +108,18 @@ describe("native Jev routing", () => {
       { candidate_0: 0.03, candidate_1: 0.07, none: 0.9 },
       0.95,
       {},
-      "none",
+      "new_child_recommended",
     ],
     [
       "candidate_0",
       { candidate_0: 0.9, candidate_1: 0.05, none: 0.05 },
+      0.5,
+      {},
+      "low_confidence",
+    ],
+    [
+      "none",
+      { candidate_0: 0.03, candidate_1: 0.07, none: 0.9 },
       0.5,
       {},
       "low_confidence",
@@ -230,7 +237,7 @@ describe("native Jev routing", () => {
     const { engine, modelRegistry } = setup();
     await expect(engine.decide({ ...input, candidates: [] })).resolves.toEqual({
       kind: "no_match",
-      reason: "none",
+      reason: "new_child_recommended",
     });
     await expect(
       engine.decide({
@@ -306,7 +313,10 @@ describe("native Jev routing", () => {
     );
     await expect(
       engine.decide({ ...input, candidates }),
-    ).resolves.toMatchObject({ kind: "no_match", reason: "none" });
+    ).resolves.toMatchObject({
+      kind: "no_match",
+      reason: "new_child_recommended",
+    });
     expect(modelRegistry.classify).toHaveBeenCalledOnce();
   });
 

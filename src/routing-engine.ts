@@ -27,7 +27,10 @@ export interface RoutingEvidence {
 
 export const ROUTING_PROVIDER_ENV = "PI_ORCHESTRATOR_ROUTER";
 
-export type RoutingNoMatchReason = "none" | "low_confidence" | "ambiguous";
+export type RoutingNoMatchReason =
+  | "new_child_recommended"
+  | "low_confidence"
+  | "ambiguous";
 
 export type RoutingErrorReason =
   | "disabled"
@@ -112,14 +115,7 @@ export function decideFromRoutingChoice(
   if (!isValidRoutingEvidence(evidence)) {
     return { kind: "error", reason: "invalid_response" };
   }
-  if (choice === "none") {
-    return {
-      kind: "no_match",
-      reason: "none",
-      evidence,
-    };
-  }
-  if (!candidateIds.includes(choice)) {
+  if (choice !== "none" && !candidateIds.includes(choice)) {
     return { kind: "error", reason: "invalid_response" };
   }
   const failureReason = routingEvidenceFailureReason(evidence, policy);
@@ -127,6 +123,13 @@ export function decideFromRoutingChoice(
     return {
       kind: "no_match",
       reason: failureReason,
+      evidence,
+    };
+  }
+  if (choice === "none") {
+    return {
+      kind: "no_match",
+      reason: "new_child_recommended",
       evidence,
     };
   }

@@ -201,8 +201,9 @@ describe("orchestrator routing advisor", () => {
 
     expect(result.details.decision).toEqual({
       kind: "no_match",
-      reason: "none",
+      reason: "new_child_recommended",
     });
+    expect(result.content[0].text).toContain("recommends creating a new child");
     expect(decide).not.toHaveBeenCalled();
   });
 

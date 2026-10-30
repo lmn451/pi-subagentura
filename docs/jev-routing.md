@@ -99,8 +99,10 @@ conservative defaults, not measured accuracy guarantees.
    `resolve_orchestrator_route({ task: "the original user task" })`.
 3. On `kind: "match"`, send the original task to the returned `childId` through
    `send_interactive_subagent_message`.
-4. On `kind: "no_match"` or `kind: "error"`, apply the existing parent policy.
-   On `kind: "cancelled"`, stop the cancelled request.
+4. On `kind: "no_match", reason: "new_child_recommended"`, consider creating a
+   new child under the existing parent policy. This is advice, not a mandate.
+   On `low_confidence`, `ambiguous`, or `error`, abstain and apply the existing
+   parent policy. On `kind: "cancelled"`, stop the cancelled request.
 
 The advisor builds candidates from the current parent session's authority and
 runtime state, not a model-supplied list. Only live, actionable, non-stale direct

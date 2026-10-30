@@ -60,7 +60,7 @@ const ROUTING_ERROR_REASONS: ReadonlySet<string> = new Set([
   "incomplete_registry",
 ]);
 const ROUTING_NO_MATCH_REASONS: ReadonlySet<string> = new Set([
-  "none",
+  "new_child_recommended",
   "low_confidence",
   "ambiguous",
 ]);
@@ -240,7 +240,10 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
   if (initialCandidates.length === 0) {
-    return routingAdviceResult({ kind: "no_match", reason: "none" });
+    return routingAdviceResult({
+      kind: "no_match",
+      reason: "new_child_recommended",
+    });
   }
 
   const snapshots = initialCandidates.map((entry) => ({
@@ -769,7 +772,9 @@ function routingAdviceResult(decision: RoutingDecision): {
     decision.kind === "match"
       ? `Routing advisor selected existing child ${decision.childId}.`
       : decision.kind === "no_match"
-        ? `No existing child matches this task (${decision.reason}).`
+        ? decision.reason === "new_child_recommended"
+          ? "Routing advisor recommends creating a new child for this task; this is advice only."
+          : `Routing advisor abstained (${decision.reason}).`
         : decision.kind === "cancelled"
           ? "Routing advisor cancelled this routing request."
           : `Routing advisor could not decide (${decision.reason}).`;
