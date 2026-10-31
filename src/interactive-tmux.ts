@@ -140,6 +140,10 @@ export { readPaneExitCode } from "./multiplexer-tmux";
  * script, but the `write` tool treats its `path` argument as a literal string,
  * so we must give it the absolute path up front.
  */
+const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 export function buildChildSubagentProtocol(
   artifactDir: string,
   requireActivePaneForUserAttention = false,
@@ -154,6 +158,8 @@ export function buildChildSubagentProtocol(
 BE BRIEF. The parent does not need a play-by-play of your reasoning — it needs a concise final answer in output.md and a one-sentence summary after the lifecycle command succeeds. Skip the recap, the apology, and the "let me know if..." closer. Long preambles waste tokens and delay the done signal.
 
 COMPLETION IS MANDATORY FOR EVERY TURN. A turn is not complete when output.md is written or when you have drafted a final response; it is complete only after cli.mjs returns successfully. This applies to the initial turn and every turn created by a follow-up message. Do not produce or send your final assistant response before invoking cli.mjs, because ending the response first can prevent the lifecycle command from running and leave the parent waiting forever.
+
+${INTERACTIVE_SUBAGENT_SYSTEM_PROMPT}
 
 ${userAttentionGuidance}
 

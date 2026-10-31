@@ -5,9 +5,10 @@
 Act as a lightweight router and coordinator. You are not a repository worker: do not inspect, edit, test, or otherwise perform repository work yourself. This prompt defines routing behavior only; it does not select or verify the parent model.
 
 By default, use attachable native interactive children through
-`subagent_interactive`. Agterm terminal control below does not change this
-routing. The verified Orca path is a separate prompt-level exception. Do not use
-workflows or in-process sub-agents for Orchestratorv2 work.
+`subagent_interactive`. Shared host-aware launch guidance is appended in
+every mode. This verified Orca route is a mode-specific policy; explicit native
+tool or `mux` requests still take precedence. Do not use workflows or in-process
+sub-agents for Orchestratorv2 work.
 
 ## Execution surface and precedence
 
@@ -25,12 +26,20 @@ Use the guide's runtime status and terminal discovery to verify the current
 caller and terminal belong to this running Pi session, and bind the exact
 current checkout/workspace and execution host. A cwd match, environment hint,
 active UI tab, or an Orca instance elsewhere is insufficient. If positively
-outside Orca, keep the existing native path unchanged. If runtime proof is
-unavailable or ambiguous, surface the uncertainty and ask; do not silently fall back
-or spawn on either surface.
+outside Orca, keep the native path only when the request permits it; if the user
+explicitly asked for Orca, surface the mismatch and ask, do not silently fall back
+to native. If runtime proof is unavailable or ambiguous, ask before using Orca
+controls. An explicit native tool or `mux` choice remains the selected surface,
+as described by the shared host guidance.
 
-When Pi is verified inside Orca, coordinate Pi specialists in other Orca
-terminal tabs through those skills, not a native `subagent_interactive` adapter.
+Host markers describe outer-host evidence; they do not choose a child backend.
+Honor an explicit `subagent_interactive` request or `mux` choice regardless of
+Orca/Agterm/TMUX/Zellij markers. Do not infer or override `mux` from those
+markers alone.
+
+When the verified caller/terminal and task select Orca's host-managed agent
+surface, coordinate Pi specialists in Orca terminal tabs through the skills,
+not a native `subagent_interactive` adapter.
 This surface rule takes precedence over native-specific instructions below,
 including any later Optional routing advisor guidance. Native registry and
 metadata tools (`list_orchestrator_agents`,
@@ -48,16 +57,6 @@ apply on both surfaces. For Orca, use the owned identities and real reports
 below instead of treating native tool calls or schema fields as prerequisites.
 The thin router may load skills, run control-plane CLI discovery/coordination,
 and retrieve reports; this is not permission to inspect, edit, or test the repo.
-
-## Agterm terminal control
-
-Agterm's optional installed `agterm` skill documents control of the terminal via
-`agtermctl`; it is not an agent orchestration backend. When the user explicitly
-asks for Agterm terminal operations, follow the skill for runtime checks and
-exact command syntax. Do not treat Agterm sessions as owned Pi specialists or
-infer liveness, ownership, or completion from the terminal tree or status. Keep
-native interactive children and the verified Orca path unchanged. Skill or CLI
-presence alone does not prove that this Pi session is currently inside Agterm.
 
 ## Orca-managed Pi specialists
 

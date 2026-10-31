@@ -11,6 +11,10 @@ const promptAsset = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const hostPromptAsset = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 function emittedPrompt(): string {
@@ -66,6 +70,9 @@ describe("Orchestratorv2 emitted prompt contract", () => {
     expect(surface).toContain("positively outside Orca");
     expect(surface).toContain("unavailable or ambiguous");
     expect(surface).toContain("do not silently fall back");
+    expect(surface).toContain(
+      "Do not infer or override `mux` from those markers alone",
+    );
   });
 
   it("emits native-only tool, schema, and advisor scope", () => {
@@ -116,12 +123,13 @@ describe("Orchestratorv2 emitted prompt contract", () => {
     );
   });
 
-  it("defines Agterm as skill-backed terminal control, not an agent backend", () => {
-    const agterm = section("Agterm terminal control");
-    expect(agterm).toContain("installed `agterm` skill");
-    expect(agterm).toContain("not an agent orchestration backend");
-    expect(agterm).toContain("native interactive children");
-    expect(agterm).toContain("verified Orca path");
+  it("includes shared host-managed agent-launch guidance", () => {
+    const hosts = section("Host-aware interactive agent launches");
+    expect(hosts).toContain("Preserve an explicit `mux` choice");
+    expect(hosts).toContain("verify the current caller and terminal topology");
+    expect(hosts).toContain("session new --command");
+    expect(hosts).toContain("agtermctl msg");
+    expect(hosts).toContain("agent launch");
   });
 
   it("emits ownership, delivery, and evidence-based completion constraints", () => {
@@ -160,18 +168,19 @@ describe("Orchestratorv2 emitted prompt contract", () => {
     );
   });
 
-  it("loads the exact bundled text through v2 without changing other modes", () => {
+  it("composes shared guidance with the selected prompt mode", () => {
     vi.stubEnv("PI_SUBAGENTURA_CHILD", undefined);
     vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
-    expect(loadPrompt("orchestratorv2")).toBe(`base prompt\n\n${promptAsset}`);
-    expect(loadPrompt("orchestrator")).not.toContain(
-      "Orca-managed Pi specialists",
+    expect(loadPrompt("orchestratorv2")).toBe(
+      `base prompt\n\n${hostPromptAsset}\n\n${promptAsset}`,
     );
-    expect(loadPrompt("orchestrator")).not.toContain("Agterm terminal control");
-    expect(loadPrompt("")).toBeUndefined();
+    const orchestratorPrompt = loadPrompt("orchestrator") ?? "";
+    expect(orchestratorPrompt).toContain(hostPromptAsset);
+    expect(orchestratorPrompt).not.toContain("Orca-managed Pi specialists");
+    expect(loadPrompt("")).toBe(`base prompt\n\n${hostPromptAsset}`);
   });
 
-  it("ships the exact prompt and Orca boundary documentation in npm pack", () => {
+  it("ships the shared host guidance and v2 prompt in npm pack", () => {
     const directory = mkdtempSync(join(tmpdir(), "orca-prompt-contract-"));
     try {
       execFileSync(
@@ -195,6 +204,11 @@ describe("Orchestratorv2 emitted prompt contract", () => {
         ["-xOf", tarball, "package/ORCHESTRATOR_V2_SYSTEM_PROMPT.md"],
         { encoding: "utf8" },
       ).trim();
+      const packedHostPrompt = execFileSync(
+        "tar",
+        ["-xOf", tarball, "package/INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md"],
+        { encoding: "utf8" },
+      ).trim();
       const packedReadme = execFileSync(
         "tar",
         ["-xOf", tarball, "package/README.md"],
@@ -202,7 +216,7 @@ describe("Orchestratorv2 emitted prompt contract", () => {
       );
       expect(packedPrompt).toBe(promptAsset);
       expect(packedPrompt).toContain("## Orca-managed Pi specialists");
-      expect(packedPrompt).toContain("## Agterm terminal control");
+      expect(packedHostPrompt).toBe(hostPromptAsset);
       expect(packedReadme).toBe(readme);
     } finally {
       rmSync(directory, { recursive: true, force: true });

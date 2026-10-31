@@ -39,6 +39,26 @@ describe("session host attribution", () => {
     ).toBe("unknown");
   });
 
+  it.each([
+    ["tmux", { TMUX: "/tmp/tmux/default,1,0", TERM_PROGRAM: "tmux" }],
+    ["zellij", { ZELLIJ_SESSION_NAME: "outer-zellij", TERM_PROGRAM: "zellij" }],
+  ])(
+    "keeps Agterm host evidence independent of inherited %s context",
+    (_mux, muxEnv) => {
+      expect(
+        resolveTelemetrySessionHost(
+          {
+            AGTERM_ENABLED: "1",
+            AGTERM_SESSION_ID: "stale-session",
+            AGTERM_PANE_ID: "stale-pane",
+            ...muxEnv,
+          },
+          "darwin",
+        ),
+      ).toBe("agterm");
+    },
+  );
+
   it.each([undefined, "", "0", "true", " 1 ", "1\n"])(
     "fails closed for non-exact Agterm marker %j",
     (value) => {
@@ -58,7 +78,23 @@ describe("session host attribution", () => {
   });
 
   it.each([
+    ["tmux", { TMUX: "/tmp/tmux/default,1,0", TERM_PROGRAM: "tmux" }],
+    ["zellij", { ZELLIJ_SESSION_NAME: "outer-zellij", TERM_PROGRAM: "zellij" }],
+  ])(
+    "keeps Orca launch origin independent of inherited %s context",
+    (_mux, muxEnv) => {
+      expect(
+        resolveTelemetrySessionHost(
+          { ...launchEnv, ORCA_TERMINAL_HANDLE: "stale", ...muxEnv },
+          "darwin",
+        ),
+      ).toBe("orca");
+    },
+  );
+
+  it.each([
     {},
+    { TMUX: "/tmp/tmux/default,1,0", ZELLIJ_SESSION_NAME: "nested" },
     { ORCA_AGENT_PANE: "private-pane" },
     { ORCA_TERMINAL_HANDLE: "private-handle", ORCA_PANE_KEY: "private-pane" },
     { ORCA_PI_STATUS_OWNED: "1" },

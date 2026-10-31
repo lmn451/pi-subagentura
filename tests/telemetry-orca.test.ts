@@ -61,13 +61,13 @@ function stubOrcaHost(present = true): void {
   }
 }
 
-describe("Orca prompt-only telemetry attribution boundary", () => {
+describe("prompt-only host telemetry attribution boundary", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
   it.each(childMuxes)(
-    "keeps the observed %s child backend independent of Orca host markers",
+    "keeps the observed %s child backend independent of host markers",
     (mux) => {
       stubOrcaHost(false);
       const session = createTelemetrySession(
@@ -127,6 +127,36 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
             } as TelemetryEvent).properties,
           ).not.toHaveProperty("session_host");
         }
+      }
+    },
+  );
+
+  it.each(["orca", "agterm"] as const)(
+    "keeps %s root host evidence separate from extension launch backends",
+    (host) => {
+      const session = createTelemetrySession(
+        true,
+        "straight",
+        undefined,
+        "development",
+      );
+      const started = buildTelemetryPayload(session, {
+        event: "session_started",
+        session_host: host,
+      }).properties;
+
+      expect(started.session_host).toBe(host);
+      for (const mux of childMuxes) {
+        const resolution = lifecycleEvents(mux).find(
+          (event) => event.event === "agent_launch_resolved",
+        );
+        expect(resolution).toBeDefined();
+        const launch = buildTelemetryPayload(session, resolution!).properties;
+
+        expect(launch.telemetry_session_id).toBe(started.telemetry_session_id);
+        expect(launch.requested_mux).toBe(mux === "none" ? "none" : "auto");
+        expect(launch.mux).toBe(mux);
+        expect(launch).not.toHaveProperty("session_host");
       }
     },
   );

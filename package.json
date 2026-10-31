@@ -42,6 +42,7 @@
     "LICENSE",
     "ORCHESTRATOR_SYSTEM_PROMPT.md",
     "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+    "INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
     "docs/workflows.md",
     "docs/jev-routing.md",
     "docs/telemetry.md",

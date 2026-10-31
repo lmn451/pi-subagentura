@@ -93,6 +93,10 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
@@ -165,7 +169,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("before_agent_start", (event, ctx) => {
     const routingEnabled = isRoutingEnabled(process.env, ctx.modelRegistry);
-    const prompts: string[] = [];
+    const prompts: string[] = [INTERACTIVE_SUBAGENT_SYSTEM_PROMPT];
     if (pi.getFlag("orchestrator") === true) {
       prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
     }

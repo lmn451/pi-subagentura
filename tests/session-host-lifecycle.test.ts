@@ -14,12 +14,16 @@ let root: string;
 let captured: any[];
 const registrations: Map<string, Function>[] = [];
 
-function registration(enabled = true, allowRoot = true) {
+function registration(
+  enabled = true,
+  allowRoot = true,
+  mode?: "orchestrator" | "orchestratorv2",
+) {
   const handlers = new Map<string, Function>();
   const pi = {
     on: (name: string, handler: Function) => handlers.set(name, handler),
     appendEntry: vi.fn(),
-    getFlag: vi.fn(),
+    getFlag: vi.fn((name: string) => name === mode),
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
   };
@@ -90,6 +94,38 @@ describe("session host capture lifecycle", () => {
     expect(JSON.stringify(captured)).not.toContain("private-pi-id");
     expect(JSON.stringify(captured)).not.toContain(root);
   });
+
+  it("attributes Agterm in straight mode without orchestration flags", () => {
+    vi.mocked(resolveTelemetrySessionHost).mockReturnValue("agterm");
+    registration().start();
+    const start = captured.find(
+      (event) => event.event === "pi_subagentura_session_started",
+    );
+
+    expect(start?.properties.mode).toBe("straight");
+    expect(start?.properties.session_host).toBe("agterm");
+  });
+
+  it.each([
+    ["straight", "orca", undefined],
+    ["straight", "agterm", undefined],
+    ["orchestrator", "orca", "orchestrator"],
+    ["orchestrator", "agterm", "orchestrator"],
+    ["orchestrator_v2", "orca", "orchestratorv2"],
+    ["orchestrator_v2", "agterm", "orchestratorv2"],
+  ] as const)(
+    "captures %s host evidence independently of %s mode",
+    (modeName, host, flag) => {
+      vi.mocked(resolveTelemetrySessionHost).mockReturnValue(host);
+      registration(true, true, flag).start();
+      const start = captured.find(
+        (event) => event.event === "pi_subagentura_session_started",
+      );
+
+      expect(start?.properties.mode).toBe(modeName);
+      expect(start?.properties.session_host).toBe(host);
+    },
+  );
 
   it("keeps unknown session capture synchronous without any probe", () => {
     registration().start();
