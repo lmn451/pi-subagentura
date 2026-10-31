@@ -97,6 +97,10 @@ const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
@@ -162,6 +166,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     prompts.push(ORCA_INTERACTIVE_SYSTEM_PROMPT);
+    prompts.push(INTERACTIVE_SUBAGENT_SYSTEM_PROMPT);
     return {
       systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
     };
@@ -196,6 +201,7 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
+
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);

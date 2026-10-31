@@ -13,12 +13,15 @@ Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
-clarification when a request is ambiguous or a narrow request has no matching
-owner, and leave repository work to specialists. The shared [Orca interactive
-delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) applies when normal Pi
-parents or interactive children/nested contexts delegate interactively, with or
-without `--orchestratorv2`. Compatibility workflow and in-process tools remain
-registered.
+clarification when a request is ambiguous, and leave repository work to
+specialists. A clear scoped request may create one specialist when fresh
+discovery establishes that no suitable owner exists. Shared host-aware launch
+guidance also applies in regular sessions and `--orchestrator` mode; see
+[host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
+The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+applies when normal Pi parents or interactive children/nested contexts delegate
+interactively, with or without `--orchestratorv2`. Compatibility workflow and
+in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -76,8 +79,9 @@ Review the authentication layer across the API and database boundaries.
 ```
 
 The parent routes work to attachable interactive subagents and asks for
-clarification when a request is ambiguous or a narrow request has no matching
-child. For reusable workflows, use the workflow-oriented `--orchestrator` mode:
+clarification when a request is ambiguous. A clear scoped request may create
+one child when fresh discovery establishes that no suitable owner exists. For
+reusable workflows, use the workflow-oriented `--orchestrator` mode:
 
 ```text
 pi --orchestrator
@@ -292,18 +296,30 @@ This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
 verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
-tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate through attachable specialists. Its existing
-native interactive path continues to use the parent session's authoritative
-routing ledger and the project-local routing cache inside and outside Orca.
+tools remain registered for compatibility. When no verified host-managed
+surface is selected, Orchestratorv2 directs delegation through native attachable
+specialists using its parent-session authority ledger; the project-local routing
+cache is only an untrusted lookup aid.
 
-### Interactive delegation inside Orca (prompt-only integration)
+### Host-aware interactive agent spawning
 
-The shared [Orca interactive system prompt](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
-guides interactive delegation by normal Pi parents, Orchestratorv2, and
-interactive children/nested contexts. It is prompt/skill-based; it does not
-change legacy workflow selection or add an Orca backend. The linked prompt is
-the authority for verification, coordination, and native-versus-Orca handling.
+`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` provides the canonical detailed Orca
+guidance. `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` layers Agterm guidance,
+explicit target-selection precedence, and analytics boundaries on top. Both
+shared assets are appended exactly once to every root and interactive-child
+prompt; mode-specific prompt assets remain root-only.
+
+Verified Orca selects the host-managed surface as the default interactive
+surface for ordinary parents and interactive children when the user leaves
+target selection open. Any explicit user-selected target wins, including
+native `subagent_interactive` and `mux`; if the user explicitly
+requests Orca but discovery proves the caller is outside Orca, report the
+mismatch and ask rather than silently falling back to native. Host markers never
+choose or override `mux`. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+and [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
+
+For host attribution and the boundary around extension launch telemetry, see
+[telemetry documentation](docs/telemetry.md).
 
 ### Extension settings
 
@@ -412,8 +428,9 @@ This is the core v2 model in miniature: **you can keep talking with the orchestr
 
 The v2 prompt gives the parent a lightweight routing role: it routes clear work
 to attachable interactive subagents, can split broad requests across specialists,
-and asks for clarification when a request is ambiguous or a narrow request has no
-matching child. The parent is instructed to leave specialist repository work to
+and asks for clarification when a request is ambiguous. A clear scoped request
+may create one child when fresh discovery establishes that no suitable owner
+exists. The parent is instructed to leave specialist repository work to
 those children; this is prompt guidance, not an enforced routing boundary.
 
 For interactive children in the matching parent session, artifacts, routing state,

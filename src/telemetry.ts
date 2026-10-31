@@ -21,7 +21,7 @@ const MAX_TELEMETRY_DEPTH = 64;
 const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
-export type TelemetrySessionHost = "orca" | "unknown";
+export type TelemetrySessionHost = "agterm" | "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
 export type TelemetryTrafficOrigin =
@@ -979,7 +979,12 @@ export function buildTelemetryPayload(
     case "session_started":
       properties = {
         ...common,
-        session_host: event.session_host === "orca" ? "orca" : "unknown",
+        session_host:
+          event.session_host === "agterm"
+            ? "agterm"
+            : event.session_host === "orca"
+              ? "orca"
+              : "unknown",
       };
       break;
     case "session_setup_failed":

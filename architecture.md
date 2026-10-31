@@ -180,7 +180,7 @@ Registration is mode-gated so a child process does not recursively expose the fu
 | Every activation                     | Register coordinated completion entry renderers                                                                                                                                                                | `src/subagent.ts`, `registerCompletionCoordinator`                           |
 | Every parent activation              | Register Pi session lifecycle callbacks                                                                                                                                                                        | `registerSessionHandlers`                                                    |
 | Normal parent with `--orchestrator`  | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                                                 | `src/subagent.ts:default`                                                    |
-| Every activation before child return | Append shared `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` guidance once to normal-parent and interactive-child prompts; root prompt assets remain conditional                                                          | `src/subagent.ts`, `before_agent_start`                                      |
+| Every activation before child return | Append both shared prompt assets exactly once to normal-parent and interactive-child prompts; root mode assets remain conditional and children never query root flags                                          | `src/subagent.ts`, `before_agent_start`                                      |
 | Normal parent                        | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                                             | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
 | Normal parent                        | Register interactive spawn/status/cancel/send/read/list tools                                                                                                                                                  | `registerInteractiveSubagentTools`                                           |
 | Normal parent                        | Register workflow tools and commands                                                                                                                                                                           | `registerWorkflowTool` through internal `workflow.ts` barrel                 |
@@ -1143,16 +1143,17 @@ The internal `src/workflow.ts` barrel must not be described as a supported runti
 
 Runtime companions have distinct loading/materialization rules:
 
-| Companion                           | Boundary                                                                                                     |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `workflow-worker-thread.mjs`        | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
-| `workflow-script.mjs`               | Imported by the worker companion and re-exported by the typed TS bridge                                      |
-| `workflow-script.d.mts`             | Declaration-only surface for the ESM parser companion                                                        |
-| generated artifact `cli.mjs`        | Source string comes from the installed package but is written into each artifact directory and invoked there |
-| `ORCHESTRATOR_SYSTEM_PROMPT.md`     | Loaded as a package asset by file URL, not a code module                                                     |
-| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`  | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
-| `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` | Shared prompt-only Orca interactive-delegation guidance asset; not a code module                             |
-| child Pi session JSONL              | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
+| Companion                               | Boundary                                                                                                     |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `workflow-worker-thread.mjs`            | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
+| `workflow-script.mjs`                   | Imported by the worker companion and re-exported by the typed TS bridge                                      |
+| `workflow-script.d.mts`                 | Declaration-only surface for the ESM parser companion                                                        |
+| generated artifact `cli.mjs`            | Source string comes from the installed package but is written into each artifact directory and invoked there |
+| `ORCHESTRATOR_SYSTEM_PROMPT.md`         | Loaded as a package asset by file URL, not a code module                                                     |
+| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`      | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
+| `ORCA_INTERACTIVE_SYSTEM_PROMPT.md`     | Shared prompt-only Orca interactive-delegation guidance asset; not a code module                             |
+| `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` | Shared Agterm, explicit-target, and analytics guidance layer; not a code module                              |
+| child Pi session JSONL                  | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
 
 The restrictive exports map matters: shipping all source files in `package.json#files` does not make every source path a supported public subpath.
 
