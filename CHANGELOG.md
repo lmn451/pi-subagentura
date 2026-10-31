@@ -317,8 +317,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Promoted `--orchestratorv2` as a routing-first interactive mode. Its prompt
   guides the parent to route work to attachable interactive subagents, ask for
-  clarification when a request is ambiguous or a narrow request has no matching
-  child, and leave
+  clarification when a request is ambiguous, and leave
   specialist work to those children. Compatibility workflow and in-process tools
   remain registered; this is prompt guidance rather than an enforced boundary.
 - Orchestratorv2 routing now treats the current parent branch as the sole authority ledger and the project-local JSON file as repairable untrusted cache data, preventing child-written records from becoming actionable, consuming authority capacity, blocking approved writes, or hiding authoritative stale records.

@@ -13,8 +13,9 @@ Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
-clarification when a request is ambiguous or a narrow request has no matching
-owner, and leave repository work to specialists. Shared host-aware launch
+clarification when a request is ambiguous, and leave repository work to
+specialists. A clear scoped request may create one specialist when fresh
+discovery establishes that no suitable owner exists. Shared host-aware launch
 guidance also applies in regular sessions and `--orchestrator` mode; see
 [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
 The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
@@ -78,8 +79,9 @@ Review the authentication layer across the API and database boundaries.
 ```
 
 The parent routes work to attachable interactive subagents and asks for
-clarification when a request is ambiguous or a narrow request has no matching
-child. For reusable workflows, use the workflow-oriented `--orchestrator` mode:
+clarification when a request is ambiguous. A clear scoped request may create
+one child when fresh discovery establishes that no suitable owner exists. For
+reusable workflows, use the workflow-oriented `--orchestrator` mode:
 
 ```text
 pi --orchestrator
@@ -426,8 +428,9 @@ This is the core v2 model in miniature: **you can keep talking with the orchestr
 
 The v2 prompt gives the parent a lightweight routing role: it routes clear work
 to attachable interactive subagents, can split broad requests across specialists,
-and asks for clarification when a request is ambiguous or a narrow request has no
-matching child. The parent is instructed to leave specialist repository work to
+and asks for clarification when a request is ambiguous. A clear scoped request
+may create one child when fresh discovery establishes that no suitable owner
+exists. The parent is instructed to leave specialist repository work to
 those children; this is prompt guidance, not an enforced routing boundary.
 
 For interactive children in the matching parent session, artifacts, routing state,
