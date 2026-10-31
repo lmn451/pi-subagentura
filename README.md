@@ -14,9 +14,9 @@ Herdr.
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
 clarification when a request is ambiguous or a narrow request has no matching
-owner, and leave repository work to specialists. Inside a verified Orca terminal,
-it uses the installed Orca skills to coordinate Pi terminal tabs instead of native
-children; [see the prompt-only Orca path](#pi-inside-orca-prompt-only-integration).
+owner, and leave repository work to specialists. Shared host-aware launch
+guidance also applies in regular sessions and `--orchestrator` mode; see
+[host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
 Compatibility workflow and in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
@@ -303,30 +303,15 @@ including unflagged sessions, and is included in each `subagent_interactive`
 child prompt. It is shared by regular interactive use, `--orchestrator`, and
 `--orchestratorv2`; mode-specific prompts add their own routing policy.
 
-Host identity and the child launch backend are separate. The host guidance asks
-Pi to verify the actual caller, terminal and target with the host skill. It does
-not infer a launch target or override an explicit `mux` choice from `AGTERM_*`,
-Orca provenance, `TMUX`, or Zellij environment markers. The extension's native
-`subagent_interactive` path remains available inside either host.
+The shared host guidance consults the installed host skill to verify the caller,
+terminal topology, and supported launch target. Host markers do not select a
+launch target or override an explicit `mux` choice. The native
+`subagent_interactive` path remains available inside either host. See
+[the shared launch guidance](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md) for the
+Orca and Agterm policies.
 
-- **Orca:** the version-matched `orca-cli` skill supports `agent launch` in an
-  existing worktree and `worktree create --agent` when a separate checkout is
-  requested. The `orchestration` skill owns explicit supervised Runs, Tasks,
-  Dispatches, DAGs and ask/reply. Orchestratorv2 adds its own verified routing
-  policy; host markers alone do not establish Orca runtime topology.
-- **Agterm:** the installed skill documents process-backed worker sessions via
-  `session new --command`, per-pane mailboxes via `agtermctl msg`, and status/wait
-  flows when the agent has a status hook. This is host-managed process control,
-  not a subagentura-owned child with extension artifacts or completion receipts.
-  The skill warns that `session type` is input to an existing program, not a
-  launcher. Follow the installed skill for exact commands and target discovery.
-
-The existing schema-v6 `session_host` field is sent on fresh root starts
-regardless of orchestration flags. It records closed outer-host evidence, not a
-spawn method. `execution`, `requested_mux`, and `mux` describe extension-managed
-launches only; Orca CLI and Agterm `agtermctl` worker launches do not emit those
-events. See [telemetry documentation](docs/telemetry.md) for the privacy and
-analytics boundary.
+For host attribution and the boundary around extension launch telemetry, see
+[telemetry documentation](docs/telemetry.md).
 
 ### Extension settings
 
