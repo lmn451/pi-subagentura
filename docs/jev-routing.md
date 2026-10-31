@@ -117,7 +117,7 @@ conservative defaults, not measured accuracy guarantees.
    whether to create a specialist. On `error`, or if the advisor is unavailable,
    use current authoritative registry metadata and the base policy; a clear
    request with no suitable owner may proceed without a redundant approval
-   prompt. Never follow an erroneous recommendation. On `kind: "cancelled",
+   prompt. Never follow an erroneous recommendation. On `kind: "cancelled"`,
    stop routing the request.
 
 Ask for clarification only when a substantive request requirement or
