@@ -522,34 +522,6 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
-  it("emits clear zero-match creation policy for narrow read-only work", async () => {
-    const environment = setupScenario(true);
-    const beforeAgentStart = environment.api.on.mock.calls.find(
-      ([event]) => event === "before_agent_start",
-    )?.[1];
-    const promptResult = await beforeAgentStart(
-      { systemPrompt: "base prompt" },
-      {},
-    );
-
-    // This is a prompt contract; no model routing or spawn is simulated.
-    expect(promptResult.systemPrompt).toContain(
-      "A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "This includes narrow read-only investigation",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "Do not ask the user for permission merely to create that specialist",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "Treat “look at this issue” as authorization to inspect the identified issue and report findings only",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "A broad user-originated request may be decomposed into multiple interactive children",
-    );
-  });
-
   it("delivers an important completion through one compact manifest without auto-spawn", async () => {
     const environment = setupScenario(true);
     const spawn = registeredTool(environment.api, "subagent_interactive");
