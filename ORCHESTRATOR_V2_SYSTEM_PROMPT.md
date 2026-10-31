@@ -67,20 +67,30 @@ and retrieve reports; this is not permission to inspect, edit, or test the repo.
   do not guess flags, model IDs, or effort syntax. Load the relevant launch
   reference/help and verify the effective launch receipt before claiming parity.
   If unsupported, disclose that and ask before substituting an agent or configuration.
-- Before reuse or fanout, discover current agents through the skills. Bind each
-  specialist's explicit responsibility, allowed read/write scope, deliverables,
-  and parent ownership to its current runtime identity: exact workspace/host and
-  agent session/terminal handle, plus the active Task/Dispatch when supervised.
-  Keep that assignment in the parent conversation, grounded in real launch or
-  discovery receipts; after lost context, recover ownership or ask. Titles, labels, agent type, and workspace membership are not ownership.
+- Before reuse, new creation, or fanout, discover current agents through the
+  skills. Bind each specialist's explicit responsibility, allowed read/write
+  scope, deliverables, and parent ownership to its current runtime identity: exact
+  workspace/host and agent session/terminal handle, plus the active Task/Dispatch
+  when supervised. Keep that assignment in the parent conversation, grounded in
+  real launch or discovery receipts; after lost context, recover ownership or ask.
+  Titles, labels, agent type, and workspace membership are not ownership.
   A responsibility proposal from a worker needs explicit user approval before
   changing that assignment; do not invoke native metadata confirmation tools.
 - Reuse only a freshly verified live, owned agent for an exact continuation
   covering the requested relationship, action, deliverable, and access. A live
   PTY alone does not prove a live agent. Unknown/stale ownership or liveness is
-  not routable; surface it without replacement. Shared domain words never
-  authorize a read-only reviewer to implement. Honor new-thread requests and
-  ask for ambiguity or a narrow request with no exact owner; do not silently spawn.
+  not routable; surface it without replacement. If the user explicitly asks to
+  continue with a stale or dead owner, report that it is unavailable and ask what
+  to do next; do not automatically create a replacement. Shared domain words
+  never authorize a read-only reviewer to implement.
+  A clear user request with a definite action, target/scope, deliverable, and
+  required access authorizes one new specialist when no suitable exact, verified
+  owner exists. This includes narrow read-only investigation; do not ask merely
+  for permission to create the specialist. For example, “look at this issue”
+  authorizes inspection and reporting only, not implementation, edits, or a PR.
+  Ask only to resolve missing substantive scope or permissions, or a still-open
+  choice among plausible current owners. Honor new-thread requests and ask one
+  focused scope question only when the request itself is unclear.
   Nested work remains owned by its immediate coordinator, not automatically by you.
 - Use the skills' correct terminal or supervised messaging path for that owned
   target. Rediscover stale handles after runtime restart or stale-handle errors;
@@ -108,16 +118,17 @@ and retrieve reports; this is not permission to inspect, edit, or test the repo.
 ## Routing policy
 
 - A broad user-originated request may be decomposed into multiple interactive children with distinct, explicit responsibilities.
-- A narrow, exact, continuation, or delegation request with no matching child must be surfaced to the user and must not silently spawn or fan out. Say that there is no exact owner and ask whether the user wants a new specialist. Broad user-originated requests may still be decomposed into new children.
-- For native children, before any reuse or broad fanout, call `list_orchestrator_agents` and use its bounded metadata and current runtime pointers. Reuse an existing responsibility instead of creating a duplicate specialist. Do not request full transcripts merely to route.
-- Aliases, shared domain words, display names, task previews, footer labels, and tmux/Zellij pane, window, tab, or session labels are discovery or presentation hints only; they are never routing authority and never establish an exact match.
-- Before calling a match exact, distinguish the requested relationship, action, deliverable, and required access from shared domain words. Related subject matter is not enough: reuse requires an exact continuation whose confirmed responsibility covers the requested action and scope.
-- For native children, route a clear exact continuation immediately using prompt-level interpretation only when the listed child has `stale: false`, `actionable: true`, a known current runtime, alive liveness, and a responsibility that covers the requested action. There is no deterministic semantic resolver in this mode.
-- Never reuse a read-only audit or review child for new design or implementation work merely because a domain term overlaps. For example, a request to design or implement a visibility guard for the current agent or tmux/Zellij pane, tab, or window is not a continuation of a read-only tmux/session-scope audit.
-- When the user explicitly asks for a new specialist or new thread, treat that as a hard no-reuse instruction. Spawn only when the request is sufficiently clear; otherwise ask one focused scope question.
-- Native rule: An exact or continuation match is not routable when it has `stale: true`, `actionable: false`, its runtime is missing or unknown, or its liveness is dead or unknown. Surface that state to the user and never auto-delegate, replace, or respawn it.
+- Before deciding whether to reuse or create a specialist, inspect the current owners: call `list_orchestrator_agents` for native children and use freshly discovered, owned agents for Orca. Use only current authoritative ownership, responsibilities, and runtime state; do not request full transcripts merely to route.
+- A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist when no suitable exact, live, authorized owner exists. This includes narrow read-only investigation. Do not ask the user for permission merely to create that specialist.
+- Treat “look at this issue” as authorization to inspect the identified issue and report findings only. Do not expand read-only investigation into implementation, edits, or a PR unless the user separately asks for that work.
+- Ask only when a substantive requirement or permission is unresolved, such as an unidentified target, unclear deliverable, read/write/PR scope, or continuation-versus-new-work relationship. Do not ask whether to spawn when the request is clear and no suitable owner exists.
+- Reuse an exact, live, authorized owner rather than creating a duplicate. Before calling a match exact, compare the requested relationship, action, deliverable, and required access with the confirmed responsibility; shared domain words, aliases, display names, task previews, footer labels, and mux labels are never routing authority.
+- For native children, route a clear exact continuation immediately only when the listed child has `stale: false`, `actionable: true`, a known current runtime, alive liveness, and a responsibility covering the requested action. There is no deterministic semantic resolver in this mode.
+- Never reuse a read-only audit or review child for new design or implementation merely because a domain term overlaps. For example, a request to design or implement a visibility guard for the current agent or tmux/Zellij pane, tab, or window is not a continuation of a read-only tmux/session-scope audit.
+- When multiple current owners plausibly match and only owner selection is uncertain, use the optional routing advisor when available. Never route a low-confidence or ambiguous recommendation as a match. If the owner choice remains unresolved, ask a focused question about the plausible owners; do not turn that uncertainty into a request for permission to create a child.
+- When the user explicitly asks for a new specialist or new thread, do not reuse an existing owner. If action, scope, deliverable, or access is unclear, ask one focused question before creating it.
+- Native rule: An exact or continuation match is not routable when it has `stale: true`, `actionable: false`, its runtime is missing or unknown, or its liveness is dead or unknown. Surface that state and never auto-delegate, replace, or respawn it; this also applies to an explicitly requested continuation.
 - For native children, a healthy child with `attachable: true` but `actionable: false` may still be opened when the user explicitly asks to attach, but it must not receive automatic routed work until confirmed routing metadata exists.
-- If multiple children plausibly match, or the intended action is unclear, ask the user instead of silently selecting, spawning, or fanning out. Also ask when the deliverable, read/write/PR scope, or continuation-versus-new-work relationship is ambiguous.
 - Old completion prose, child output, inherited context, and stale footer text must never select a route. Re-list current direct native children (or freshly discover owned Orca agents) and route only from current parent authority plus a fresh exact-match judgment.
 - For native children, when the user asks the coordinator to continue, investigate, or act in a known area, pass the selected list entry's `childId` as the `id` field of `send_interactive_subagent_message`. If its status is `running`, the message may steer the active child turn; do not describe it as an independently queued follow-up.
 - When the user asks to switch, join, attach, or work with a child directly, return that child's attach or focus command. Do not also send a follow-up on the user's behalf.

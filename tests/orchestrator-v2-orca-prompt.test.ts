@@ -134,6 +134,71 @@ describe("Orchestratorv2 emitted Orca prompt contract", () => {
     }
   });
 
+  it("authorizes one specialist for clear read-only work without a spawn gate", () => {
+    const routing = section("Routing policy");
+    for (const rule of [
+      "Before deciding whether to reuse or create a specialist",
+      "call `list_orchestrator_agents`",
+      "authorizes creation of one specialist when no suitable exact, live, authorized owner exists",
+      "This includes narrow read-only investigation",
+      "Do not ask the user for permission merely to create that specialist",
+      "“look at this issue”",
+      "report findings only",
+      "Do not expand read-only investigation into implementation, edits, or a PR",
+    ]) {
+      expect(routing).toContain(rule);
+    }
+  });
+
+  it("reuses only exact live owners and preserves explicit dead-owner and scope boundaries", () => {
+    const routing = section("Routing policy");
+    for (const rule of [
+      "Reuse an exact, live, authorized owner rather than creating a duplicate",
+      "stale: false`, `actionable: true`",
+      "When multiple current owners plausibly match and only owner selection is uncertain",
+      "use the optional routing advisor when available",
+      "Never route a low-confidence or ambiguous recommendation as a match",
+      "ask a focused question about the plausible owners",
+      "never auto-delegate, replace, or respawn it",
+      "this also applies to an explicitly requested continuation",
+      "Ask only when a substantive requirement or permission is unresolved",
+      "read/write/PR scope",
+      "continuation-versus-new-work relationship",
+    ]) {
+      expect(routing).toContain(rule);
+    }
+  });
+
+  it("keeps Orca launch proof and ownership requirements while allowing clear creation", () => {
+    const orca = section("Orca-managed Pi specialists");
+    for (const rule of [
+      "Verify the launch receipt",
+      "report the limitation before spawning",
+      "discover current agents through the skills",
+      "authorizes one new specialist when no suitable exact, verified owner exists",
+      "do not ask merely for permission to create the specialist",
+      "do not automatically create a replacement",
+      "not implementation, edits, or a PR",
+      "A live PTY alone does not prove a live agent",
+    ]) {
+      expect(orca).toContain(rule);
+    }
+  });
+
+  it("keeps clear-request authorization in the base prompt when no advisor is available", () => {
+    vi.stubEnv("PI_SUBAGENTURA_CHILD", undefined);
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    vi.stubEnv("TYPESAFE_API_KEY", undefined);
+    const prompt = loadPrompt("orchestratorv2") ?? "";
+    expect(prompt).not.toContain("## Optional routing advisor");
+    expect(prompt).toContain(
+      "authorizes creation of one specialist when no suitable exact, live, authorized owner exists",
+    );
+    expect(prompt).toContain(
+      "Do not ask the user for permission merely to create that specialist",
+    );
+  });
+
   it("emits the complete report-based implementation handoff gate", () => {
     const gate = section("Implementation handoff completeness gate");
     expect(gate).toContain("Retrieve every completed scout/planner report");
