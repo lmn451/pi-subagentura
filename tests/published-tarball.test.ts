@@ -251,22 +251,9 @@ describe("published tarball", () => {
           specifier: "../ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
           runtime: true,
         },
-        {
-          specifier: "../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
-          runtime: true,
-        },
         { specifier: "./tools/orchestrator", runtime: true },
       ]),
     );
-
-    const interactiveSource = readFileSync(
-      join(pkgDir, "src/interactive-tmux.ts"),
-      "utf8",
-    );
-    expect(sourceReferences(interactiveSource)).toContainEqual({
-      specifier: "../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
-      runtime: true,
-    });
 
     const toolSource = readFileSync(
       join(pkgDir, "src/tools/orchestrator.ts"),
