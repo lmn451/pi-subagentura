@@ -38,15 +38,16 @@ These fields remain independent of the outer-host label. Nested or inherited
 host, tmux and Zellij markers must not make these dimensions mutually exclusive
 or select a target in place of an explicit mux choice.
 
-The shared host-aware prompt is available in ordinary sessions, interactive
-children and both orchestration modes. It follows the installed host skills for
-runtime/topology discovery and supported launch mechanisms. Orca's `agent
-launch` / supervised orchestration tools and Agterm's process-backed
-`session new --command` plus pane mailboxes are host-managed operations; they do
-not create subagentura-owned children. Do not manufacture `agent_created`,
-`agent_launch_resolved`, task, artifact or completion records from host CLI
-receipts. The host integrations add no native Orca or Agterm backend to
-`subagent_interactive`.
+The shared host-aware guidance is prompt/skill-based in ordinary sessions,
+interactive children/nested contexts, and both orchestration modes. Orca's
+`agent launch`/supervised orchestration tools and Agterm's process-backed
+`session new --command` plus pane mailboxes are host-managed operations, not
+subagentura-owned children or extension launch instrumentation. Do not manufacture
+`agent_created`, `agent_launch_resolved`, task, artifact, or completion records
+from host CLI receipts. There is no native Orca or Agterm
+`subagent_interactive` backend, and `orca` is not a supported telemetry mux
+value; filtering by `mux=orca` cannot measure Orca prompt-path adoption. The
+`orchestrator_v2` mode label is not proof that the Orca path was used.
 
 Fresh root `session_started` records include the additive schema-v6
 `session_host` dimension: `agterm`, `orca`, or `unknown`, regardless of whether
@@ -66,6 +67,8 @@ new source. Validation matches trimmed, nonempty, at-most-4096-character fields,
 rejects control characters, and requires an absolute platform-appropriate
 profile path. Source ID and incarnation are opaque local validation inputs, not
 uploaded identifiers.
+
+A standalone root Pi that inherits a complete valid Orca stamp can still classify and count as `orca`; this does not prove that the session remains Orca-managed.
 
 Agterm attribution uses only the exact `AGTERM_ENABLED=1` marker documented by
 [Agterm's installed skill](https://github.com/umputun/agterm/blob/master/plugins/agterm/skills/agterm/SKILL.md).

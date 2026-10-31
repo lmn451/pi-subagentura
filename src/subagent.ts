@@ -93,6 +93,10 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
+  new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
   new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
@@ -101,31 +105,42 @@ const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
 
-For this enabled mode, this section overrides the earlier instruction to ask
-whenever multiple children plausibly match. If the user's action, scope,
-deliverable, and required access are clear and only the choice of child is
-unresolved, call list_orchestrator_agents, then resolve_orchestrator_route with
-the user's original task. The advisor obtains current authoritative candidates
-itself; do not pass it transcripts, file contents, secrets, or unrelated context.
+When the user's action, target/scope, deliverable, and required access are clear
+and only the choice of current owner is uncertain, use the advisor to help select
+among current owners. Call list_orchestrator_agents first, then
+resolve_orchestrator_route with the user's original task. The advisor obtains
+current authoritative candidates itself; do not pass it transcripts, file
+contents, secrets, or unrelated context.
 
 On kind="match", use the returned childId as the id of
 send_interactive_subagent_message and send the original task. The recommendation
 does not expand the child's responsibility or permissions. If the send fails
 because the child is unavailable, surface that state instead of replacing it.
-On kind="no_match" with reason="new_child_recommended", consider creating a child
-under the existing orchestrator policy; the recommendation does not authorize or
-mandate spawning. On low_confidence or ambiguous, abstain and apply the existing
-policy without treating the result as a new-child recommendation.
-On kind="error", do not send a task based on the advisor; follow the existing
-fallback policy. On kind="cancelled", stop routing that request and do not send
-a task or ask a follow-up about it.
+
+On kind="no_match" with reason="new_child_recommended", creation is permitted
+under the existing policy, but the recommendation alone neither mandates nor
+authorizes a spawn. If current authoritative registry metadata shows no suitable
+owner and the request is clear, create one specialist without asking permission
+merely to create it. On low_confidence or ambiguous, abstain: do not route to the
+suggested owner or treat the result as proof that no suitable owner exists. If a
+plausible-owner choice remains unresolved, ask about that choice, not for spawn
+approval.
+
+On kind="error", or when the advisor is unavailable, do not act on an advisor
+recommendation. Fall back to the current authoritative registry metadata and the
+base routing policy: reuse an exact live authorized owner, or, when none is
+suitable and the request is clear, create one specialist without a redundant
+approval prompt. Never let an error or recommendation override current registry
+authority. On kind="cancelled", stop routing that request; do not send a task or
+ask a follow-up about it.
 
 Explicit child identity, explicit new-child instructions, and attach/focus
 requests bypass the advisor and follow the existing policy. A clear exact
-continuation may still route directly. Ambiguous action, scope, deliverable,
-access, or continuation-versus-new-work intent still requires clarification.
-Aliases alone never authorize reuse. Treat the advisor as a bounded selection
-aid; all sending, creation, and lifecycle control remain with the parent.
+continuation may still route directly. Unclear action, scope, deliverable, or
+access requires clarification; uncertainty only about which current owner fits
+is a routing question, not unclear user scope. Aliases alone never authorize
+reuse. Treat the advisor as a bounded selection aid; all sending, creation, and
+lifecycle control remain with the parent.
 `.trim();
 
 export default function (pi: ExtensionAPI) {
@@ -137,6 +152,25 @@ export default function (pi: ExtensionAPI) {
   const initialSpawnTreeContext = childArtifactDir
     ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
+  pi.on("before_agent_start", (event, ctx) => {
+    const prompts: string[] = [];
+    if (!isChild) {
+      if (pi.getFlag("orchestrator") === true) {
+        prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
+      }
+      if (pi.getFlag("orchestratorv2") === true) {
+        prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+        if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
+          prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
+        }
+      }
+    }
+    prompts.push(ORCA_INTERACTIVE_SYSTEM_PROMPT);
+    prompts.push(INTERACTIVE_SUBAGENT_SYSTEM_PROMPT);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
+    };
+  });
   if (isChild) {
     registerChildProtocol(pi);
     pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
@@ -167,21 +201,7 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
-  pi.on("before_agent_start", (event, ctx) => {
-    const routingEnabled = isRoutingEnabled(process.env, ctx.modelRegistry);
-    const prompts: string[] = [INTERACTIVE_SUBAGENT_SYSTEM_PROMPT];
-    if (pi.getFlag("orchestrator") === true) {
-      prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
-    }
-    if (pi.getFlag("orchestratorv2") === true) {
-      prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
-      if (routingEnabled) prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
-    }
-    if (prompts.length === 0) return;
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
-    };
-  });
+
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);

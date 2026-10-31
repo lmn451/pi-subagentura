@@ -439,7 +439,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
   });
 
-  it("represents ambiguity through the v2 prompt and available list without a semantic resolver or model-backed claim", async () => {
+  it("emits ambiguous-owner guidance without registering an unavailable advisor", async () => {
     const environment = setupScenario(true);
     await spawnAgentsAB(environment);
     const list = registeredTool(environment.api, "list_orchestrator_agents");
@@ -460,10 +460,13 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       CHILD_B,
     ]);
     expect(promptResult.systemPrompt).toContain(
-      "If multiple children plausibly match, or the intended action is unclear, ask the user",
+      "When multiple current owners plausibly match and only owner selection is uncertain, use the optional routing advisor when available",
     );
     expect(promptResult.systemPrompt).toContain(
-      "instead of silently selecting, spawning, or fanning out",
+      "Never route a low-confidence or ambiguous recommendation as a match",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "ask a focused question about the plausible owners",
     );
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
@@ -505,29 +508,21 @@ describe("Orchestratorv2 thin-router scenarios", () => {
         actionable: true,
       }),
     ]);
-    expect(promptResult.systemPrompt).toContain(
-      "discovery or presentation hints only; they are never routing authority",
-    );
-    expect(promptResult.systemPrompt).toContain(
+    for (const rule of [
+      "shared domain words, aliases, display names, task previews, footer labels, and mux labels are never routing authority",
       "requested relationship, action, deliverable, and required access",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "Never reuse a read-only audit or review child for new design or implementation work",
-    );
-    expect(promptResult.systemPrompt).toContain(
+      "Never reuse a read-only audit or review child for new design or implementation merely because a domain term overlaps",
       "visibility guard for the current agent or tmux/Zellij pane, tab, or window",
-    );
-    expect(promptResult.systemPrompt).toContain(
       "explicitly asks for a new specialist or new thread",
-    );
-    expect(promptResult.systemPrompt).toContain("no exact owner");
-    expect(promptResult.systemPrompt).toContain(
+      "no suitable exact, live, authorized owner exists",
       "Old completion prose, child output, inherited context, and stale footer text must never select a route",
-    );
+    ]) {
+      expect(promptResult.systemPrompt).toContain(rule);
+    }
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
-  it("surfaces a zero-match narrow request without spawning or fanning out", async () => {
+  it("emits clear zero-match creation policy for narrow read-only work", async () => {
     const environment = setupScenario(true);
     const beforeAgentStart = environment.api.on.mock.calls.find(
       ([event]) => event === "before_agent_start",
@@ -537,17 +532,22 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       {},
     );
 
+    // This is a prompt contract; no model routing or spawn is simulated.
     expect(promptResult.systemPrompt).toContain(
-      "A narrow, exact, continuation, or delegation request with no matching child must be surfaced to the user",
+      "A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist",
     );
     expect(promptResult.systemPrompt).toContain(
-      "must not silently spawn or fan out",
+      "This includes narrow read-only investigation",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "Do not ask the user for permission merely to create that specialist",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "Treat “look at this issue” as authorization to inspect the identified issue and report findings only",
     );
     expect(promptResult.systemPrompt).toContain(
       "A broad user-originated request may be decomposed into multiple interactive children",
     );
-    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
-    expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
 
   it("delivers an important completion through one compact manifest without auto-spawn", async () => {

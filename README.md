@@ -17,7 +17,10 @@ clarification when a request is ambiguous or a narrow request has no matching
 owner, and leave repository work to specialists. Shared host-aware launch
 guidance also applies in regular sessions and `--orchestrator` mode; see
 [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
-Compatibility workflow and in-process tools remain registered.
+The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+applies when normal Pi parents or interactive children/nested contexts delegate
+interactively, with or without `--orchestratorv2`. Compatibility workflow and
+in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -291,24 +294,27 @@ This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
 verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
-tools remain registered for compatibility. Outside a verified host-managed
-surface, the Orchestratorv2 prompt directs delegation through attachable
-specialists using its parent-session authority ledger; the
-project-local routing cache is only an untrusted lookup aid.
+tools remain registered for compatibility. When no verified host-managed
+surface is selected, Orchestratorv2 directs delegation through native attachable
+specialists using its parent-session authority ledger; the project-local routing
+cache is only an untrusted lookup aid.
 
 ### Host-aware interactive agent spawning
 
-`INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` is appended to every root Pi prompt,
-including unflagged sessions, and is included in each `subagent_interactive`
-child prompt. It is shared by regular interactive use, `--orchestrator`, and
-`--orchestratorv2`; mode-specific prompts add their own routing policy.
+`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` provides the canonical detailed Orca
+guidance. `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` layers Agterm guidance,
+explicit target-selection precedence, and analytics boundaries on top. Both
+shared assets are appended exactly once to every root and interactive-child
+prompt; mode-specific prompt assets remain root-only.
 
-The shared host guidance consults the installed host skill to verify the caller,
-terminal topology, and supported launch target. Host markers do not select a
-launch target or override an explicit `mux` choice. The native
-`subagent_interactive` path remains available inside either host. See
-[the shared launch guidance](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md) for the
-Orca and Agterm policies.
+Verified Orca selects the host-managed surface as the default interactive
+surface for ordinary parents and interactive children when the user leaves
+target selection open. Any explicit user-selected target wins, including
+native `subagent_interactive` and `mux`; if the user explicitly
+requests Orca but discovery proves the caller is outside Orca, report the
+mismatch and ask rather than silently falling back to native. Host markers never
+choose or override `mux`. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+and [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
 
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).

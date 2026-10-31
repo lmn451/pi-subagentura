@@ -1,35 +1,27 @@
-## Host-aware interactive agent launches
+## Shared interactive host guidance
 
-This guidance applies in ordinary Pi sessions and interactive child sessions,
-regardless of `--orchestrator` or `--orchestratorv2` flags.
+This layer applies to ordinary parent and interactive child sessions,
+regardless of orchestration flags. Detailed Orca behavior remains in the
+canonical `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` asset.
 
-### Choose the surface from intent and verified topology
+### Surface selection
 
 `subagent_interactive` starts an extension-managed Pi child; its `mux` is
-the extension's child backend, independent of the outer host.
-Preserve an explicit `mux` choice and any other user-selected target.
-Orca/Agterm evidence and inherited `TMUX` or `ZELLIJ_SESSION_NAME` variables do not imply a mux.
-Do not infer or override `mux` from host markers or those inherited values.
-Host and mux may be nested.
+independent of the outer host. Host and mux may be nested. Host evidence and
+inherited `TMUX` or `ZELLIJ_SESSION_NAME` variables do not imply a mux and must
+not infer or override an explicit `mux` choice.
 
-Use a host's own agent controls only when the request calls for that host-managed
-surface or a verified mode-specific policy selects it. First consult the
-already-installed host skill to verify the current caller and terminal topology,
-then bind the exact checkout/session/pane and supported launch target. A skill,
-CLI installation, environment marker, or terminal title alone does not prove the
-current runtime or target. If host, target, or supported launch path is ambiguous,
-ask rather than silently switching surfaces, falling back, or launching a duplicate.
+An explicit user-selected target always wins over host-based defaults, including
+native `subagent_interactive` or a requested `mux`.
 
-### Orca
-
-Use the version-matched `orca-cli` skill for ordinary terminal work and
-unsupervised handoffs; its `agent launch` path targets an existing worktree, and
-`worktree create --agent` creates a separate checkout only when that is requested.
-Use the `orchestration` skill for explicitly supervised work, task tracking,
-DAGs, or ask/reply. Follow those skills' caller, worktree, terminal, launch, and
-submission-receipt checks. Do not invent lifecycle records for host-managed
-Orca agents. An explicit request for `subagent_interactive` or a mux backend
-takes precedence over host-based routing.
+Use host-managed controls when the user requests them. The canonical Orca guide
+also selects its host-managed surface by default when current-session proof
+confirms Orca and no explicit target overrides it; Agterm remains request-
+driven. If the requested host or target conflicts with verified topology—for
+example, the user explicitly requests Orca but discovery proves the caller is
+outside Orca—report the mismatch and ask instead of silently switching or
+falling back. When host, target, or supported launch path is ambiguous, ask
+rather than silently switching surfaces or launching a duplicate.
 
 ### Agterm
 
