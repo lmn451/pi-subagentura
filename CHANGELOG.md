@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add optional Orchestratorv2 child selection through Pi's native classifier
   API, with bounded inputs, fail-closed selection, and usage accounting.
 
+### Changed
+
+- Extend shared Orca prompt/skill guidance to interactive delegation in normal
+  Pi parents, interactive children/nested contexts, and Orchestratorv2 without
+  replacing native child execution or changing legacy workflow selection.
+
 ## [4.1.0] - 2026-10-25
 
 ### Changed
