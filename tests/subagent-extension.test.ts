@@ -235,9 +235,11 @@ describe("extension registration", () => {
       "An exact or continuation match is not routable",
     );
     expect(result.systemPrompt).toContain(
-      "A narrow, exact, continuation, or delegation request with no matching child",
+      "A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist",
     );
-    expect(result.systemPrompt).toContain("must not silently spawn or fan out");
+    expect(result.systemPrompt).toContain(
+      "Do not ask the user for permission merely to create that specialist",
+    );
     expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
@@ -373,22 +375,35 @@ describe("extension registration", () => {
       }
     }
 
+    const normalizedPrompt = result.systemPrompt.replace(/\s+/g, " ");
     expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
-    expect(result.systemPrompt).toContain("## Optional routing advisor");
+    expect(normalizedPrompt).toContain("## Optional routing advisor");
     expect(
-      result.systemPrompt.indexOf("If multiple children plausibly match"),
-    ).toBeLessThan(result.systemPrompt.indexOf("## Optional routing advisor"));
-    expect(result.systemPrompt).toContain(
+      normalizedPrompt.indexOf("When multiple current owners plausibly match"),
+    ).toBeLessThan(normalizedPrompt.indexOf("## Optional routing advisor"));
+    expect(normalizedPrompt).not.toContain(
       "this section overrides the earlier instruction",
     );
-    expect(result.systemPrompt).toContain('On kind="match"');
-    expect(result.systemPrompt).toContain('On kind="no_match"');
-    expect(result.systemPrompt).toContain('On kind="error"');
-    expect(result.systemPrompt).toContain('On kind="cancelled"');
-    expect(result.systemPrompt).toContain(
+    for (const policy of [
+      'On kind="match"',
+      'On kind="no_match" with reason="new_child_recommended"',
+      "creation is permitted under the existing policy",
+      "the recommendation alone neither mandates nor authorizes a spawn",
+      "On low_confidence or ambiguous, abstain",
+      "do not route to the suggested owner",
+      'On kind="error", or when the advisor is unavailable',
+      "current authoritative registry metadata",
+      "without a redundant approval prompt",
+      'On kind="cancelled", stop routing that request',
+      "Explicit child identity, explicit new-child instructions, and attach/focus",
+      "uncertainty only about which current owner fits is a routing question",
+    ]) {
+      expect(normalizedPrompt).toContain(policy);
+    }
+    expect(normalizedPrompt).toContain(
       "send_interactive_subagent_message and send the original task",
     );
-    expect(result.systemPrompt).toContain("requests bypass the advisor");
+    expect(normalizedPrompt).toContain("requests bypass the advisor");
     expect(fetch).not.toHaveBeenCalled();
   });
 

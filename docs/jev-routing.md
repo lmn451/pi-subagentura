@@ -94,23 +94,43 @@ conservative defaults, not measured accuracy guarantees.
 
 ## Parent flow and authority
 
-1. Call `list_orchestrator_agents` for responsibilities and runtimes.
-2. When only child selection is ambiguous and the advisor is available, call
+1. Call `list_orchestrator_agents` and inspect current authoritative
+   responsibilities and runtimes before deciding whether to reuse or create a
+   native specialist. For Orca, first discover currently owned agents through
+   the version-matched skills.
+2. Reuse an exact, live, authorized owner when its confirmed responsibility
+   covers the requested action, scope, deliverable, and access. When only the
+   choice among plausible owners is uncertain, call
    `resolve_orchestrator_route({ task: "the original user task" })`.
 3. On `kind: "match"`, send the original task to the returned `childId` through
-   `send_interactive_subagent_message`.
-4. On `kind: "no_match", reason: "new_child_recommended"`, consider creating a
-   new child under the existing parent policy. This is advice, not a mandate.
-   On `low_confidence`, `ambiguous`, or `error`, abstain and apply the existing
-   parent policy. On `kind: "cancelled"`, stop the cancelled request.
+   `send_interactive_subagent_message`. A match does not expand the owner's
+   responsibility or permissions.
+4. On `kind: "no_match", reason: "new_child_recommended"`, creation is permitted
+   under the existing policy but is not mandatory. If current authoritative
+   metadata shows no suitable owner and the request clearly states its action,
+   target/scope, deliverable, and access, create one specialist without asking
+   merely for creation approval. This includes narrow read-only investigation;
+   “look at this issue” means inspect and report, not implement.
+5. On `low_confidence` or `ambiguous`, do not route a recommendation as a match
+   or treat it as evidence that no suitable owner exists. If a plausible-owner
+   choice remains unresolved, ask a focused question about that choice, not
+   whether to create a specialist. On `error`, or if the advisor is unavailable,
+   use current authoritative registry metadata and the base policy; a clear
+   request with no suitable owner may proceed without a redundant approval
+   prompt. Never follow an erroneous recommendation. On `kind: "cancelled",
+   stop routing the request.
+
+Ask for clarification only when a substantive request requirement or
+permission remains unclear, such as target, deliverable, read/write/PR scope, or
+whether this is a continuation or new work. Do not expand read-only/reviewer
+permissions. Explicit child IDs, explicit new-child requests, and attach/focus
+requests follow existing policy and bypass the advisor. Aliases remain discovery
+hints.
 
 The advisor builds candidates from the current parent session's authority and
 runtime state, not a model-supplied list. Only live, actionable, non-stale direct
 children with confirmed responsibilities are eligible. Project routing caches
-cannot authorize candidates. Explicit child IDs, requests for a new child,
-attach/focus requests, and clear exact continuations follow existing policy.
-Unclear action, deliverable, access, or scope requires user clarification first.
-Aliases remain discovery hints.
+cannot authorize candidates.
 
 The classifier chooses a request-local token or `none`. The host validates the
 choice, complete probability map, finite values, unit sum, argmax, confidence,
