@@ -1,4 +1,13 @@
 import { Type } from "typebox";
+import {
+  formatWaitingInputActions,
+  registerDurableWorkflowTools,
+} from "./workflow-durable-tools";
+import { WorkflowRecoveryRequiredError } from "./workflow-run-store";
+import {
+  prepareDurableProcess,
+  cancelDurableProcess,
+} from "./workflow-durable-process";
 import { abortableWait } from "./abortable-wait";
 import {
   debugLog,
@@ -10,13 +19,17 @@ import {
   type JobState,
   type StartSubagentJobResult,
 } from "./helpers";
-import { launchInteractiveSubagent } from "./interactive-tmux";
+import {
+  launchInteractiveSubagent,
+  registerInteractiveSubagentState,
+} from "./interactive-tmux";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
   INTERACTIVE_POLL_MS,
   MAX_TOTAL_AGENTS,
   listSavedWorkflows,
+  inspectSavedWorkflow,
   loadWorkflowScript,
   parseWorkflow,
   saveWorkflowScript,
@@ -32,8 +45,9 @@ import {
   workflowUsageFromUsage,
 } from "./workflow-core";
 import {
-  cancelWorkflowJob,
+  cancelWorkflowJobOnce,
   discardWorkflowJob,
+  durableWorkflowTerminalStatus,
   getWorkflowCompletionPresentation,
   getWorkflowJobForOwner,
   normalizeCancelledWorkflowState,
@@ -43,7 +57,17 @@ import {
 } from "./workflow-jobs";
 import { renderProgress } from "./workflow-ui";
 import { awaitInteractiveResult, stringify } from "./workflow-worker";
-import { completionDisplayLabel } from "./completion-presentation";
+import { getLiveWorkflowV4Store } from "./workflow-v4-store";
+import { sanitizeOutput } from "./notifications";
+import {
+  modelSafeWorkflowErrorMessage,
+  safeWorkflowDiagnosticMessage,
+  sanitizeWorkflowDiagnosticDetails,
+} from "./workflow-disclosure";
+import {
+  completionDisplayLabel,
+  formatCompletionMessage,
+} from "./completion-presentation";
 import { showWorkflowTree } from "./workflow-tree-ui";
 import {
   WorkflowPickerComponent,
@@ -115,42 +139,79 @@ const WorkflowUsageOutputSchema = Type.Object({
     ]),
   ),
 });
-const WorkflowStatusOutputSchema = Type.Union([
-  Type.Object({
+const WorkflowDurableStatusOutputSchema = Type.Object(
+  {
     status: Type.Union([
-      Type.Literal("running"),
       Type.Literal("done"),
       Type.Literal("error"),
       Type.Literal("cancelled"),
+      Type.Literal("interrupted"),
+      Type.Literal("rejected"),
+      Type.Literal("waiting_for_input"),
     ]),
     workflowId: Type.String(),
-    name: Type.String(),
-    presentationStatus: Type.String(),
-    elapsedMs: Type.Number(),
-    agentsSpawned: Type.Number(),
-    runningCount: Type.Optional(Type.Number()),
-    errorCount: Type.Number(),
+    durable: Type.Literal(true),
+    name: Type.Optional(Type.String()),
+    presentationStatus: Type.Optional(Type.String()),
+    elapsedMs: Type.Optional(Type.Number()),
+    agentsSpawned: Type.Optional(Type.Number()),
+    errorCount: Type.Optional(Type.Number()),
     usage: Type.Optional(WorkflowUsageOutputSchema),
     liveUsage: Type.Optional(WorkflowUsageOutputSchema),
     budgetTotal: Type.Optional(Type.Number()),
     currentPhase: Type.Optional(Type.String()),
     error: Type.Optional(Type.String()),
-  }),
-  Type.Object({
-    status: Type.Literal("not_found"),
-    workflowId: Type.String(),
-  }),
+  },
+  { additionalProperties: false },
+);
+const WorkflowStatusOutputSchema = Type.Union([
+  Type.Object(
+    {
+      status: Type.Union([
+        Type.Literal("running"),
+        Type.Literal("waiting_for_input"),
+        Type.Literal("done"),
+        Type.Literal("error"),
+        Type.Literal("cancelled"),
+      ]),
+      workflowId: Type.String(),
+      name: Type.String(),
+      presentationStatus: Type.String(),
+      elapsedMs: Type.Number(),
+      agentsSpawned: Type.Number(),
+      runningCount: Type.Optional(Type.Number()),
+      errorCount: Type.Number(),
+      usage: Type.Optional(WorkflowUsageOutputSchema),
+      liveUsage: Type.Optional(WorkflowUsageOutputSchema),
+      budgetTotal: Type.Optional(Type.Number()),
+      currentPhase: Type.Optional(Type.String()),
+      error: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
+  WorkflowDurableStatusOutputSchema,
+  Type.Object(
+    {
+      status: Type.Literal("not_found"),
+      workflowId: Type.String(),
+    },
+    { additionalProperties: false },
+  ),
 ]);
 const WorkflowResultOutputSchema = Type.Object({
   status: Type.Union([
     Type.Literal("not_found"),
     Type.Literal("wait_cancelled"),
     Type.Literal("running"),
+    Type.Literal("waiting_for_input"),
     Type.Literal("done"),
     Type.Literal("error"),
     Type.Literal("cancelled"),
+    Type.Literal("interrupted"),
+    Type.Literal("rejected"),
   ]),
   workflowId: Type.String(),
+  durable: Type.Optional(Type.Literal(true)),
   name: Type.Optional(Type.String()),
   presentationStatus: Type.Optional(Type.String()),
   result: Type.Optional(Type.String()),
@@ -303,6 +364,22 @@ function emitWorkflowResultReadTelemetry(
   );
 }
 
+function cancellationRaceResponse(
+  job: WorkflowJobState,
+  status: string,
+): AgentToolResult<unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Workflow ${job.id} is already ${status}; nothing was cancelled.`,
+      },
+    ],
+    details: { status, workflowId: job.id, cancelled: false },
+    ...(status === "error" || status === "rejected" ? { isError: true } : {}),
+  };
+}
+
 export function registerWorkflowTool(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
@@ -332,10 +409,14 @@ export function registerWorkflowTool(
       isolation,
       label,
       schema,
+      readOnly,
       thinkingLevel,
       onProgress,
       onCancellationSnapshot,
+      durableAttempt,
     }) => {
+      if (readOnly !== undefined && typeof readOnly !== "boolean")
+        throw new Error("Workflow agent readOnly must be a boolean.");
       const launchRequestedAt = Date.now();
       const tryProcess = isolation !== "in-process";
       const childScope = resolveLiveSessionScope(supervisorOwner);
@@ -407,34 +488,54 @@ export function registerWorkflowTool(
 
       if (tryProcess) {
         let state: ReturnType<typeof launchInteractiveSubagent> | undefined;
+        const durableProcess = durableAttempt
+          ? await prepareDurableProcess(durableAttempt)
+          : undefined;
         try {
-          state = launchInteractiveSubagent({
-            name: (label || "wf-agent").slice(0, 40),
-            task: prompt,
-            persona,
-            model,
-            cwd: ctx.cwd,
-            contextText: null,
-            background: true,
-            thinkingLevel,
-            supervisorOwner,
-            sessionScope: childScope,
-            spawnTreeContext: childScope?.spawnTreeContext,
-            workflowId: ownedWorkflowId,
-            completionOwner: "workflow",
-            completionPolicy: "each",
-            telemetryInvocationSource: "workflow",
-            telemetryAsync: workflowAsync,
-            telemetryCompletionPolicy,
-            spawnRequestedAt: launchRequestedAt,
-            onSpawnFailure: (failure) => {
-              initialFailure = failure;
-            },
-          });
+          if (durableAttempt && !durableProcess?.previous)
+            await durableAttempt.recordDispatch?.();
+          if (signal?.aborted)
+            throw new Error("Workflow interrupted before process launch.");
+          state =
+            durableProcess?.previous ??
+            launchInteractiveSubagent({
+              wrapCommand: durableProcess?.wrapCommand,
+              beforeDispatch: durableProcess?.beforeDispatch,
+              name: (label || "wf-agent").slice(0, 40),
+              task: prompt,
+              persona,
+              model,
+              cwd: ctx.cwd,
+              contextText: null,
+              background: true,
+              ...(readOnly === true ? { readOnly: true } : {}),
+              thinkingLevel,
+              supervisorOwner,
+              sessionScope: childScope,
+              spawnTreeContext: childScope?.spawnTreeContext,
+              workflowId: ownedWorkflowId,
+              completionOwner: "workflow",
+              completionPolicy: "each",
+              telemetryInvocationSource: "workflow",
+              telemetryAsync: workflowAsync,
+              telemetryCompletionPolicy,
+              spawnRequestedAt: launchRequestedAt,
+              onSpawnFailure: (failure) => {
+                initialFailure = failure;
+              },
+            });
         } catch (err) {
           initialFailure ??= {
             stage: spawnFailureStage(err) ?? "unknown",
           };
+          // A partially dispatched durable process must not also launch in-process.
+          if (durableAttempt) {
+            resolveFailedLaunch(signal?.aborted ? "cancelled" : "rejected");
+            throw new WorkflowRecoveryRequiredError(
+              "Durable process launch did not finish cleanly; inspect its attempt before resuming.",
+              err,
+            );
+          }
           const msg = err instanceof Error ? err.message : String(err);
           debugLog("warn", "isolation_process_fallback", { reason: msg });
           onProgress?.({
@@ -444,6 +545,14 @@ export function registerWorkflowTool(
           });
         }
         if (state) {
+          state.supervisorOwner = supervisorOwner;
+          state.workflowId = ownedWorkflowId;
+          state.completionOwner = "workflow";
+          // launchInteractiveSubagent performs this registration itself. Repeating
+          // the idempotent synchronization here keeps alternate launch adapters and
+          // test doubles on the same production contract: the owner scope is the
+          // authoritative index, while the process-global registry is compatibility.
+          registerInteractiveSubagentState(state, childScope);
           launchResolution({
             outcome: "started",
             execution: "interactive",
@@ -455,6 +564,15 @@ export function registerWorkflowTool(
             signal,
             undefined,
             onCancellationSnapshot,
+            durableProcess
+              ? () => {
+                  if (
+                    (signal?.reason as { source?: string } | undefined)
+                      ?.source !== "durable_interrupt"
+                  )
+                    cancelDurableProcess(durableProcess.path);
+                }
+              : undefined,
             childTelemetry,
           );
           state.workflowResultConsumed = true;
@@ -526,6 +644,7 @@ export function registerWorkflowTool(
           parentModelRegistry: ctx.modelRegistry,
           onCancellationSnapshot,
           cancellationSource: "workflow",
+          ...(readOnly === true ? { readOnly: true } : {}),
           thinkingLevel,
           // The child binds this depth into its own orchestration context, so a
           // sub-agent it spawns counts from here. Left unset, the child bound
@@ -683,7 +802,7 @@ export function registerWorkflowTool(
     return completionDisplayLabel(job.name, "workflow");
   }
 
-  function notifyWorkflowCompletion(job: WorkflowJobState): void {
+  function notifyWorkflowCompletion(job: WorkflowJobState): boolean {
     const errorCount = job.result?.errorCount ?? job.snapshot.errorCount;
     const presentation = getWorkflowCompletionPresentation(
       job.status,
@@ -693,7 +812,7 @@ export function registerWorkflowTool(
       debugLog("warn", "workflow_completion_policy_missing", {
         workflowId: job.id,
       });
-      return;
+      return false;
     }
     publishCompletion(
       {
@@ -728,7 +847,23 @@ export function registerWorkflowTool(
       },
       job.parentSessionOwner,
     );
+    return true;
   }
+
+  const durableTools = registerDurableWorkflowTools(
+    pi,
+    owner,
+    (ctx, id, runAsync, completion, sessionOwner) =>
+      makeRunAgent(
+        ctx,
+        id,
+        sessionOwner,
+        runAsync,
+        workflowTelemetryCompletionPolicy(runAsync, completion),
+        resolveWorkflowSpawn(ctx),
+      ),
+    notifyWorkflowCompletion,
+  );
 
   registerToolWithDefaultGuidance(pi, {
     name: "workflow",
@@ -736,7 +871,7 @@ export function registerWorkflowTool(
     description: [
       "Only use this tool when the user explicitly requests a workflow or the active CLI mode explicitly selects it.",
       "Without either, do not choose it automatically based on task suitability.",
-      "Run an agent-authored JavaScript workflow that deterministically orchestrates ISOLATED",
+      "Run an agent-authored TypeScript or JavaScript workflow that deterministically orchestrates ISOLATED",
       "sub-agents. Intermediate results live in script variables, not your context window — fan out",
       "dozens of sub-agents (review pipelines, research sweeps, migrations) without context pressure.",
       "Workflow scripts are trusted agent-authored code, not arbitrary user input;",
@@ -745,21 +880,35 @@ export function registerWorkflowTool(
       "In-process sub-agents cannot invoke this tool; this topology is unsupported",
       "until cross-registry cancellation is implemented (GitHub issue #62).",
       "",
-      "Script shape:",
+      "V4 shape (session-scoped by default; opt into persistence explicitly):",
+      "  import { defineWorkflow, schema } from 'pi-subagentura/workflow';",
+      "  export default defineWorkflow({ name: 'my-flow', version: 1, async run(ctx, args) {",
+      "    return ctx.agent('review', { prompt: 'Review the change', readOnly: true, output: schema.object({ ok: schema.boolean() }) });",
+      "  } });",
+      "V4 ctx exposes step, agent, group, named-object parallel, map, streaming pipeline, repeat, workflow, ask, gate, checkpoint, artifact, log, budget, and signal.",
+      "Use stable explicit step IDs and item keys; repeat requires maxIterations. Steps throw failures by default; collection policies return typed TaskResult errors. Agent output uses the supported schema subset.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this organizes prompts but does not enforce semantic scope.",
+      "For purely observational review or research, set readOnly: true. It restricts model-facing tools to Pi read/grep/find/ls (in-process schema capture may also use internal structured_output), not OS access or paths.",
+      "Read-only process agents should return final prose/JSON directly rather than writing an output file or using bash for handoff. Progress comes from actual workflow step records; do not maintain a second model-authored todo ledger.",
+      "V4 definitions run through the existing in-memory session engine by default; durable: true opts into persisted execution and recovery. Saved /workflows launches remain session-scoped. respond_workflow_input asks the human to answer waiting questions or approvals. async:false collects input directly through Pi UI.",
+      "Erasable TypeScript and named imports of defineWorkflow/schema from pi-subagentura/workflow are supported; other runtime imports and dynamic imports are rejected.",
+      "",
+      "Legacy script shape:",
       "  export const meta = { name: 'my-flow', description: '...', phases: [{ title: 'Scan' }] };",
       "  phase('Scan');",
       "  const out = await parallel([() => agent('task A'), () => agent('task B')]);",
       "  return out;",
       "",
-      "Injected helpers/globals:",
+      "Legacy injected helpers/globals:",
       "  agent(prompt, opts?)   -> spawn one isolated sub-agent. opts: { schema?, label?, phase?,",
       "                            model?, persona?, isolation?, agentType? (compatibility no-op), thinkingLevel? (off|minimal|low|medium|high|xhigh|max) }. Without schema returns the final text;",
       "                            with schema returns a value validated against the supported JSON Schema",
       "                            subset (type, enum, required/properties, additionalProperties, items,",
       "                            minItems, maxItems), or null after retries. Returns null on error",
       "                            (filter with Boolean).",
-      "                            Defaults to attachable multiplexer process isolation;",
-      "                            falls back to in-process if no multiplexer is available.",
+      "                            Session-scoped calls default to attachable multiplexer process isolation",
+      "                            and may fall back to in-process if no multiplexer is available.",
+      "                            Durable process attempts fail closed instead of falling back.",
       "Model selection: By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
       "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
@@ -779,14 +928,22 @@ export function registerWorkflowTool(
     promptSnippet:
       "Orchestrate decomposable multi-agent work with trusted raw JavaScript workflows.",
     promptGuidelines: [
-      "Use workflows only for decomposable multi-agent work; handle simple or sequential tasks directly.",
+      "Use workflows for repeatable multi-agent work, including sequential pipelines; handle simple one-off tasks directly.",
+      "A vague request to create a new workflow means suggest one and confirm before saving/running.",
+      "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation; assess feasibility and semantically review the exact final source before saving or running, and decline unsuitable/infeasible drafts or unresolved material findings.",
+      "Explicit requests to run an existing named workflow keep the normal saved-workflow execution path.",
+      "Durability is opt-in with durable:true. `/workflow` authoring defaults to session-scoped execution and may use the existing V4 in-memory engine or a legacy script as appropriate. Only use durable:true when the user's task explicitly requests persisted restart recovery; durable readiness is metadata, not permission. Saved `/workflows` name/picker launches remain session-scoped. Durable calls need unique stable id options on agent() and workflow(); include item keys and retry attempt numbers. Resume interrupted runs explicitly with resume_workflow.",
       "Omit async for the default background behavior; use async: false only when synchronous execution is required.",
-      "Pass raw JavaScript with no markdown fences. Include a top-level pure-literal `export const meta = { name, description, phases? }`.",
-      "Do not use TypeScript, imports, require, fs, or other Node APIs. Date.now(), Math.random(), and argless new Date() are unavailable.",
-      "Available globals are agent, parallel, pipeline, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
+      "For new workflows use a raw defineWorkflow module with no markdown fences when its typed step APIs fit; legacy scripts may use top-level pure-literal `export const meta = { name, description, phases? }`.",
+      "Use erasable TypeScript with only the pi-subagentura/workflow SDK import. Do not use require, fs, other Node APIs, or dynamic imports. Date.now(), Math.random(), and argless new Date() are unavailable.",
+      "V4 orchestration uses ctx; legacy globals are agent, parallel, pipeline, retry, workflow, phase, log, args, immutable cwd, budget, console, guarded Date, and guarded Math.",
+      "retry(work, {attempts:3, retryOnNull:true}) explicitly repeats thrown/null failures with a one-based attempt argument (1–10 attempts). Agent schema repair separately uses up to three total attempts. Side effects may repeat.",
       "Call phase(title) at real work-group transitions. Agent phase defaults to the current phase; an explicit agent phase overrides it.",
       "parallel() takes thunks such as `() => agent(...)`; pipeline() streams each item through every stage independently, with no barrier between stages.",
       "Give agent calls unique short labels, include enough task context and relevant paths, and treat failed agents or stages as null.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this organizes prompts but does not enforce semantic scope.",
+      "Use readOnly: true for purely observational review/research. It limits model-facing tools to Pi read/grep/find/ls (in-process schema capture may use internal structured_output), not OS/path access; read-only process agents return final prose/JSON directly rather than using write/bash handoff.",
+      "Track progress with actual workflow step records, not a second model-maintained todo ledger.",
       "By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
       "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
@@ -794,10 +951,16 @@ export function registerWorkflowTool(
       "Filter or handle null results, then use a final synthesis agent when the workflow needs one coherent answer.",
     ],
     parameters: Type.Object({
+      durable: Type.Optional(
+        Type.Boolean({
+          description:
+            "Persist this run for explicit restart recovery in the same host/cwd. durable: true opts into persistence; omitted or false is session-scoped, including V4 in-memory execution. Legacy durable runs also require the original Pi session. Requires stable step IDs; interrupted external side effects can repeat.",
+        }),
+      ),
       script: Type.Optional(
         Type.String({
           description:
-            "The workflow script (export const meta + top-level body). Omit if using `name`.",
+            "A defineWorkflow TypeScript/JavaScript module or legacy export const meta + top-level body. Omit if using name.",
         }),
       ),
       name: Type.Optional(
@@ -862,6 +1025,9 @@ export function registerWorkflowTool(
         };
       }
 
+      if (params.durable === true)
+        return durableTools.run(params, signal, onUpdate, ctx);
+
       let completion: ResolvedCompletionPolicy;
       try {
         completion =
@@ -915,9 +1081,31 @@ export function registerWorkflowTool(
       // values correct if that restriction is ever lifted.
       const spawn = resolveWorkflowSpawn(ctx);
       const baseOpts = (workflowId: string) => ({
+        workflowId,
         args: params.args,
         cwd: ctx.cwd,
         budgetTotal: params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
+        ...(params.durable !== true && params.async === false
+          ? {
+              requestInput: async (
+                request: unknown,
+                stepSignal?: AbortSignal,
+              ) => {
+                if (!isSessionOwnerLive(workflowOwner))
+                  throw new Error("Workflow input was interrupted.");
+                stepSignal?.throwIfAborted();
+                const value = await durableTools.requestInput(
+                  ctx,
+                  request,
+                  stepSignal,
+                );
+                if (!isSessionOwnerLive(workflowOwner))
+                  throw new Error("Workflow input was interrupted.");
+                stepSignal?.throwIfAborted();
+                return value;
+              },
+            }
+          : {}),
         runAgent: makeRunAgent(
           ctx,
           workflowId,
@@ -1102,7 +1290,7 @@ export function registerWorkflowTool(
           },
         };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         emitWorkflowResultReadTelemetry(
           job,
           workflowOwner,
@@ -1148,9 +1336,23 @@ export function registerWorkflowTool(
       }),
     }),
     outputSchema: WorkflowStatusOutputSchema,
-    async execute(_id, params): Promise<AgentToolResult<unknown>> {
-      const st = getWorkflowJobForOwner(params.workflowId, owner());
+    async execute(
+      _id,
+      params,
+      _signal,
+      _update,
+      ctx,
+    ): Promise<AgentToolResult<unknown>> {
+      const workflowOwner = owner();
+      const st = getWorkflowJobForOwner(params.workflowId, workflowOwner);
       if (!st) {
+        const persisted = await durableTools.inspect(
+          params.workflowId,
+          ctx,
+          false,
+          workflowOwner,
+        );
+        if (persisted) return persisted;
         return {
           content: [
             { type: "text", text: workflowNotFoundMessage(params.workflowId) },
@@ -1171,6 +1373,21 @@ export function registerWorkflowTool(
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
       const usage = presentWorkflowUsage(st.snapshot.usage);
       const liveUsage = presentWorkflowUsage(st.snapshot.liveUsage);
+      const allWaiting =
+        st.status === "running"
+          ? (
+              getLiveWorkflowV4Store(st.id)?.snapshot(Infinity) ??
+              st.snapshot.steps ??
+              []
+            ).filter((step) => step.status === "waiting_for_input")
+          : [];
+      const visibleStatus =
+        st.status === "running" && allWaiting.length
+          ? "waiting_for_input"
+          : st.status;
+      const waitingActions = formatWaitingInputActions(st.id, allWaiting);
+      const waiting = sanitizeWorkflowDiagnosticDetails(waitingActions.visible);
+      const waitingRemainderCount = waitingActions.omittedCount;
       return {
         content: [
           {
@@ -1188,19 +1405,22 @@ export function registerWorkflowTool(
               (st.snapshot.currentPhase
                 ? `, phase: ${st.snapshot.currentPhase}`
                 : "") +
-              (st.error ? `\nerror: ${st.error}` : ""),
+              (st.error ? `\n${safeWorkflowDiagnosticMessage()}` : "") +
+              waitingActions.text,
           },
         ],
         details: {
-          status: st.status,
+          status: visibleStatus,
+          waiting,
+          waitingRemainderCount,
           presentationStatus: presentation.label,
           workflowId: st.id,
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
-          ...st.snapshot,
+          ...sanitizeWorkflowDiagnosticDetails(st.snapshot),
         },
         structuredContent: {
-          status: st.status,
+          status: visibleStatus,
           workflowId: st.id,
           name: st.name,
           presentationStatus: presentation.label,
@@ -1218,7 +1438,9 @@ export function registerWorkflowTool(
           ...(st.snapshot.currentPhase === undefined
             ? {}
             : { currentPhase: st.snapshot.currentPhase }),
-          ...(st.error === undefined ? {} : { error: st.error }),
+          ...(st.error === undefined
+            ? {}
+            : { error: safeWorkflowDiagnosticMessage() }),
         },
       };
     },
@@ -1236,10 +1458,23 @@ export function registerWorkflowTool(
       }),
     }),
     outputSchema: WorkflowResultOutputSchema,
-    async execute(_id, params, signal): Promise<AgentToolResult<unknown>> {
+    async execute(
+      _id,
+      params,
+      signal,
+      _update,
+      ctx,
+    ): Promise<AgentToolResult<unknown>> {
       const workflowOwner = owner();
       const st = getWorkflowJobForOwner(params.workflowId, workflowOwner);
       if (!st) {
+        const persisted = await durableTools.inspect(
+          params.workflowId,
+          ctx,
+          true,
+          workflowOwner,
+        );
+        if (persisted) return persisted;
         emitWorkflowResultReadTelemetry(
           undefined,
           workflowOwner,
@@ -1301,7 +1536,7 @@ export function registerWorkflowTool(
         run = waitResult.value!;
       } catch (err) {
         // Non-abort errors preserve the original structured handling
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = modelSafeWorkflowErrorMessage(err);
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};
@@ -1432,9 +1667,18 @@ export function registerWorkflowTool(
         description: "Workflow ID returned by an async `workflow` spawn.",
       }),
     }),
-    async execute(_id, params): Promise<AgentToolResult<unknown>> {
-      const st = getWorkflowJobForOwner(params.workflowId, owner());
+    async execute(
+      _id,
+      params,
+      _signal,
+      _update,
+      ctx,
+    ): Promise<AgentToolResult<unknown>> {
+      const cancellationOwner = owner();
+      const st = getWorkflowJobForOwner(params.workflowId, cancellationOwner);
       if (!st) {
+        const persisted = await durableTools.cancel(params.workflowId, ctx);
+        if (persisted) return persisted;
         return {
           content: [
             { type: "text", text: workflowNotFoundMessage(params.workflowId) },
@@ -1443,7 +1687,23 @@ export function registerWorkflowTool(
           isError: true,
         };
       }
-      if (st.status === "cancelled") {
+      let outcome: Awaited<ReturnType<typeof cancelWorkflowJobOnce>>;
+      try {
+        outcome = await cancelWorkflowJobOnce(st);
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
+          details: { status: st.status, workflowId: st.id },
+          isError: true,
+        };
+      }
+      const durableStatus = durableWorkflowTerminalStatus(st);
+      if (outcome === "already_cancelled") {
         if (cancellationSnapshotsEnabled()) {
           await waitForCancellationReceipts(st);
           normalizeCancelledWorkflowState(st);
@@ -1455,27 +1715,20 @@ export function registerWorkflowTool(
           details: {
             status: "cancelled",
             workflowId: st.id,
-            cancelled: true,
+            cancelled: false,
             snapshots: [...(st.cancellationSnapshots ?? [])],
           },
         };
       }
-      if (st.status !== "running") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Workflow ${st.id} is already ${st.status}; nothing was cancelled.`,
-            },
-          ],
-          details: {
-            status: st.status,
-            workflowId: st.id,
-            cancelled: false,
-          },
-        };
+      if (outcome === "terminal")
+        return cancellationRaceResponse(st, durableStatus ?? String(st.status));
+      if (durableStatus && durableStatus !== "cancelled")
+        return cancellationRaceResponse(st, durableStatus);
+      const finalStatus =
+        durableWorkflowTerminalStatus(st) ?? String(st.status);
+      if (finalStatus !== "cancelled") {
+        return cancellationRaceResponse(st, finalStatus);
       }
-      cancelWorkflowJob(st, "explicit_cancel");
       if (cancellationSnapshotsEnabled()) {
         await waitForCancellationReceipts(st);
         normalizeCancelledWorkflowState(st);
@@ -1505,10 +1758,21 @@ export function registerWorkflowTool(
       script: Type.String({
         description: "The workflow script to save (validated before writing).",
       }),
+      requireDurable: Type.Optional(
+        Type.Boolean({
+          description:
+            "Reject scripts without statically verifiable durable operation IDs before saving.",
+        }),
+      ),
     }),
     async execute(_id, params): Promise<AgentToolResult<unknown>> {
       try {
-        const file = saveWorkflowScript(params.name, params.script);
+        const file = saveWorkflowScript(params.name, params.script, undefined, {
+          requireDurable: params.requireDurable === true,
+        });
+        const { durableReady, definitionDigest } = inspectSavedWorkflow(
+          params.script,
+        );
         return {
           content: [
             {
@@ -1516,7 +1780,13 @@ export function registerWorkflowTool(
               text: `Saved workflow "${params.name}" to ${file}.`,
             },
           ],
-          details: { status: "saved", name: params.name, file },
+          details: {
+            status: "saved",
+            name: params.name,
+            file,
+            durableReady,
+            definitionDigest,
+          },
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1539,7 +1809,12 @@ export function registerWorkflowTool(
     async execute() {
       const items = listSavedWorkflows();
       const text = items.length
-        ? items.map((w) => `- ${w.name}: ${w.description}`).join("\n")
+        ? items
+            .map(
+              (w) =>
+                `- ${w.name} [${w.durableReady ? "durable-ready" : "session-scoped"}]: ${w.description}`,
+            )
+            .join("\n")
         : "(no saved workflows)";
       return {
         content: [{ type: "text", text }],
@@ -1630,7 +1905,7 @@ export function registerWorkflowTool(
       pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     };
 
-    const startSavedWorkflowFromCommand = (
+    const startSavedWorkflowFromCommand = async (
       name: string,
       argsValue: unknown,
       ctx: ExtensionCommandContext,
@@ -1681,7 +1956,7 @@ export function registerWorkflowTool(
         },
       );
       configureWorkflowCompletion(job, commandCompletion, workflowOwner);
-      return { job, meta };
+      return { id: job.id, meta };
     };
 
     const selectSavedWorkflow = async (
@@ -1732,7 +2007,7 @@ export function registerWorkflowTool(
 
       const choices = items.map((w) => ({
         name: w.name,
-        description: w.description || "(no description)",
+        description: `[${w.durableReady ? "durable-ready" : "session-scoped"}] ${w.description || "(no description)"}`,
       }));
 
       if (items.length === 0) {
@@ -1781,14 +2056,15 @@ export function registerWorkflowTool(
           ? parseArgsJson(parsed.argsJson)
           : await promptForWorkflowArgs(ctx);
         if (argsValue === CANCELLED_ARGS_PROMPT) return;
-        const { job, meta } = startSavedWorkflowFromCommand(
+        const { id, meta } = await startSavedWorkflowFromCommand(
           name,
           argsValue,
           ctx,
         );
         const text =
-          `Workflow "${meta.name}" started in background as ${job.id}. ` +
-          `${WORKFLOW_SESSION_SCOPE_MESSAGE} Use /workflow-status to inspect running jobs.`;
+          `Workflow "${meta.name}" started in background as ${id}. ` +
+          `Session-scoped run. ${WORKFLOW_SESSION_SCOPE_MESSAGE} ` +
+          "Use /workflow-status to inspect running jobs.";
         ctx.ui.notify(`Started workflow ${meta.name}.`);
         sendCommandMessage(text);
       } catch (err) {
@@ -1801,7 +2077,7 @@ export function registerWorkflowTool(
 
     registerCommandWithTelemetry(pi, "workflow", {
       description:
-        "Create a reusable workflow from a task, save it, and run it immediately.",
+        "Assess feasibility, draft, review, save, and run a suitable reusable V4 workflow.",
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const inlineTask = args.trim();
         const editor = (
@@ -1946,16 +2222,27 @@ export function registerWorkflowTool(
     return [
       "You are handling the `/workflow <task>` command.",
       "",
-      "Create a reusable JavaScript workflow for the user's task, save it, and run it immediately.",
+      "First assess whether the task is feasible and suitable for a reusable workflow with the available SDK, runtime, and tools. Prefer a bounded plan with reusable inputs. If it is unsuitable, unsupported, materially underspecified, or otherwise infeasible, explain why and do not save or start a workflow.",
+      "",
+      "An explicit `/workflow` request opts into this authoring flow and authorizes saving and running a suitable workflow without routine confirmation. Do not route ordinary requests to workflows. Ask for human input only when the user requests it or the task's risk warrants it.",
+      "",
+      "Once feasibility is established, draft a reusable workflow using V4 where its typed step APIs fit, or the legacy script shape where simpler. Execution is session-scoped by default; only use durable:true when the user's task explicitly requests persisted restart recovery.",
+      "For multi-agent assignments, put shared context in # Goal / # Contract and give each agent a narrow # Target / # Change / # Acceptance; this is prompt organization, not semantic scope enforcement.",
+      "Use readOnly: true for purely observational review/research. It restricts model-facing tools to Pi read/grep/find/ls, with internal structured_output only for in-process schema capture; it is not an OS sandbox or path restriction.",
+      "Read-only process agents should return final prose/JSON directly rather than requiring a file write or bash handoff. Track progress using actual workflow step records, not a second model-maintained todo ledger.",
       "",
       "Requirements:",
-      "1. Design a bounded workflow script with `export const meta = { name, description, phases }`.",
-      "2. The workflow should accept its task/config through `args` so it can be reused later.",
-      "3. Save the script with `save_workflow` using a lowercase slug name.",
-      "4. Immediately start it with the `workflow` tool by saved `name` and suitable `args`.",
-      "5. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
-      "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
-      "7. Report the saved workflow name and returned workflowId.",
+      "1. Pass task/config through args. Use a V4 defineWorkflow module with meaningful input/output schemas and structured agent-output contracts when its step APIs fit, including for session-scoped execution; otherwise use the legacy `export const meta = { name, description, phases? }` script shape.",
+      "2. Use ordinary JavaScript control flow where it is clearest. For persisted V4 steps, give persisted operations stable unique IDs; bound loops, repeat iterations, map/parallel work, and other fan-out. Use ctx.step/agent/group/parallel/map/pipeline/repeat/workflow as appropriate, literal saved names for nested workflows, and handle TaskResult failures explicitly.",
+      "3. Do not use Node APIs inside the workflow script. Workflow-agent file I/O must use tools actually available to those agents.",
+      "4. Before saving or running anything, semantically review the exact draft in a distinct pass. Use an independent reviewer through an available existing tool when possible; otherwise do a fresh self-review as a separate phase. Review task fit, contracts, prompts/roles, stable bounded control flow, failure handling, side effects, and whether available tools can do the work. Parsing, durable-readiness checks, and execution/smoke tests are not semantic review.",
+      "5. Address material findings and repeat semantic review after every source revision. If material issues remain or you cannot reach a sound review, explain why and do not save or start. Any validation-driven or other source change requires another semantic review before saving.",
+      "6. After review is complete, fix validation errors before persistence. Save the final reviewed source with save_workflow using a lowercase slug name. Set requireDurable: true only when persisted restart recovery was requested. Inspect the saved source with inspect_workflow and confirm it exactly matches the reviewed source; otherwise do not start until reconciled and re-reviewed.",
+      "Only then start the saved name with the workflow tool, suitable args, and async: true. Use durable: true if and only if persistence was requested; otherwise omit it for session-scoped execution. If an explicit durable start fails, report the error without retrying as session-scoped.",
+      "7. Do not set isolation unless the workflow explicitly needs to opt out. Session-scoped agents may fall back from process to in-process execution when no multiplexer is available; durable process attempts fail closed instead of falling back.",
+      "8. Report the saved workflow name and returned workflowId. Explain that session-scoped work ends with its parent session; V4 recovery is manual in the same project and requires Pi to be running. Human gates wait for respond_workflow_input.",
+      "",
+      "The save/runtime checks do not prove semantic suitability or that this review occurred; do not describe them as doing so.",
       "",
       "User task:",
       task,

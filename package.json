@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/subagent.ts",
     "./workflow": {
-      "types": "./types/workflow.d.ts"
+      "types": "./types/workflow.d.ts",
+      "default": "./src/workflow-v4-sdk.mjs"
     }
   },
   "type": "module",
@@ -40,6 +41,7 @@
   },
   "files": [
     "LICENSE",
+    "WORKFLOW_RUNTIME.md",
     "ORCHESTRATOR_SYSTEM_PROMPT.md",
     "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
     "docs/workflows.md",
@@ -48,12 +50,20 @@
     "docs/protocol-v1-compatibility.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
+    "examples/workflows/*.ts",
     "skills/pi-subagentura-debug",
     "types/workflow.d.ts",
+    "types/workflow-v4.d.ts",
+    "src/workflow-v4-sdk.mjs",
+    "src/workflow-v4-sdk.d.mts",
+    "src/workflow-v4-runtime.mjs",
+    "src/workflow-v4-runtime.d.mts",
+    "src/workflow-v4-store.ts",
     "src/notifications.ts",
     "src/rendering.ts",
     "src/schemas.ts",
     "src/tool-guidance.ts",
+    "src/agent-capabilities.ts",
     "src/artifact.ts",
     "src/identifier-types.ts",
     "src/artifact-poller.ts",
@@ -98,10 +108,18 @@
     "src/subagent-artifact-cli.ts",
     "src/workflow.ts",
     "src/workflow-core.ts",
+    "src/workflow-disclosure.ts",
     "src/workflow-script.ts",
     "src/workflow-script.mjs",
     "src/workflow-script.d.mts",
     "src/workflow-worker.ts",
+    "src/workflow-run-store.ts",
+    "src/workflow-durable.ts",
+    "src/workflow-durable-preflight.ts",
+    "src/workflow-durable-process.ts",
+    "src/workflow-durable-tools.ts",
+    "src/workflow-process-worker.mjs",
+    "src/completion-group-store.ts",
     "src/workflow-structured-output.ts",
     "src/workflow-worker-thread.mjs",
     "src/workflow-jobs.ts",
@@ -115,7 +133,7 @@
     "src/cancellation-snapshots.ts"
   ],
   "engines": {
-    "node": ">=22.23.2"
+    "node": ">=24.12.0"
   },
   "publishConfig": {
     "access": "public"
@@ -177,11 +195,12 @@
     "simple-git-hooks": "^2.13.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.1"
   },
   "dependencies": {
     "@juanibiapina/pi-extension-settings": "^0.9.1",
     "acorn": "^8.14.0",
+    "effect": "4.0.0-rc.117",
     "is-path-inside": "^4.0.0"
   }
 }

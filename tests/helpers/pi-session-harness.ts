@@ -13,18 +13,20 @@ import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
+  type ToolCall,
+  type Usage,
   type TranscriptContext,
   type Model,
 } from "@earendil-works/pi-ai";
 
-function assistant(text: string): AssistantMessage {
+function assistant(text: string, usage?: Usage): AssistantMessage {
   return {
     role: "assistant",
     content: [{ type: "text", text }],
     api: "subagentura-faux",
     provider: "subagentura-faux",
     model: "faux-model",
-    usage: {
+    usage: usage ?? {
       input: 1,
       output: 1,
       cacheRead: 0,
@@ -41,6 +43,7 @@ export interface PiSessionHarness {
   session: AgentSession;
   sessionManager: SessionManager;
   contexts: TranscriptContext[];
+  completeNextTool(name: string, arguments_: ToolCall["arguments"]): void;
   thinkingLevels: Array<string | undefined>;
   completeNext(text?: string): void;
   configureTestAuth(): void;
@@ -124,6 +127,13 @@ export async function createPiSessionHarness(
     extensionRoot?: string;
     includeTools?: boolean;
     sessionManager?: SessionManager;
+    modelContextWindow?: number;
+    compactionSettings?: {
+      enabled: boolean;
+      reserveTokens: number;
+      keepRecentTokens: number;
+    };
+    assistantUsage?: Usage;
     nativeModel?: Model<any>;
     nativeProvider?: unknown;
     onNativeSessionStart?: (ctx: any) => Promise<void> | void;
@@ -147,6 +157,7 @@ export async function createPiSessionHarness(
   const thinkingLevels: Array<string | undefined> = [];
   const pending: Array<ReturnType<typeof createAssistantMessageEventStream>> =
     [];
+  let toolCallSequence = 0;
   const fauxProvider = {
     api: "subagentura-faux",
     apiKey: options.missingAuth ? `$${missingAuthEnvVar}` : "test",
@@ -164,7 +175,7 @@ export async function createPiSessionHarness(
           cacheRead: 0,
           cacheWrite: 0,
         },
-        contextWindow: 200_000,
+        contextWindow: options.modelContextWindow ?? 200_000,
         maxTokens: 4_096,
       },
     ],
@@ -205,6 +216,11 @@ export async function createPiSessionHarness(
       ...options.retrySettings!,
       maxAgentDelayMs: 0,
     });
+  }
+  if (options.compactionSettings) {
+    settingsManager.getCompactionEnabled = () =>
+      options.compactionSettings!.enabled;
+    settingsManager.getCompactionSettings = () => options.compactionSettings!;
   }
   const extensionFactories = options.nativeProvider
     ? [
@@ -284,7 +300,7 @@ export async function createPiSessionHarness(
     completeNext(text = "ok") {
       const stream = pending.shift();
       if (!stream) throw new Error("no pending faux provider response");
-      const message = assistant(text);
+      const message = assistant(text, options.assistantUsage);
       const started = { ...message, content: [] };
       const textStarted = {
         ...message,
@@ -309,6 +325,41 @@ export async function createPiSessionHarness(
         partial: message,
       });
       stream.push({ type: "done", reason: "stop", message });
+      stream.end(message);
+    },
+    completeNextTool(name, arguments_) {
+      const stream = pending.shift();
+      if (!stream) throw new Error("no pending faux provider response");
+      const call: ToolCall = {
+        type: "toolCall",
+        id: `harness-tool-${++toolCallSequence}`,
+        name,
+        arguments: arguments_,
+      };
+      const message: AssistantMessage = {
+        ...assistant(""),
+        content: [call],
+        stopReason: "toolUse",
+      };
+      stream.push({ type: "start", partial: { ...message, content: [] } });
+      stream.push({
+        type: "toolcall_start",
+        contentIndex: 0,
+        partial: { ...message, content: [{ ...call, arguments: {} }] },
+      });
+      stream.push({
+        type: "toolcall_delta",
+        contentIndex: 0,
+        delta: JSON.stringify(arguments_),
+        partial: message,
+      });
+      stream.push({
+        type: "toolcall_end",
+        contentIndex: 0,
+        toolCall: call,
+        partial: message,
+      });
+      stream.push({ type: "done", reason: "toolUse", message });
       stream.end(message);
     },
     failNext(errorMessage = "rate limit, please retry your request") {

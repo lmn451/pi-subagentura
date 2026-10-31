@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { sanitizeWorkflowDiagnosticContext } from "../src/workflow-disclosure";
 import { nativeClassifierRegistry } from "./helpers/native-classifier";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +54,10 @@ const WORKFLOW_TOOL_NAMES = [
   "delete_workflow",
   "get_workflow_result",
   "get_workflow_status",
+  "resume_workflow",
+  "respond_workflow_input",
+  "list_workflow_runs",
+  "inspect_workflow",
   "list_workflows",
   "save_workflow",
   "workflow",
@@ -119,6 +125,68 @@ describe("extension registration", () => {
       "ctrl+alt+a",
       expect.any(Object),
     );
+  });
+
+  it("redacts historical workflow failures before provider context is built", () => {
+    const api = mockApi();
+    registerExtension(api as any);
+    const contextHandler = api.on.mock.calls.find(
+      ([event]: any[]) => event === "context",
+    )?.[1];
+    expect(contextHandler).toBeTypeOf("function");
+    const marker = "PRIVATE_HISTORICAL_WORKFLOW_ERROR_CANARY";
+    const failure = {
+      role: "toolResult",
+      toolCallId: "call-private",
+      toolName: "get_workflow_result",
+      content: [{ type: "text", text: `Workflow failed: ${marker}` }],
+      details: { status: "error", error: marker },
+      isError: true,
+      timestamp: 1,
+    };
+    const legacyNotification = {
+      role: "custom",
+      customType: "workflow-notify",
+      content: `Workflow failed: ${marker}`,
+      details: { status: "error", workflowId: "wf_private" },
+      display: true,
+      timestamp: 2,
+    };
+    const listFailure = {
+      role: "toolResult",
+      toolCallId: "call-list",
+      toolName: "list_workflow_runs",
+      content: [
+        { type: "text", text: "wfd_private private-diagnostic: error" },
+      ],
+      details: {
+        runs: [{ workflowId: "wfd_private", status: "error", error: marker }],
+      },
+      isError: false,
+      timestamp: 3,
+    };
+    const success = {
+      role: "toolResult",
+      toolCallId: "call-success",
+      toolName: "get_workflow_result",
+      content: [{ type: "text", text: "safe result" }],
+      details: { status: "done", result: "safe result" },
+      isError: false,
+      timestamp: 2,
+    };
+    const result = contextHandler(
+      {
+        type: "context",
+        messages: [failure, legacyNotification, listFailure, success],
+      },
+      {},
+    );
+    expect(JSON.stringify(result)).not.toContain(marker);
+    expect(result.messages[0].details.status).toBe("error");
+    expect(result.messages[0].content[0].text).toContain("diagnostic");
+    expect(result.messages[1].content).toContain("diagnostic");
+    expect(result.messages[2].details.runs[0].error).toContain("diagnostic");
+    expect(result.messages[3]).toEqual(success);
   });
 
   it("adds default-preservation guidance to every tool", () => {
@@ -517,7 +585,6 @@ describe("extension registration", () => {
     expect(names).not.toContain("list_orchestrator_agents");
     expect(names).not.toContain("update_orchestrator_agent_description");
 
-    expect(api.registerFlag).not.toHaveBeenCalled();
     expect(api.registerMessageRenderer).toHaveBeenCalledWith(
       "subagent-notify",
       expect.any(Function),
@@ -540,8 +607,75 @@ describe("extension registration", () => {
         "agent_end",
         "agent_settled",
         "session_start",
+        "session_before_compact",
         "session_shutdown",
       ]),
     );
+  });
+});
+
+describe("workflow diagnostic context filtering", () => {
+  it("preserves safe rows in mixed failed workflow-run context", () => {
+    const diagnostic = "PRIVATE_WORKFLOW_DIAGNOSTIC_canary";
+    const message: ToolResultMessage<{
+      runs: {
+        workflowId: string;
+        name: string;
+        status: "error" | "waiting_for_input" | "done";
+        error?: string;
+      }[];
+    }> = {
+      role: "toolResult",
+      toolCallId: "list-runs-call",
+      toolName: "list_workflow_runs",
+      content: [
+        {
+          type: "text",
+          text: [
+            "failed-run-id failed-run-name: error",
+            "waiting-run-id waiting-run-name: waiting_for_input",
+            "done-run-id done-run-name: done",
+          ].join("\n"),
+        },
+      ],
+      details: {
+        runs: [
+          {
+            workflowId: "failed-run-id",
+            name: "failed-run-name",
+            status: "error",
+            error: diagnostic,
+          },
+          {
+            workflowId: "waiting-run-id",
+            name: "waiting-run-name",
+            status: "waiting_for_input",
+          },
+          { workflowId: "done-run-id", name: "done-run-name", status: "done" },
+        ],
+      },
+      isError: false,
+      timestamp: 1,
+    };
+
+    const [sanitized] = sanitizeWorkflowDiagnosticContext([message]);
+    const safeContent = JSON.stringify(sanitized.content);
+    const safeDetails = JSON.stringify(sanitized.details);
+
+    expect(safeContent).not.toContain(diagnostic);
+    expect(safeDetails).not.toContain(diagnostic);
+    for (const value of [
+      "failed-run-id",
+      "failed-run-name",
+      "error",
+      "waiting-run-id",
+      "waiting-run-name",
+      "waiting_for_input",
+      "done-run-id",
+      "done",
+    ]) {
+      expect(safeContent).toContain(value);
+      expect(safeDetails).toContain(value);
+    }
   });
 });

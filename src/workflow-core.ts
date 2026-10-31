@@ -256,11 +256,16 @@ export function formatWorkflowUsageLegend(ascii = false): string {
 
 /** Options accepted by the injected `agent()` helper. */
 export interface WorkflowAgentOpts {
+  /** Stable operation identity; required only for durable execution. */
+  id?: string;
+  /** V4 only: omit this agent result from the workflow journal. */
+  persist?: boolean;
   schema?: unknown;
   label?: string;
   phase?: string;
   model?: string;
   persona?: string;
+  readOnly?: boolean;
   /** Defaults to "process" (attachable multiplexer); use "in-process" to opt out. */
   isolation?: string;
   /** Accepted for fidelity but a no-op in v2. */
@@ -291,10 +296,13 @@ export type WorkflowAgentProgress =
 /** Injectable spawn function — wraps in-process or process-backed agents. */
 export type WorkflowAgentRunner = (req: {
   prompt: string;
+  /** Internal recovery context, never exposed as a script-controlled option. */
+  durableAttempt?: import("./workflow-durable").DurableAttemptContext;
   persona?: string;
   model?: string;
   signal?: AbortSignal;
   isolation?: string;
+  readOnly?: boolean;
   label?: string;
   schema?: unknown;
   /** Thinking/reasoning for the sub-agent. */
@@ -509,6 +517,14 @@ export class WorkflowExecutionError extends Error {
     this.usage = usage;
   }
 }
+
+/** Thrown only when a private sub-agent error crosses the workflow boundary. */
+export class WorkflowPrivateDiagnosticError extends WorkflowExecutionError {
+  constructor(message: string, usage?: WorkflowUsage, cause?: unknown) {
+    super(message, usage, cause);
+    this.name = "WorkflowPrivateDiagnosticError";
+  }
+}
 /** Typed evidence for the workflow VM's exact wall-clock timeout branch. */
 export class WorkflowWallTimeoutError extends Error {
   readonly timeoutMs: number;
@@ -523,6 +539,14 @@ export class WorkflowWallTimeoutError extends Error {
 }
 
 export interface RunWorkflowOptions {
+  /** Host job id used to route live v4 input without a durable journal. */
+  workflowId?: string;
+  requestInput?: (request: unknown, signal?: AbortSignal) => Promise<unknown>;
+  onStep?: (
+    steps: ReturnType<typeof import("./workflow-v4-store").workflowV4Steps>,
+  ) => void;
+  /** Internal opt-in durable transcript; plain calls remain session-scoped. */
+  durable?: import("./workflow-durable").DurableWorkflow;
   args?: unknown;
   /** Parent execution directory exposed to workflow scripts as immutable `cwd`. */
   cwd?: string;
@@ -545,6 +569,7 @@ export interface RunWorkflowOptions {
 // ── Script parsing ───────────────────────────────────────────────────
 
 import { parseWorkflow } from "./workflow-script";
+import { inspectDurableWorkflow } from "./workflow-durable-preflight";
 export { parseWorkflow };
 
 // ── Minimal JSON-Schema validation (dependency-free) ─────────────────
@@ -861,12 +886,32 @@ export function saveWorkflowScript(
   name: string,
   script: string,
   dir = WORKFLOWS_DIR,
+  options: { requireDurable?: boolean } = {},
 ): string {
   const safe = sanitizeWorkflowName(name);
-  parseWorkflow(script); // validate before persisting
+  const parsed = parseWorkflow(script); // validate before persisting
+  if (options.requireDurable) {
+    const inspection = inspectSavedWorkflow(script, dir);
+    if (!inspection.durableReady)
+      throw new Error(
+        `Workflow is not durable-ready: ${inspection.errors.join("; ")}`,
+      );
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = join(dir, `${safe}.js`);
+  const file = join(
+    dir,
+    `${safe}.${parsed.format === "definition" ? "ts" : "js"}`,
+  );
   writeFileSync(file, script, { encoding: "utf8", mode: 0o600 });
+  const replaced = join(
+    dir,
+    `${safe}.${parsed.format === "definition" ? "js" : "ts"}`,
+  );
+  try {
+    unlinkSync(replaced);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   return file;
 }
 
@@ -880,7 +925,8 @@ export function loadWorkflowScript(
   } catch {
     return null;
   }
-  const file = join(dir, `${safe}.js`);
+  const typed = join(dir, `${safe}.ts`);
+  const file = existsSync(typed) ? typed : join(dir, `${safe}.js`);
   if (!existsSync(file)) return null;
   try {
     return readFileSync(file, "utf8");
@@ -889,22 +935,55 @@ export function loadWorkflowScript(
   }
 }
 
+export function inspectSavedWorkflow(script: string, dir = WORKFLOWS_DIR) {
+  const inspection = inspectDurableWorkflow(script);
+  for (const name of inspection.referencedWorkflows ?? []) {
+    const child = loadWorkflowScript(name, dir);
+    if (!child) {
+      inspection.errors.push(`Nested workflow "${name}" is unavailable.`);
+      continue;
+    }
+    const nested = inspectDurableWorkflow(child);
+    if (!nested.durableReady || (nested.referencedWorkflows?.length ?? 0) > 0)
+      inspection.errors.push(
+        `Nested workflow "${name}" is not durable-ready at the supported nesting depth.`,
+      );
+  }
+  inspection.durableReady = inspection.errors.length === 0;
+  return inspection;
+}
+
+export interface SavedWorkflowSummary {
+  name: string;
+  description: string;
+  durableReady: boolean;
+  definitionDigest?: string;
+}
+
 export function listSavedWorkflows(
   dir = WORKFLOWS_DIR,
-): Array<{ name: string; description: string }> {
+): SavedWorkflowSummary[] {
   if (!existsSync(dir)) return [];
-  const out: Array<{ name: string; description: string }> = [];
-  for (const entry of readdirSync(dir)) {
-    const m = /^(.+)\.js$/.exec(entry);
+  const out: SavedWorkflowSummary[] = [];
+  const seen = new Set<string>();
+  for (const entry of readdirSync(dir).sort(
+    (a, b) => Number(b.endsWith(".ts")) - Number(a.endsWith(".ts")),
+  )) {
+    const m = /^(.+)\.(?:js|ts)$/.exec(entry);
     if (!m) continue;
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
     let description = "";
+    let durableReady = false;
+    let definitionDigest: string | undefined;
     try {
-      description = parseWorkflow(readFileSync(join(dir, entry), "utf8")).meta
-        .description;
+      const source = readFileSync(join(dir, entry), "utf8");
+      description = parseWorkflow(source).meta.description;
+      ({ durableReady, definitionDigest } = inspectSavedWorkflow(source, dir));
     } catch {
       description = "(unparseable)";
     }
-    out.push({ name: m[1], description });
+    out.push({ name: m[1], description, durableReady, definitionDigest });
   }
   return out;
 }
@@ -914,12 +993,14 @@ export function deleteWorkflowScript(
   dir = WORKFLOWS_DIR,
 ): boolean {
   const safe = sanitizeWorkflowName(name);
-  const file = join(dir, `${safe}.js`);
-  try {
-    unlinkSync(file);
-    return true;
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return false;
-    throw err;
+  let removed = false;
+  for (const extension of ["ts", "js"]) {
+    try {
+      unlinkSync(join(dir, `${safe}.${extension}`));
+      removed = true;
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+    }
   }
+  return removed;
 }

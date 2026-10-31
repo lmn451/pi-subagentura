@@ -460,6 +460,27 @@ describe("interactive-tmux", () => {
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
     expect(calls.some((args) => args[0] === "split-window")).toBe(false);
   });
+  it("rejects malformed read-only launch policy before spawning", async () => {
+    const readOnlyMod = await importFresh<typeof InteractiveTmux>(
+      "../src/interactive-tmux",
+    );
+    const launchWithMalformedReadOnly =
+      readOnlyMod.launchInteractiveSubagent as unknown as (params: {
+        name: string;
+        task: string;
+        cwd: string;
+        readOnly: unknown;
+      }) => unknown;
+
+    expect(() =>
+      launchWithMalformedReadOnly({
+        name: "Invalid",
+        task: "Inspect source",
+        cwd: "/repo",
+        readOnly: "true",
+      }),
+    ).toThrow("readOnly must be a boolean");
+  });
   it("keeps the parent state cwd separate from the child working cwd", async () => {
     const parentCwd = makeTmp();
     const childCwd = join(parentCwd, "child");

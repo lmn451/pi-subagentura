@@ -5,21 +5,223 @@ keywords: [workflow, subagent, ralplan, planner, architect, critic, consensus]
 
 # Workflows
 
-This project ships several `.mjs` workflow scripts under
+Workflows support two source formats. New typed workflows use the V4 TypeScript
+SDK described below; existing `.mjs` scripts use the legacy injected-global API.
+See [README workflow usage](../README.md#reusable-workflows) for command
+defaults and the [runtime contract](../WORKFLOW_RUNTIME.md) for execution,
+recovery, cancellation, and result-consumption details. See also the typed
+[example](../examples/workflows/review-source.ts).
+
+`/workflow <task>` explicitly opts into authoring, not durable execution. By
+default it assesses suitability, authors with the typed V4 API when its step
+APIs fit or the legacy `.mjs` API only when simpler, then semantically reviews
+the exact source before saving and running it session-scoped. If persisted
+restart recovery is explicitly requested, author a suitable V4 definition,
+save it with `requireDurable:true`, and launch the direct workflow tool with
+`durable:true`.
+`/workflows` labels saved scripts `durable-ready` or `session-scoped`; readiness
+is capability metadata only, and selecting a definition remains session-scoped.
+`list_workflows` returns readiness and a SHA-256 source digest; computed
+operation IDs are still checked at runtime.
+
+## V4 typed workflows
+
+A V4 workflow is a TypeScript module that imports `defineWorkflow` and `schema`
+from `pi-subagentura/workflow`, then default-exports a definition. The module
+name must be a lowercase slug of at most 64 characters and its version a
+positive integer. The compiler strips erasable TypeScript syntax with Node's
+native support, but does not run a type checker. Use erasable syntax only; enum
+declarations and other syntax that needs code generation are rejected. Runtime
+imports are restricted to named `defineWorkflow` and `schema` bindings from
+that one package subpath. Type-only imports disappear during stripping; runtime
+imports, dynamic imports, `import.meta`, and named exports are unavailable.
+
+The SDK's `schema` builder defines the input, agent-output, and final-result
+shapes. The `run(ctx, args)` function receives a typed `WorkflowContext` with
+`step`, `agent`, `group`, `parallel`, `map`, `pipeline`, `repeat`, `workflow`,
+`ask`, `gate`, `checkpoint`, `artifact`, `log`, `budget`, and `signal`. Stable
+step IDs and native TypeScript control flow keep orchestration code explicit.
+The runner uses Effect 4 internally (`effect@4.0.0-rc.117`); Effect is not part
+of the authoring API.
+
+Steps and agents accept `timeout`, `retry`, `failure`, `persist`, `resume`,
+`cache`, and per-step `budget` options. A timeout can be positive milliseconds
+or a duration string such as `"10 minutes"`; retry accepts 1–10 attempts and
+fixed or exponential backoff. `failure: "continue"` and `"collect"` return
+structured task results for failed branches. The per-step output-token budget
+is checked when that step settles.
+
+### Read-only agent capabilities
+
+Set `readOnly: true` in a V4 `ctx.agent()` options object when the model needs
+to inspect but not modify source. The effective capability is snapshotted per
+agent call; omitted or false preserves the existing default model-facing tool
+set. The allowlist is exactly Pi `read`, `grep`, `find`, and `ls`. It excludes
+`edit`, `write`, `bash`, `powershell`, recursive subagent/workflow tools, and
+arbitrary extension tools, including `mcp__*`, `list_mcp_resources`,
+`list_mcp_resource_templates`, and `read_mcp_resource`. In-process native
+schema capture additionally permits the internal `structured_output` return
+tool; this is return plumbing, not a general-purpose agent tool.
+
+For process-backed read-only agents, the child returns its final assistant
+prose/JSON directly. The trusted host captures that output into the existing
+result artifact before settling the attempt. The process-selected SDK schema
+fallback deliberately remains text JSON, which the parent workflow extracts
+and validates against the schema. Schema repair and retries retain the same
+capability policy.
+
+`readOnly` controls model-facing tool dispatch only. It does not sandbox the
+process, constrain filesystem paths, or restrict host/extension code, which
+still runs as the same OS user. Prompt `# Goal` / `# Contract` context and
+per-agent `# Target` / `# Change` / `# Acceptance` sections organize requested
+work but do not enforce semantic scope.
+
+When `readOnly` is omitted or false, the existing default model-facing tool set
+remains unchanged. The option does not change isolation selection: with
+isolation omitted, the runtime's existing process default applies; non-durable
+runs may fall back to in-process execution when no supported multiplexer is
+available, retaining the restriction. Durable process launch fails closed
+rather than falling back to an unrestricted child. Durable step and attempt
+compatibility include the effective policy, so a changed capability cannot
+reuse an incompatible result or adopt an attempt with a different policy.
+Recovery preserves the recorded policy. The normal workflow step records remain
+the progress source; this adds no separate ledger or scheduler.
+
+V4 definitions use project-scoped durable storage when the direct `workflow`
+tool is called with `durable:true`; omitted or `durable:false` selects the
+session-scoped in-memory engine. Saved definitions launched through `/workflows`
+also run with the typed V4 engine and session-owned in-memory state. Completed
+durable steps are reused only when source definition, stable path, inputs, and
+policy remain compatible. A changed source hash causes the step to run again.
+`persist:false` omits a step output from durable storage; `cache:false` and
+`resume:false` disable reuse. This is a storage setting, not permission to
+disclose data to a model or provider. In particular, `persist:false` does not
+authorize sharing validation diagnostics or agent-thrown errors.
+
+Schema retries use generic feedback and omit unexpected property names/paths,
+parser details, and other raw diagnostics. Failed workflow status, result,
+run-list, and automatic notification surfaces likewise use generic summaries.
+`list_workflow_runs` keeps safe workflow IDs, names, statuses, and waiting paths
+while redacting diagnostic fields. Native `structuredContent` uses the same safe
+projection as model-visible workflow result content; it never exposes raw
+diagnostic details. Recognized historical workflow errors stay generic in
+normal model context and during native manual or automatic compaction, including
+split-turn summaries. Historical legacy runner RPC failures receive the generic
+projection during replay without redispatch; the original durable journal stays
+unchanged. Redaction operates on sanitized copies of SDK-prepared message arrays;
+the original session messages, local transcript, and session ledger remain
+unmodified. Raw agent failure text may remain in the local durable journal, but
+is not copied into retry configuration or telemetry.
+
+Optional raw diagnostic sharing remains unavailable and fails closed. This
+patch adds no diagnostic-sharing consent UI or grants and does not infer the
+physical route. In the Pi SDK version tested for this patch,
+`before_provider_request` exposes only an unknown payload, not the concrete
+physical provider/model/endpoint selected before dispatch. The session model can
+also be a virtual selection, so a pre-send grant cannot be bound to the actual
+destination. Workflow invocation, `ctx.ask()`, and `ctx.gate()` are not
+disclosure consent; explicit sharing remains deferred to
+[issue #213](https://github.com/lmn451/pi-subagentura/issues/213). Generic
+retries continue normally.
+
+`checkpoint` values and artifact references persist; artifact content is kept
+in a separate bounded private file. V4 status snapshots omit step inputs,
+policies, outputs, and human answers.
+
+If execution is interrupted before a step callback's completed output is
+committed, that callback may run again after resume. A step is a persistence
+boundary, not a transaction; make callbacks idempotent around external effects.
+Paused input waits and downtime before a manual resume do not count against the
+active V4 worker's execution-time limit.
+
+`ctx.ask()` and `ctx.gate()` wait for a human answer in the Pi UI. Use
+`list_workflow_runs` or `get_workflow_status` to find a waiting step, then call
+`respond_workflow_input({workflowId, path})`. Durable runs persist the answer
+before continuing; session-scoped V4 runs selected through `/workflows` or
+started with `durable:false` keep the answer in memory. With `async: false`, the
+tool collects input directly in Pi's UI. `ctx.budget.assertAvailable(amount)`
+checks whether a non-negative finite output-token amount fits in the current
+remaining soft budget; it does not reserve capacity or limit already-running
+work. Restart recovery is manual with `resume_workflow({workflowId})` in a live
+Pi process. See [review-source.ts](../examples/workflows/review-source.ts) for
+a runnable definition.
+
+Manual durable result reads are owned by the initiating Pi session. A session
+change while result I/O is pending cannot transfer the consumption receipt.
+Fallback receipts restored before interactive completion expectations are
+reconciled only with the exact completion identity, source, and turn, never an
+unrelated later-turn result.
+
+`cancel_workflow` and `/cancel-all-flows` persist durable cancellation intent
+before aborting owned workflow/process work. A failed intent or attempt-marker
+write reports cancellation failure. Retries persist any missing run-level
+intent and retry outstanding per-attempt markers. For durable legacy workflows,
+a cancelled-intent row alone does not reject a successful provider result when
+marker cleanup fails: the normal result remains eligible and produces one
+ordinary completion notice. Existing abort and `durableInterrupted` guards
+still apply. V4 step-based cancellation is different: an authoritative
+cancelled row remains terminal and takes precedence over queued success.
+
+A native abort linked to a synchronous durable start or resume uses the same
+persistence-first transition. An abort after a terminal result is committed
+preserves it; cancellation requested while the final journal write is still in
+flight can still append after the terminal event and make inspection report
+`cancelled`. Atomic ordering remains deferred to `pi-durable`.
+
+## Creating and resuming workflows
+
+`/workflow <task>` is explicit authoring opt-in, not automatic workflow
+routing. By default the parent assesses suitability, authors with typed V4
+when its step APIs fit or legacy `.mjs` only when simpler, semantically reviews
+the exact source in a distinct pass, then saves and starts it asynchronously in
+the current session. Use a separate reviewer when
+available, otherwise a fresh self-review; address findings and re-review each
+revision. If work is infeasible, unsupported, materially underspecified, or
+material issues remain unresolved, explain without saving or starting. Explicit
+authoring normally needs no routine approval unless the user or task risk
+warrants it.
+
+If persisted restart recovery is explicitly requested, author a suitable V4
+definition with structured contracts and stable IDs, review the exact source
+and revisions, save with `requireDurable:true`, inspect the saved source, and
+launch the direct workflow tool with `durable:true`.
+
+This sequence is parent prompt guidance, not an enforced semantic-review gate or
+authorization state machine. `save_workflow({name, script, requireDurable:true})`
+parses source and checks static durable readiness, but cannot determine task
+suitability, semantic correctness, or whether a review occurred. Parsing,
+durable-readiness checks, and execution tests do not substitute for semantic
+review. `inspect_workflow({name})` reads/parses the exact saved source without
+running agents, so the parent can confirm it matches the reviewed source before
+launch.
+
+`/workflows` shows `durable-ready` or `session-scoped` beside saved scripts and
+starts selected definitions session-scoped. The `list_workflows` tool returns
+readiness and a SHA-256 source digest; readiness is capability metadata, not
+execution permission. Use `resume_workflow({workflowId})` from a live Pi
+process in the same project after interruption; recovery is manual. Direct V4
+workflow-tool launches with `durable:true` use project-scoped storage;
+`durable:false` or an omitted flag runs session-scoped. Direct legacy `.mjs`
+calls retain the session-scoped default unless `durable:true` is passed.
+Failed explicit durable starts report their error without falling back.
+
+## Legacy `.mjs` workflow scripts
+
+This project ships several legacy `.mjs` workflow scripts under
 `examples/workflows/`. They orchestrate isolated sub-agents via the `workflow`
 tool. Two are **generic converters**; the rest are **concrete instantiations**
 of consensus planning pipelines.
 
-Workflow scripts are trusted agent-authored JavaScript. The worker VM hides
-accidental Node globals and disables string code generation, but it is not a
-security boundary; do not feed arbitrary user-supplied JavaScript to the
-workflow tool.
+Workflow scripts are trusted agent-authored JavaScript or TypeScript. The
+worker VM hides accidental Node globals and disables string code generation,
+but it is not a security boundary; do not feed arbitrary user-supplied source
+to the workflow tool.
 
 An in-process sub-agent orchestration context cannot invoke the `workflow` tool.
 This topology is unsupported until cross-registry cancellation is implemented; see
 GitHub issue [#62](https://github.com/lmn451/pi-subagentura/issues/62).
 
-## Authoring contract
+## Legacy authoring contract
 
 Submit raw JavaScript without markdown fences. Include a top-level pure-literal
 `export const meta = { name, description, phases? }`; helper declarations may
@@ -362,12 +564,12 @@ The `list_subagent_artifacts` tool lists all known sub-agents (including past on
 
 #### Backend support
 
-| Backend    | `createPane` behavior                                                                        | Available outside mux?                                           |
-| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset |
-| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached |
-| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                        |
-| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — falls back to in-process                                   |
+| Backend    | `createPane` behavior                                                                        | Available outside mux?                                                       |
+| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset             |
+| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached             |
+| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                                    |
+| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — non-durable runs may fall back to in-process; durable runs fail closed |
 
 ### Scaling
 

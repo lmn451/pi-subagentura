@@ -9,6 +9,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Executable TypeScript V4 workflows with `defineWorkflow()` and a typed
+  `ctx` API for agent calls, bounded fan-out/repeat, human input, checkpoints,
+  artifacts, and optional durable steps. Omitted `durable` or `durable: false`
+  selects the session-scoped in-memory engine; `durable: true` opts into
+  project-scoped persistence.
+- Explicit bounded `retry()` workflow primitive, independent of existing
+  three-attempt schema repair, with typed attempt numbers and cancellation guards.
+- Opt-in durable legacy code workflows: private request/response and agent-attempt
+  journals, stable operation ids, manual same-session recovery, persisted
+  results/cancellation, source inspection, and run listing. Root definitions,
+  arguments, effective settings, and nested definitions are recorded; parallel
+  response ordering and worker-visible budget deltas replay without new agent calls.
+- One-use process attempt supervisors and persisted unfinished completion
+  barriers for explicitly durable workflows. Legacy `.mjs` and V4 execution
+  remain session-scoped by default; `/workflows` selections are session-scoped.
+  Direct V4 workflow calls opt into project-scoped storage only with
+  `durable: true`. Neither mode adds a daemon, remote execution, VM snapshots,
+  or an exactly-once external-side-effect guarantee. Interrupted durable runs
+  require explicit resume from a live Pi process.
+- Durable authoring preflight via `save_workflow({ requireDurable: true })`,
+  saved-definition readiness and source digests. `/workflow <task>` defaults to
+  reviewed, session-scoped authoring, preferring the typed V4 API when its step
+  APIs fit and using legacy `.mjs` only when simpler; `/workflows` launches
+  saved definitions session-scoped. Readiness is capability metadata only, and
+  durable execution requires an explicit request for persisted recovery.
+- A reusable four-aspect source-review example with schema-validated findings,
+  deterministic severity counts and verdict precedence, and explicit failed or
+  uncertain review outcomes.
+- V4 workflow agent calls may opt into per-call `readOnly: true`, restricting
+  model-facing dispatch to Pi `read`, `grep`, `find`, and `ls` while preserving
+  the existing default tool set when omitted. In-process schema capture retains
+  the internal `structured_output` return channel; process-selected schema
+  results remain final text JSON captured by the host and validated by the
+  parent. The capability is recorded for retry/recovery compatibility and is
+  not an OS or path sandbox.
+- Explicitly exclude MCP function and resource tools on newer Pi SDKs that
+  retain MCP tools despite a positive tool allowlist.
+
+### Changed
+
+- Require Node.js 24.12 or newer for native erasable TypeScript workflow
+  syntax. The workflow worker pins Effect 4 internally; Effect remains outside
+  the public workflow API.
+- `/workflow <task>` defaults to session-scoped authoring, preferring the typed
+  V4 API when its step APIs fit and using legacy `.mjs` only when simpler. The
+  parent assesses feasibility, semantically reviews the exact source, then
+  saves and starts. V4 persistence uses `durable:true` only for explicitly
+  requested restart recovery. These phases are model guidance, not runtime-
+  enforced approval gates.
+
+- Further durability, storage, and crash-consistency hardening is deferred to
+  `pi-durable`. Keep completed journal, cancellation, and completion-group
+  repairs; this changelog does not claim additional crash-consistency guarantees.
+- An abort after a terminal result is committed preserves that result.
+  Cancellation requested while the final journal write is in flight can still
+  append after the terminal record and make inspection report `cancelled`;
+  atomic ordering is deferred to `pi-durable`.
+
+### Fixed
+
+- Failed completion-group recovery no longer suppresses independent manifests.
+  Errors remain eligible under their original group ID without guessed group
+  counts; successful and cancelled members stay behind the process-global
+  recovery fence. Only validated snapshot members count after authoritative
+  repair, and held terminal errors are reconciled once.
+- Close explicit completion-group admission when the spawning parent turn
+  settles, even if persisting the durable seal fails; later turns cannot add
+  members to that group.
+- Reconcile early fallback consumption receipts only with the exact completion
+  identity, source, and turn; stale result reads cannot transfer a receipt away
+  from their initiating owner.
+- Persist durable cancel-all intent before aborting. Inherited native-tool
+  aborts for synchronous durable starts and resumes use the same
+  persistence-first transition. Failed intent or attempt-marker writes report
+  cancellation failure; retries persist missing run-level intent and retry
+  outstanding per-attempt markers. For durable legacy workflows, a cancelled-
+  intent row alone does not reject a successful provider result when marker
+  cleanup fails; its ordinary completion remains eligible and produces one
+  ordinary completion notification. Existing abort and `durableInterrupted`
+  guards still apply. V4 step-based cancellation is different: an authoritative
+  cancelled row remains terminal and takes precedence over queued success.
+- Forward the actual process cancellation snapshot and never kill a recovered
+  pane on the authority of a persisted pane ID alone.
+- Handle promptless Pi custom agent-start events in completion coordination.
+- V4 timeouts that are collected or caught remain handled when cancellation
+  acknowledgement settles later, and nested calls preserve structured error
+  categories.
+- Wait for queued V4 step-state writes before closing the journal, so workflow
+  shutdown cannot overtake an in-flight state save.
+- Recovery charges committed output usage once globally while retaining per-step
+  attribution, preserves logical schema-error counts, and enforces step budgets
+  on settled failed attempts as well as successes without retrying budget
+  failures.
+- Compatible replay retains the original caught failure; agent cache
+  compatibility includes the captured prompt/output contract and execution
+  options with equivalent defaults normalized; artifact identity distinguishes
+  text from JSON even when their bytes match.
+- Workflow status/list exposes bounded actionable `respond_workflow_input`
+  batches of at most 256 whole paths per response and a shared 16 KiB
+  serialized-action budget per response across all listed runs. Omission counts
+  are accurate; omitted runs include exact `get_workflow_status` selectors.
+  Answering visible inputs permits later polls to show additional paths without
+  answers or private values. Resumed background runs persist their effective
+  completion policy before work proceeds.
+- V4 supports explicit generic calls in `defineWorkflow()` and schema helpers
+  under native erasable TypeScript; for `ctx.step()`, nested `policy.failure`
+  takes precedence over flat `failure`, and typed policies that may collect
+  include the failure outcome in their return union.
+- Track concurrent interactive tool calls by their call IDs and decode
+  process-exit signal diagnostics using host-native signal numbers.
+- Keep historical workflow diagnostics generic during native compaction and legacy
+  RPC replay without hiding safe workflow-list IDs, names, or statuses.
 - Add optional Orchestratorv2 child selection through Pi's native classifier
   API, with bounded inputs, fail-closed selection, and usage accounting.
 
