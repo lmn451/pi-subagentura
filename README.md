@@ -313,14 +313,8 @@ requests through `agtermctl`. This is not an agent coordination backend and does
 not replace native interactive routing or the verified Orca path. Skill or CLI
 availability alone does not prove that this Pi session is inside Agterm.
 
-For telemetry, a fresh root `session_started` event is labeled
-`session_host=agterm` only when `AGTERM_ENABLED=1`, the shell marker documented
-by [Agterm's installed skill](https://github.com/umputun/agterm/blob/master/plugins/agterm/skills/agterm/SKILL.md).
-`TERM_PROGRAM=agterm` alone is not sufficient. The marker is inherited by child
-processes, so this is an environment observation rather than proof that the
-terminal is currently live; simultaneous valid Orca and Agterm signals remain
-`unknown`. Only the closed host label is sent, and existing telemetry opt-outs
-still apply. See [telemetry documentation](docs/telemetry.md).
+For host attribution signals and telemetry opt-outs, see the
+[telemetry documentation](docs/telemetry.md).
 
 ### Extension settings
 

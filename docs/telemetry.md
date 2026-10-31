@@ -107,8 +107,8 @@ No raw stamp, marker, handle, host version, path, Orca/Pi identifier,
 environment value, prompt, or argument is uploaded or logged by this detector;
 only the closed host label enters `session_started`. The existing random
 logical-tree telemetry UUID remains the only correlation identifier. Host is
-not propagated to other events or persisted in session state; native child-backend
-attribution for Orca and Agterm remains deferred.
+not propagated to other events or persisted in session state; attribution for
+native child backends remains separate from this host dimension.
 
 ### Logical launch resolution
 
