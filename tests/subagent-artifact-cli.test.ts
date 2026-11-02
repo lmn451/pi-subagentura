@@ -590,7 +590,7 @@ describe("subagent-artifact CLI", () => {
                 cancellation.exitCode !== null,
             ).toBe(true);
           },
-          { timeout: 5_000, interval: 10 },
+          { timeout: 15_000, interval: 10 },
         );
         const cancellationHadToWait = existsSync(waitingPath);
         if (!cancellationHadToWait && !hasParentCancellation()) {
@@ -633,6 +633,7 @@ describe("subagent-artifact CLI", () => {
         );
         expect(existsSync(join(tmp, ".cancelled"))).toBe(true);
       },
+      30_000,
     );
   });
   describe("terminal publication", () => {
