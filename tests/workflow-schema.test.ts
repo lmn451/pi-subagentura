@@ -296,3 +296,33 @@ it("aggregates all failed schema attempts in result and progress", async () => {
   });
   expect(progress.at(-1)?.usage).toEqual(result.usage);
 });
+
+describe("schema enum container identity", () => {
+  it.each([
+    [{}, []],
+    [[], {}],
+    [{ "0": 1 }, [1]],
+    [[1], { "0": 1 }],
+    [{ nested: {} }, { nested: [] }],
+  ])("rejects %j when enum contains %j", (value, allowed) => {
+    expect(validateSchema(value, { enum: [allowed] })).toEqual([
+      "$: value not in enum",
+    ]);
+  });
+  it("accepts equal nested containers", () => {
+    expect(
+      validateSchema({ nested: [1, {}] }, { enum: [{ nested: [1, {}] }] }),
+    ).toEqual([]);
+  });
+  it("retries an object that only resembles an allowed array", async () => {
+    let calls = 0;
+    const result = await runWorkflow(
+      'export const meta = { name: "enum-retry", description: "test" }; return await agent("return an array", { isolation: "in-process", schema: { enum: [[1]] } });',
+      {
+        runAgent: async () => ok(++calls === 1 ? '{"0":1}' : "[1]"),
+      },
+    );
+    expect(result.result).toEqual([1]);
+    expect(calls).toBe(2);
+  });
+});
