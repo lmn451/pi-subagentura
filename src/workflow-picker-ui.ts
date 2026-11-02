@@ -2,6 +2,7 @@ import {
   DynamicBorder,
   getSelectListTheme,
   type Theme,
+  type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -80,4 +81,18 @@ export class WorkflowPickerComponent extends Container {
     const normalized = data === "j" ? "\x1b[B" : data === "k" ? "\x1b[A" : data;
     this.selectList.handleInput(normalized);
   }
+}
+export function showWorkflowPicker(
+  ui: ExtensionUIContext,
+  choices: WorkflowPickerChoice[],
+): Promise<WorkflowPickerAction | undefined> {
+  // Older Pi versions ignore the extra status metadata.
+  const options: NonNullable<Parameters<ExtensionUIContext["custom"]>[1]> & {
+    blocked: { kind: "question"; message: string };
+  } = { blocked: { kind: "question", message: "Select a workflow" } };
+  return ui.custom<WorkflowPickerAction | undefined>(
+    (_tui, theme, _kb, done) =>
+      new WorkflowPickerComponent(choices, theme, done),
+    options,
+  );
 }

@@ -124,7 +124,7 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
       "@earendil-works/pi-tui",
     ]) {
       expect(packageJson.peerDependencies[name]).toBe(">=1.2.0");
-      expect(packageJson.devDependencies[name]).toBe("1.4.0");
+      expect(packageJson.devDependencies[name]).toBe("1.5.0");
     }
     expect(packageJson.peerDependencies).not.toHaveProperty(
       "@earendil-works/pi-server",

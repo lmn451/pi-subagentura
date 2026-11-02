@@ -68,8 +68,13 @@ export function renderSubagentResult(
   result: AgentToolResult<SubagentRenderDetails>,
   { expanded, isPartial }: ToolRenderResultOptions,
   theme: Theme,
-  _context:
-    | Parameters<NonNullable<ToolDefinition["renderResult"]>>[3]
+  context:
+    | (Parameters<NonNullable<ToolDefinition["renderResult"]>>[3] & {
+        keyHint?: (
+          keybinding: "app.tools.expand",
+          description: string,
+        ) => string;
+      })
     | undefined,
 ) {
   // Async spawn result: show compact "started" display
@@ -128,13 +133,18 @@ export function renderSubagentResult(
     result.content.find(
       (c): c is { type: "text"; text: string } => c.type === "text",
     )?.text ?? "";
+  const expandHint =
+    !expanded && text && typeof context?.keyHint === "function"
+      ? `\n${context.keyHint("app.tools.expand", "to expand")}`
+      : "";
   const resultDetails = result.details;
   const thinkingLevel = resultDetails?.thinkingLevel;
 
   if (result.isError) {
     const thinking = thinkingSuffix(thinkingLevel);
     if (!expanded) {
-      const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+      const preview =
+        truncateToWidth(text.replace(/\s+/g, " "), 120) + expandHint;
       return new Text(
         thinking
           ? `${theme.fg("dim", thinking)}\n${theme.fg("error", preview)}`
@@ -161,13 +171,14 @@ export function renderSubagentResult(
       theme.fg("muted", usageStr) +
       theme.fg("dim", thinking);
     if (!expanded) {
-      return new Text(header, 0, 0);
+      return new Text(header + expandHint, 0, 0);
     }
     return new Text(`${header}\n${text}`, 0, 0);
   }
 
   if (!expanded) {
-    const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+    const preview =
+      truncateToWidth(text.replace(/\s+/g, " "), 120) + expandHint;
     return new Text(
       thinking
         ? `${theme.fg("dim", thinking)}\n${theme.fg("dim", preview)}`
