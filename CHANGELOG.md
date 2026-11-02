@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-02
+
 ### Added
 
 - Show extension update notes on Pi 1.5 using the packaged changelog.
