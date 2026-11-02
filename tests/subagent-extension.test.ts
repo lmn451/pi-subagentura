@@ -238,9 +238,6 @@ describe("extension registration", () => {
       "An exact or continuation match is not routable",
     );
     expect(result.systemPrompt).toContain(
-      "A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist",
-    );
-    expect(result.systemPrompt).toContain(
       "Do not ask the user for permission merely to create that specialist",
     );
     expect(result.systemPrompt).toContain(

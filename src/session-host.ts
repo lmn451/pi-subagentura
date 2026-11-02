@@ -15,8 +15,9 @@ function sourceField(value: unknown): string | undefined {
 
 /**
  * Orca's bundled stampRuntimeSourceEnv replaces inherited launch-source stamps.
- * This is launch-origin measurement, not live-process or routing authority:
- * another standalone root can inherit a valid stamp and retain that origin.
+ * Agterm's skill sets AGTERM_ENABLED=1 in spawned shells, including its quick
+ * terminal. Both signals are measurement-only: inherited values are not live
+ * process or routing authority. Conflicting valid host signals fail closed.
  */
 export function resolveTelemetrySessionHost(
   env: NodeJS.ProcessEnv = process.env,
@@ -26,8 +27,12 @@ export function resolveTelemetrySessionHost(
   const incarnation = sourceField(env.ORCA_RUNTIME_SOURCE_INCARNATION);
   const profile = sourceField(env.ORCA_RUNTIME_SOURCE_PROFILE_PATH);
   const pathApi = platform === "win32" ? win32 : posix;
-  if (!sourceId || !incarnation || !profile || !pathApi.isAbsolute(profile)) {
-    return "unknown";
-  }
-  return "orca";
+  const hasOrcaLaunchOrigin = Boolean(
+    sourceId && incarnation && profile && pathApi.isAbsolute(profile),
+  );
+  const hasAgtermMarker = env.AGTERM_ENABLED === "1";
+
+  if (hasOrcaLaunchOrigin && hasAgtermMarker) return "unknown";
+  if (hasOrcaLaunchOrigin) return "orca";
+  return hasAgtermMarker ? "agterm" : "unknown";
 }

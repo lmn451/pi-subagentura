@@ -8,7 +8,14 @@ This guidance governs only interactive delegation and its execution surface. It 
 
 Choose the interactive surface using the verified current-session proof below. Existing native interactive children remain native, including when Pi is inside Orca: keep their native identities, registry, artifacts, receipts, lifecycle, and completion handling in Subagentura. Do not translate them into Orca identities or dual-dispatch their work. Orca-managed Pi specialists are distinct skill-managed terminal agents; never invent native IDs, artifacts, receipts, turns, notices, or wakeups for them, or promise native Subagentura completion for their work.
 
-When Pi is verified inside Orca, these shared instructions govern selection of a new interactive delegate ahead of native-only surface defaults or advisors. Native routing, authority, schema, artifact, and completion rules continue to apply to existing native children. Nested Orca work follows its live skill/dispatch authority and remains owned by its immediate coordinator.
+When Pi is verified inside Orca and the request does not explicitly select a
+target, these shared instructions choose the host-managed surface as the
+default for a new interactive delegate, ahead of native-only defaults or
+advisors. Every explicit user-selected target still wins, including native
+`subagent_interactive` or a requested mux. Native routing, authority, schema,
+artifact, and completion rules continue to apply to existing native children.
+Nested Orca work follows its live skill/dispatch authority and remains owned by
+its immediate coordinator.
 
 ## Verify the interactive execution surface
 
@@ -16,11 +23,19 @@ Keep the existing native interactive path when there is no indication that this 
 
 When current-session terminal context suggests Orca, or the user requests that surface, load the installed `orca-cli` and `orchestration` skills before selecting Orca. Follow their discovery stubs to resolve one Orca executable, fetch its version-matched guides (including conditional references when applicable) before command discovery, and use that executable throughout. The skills are authoritative for exact commands, flags, launch and submission receipts, role classification, and recovery; do not maintain a duplicate CLI manual. Report a failure rather than switching binaries.
 
-Use the guides' runtime status and terminal discovery to verify that the current caller and terminal belong to this running Pi session, and bind the exact current checkout/workspace and execution host. Skill presence, CLI installation, a cwd or environment hint, an active UI tab, or an Orca instance elsewhere is not proof. If positively outside Orca, keep the existing native interactive path. If proof is unavailable or ambiguous, surface the uncertainty and ask; do not silently choose either surface, spawn on either surface, or dual-spawn.
+Use the guides' runtime status and terminal discovery to verify that the current caller and terminal belong to this running Pi session, and bind the exact current checkout/workspace and execution host. Skill presence, CLI installation, a cwd or environment hint, an active UI tab, or an Orca instance elsewhere is not proof. If positively outside Orca, keep the existing native interactive path only when the request has not explicitly selected Orca; otherwise report the mismatch and ask. If proof is unavailable or ambiguous, surface the uncertainty and ask; do not silently choose either surface, spawn on either surface, or dual-spawn.
 
 ## Orca specialist roles and ownership
 
-When the current session is verified inside Orca, use Orca's skills to coordinate new Pi specialists in Orca terminal tabs rather than creating new native interactive children. Use `orchestration` for explicitly supervised coordination, result tracking, DAGs, and ask/reply; honor a live dispatched-worker preamble when present. Use `orca-cli` for ordinary terminal prompts and full ownership handoffs. Do not create Run/Task/Dispatch lifecycle state for ordinary terminal prompts or full ownership handoffs. A full handoff ends after verified delivery and reporting the owned identity; do not monitor it as supervised work.
+When the current session is verified inside Orca and the user has not
+explicitly selected another target, use Orca's skills to coordinate new Pi
+specialists in Orca terminal tabs instead of creating new native interactive
+children. Use `orchestration` for explicitly supervised coordination, result
+tracking, DAGs, and ask/reply; honor a live dispatched-worker preamble when
+present. Use `orca-cli` for ordinary terminal prompts and full ownership
+handoffs. Do not create Run/Task/Dispatch lifecycle state for ordinary terminal
+prompts or full ownership handoffs. A full handoff ends after verified delivery
+and reporting the owned identity; do not monitor it as supervised work.
 
 Use the same checkout and exact discovered workspace by default; do not create a worktree unless requested. If sharing would create a conflict, pause and ask rather than silently isolating the work. Request the terminal surface explicitly through documented launch controls so specialists open as terminal tabs, not Chat UI. Verify the launch receipt; if the installed version cannot honor the terminal surface, report that limitation before spawning.
 
@@ -28,7 +43,7 @@ Prefer Pi in the terminal and the same model and reasoning effort as the parent 
 
 Before reuse or fanout, discover agents through the skills. Bind each specialist's explicit responsibility, allowed read/write scope, deliverables, and parent ownership to its current runtime identity: exact workspace/host and agent session/terminal handle, plus the active Task/Dispatch when supervised. Ground assignments in actual launch or discovery receipts and keep them in the parent conversation; after lost context, recover ownership or ask. Titles, labels, agent type, and workspace membership are not ownership. A responsibility proposal from a worker requires explicit user approval before changing its assignment.
 
-Reuse only a freshly verified live, owned agent for an exact continuation covering the requested relationship, action, deliverable, and access. A live PTY alone does not prove a live agent. Unknown or stale ownership/liveness is not routable; surface it without replacement. Shared domain words do not authorize a read-only reviewer to design or implement; scope expansion requires a new, explicitly approved responsibility. Honor new-thread requests and ask about ambiguity or a narrow request with no exact owner rather than silently reusing or spawning. Nested work remains owned by its immediate coordinator.
+Reuse only a freshly verified live, owned agent for an exact continuation covering the requested relationship, action, deliverable, and access. A live PTY alone does not prove a live agent. Unknown or stale ownership/liveness is not routable; surface it without replacement, and never treat lost contact or stale/unknown ownership as proof that no owner exists. Shared domain words do not authorize a read-only reviewer to design or implement; scope expansion requires a new, explicitly approved responsibility. Honor new-thread requests. When fresh authoritative registry/discovery establishes that no suitable exact, live, authorized owner exists, a clear request with a definite action, scope, deliverable, and access authorizes exactly one new specialist without asking again. This includes narrow read-only investigation; ask only when the action, scope, deliverable, or access is genuinely unclear, or a choice among plausible owners remains unresolved. Nested work remains owned by its immediate coordinator.
 
 Use the skills' correct terminal or supervised messaging path for the owned target. Rediscover stale handles after a runtime restart or stale-handle error; use only the freshly proven replacement and never dual-send. After an ambiguous launch or send failure, inspect the receipt and current runtime without injecting input, then follow only the documented same-operation recovery. Do not switch to native tools, launch a duplicate, send via another channel, or respawn or resend on silence. For an attach request, focus or switch only; do not also send a task.
 
