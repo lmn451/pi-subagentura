@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show extension update notes on Pi 1.5 using the packaged changelog.
+- Report the saved-workflow picker as waiting for user input on Pi 1.5.
+- Show configured expand shortcuts in collapsed subagent results on Pi 1.5.
+- Recognize provider-billed usage totals, including free requests, while
+  preserving legacy Pi cost accounting.
+
 - Add optional Orchestratorv2 child selection through Pi's native classifier
   API, with bounded inputs, fail-closed selection, and usage accounting.
 

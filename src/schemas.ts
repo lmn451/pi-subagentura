@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
@@ -19,7 +18,12 @@ const THINKING_LEVELS = [
 export const MAX_INTERACTIVE_CONTEXT_BYTES = 64 * 1024;
 
 function thinkingLevelSchema(description: string) {
-  return StringEnum(THINKING_LEVELS, { description });
+  // Preserve the literal union across Pi SDK versions while emitting plain JSON Schema.
+  return Type.Unsafe<(typeof THINKING_LEVELS)[number]>({
+    type: "string",
+    enum: [...THINKING_LEVELS],
+    description,
+  });
 }
 
 export const BaseParams = Type.Object(
