@@ -93,6 +93,14 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
+  new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
@@ -144,6 +152,25 @@ export default function (pi: ExtensionAPI) {
   const initialSpawnTreeContext = childArtifactDir
     ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
+  pi.on("before_agent_start", (event, ctx) => {
+    const prompts: string[] = [];
+    if (!isChild) {
+      if (pi.getFlag("orchestrator") === true) {
+        prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
+      }
+      if (pi.getFlag("orchestratorv2") === true) {
+        prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+        if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
+          prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
+        }
+      }
+    }
+    prompts.push(ORCA_INTERACTIVE_SYSTEM_PROMPT);
+    prompts.push(INTERACTIVE_SUBAGENT_SYSTEM_PROMPT);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
+    };
+  });
   if (isChild) {
     registerChildProtocol(pi);
     pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
@@ -174,21 +201,7 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
-  pi.on("before_agent_start", (event, ctx) => {
-    const routingEnabled = isRoutingEnabled(process.env, ctx.modelRegistry);
-    const prompts: string[] = [];
-    if (pi.getFlag("orchestrator") === true) {
-      prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
-    }
-    if (pi.getFlag("orchestratorv2") === true) {
-      prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
-      if (routingEnabled) prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
-    }
-    if (prompts.length === 0) return;
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
-    };
-  });
+
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);
