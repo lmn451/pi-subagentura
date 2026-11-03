@@ -375,6 +375,12 @@ describe("extension registration", () => {
 
     expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
     expect(result.systemPrompt).toContain("## Optional routing advisor");
+    expect(result.systemPrompt).toContain(
+      "This advisor applies only to native Subagentura children, not Orca-managed agents.",
+    );
+    expect(result.systemPrompt).toContain(
+      "The Orca skill path takes precedence over this section for Orca-managed agents.",
+    );
     expect(
       result.systemPrompt.indexOf("If multiple children plausibly match"),
     ).toBeLessThan(result.systemPrompt.indexOf("## Optional routing advisor"));

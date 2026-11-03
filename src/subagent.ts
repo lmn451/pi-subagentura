@@ -97,6 +97,9 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
 
+This advisor applies only to native Subagentura children, not Orca-managed agents.
+The Orca skill path takes precedence over this section for Orca-managed agents.
+
 For this enabled mode, this section overrides the earlier instruction to ask
 whenever multiple children plausibly match. If the user's action, scope,
 deliverable, and required access are clear and only the choice of child is

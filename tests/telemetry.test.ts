@@ -1382,6 +1382,7 @@ describe("anonymous product telemetry", () => {
       "reason",
       "reporter",
       "schema_version",
+      "session_host",
       "source",
       "spawn_duration_bucket",
       "spawn_duration_ms",

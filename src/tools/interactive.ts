@@ -1177,7 +1177,7 @@ export function registerInteractiveSubagentTools(
       );
     },
 
-    renderResult(result, _options, theme) {
+    renderResult(result, _options, theme, context) {
       const details = result.details as
         | (Partial<InteractiveSubagentState> & { thinkingLevel?: string })
         | undefined;
@@ -1186,7 +1186,7 @@ export function registerInteractiveSubagentTools(
       const thinking = details?.thinkingLevel
         ? ` · thinking: ${details.thinkingLevel}`
         : "";
-      if (result.isError) {
+      if (context?.isError || result.isError) {
         const first = result.content?.[0];
         const text =
           first?.type === "text"

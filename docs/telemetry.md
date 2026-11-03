@@ -27,6 +27,74 @@ launches, and schema retries can request further child work. Rejected pre-start
 launches need not produce a task completion. Daily start and terminal events are
 not a linked cohort. A runtime success does not measure answer usefulness.
 
+### Child backend versus Orca host
+
+`mux` attributes the child execution backend, not the application hosting the
+parent. An extension-managed tmux child remains `mux=tmux` even when its parent
+runs in Orca; an in-process child remains `mux=none`. `requested_mux` describes
+the extension launch request, not the host either. For rejected launches, `mux`
+can preserve a selected backend without implying that a child was accepted.
+
+Orca integration in Orchestratorv2 is prompt-only. There is no native Orca
+`subagent_interactive` backend, and `orca` is not currently a supported telemetry
+mux value. Commands executed through the Orca CLI are outside the extension's
+child launch/turn instrumentation: do not manufacture `agent_created`,
+`agent_launch_resolved`, or task lifecycle records from prompt instructions or
+CLI receipts. Consequently, filtering these reports by `mux=orca` cannot measure
+Orca prompt-path adoption or reliability. Enabling `mode=orchestrator_v2` identifies
+the extension mode, not proof that the Orca path was used.
+
+An independently launched Pi instance that loads this extension can report its
+own observed package activity; that does not reconstruct an Orca CLI launch or
+establish an extension-managed parent/child relationship.
+
+Fresh root `session_started` records now include the additive schema-v6
+`session_host` dimension: `orca` or `unknown`. Earlier v6 releases omit it; a
+missing historical value means `unknown`, never non-Orca. This is observed
+**Orca-origin logical sessions**, not unique people, installations, active
+terminals, or proof that a particular prompt/CLI path was used. No persistent
+installation or user identifier is created.
+
+Attribution consumes only the complete, dedicated Orca launch-origin stamp:
+`ORCA_RUNTIME_SOURCE_ID`, `ORCA_RUNTIME_SOURCE_INCARNATION`, and
+`ORCA_RUNTIME_SOURCE_PROFILE_PATH`. The Orca 1.4.245 bundled
+`shared/runtime-source-env` contract describes these as which runtime launched
+a process; `stampRuntimeSourceEnv` clears any inherited stamp before setting the
+new source. This implementation matches its trimmed, nonempty, at-most-4096-
+character fields, additionally rejecting control characters and requiring an
+absolute platform-appropriate profile path. The source ID and incarnation are
+opaque local validation inputs, not uploaded identifiers.
+
+This is measurement-only **launch-origin provenance**, not verification of a
+currently-live runtime, current process, foreground terminal, routing,
+cancellation, or security authority. A standalone root Pi inheriting a complete
+stamp can retain that Orca origin and count as another logical session. This
+is an intentional inheritance limitation, not a claim that the process is an
+Orca-managed agent. Native extension-managed children do not emit root starts.
+Reload/resume preserve existing logical-session suppression and do not
+reclassify the session.
+
+Installed CLI/skills, worktree paths, `ORCA_AGENT_PANE`, terminal handles, and
+other loose markers do not establish attribution. Older launchers, scrubbed,
+missing, partial, malformed, or oversized stamps produce `unknown`. These
+conservative checks can undercount Orca-origin sessions; `unknown` is not a
+non-Orca population. The stamp is not cryptographic proof against forged
+same-user environment variables.
+
+Only telemetry-enabled fresh roots evaluate this pure environment-to-enum
+classification. It runs no command, runtime probe, app launch, filesystem read,
+or network request on any platform; it neither discovers an installed CLI nor
+uses remote/active-tab defaults. No executable or environment-provided command
+is ever loaded. Existing opt-outs suppress classification as well as capture.
+There is no asynchronous detection or startup delay.
+
+No raw stamp, handle, host version, path, Orca/Pi identifier, environment value,
+prompt, or argument is uploaded or logged by this detector; only the closed
+host label enters `session_started`. The existing random logical-tree telemetry
+UUID remains the only correlation identifier. Host is not propagated to other
+events or persisted in session state; native Orca backend attribution remains
+deferred.
+
 ### Logical launch resolution
 
 `agent_launch_resolved.outcome` is one of:
@@ -149,7 +217,7 @@ traffic. Terminal E2E children retain their separate network guard.
 
 ## Report setup
 
-Create five SQL insights using the queries below. PostHog's
+Create six SQL insights using the queries below. PostHog's
 [`{filters}` placeholder](https://posthog.com/docs/sql) supplies the saved insight's
 date/property filters. Select UTC for the reporting date range. Keep release,
 schema, mode, and traffic-origin populations explicit; never silently relabel
@@ -736,3 +804,34 @@ Keep workflow lifecycle counts separate from agent launch and task completion
 counts. This report describes observed start/terminal volume in a window only;
 it cannot establish a unique-workflow total or explain historical aggregate
 differences.
+
+### 6. Observed fresh root sessions by host
+
+Count observed `session_started` records by the closed host label. Keep schema,
+release, mode, origin, and UTC date filters explicit. Do not apply child `mux`,
+execution, or operation filters: host is emitted only on root session starts.
+Historical missing and unexpected values stay `unknown`. This report measures
+sessions, not people, installations, all active sessions, native Orca launches,
+or verified current foreground agents. Repeated human use can create many
+sessions; continuing sessions without a fresh start in the window are absent.
+
+```sql
+SELECT
+  coalesce(properties.schema_version, 0) AS schema_version,
+  coalesce(properties.$lib_version, 'unknown') AS release,
+  coalesce(properties.mode, 'unknown') AS mode,
+  coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
+  CASE WHEN properties.session_host = 'orca' THEN 'orca'
+    ELSE 'unknown' END AS session_host,
+  count(*) AS observed_session_starts
+FROM events
+WHERE {filters} AND event = 'pi_subagentura_session_started'
+GROUP BY schema_version, release, mode, traffic_origin, session_host
+ORDER BY schema_version, release, mode, traffic_origin, observed_session_starts DESC
+```
+
+No schema filter is hard-coded so historical missing host values remain visible.
+The additive field does not change schema-v6 event meanings or require rewriting
+the existing five reports. Do not call the `orca` share a unique-user share or
+the `unknown` remainder a non-Orca share, and do not use this event-only property
+as a shared filter on the other reports' active-tree denominators.
