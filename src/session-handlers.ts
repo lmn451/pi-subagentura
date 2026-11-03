@@ -67,7 +67,6 @@ import {
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
-import { closeActiveInteractiveSupervisor } from "./interactive-supervisor-ui";
 import {
   clearCompletionTurnWake,
   isOrchestratorMode,
@@ -508,7 +507,6 @@ export function registerSessionHandlers(
     if (scope.lifecycle === "started") {
       const previousOwner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
-      closeActiveInteractiveSupervisor(previousOwner);
       clearSessionParsers(previousOwner);
       cleanupScopeGeneration(scope, previousOwner, event, "session_start", ctx);
       retireSessionScopedCompletions(
@@ -706,7 +704,6 @@ export function registerSessionHandlers(
 
       const owner = sessionOwner(scope);
       retireTelemetrySession(scope.telemetry);
-      closeActiveInteractiveSupervisor(owner);
       clearSessionParsers(owner);
       cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
       clearFreshChildLineage(scope, event?.reason);

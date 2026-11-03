@@ -5,15 +5,30 @@ import { createHarness } from "../harness.mjs";
 const name = process.argv[2] ?? "interactive";
 const scenario = getScenario(name);
 const harness = createHarness({ scenario: name, keep: false });
-const supervisorScenarios = new Set([
-  "async-isolated",
-  "background-workflow",
-  "interactive",
-  "interactive-error",
-  "process-workflow",
-  "workflow",
-  "workflow-partial",
-]);
+const toolInspectionScenarios = new Map(
+  Object.entries({
+    "async-isolated": {
+      marker: "[E2E:ASYNC_RESULT]",
+      prompt: "[E2E:ASYNC_RESULT] Collect the completed async result.",
+      expected: "Child result for [E2E:CHILD_ASYNC_ISOLATED].",
+    },
+    "background-workflow": {
+      marker: "[E2E:WORKFLOW_RESULT]",
+      prompt: "[E2E:WORKFLOW_RESULT] Collect the completed workflow result.",
+      expected: "Child result for [E2E:CHILD_WORKFLOW].",
+    },
+    interactive: {
+      marker: "[E2E:INTERACTIVE_READ]",
+      prompt: "[E2E:INTERACTIVE_READ] Read the completed child artifact.",
+      expected: "[E2E:INTERACTIVE_OUTPUT_1]",
+    },
+    "interactive-error": {
+      marker: "[E2E:INTERACTIVE_READ]",
+      prompt: "[E2E:INTERACTIVE_READ] Read the failed child artifact.",
+      expected: "Artifact for",
+    },
+  }),
+);
 let failed = false;
 
 function sleep(milliseconds) {
@@ -92,28 +107,22 @@ function detachTmux() {
     harness.tmux(["detach-client", "-s", harness.session]);
 }
 
-async function showSupervisor() {
-  caption(
-    "STEP 4/4  Open the supervisor and inspect the completed child",
-    3000,
-  );
+async function showToolInspection() {
+  const inspection = toolInspectionScenarios.get(name);
+  if (!inspection) return;
+  caption("STEP 4/4  Use result tools to inspect the completed child", 3000);
   await sleep(700);
-  await typeText("/subagents", 70);
+  await typeText(inspection.prompt, 70);
   harness.pressEnter();
-  await harness.waitForScreen(
-    (screen) => screen.includes("Async Subagents"),
-    "cinematic supervisor overlay",
+  await harness.waitForProvider(
+    () => providerReached(inspection.marker, ["complete"]),
+    `${name} cinematic tool inspection`,
   );
-  await sleep(1400);
-  harness.sendKey("Enter");
-  await sleep(2000);
-  harness.sendKey("Left");
-  await sleep(900);
-  harness.sendKey("Escape");
   await harness.waitForScreen(
-    (screen) => !screen.includes("Async Subagents"),
-    "cinematic supervisor close",
+    (screen) => screen.includes(inspection.expected),
+    "cinematic tool inspection result",
   );
+  await sleep(1800);
 }
 
 async function runCinematicSequence() {
@@ -157,7 +166,7 @@ async function runCinematicSequence() {
   );
   await sleep(1800);
 
-  if (supervisorScenarios.has(name)) await showSupervisor();
+  await showToolInspection();
   caption(`DONE  ${name} completed without real LLM or network calls`, 2800);
   await sleep(2800);
   detachTmux();

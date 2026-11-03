@@ -201,7 +201,7 @@ describe("operation telemetry", () => {
       description: "",
       handler: command,
     });
-    registerShortcutWithTelemetry(pi, "ctrl+alt+a", {
+    registerShortcutWithTelemetry(pi, "ctrl+alt+x", {
       description: "",
       handler: shortcut,
     });
@@ -220,7 +220,7 @@ describe("operation telemetry", () => {
         ]),
     ).toEqual([
       ["command", "workflow", "returned"],
-      ["shortcut", "ctrl+alt+a", "returned"],
+      ["shortcut", "ctrl+alt+x", "returned"],
     ]);
     expect(JSON.stringify(payloads)).not.toContain("private task");
   });

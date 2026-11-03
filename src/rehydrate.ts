@@ -51,8 +51,7 @@ const MAX_RECOVERY_COUNTS = 1_000;
  * It is rendered where the UI promises a copy-pasteable command
  * (`Attach: <cmd>`), so it must be unmistakably NOT a command: the previous
  * bare `"unavailable"` read as one, for every backend. Keep the parenthesized
- * shape — `interactive-supervisor-registration.ts` builds its own detailed
- * variants of this and matches the convention.
+ * shape so tool results cannot mistake the diagnostic for a shell command.
  */
 export const ATTACH_UNAVAILABLE =
   "(attach command unavailable - pane could not be resolved)";

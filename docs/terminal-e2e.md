@@ -9,7 +9,8 @@ keywords:
 `npm run test:tui` drives the **real Pi CLI** inside an isolated tmux PTY and
 asserts on what it actually paints. It is the regression source of truth for
 extension registration, tool rendering, async notifications, workflow progress,
-the supervisor overlay, and keyboard interaction.
+tool-driven child inspection/cancellation, the shared activity footer, and
+keyboard cancellation.
 
 ```bash
 npm run test:tui          # the terminal suite (needs tmux >= 3.2 and the Pi CLI)
@@ -80,12 +81,30 @@ automatically instead of being silently excluded everywhere.
 - **Captures use `capture-pane -J`** so a line Pi wrapped at the pane width still
   matches a single-line expectation. Diagnostics keep the un-joined capture.
 
+### Dashboard removal and replacement coverage
+
+The cross-mode supervisor dashboard has been retired. Terminal E2E flows must
+not type `/subagents`, send the old Ctrl+Alt+A shortcut, or recreate a fake
+dashboard. Use the existing tools that users now have:
+
+- In-process async jobs: `get_subagent_status`, `get_subagent_result`, and
+  `cancel_subagent`.
+- Interactive panes/artifacts: `get_interactive_subagent_status`,
+  `list_subagent_artifacts`, `read_subagent_artifact`, and
+  `cancel_interactive_subagent`.
+- Background workflows: `get_workflow_status` and `get_workflow_result`.
+
+The recording demos follow the same replacement path: after the deterministic
+child finishes, they type a tool-backed marker prompt to inspect or collect the
+result instead of opening a dashboard overlay.
+
 ### Screen assertions are pinned to one SDK leg
 
 The suite matches literal Pi chrome (`ctrl+c/ctrl+d clear/exit`,
 `Model: subagentura-e2e/mock`, `Workflow "e2e-workflow" complete`,
-`Async Subagents`). CI therefore runs `test:tui` only on the **pinned** Pi SDK
-leg; a cosmetic upstream TUI change must not turn master red on the floating
+`get_subagent_status`, `Artifact for`). CI therefore runs `test:tui` only on
+the **pinned** Pi SDK leg; a cosmetic upstream TUI change must not turn master
+red on the floating
 `latest` leg where it would read as a flake. Unit and integration coverage stays
 strict on both legs.
 

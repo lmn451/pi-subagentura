@@ -268,10 +268,10 @@ metadata. The active `SessionScope` carries a typed lineage context. Child launc
 write that context to a mode-0600 one-use bootstrap and export only its path. The child
 atomically claims and unlinks the bootstrap before registration; credentials expire
 after 60 seconds, cancellation/fresh transitions retire unclaimed files, and reloads
-reuse the
-process-local copy. Without an explicit context, the supervisor may show and act on
-direct registry entries but must not project persisted lineage. Vitest setup strips
-lineage/bootstrap variables globally, and lineage tests opt into temporary contexts.
+reuse the process-local copy. Without an explicit context, tools may show and act
+on direct registry entries but must not infer authority from persisted lineage.
+Vitest setup strips lineage/bootstrap variables globally, and lineage tests opt
+into temporary contexts.
 Legacy lineage identity/depth environment variables are intentionally ignored. A
 mixed-version child without a bootstrap degrades to direct-registry-only lineage and
 cannot recursively spawn interactive children until it is respawned; it must never

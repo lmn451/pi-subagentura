@@ -153,9 +153,13 @@ const KNOWN_MARKERS = new Set([
   "[E2E:WORKFLOW_PARTIAL]",
   "[E2E:ASYNC_STATUS]",
   "[E2E:ASYNC_RESULT]",
+  "[E2E:ASYNC_CANCEL]",
   "[E2E:WORKFLOW_STATUS]",
   "[E2E:WORKFLOW_RESULT]",
   "[E2E:INTERACTIVE]",
+  "[E2E:INTERACTIVE_STATUS]",
+  "[E2E:INTERACTIVE_LIST]",
+  "[E2E:INTERACTIVE_READ]",
   "[E2E:INTERACTIVE_FOLLOWUP_PARENT]",
   "[E2E:INTERACTIVE_CANCEL_PARENT]",
   "[E2E:INTERACTIVE_ERROR_PARENT]",
@@ -681,6 +685,11 @@ function parentTool(marker: string, context: Context): ToolCall {
       jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),
     });
   }
+  if (marker.includes("ASYNC_CANCEL")) {
+    return toolCall("e2e-async-cancel-1", "cancel_subagent", {
+      jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),
+    });
+  }
   if (marker.includes("WORKFLOW_STATUS")) {
     return toolCall("e2e-workflow-status-1", "get_workflow_status", {
       workflowId: resultId(context, "workflow", /\bwf_[a-f0-9]{10}\b/),
@@ -689,6 +698,27 @@ function parentTool(marker: string, context: Context): ToolCall {
   if (marker.includes("WORKFLOW_RESULT")) {
     return toolCall("e2e-workflow-result-1", "get_workflow_result", {
       workflowId: resultId(context, "workflow", /\bwf_[a-f0-9]{10}\b/),
+    });
+  }
+  if (marker.includes("INTERACTIVE_STATUS")) {
+    return toolCall(
+      "e2e-interactive-status-parent-1",
+      "get_interactive_subagent_status",
+      {
+        jobId: interactiveResultId(context),
+      },
+    );
+  }
+  if (marker.includes("INTERACTIVE_LIST")) {
+    return toolCall(
+      "e2e-interactive-list-parent-1",
+      "list_subagent_artifacts",
+      {},
+    );
+  }
+  if (marker.includes("INTERACTIVE_READ")) {
+    return toolCall("e2e-interactive-read-parent-1", "read_subagent_artifact", {
+      id: interactiveResultId(context),
     });
   }
   if (marker.includes("INTERACTIVE_FOLLOWUP_PARENT")) {

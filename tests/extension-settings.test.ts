@@ -822,7 +822,7 @@ describe("generic extension settings", () => {
     handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
   });
 
-  it("keeps list/status tools and the visual supervisor available when the widget is hidden", () => {
+  it("keeps list/status/cancel tools available when the widget is hidden", () => {
     const api = mockApi((name) =>
       name === HIDE_AGENT_LIST_FLAG ? true : undefined,
     );
@@ -835,30 +835,16 @@ describe("generic extension settings", () => {
     expect(tools).toContain("subagent_interactive");
     expect(tools).toContain("cancel_interactive_subagent");
     expect(tools).toContain("read_subagent_artifact");
-    expect(api.registerCommand).toHaveBeenCalledWith(
-      "subagents",
-      expect.anything(),
-    );
-    expect(api.registerShortcut).toHaveBeenCalledWith(
-      "ctrl+alt+a",
-      expect.anything(),
-    );
   });
 
-  it("preserves list tools and visual supervisor visibility by default", () => {
+  it("preserves list/status/cancel tools by default", () => {
     const api = mockApi();
     registerExtension(api as any);
     const tools = registeredTools(api);
 
     expect(tools).toContain("list_orchestrator_agents");
     expect(tools).toContain("list_subagent_artifacts");
-    expect(api.registerCommand).toHaveBeenCalledWith(
-      "subagents",
-      expect.anything(),
-    );
-    expect(api.registerShortcut).toHaveBeenCalledWith(
-      "ctrl+alt+a",
-      expect.anything(),
-    );
+    expect(tools).toContain("get_interactive_subagent_status");
+    expect(tools).toContain("cancel_interactive_subagent");
   });
 });

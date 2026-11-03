@@ -67,7 +67,7 @@ describe("README public surface", () => {
         "update_orchestrator_agent_description",
       ].sort(),
     );
-    expect(commands).toHaveLength(8);
+    expect(commands).toHaveLength(7);
     for (const name of tools) {
       expect(toolInventory, `Missing tool inventory row for ${name}`).toContain(
         `| \`${name}\``,

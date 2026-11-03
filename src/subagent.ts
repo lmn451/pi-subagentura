@@ -42,7 +42,6 @@ import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
-import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
 import { registerExtensionSettings } from "./settings";
 import {
   acquireRuntimeSpawnTreeContext,
@@ -116,7 +115,6 @@ export default function (pi: ExtensionAPI) {
     registerInteractiveSubagentTools(pi, sessionScope);
     registerSubagentArtifactsCleanupTool(pi, sessionScope);
     registerSubagentModelListTool(pi);
-    registerInteractiveSupervisor(pi, sessionScope);
     return;
   }
   if (typeof pi.registerMessageRenderer !== "function") {
@@ -152,7 +150,6 @@ export default function (pi: ExtensionAPI) {
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);
   registerOrchestratorTools(pi, sessionScope);
-  registerInteractiveSupervisor(pi, sessionScope);
   registerWorkflowTool(pi, sessionScope);
   registerInProcessSubagentTools(pi, sessionScope);
   registerInProcessMaintenanceTools(pi, sessionScope);

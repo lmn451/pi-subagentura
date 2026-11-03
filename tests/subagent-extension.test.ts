@@ -106,12 +106,20 @@ describe("extension registration", () => {
         ...WORKFLOW_TOOL_NAMES,
       ].sort(),
     );
-    expect(api.registerCommand).toHaveBeenCalledWith(
+    expect(api.registerCommand).not.toHaveBeenCalledWith(
       "subagents",
       expect.any(Object),
     );
-    expect(api.registerShortcut).toHaveBeenCalledWith(
+    expect(api.registerShortcut).not.toHaveBeenCalledWith(
       "ctrl+alt+a",
+      expect.any(Object),
+    );
+    expect(api.registerCommand).toHaveBeenCalledWith(
+      "cancel-all-flows",
+      expect.any(Object),
+    );
+    expect(api.registerShortcut).toHaveBeenCalledWith(
+      "ctrl+alt+x",
       expect.any(Object),
     );
   });
@@ -395,11 +403,11 @@ describe("extension registration", () => {
       "subagent-notify",
       expect.any(Function),
     );
-    expect(api.registerCommand).toHaveBeenCalledWith(
+    expect(api.registerCommand).not.toHaveBeenCalledWith(
       "subagents",
       expect.any(Object),
     );
-    expect(api.registerShortcut).toHaveBeenCalledWith(
+    expect(api.registerShortcut).not.toHaveBeenCalledWith(
       "ctrl+alt+a",
       expect.any(Object),
     );

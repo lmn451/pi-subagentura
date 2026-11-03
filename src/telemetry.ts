@@ -173,10 +173,9 @@ export const TELEMETRY_OPERATION_NAMES = {
     "workflow-status",
     "workflow-tree",
     "delete-workflow",
-    "subagents",
     "cancel-all-flows",
   ],
-  shortcut: ["ctrl+alt+a", "ctrl+alt+x"],
+  shortcut: ["ctrl+alt+x"],
 } as const;
 export type TelemetrySurface = keyof typeof TELEMETRY_OPERATION_NAMES;
 export type TelemetryOperation =

@@ -3,24 +3,11 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gateForMarker } from "./fixtures/mock-provider";
-import {
-  createHarness,
-  tmuxVersion,
-  type TerminalHarness,
-} from "./harness.mjs";
+import { createHarness, type TerminalHarness } from "./harness.mjs";
 import { getScenario } from "./scenarios.mjs";
 
 const timeout = 60_000;
 let harness: TerminalHarness;
-
-/**
- * `C-M-a` needs `extended-keys-format csi-u`, which tmux only understands from
- * 3.5. ubuntu-latest ships 3.4, so the shortcut test is *reported as skipped*
- * there rather than silently not executing inside a passing test body.
- */
-const tmux = tmuxVersion();
-const supportsExtendedKeyShortcut =
-  tmux.major > 3 || (tmux.major === 3 && tmux.minor >= 5);
 
 beforeEach(() => {
   harness = createHarness({ scenario: "terminal" });
@@ -107,22 +94,6 @@ function childPane() {
     );
 }
 
-async function openSupervisor(): Promise<void> {
-  await harness.sendPrompt("/subagents");
-  await harness.waitForScreen(
-    (screen) => screen.includes("Async Subagents"),
-    "supervisor overlay",
-  );
-}
-
-async function closeSupervisor(key = "q"): Promise<void> {
-  harness.sendKey(key);
-  await harness.waitForScreen(
-    (screen) => !screen.includes("Async Subagents"),
-    "supervisor close",
-  );
-}
-
 function assertCompletionSnapshot(
   event: Record<string, unknown>,
   marker: string,
@@ -177,10 +148,12 @@ describe("real Pi terminal E2E", () => {
       // start() gates on the editor key hints, so assert the things it does not:
       // the scripted model is selected and both extensions loaded.
       const screen = harness.renderedScreen();
+      const compactScreen = screen.replace(/\s+/g, "");
       expect(screen).toContain("mock • medium");
       expect(screen).toContain("mock-");
-      expect(screen).toContain("provider.ts");
-      expect(screen).toContain("subagent.ts");
+      expect(compactScreen).toContain("mock-provider.ts");
+      expect(compactScreen).toContain("subagent.ts");
+      expect(screen).toContain("0.0%/200k");
       expect(harness.panes()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ session: expect.stringMatching(/^e2e-/) }),
@@ -438,6 +411,27 @@ describe("real Pi terminal E2E", () => {
         .filter((event) => event.type === "completion");
       expect(firstCompletions).toHaveLength(1);
 
+      await sendMarker("[E2E:INTERACTIVE_STATUS]");
+      await harness.waitForScreen(
+        (screen) =>
+          screen.includes("E2E interactive child") &&
+          screen.includes("Artifact:"),
+        "interactive status result rendered",
+      );
+      await sendMarker("[E2E:INTERACTIVE_LIST]");
+      await harness.waitForScreen(
+        (screen) =>
+          screen.includes("E2E interactive child") && screen.includes("[idle]"),
+        "interactive artifact list rendered",
+      );
+      await sendMarker("[E2E:INTERACTIVE_READ]");
+      await harness.waitForScreen(
+        (screen) =>
+          screen.includes("Artifact for") &&
+          screen.includes("[E2E:INTERACTIVE_OUTPUT_1]"),
+        "interactive artifact read rendered",
+      );
+
       await harness.sendPrompt(
         "[E2E:INTERACTIVE_FOLLOWUP_PARENT] Send the deterministic follow-up.",
       );
@@ -572,80 +566,30 @@ describe("real Pi terminal E2E", () => {
   );
 
   it(
-    "navigates the supervisor and cancels its selected async child",
+    "cancels a running async child through status and cancel tools",
     async () => {
       const scenario = getScenario("async-isolated");
       await startScenario("async-isolated");
       await harness.waitForProvider(
         (events) => hasStage(events, scenario.child!, "gated"),
-        "supervisor fixture gate",
+        "async cancellation fixture gate",
       );
       await waitForParentSettled(scenario.marker);
 
-      let standaloneJobId: string | undefined;
-      await openSupervisor();
-      await harness.waitForScreen((screen) => {
-        const selectedStandalone = screen.match(
-          /▶ ▸ \[in-process\] → running ([a-f0-9]{16})\b/,
-        );
-        if (!selectedStandalone) return false;
-        standaloneJobId = selectedStandalone[1];
-        return true;
-      }, "standalone in-process row selected as running");
-      expect(standaloneJobId).toMatch(/^[a-f0-9]{16}$/);
-      if (!standaloneJobId) {
-        throw new Error("selected standalone job id was not captured");
-      }
-      await closeSupervisor();
+      await sendMarker("[E2E:ASYNC_STATUS]");
+      await harness.waitForScreen(
+        (screen) => /get_subagent_status [a-f0-9]{16}/.test(screen),
+        "async status tool call rendered before cancellation",
+      );
 
-      const workflow = getScenario("background-workflow");
-      await harness.sendPrompt(workflow.prompt);
-      await harness.waitForProvider(
-        (events) => hasStage(events, workflow.child!, "gated"),
-        "supervisor workflow gate",
+      await harness.sendPrompt(
+        "[E2E:ASYNC_CANCEL] Cancel the running async fixture.",
       );
-      await waitForParentSettled(workflow.marker);
-
-      await openSupervisor();
+      await waitForParentSettled("[E2E:ASYNC_CANCEL]");
       await harness.waitForScreen(
-        (screen) => screen.includes("▶ ▸ [workflow] → running e2e-workflow"),
-        "workflow root selected first",
+        (screen) => /cancel_subagent [a-f0-9]{16}/.test(screen),
+        "async cancel tool call rendered",
       );
-      harness.sendKey("Enter");
-      await harness.waitForScreen(
-        (screen) =>
-          screen.includes("▶ ▾ [workflow] → running e2e-workflow") &&
-          screen.includes("Workflow: e2e-workflow") &&
-          screen.includes("Agents:"),
-        "expanded workflow root details",
-      );
-      harness.sendKey("j");
-      await harness.waitForScreen((screen) => {
-        const selectedGroupedChild = screen.match(
-          /▶ ▸ \[in-process\] → running ([a-f0-9]{16})\b/,
-        );
-        return (
-          selectedGroupedChild !== null &&
-          selectedGroupedChild[1] !== standaloneJobId
-        );
-      }, "grouped workflow child selected");
-      harness.sendKey("j");
-      await harness.waitForScreen(
-        (screen) =>
-          screen.includes(`▶ ▸ [in-process] → running ${standaloneJobId}`),
-        "captured standalone job selected",
-      );
-      harness.sendKey("Enter");
-      await harness.waitForScreen((screen) => {
-        const selectedRow = `▶ ▾ [in-process] → running ${standaloneJobId}`;
-        const selectedRowIndex = screen.indexOf(selectedRow);
-        return (
-          selectedRowIndex >= 0 &&
-          screen.indexOf("Model: subagentura-e2e/mock", selectedRowIndex) >
-            selectedRowIndex
-        );
-      }, "expanded captured standalone job details");
-      harness.sendKey("x");
       await harness.waitForProvider(
         (events) =>
           events.some(
@@ -654,31 +598,12 @@ describe("real Pi terminal E2E", () => {
               event.afterStage === "failed" &&
               event.abort === true,
           ),
-        "supervisor cancellation",
+        "async tool cancellation",
       );
-      await closeSupervisor("Escape");
-      await harness.assertNoNetwork();
-    },
-    timeout,
-  );
-
-  it.skipIf(!supportsExtendedKeyShortcut)(
-    "opens the supervisor through the C-M-a shortcut (tmux >= 3.5)",
-    async () => {
-      const scenario = getScenario("async-isolated");
-      await startScenario("async-isolated");
-      await harness.waitForProvider(
-        (events) => hasStage(events, scenario.child!, "gated"),
-        "supervisor shortcut fixture gate",
-      );
-      await waitForParentSettled(scenario.marker);
-
-      harness.sendKey("C-M-a");
       await harness.waitForScreen(
-        (screen) => screen.includes("Async Subagents"),
-        "supervisor shortcut overlay",
+        (screen) => /Job [a-f0-9]{16} cancelled/.test(screen),
+        "async cancellation result rendered",
       );
-      await closeSupervisor();
       await harness.assertNoNetwork();
     },
     timeout,

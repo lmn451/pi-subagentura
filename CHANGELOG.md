@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** Removed the cross-mode `/subagents` supervisor dashboard and
+  `Ctrl+Alt+A` shortcut. Use the existing list/status/result/cancel tools and
+  returned native attach/focus commands instead. The activity widget, running
+  footer, `/workflow-tree`, and `/cancel-all-flows` remain available; lineage
+  ownership and cancellation infrastructure are retained.
+
 ## [3.6.5] - 2026-10-14
 
 ### Added

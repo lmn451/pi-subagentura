@@ -1,7 +1,7 @@
 /**
  * End-to-end coverage for workflow-owned children as seen by the parent session's
- * live surfaces: the supervisor overlay, the activity widget, the running-agents
- * footer, the job registries, and `session_shutdown`.
+ * live surfaces: the activity widget, the running-agents footer, the job
+ * registries, and `session_shutdown`.
  *
  * Only the two process boundaries are stubbed — `launchInteractiveSubagent` (which
  * would spawn a real tmux pane) and `startSubagentJob` (which would open a real
@@ -42,11 +42,6 @@ vi.mock("../src/helpers", async (importOriginal) => {
 
 import { pollArtifactChanges } from "../src/artifact-poller";
 import { jobRegistry } from "../src/helpers";
-import {
-  buildAsyncSupervisorItems,
-  directSupervisorItems,
-} from "../src/interactive-supervisor-registration";
-import type { AsyncSupervisorItem } from "../src/interactive-supervisor-ui";
 import {
   interactiveSubagentRegistry,
   type InteractiveSubagentState,
@@ -136,16 +131,6 @@ function liveSessionContext(options: {
 
 function ownerOf(context: SessionScope) {
   return { id: context.id, generation: context.generation };
-}
-
-/** [id, depth] pairs, the two things the grouped supervisor list is about. */
-function rowShape(items: AsyncSupervisorItem[]): [string, number][] {
-  return items.map((item) => [
-    item.kind === "in-process" || item.kind === "workflow"
-      ? item.job.id
-      : item.state.id,
-    item.depth,
-  ]);
 }
 
 function lastWidgetRows(
@@ -289,7 +274,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("workflow supervisor integration", () => {
+describe("workflow child lifecycle integration", () => {
   it.each([
     [{ async: true }, "each"],
     [
@@ -349,7 +334,7 @@ describe("workflow supervisor integration", () => {
     releaseAgent(subagentResult("done"));
   });
 
-  it("shows a live process child under its tracked sync workflow", async () => {
+  it("registers a live process child with its tracked sync workflow", async () => {
     const { context } = liveSessionContext({ id: 7, sessionId: "session-a" });
     const owner = ownerOf(context);
     const { pi, findTool } = makePi();
@@ -382,14 +367,9 @@ describe("workflow supervisor integration", () => {
     // the reason ownership must be answered by supervisorOwner everywhere.
     expect(mockLaunch.mock.calls[0]?.[0]?.parentSessionId).toBeUndefined();
 
-    const items = buildAsyncSupervisorItems(
-      directSupervisorItems(undefined, owner),
-      owner,
-    );
-    expect(rowShape(items)).toEqual([
-      [workflow!.id, 0],
-      ["workflow-child", 1],
-    ]);
+    const child = context.interactiveStates.get("workflow-child");
+    expect(child?.workflowId).toBe(workflow!.id);
+    expect(child?.completionOwner).toBe("workflow");
 
     releaseAgent(subagentResult("reviewed"));
     const result = await execution;
@@ -524,14 +504,8 @@ describe("workflow supervisor integration", () => {
     const workflow = [...workflowJobRegistry.values()].find(
       (job) => job.name === "fallback",
     );
-    const items = buildAsyncSupervisorItems(
-      directSupervisorItems(undefined, owner),
-      owner,
-    );
-    expect(rowShape(items)).toEqual([
-      [workflow!.id, 0],
-      ["fallback-child", 1],
-    ]);
+    expect(context.inProcessJobs.get("fallback-child")).toBe(childJob);
+    expect(childJob?.workflowId).toBe(workflow!.id);
 
     releaseChild(subagentResult("fallback complete"));
     const result = await execution;
