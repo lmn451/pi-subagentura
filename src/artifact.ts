@@ -100,37 +100,39 @@ export type ProcessTerminationReason =
   | "nonzero_exit"
   | "cancelled"
   | "unknown";
-export type ProcessSignal =
-  | "SIGHUP"
-  | "SIGINT"
-  | "SIGQUIT"
-  | "SIGILL"
-  | "SIGTRAP"
-  | "SIGABRT"
-  | "SIGBUS"
-  | "SIGFPE"
-  | "SIGKILL"
-  | "SIGUSR1"
-  | "SIGSEGV"
-  | "SIGUSR2"
-  | "SIGPIPE"
-  | "SIGALRM"
-  | "SIGTERM"
-  | "SIGCHLD"
-  | "SIGCONT"
-  | "SIGSTOP"
-  | "SIGTSTP"
-  | "SIGTTIN"
-  | "SIGTTOU"
-  | "SIGURG"
-  | "SIGXCPU"
-  | "SIGXFSZ"
-  | "SIGVTALRM"
-  | "SIGPROF"
-  | "SIGWINCH"
-  | "SIGIO"
-  | "SIGPWR"
-  | "SIGSYS";
+export const PROCESS_SIGNAL_NAMES = [
+  "SIGHUP",
+  "SIGINT",
+  "SIGQUIT",
+  "SIGILL",
+  "SIGTRAP",
+  "SIGABRT",
+  "SIGBUS",
+  "SIGFPE",
+  "SIGKILL",
+  "SIGUSR1",
+  "SIGSEGV",
+  "SIGUSR2",
+  "SIGPIPE",
+  "SIGALRM",
+  "SIGTERM",
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGSTOP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGURG",
+  "SIGXCPU",
+  "SIGXFSZ",
+  "SIGVTALRM",
+  "SIGPROF",
+  "SIGWINCH",
+  "SIGIO",
+  "SIGPWR",
+  "SIGSYS",
+] as const;
+export type ProcessSignal = (typeof PROCESS_SIGNAL_NAMES)[number];
 export type SubagentEventV2 =
   | {
       version: 2;
@@ -416,41 +418,10 @@ function normalizeProcessTerminationReason(
 }
 
 function normalizeProcessSignal(value: unknown): ProcessSignal | undefined {
-  switch (value) {
-    case "SIGHUP":
-    case "SIGINT":
-    case "SIGQUIT":
-    case "SIGILL":
-    case "SIGTRAP":
-    case "SIGABRT":
-    case "SIGBUS":
-    case "SIGFPE":
-    case "SIGKILL":
-    case "SIGUSR1":
-    case "SIGSEGV":
-    case "SIGUSR2":
-    case "SIGPIPE":
-    case "SIGALRM":
-    case "SIGTERM":
-    case "SIGCHLD":
-    case "SIGCONT":
-    case "SIGSTOP":
-    case "SIGTSTP":
-    case "SIGTTIN":
-    case "SIGTTOU":
-    case "SIGURG":
-    case "SIGXCPU":
-    case "SIGXFSZ":
-    case "SIGVTALRM":
-    case "SIGPROF":
-    case "SIGWINCH":
-    case "SIGIO":
-    case "SIGPWR":
-    case "SIGSYS":
-      return value;
-    default:
-      return undefined;
-  }
+  return typeof value === "string" &&
+    PROCESS_SIGNAL_NAMES.includes(value as ProcessSignal)
+    ? (value as ProcessSignal)
+    : undefined;
 }
 
 function normalizeDiagnosticTool(value: unknown): string | undefined {

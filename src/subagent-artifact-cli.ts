@@ -19,6 +19,7 @@
  * Exit codes: 0 on success, 2 on usage error (missing env var / unknown cmd).
  */
 
+import { constants as osConstants } from "node:os";
 import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
@@ -27,7 +28,26 @@ import {
   MAX_OUTPUT_SNAPSHOT_BYTES,
   MAX_TOOL_NAME_LENGTH,
   MAX_TURN_ID_LENGTH,
+  PROCESS_SIGNAL_NAMES,
+  type ProcessSignal,
 } from "./artifact";
+
+/** Build the host-specific signal lookup embedded in the standalone CLI. */
+export function buildProcessSignalEntries(
+  signalNumbers: Partial<Record<ProcessSignal, number>>,
+): Array<[number, ProcessSignal]> {
+  const entries: Array<[number, ProcessSignal]> = [];
+  for (const name of PROCESS_SIGNAL_NAMES) {
+    const number = signalNumbers[name];
+    if (number === undefined || !Number.isSafeInteger(number)) continue;
+    entries.push([number, name]);
+  }
+  return entries;
+}
+
+const PROCESS_SIGNAL_ENTRIES = JSON.stringify(
+  buildProcessSignalEntries(osConstants.signals),
+);
 
 /**
  * The body of the CLI as a string, written verbatim to
@@ -183,43 +203,11 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
-const signalNames = [
-  undefined,
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGILL",
-  "SIGTRAP",
-  "SIGABRT",
-  "SIGBUS",
-  "SIGFPE",
-  "SIGKILL",
-  "SIGUSR1",
-  "SIGSEGV",
-  "SIGUSR2",
-  "SIGPIPE",
-  "SIGALRM",
-  "SIGTERM",
-  "SIGCHLD",
-  "SIGCONT",
-  "SIGSTOP",
-  "SIGTSTP",
-  "SIGTTIN",
-  "SIGTTOU",
-  "SIGURG",
-  "SIGXCPU",
-  "SIGXFSZ",
-  "SIGVTALRM",
-  "SIGPROF",
-  "SIGWINCH",
-  "SIGIO",
-  "SIGPWR",
-  "SIGSYS",
-  ];
+const signalNames = new Map(${PROCESS_SIGNAL_ENTRIES});
 const signalForExitCode = (exitCode) => {
   const signalNumber = exitCode - 128;
-  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
-    ? signalNames[signalNumber]
+  return Number.isSafeInteger(exitCode)
+    ? signalNames.get(signalNumber)
     : undefined;
 };
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {

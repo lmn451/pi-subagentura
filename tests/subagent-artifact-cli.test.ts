@@ -7,13 +7,18 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
+import {
+  buildProcessSignalEntries,
+  CLI_SOURCE,
+  writeCliScript,
+} from "../src/subagent-artifact-cli";
 import {
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
+  type ProcessSignal,
 } from "../src/artifact";
 
 function makeTmp(): string {
@@ -197,6 +202,37 @@ describe("subagent-artifact CLI", () => {
         exitCode: 143,
         terminationReason: "signal",
         signal: "SIGTERM",
+      });
+    });
+
+    it("builds signal mappings from the host signal numbers", () => {
+      const macSignalNumbers: Partial<Record<ProcessSignal, number>> = {
+        SIGBUS: 10,
+        SIGUSR1: 30,
+      };
+
+      expect(buildProcessSignalEntries(macSignalNumbers)).toEqual([
+        [10, "SIGBUS"],
+        [30, "SIGUSR1"],
+      ]);
+    });
+
+    it("uses the host signal number in the generated CLI", () => {
+      const signalNumber = osConstants.signals.SIGBUS;
+      expect(signalNumber).toBeDefined();
+
+      const r = runCli(tmp, ["process-exit", String(128 + signalNumber)]);
+      expect(r.status).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+
+      expect(events.at(-1)).toMatchObject({
+        type: "process_exited",
+        exitCode: 128 + signalNumber,
+        terminationReason: "signal",
+        signal: "SIGBUS",
       });
     });
 
