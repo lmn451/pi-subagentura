@@ -2233,122 +2233,60 @@ function releaseStateLock(
   }
 }
 
-function releaseStateRecoveryLock(
-  lock: string,
-  fd: number,
-  ownerMetadata: string,
-): void {
-  closeSync(fd);
-  try {
-    if (readFileSync(lock, "utf8") === ownerMetadata) unlinkSync(lock);
-  } catch {
-    /* A recovery path may have already removed or replaced this claim. */
-  }
+function isStateLockRecoverable(lock: string): boolean {
+  const owner = readStateLockOwner(lock);
+  return owner
+    ? !isProcessAlive(owner.pid)
+    : Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS;
 }
 
-export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
-  const piDir = join(cwd, ".pi");
-  const lock = join(piDir, "subagentura-state.lock");
-  const recoveryLock = `${lock}.recovery`;
-  mkdirSync(piDir, { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+function withStateFileLock<T>(
+  lock: string,
+  deadline: number,
+  action: () => T,
+): T {
   const ownerMetadata = JSON.stringify({
     pid: process.pid,
     token: randomUUID(),
   });
-  const recoveryMetadata = JSON.stringify({
-    pid: process.pid,
-    token: randomUUID(),
-  });
   let fd: number | undefined;
-  let recoveryFd: number | undefined;
   let acquiredDevice = 0;
   let acquiredInode = 0;
   while (fd === undefined) {
     try {
       fd = openSync(lock, "wx", 0o600);
-      writeFileSync(fd, ownerMetadata);
       const acquired = fstatSync(fd);
       acquiredDevice = acquired.dev;
       acquiredInode = acquired.ino;
-      if (recoveryFd !== undefined) {
-        releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        recoveryFd = undefined;
-      }
+      writeFileSync(fd, ownerMetadata);
     } catch (error: any) {
       if (fd !== undefined) {
-        closeSync(fd);
+        releaseStateLock(
+          lock,
+          fd,
+          ownerMetadata,
+          acquiredDevice,
+          acquiredInode,
+        );
         fd = undefined;
-        try {
-          unlinkSync(lock);
-        } catch {
-          /* Another process may have recovered an incomplete lock. */
-        }
+        // A partial metadata write is recovered after its lease, not unlinked blindly.
       }
-      if (error?.code !== "EEXIST") {
-        if (recoveryFd !== undefined) {
-          releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        }
-        throw error;
-      }
-      if (recoveryFd === undefined) {
-        try {
-          recoveryFd = openSync(recoveryLock, "wx", 0o600);
-          writeFileSync(recoveryFd, recoveryMetadata);
-        } catch (recoveryError: any) {
-          if (recoveryFd !== undefined) {
-            closeSync(recoveryFd);
-            recoveryFd = undefined;
-            try {
-              unlinkSync(recoveryLock);
-            } catch {
-              /* Another contender may own the recovery claim. */
-            }
-          }
-          if (recoveryError?.code !== "EEXIST") throw recoveryError;
-          // Existing recovery claims are never reclaimed automatically.
-        }
-      }
-      if (recoveryFd !== undefined) {
-        try {
-          if (!existsSync(lock)) continue;
-          const owner = readStateLockOwner(lock);
-          const lockAge = Date.now() - statSync(lock).mtimeMs;
-          const stale = !owner && lockAge > STATE_LOCK_STALE_MS;
-          if (owner && isProcessAlive(owner.pid)) {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          } else if (stale || (owner && !isProcessAlive(owner.pid))) {
-            unlinkSync(lock);
-            continue;
-          } else {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          }
-        } catch {
-          if (recoveryFd !== undefined) {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          }
-        }
-      }
-      if (Date.now() >= deadline) {
-        if (recoveryFd !== undefined) {
-          releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        }
+      if (error?.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline)
         throw new Error(`timed out acquiring interactive state lock: ${lock}`);
+      try {
+        if (isStateLockRecoverable(lock)) {
+          // Recover crashed reclaimers under the next claim rather than deleting
+          // their claim without serialization. Live owners are never reclaimed.
+          withStateFileLock(`${lock}.recovery`, deadline, () => {
+            // The owner may have changed while waiting for the recovery claim.
+            if (isStateLockRecoverable(lock)) unlinkSync(lock);
+          });
+          continue;
+        }
+      } catch (recoveryError: any) {
+        if (recoveryError?.code !== "ENOENT") throw recoveryError;
+        // The owner released its lock before the recovery check.
       }
       Atomics.wait(stateLockWaiter, 0, 0, 10);
     }
@@ -2358,6 +2296,13 @@ export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
   } finally {
     releaseStateLock(lock, fd, ownerMetadata, acquiredDevice, acquiredInode);
   }
+}
+
+export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
+  const piDir = join(cwd, ".pi");
+  const lock = join(piDir, "subagentura-state.lock");
+  mkdirSync(piDir, { recursive: true, mode: 0o700 });
+  return withStateFileLock(lock, Date.now() + STATE_LOCK_TIMEOUT_MS, action);
 }
 
 function writeInteractiveStatesUnlocked(
