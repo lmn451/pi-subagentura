@@ -1,5 +1,8 @@
 /** Protocol-v2 artifact events are authoritative for interactive completion. */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,10 +77,16 @@ describe("protocol-v2 interactive completion", () => {
       source: "agent_settled",
     });
 
-    const entries: Array<{ type: string; customType: string; data: unknown }> =
-      [];
+    const entries: SessionEntry[] = [];
     const appendEntry = vi.fn((customType: string, data: unknown) => {
-      entries.push({ type: "custom", customType, data });
+      entries.push({
+        type: "custom",
+        id: `test-entry-${entries.length}`,
+        parentId: entries.at(-1)?.id ?? null,
+        timestamp: "1970-01-01T00:00:00.000Z",
+        customType,
+        data,
+      });
     });
     const api = { appendEntry } as unknown as ExtensionAPI;
     const scope = registerSessionScope({

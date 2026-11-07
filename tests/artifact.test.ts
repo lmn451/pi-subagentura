@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
   existsSync,
@@ -1116,7 +1116,7 @@ describe("persisted interactive state helpers", () => {
     expect(readFileSync(lock, "utf8")).toBe(replacement);
   });
 
-  it("fails closed when a recovery claim already exists", () => {
+  it("recovers abandoned recovery claims", () => {
     const piDir = join(root, ".pi");
     const lock = join(piDir, "subagentura-state.lock");
     const recoveryLock = `${lock}.recovery`;
@@ -1128,11 +1128,9 @@ describe("persisted interactive state helpers", () => {
     });
     writeFileSync(lock, deadOwner, { mode: 0o600 });
     writeFileSync(recoveryLock, existingRecovery, { mode: 0o600 });
-    expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
-      /timed out acquiring interactive state lock/,
-    );
-    expect(readFileSync(lock, "utf8")).toBe(deadOwner);
-    expect(readFileSync(recoveryLock, "utf8")).toBe(existingRecovery);
+    expect(withInteractiveStateLock(root, () => "acquired")).toBe("acquired");
+    expect(existsSync(lock)).toBe(false);
+    expect(existsSync(recoveryLock)).toBe(false);
   });
 
   it("stateFilePath returns <cwd>/.pi/subagentura-state.json", () => {
@@ -2075,6 +2073,81 @@ describe("persisted interactive state helpers", () => {
 
   it("deleteInteractiveStatesFile is a no-op when the file is absent", () => {
     expect(() => deleteInteractiveStatesFile(root)).not.toThrow();
+  });
+  it.each(["", ".recovery"])(
+    "does not steal a live owner at recovery level %s",
+    (suffix) => {
+      const lock = join(root, ".pi", "subagentura-state.lock");
+      mkdirSync(join(root, ".pi"), { recursive: true });
+      const dead = JSON.stringify({ pid: 999_999_999, token: "dead" });
+      const live = JSON.stringify({ pid: process.pid, token: "live-recovery" });
+      writeFileSync(lock, dead);
+      writeFileSync(lock + ".recovery", suffix ? dead : live);
+      if (suffix) writeFileSync(lock + ".recovery.recovery", live);
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lock + ".recovery" + suffix, old, old);
+      expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+        /timed out acquiring interactive state lock/,
+      );
+      expect(readFileSync(lock, "utf8")).toBe(dead);
+      expect(readFileSync(lock + ".recovery" + suffix, "utf8")).toBe(live);
+    },
+  );
+  it.each(["dead", "partial"])("recovers %s nested recovery claims", (kind) => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    for (const suffix of ["", ".recovery", ".recovery.recovery"]) {
+      writeFileSync(
+        lock + suffix,
+        kind === "dead"
+          ? JSON.stringify({ pid: 999_999_999, token: "dead" })
+          : "{",
+      );
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lock + suffix, old, old);
+    }
+    expect(withInteractiveStateLock(root, () => "acquired")).toBe("acquired");
+    for (const suffix of [
+      "",
+      ".recovery",
+      ".recovery.recovery",
+      ".recovery.recovery.recovery",
+    ])
+      expect(existsSync(lock + suffix)).toBe(false);
+  });
+  it("rechecks the main owner after recovering an abandoned claim", () => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    const live = JSON.stringify({ pid: process.pid, token: "replacement" });
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_999, token: "dead" }));
+    writeFileSync(
+      lock + ".recovery",
+      JSON.stringify({ pid: 999_999_998, token: "dead-reclaimer" }),
+    );
+    const originalKill = process.kill;
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === 999_999_998) writeFileSync(lock, live);
+      return originalKill(pid, signal);
+    });
+    try {
+      expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+        /timed out acquiring interactive state lock/,
+      );
+      expect(readFileSync(lock, "utf8")).toBe(live);
+      expect(existsSync(lock + ".recovery")).toBe(false);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+  it("does not reclaim a fresh partial recovery claim", () => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_999, token: "dead" }));
+    writeFileSync(lock + ".recovery", "{");
+    expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+      /timed out acquiring interactive state lock/,
+    );
+    expect(readFileSync(lock + ".recovery", "utf8")).toBe("{");
   });
 });
 

@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Make grouped error completions eligible before the rest of the group finishes;
-  successful and cancelled results retain the group barrier.
 - Return recorded terminal error diagnostics verbatim in interactive artifact
   reads, including for empty snapshots, without parsing or sanitization; existing
   protocol storage limits still apply.
@@ -22,6 +20,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `process` identity.
 - Serialize prompt-error publication with all parent cancellation writers so
   cancellation prevents later errors while earlier committed errors remain.
+
+- Serialize child terminal completions with parent cancellation, preventing
+  late output snapshots while preserving already committed artifact history.
+- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
+  for an uncompleted current turn when `.cancelled` exists, then record
+  `process_exited`.
+- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
+  also retains a nonempty owner-token tombstone until artifact retirement so
+  delayed waiters cannot rename a fresh owner into a vacant path.
+- Preserve terminal `message` and `errorMessage` diagnostics verbatim through
+  event normalization within the existing 1 MiB event-record limit.
+
+## [4.2.1] - 2026-11-07
+
+### Added
+
+- Report allowlisted terminal application and observed parent multiplexer context
+  on fresh root telemetry, independently of session host and child execution
+  backend. Missing or ambiguous environment markers remain `unknown`; raw
+  environment values, socket paths, and session names are never uploaded.
+- Document terminal and parent-multiplexer telemetry dimensions, privacy rules,
+  and environment-inheritance limitations.
+
+### Fixed
+
+- Recover abandoned interactive-state locks without taking over a live owner.
+- Target tmux windows reliably when names collide across sessions.
+
+## [4.2.0] - 2026-11-02
+
+### Added
+
+- Show extension update notes on Pi 1.5 using the packaged changelog.
+- Report the saved-workflow picker as waiting for user input on Pi 1.5.
+- Show configured expand shortcuts in collapsed subagent results on Pi 1.5.
+- Recognize provider-billed usage totals, including free requests, while
+  preserving legacy Pi cost accounting.
+
+- Add optional Orchestratorv2 child selection through Pi's native classifier
+  API, with bounded inputs, fail-closed selection, and usage accounting.
+
+### Changed
+
+- Extend shared Orca prompt/skill guidance to interactive delegation in normal
+  Pi parents, interactive children/nested contexts, and Orchestratorv2 without
+  replacing native child execution or changing legacy workflow selection.
+- Layer Agterm guidance and explicit target precedence onto shared Orca
+  delegation, and attribute the closed host label on fresh root telemetry.
+
+## [4.1.0] - 2026-10-25
+
+### Changed
+
+- Keep transient mux-liveness uncertainty in local debug logs; anonymous
+  `mux_probe` runtime failures now report only when a workflow waiter exhausts
+  its grace and is blocked, with `impact=blocked`. Shared pane-episode dedupe
+  remains; other runtime failures and liveness/artifact handling are unchanged.
+- Expand the published PostHog SQL insights with separate launch/task/workflow
+  outcomes, mode-aware adoption and busiest-tree concentration, schema/provenance
+  and unknown coverage, diagnostic event units, and workflow lifecycle window
+  coverage. Window totals remain coverage diagnostics, not matched workflows.
+- Remove the bundled RALPLAN skill.
+- Add the `herdr` keyword for npm package discovery.
+
+### Fixed
+
+- Reject new workflows during session teardown and replacement setup, including
+  lifecycle changes inside options builders, while retaining terminal telemetry
+  for already accepted work.
+
+### Breaking
+
+- Require Pi SDK `>=1.2.0`; development dependencies pin SDK 1.4.0.
+
+### Added
+
+- Add schema-backed structured results to 11 read-only tools, preserving human
+  content/details while exposing explicit machine-readable states and exact
+  terminal output.
+- Use a hidden native Orchestratorv2 custom wake after the manifest is sent,
+  with a dedicated wake type and `details.orchestratorV2WakeId` identity.
+- Expand the bundled debug skill with guidance for safe state recovery.
+
+### Changed
+
+- Remove the unused Pi server peer/dev/test-install dependency and legacy SDK
+  compatibility code, including `src/pi-sdk-compat.ts`, obsolete runtime
+  branches, wrappers, and aliases. Child sessions use `ModelRuntime` with copied
+  extension-added custom/native provider registrations; inherited context uses
+  `buildSessionProjection().messages` directly.
+- Replace synthetic user wake messages with a manifest-first native custom
+  wake; preserve the existing request/acknowledgement ledger schema.
+- Rename the minimum SDK CI check to `Test (Pi 1.2.0)` and keep required check
+  names synchronized with the repository ruleset.
+- Check tool definitions, session/context projections, model resolution, and
+  result callbacks against public Pi SDK types instead of local SDK-shaped
+  interfaces and broad casts; retain extension-owned state and result protocols.
+
+## [4.0.1] - 2026-10-18
+
+### Fixed
+
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
 
 ## [4.0.0] - 2026-10-16
 
@@ -79,16 +181,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that earlier completion.
 - Restore interactive activity rows from protocol-v2 tool events in physical
   byte order, including tool-name fallback for missing or non-visible summaries.
-- Serialize child terminal completions with parent cancellation, preventing
-  late output snapshots while preserving already committed artifact history.
-- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
-  for an uncompleted current turn when `.cancelled` exists, then record
-  `process_exited`.
-- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
-  also retains a nonempty owner-token tombstone until artifact retirement so
-  delayed waiters cannot rename a fresh owner into a vacant path.
-- Preserve terminal `message` and `errorMessage` diagnostics verbatim through
-  event normalization within the existing 1 MiB event-record limit.
+- Make grouped error completions eligible before the rest of the group finishes;
+  successful and cancelled results retain the group barrier.
+- Record a process-level error completion for missing selected-model authentication
+  during child session startup, so pre-run failures become reportable while the
+  child REPL remains available for `/login` and a later turn.
+- Include a bounded, explicitly untrusted terminal error diagnostic in interactive
+  artifact reads, including for empty snapshots; diagnostic credentials are not
+  redacted.
 
 ## [3.6.5] - 2026-10-14
 
@@ -107,17 +207,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events when local debug logging is enabled with `SUBAGENT_DEBUG_LOG_DIR`.
 - Bundle the `pi-subagentura-debug` skill for launch, working-directory, mux, and
   artifact diagnostics.
-
-### Changed
-
-- Breaking: make the interactive runtime protocol-v2-only. Remove v1 event/state
-  migration, synthetic identities, numeric snapshot readers, and child session-log
-  tailing. Existing legacy files are not deleted or rewritten, but this runtime no
-  longer reads them and does not provide migration tooling.
-- Breaking: remove `notifyOnComplete`, `triggerTurnOnComplete`, direct notification
-  and injection brokers, and pre-coordinator delivery-intent recovery. Completion
-  now uses the coordinated each/group protocol only.
-- Remove the unused `ndjson` runtime dependency after removing session-log parsing.
 
 ### Fixed
 
@@ -277,8 +366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Promoted `--orchestratorv2` as a routing-first interactive mode. Its prompt
   guides the parent to route work to attachable interactive subagents, ask for
-  clarification when a request is ambiguous or a narrow request has no matching
-  child, and leave
+  clarification when a request is ambiguous, and leave
   specialist work to those children. Compatibility workflow and in-process tools
   remain registered; this is prompt guidance rather than an enforced boundary.
 - Orchestratorv2 routing now treats the current parent branch as the sole authority ledger and the project-local JSON file as repairable untrusted cache data, preventing child-written records from becoming actionable, consuming authority capacity, blocking approved writes, or hiding authoritative stale records.
@@ -427,7 +515,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
+[4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
 [3.6.5]: https://github.com/lmn451/pi-subagentura/compare/v3.6.4...v3.6.5
 [3.6.2]: https://github.com/lmn451/pi-subagentura/compare/v3.6.1...v3.6.2

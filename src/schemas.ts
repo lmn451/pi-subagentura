@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   MAX_ORCHESTRATOR_ROUTING_ALIASES,
@@ -19,7 +18,12 @@ const THINKING_LEVELS = [
 export const MAX_INTERACTIVE_CONTEXT_BYTES = 64 * 1024;
 
 function thinkingLevelSchema(description: string) {
-  return StringEnum(THINKING_LEVELS, { description });
+  // Keep the flat enum shape while retaining TypeBox's static type across Pi SDK versions.
+  return Type.Unsafe<(typeof THINKING_LEVELS)[number]>({
+    type: "string",
+    enum: [...THINKING_LEVELS],
+    description,
+  });
 }
 
 export const BaseParams = Type.Object(
@@ -268,7 +272,7 @@ function exposeProviderObjectShape<T extends object>(
   validationSchema: T,
   providerShape: typeof InteractiveProviderFields,
 ): T {
-  // Pi 0.80.6's Anthropic adapter projects only these top-level keywords.
+  // The Anthropic adapter projects only these top-level keywords.
   // Keep allOf/anyOf on the returned schema so TypeBox validation stays strict.
   return {
     ...validationSchema,

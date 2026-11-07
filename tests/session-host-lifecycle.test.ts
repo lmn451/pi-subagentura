@@ -1,0 +1,244 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveTelemetrySessionHost } from "../src/session-host";
+import { registerSessionHandlers } from "../src/session-handlers";
+import { clearSessionScopes } from "../src/session-scope";
+import {
+  buildTelemetryPayload,
+  createTelemetrySession,
+  sanitizeTelemetryTerminalProgram,
+  TelemetryEvent,
+} from "../src/telemetry";
+
+vi.mock("../src/session-host", () => ({
+  resolveTelemetrySessionHost: vi.fn(() => "unknown"),
+}));
+
+let root: string;
+let captured: any[];
+const registrations: Map<string, Function>[] = [];
+
+function registration(
+  enabled = true,
+  allowRoot = true,
+  mode?: "orchestrator" | "orchestratorv2",
+) {
+  const handlers = new Map<string, Function>();
+  const pi = {
+    on: (name: string, handler: Function) => handlers.set(name, handler),
+    appendEntry: vi.fn(),
+    getFlag: vi.fn((name: string) => name === mode),
+    sendMessage: vi.fn(),
+    sendUserMessage: vi.fn(),
+  };
+  const scope = registerSessionHandlers(
+    pi as any,
+    undefined,
+    allowRoot,
+    () => enabled,
+  );
+  const ctx = {
+    cwd: root,
+    ui: { notify: vi.fn() },
+    sessionManager: {
+      getSessionId: () => "private-pi-id",
+      getEntries: () => [],
+      getBranch: () => [],
+    },
+  };
+  registrations.push(handlers);
+  return {
+    handlers,
+    scope,
+    start: (reason = "new") => handlers.get("session_start")!({ reason }, ctx),
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.mocked(resolveTelemetrySessionHost).mockReturnValue("unknown");
+  root = mkdtempSync(join(tmpdir(), "session-host-"));
+  captured = [];
+  vi.stubEnv("PI_SUBAGENTURA_TELEMETRY_ORIGIN", "development");
+  vi.stubEnv("PI_SUBAGENTURA_CHILD", undefined);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url, options) => {
+      captured.push(JSON.parse(String(options?.body)));
+      return new Response(null, { status: 204 });
+    }),
+  );
+});
+
+afterEach(() => {
+  for (const handlers of registrations.splice(0))
+    handlers.get("session_shutdown")?.({ reason: "reload" }, {});
+  clearSessionScopes();
+  rmSync(root, { recursive: true, force: true });
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+describe("session host capture lifecycle", () => {
+  it("classifies once for a fresh root, suppressing reload/resume and keeping identifiers local", () => {
+    vi.mocked(resolveTelemetrySessionHost).mockReturnValue("orca");
+    const { start } = registration();
+    start();
+    start("reload");
+    start("resume");
+    expect(resolveTelemetrySessionHost).toHaveBeenCalledOnce();
+    const starts = captured.filter(
+      (p) => p.event === "pi_subagentura_session_started",
+    );
+    expect(starts).toHaveLength(1);
+    expect(starts[0].properties.session_host).toBe("orca");
+    expect(starts[0].properties).not.toHaveProperty("mux");
+    expect(JSON.stringify(captured)).not.toContain("private-pi-id");
+    expect(JSON.stringify(captured)).not.toContain(root);
+  });
+
+  it("attributes Agterm in straight mode without orchestration flags", () => {
+    vi.mocked(resolveTelemetrySessionHost).mockReturnValue("agterm");
+    registration().start();
+    const start = captured.find(
+      (event) => event.event === "pi_subagentura_session_started",
+    );
+
+    expect(start?.properties.mode).toBe("straight");
+    expect(start?.properties.session_host).toBe("agterm");
+  });
+
+  it.each([
+    ["straight", "orca", undefined],
+    ["straight", "agterm", undefined],
+    ["orchestrator", "orca", "orchestrator"],
+    ["orchestrator", "agterm", "orchestrator"],
+    ["orchestrator_v2", "orca", "orchestratorv2"],
+    ["orchestrator_v2", "agterm", "orchestratorv2"],
+  ] as const)(
+    "captures %s host evidence independently of %s mode",
+    (modeName, host, flag) => {
+      vi.mocked(resolveTelemetrySessionHost).mockReturnValue(host);
+      registration(true, true, flag).start();
+      const start = captured.find(
+        (event) => event.event === "pi_subagentura_session_started",
+      );
+
+      expect(start?.properties.mode).toBe(modeName);
+      expect(start?.properties.session_host).toBe(host);
+    },
+  );
+
+  it("keeps unknown session capture synchronous without any probe", () => {
+    registration().start();
+    expect(captured[0].properties.session_host).toBe("unknown");
+  });
+
+  it.each([
+    "explicit child",
+    "environment child",
+    "telemetry off",
+    "test origin",
+  ])("does not classify or submit a root start for %s", (kind) => {
+    if (kind === "environment child") vi.stubEnv("PI_SUBAGENTURA_CHILD", "1");
+    if (kind === "test origin")
+      vi.stubEnv("PI_SUBAGENTURA_TELEMETRY_ORIGIN", "test");
+    if (kind === "telemetry off") vi.stubEnv("AGTERM_ENABLED", "1");
+    registration(kind !== "telemetry off", kind !== "explicit child").start();
+    expect(resolveTelemetrySessionHost).not.toHaveBeenCalled();
+    expect(
+      captured.filter((p) => p.event === "pi_subagentura_session_started"),
+    ).toHaveLength(0);
+    if (kind === "telemetry off" || kind === "test origin")
+      expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["startup", "reload", "resume"])(
+    "does not reclassify a persisted logical session on %s",
+    (reason) => {
+      registration().start();
+      vi.mocked(resolveTelemetrySessionHost).mockClear();
+      captured.length = 0;
+      registration().start(reason);
+      expect(resolveTelemetrySessionHost).not.toHaveBeenCalled();
+      expect(
+        captured.some((p) => p.event === "pi_subagentura_session_started"),
+      ).toBe(false);
+    },
+  );
+
+  it.each(["new", "fork"])("classifies a fresh %s logical root", (reason) => {
+    const { start, scope } = registration();
+    start();
+    const previousId = scope.telemetry?.correlationId;
+    start(reason);
+    expect(resolveTelemetrySessionHost).toHaveBeenCalledTimes(2);
+    expect(scope.telemetry?.correlationId).not.toBe(previousId);
+    expect(
+      captured.filter((p) => p.event === "pi_subagentura_session_started"),
+    ).toHaveLength(2);
+  });
+});
+describe("terminal program capture", () => {
+  it("reports agterm independently of Orca launch origin", () => {
+    vi.stubEnv("TERM_PROGRAM", "agterm");
+    vi.mocked(resolveTelemetrySessionHost).mockReturnValue("orca");
+    registration().start();
+    expect(captured[0].properties).toMatchObject({
+      session_host: "orca",
+      terminal_program: "agterm",
+    });
+  });
+});
+describe("terminal program privacy", () => {
+  it.each([
+    ["agterm", "agterm"],
+    ["ghostty", "ghostty"],
+    ["iTerm.app", "iterm2"],
+    ["Apple_Terminal", "apple_terminal"],
+    ["vscode", "vscode"],
+    ["WezTerm", "wezterm"],
+    ["wezterm", "wezterm"],
+    ["kitty", "kitty"],
+    [undefined, "unknown"],
+    ["", "unknown"],
+    ["/private/terminal", "unknown"],
+    ["agterm\n", "unknown"],
+    ["agterm".repeat(1000), "unknown"],
+  ])("maps %s to the closed label %s", (raw, expected) => {
+    expect(sanitizeTelemetryTerminalProgram(raw)).toBe(expected);
+  });
+  it("sanitizes untrusted event values", () => {
+    const session = createTelemetrySession(true);
+    const event = {
+      event: "session_started",
+      terminal_program: "/private/raw",
+    } as unknown as TelemetryEvent;
+    expect(
+      buildTelemetryPayload(session, event).properties.terminal_program,
+    ).toBe("unknown");
+    expect(
+      buildTelemetryPayload(session, { event: "session_started" }).properties
+        .terminal_program,
+    ).toBe("unknown");
+  });
+});
+describe("parent multiplexer capture", () => {
+  it("reports parent tmux independently of the terminal and child backend", () => {
+    vi.stubEnv("TMUX", "/private/socket,123,0");
+    vi.stubEnv("ZELLIJ_SESSION_NAME", undefined);
+    vi.stubEnv("HERDR_ENV", undefined);
+    vi.stubEnv("TERM_PROGRAM", "agterm");
+    registration().start();
+    expect(captured[0].properties).toMatchObject({
+      parent_mux: "tmux",
+      terminal_program: "agterm",
+    });
+    expect(captured[0].properties).not.toHaveProperty("mux");
+    expect(JSON.stringify(captured)).not.toContain("/private/socket");
+  });
+});

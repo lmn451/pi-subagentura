@@ -41,6 +41,7 @@ const PKG = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
   exports: Record<string, unknown>;
   dependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  pi?: { skills?: string[] };
 };
 const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs", ".js"];
 const APPROVED_PI_PEERS = new Set([
@@ -227,6 +228,7 @@ describe("published tarball", () => {
       expect.arrayContaining([
         "ORCHESTRATOR_SYSTEM_PROMPT.md",
         "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+        "INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
         "src/completion-coordinator.ts",
         "src/completion-ledger.ts",
         "src/completion-turn.ts",
@@ -274,7 +276,7 @@ describe("published tarball", () => {
     });
   });
 
-  it("contains the workflow guide, examples, and bundled RALPLAN skill", () => {
+  it("contains workflow examples without the removed bundled RALPLAN skill", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         "docs/workflows.md",
@@ -284,8 +286,10 @@ describe("published tarball", () => {
         "examples/workflows/ralplan-from-skill.mjs",
         "examples/workflows/ralplan-occ.mjs",
         "examples/workflows/skill-to-workflow.mjs",
-        "skills/ralplan/SKILL.md",
       ]),
+    );
+    expect(entries.some((entry) => entry.startsWith("skills/ralplan/"))).toBe(
+      false,
     );
   });
 
@@ -318,6 +322,32 @@ describe("published tarball", () => {
       runtime: true,
     });
     expect(entries).toContain("src/workflow-worker-thread.mjs");
+  });
+
+  it("registers and publishes the debug skill with recovery guidance", () => {
+    const skillPath = "./skills/pi-subagentura-debug";
+    expect(PKG.pi?.skills).toContain(skillPath);
+    expect(entries).toContain(`${skillPath.slice(2)}/SKILL.md`);
+
+    const packedPackage = JSON.parse(
+      readFileSync(join(pkgDir, "package.json"), "utf8"),
+    );
+    expect(packedPackage.pi.skills).toContain(skillPath);
+
+    const skill = readFileSync(
+      join(pkgDir, "skills/pi-subagentura-debug/SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toMatch(/^---\nname: pi-subagentura-debug\n/);
+    expect(skill).toMatch(
+      /^description:.*unsupported.*state.*schema.*persistence error/im,
+    );
+    expect(skill).toContain(
+      "## Unsupported interactive state or persistence errors",
+    );
+    expect(skill).toContain("private backup");
+    expect(skill).toContain("explicit user confirmation");
+    expect(skill).toContain("does not stop existing panes or processes");
   });
 
   it("declares every bare runtime source import", () => {
@@ -366,7 +396,6 @@ describe("published tarball", () => {
         "--no-fund",
         tgz,
         "jiti",
-        "@earendil-works/pi-server@latest",
       ],
       { cwd: consumer, encoding: "utf8" },
     );
@@ -385,5 +414,34 @@ describe("published tarball", () => {
       { cwd: consumer, encoding: "utf8" },
     );
     expect(smoke.status, smoke.stderr || smoke.stdout).toBe(0);
+    const jevSmoke = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { createJiti } from "jiti";
+         const jiti = createJiti(import.meta.url);
+         const mod = await jiti.import("pi-subagentura", { default: false });
+         globalThis.fetch = () => { throw new Error("registration must not fetch"); };
+         const tools = [];
+         mod.default({
+           registerTool: (tool) => tools.push(tool.name),
+           registerMessageRenderer() {}, registerFlag() {}, registerCommand() {},
+           registerShortcut() {}, on() {},
+           getFlag: (name) => name === "orchestratorv2",
+         });
+         if (tools.includes("resolve_orchestrator_route")) process.exit(5);`,
+      ],
+      {
+        cwd: consumer,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PI_ORCHESTRATOR_ROUTER: "jev",
+          TYPESAFE_API_KEY: "synthetic-no-network",
+        },
+      },
+    );
+    expect(jevSmoke.status, jevSmoke.stderr || jevSmoke.stdout).toBe(0);
   }, 60_000);
 });

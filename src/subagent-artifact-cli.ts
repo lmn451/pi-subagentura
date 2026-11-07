@@ -60,6 +60,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { constants as osConstants } from "node:os";
 
 export function reportPromptError(turnId, message, previousUserEntryId) {
   runCli({ promptError: { turnId, message, previousUserEntryId } });
@@ -368,44 +369,10 @@ const isCancelled = () =>
 const completed = (targetTurnId) =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === targetTurnId);
-const signalNames = [
-  undefined,
-  "SIGHUP",
-  "SIGINT",
-  "SIGQUIT",
-  "SIGILL",
-  "SIGTRAP",
-  "SIGABRT",
-  "SIGBUS",
-  "SIGFPE",
-  "SIGKILL",
-  "SIGUSR1",
-  "SIGSEGV",
-  "SIGUSR2",
-  "SIGPIPE",
-  "SIGALRM",
-  "SIGTERM",
-  "SIGCHLD",
-  "SIGCONT",
-  "SIGSTOP",
-  "SIGTSTP",
-  "SIGTTIN",
-  "SIGTTOU",
-  "SIGURG",
-  "SIGXCPU",
-  "SIGXFSZ",
-  "SIGVTALRM",
-  "SIGPROF",
-  "SIGWINCH",
-  "SIGIO",
-  "SIGPWR",
-  "SIGSYS",
-  ];
 const signalForExitCode = (exitCode) => {
+  if (!Number.isSafeInteger(exitCode)) return undefined;
   const signalNumber = exitCode - 128;
-  return Number.isSafeInteger(exitCode) && signalNumber > 0 && signalNumber < signalNames.length
-    ? signalNames[signalNumber]
-    : undefined;
+  return Object.entries(osConstants.signals).find(([, number]) => number === signalNumber)?.[0];
 };
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {
   const activeTool = activeState?.activeTools?.at(-1);

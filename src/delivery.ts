@@ -292,7 +292,7 @@ function consumedInteractiveDeliveryIds(
   const data = objectRecord(record.data);
   if (data?.source !== "interactive" || data.sourceId !== state.id) return [];
   return (state.pendingDeliveries ?? [])
-    .filter((intent) => !data.turnId || intent.turnId === data.turnId)
+    .filter((intent) => intent.turnId === data.turnId)
     .map((intent) => intent.deliveryId);
 }
 

@@ -438,8 +438,15 @@ test("buildAttachCommands emits window targets real tmux resolves unambiguously"
     paneId: panes["attach-a"]!,
     windowName,
   });
-  expect(cmds.focusCommand).toContain(`'attach-a:${windowName}'`);
-  expect(cmds.attachCommand).toContain(`'attach-a:${windowName}'`);
+  const targetIndex = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    panes["attach-a"]!,
+    "#{window_index}",
+  ]).trim();
+  expect(cmds.focusCommand).toContain(`'attach-a:${targetIndex}'`);
+  expect(cmds.attachCommand).toContain(`'attach-a:${targetIndex}'`);
 
   // 1. The focusCommand, run verbatim through a shell, moves the requested
   //    session and leaves the identically-named window in the other one alone.
@@ -590,4 +597,54 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     grandchild,
   );
   cancelInteractiveSubagent(child.id, "cancel_interactive_subagent", child);
+});
+
+test("detached windows respect base-index and duplicate names remain addressable", () => {
+  tmux(["new-session", "-d", "-s", "seed"]);
+  tmux(["set-option", "-g", "base-index", "1"]);
+  tmux(["set-window-option", "-g", "automatic-rename", "off"]);
+  const mux = new TmuxMultiplexer();
+  const first = mux.createPane({
+    name: "reviewer",
+    cwd: tempRoot,
+    background: true,
+    id: "duplicate",
+  });
+  const second = mux.createPane({
+    name: "reviewer",
+    cwd: tempRoot,
+    background: true,
+    id: "another",
+  });
+  expect(
+    tmux([
+      "display-message",
+      "-p",
+      "-t",
+      first.paneId,
+      "#{window_index}",
+    ]).trim(),
+  ).toBe("1");
+  for (const pane of [first, second]) {
+    expect(
+      tmux([
+        "display-message",
+        "-p",
+        "-t",
+        pane.paneId,
+        "#{window_name}",
+      ]).trim(),
+    ).toBe("reviewer");
+    const commands = mux.buildAttachCommands(pane);
+    execFileSync("/bin/sh", ["-c", commands.focusCommand], { stdio: "pipe" });
+    expect(
+      tmux([
+        "display-message",
+        "-p",
+        "-t",
+        pane.session + ":",
+        "#{pane_id}",
+      ]).trim(),
+    ).toBe(pane.paneId);
+  }
 });

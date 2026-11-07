@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 0.80.6. CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `is-path-inside`, and `ndjson`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 1.2.0 (development pin 1.4.0). CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, and `is-path-inside`. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
@@ -138,8 +138,10 @@ The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is
 The coordinated async default is `completionPolicy="each"`; grouped work must
 use `completionPolicy="group"` and a bounded explicit `completionGroupId`.
 Registration happens at spawn. Every parent `agent_settled` seals its registered
-groups, and a group becomes ready only after all members are terminal. `error`
-and `cancelled` are terminal; late members are rejected.
+groups, and a group itself becomes ready only after all members are terminal.
+Error records bypass the group barrier for delivery before the group is ready;
+this does not complete the group. Successful and `cancelled` records remain
+gated until the group is ready. Late members are rejected.
 
 Each parent-visible standalone terminal record and each background workflow
 aggregate appends
@@ -258,6 +260,10 @@ remain process/session scoped and are retired rather than rehydrated.
 - The schema is versioned (`schemaVersion: 2`). Unsupported older or removed-field
   state is preserved, not migrated or rewritten; runtime operations requiring
   unsupported state fail closed.
+
+### Debug-skill trigger
+
+When Pi exposes the repository's `pi-subagentura-debug` skill, explicitly load it (`/skill:pi-subagentura-debug`) before diagnosing relevant errors. This includes unsupported schema or removed-field errors and read/write/rehydration failures for `.pi/subagentura-state.json`, `subagent_interactive` launch failures even when no pane was created, multiplexer failures, and missing artifacts or completion. This is prompt guidance for the agent, not runtime error interception; if the host does not expose the skill, use the repository documentation and do not claim it was automatically invoked.
 
 ## Git
 

@@ -4,7 +4,10 @@
  * on registration and public exports.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   deleteInteractiveStatesFile,
   hasPersistedTelemetryField,
@@ -76,6 +79,7 @@ import {
   isTelemetryEnabled,
   readExtensionSettings,
 } from "./settings";
+import { resolveTelemetrySessionHost } from "./session-host";
 import {
   captureTelemetry,
   createTelemetrySession,
@@ -83,8 +87,11 @@ import {
   retireTelemetrySession,
   resolveTelemetryMode,
   type TelemetryTerminalReason,
+  type TelemetrySession,
   resolveTelemetryTrafficOrigin,
   TELEMETRY_ORIGIN_ENV,
+  sanitizeTelemetryTerminalProgram,
+  resolveTelemetryParentMux,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -95,6 +102,18 @@ function logSessionError(event: string, error: unknown): void {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   debugLog("error", event, { error: message });
+}
+
+function captureRootSessionStarted(telemetry: TelemetrySession): void {
+  if (!telemetry.enabled || telemetry.trafficOrigin === "test") return;
+  captureTelemetry(telemetry, {
+    event: "session_started",
+    session_host: resolveTelemetrySessionHost(),
+    parent_mux: resolveTelemetryParentMux(),
+    terminal_program: sanitizeTelemetryTerminalProgram(
+      process.env.TERM_PROGRAM,
+    ),
+  });
 }
 
 function recordPreparedManifest(
@@ -147,7 +166,7 @@ function ensureInteractivePoller(globalState: any): void {
 
 function sessionIdForScope(
   scope: SessionScope,
-  fallbackManager?: { getSessionId?: () => string },
+  fallbackManager?: ExtensionContext["sessionManager"],
 ): string | undefined {
   try {
     return (scope.sessionManager ?? fallbackManager)?.getSessionId?.();
@@ -342,10 +361,7 @@ function cleanupScopeGeneration(
   owner: SessionOwnerToken,
   event: { reason?: string } | undefined,
   lifecycleOrigin: "session_start" | "session_shutdown",
-  ctx?: {
-    cwd?: string;
-    sessionManager?: { getSessionId?: () => string };
-  },
+  ctx?: ExtensionContext,
 ): void {
   const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
@@ -445,11 +461,11 @@ export function registerSessionHandlers(
       flushCompletionManifests(owner);
     });
   };
-  (pi as any).on?.("ui_prompt_start", () => {
+  pi.on("ui_prompt_start", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = true;
   });
-  (pi as any).on?.("ui_prompt_end", () => {
+  pi.on("ui_prompt_end", () => {
     if (scope.lifecycle !== "started") return;
     scope.uiPromptActive = false;
     flushAfterUiPrompt();
@@ -463,8 +479,8 @@ export function registerSessionHandlers(
   pi.on("before_agent_start", (event) => {
     if (scope.lifecycle !== "started") return;
     const owner = sessionOwner(scope);
-    if ("prompt" in event) {
-      markCompletionTurnWakeStarted(pi, event.prompt);
+    if (event.messageType === "custom") {
+      markCompletionTurnWakeStarted(pi, event.message);
     }
     markCompletionTurnStarting(owner);
     const message = prepareCompletionManifest(owner);
@@ -485,6 +501,7 @@ export function registerSessionHandlers(
   });
 
   pi.on("session_start", (event, ctx) => {
+    scope.workflowAdmissionClosed = true;
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
@@ -584,7 +601,7 @@ export function registerSessionHandlers(
       });
     }
     if (!isChild && recoveredTelemetry === undefined) {
-      captureTelemetry(scope.telemetry, { event: "session_started" });
+      captureRootSessionStarted(scope.telemetry);
     }
     // With telemetry off there is nothing to persist, so touching `.pi/`, the
     // state lock, and the state file would make the opt-out observable. The one
@@ -706,57 +723,53 @@ export function registerSessionHandlers(
       }
     }
     ensureInteractivePoller(globalState);
+    scope.workflowAdmissionClosed = false;
   });
 
-  (pi as any).on?.(
-    "session_shutdown",
-    (
-      event?: { reason?: string },
-      ctx?: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
-    ) => {
-      if (scope.lifecycle !== "started") return;
+  pi.on("session_shutdown", (event, ctx) => {
+    if (scope.lifecycle !== "started") return;
+    scope.workflowAdmissionClosed = true;
 
-      const owner = sessionOwner(scope);
-      retireTelemetrySession(scope.telemetry);
-      closeActiveInteractiveSupervisor(owner);
-      cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
-      clearFreshChildLineage(scope, event?.reason);
-      retireSessionScopedCompletions(
-        owner,
-        event?.reason === "new" || event?.reason === "fork",
-      );
-      clearCompletionCoordinator(owner);
-      scope.parentStreaming = false;
-      scope.uiPromptActive = false;
-      scope.isParentIdle = undefined;
-      clearCompletionTurnWake(pi);
-      scope.lifecycle = "shutdown";
-      advanceSessionScopeGeneration(scope.id);
-      removeSessionScope(scope.id);
+    const owner = sessionOwner(scope);
+    retireTelemetrySession(scope.telemetry);
+    closeActiveInteractiveSupervisor(owner);
+    cleanupScopeGeneration(scope, owner, event, "session_shutdown", ctx);
+    clearFreshChildLineage(scope, event?.reason);
+    retireSessionScopedCompletions(
+      owner,
+      event?.reason === "new" || event?.reason === "fork",
+    );
+    clearCompletionCoordinator(owner);
+    scope.parentStreaming = false;
+    scope.uiPromptActive = false;
+    scope.isParentIdle = undefined;
+    clearCompletionTurnWake(pi);
+    scope.lifecycle = "shutdown";
+    advanceSessionScopeGeneration(scope.id);
+    removeSessionScope(scope.id);
 
-      const remainingScopes = getStartedSessionScopes();
-      if (remainingScopes.length > 0) return;
+    const remainingScopes = getStartedSessionScopes();
+    if (remainingScopes.length > 0) return;
 
-      const handle = globalState.__piSubagenturaInteractivePollerHandle;
-      if (handle) {
-        try {
-          clearInterval(handle);
-        } catch {
-          /* defensive */
-        }
-        globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    const handle = globalState.__piSubagenturaInteractivePollerHandle;
+    if (handle) {
+      try {
+        clearInterval(handle);
+      } catch {
+        /* defensive */
       }
+      globalState.__piSubagenturaInteractivePollerHandle = undefined;
+    }
 
-      if (event?.reason === "new" && ctx?.cwd) {
-        try {
-          deleteInteractiveStatesFile(ctx.cwd);
-          deleteOrchestratorRoutingFile(ctx.cwd);
-        } catch {
-          /* best effort */
-        }
+    if (event?.reason === "new" && ctx?.cwd) {
+      try {
+        deleteInteractiveStatesFile(ctx.cwd);
+        deleteOrchestratorRoutingFile(ctx.cwd);
+      } catch {
+        /* best effort */
       }
-    },
-  );
+    }
+  });
 
   return scope;
 }

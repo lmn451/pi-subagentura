@@ -72,6 +72,7 @@ function mockCtx() {
     ui: { notify: vi.fn(), setStatus: vi.fn() },
     sessionManager: {
       getBranch: vi.fn().mockReturnValue([]),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
       getSessionId: vi.fn().mockReturnValue("test-session-id"),
     },
   };
@@ -205,6 +206,68 @@ describe("subagent_interactive tool lifecycle", () => {
       mockInteractiveState("cancelled"),
     );
     mockLaunchInteractiveSubagent.mockReturnValue(mockInteractiveState());
+  });
+
+  it.each([false, true])(
+    "renders launch failures from the host error context (expanded=%s)",
+    (expanded) => {
+      const toolDef = getInteractiveToolDef(api);
+      const message =
+        "Failed to start interactive sub-agent: unsupported state";
+      const result = {
+        content: [{ type: "text", text: message }],
+        details: { status: "error", error: "unsupported state" },
+      };
+      const theme = { fg: vi.fn((_color: string, text: string) => text) };
+      const rendered = toolDef.renderResult(
+        result,
+        { expanded, isPartial: false },
+        theme,
+        { isError: true },
+      );
+
+      expect(result).not.toHaveProperty("isError");
+      expect(getRenderedText(rendered)).toBe(message);
+      expect(theme.fg).toHaveBeenCalledWith("error", message);
+    },
+  );
+
+  it.each([undefined, { isError: false }])(
+    "preserves legacy launch error rendering with context %j",
+    (context) => {
+      const toolDef = getInteractiveToolDef(api);
+      const message = "Failed to start interactive sub-agent: unavailable mux";
+      const rendered = toolDef.renderResult(
+        {
+          content: [{ type: "text", text: message }],
+          details: { status: "error", error: "unavailable mux" },
+          isError: true,
+        },
+        { expanded: false, isPartial: false },
+        { fg: (_color: string, text: string) => text },
+        context,
+      );
+
+      expect(getRenderedText(rendered)).toBe(message);
+    },
+  );
+
+  it("preserves successful host-shaped launch rendering", () => {
+    const toolDef = getInteractiveToolDef(api);
+    const state = mockInteractiveState();
+    const rendered = toolDef.renderResult(
+      {
+        content: [{ type: "text", text: "Interactive sub-agent started" }],
+        details: { ...state, status: "started", thinkingLevel: "high" },
+      },
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+      { isError: false },
+    );
+
+    expect(getRenderedText(rendered)).toBe(
+      `⚡ Interactive sub-agent ${state.id} — pane ${state.paneId} · thinking: high`,
+    );
   });
 
   it("describes provider-aware model selection", () => {
@@ -365,15 +428,13 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
-  it("uses only the serialized parent branch when includeContext is true", async () => {
+  it("uses projected parent messages when includeContext is true", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();
-    ctx.sessionManager.getBranch.mockReturnValue([
-      {
-        type: "message",
-        message: { role: "user", content: "PARENT-BRANCH-MARKER" },
-      },
-    ]);
+    const buildSessionProjection = vi.fn().mockReturnValue({
+      messages: [{ role: "user", content: "PARENT-PROJECTED-MARKER" }],
+    });
+    Object.assign(ctx.sessionManager, { buildSessionProjection });
 
     await toolDef.execute(
       "call-parent-context",
@@ -387,10 +448,11 @@ describe("subagent_interactive tool lifecycle", () => {
       ctx,
     );
 
-    expect(ctx.sessionManager.getBranch).toHaveBeenCalledOnce();
+    expect(buildSessionProjection).toHaveBeenCalledOnce();
+    expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
     const contextText = mockLaunchInteractiveSubagent.mock.calls[0][0]
       .contextText as string;
-    expect(contextText).toContain("PARENT-BRANCH-MARKER");
+    expect(contextText).toContain("PARENT-PROJECTED-MARKER");
     expect(contextText).not.toContain(
       "EXPLICIT-CONTEXT-MUST-NOT-BE-CONCATENATED",
     );

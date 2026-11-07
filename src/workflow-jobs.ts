@@ -472,12 +472,15 @@ export function startWorkflowJob(
   executionMode: "async" | "sync" = "async",
   telemetryOptions?: WorkflowJobTelemetryOptions,
 ): WorkflowJobState {
-  if (!owner || !isSessionOwnerLive(owner)) {
+  if (!owner) {
     throw new Error("Workflow jobs require an owner from a live session.");
   }
   const parentSessionOwner = owner;
-  const telemetrySession =
-    resolveLiveSessionScope(parentSessionOwner)?.telemetry;
+  const ownerScope = resolveLiveSessionScope(parentSessionOwner);
+  if (!ownerScope || ownerScope.workflowAdmissionClosed) {
+    throw new Error("Workflow jobs require an owner from a live session.");
+  }
+  const telemetrySession = ownerScope.telemetry;
   // A blocking sync workflow ran unconditionally before it was tracked here.
   // Subjecting it to the cap would turn an always-succeeding call into a new
   // user-visible failure, so sync jobs are exempt — they are also removed from
@@ -535,6 +538,12 @@ export function startWorkflowJob(
   };
   const opts =
     typeof optsOrBuilder === "function" ? optsOrBuilder(id) : optsOrBuilder;
+  if (
+    resolveLiveSessionScope(parentSessionOwner) !== ownerScope ||
+    ownerScope.workflowAdmissionClosed
+  ) {
+    throw new Error("Workflow jobs require an owner from a live session.");
+  }
   const abort = new AbortController();
   const externalSignal = opts.signal;
   const forwardAbort = () => abort.abort(externalSignal?.reason);

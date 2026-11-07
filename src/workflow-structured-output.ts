@@ -1,4 +1,5 @@
-import { Type } from "typebox";
+import { Type, type TObject, type TSchema } from "typebox";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 
 export interface WorkflowStructuredOutputCapture {
@@ -6,41 +7,20 @@ export interface WorkflowStructuredOutputCapture {
   value: unknown;
 }
 
-interface WorkflowStructuredOutputToolDefinition {
-  name: string;
-  label: string;
-  description: string;
-  parameters: unknown;
-  constrainedSampling: {
-    type: "json_schema";
-    strict: "prefer";
-  };
-  executionMode: "sequential";
-  execute(
-    _toolCallId: string,
-    params: { value: unknown },
-    _signal?: AbortSignal,
-    _onUpdate?: (partialResult: AgentToolResult<unknown>) => void,
-  ): Promise<AgentToolResult<{ value: unknown }>>;
-}
+type WorkflowStructuredOutputParameters = TObject<{ value: TSchema }>;
 
-export interface WorkflowStructuredOutputTool {
-  tool: WorkflowStructuredOutputToolDefinition;
-  capture: WorkflowStructuredOutputCapture;
-}
-
-function wrapSchemaWithValue(schema: unknown): unknown {
+function wrapSchemaWithValue(
+  schema: unknown,
+): WorkflowStructuredOutputParameters {
   return Type.Object(
     {
-      value: schema as any,
+      value: schema as TSchema,
     },
     { required: ["value"] },
   );
 }
 
-export function createWorkflowStructuredOutputTool(
-  schema: unknown,
-): WorkflowStructuredOutputTool {
+export function createWorkflowStructuredOutputTool(schema: unknown) {
   const capture: WorkflowStructuredOutputCapture = {
     called: false,
     value: undefined,
@@ -73,6 +53,9 @@ export function createWorkflowStructuredOutputTool(
           terminate: true,
         });
       },
-    },
+    } satisfies ToolDefinition<
+      WorkflowStructuredOutputParameters,
+      { value: unknown }
+    >,
   };
 }

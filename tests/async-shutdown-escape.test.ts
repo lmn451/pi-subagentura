@@ -45,6 +45,9 @@ function fakeCtx(withContext: boolean) {
         withContext
           ? [{ type: "message", message: { role: "user", content: "Hi" } }]
           : [],
+      buildSessionProjection: () => ({
+        messages: withContext ? [{ role: "user", content: "Hi" }] : [],
+      }),
       getSessionId: () => "parent-session",
       getEntries: () => [],
     },

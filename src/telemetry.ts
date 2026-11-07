@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  getBuiltinModel,
+  getBuiltinProviders,
+  type BuiltinProvider,
+} from "@earendil-works/pi-ai/providers/all";
 import {
   asStringIdentifier,
   type TelemetryCorrelationId,
@@ -17,6 +21,7 @@ const MAX_TELEMETRY_DEPTH = 64;
 const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
+export type TelemetrySessionHost = "agterm" | "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
 export type TelemetryTrafficOrigin =
@@ -213,6 +218,7 @@ export const TELEMETRY_OPERATION_NAMES = {
     "list_subagent_artifacts",
     "list_orchestrator_agents",
     "update_orchestrator_agent_description",
+    "resolve_orchestrator_route",
     "workflow",
     "get_workflow_status",
     "get_workflow_result",
@@ -288,7 +294,12 @@ type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
 };
 
 export type TelemetryEvent =
-  | { event: "session_started" }
+  | {
+      event: "session_started";
+      session_host?: TelemetrySessionHost;
+      terminal_program?: TelemetryTerminalProgram;
+      parent_mux?: TelemetryParentMux;
+    }
   | {
       event: "session_setup_failed";
       failure_stage: TelemetrySessionFailureStage;
@@ -498,7 +509,10 @@ export function retireTelemetrySession(
 
 function builtInModel(provider: string, modelId: string): boolean {
   try {
-    return getModel(provider as never, modelId) !== undefined;
+    return (
+      getBuiltinModel(provider as BuiltinProvider, modelId as never) !==
+      undefined
+    );
   } catch {
     return false;
   }
@@ -514,11 +528,10 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
     const modelId = model.slice(separator + 1);
     return builtInModel(provider, modelId) ? model : "custom";
   }
-  // Provider enumeration reaches registry code owned by the host agent. A throw
-  // there must degrade the dimension, never fail the sub-agent launch that only
-  // wanted to label a model.
+  // The generated provider catalog is used only to label telemetry. Any
+  // lookup failure must degrade this dimension, not fail sub-agent launch.
   try {
-    for (const provider of getProviders()) {
+    for (const provider of getBuiltinProviders()) {
       if (builtInModel(provider, model)) return model;
     }
   } catch {
@@ -969,7 +982,19 @@ export function buildTelemetryPayload(
   let properties: TelemetryPayload["properties"];
   switch (event.event) {
     case "session_started":
-      properties = common;
+      properties = {
+        ...common,
+        session_host:
+          event.session_host === "agterm"
+            ? "agterm"
+            : event.session_host === "orca"
+              ? "orca"
+              : "unknown",
+        terminal_program: sanitizeTelemetryTerminalProgram(
+          event.terminal_program,
+        ),
+        parent_mux: sanitizeTelemetryParentMux(event.parent_mux),
+      };
       break;
     case "session_setup_failed":
       properties = { ...common, failure_stage: event.failure_stage };
@@ -1327,4 +1352,59 @@ export function captureTelemetry(
     // Best-effort analytics must never affect extension behavior.
     clearTimeout(timeout);
   }
+}
+export type TelemetryTerminalProgram =
+  | "agterm"
+  | "ghostty"
+  | "iterm2"
+  | "apple_terminal"
+  | "vscode"
+  | "wezterm"
+  | "kitty"
+  | "unknown";
+
+export function sanitizeTelemetryTerminalProgram(
+  value: unknown,
+): TelemetryTerminalProgram {
+  switch (value) {
+    case "agterm":
+    case "ghostty":
+    case "vscode":
+    case "wezterm":
+    case "kitty":
+      return value;
+    case "WezTerm":
+      return "wezterm";
+    case "iTerm.app":
+    case "iterm2":
+      return "iterm2";
+    case "Apple_Terminal":
+    case "apple_terminal":
+      return "apple_terminal";
+    default:
+      return "unknown";
+  }
+}
+export type TelemetryParentMux = "tmux" | "zellij" | "herdr" | "unknown";
+
+export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
+  return value === "tmux" || value === "zellij" || value === "herdr"
+    ? value
+    : "unknown";
+}
+
+export function resolveTelemetryParentMux(
+  env: NodeJS.ProcessEnv = process.env,
+): TelemetryParentMux {
+  const marker = (value: unknown): boolean =>
+    typeof value === "string" &&
+    value.length <= 4096 &&
+    value.trim().length > 0 &&
+    !/[\x00-\x1f\x7f]/.test(value);
+  const candidates: TelemetryParentMux[] = [];
+  if (marker(env.TMUX)) candidates.push("tmux");
+  if (marker(env.ZELLIJ_SESSION_NAME)) candidates.push("zellij");
+  if (env.HERDR_ENV === "1") candidates.push("herdr");
+  // Multiple markers cannot establish which nested multiplexer owns this process.
+  return candidates.length === 1 ? candidates[0] : "unknown";
 }

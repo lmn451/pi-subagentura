@@ -1,12 +1,12 @@
 ---
 name: pi-subagentura-debug
-description: Diagnose pi-subagentura sub-agent launches, tool calls, missing working directories, multiplexer panes, and artifact delivery. Use when behavior is unexpected or a sub-agent starts then exits.
+description: Diagnose pi-subagentura sub-agent launches, tool calls, working-directory and multiplexer problems, and artifact delivery. Use when a tool call fails, an interactive child fails before or after pane creation, `.pi/subagentura-state.json` cannot be read or mutated, an unsupported interactive state schema or persistence errors are reported, or completion/artifacts are missing.
 level: beginner
 ---
 
 # Debugging pi-subagentura
 
-Use this skill when a pi-subagentura tool behaves unexpectedly, an interactive child exits immediately, or completion/artifact delivery is unclear. Gather the exact tool name, arguments, visible error, Pi version, and whether the call was in-process or interactive before changing settings.
+Use this skill for pi-subagentura tool failures, interactive children that fail to spawn or exit, unsupported state-schema or persistence errors, and missing completion or artifacts. If the skill is exposed but not loaded, explicitly invoke `/skill:pi-subagentura-debug`; skill discovery is model guidance, not a runtime error-interception hook. Gather the exact tool name, arguments, visible error, Pi version, and whether the call was in-process or interactive before changing settings.
 
 ## Inspect arguments and the loaded extension
 
@@ -46,7 +46,7 @@ Confirm that the directory exists, is a directory, and can be traversed by the u
 
 If the error still occurs with a valid path:
 
-1. Record the exact tool name, `cwd`, error text, selected mux, and whether a pane was created.
+1. Record the exact tool name, `cwd`, error text, selected mux, and whether a pane was created. A spawn error before pane creation is a launch failure, not an immediate child exit.
 2. Check that the selected multiplexer is available and that the child process can run Pi from that directory.
 3. Use `get_interactive_subagent_status` and `list_subagent_artifacts` to inspect retained state; use `read_subagent_artifact` when an artifact reference is available.
 4. Share the smallest redacted relevant log excerpt and the Pi/extension versions when reporting the issue.
@@ -56,3 +56,13 @@ If the error still occurs with a valid path:
 ## Completion or output appears missing
 
 For interactive children, inspect status and artifacts before retrying. A dead pane can still have useful artifact state. Distinguish a child that has not completed from one whose completion was recorded but whose delivery has not been consumed. Follow the tool's returned status and artifact references; do not infer completion from pane disappearance alone.
+
+## Unsupported interactive state or persistence errors
+
+`.pi/subagentura-state.json` is a per-working-directory recovery index, not the child process, artifact store, or Pi session history. For an unsupported schema/removed-field error or state read/write failure:
+
+1. Stop retrying mutations. Record the exact error and Pi/extension versions; do not paste state-file contents or identifiers into a report.
+2. If the file exists, make a private backup before cleanup. Never hand-edit schema versions, cursors, delivery intents, or receipts. The current reader preserves unsupported bytes and mutations fail closed; `/reload` and restarts do not migrate them.
+3. Treat child liveness as unknown. A child whose record could not be loaded may still have a running pane or process and may be absent from status/artifact listings. Do not infer it is dead or spawn a duplicate solely because the registry cannot show it.
+4. Do not use `/new` or deleting the state file as a repair. `/new` is destructive and can only attempt cleanup for panes enumerable in the current process scope; children hidden by unreadable state may remain. Deleting the index does not stop existing panes or processes, remove artifact directories, or delete Pi session histories; it discards records needed to rehydrate or poll those children.
+5. Ask whether the user needs to preserve existing agents or state, and obtain explicit user confirmation before deleting the file, using `/new`, or performing another destructive reset. If legacy data needs inspection, retain a copy and consult the last release that supported it; the current runtime has no importer or migration tool.

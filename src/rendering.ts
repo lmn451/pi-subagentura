@@ -1,4 +1,8 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type {
+  Theme,
+  ToolDefinition,
+  ToolRenderResultOptions,
+} from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
@@ -12,6 +16,23 @@ import type { SubagentDetails } from "./subagent";
 import type { SubagentResult } from "./helpers";
 import { sanitizeOutput } from "./notifications";
 import type { InteractiveSubagentState } from "./interactive-tmux";
+
+export type SubagentRenderDetails =
+  | ((
+      | SubagentDetails
+      | (Omit<
+          Extract<SubagentDetails, { status: "running" }>,
+          "subagentStatus"
+        > & { subagentStatus?: undefined })
+      | { status?: "wait_cancelled" | "wait_timeout"; jobId?: string }
+    ) &
+      Partial<
+        Pick<
+          Extract<SubagentDetails, { status: "done" | "error" }>,
+          "usageSummary" | "thinkingLevel"
+        >
+      >)
+  | undefined;
 
 function thinkingSuffix(level?: ThinkingLevel): string {
   return level ? ` · thinking: ${level}` : "";
@@ -44,10 +65,17 @@ export function renderSubagentCall(
 }
 
 export function renderSubagentResult(
-  result: AgentToolResult<any> & { isError?: boolean },
-  { expanded, isPartial }: { expanded: boolean; isPartial: boolean },
+  result: AgentToolResult<SubagentRenderDetails>,
+  { expanded, isPartial }: ToolRenderResultOptions,
   theme: Theme,
-  _context: unknown,
+  context:
+    | (Parameters<NonNullable<ToolDefinition["renderResult"]>>[3] & {
+        keyHint?: (
+          keybinding: "app.tools.expand",
+          description: string,
+        ) => string;
+      })
+    | undefined,
 ) {
   // Async spawn result: show compact "started" display
   if (result.details?.status === "started") {
@@ -105,14 +133,18 @@ export function renderSubagentResult(
     result.content.find(
       (c): c is { type: "text"; text: string } => c.type === "text",
     )?.text ?? "";
-  const resultDetails = result.details as
-    | { usageSummary?: string; thinkingLevel?: ThinkingLevel }
-    | undefined;
+  const expandHint =
+    !expanded && text && typeof context?.keyHint === "function"
+      ? `\n${context.keyHint("app.tools.expand", "to expand")}`
+      : "";
+  const resultDetails = result.details;
+  const thinkingLevel = resultDetails?.thinkingLevel;
 
   if (result.isError) {
-    const thinking = thinkingSuffix(resultDetails?.thinkingLevel);
+    const thinking = thinkingSuffix(thinkingLevel);
     if (!expanded) {
-      const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+      const preview =
+        truncateToWidth(text.replace(/\s+/g, " "), 120) + expandHint;
       return new Text(
         thinking
           ? `${theme.fg("dim", thinking)}\n${theme.fg("error", preview)}`
@@ -131,7 +163,7 @@ export function renderSubagentResult(
   }
 
   const usageStr = resultDetails?.usageSummary;
-  const thinking = thinkingSuffix(resultDetails?.thinkingLevel);
+  const thinking = thinkingSuffix(thinkingLevel);
 
   if (usageStr) {
     const header =
@@ -139,13 +171,14 @@ export function renderSubagentResult(
       theme.fg("muted", usageStr) +
       theme.fg("dim", thinking);
     if (!expanded) {
-      return new Text(header, 0, 0);
+      return new Text(header + expandHint, 0, 0);
     }
     return new Text(`${header}\n${text}`, 0, 0);
   }
 
   if (!expanded) {
-    const preview = truncateToWidth(text.replace(/\s+/g, " "), 120);
+    const preview =
+      truncateToWidth(text.replace(/\s+/g, " "), 120) + expandHint;
     return new Text(
       thinking
         ? `${theme.fg("dim", thinking)}\n${theme.fg("dim", preview)}`
@@ -216,8 +249,11 @@ export function renderSubagentNotify(
   if (!options.expanded) {
     line = isError ? theme.fg("error", text) : theme.fg("accent", text);
   } else {
+    const resultOutput = details?.result?.output;
     const output = sanitizeOutput(
-      (details?.result?.output ?? "").slice(0, 500).replace(/\s+/g, " "),
+      (resultOutput === "" ? "(no output)" : (resultOutput ?? ""))
+        .slice(0, 500)
+        .replace(/\s+/g, " "),
     );
     const header = isError
       ? theme.fg("error", "❌ Sub-agent Failed")

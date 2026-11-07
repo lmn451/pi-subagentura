@@ -10,7 +10,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, constants } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
@@ -1509,4 +1509,30 @@ describe("subagent-artifact CLI", () => {
       expect(r.stderr).toContain("Unknown command");
     });
   });
+});
+
+describe("platform process-exit signals", () => {
+  it.each(["SIGBUS", "SIGUSR1"] as const)(
+    "uses the platform number for %s",
+    (signal) => {
+      const tmp = makeTmp();
+      try {
+        const exitCode = 128 + constants.signals[signal];
+        expect(runCli(tmp, ["process-exit", String(exitCode)]).status).toBe(0);
+        const event = JSON.parse(
+          readFileSync(join(tmp, "events.ndjson"), "utf8")
+            .trim()
+            .split("\n")
+            .at(-1)!,
+        );
+        expect(event).toMatchObject({
+          type: "process_exited",
+          exitCode,
+          signal,
+        });
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 });

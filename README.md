@@ -12,10 +12,16 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, or
 Herdr.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to route clear work to attachable interactive subagents, ask
-for clarification when a request is ambiguous or a narrow request has no matching
-child, and leave specialist repository work to those children. Compatibility
-workflow and in-process tools remain registered.
+guides the parent to route clear work to attachable specialists, ask for
+clarification when a request is ambiguous, and leave repository work to
+specialists. A clear scoped request may create one specialist when fresh
+discovery establishes that no suitable owner exists. Shared host-aware launch
+guidance also applies in regular sessions and `--orchestrator` mode; see
+[host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
+The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+applies when normal Pi parents or interactive children/nested contexts delegate
+interactively, with or without `--orchestratorv2`. Compatibility workflow and
+in-process tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -37,7 +43,7 @@ plays in 8:06, with quiet stretches accelerated and English translations include
 
 See [CHANGELOG.md](./CHANGELOG.md) for breaking changes between major versions.
 
-Node.js 22.23.2 or newer is required.
+Pi SDK 1.2.0 or newer and Node.js 22.23.2 or newer are required.
 
 Install globally:
 
@@ -73,8 +79,9 @@ Review the authentication layer across the API and database boundaries.
 ```
 
 The parent routes work to attachable interactive subagents and asks for
-clarification when a request is ambiguous or a narrow request has no matching
-child. For reusable workflows, use the workflow-oriented `--orchestrator` mode:
+clarification when a request is ambiguous. A clear scoped request may create
+one child when fresh discovery establishes that no suitable owner exists. For
+reusable workflows, use the workflow-oriented `--orchestrator` mode:
 
 ```text
 pi --orchestrator
@@ -191,6 +198,30 @@ The extension registers these public tools for parent agents.
 | `read_subagent_artifact`                | Read lifecycle events and output snapshots                        |
 | `cleanup_subagent_artifacts`            | Remove expired artifact directories and stale registry entries    |
 
+### Structured results
+
+All 11 read-only tools declare an `outputSchema` and return typed
+`structuredContent` while retaining their existing human-readable
+content/details:
+
+- **Jobs and workflows:** `get_subagent_status`, `get_subagent_result`,
+  `get_workflow_status`, `get_workflow_result`.
+- **Interactive artifacts:** `get_interactive_subagent_status`,
+  `list_subagent_artifacts`, `read_subagent_artifact`.
+- **Discovery and activity:** `list_available_models`,
+  `get_current_pane_activity`, `list_workflows`,
+  `list_orchestrator_agents`.
+
+Structured status, error, pending, and wait states are explicit. Terminal
+results preserve exact raw output: an empty string stays distinct from the
+literal `"(no output)"`, which is only a human-presentation sentinel. Artifact
+output remains sanitized and capped at 64 KiB with allowlisted metadata;
+artifact listings omit task text, paths, and raw events.
+
+Successful terminal reads through `get_subagent_result`,
+`get_workflow_result`, or output-bearing `read_subagent_artifact` persist a
+consumption receipt before returning. Receipt-storage failure blocks collection.
+
 ## How it compares with other Pi sub-agent extensions
 
 There is no single best extension; the useful distinction is what kind of
@@ -265,10 +296,30 @@ This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
 verify the parent model and does not enforce a host-level tool allowlist. Select
 the intended lightweight model separately, and do not enable
 `--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
-tools remain registered for compatibility, while the Orchestratorv2 prompt
-directs the parent to delegate only through attachable interactive children and
-use the parent session's authoritative routing ledger together with the
-project-local routing cache.
+tools remain registered for compatibility. When no verified host-managed
+surface is selected, Orchestratorv2 directs delegation through native attachable
+specialists using its parent-session authority ledger; the project-local routing
+cache is only an untrusted lookup aid.
+
+### Host-aware interactive agent spawning
+
+`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` provides the canonical detailed Orca
+guidance. `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` layers Agterm guidance,
+explicit target-selection precedence, and analytics boundaries on top. Both
+shared assets are appended exactly once to every root and interactive-child
+prompt; mode-specific prompt assets remain root-only.
+
+Verified Orca selects the host-managed surface as the default interactive
+surface for ordinary parents and interactive children when the user leaves
+target selection open. Any explicit user-selected target wins, including
+native `subagent_interactive` and `mux`; if the user explicitly
+requests Orca but discovery proves the caller is outside Orca, report the
+mismatch and ask rather than silently falling back to native. Host markers never
+choose or override `mux`. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+and [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
+
+For host attribution and the boundary around extension launch telemetry, see
+[telemetry documentation](docs/telemetry.md).
 
 ### Extension settings
 
@@ -377,8 +428,9 @@ This is the core v2 model in miniature: **you can keep talking with the orchestr
 
 The v2 prompt gives the parent a lightweight routing role: it routes clear work
 to attachable interactive subagents, can split broad requests across specialists,
-and asks for clarification when a request is ambiguous or a narrow request has no
-matching child. The parent is instructed to leave specialist repository work to
+and asks for clarification when a request is ambiguous. A clear scoped request
+may create one child when fresh discovery establishes that no suitable owner
+exists. The parent is instructed to leave specialist repository work to
 those children; this is prompt guidance, not an enforced routing boundary.
 
 For interactive children in the matching parent session, artifacts, routing state,
@@ -388,6 +440,11 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
+An optional native classifier advisor can recommend an existing child; the
+parent still sends the task. See [Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
+for setup and [Jev routing](docs/jev-routing.md) for its configuration and
+failure behavior.
+
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
 to the exact payload, current session generation, and a later user message; a
@@ -427,6 +484,28 @@ immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
 
+#### Enable the optional classifier advisor
+
+With pi-subagentura installed on **Pi ≥ 1.2.0** (`pi --version`), set
+`PI_ORCHESTRATOR_ROUTER=jev` and start Pi with `--orchestratorv2`. Configure
+provider authentication through Pi, then ask the parent to use
+`resolve_orchestrator_route` for a clear task whose child owner is ambiguous.
+The classifier recommends an existing child; it does not replace your chat
+model or automatically send work.
+
+For the default OpenRouter Jev classifier, authenticate with `/login openrouter`
+and start Pi with:
+
+```bash
+PI_ORCHESTRATOR_ROUTER=jev pi --orchestratorv2
+```
+
+Only live children with confirmed responsibilities can be recommended; the
+parent still sends the original task through its existing messaging tool. This
+opt-in sends bounded task and responsibility text to the configured provider.
+See [Jev routing](docs/jev-routing.md) for provider choices, configuration,
+payload disclosure, and failure behavior.
+
 ## Cancellation context snapshots (opt-in)
 
 Cancellation snapshots are **disabled by default**. To enable bounded snapshots before parent-initiated cancellation, set:
@@ -448,10 +527,9 @@ Snapshots use schema version 1, temp-file + rename writes, deterministic per-ses
 
 ### `subagent_with_context`
 
-Starts a sub-agent with the parent conversation included in its prompt. When the
-installed Pi SDK exposes the canonical session projection, that projection is
-used (including omission and replacement edits); older supported SDKs fall back
-to their message entries.
+Starts a sub-agent with the parent's canonical projected conversation included
+in its prompt. The extension passes `buildSessionProjection().messages`
+directly rather than serializing raw branch entries.
 
 Parameters:
 
@@ -578,7 +656,7 @@ Parameters:
 - `persona` — optional system prompt appended to the child session
 - `model` — optional model override
 - `cwd` — optional working directory
-- `includeContext` — context mode selector: `true` serializes the canonical parent session projection when available (including omission and replacement edits), with a message-entry fallback on older supported SDKs; `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
+- `includeContext` — context mode selector: `true` includes the canonical parent session projection (including omission and replacement edits); `false` permits an explicit `context`; omitting both fields keeps the legacy independent mode
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
@@ -606,23 +684,25 @@ protocol-v1 artifacts are left untouched but are not readable by this runtime.
 The standalone interactive sub-agent **registry state** survives parent reloads and restarts. When spawned,
 a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
-The state file and subagent panes are preserved across these actions:
+Standalone interactive registry state and panes behave across these lifecycle actions as follows:
 
-| Action                                            | State file                   | Panes      | Rehydrated next start?                       |
-| ------------------------------------------------- | ---------------------------- | ---------- | -------------------------------------------- |
-| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved  | ✅ Same session, parentSessionId matches     |
-| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved  | ❌ Different session, no match               |
-| **`/reload`**                                     | Kept                         | Preserved  | ✅ Same session                              |
-| **`/resume`** (switch to another session)         | Kept                         | Preserved  | ✅ If parentSessionId matches                |
-| **`/new`**                                        | **Deleted**                  | **Killed** | ❌ Clean slate                               |
-| **`/fork`**                                       | Kept (owned entries removed) | **Killed** | ❌ Fresh fork does not rehydrate prior state |
+| Action                                            | State file                   | Panes                   | Rehydrated next start?                       |
+| ------------------------------------------------- | ---------------------------- | ----------------------- | -------------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved               | ✅ Same session, parentSessionId matches     |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved               | ❌ Different session, no match               |
+| **`/reload`**                                     | Kept                         | Preserved               | ✅ Same session                              |
+| **`/resume`** (switch to another session)         | Kept                         | Preserved               | ✅ If parentSessionId matches                |
+| **`/new`**                                        | **Deleted***                 | Tracked panes targeted* | ❌ Clean slate                               |
+| **`/fork`**                                       | Kept (owned entries removed) | Tracked panes targeted  | ❌ Fresh fork does not rehydrate prior state |
 
-> **Note:** `/new` deletes the whole state file. `/fork` removes entries owned
-> by the old parent while preserving any unrelated entries in that file; a
-> fresh fork does not rehydrate prior state. If you do `/new` and then
-> `/resume` back to the session where subagents were spawned, they **will not
-> reappear** because the state file was already deleted. Only `/reload` or a
-> restart with the same session (`--session`/`-r`) preserves the registry.
+> **Note:** `/new` deletes the whole state file when no other started session
+> scope remains. `/fork` removes entries owned by the old parent while preserving
+> unrelated entries. Both transitions can only stop panes known to active
+> in-memory registries; children hidden by an unreadable or unsupported state file
+> may remain alive. These are destructive transitions, not recovery steps. If you
+> do `/new` and then `/resume` the old session, its deleted records will not
+> reappear. `/reload` or restarting with the same session can preserve and
+> rehydrate only state supported by the loaded version.
 
 On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
@@ -708,7 +788,7 @@ session, and cancellation preserves its artifact directory for later inspection.
 #### Sub-agent completion protocol
 
 Every interactive child runs protocol-only Pi lifecycle hooks and therefore
-requires Pi SDK `>=0.80.6`. `before_agent_start` creates a provisional
+requires Pi SDK `>=1.2.0`. `before_agent_start` creates a provisional
 turn, the first `turn_start` binds it to the persisted Pi user-entry id, tool
 hooks record activity, and `agent_settled` records the authoritative completion
 after retries, compaction, and queued continuations. When Pi accepts Enter while
@@ -824,9 +904,9 @@ from the parent-model channel:
 
 A named group is advanced cross-call control. A group supports at most 32 distinct `source:sourceId` members, with at most 512 groups per parent session. `completionGroupId` is 1–128 characters and must match `[A-Za-z0-9][A-Za-z0-9._:-]*`. A source can satisfy a group only once; later turns from the same source/group are delivered independently as `each`.
 
-The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 uses the lower-level transport to persist a wake request, publish the manifest with its wake identity, and send a synthetic user follow-up so `before_agent_start` installs the thin-router prompt. A streaming parent keeps Pi's native follow-up behavior.
+The completion coordinator owns readiness, group barriers, TUI notice persistence, and compact manifest construction. When an idle manifest is ready, it passes through `sendCompletionTurn` with the actual parent streaming state. Non-v2 modes fall through to Pi's native `sendMessage`; idle Orchestratorv2 records its wake request, sends the hidden `subagent-manifest` with `triggerTurn:false`, then sends a separate hidden custom message of type `orchestratorv2-completion-wakeup` with `triggerTurn:true` and `details.orchestratorV2WakeId`. This native custom wake is not a synthetic user message. A streaming parent keeps Pi's native follow-up behavior.
 
-Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. The exact synthetic prompt is marked in `before_agent_start`, and only that marked run's `agent_settled` acknowledges the wake; unrelated turns cannot consume it. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch.
+Wake state is process-global because Pi can load delivery and lifecycle extension graphs as separate module instances. `before_agent_start` acknowledges only a message with `messageType:"custom"`, custom type `orchestratorv2-completion-wakeup`, and `details.orchestratorV2WakeId` matching the active wake ID; natural user messages and unrelated custom messages cannot acknowledge it. The request/acknowledgement ledger types and schema are unchanged. A missing run start receives at most three wake attempts separated by a 30-second watchdog, while durable acknowledgement writes retry at most three times with a one-second delay. Session replacement and shutdown clear both timers; reload/resume recover only delivered, unacknowledged wakes from the active parent branch. Coalescing and human-input priority are unchanged.
 
 Successful terminal retrieval through `get_subagent_result`,
 `get_workflow_result`, or `read_subagent_artifact` with output consumes the
@@ -1011,8 +1091,8 @@ arguments, messages, outputs, raw errors, provider responses, paths, and runtime
 agent/job/workflow/session identifiers. Capture is best-effort and is not retried;
 missing completion events do not prove a crash or failed task.
 
-The detailed event schema, closed dimensions, recovery behavior, privacy limits,
-measurement caveats, and PostHog report queries live in
+The authoritative event schema, closed dimensions, recovery behavior, privacy
+limits, measurement caveats, and PostHog report queries live in
 [User-impact telemetry and PostHog reports](docs/telemetry.md).
 
 ### Traffic provenance
@@ -1199,14 +1279,18 @@ arguments as JSON.
 This displays the call arguments, not a list of every schema parameter or
 omitted default. It does not require debug logging.
 
-The bundled [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md)
-covers launch, working-directory, mux, and artifact diagnostics. It is included
-under `skills/pi-subagentura-debug/` in the package tarball for this branch.
-The current `pi` manifest declares only the extension, so a plain package source
-does not automatically expose the skill. Load it explicitly (for example,
-`pi --skill ./skills/pi-subagentura-debug` from this checkout), then invoke
-`/skill:pi-subagentura-debug`. These additions are unreleased, not features shipped
-in npm version 3.6.4.
+The [pi-subagentura-debug skill](./skills/pi-subagentura-debug/SKILL.md) covers
+launch, working-directory, multiplexer, state-persistence, and artifact
+troubleshooting. It is included in the package tarball and registered under
+`pi.skills`, so Pi discovers it for agent selection and the `/skill:` command
+when the package is loaded as a Pi package. Discovery is agent guidance, not a
+guaranteed invocation or runtime error hook. For unsupported state/schema or
+persistence errors, interactive spawn failures (including before pane creation),
+or mux/artifact/completion symptoms, explicitly ask the agent to load
+`/skill:pi-subagentura-debug` when exposed. Loading the checkout's extension file
+alone does not load package skills; pass `--skill ./skills/pi-subagentura-debug`
+when running that extension directly. Use `pi list` and `pi config` to confirm
+the package and version Pi actually loaded.
 
 Interactive spawning also validates that the resolved `cwd` exists and is a
 directory before creating a pane; create a requested worktree before spawning.

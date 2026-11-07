@@ -413,7 +413,7 @@ describe("multiplexer-tmux", () => {
     });
 
     expect(result.paneId).toBe(MOCK_PANE_ID);
-    // Relaxed path always defines windowName (renamed from default "0")
+    // The initial window is named at creation, regardless of base-index.
     expect(result.windowName).toBe("demo");
     expect(result.session).toBe("pi-subagent-abc12345");
 
@@ -428,10 +428,9 @@ describe("multiplexer-tmux", () => {
     expect(ns).toContain("-F");
     expect(ns).toContain("#{pane_id}");
 
-    const rn = calls.find((a) => a[0] === "rename-window");
-    expect(rn).toBeDefined();
-    expect(rn).toContain("pi-subagent-abc12345:0");
-    expect(rn).toContain("demo");
+    expect(ns).toContain("-n");
+    expect(ns?.[ns.indexOf("-n") + 1]).toBe("demo");
+    expect(calls.some((args) => args[0] === "rename-window")).toBe(false);
   });
 
   it("reuses the detached session and opens later subagents as windows", async () => {
@@ -486,10 +485,10 @@ describe("multiplexer-tmux", () => {
     // second agent's window cannot be confused with an identically-named window
     // in another session.
     expect(commands.attachCommand).toContain(
-      "select-window -t 'pi-subagent-abc12345:second'",
+      "select-window -t 'pi-subagent-abc12345:1'",
     );
     expect(commands.focusCommand).toBe(
-      "tmux select-window -t 'pi-subagent-abc12345:second'",
+      "tmux select-window -t 'pi-subagent-abc12345:1'",
     );
   });
 
@@ -828,9 +827,9 @@ describe("multiplexer-tmux", () => {
     // Session-qualified window target — `-t 'demo'` alone is ambiguous across
     // sessions and silently selects the wrong one (see the real-binary guard in
     // tests/tmux.integration.test.ts).
-    expect(cmds.attachCommand).toContain("select-window -t 'main:demo'");
+    expect(cmds.attachCommand).toContain("select-window -t 'main:1'");
 
-    expect(cmds.focusCommand).toBe("tmux select-window -t 'main:demo'");
+    expect(cmds.focusCommand).toBe("tmux select-window -t 'main:1'");
   });
 
   /* ------------------------------------------------------------------ */

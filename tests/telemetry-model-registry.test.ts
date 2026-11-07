@@ -1,15 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-// `sanitizeTelemetryModel` runs on the sub-agent launch path. It consults the
-// host agent's model registry, which is third-party code this extension does
-// not own, so a throw there must degrade the telemetry dimension rather than
-// fail the launch.
-vi.mock("@earendil-works/pi-ai/compat", () => ({
-  getProviders: () => {
-    throw new Error("provider registry unavailable");
+// `sanitizeTelemetryModel` runs on the sub-agent launch path. A generated
+// catalog lookup failure must degrade this telemetry dimension, not fail launch.
+vi.mock("@earendil-works/pi-ai/providers/all", () => ({
+  getBuiltinProviders: () => {
+    throw new Error("provider catalog unavailable");
   },
-  getModel: () => {
-    throw new Error("model registry unavailable");
+  getBuiltinModel: () => {
+    throw new Error("model catalog unavailable");
   },
 }));
 

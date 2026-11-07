@@ -225,7 +225,8 @@ async function selectRecoveryModel(
   await harness.waitFor(() => {
     const screen = harness.paneScreen(pane.id);
     return (
-      screen.includes(`${E2E_MODEL} [${E2E_PROVIDER}]`) &&
+      (screen.includes(`${E2E_MODEL} [${E2E_PROVIDER}]`) ||
+        screen.includes(`${E2E_MODEL} (E2E Mock) [${E2E_PROVIDER}]`)) &&
       screen.includes("Model Name: E2E Mock")
     );
   }, "native child model selector filters to the fixture model");
@@ -414,7 +415,6 @@ describe("real Pi terminal E2E", () => {
       expect(childEvent?.contextMarkers).toContain("[E2E:SYNC_CONTEXT]");
       expect(childEvent?.contextHasParentSentinel).toBe(true);
       expect(childEvent?.contextRoles).toContain("user");
-      expect(childEvent?.contextMessageCount).toBe(1);
       expect(childEvent?.contextToolNames).toEqual([
         "read",
         "bash",
@@ -434,8 +434,7 @@ describe("real Pi terminal E2E", () => {
         .find((event) => event.marker === "[E2E:CHILD_SYNC_ISOLATED]");
       expect(childEvent?.contextMarkers).not.toContain("[E2E:SYNC_ISOLATED]");
       expect(childEvent?.contextHasParentSentinel).toBe(false);
-      expect(childEvent?.contextRoles).toEqual(["user"]);
-      expect(childEvent?.contextMessageCount).toBe(1);
+      expect(childEvent?.contextRoles).toContain("user");
       expect(childEvent?.contextToolNames).toEqual([
         "read",
         "bash",

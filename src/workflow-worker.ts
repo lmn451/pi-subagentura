@@ -1016,7 +1016,7 @@ function reportMuxProbeRuntimeFailure(
       execution: "interactive",
       mux: state.mux,
       reporter: "workflow_waiter",
-      impact: "unknown",
+      impact: "blocked",
     },
     { dedupeKey: runtimeFailureDedupeKey("mux_probe", episodeId) },
   );
@@ -1126,7 +1126,6 @@ export async function awaitInteractiveResult(
       } else if (liveness === "unknown") {
         deadTicks = 0;
         muxProbeFailureTicks++;
-        reportMuxProbeRuntimeFailure(state, telemetry);
         debugLog("warn", "interactive_mux_probe_unknown", {
           probeFailureTicks: muxProbeFailureTicks,
           graceLimit: INTERACTIVE_DEAD_GRACE_TICKS,
@@ -1138,6 +1137,8 @@ export async function awaitInteractiveResult(
             requestCancellationOnce();
             return abortedInteractiveResult(usage);
           }
+          reportMuxProbeRuntimeFailure(state, telemetry);
+
           return attachWorkflowFailure(
             {
               isError: true,

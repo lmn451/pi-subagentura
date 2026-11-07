@@ -51,7 +51,7 @@ process agents use textual JSON extraction and validation as a fallback.
 | `ralplan-occ.mjs`        | 59.6 KB | Workflow re-implementation of oh-my-claudecode's RALPLAN |
 | `ralplan-from-skill.mjs` | 28.8 KB | Demo: `skill-to-workflow` output for pi-ralplan          |
 
-The demo output of `package-to-skill` is in `skills/ralplan/` — a complete installable skill.
+The generated skill is written to the caller-selected `skillDir`; the repository does not bundle generated skill output.
 
 ## Generic converters
 

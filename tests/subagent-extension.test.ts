@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
+import { nativeClassifierRegistry } from "./helpers/native-classifier";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,8 +81,12 @@ describe("extension registration", () => {
   beforeEach(() => {
     previousChild = process.env.PI_SUBAGENTURA_CHILD;
     delete process.env.PI_SUBAGENTURA_CHILD;
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    vi.stubEnv("TYPESAFE_API_KEY", undefined);
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     if (previousChild === undefined) {
       delete process.env.PI_SUBAGENTURA_CHILD;
     } else {
@@ -204,7 +209,7 @@ describe("extension registration", () => {
     );
   });
 
-  it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {
+  it("appends the V2 prompt when --orchestratorv2 is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestratorv2"),
     });
@@ -212,8 +217,11 @@ describe("extension registration", () => {
     registerExtension(api as any);
 
     const beforeAgentStart = api.on.mock.calls.find(
-      ([event]: any[]) => event === "before_agent_start",
+      ([event]) => event === "before_agent_start",
     )?.[1];
+    if (!beforeAgentStart) {
+      throw new Error("before_agent_start handler was not registered");
+    }
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
     expect(result.systemPrompt).toContain(
@@ -227,9 +235,8 @@ describe("extension registration", () => {
       "An exact or continuation match is not routable",
     );
     expect(result.systemPrompt).toContain(
-      "A narrow, exact, continuation, or delegation request with no matching child",
+      "Do not ask the user for permission merely to create that specialist",
     );
-    expect(result.systemPrompt).toContain("must not silently spawn or fan out");
     expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
@@ -306,6 +313,126 @@ describe("extension registration", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    { flag: "orchestratorv2", router: undefined, key: undefined },
+    { flag: "", router: "jev", key: "fake-key" },
+    { flag: "orchestratorv2", router: undefined, key: "fake-key" },
+    { flag: "orchestratorv2", router: "JEV", key: "fake-key" },
+    { flag: "orchestratorv2", router: "deterministic", key: "fake-key" },
+    { flag: "orchestrator", router: "jev", key: "fake-key" },
+  ])(
+    "keeps routing disabled for $flag / $router",
+    async ({ flag, router, key }) => {
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", router);
+      vi.stubEnv("TYPESAFE_API_KEY", key);
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = mockApi({ getFlag: vi.fn((name: string) => name === flag) });
+
+      registerExtension(api as any);
+      const beforeAgentStart = api.on.mock.calls.find(
+        ([event]: any[]) => event === "before_agent_start",
+      )?.[1];
+      const result = await beforeAgentStart(
+        { systemPrompt: "base prompt" },
+        {},
+      );
+
+      expect(getRegisteredToolNames(api)).not.toContain(
+        "resolve_orchestrator_route",
+      );
+      expect(result?.systemPrompt ?? "").not.toContain(
+        "## Optional routing advisor",
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("delivers enabled advisor guidance and registers the tool without making a request", async () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+    const modelRegistry = nativeClassifierRegistry();
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const api = mockApi({
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+    });
+
+    registerExtension(api as any);
+    const beforeAgentStart = api.on.mock.calls.find(
+      ([event]: any[]) => event === "before_agent_start",
+    )?.[1];
+    // The emitted system prompt is the interface delivered to the parent.
+    // These assertions do not claim to test an LLM's interpretation of it.
+    const ctx = { modelRegistry };
+    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, ctx);
+    for (const [event, handler] of api.on.mock.calls) {
+      if (event === "before_agent_start" && handler !== beforeAgentStart) {
+        await handler({ systemPrompt: "base prompt" }, ctx);
+      }
+    }
+
+    const normalizedPrompt = result.systemPrompt.replace(/\s+/g, " ");
+    expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
+    expect(normalizedPrompt).toContain("## Optional routing advisor");
+    expect(
+      normalizedPrompt.indexOf("When multiple current owners plausibly match"),
+    ).toBeLessThan(normalizedPrompt.indexOf("## Optional routing advisor"));
+    expect(normalizedPrompt).not.toContain(
+      "this section overrides the earlier instruction",
+    );
+    for (const policy of [
+      'On kind="match"',
+      'On kind="no_match" with reason="new_child_recommended"',
+      "creation is permitted under the existing policy",
+      "the recommendation alone neither mandates nor authorizes a spawn",
+      "On low_confidence or ambiguous, abstain",
+      "do not route to the suggested owner",
+      'On kind="error", or when the advisor is unavailable',
+      "current authoritative registry metadata",
+      "without a redundant approval prompt",
+      'On kind="cancelled", stop routing that request',
+      "Explicit child identity, explicit new-child instructions, and attach/focus",
+      "uncertainty only about which current owner fits is a routing question",
+    ]) {
+      expect(normalizedPrompt).toContain(policy);
+    }
+    expect(normalizedPrompt).toContain(
+      "send_interactive_subagent_message and send the original task",
+    );
+    expect(normalizedPrompt).toContain("requests bypass the advisor");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["api", "model", "auth"])(
+    "omits advisor guidance and registration when native %s is unavailable",
+    async (missing) => {
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+      vi.stubEnv("TYPESAFE_API_KEY", "fake-key");
+      const registry = nativeClassifierRegistry();
+      if (missing === "model") registry.findOfType.mockReturnValue(undefined);
+      if (missing === "auth")
+        registry.getProviderAuthStatus.mockReturnValue({ configured: false });
+      const api = mockApi({
+        getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+      });
+      registerExtension(api as any);
+      for (const [event, handler] of api.on.mock.calls) {
+        if (event !== "before_agent_start") continue;
+        const result = await handler(
+          { systemPrompt: "base" },
+          { modelRegistry: missing === "api" ? {} : registry },
+        );
+        expect(result?.systemPrompt ?? "").not.toContain(
+          "## Optional routing advisor",
+        );
+      }
+      expect(getRegisteredToolNames(api)).not.toContain(
+        "resolve_orchestrator_route",
+      );
+      expect(registry.classify).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not acknowledge a completion wake during preflight", async () => {
     const api = mockApi({

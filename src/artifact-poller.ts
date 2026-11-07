@@ -575,13 +575,22 @@ function taskExitCodeBucket(
 
 type ArtifactRuntimeFailureKind = Extract<
   TelemetryRuntimeFailureKind,
-  | "artifact_unreadable"
-  | "artifact_malformed"
-  | "artifact_oversized"
-  | "mux_probe"
+  "artifact_unreadable" | "artifact_malformed" | "artifact_oversized"
 >;
 
 const debuggedMuxProbeStates = new WeakSet<InteractiveSubagentState>();
+
+function logMuxProbeUnknown(
+  state: InteractiveSubagentState,
+  failureReason?: PaneLivenessFailureReason,
+): void {
+  if (debuggedMuxProbeStates.has(state)) return;
+  debuggedMuxProbeStates.add(state);
+  debugLog("warn", "interactive_mux_probe_unknown", {
+    mux: state.mux,
+    ...(failureReason === undefined ? {} : { failureReason }),
+  });
+}
 
 function runtimeFailureKindForIssue(
   issue: EventReadIssue,
@@ -604,15 +613,7 @@ function reportRuntimeFailure(
   kind: ArtifactRuntimeFailureKind,
   category: TelemetryErrorCategory,
   stage: TelemetryErrorStage,
-  failureReason?: PaneLivenessFailureReason,
 ): void {
-  if (kind === "mux_probe" && !debuggedMuxProbeStates.has(state)) {
-    debuggedMuxProbeStates.add(state);
-    debugLog("warn", "interactive_mux_probe_unknown", {
-      mux: state.mux,
-      ...(failureReason === undefined ? {} : { failureReason }),
-    });
-  }
   if (
     !telemetry ||
     !telemetry.enabled ||
@@ -634,7 +635,7 @@ function reportRuntimeFailure(
       execution: "interactive",
       mux: state.mux,
       reporter: "artifact_poller",
-      impact: kind === "mux_probe" ? "unknown" : "degraded",
+      impact: "degraded",
     },
     { dedupeKey: runtimeFailureDedupeKey(kind, episodeId) },
   );
@@ -642,7 +643,7 @@ function reportRuntimeFailure(
 
 function clearRuntimeFailureEpisodeForState(
   state: InteractiveSubagentState,
-  kind: ArtifactRuntimeFailureKind,
+  kind: ArtifactRuntimeFailureKind | "mux_probe",
 ): void {
   clearRuntimeFailureEpisode(state.artifactDir, kind);
   if (kind === "mux_probe") debuggedMuxProbeStates.delete(state);
@@ -821,14 +822,7 @@ async function runPollArtifactChanges(
       if (stateMap.get(state.id) !== state) continue;
       const paneLiveness = livenessDiagnostic.liveness;
       if (paneLiveness === "unknown") {
-        reportRuntimeFailure(
-          state,
-          ownerContext?.telemetry,
-          "mux_probe",
-          "mux",
-          "polling",
-          livenessDiagnostic.failureReason,
-        );
+        logMuxProbeUnknown(state, livenessDiagnostic.failureReason);
       } else {
         clearRuntimeFailureEpisodeForState(state, "mux_probe");
       }
