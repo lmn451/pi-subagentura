@@ -171,29 +171,55 @@ describe("getMux relaxed-spawn resolution", () => {
     expect(getMux({ preference: "auto" }).name).toBe("herdr");
   });
 
-  it("getMux explicit preference bypasses all env checks", async () => {
-    // Even with no env vars and binary unavailable, explicit preference
-    // should return the requested backend (the error comes later at
-    // createPane time, not at resolution time).
-    vi.doMock(
-      "node:child_process",
-      () =>
-        ({
-          execFileSync: () => {
-            throw new Error("ENOENT");
-          },
-        }) as unknown as typeof import("node:child_process"),
-    );
-
-    const { getMux, __resetMuxInstances } =
-      await importFresh<typeof import("../src/multiplexer")>(
-        "../src/multiplexer",
+  it.each([
+    ["Agterm", "tmux", { AGTERM_ENABLED: "1" }],
+    ["Agterm", "zellij", { AGTERM_ENABLED: "1" }],
+    [
+      "Orca",
+      "tmux",
+      {
+        ORCA_RUNTIME_SOURCE_ID: "source",
+        ORCA_RUNTIME_SOURCE_INCARNATION: "incarnation",
+        ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/private/profile",
+      },
+    ],
+    [
+      "Orca",
+      "zellij",
+      {
+        ORCA_RUNTIME_SOURCE_ID: "source",
+        ORCA_RUNTIME_SOURCE_INCARNATION: "incarnation",
+        ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/private/profile",
+      },
+    ],
+  ])(
+    "preserves explicit %s-host %s selection with nested mux markers",
+    async (_host, preference, hostEnv) => {
+      Object.assign(process.env, hostEnv, {
+        TMUX: "/tmp/tmux/default,1,0",
+        ZELLIJ_SESSION_NAME: "outer-zellij",
+      });
+      vi.doMock(
+        "node:child_process",
+        () =>
+          ({
+            execFileSync: () => {
+              throw new Error("explicit mux selection must not probe");
+            },
+          }) as unknown as typeof import("node:child_process"),
       );
-    __resetMuxInstances();
 
-    const mux = getMux({ preference: "tmux" });
-    expect(mux.name).toBe("tmux");
-  });
+      const { getMux, __resetMuxInstances } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      __resetMuxInstances();
+
+      expect(getMux({ preference: preference as "tmux" | "zellij" }).name).toBe(
+        preference,
+      );
+    },
+  );
 });
 
 describe("safeSegment", () => {

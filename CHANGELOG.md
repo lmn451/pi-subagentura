@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-02
+
 ### Added
+
+- Show extension update notes on Pi 1.5 using the packaged changelog.
+- Report the saved-workflow picker as waiting for user input on Pi 1.5.
+- Show configured expand shortcuts in collapsed subagent results on Pi 1.5.
+- Recognize provider-billed usage totals, including free requests, while
+  preserving legacy Pi cost accounting.
 
 - Add optional Orchestratorv2 child selection through Pi's native classifier
   API, with bounded inputs, fail-closed selection, and usage accounting.
+
+### Changed
+
+- Extend shared Orca prompt/skill guidance to interactive delegation in normal
+  Pi parents, interactive children/nested contexts, and Orchestratorv2 without
+  replacing native child execution or changing legacy workflow selection.
+- Layer Agterm guidance and explicit target precedence onto shared Orca
+  delegation, and attribute the closed host label on fresh root telemetry.
 
 ## [4.1.0] - 2026-10-25
 
@@ -309,8 +325,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Promoted `--orchestratorv2` as a routing-first interactive mode. Its prompt
   guides the parent to route work to attachable interactive subagents, ask for
-  clarification when a request is ambiguous or a narrow request has no matching
-  child, and leave
+  clarification when a request is ambiguous, and leave
   specialist work to those children. Compatibility workflow and in-process tools
   remain registered; this is prompt guidance rather than an enforced boundary.
 - Orchestratorv2 routing now treats the current parent branch as the sole authority ledger and the project-local JSON file as repairable untrusted cache data, preventing child-written records from becoming actionable, consuming authority capacity, blocking approved writes, or hiding authoritative stale records.
