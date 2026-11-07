@@ -34,6 +34,15 @@ does not restore these values: each Vitest worker is treated as a disposable
 quarantine. A command that bypasses Vitest configuration and setup files still
 needs to provide its own environment isolation.
 
+Both Vitest configurations also remove an inherited `SUBAGENT_DEBUG_LOG_DIR`
+before loading test modules. Failure-injection tests must not append synthetic
+errors to the runtime logs of the Pi process that launched them. Logging tests
+can explicitly set the variable to a temporary test-owned directory before
+importing the logger; because the logger caches its destination at module load,
+reset the module cache when changing that destination. Remove the temporary
+directory in teardown. The test process does not modify existing runtime logs
+or the launching process's environment.
+
 ## Creating a child-mode Pi fixture
 
 `tests/helpers/pi-session-harness.ts` exports `createPiSessionHarness`. It

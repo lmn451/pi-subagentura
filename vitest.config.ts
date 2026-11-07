@@ -2,6 +2,8 @@ import { defineConfig } from "vitest/config";
 
 // Tests should not inherit interactive child mode from the invoking process.
 delete process.env.PI_SUBAGENTURA_CHILD;
+// Logging tests opt into temporary destinations after configuration loads.
+delete process.env.SUBAGENT_DEBUG_LOG_DIR;
 export default defineConfig({
   test: {
     testTimeout: 15_000,
