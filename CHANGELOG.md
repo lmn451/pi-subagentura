@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-11-07
+
+### Added
+
+- Report allowlisted terminal application and observed parent multiplexer context
+  on fresh root telemetry, independently of session host and child execution
+  backend. Missing or ambiguous environment markers remain `unknown`; raw
+  environment values, socket paths, and session names are never uploaded.
+- Document terminal and parent-multiplexer telemetry dimensions, privacy rules,
+  and environment-inheritance limitations.
+
+### Fixed
+
+- Recover abandoned interactive-state locks without taking over a live owner.
+- Target tmux windows reliably when names collide across sessions.
+
 ## [4.2.0] - 2026-11-02
 
 ### Added
