@@ -71,6 +71,12 @@ pi install git:github.com/lmn451/pi-subagentura
 
 ## Quick start
 
+Try routing mode for a single run without installing:
+
+```bash
+pi -e npm:pi-subagentura --orchestratorv2
+```
+
 For routing-first interactive delegation:
 
 ```text
