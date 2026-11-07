@@ -828,15 +828,19 @@ function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (
     typeof a !== typeof b ||
+    Array.isArray(a) !== Array.isArray(b) ||
     a === null ||
     b === null ||
-    typeof a !== "object"
+    typeof a !== "object" ||
+    typeof b !== "object"
   )
     return false;
   const ka = Object.keys(a as object);
   const kb = Object.keys(b as object);
   if (ka.length !== kb.length) return false;
-  return ka.every((k) => deepEqual((a as any)[k], (b as any)[k]));
+  return ka.every(
+    (k) => Object.hasOwn(b, k) && deepEqual((a as any)[k], (b as any)[k]),
+  );
 }
 
 // ── Concurrency semaphore ────────────────────────────────────────────

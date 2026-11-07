@@ -70,9 +70,9 @@ import {
 } from "./completion-presentation";
 import { showWorkflowTree } from "./workflow-tree-ui";
 import {
-  WorkflowPickerComponent,
   type WorkflowPickerAction,
   type WorkflowPickerChoice,
+  showWorkflowPicker,
 } from "./workflow-picker-ui";
 import type {
   AgentToolResult,
@@ -1964,10 +1964,7 @@ export function registerWorkflowTool(
       choices: WorkflowPickerChoice[],
     ): Promise<WorkflowPickerAction | undefined> => {
       if (typeof ui.custom === "function") {
-        return ui.custom<WorkflowPickerAction | undefined>(
-          (_tui, theme, _kb, done) =>
-            new WorkflowPickerComponent(choices, theme, done),
-        );
+        return showWorkflowPicker(ui, choices);
       }
       const deleteLabel = "🗑  Delete a workflow…";
       const labels = choices.map(

@@ -125,6 +125,7 @@ export async function createPiSessionHarness(
     bindExtensionLifecycle?: boolean;
     extensionFlags?: Record<string, boolean | string>;
     extensionRoot?: string;
+    appendSystemPrompt?: string;
     includeTools?: boolean;
     sessionManager?: SessionManager;
     modelContextWindow?: number;
@@ -250,6 +251,9 @@ export async function createPiSessionHarness(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    appendSystemPrompt: options.appendSystemPrompt
+      ? [options.appendSystemPrompt]
+      : undefined,
   } as any);
   const previousChild = process.env.PI_SUBAGENTURA_CHILD;
   const previousArtifactDir = process.env.ARTIFACT_DIR;

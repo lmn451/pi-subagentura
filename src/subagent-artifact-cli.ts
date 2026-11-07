@@ -227,6 +227,7 @@ for (const name of processSignalNames) {
   }
 }
 const signalForExitCode = (exitCode) => {
+  if (!Number.isSafeInteger(exitCode)) return undefined;
   const signalNumber = exitCode - 128;
   return Number.isSafeInteger(exitCode) && signalNumber > 0
     ? signalNamesByNumber.get(signalNumber)

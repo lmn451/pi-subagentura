@@ -413,7 +413,8 @@ export class ZellijMultiplexer implements Multiplexer {
       panesBefore.filter((p) => !p.is_plugin).map((p) => String(p.id)),
     );
     const newPanes = terminalsAfter.filter((p) => !beforeIds.has(String(p.id)));
-    const chosen = newPanes[0] ?? terminalsAfter[0];
+    // Never launch into a terminal that existed before pane creation.
+    const chosen = newPanes[0];
     const paneId = chosen ? normalizePaneId(String(chosen.id)) : "";
     if (!paneId) {
       throw new Error("Failed to determine pane ID after creating pane");

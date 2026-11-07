@@ -1,6 +1,6 @@
 {
   "name": "pi-subagentura",
-  "version": "4.1.0",
+  "version": "4.2.1",
   "description": "Reusable agent workflows and observable, attachable sub-agents for the Pi coding agent",
   "author": "lmn451",
   "license": "MIT",
@@ -42,8 +42,11 @@
   "files": [
     "LICENSE",
     "WORKFLOW_RUNTIME.md",
+    "CHANGELOG.md",
     "ORCHESTRATOR_SYSTEM_PROMPT.md",
     "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+    "ORCA_INTERACTIVE_SYSTEM_PROMPT.md",
+    "INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
     "docs/workflows.md",
     "docs/jev-routing.md",
     "docs/telemetry.md",
@@ -139,6 +142,7 @@
     "access": "public"
   },
   "pi": {
+    "changelogPath": "CHANGELOG.md",
     "extensions": [
       "./src/subagent.ts"
     ],
@@ -182,10 +186,10 @@
     "typebox": ">=1.1.38 <2"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^5.0.0",

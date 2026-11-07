@@ -1266,6 +1266,33 @@ it("createPane relaxed path throws improved diagnostic on attach failure", async
   );
 });
 
+describe("Zellij pane identity regression", () => {
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    delete process.env.ZELLIJ;
+    delete process.env.ZELLIJ_SESSION_NAME;
+  });
+  it("rejects unchanged nonempty pane listings instead of targeting an existing terminal", async () => {
+    process.env.ZELLIJ = "0";
+    process.env.ZELLIJ_SESSION_NAME = "main";
+    installMockExec((_file, args) => {
+      if (args.includes("list-panes")) return PANES_BEFORE;
+      if (args.includes("current-tab-info")) return "position: 0\n";
+      return "";
+    });
+    const { ZellijMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-zellij")
+    >("../src/multiplexer-zellij");
+    expect(() =>
+      new ZellijMultiplexer().createPane({
+        name: "Demo",
+        cwd: "/tmp",
+        background: true,
+      }),
+    ).toThrow(/Failed to determine pane ID/);
+  });
+});
+
 it("createPane background throws improved diagnostic on new-tab failure", async () => {
   process.env.ZELLIJ = "0";
   vi.resetModules();

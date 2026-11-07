@@ -40,7 +40,13 @@ const workflow = parse(
 ) as Workflow;
 const packageJson = JSON.parse(
   readFileSync(resolve(REPO, "package.json"), "utf8"),
-) as { scripts: Record<string, string>; engines: { node: string } };
+) as {
+  scripts: Record<string, string>;
+  engines: { node: string };
+  peerDependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
+  files: string[];
+};
 
 function step(job: WorkflowJob, name: string): WorkflowStep {
   const found = job.steps.find((candidate) => candidate.name === name);
@@ -120,6 +126,29 @@ describe("CI workflow (.github/workflows/ci.yml)", () => {
         expect(invocations[0]).toContain(`@earendil-works/${name}@${version}`);
     },
   );
+
+  it("preserves the Pi 1.5 development pin and supported SDK floor", () => {
+    for (const name of [
+      "pi-agent-core",
+      "pi-ai",
+      "pi-coding-agent",
+      "pi-tui",
+    ]) {
+      expect(packageJson.peerDependencies[`@earendil-works/${name}`]).toBe(
+        ">=1.2.0",
+      );
+      expect(packageJson.devDependencies[`@earendil-works/${name}`]).toBe(
+        "1.5.0",
+      );
+    }
+    expect(packageJson.peerDependencies).not.toHaveProperty(
+      "@earendil-works/pi-server",
+    );
+    expect(packageJson.devDependencies).not.toHaveProperty(
+      "@earendil-works/pi-server",
+    );
+    expect(packageJson.files).not.toContain("src/pi-sdk-compat.ts");
+  });
 
   it("assigns checks to the intended SDK leg", () => {
     const test = workflow.jobs.test!;

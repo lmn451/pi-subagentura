@@ -241,7 +241,7 @@ describe("v4 workflow integration through worker and durable store", () => {
     const result = await execute(store, runner);
     expect(result.result).toMatchObject({
       ok: false,
-      error: { category: "unknown", stage: "completion" },
+      error: { category: "unknown", stage: "turn" },
     });
     const agentStep = store.events
       .filter((event) => event.kind === "v4.step")

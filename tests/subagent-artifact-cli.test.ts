@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { constants as osConstants, tmpdir } from "node:os";
+import { constants, constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
@@ -464,4 +464,30 @@ describe("subagent-artifact CLI", () => {
       expect(r.stderr).toContain("Unknown command");
     });
   });
+});
+
+describe("platform process-exit signals", () => {
+  it.each(["SIGBUS", "SIGUSR1"] as const)(
+    "uses the platform number for %s",
+    (signal) => {
+      const tmp = makeTmp();
+      try {
+        const exitCode = 128 + constants.signals[signal];
+        expect(runCli(tmp, ["process-exit", String(exitCode)]).status).toBe(0);
+        const event = JSON.parse(
+          readFileSync(join(tmp, "events.ndjson"), "utf8")
+            .trim()
+            .split("\n")
+            .at(-1)!,
+        );
+        expect(event).toMatchObject({
+          type: "process_exited",
+          exitCode,
+          signal,
+        });
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 });

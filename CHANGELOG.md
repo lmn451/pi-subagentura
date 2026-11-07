@@ -121,8 +121,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process-exit signal diagnostics using host-native signal numbers.
 - Keep historical workflow diagnostics generic during native compaction and legacy
   RPC replay without hiding safe workflow-list IDs, names, or statuses.
+
+## [4.2.1] - 2026-11-07
+
+### Added
+
+- Report allowlisted terminal application and observed parent multiplexer context
+  on fresh root telemetry, independently of session host and child execution
+  backend. Missing or ambiguous environment markers remain `unknown`; raw
+  environment values, socket paths, and session names are never uploaded.
+- Document terminal and parent-multiplexer telemetry dimensions, privacy rules,
+  and environment-inheritance limitations.
+
+### Fixed
+
+- Recover abandoned interactive-state locks without taking over a live owner.
+- Target tmux windows reliably when names collide across sessions.
+
+## [4.2.0] - 2026-11-02
+
+### Added
+
+- Show extension update notes on Pi 1.5 using the packaged changelog.
+- Report the saved-workflow picker as waiting for user input on Pi 1.5.
+- Show configured expand shortcuts in collapsed subagent results on Pi 1.5.
+- Recognize provider-billed usage totals, including free requests, while
+  preserving legacy Pi cost accounting.
+
 - Add optional Orchestratorv2 child selection through Pi's native classifier
   API, with bounded inputs, fail-closed selection, and usage accounting.
+
+### Changed
+
+- Extend shared Orca prompt/skill guidance to interactive delegation in normal
+  Pi parents, interactive children/nested contexts, and Orchestratorv2 without
+  replacing native child execution or changing legacy workflow selection.
+- Layer Agterm guidance and explicit target precedence onto shared Orca
+  delegation, and attribute the closed host label on fresh root telemetry.
 
 ## [4.1.0] - 2026-10-25
 
@@ -421,8 +456,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Promoted `--orchestratorv2` as a routing-first interactive mode. Its prompt
   guides the parent to route work to attachable interactive subagents, ask for
-  clarification when a request is ambiguous or a narrow request has no matching
-  child, and leave
+  clarification when a request is ambiguous, and leave
   specialist work to those children. Compatibility workflow and in-process tools
   remain registered; this is prompt guidance rather than an enforced boundary.
 - Orchestratorv2 routing now treats the current parent branch as the sole authority ledger and the project-local JSON file as repairable untrusted cache data, preventing child-written records from becoming actionable, consuming authority capacity, blocking approved writes, or hiding authoritative stale records.
