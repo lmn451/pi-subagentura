@@ -75,6 +75,8 @@
     "src/completion-presentation.ts",
     "src/delivery.ts",
     "src/completion-coordinator.ts",
+    "src/completion-contracts.ts",
+    "src/completion-manifest.ts",
     "src/completion-ledger.ts",
     "src/helpers.ts",
     "src/usage.ts",

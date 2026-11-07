@@ -1,5 +1,36 @@
 # PR #194 current-master preparation
 
+## Follow-up merge of current master
+
+The next local merge brings `origin/master`
+`9da38ff64152780d54cad7d31b6274fa0c1fab66` into published PR head
+`0ab3ca60784a897f4a7e434ac64e3967066305f1`, preserving both parents.
+Master adds #228's completion-contract/manifest extraction and #229's routing
+quick start. Only `architecture.md` conflicted: the inventory retains V4/durable
+modules, adds both extracted modules, and lists the coordinator's new imports
+alongside `completion-group-store`. The coordinator's automatic merge preserves
+its durable behavior and compatible contract re-exports; both new modules remain
+packaged. No runtime source fix or product-scope expansion was needed.
+
+Fresh verification of this follow-up candidate:
+
+- Typecheck, format check (285 files), and package dry run (103 files): passed.
+- Full suite: 127 files passed, 2 skipped; 2,693 tests passed, 11 skipped, using
+  `npm test -- --maxWorkers=1 --testTimeout=180000` (588 seconds).
+- Real-Pi terminal E2E: 53 tests passed using
+  `npm run test:tui -- --maxWorkers=1` (261 seconds).
+- Focused completion/manifest/ownership/worker/Pi checks exercised 102 tests;
+  the initial parallel run timed out on retirement-floor stress under host load.
+  Coordinator alone then passed 68/68. A subsequent full run timed out only on
+  packed-consumer startup; that suite passed alone 11/11, and the final serialized
+  full run passed all tests. Timeouts were not repaired by changing expectations.
+
+The earlier Zellij and platform/provider validation limits below remain; the
+unchanged multiplexer suites were not rerun for this completion extraction.
+No push, PR merge, or publication was performed.
+
+## Previous preparation
+
 ## Scope and integration
 
 This local candidate merges `origin/master` at
