@@ -298,6 +298,7 @@ export type TelemetryEvent =
       event: "session_started";
       session_host?: TelemetrySessionHost;
       terminal_program?: TelemetryTerminalProgram;
+      parent_mux?: TelemetryParentMux;
     }
   | {
       event: "session_setup_failed";
@@ -992,6 +993,7 @@ export function buildTelemetryPayload(
         terminal_program: sanitizeTelemetryTerminalProgram(
           event.terminal_program,
         ),
+        parent_mux: sanitizeTelemetryParentMux(event.parent_mux),
       };
       break;
     case "session_setup_failed":
@@ -1382,4 +1384,27 @@ export function sanitizeTelemetryTerminalProgram(
     default:
       return "unknown";
   }
+}
+export type TelemetryParentMux = "tmux" | "zellij" | "herdr" | "unknown";
+
+export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
+  return value === "tmux" || value === "zellij" || value === "herdr"
+    ? value
+    : "unknown";
+}
+
+export function resolveTelemetryParentMux(
+  env: NodeJS.ProcessEnv = process.env,
+): TelemetryParentMux {
+  const marker = (value: unknown): boolean =>
+    typeof value === "string" &&
+    value.length <= 4096 &&
+    value.trim().length > 0 &&
+    !/[\x00-\x1f\x7f]/.test(value);
+  const candidates: TelemetryParentMux[] = [];
+  if (marker(env.TMUX)) candidates.push("tmux");
+  if (marker(env.ZELLIJ_SESSION_NAME)) candidates.push("zellij");
+  if (env.HERDR_ENV === "1") candidates.push("herdr");
+  // Multiple markers cannot establish which nested multiplexer owns this process.
+  return candidates.length === 1 ? candidates[0] : "unknown";
 }

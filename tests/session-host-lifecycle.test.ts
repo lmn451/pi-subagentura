@@ -227,3 +227,18 @@ describe("terminal program privacy", () => {
     ).toBe("unknown");
   });
 });
+describe("parent multiplexer capture", () => {
+  it("reports parent tmux independently of the terminal and child backend", () => {
+    vi.stubEnv("TMUX", "/private/socket,123,0");
+    vi.stubEnv("ZELLIJ_SESSION_NAME", undefined);
+    vi.stubEnv("HERDR_ENV", undefined);
+    vi.stubEnv("TERM_PROGRAM", "agterm");
+    registration().start();
+    expect(captured[0].properties).toMatchObject({
+      parent_mux: "tmux",
+      terminal_program: "agterm",
+    });
+    expect(captured[0].properties).not.toHaveProperty("mux");
+    expect(JSON.stringify(captured)).not.toContain("/private/socket");
+  });
+});
