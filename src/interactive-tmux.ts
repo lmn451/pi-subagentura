@@ -66,6 +66,7 @@ import {
 import type { CompletionPolicy } from "./completion-coordinator";
 import { clearRuntimeFailureEpisodes } from "./telemetry-runtime";
 import {
+  type AgentPromptDeliveryResult,
   type CapturePaneOptions,
   type CapturePaneResult,
   getMux,
@@ -1415,6 +1416,154 @@ export function sendCommandToPane(
   const mux = getMuxForState(state);
   mux.sendKeys(state.paneId, command, state.muxSession);
   mux.sendEnter(state.paneId, state.muxSession);
+}
+
+export type InteractiveFollowupFailureStatus =
+  | "unsupported_api"
+  | "blocked"
+  | "send_uncertain"
+  | "malformed_response"
+  | "send_rejected"
+  | "send_failed";
+
+export type InteractiveFollowupDelivery =
+  | { readonly status: "sent" }
+  | {
+      readonly status: "failed";
+      readonly failureStatus: InteractiveFollowupFailureStatus;
+      readonly message: string;
+      readonly error: string;
+      readonly errorCode?: string;
+      readonly delivery?: "uncertain";
+    };
+
+function followupFailure(params: {
+  failureStatus: InteractiveFollowupFailureStatus;
+  message: string;
+  error: string;
+  errorCode?: string;
+  uncertain?: boolean;
+}): InteractiveFollowupDelivery {
+  return {
+    status: "failed",
+    failureStatus: params.failureStatus,
+    message: params.message,
+    error: params.error,
+    ...(params.errorCode ? { errorCode: params.errorCode } : {}),
+    ...(params.uncertain ? { delivery: "uncertain" } : {}),
+  };
+}
+
+function uncertainPromptFailure(message: string): InteractiveFollowupDelivery {
+  return followupFailure({
+    failureStatus: "send_uncertain",
+    message:
+      `Prompt delivery is uncertain. Do not resend automatically; ` +
+      `check the child artifact/status before deciding. ${message}`,
+    error: message,
+    uncertain: true,
+  });
+}
+
+function summarizeAgentPromptFailure(
+  result: Exclude<AgentPromptDeliveryResult, { status: "sent" }>,
+): InteractiveFollowupDelivery {
+  switch (result.status) {
+    case "unsupported":
+      return followupFailure({
+        failureStatus: "unsupported_api",
+        message:
+          `This backend cannot submit a semantic follow-up. Upgrade the ` +
+          `mux API if applicable; no raw-input fallback was attempted. ` +
+          result.message,
+        error: result.message,
+      });
+    case "blocked":
+      return followupFailure({
+        failureStatus: "blocked",
+        message:
+          `The target agent is blocked, possibly awaiting approval or a ` +
+          `question. Inspect and resolve it directly; no prompt was sent. ` +
+          result.message,
+        error: result.message,
+        errorCode: result.errorCode,
+      });
+    case "uncertain":
+      return uncertainPromptFailure(result.message);
+    case "malformed_response":
+      if (result.delivery === "uncertain") {
+        return uncertainPromptFailure(result.message);
+      }
+      return followupFailure({
+        failureStatus: "malformed_response",
+        message: `The mux returned a malformed response before submission. ${result.message}`,
+        error: result.message,
+      });
+    case "transport_error":
+      if (result.delivery === "uncertain") {
+        return uncertainPromptFailure(result.message);
+      }
+      return followupFailure({
+        failureStatus: "send_failed",
+        message: `Could not contact the mux before submission. ${result.message}`,
+        error: result.message,
+      });
+    case "rejected":
+      return followupFailure({
+        failureStatus: "send_rejected",
+        message: `The mux rejected the follow-up (${result.errorCode}): ${result.message}`,
+        error: result.message,
+        errorCode: result.errorCode,
+      });
+  }
+  const exhaustive: never = result;
+  throw new Error(`Unexpected semantic prompt result: ${String(exhaustive)}`);
+}
+
+/** Route the existing follow-up payload through the persisted mux backend. */
+export async function sendInteractiveSubagentFollowup(
+  state: InteractiveSubagentState,
+  prompt: string,
+): Promise<InteractiveFollowupDelivery> {
+  if (state.mux === "herdr") {
+    const mux = getMuxForState(state);
+    if (!mux.sendAgentPrompt) {
+      return summarizeAgentPromptFailure({
+        status: "unsupported",
+        reason: "api",
+        message: "Herdr semantic prompt API unavailable; no prompt was sent.",
+      });
+    }
+    let result: AgentPromptDeliveryResult;
+    try {
+      result = await mux.sendAgentPrompt(paneRefForState(state), prompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return uncertainPromptFailure(message);
+    }
+    if (result.status === "sent") return result;
+
+    return summarizeAgentPromptFailure(result);
+  }
+  if (state.mux !== "tmux" && state.mux !== "zellij") {
+    const message = "Unknown multiplexer backend; no follow-up was sent.";
+    return followupFailure({
+      failureStatus: "send_failed",
+      message,
+      error: message,
+    });
+  }
+  try {
+    sendCommandToPane(state, prompt);
+    return { status: "sent" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return followupFailure({
+      failureStatus: "send_failed",
+      message: `Failed to send message to interactive sub-agent ${state.id}: ${message}`,
+      error: message,
+    });
+  }
 }
 
 /** Rebuild attach/focus commands for a persisted or rehydrated state. */

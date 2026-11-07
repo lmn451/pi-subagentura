@@ -2,13 +2,12 @@
  * Tests for the `send_interactive_subagent_message` tool.
  *
  * Verifies that the parent-facing tool:
- *   - calls `sendCommandToPane` with the right pane id and message
+ *   - dispatches follow-ups through the persisted mux backend
  *   - refuses invalid / unknown / non-running sub-agents
- *   - returns a structured error if tmux itself rejects the send-keys call
+ *   - surfaces delivery failures without changing lifecycle or ownership state
  *
- * The tool uses `sendCommandToPane` (which shells out to `tmux send-keys`)
- * and the registration-captured SessionScope state map — both stay hermetic
- * here, so the test doesn't require a live tmux server.
+ * The tmux/Zellij path stays hermetic through a stubbed send-keys helper. Herdr
+ * uses a separately stubbed semantic prompt API, so no live mux is required.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
@@ -17,10 +16,21 @@ import {
   getSessionScopes,
   sessionOwner,
   type SessionScope,
+  removeSessionScope,
 } from "../src/session-scope";
 
-const { mockSendCommandToPane } = vi.hoisted(() => ({
+const {
+  mockSendCommandToPane,
+  mockSendEnterToPane,
+  mockAgentPrompt,
+  mockGet,
+  mockStates,
+} = vi.hoisted(() => ({
   mockSendCommandToPane: vi.fn(),
+  mockSendEnterToPane: vi.fn(),
+  mockAgentPrompt: vi.fn(),
+  mockGet: vi.fn(),
+  mockStates: new Map<string, any>(),
 }));
 
 // Keep the scoped registry real while controlling the send-keys helper.
@@ -33,7 +43,33 @@ vi.mock("../src/interactive-tmux", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/multiplexer", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/multiplexer")>();
+  return {
+    ...actual,
+    getMux: vi.fn((options?: { preference?: string }) => {
+      if (options?.preference === "herdr") {
+        return {
+          sendAgentPrompt: mockAgentPrompt,
+          sendKeys: (paneId: string, text: string) =>
+            mockSendCommandToPane(mockStates.get(paneId), text),
+          sendEnter: (paneId: string) => mockSendEnterToPane(paneId),
+        };
+      }
+      return {
+        sendKeys: (paneId: string, text: string) =>
+          mockSendCommandToPane(mockStates.get(paneId), text),
+        sendEnter: (paneId: string) => mockSendEnterToPane(paneId),
+      };
+    }),
+  };
+});
+
 import registerExtension from "../src/subagent";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { appendInteractiveState, loadInteractiveStates } from "../src/artifact";
 
 function setupExtension() {
   const api = {
@@ -76,6 +112,7 @@ function runningState(
     id: "abc12345def67890",
     name: "Test",
     paneId: "%99",
+    mux: "tmux",
     status: "running",
     ...overrides,
   } as InteractiveSubagentState;
@@ -89,6 +126,7 @@ function registerState(
     ...overrides,
   });
   scope.interactiveStates.set(value.id, value);
+  mockStates.set(value.paneId, value);
   return value;
 }
 
@@ -97,12 +135,14 @@ describe("send_interactive_subagent_message", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockStates.clear();
     api = setupExtension();
   });
 
   afterEach(() => {
     vi.clearAllMocks();
     clearSessionScopes();
+    vi.unstubAllGlobals();
   });
 
   it("is registered with the expected name", () => {
@@ -273,6 +313,284 @@ describe("send_interactive_subagent_message", () => {
     );
     expect(result.isError).toBeFalsy();
     expect(result.details.status).toBe("sent");
+  });
+
+  it("uses Herdr agent.prompt and transitions only after its positive acceptance", async () => {
+    const state = registerState(api.sessionScope, {
+      mux: "herdr",
+      status: "idle",
+    });
+    mockAgentPrompt.mockResolvedValue({ status: "sent" });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-herdr-success", {
+      id: state.id,
+      message: "continue through Herdr",
+    });
+
+    expect(mockAgentPrompt).toHaveBeenCalledOnce();
+    expect(mockAgentPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ paneId: state.paneId }),
+      expect.stringMatching(
+        /^continue through Herdr \[MANDATORY COMPLETION PROTOCOL/,
+      ),
+    );
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+    expect(result.isError).toBeFalsy();
+    expect(result.details.status).toBe("sent");
+    expect(state.completionPolicy).toBe("each");
+  });
+
+  it("promotes a consumed workflow-owned Herdr child when its accepted prompt starts a turn", async () => {
+    const state = registerState(api.sessionScope, {
+      mux: "herdr",
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "wf-herdr",
+      workflowResultConsumed: true,
+      completionPolicy: "group",
+      completionGroupId: "finished-herdr-group",
+    });
+    mockAgentPrompt.mockImplementation(async () => {
+      state.status = "running";
+      return { status: "sent" };
+    });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-herdr-workflow", {
+      id: state.id,
+      message: "continue independently",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(state.status).toBe("running");
+    expect(state.completionOwner).toBe("standalone");
+    expect(state.workflowId).toBeUndefined();
+    expect(state.completionPolicy).toBe("each");
+    expect(state.completionGroupId).toBeUndefined();
+  });
+
+  it.each(["tmux", "zellij"] as const)(
+    "keeps %s follow-ups on the generic text+Enter path",
+    async (mux) => {
+      const state = registerState(api.sessionScope, { mux, status: "idle" });
+      mockSendCommandToPane.mockReturnValue(undefined);
+
+      const toolDef = getToolDef(api, "send_interactive_subagent_message");
+      const result = await toolDef.execute(`call-${mux}`, {
+        id: state.id,
+        message: `continue in ${mux}`,
+      });
+
+      expect(mockSendCommandToPane).toHaveBeenCalledOnce();
+      expect(mockSendCommandToPane).toHaveBeenCalledWith(
+        state,
+        expect.stringMatching(
+          new RegExp(`^continue in ${mux} \\[MANDATORY COMPLETION PROTOCOL`),
+        ),
+      );
+      expect(mockSendEnterToPane).toHaveBeenCalledWith(state.paneId);
+      expect(mockAgentPrompt).not.toHaveBeenCalled();
+      expect(result.isError).toBeFalsy();
+      expect(result.details.status).toBe("sent");
+    },
+  );
+
+  it.each([
+    [
+      "blocked approval UI",
+      {
+        status: "blocked",
+        errorCode: "agent_blocked",
+        message: "approval required",
+      },
+    ],
+    [
+      "unsupported API",
+      { status: "unsupported", reason: "version", message: "upgrade Herdr" },
+    ],
+    [
+      "malformed preflight response",
+      {
+        status: "malformed_response",
+        delivery: "not_sent",
+        message: "bad ping",
+      },
+    ],
+    [
+      "transport failure before prompt request",
+      {
+        status: "transport_error",
+        delivery: "not_sent",
+        message: "ping failed",
+      },
+    ],
+    [
+      "unrecognized active agent",
+      {
+        status: "rejected",
+        errorCode: "agent_not_ready",
+        message: "no active agent",
+      },
+    ],
+  ] as const)(
+    "refuses raw fallback after Herdr reports no submission (%s)",
+    async (_label, promptResult) => {
+      const capturedKeys = new Set<string>();
+      api.sessionScope.telemetry = {
+        enabled: true,
+        mode: "straight",
+        correlationId: "refused-message-test",
+        trafficOrigin: "development",
+        capturedKeys,
+        active: true,
+      };
+      vi.stubGlobal("fetch", vi.fn());
+      const state = registerState(api.sessionScope, {
+        mux: "herdr",
+        status: "idle",
+        completionOwner: "workflow",
+        workflowId: "workflow-released-after-fallback",
+        workflowResultConsumed: true,
+        completionPolicy: "group",
+        completionGroupId: "group-released-after-fallback",
+      });
+      mockAgentPrompt.mockResolvedValue(promptResult);
+
+      const toolDef = getToolDef(api, "send_interactive_subagent_message");
+      const result = await toolDef.execute("call-herdr-fallback", {
+        id: state.id,
+        message: "continue safely",
+      });
+
+      expect(mockAgentPrompt).toHaveBeenCalledOnce();
+      expect(mockSendCommandToPane).not.toHaveBeenCalled();
+      expect(mockSendEnterToPane).not.toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(state.status).toBe("idle");
+      expect(state.completionOwner).toBe("workflow");
+      expect(state.workflowId).toBe("workflow-released-after-fallback");
+      expect(state.completionPolicy).toBe("group");
+      expect(state.completionGroupId).toBe("group-released-after-fallback");
+      expect([...capturedKeys]).toEqual([]);
+      // Master records tool-operation diagnostics even for reported errors;
+      // failed delivery must not emit successful follow-up lifecycle telemetry.
+      const events = vi
+        .mocked(fetch)
+        .mock.calls.map(([, init]) => JSON.parse(String(init?.body)).event);
+      expect(events).toEqual([
+        "pi_subagentura_operation_started",
+        "pi_subagentura_operation_completed",
+      ]);
+    },
+  );
+
+  it.each([
+    [
+      "malformed prompt response",
+      {
+        status: "malformed_response",
+        delivery: "uncertain",
+        message: "bad response",
+      },
+    ],
+    [
+      "transport failure after request",
+      {
+        status: "transport_error",
+        delivery: "uncertain",
+        message: "socket closed",
+      },
+    ],
+    [
+      "uncertain timeout",
+      { status: "uncertain", reason: "timeout", message: "request timed out" },
+    ],
+  ] as const)(
+    "does not raw-fallback or change lifecycle state after %s",
+    async (_label, promptResult) => {
+      const state = registerState(api.sessionScope, {
+        mux: "herdr",
+        status: "idle",
+        completionOwner: "workflow",
+        workflowId: "workflow-kept-on-uncertainty",
+        workflowResultConsumed: true,
+        completionPolicy: "group",
+        completionGroupId: "group-kept-on-uncertainty",
+      });
+      const before = {
+        status: state.status,
+        completionOwner: state.completionOwner,
+        workflowId: state.workflowId,
+        completionPolicy: state.completionPolicy,
+        completionGroupId: state.completionGroupId,
+      };
+      const capturedKeys = new Set<string>();
+      api.sessionScope.telemetry = {
+        enabled: true,
+        mode: "straight",
+        correlationId: "send-message-test",
+        trafficOrigin: "development",
+        capturedKeys,
+        active: true,
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ body: { cancel: vi.fn() } }),
+      );
+      mockAgentPrompt.mockResolvedValue(promptResult);
+
+      const toolDef = getToolDef(api, "send_interactive_subagent_message");
+      const result = await toolDef.execute("call-herdr-uncertain", {
+        id: state.id,
+        message: "continue safely",
+      });
+
+      expect(mockAgentPrompt).toHaveBeenCalledOnce();
+      expect(mockSendCommandToPane).not.toHaveBeenCalled();
+      expect(mockSendEnterToPane).not.toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(result.details.status).toBe("send_uncertain");
+      expect(result.details.delivery).toBe("uncertain");
+      expect(state).toMatchObject(before);
+      expect([...capturedKeys]).toEqual([]);
+    },
+  );
+
+  it("reports blocked dispatch without attempting raw input", async () => {
+    const state = registerState(api.sessionScope, {
+      mux: "herdr",
+      status: "idle",
+      completionOwner: "workflow",
+      workflowId: "workflow-kept-on-fallback-error",
+      workflowResultConsumed: true,
+      completionPolicy: "group",
+      completionGroupId: "group-kept-on-fallback-error",
+    });
+    mockAgentPrompt.mockResolvedValue({
+      status: "blocked",
+      errorCode: "agent_blocked",
+      message: "approval required",
+    });
+    mockSendCommandToPane.mockImplementation(() => {
+      throw new Error("raw input failed");
+    });
+
+    const toolDef = getToolDef(api, "send_interactive_subagent_message");
+    const result = await toolDef.execute("call-herdr-fallback-error", {
+      id: state.id,
+      message: "continue safely",
+    });
+
+    expect(mockAgentPrompt).toHaveBeenCalledOnce();
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+    expect(mockSendEnterToPane).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("blocked");
+    expect(result.details.delivery).toBeUndefined();
+    expect(state.completionOwner).toBe("workflow");
+    expect(state.completionPolicy).toBe("group");
+    expect(state.completionGroupId).toBe("group-kept-on-fallback-error");
   });
 
   it("promotes an idle workflow-owned sub-agent after sending a follow-up", async () => {
@@ -524,4 +842,124 @@ describe("send_interactive_subagent_message", () => {
     expect(result.content[0].text).toContain("Failed to send message");
     expect(result.content[0].text).toContain("can't find pane: %99");
   });
+  it("fails closed when the Herdr semantic API is unavailable", async () => {
+    const state = registerState(api.sessionScope, {
+      mux: "herdr",
+      status: "idle",
+    });
+    const { getMux } = await import("../src/multiplexer");
+    vi.mocked(getMux).mockReturnValueOnce({} as ReturnType<typeof getMux>);
+    const result = await getToolDef(
+      api,
+      "send_interactive_subagent_message",
+    ).execute("call-no-api", { id: state.id, message: "continue" });
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("unsupported_api");
+    expect(mockAgentPrompt).not.toHaveBeenCalled();
+    expect(mockSendCommandToPane).not.toHaveBeenCalled();
+    expect(mockSendEnterToPane).not.toHaveBeenCalled();
+    expect(state.status).toBe("idle");
+  });
+  it("describes Herdr dispatch without promising raw fallback", () => {
+    const description = getToolDef(
+      api,
+      "send_interactive_subagent_message",
+    ).description;
+    expect(description).toContain("Herdr");
+    expect(description).toContain("never falls back");
+  });
+  it.each([
+    "generation",
+    "shutdown",
+    "scope_removed",
+    "removed",
+    "replacement",
+    "cancelled",
+    "owner",
+  ] as const)(
+    "keeps accepted pending delivery from changing retired bookkeeping (%s)",
+    async (change) => {
+      const cwd = mkdtempSync(join(tmpdir(), "followup-race-"));
+      try {
+        const state = registerState(api.sessionScope, {
+          mux: "herdr",
+          status: "idle",
+          cwd,
+          parentSessionId: "original-parent",
+          completionOwner: "workflow",
+          workflowId: "original-workflow",
+          workflowResultConsumed: true,
+          completionPolicy: "group",
+          completionGroupId: "original-group",
+        });
+        const capturedKeys = new Set<string>();
+        api.sessionScope.telemetry = {
+          enabled: true,
+          mode: "straight",
+          correlationId: "pending-message-test",
+          trafficOrigin: "development",
+          capturedKeys,
+          active: true,
+        };
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValue({ body: { cancel: vi.fn() } }),
+        );
+        let accept!: (value: { status: "sent" }) => void;
+        mockAgentPrompt.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              accept = resolve;
+            }),
+        );
+        const pending = getToolDef(
+          api,
+          "send_interactive_subagent_message",
+        ).execute("call-pending", { id: state.id, message: "continue" });
+        expect(mockAgentPrompt).toHaveBeenCalledOnce();
+        if (change === "generation") api.sessionScope.generation++;
+        if (change === "shutdown") api.sessionScope.lifecycle = "shutdown";
+        if (change === "scope_removed") removeSessionScope(api.sessionScope.id);
+        if (change === "removed")
+          api.sessionScope.interactiveStates.delete(state.id);
+        if (change === "replacement")
+          registerState(api.sessionScope, {
+            ...state,
+            completionGroupId: "replacement-group",
+          });
+        if (change === "cancelled") state.status = "cancelled";
+        if (change === "owner")
+          state.sessionOwner = { id: api.sessionScope.id, generation: 100 };
+        appendInteractiveState(cwd, {
+          id: state.id,
+          paneId: "w2:p9",
+          mux: "herdr",
+          muxSession: "/tmp/replacement.sock",
+          artifactDir: join(cwd, state.id),
+          sessionFile: join(cwd, "replacement.jsonl"),
+          parentSessionId: "replacement-parent",
+          completionPolicy: "group",
+          completionGroupId: "replacement-group",
+        });
+        const persisted = loadInteractiveStates(cwd);
+        accept({ status: "sent" });
+        const result = await pending;
+        expect(result.isError).toBeFalsy();
+        expect(result.details.status).toBe("sent");
+        expect(state.completionOwner).toBe("workflow");
+        expect(state.workflowId).toBe("original-workflow");
+        expect(state.completionPolicy).toBe("group");
+        expect(state.completionGroupId).toBe("original-group");
+        expect(loadInteractiveStates(cwd)).toEqual(persisted);
+        expect([...capturedKeys]).toEqual([]);
+        expect(result.details.persistenceWarning).toContain(
+          "Do not resend automatically",
+        );
+        expect(mockAgentPrompt).toHaveBeenCalledOnce();
+        expect(mockSendCommandToPane).not.toHaveBeenCalled();
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
 });

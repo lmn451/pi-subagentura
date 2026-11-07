@@ -667,6 +667,8 @@ Parameters:
 
 The spawn result describes the selected coordinated behavior.
 
+`send_interactive_subagent_message` sends only the follow-up text explicitly requested by its caller. tmux and Zellij retain their existing literal text + Enter path. Herdr uses its semantic `agent.prompt` API (requires 0.9.0+) through the persisted socket. Unsupported, blocked, rejected, malformed, transport, and uncertain outcomes never fall back to raw pane input or retry automatically. Failed dispatch leaves workflow ownership, status, and telemetry unchanged. Prompt acceptance is not completion: child artifact events remain authoritative.
+
 The sub-agent's artifact contains protocol-v2 `events.ndjson`, mutable
 `output.md` staging for an active turn, and immutable
 `outputs/<eventId>.md` terminal snapshots selected by `turnId`. Unsupported
