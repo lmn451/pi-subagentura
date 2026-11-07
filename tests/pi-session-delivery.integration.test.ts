@@ -250,7 +250,11 @@ describe("coordinated completion delivery", () => {
     expect(providerContext).toContain("Completed background work");
     expect(providerContext).toContain("outputs/event-a.md");
     expect(providerContext).toContain("events.ndjson");
-    expect(JSON.stringify(harness.contexts[0].messages)).not.toContain(
+    // Static system guidance can name the entry type without injecting a notice.
+    const conversationMessages = harness.contexts[0].messages.filter(
+      (message) => message.role !== "system",
+    );
+    expect(JSON.stringify(conversationMessages)).not.toContain(
       "subagentura-completion",
     );
     expect(providerContext).not.toContain("untrusted-subagent-output");
