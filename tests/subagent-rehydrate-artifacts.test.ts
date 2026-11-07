@@ -2,8 +2,16 @@
  * Tests protocol-v2 artifact-derived rehydration and owner-scoped delivery queues.
  */
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { registerSessionHandlers as registerSessionHandlersType } from "../src/session-handlers";
+import type * as SubagentModule from "../src/subagent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   appendEvent,
@@ -14,16 +22,24 @@ import {
   stateFilePath,
 } from "../src/artifact";
 import {
+  COMPLETION_CONSUMED_ENTRY_TYPE,
+  COMPLETION_ENTRY_TYPE,
+  COMPLETION_MANIFEST_TYPE,
   clearCompletionCoordinator,
   completionLatencyForIds,
+  consumeCompletionSource,
   prepareCompletionManifest,
+  publishCompletion,
   registerCompletionCoordinator,
+  registerCompletionMember,
+  restoreDurableCompletionGroupsSync,
   sealCompletionGroups,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { flushDeliveries } from "../src/delivery";
 import { createTestSessionScope } from "./session-scope-fixture";
 import {
+  advanceSessionScopeGeneration,
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
@@ -528,6 +544,325 @@ describe("rehydrateInteractiveSubagents", () => {
     ).toBeUndefined();
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
+
+  it("reconciles fallback receipts through session-start recovery", async () => {
+    const id = "rehydrated-receipt";
+    const parentSessionId = "reload-parent";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+    const entries: SessionEntry[] = [];
+    const handlers = new Map<string, Function[]>();
+    let failReceiptAppend = true;
+    const pi = {
+      on: vi.fn((name: string, handler: Function) => {
+        const current = handlers.get(name) ?? [];
+        current.push(handler);
+        handlers.set(name, current);
+      }),
+      appendEntry: vi.fn((customType: string, data: unknown) => {
+        if (
+          failReceiptAppend &&
+          customType === COMPLETION_CONSUMED_ENTRY_TYPE
+        ) {
+          throw new Error("simulated Pi receipt append failure");
+        }
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
+      }),
+      registerEntryRenderer: vi.fn(),
+      sendMessage: vi.fn(),
+      getFlag: vi.fn(() => undefined),
+    };
+    const { registerSessionHandlers } = await importFresh<{
+      registerSessionHandlers: typeof registerSessionHandlersType;
+    }>("../src/session-handlers");
+    clearSessionScopes();
+    completionScope = registerSessionHandlers(
+      pi as never,
+      undefined,
+      false,
+      () => false,
+    );
+    const ui = {
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+      notify: vi.fn(),
+    };
+    const sessionManager = {
+      getSessionId: () => parentSessionId,
+      getSessionDir: () => cwd,
+      getEntries: () => entries,
+      getBranch: () => [],
+    };
+    const ctx = { cwd, ui, sessionManager };
+    const sessionStart = handlers.get("session_start")![0];
+    const sessionShutdown = handlers.get("session_shutdown")![0];
+
+    try {
+      appendInteractiveState(cwd, {
+        id,
+        paneId: "%105",
+        mux: "tmux",
+        artifactDir: artDir,
+        sessionFile: join(cwd, "child-receipt.jsonl"),
+        parentSessionId,
+        completionPolicy: "each",
+        pendingDeliveries: [
+          {
+            deliveryId: id,
+            subagentId: id,
+            turnId: "receipt-turn",
+            eventId: "receipt-event",
+            status: "done",
+            artifactDir: artDir,
+            completionPolicy: "each",
+            state: "queued",
+          },
+        ],
+        deliveryReceipts: [],
+      });
+      await sessionStart({ reason: "startup" }, ctx);
+
+      const priorOwner = sessionOwner(completionScope);
+      expect(
+        consumeCompletionSource(
+          pi as never,
+          {
+            source: "interactive",
+            sourceId: id,
+            turnId: "receipt-turn",
+          },
+          priorOwner,
+        ),
+      ).toBe(true);
+      expect(pi.appendEntry).toHaveBeenCalledWith(
+        COMPLETION_CONSUMED_ENTRY_TYPE,
+        expect.objectContaining({
+          source: "interactive",
+          sourceId: id,
+          turnId: "receipt-turn",
+        }),
+      );
+      const ledgerPath = sessionLedgerPath(
+        cwd,
+        parentSessionId,
+        "subagentura-completion-consumed",
+      );
+      expect(readFileSync(ledgerPath, "utf8")).toContain(
+        '"turnId":"receipt-turn"',
+      );
+      expect(entries).toHaveLength(0);
+
+      failReceiptAppend = false;
+      await sessionStart({ reason: "reload" }, ctx);
+      const owner = sessionOwner(completionScope);
+      flushDeliveries(pi as never, ui, owner);
+      const replayedManifest = prepareCompletionManifest(owner);
+
+      const recovered = completionScope.interactiveStates.get(id);
+      expect(recovered).toBeDefined();
+      recovered!.pendingDeliveries!.push({
+        deliveryId: "later-unconsumed-delivery",
+        subagentId: id,
+        turnId: "later-turn",
+        eventId: "later-event",
+        status: "done",
+        artifactDir: artDir,
+        completionPolicy: "each",
+        state: "queued",
+      });
+      flushDeliveries(pi as never, ui, owner);
+      const laterManifest = prepareCompletionManifest(owner);
+
+      expect(replayedManifest).toBeUndefined();
+      expect(laterManifest?.details.completionIds).toEqual([
+        "later-unconsumed-delivery",
+      ]);
+    } finally {
+      sessionShutdown({ reason: "quit" }, ctx);
+    }
+  });
+
+  it("keeps a published interactive error terminal after group snapshot repair", async () => {
+    const mod = await importFresh<typeof SubagentModule>("../src/subagent");
+    clearSessionScopes();
+    const id = "interactive-error-member";
+    const deliveryId = "interactive-error-delivery";
+    const workflowId = "wfd_mixed-peer";
+    const groupId = "mixed-error-repair";
+    const parentSessionId = "reload-parent";
+    const artifactDir = join(cwd, id);
+    mkdirSync(artifactDir, { recursive: true });
+    const entries: SessionEntry[] = [];
+    const pi = {
+      appendEntry: vi.fn((customType: string, data: unknown) => {
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
+      }),
+      registerEntryRenderer: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const ownerScope = registerSessionScope({
+      id: 719,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as never,
+      cwd,
+      parentStreaming: true,
+      sessionManager: {
+        getSessionId: () => parentSessionId,
+        getSessionDir: () => cwd,
+        getEntries: () => entries,
+      },
+    });
+    completionScope = ownerScope;
+    registerCompletionCoordinator(pi as never, ownerScope);
+    const owner = sessionOwner(ownerScope);
+
+    appendInteractiveState(cwd, {
+      id,
+      paneId: "%119",
+      mux: "tmux",
+      artifactDir,
+      sessionFile: join(cwd, "interactive-error.jsonl"),
+      parentSessionId,
+      completionPolicy: "group",
+      completionGroupId: groupId,
+      pendingDeliveries: [
+        {
+          deliveryId,
+          subagentId: id,
+          turnId: "error-turn",
+          eventId: "error-event",
+          status: "error",
+          artifactDir,
+          completionPolicy: "group",
+          completionGroupId: groupId,
+          state: "queued",
+        },
+      ],
+      deliveryReceipts: [],
+    });
+    registerCompletionMember("interactive", id, "group", groupId, owner);
+    registerCompletionMember("workflow", workflowId, "group", groupId, owner);
+    sealCompletionGroups(owner);
+
+    const groupDirectory = `${sessionLedgerPath(
+      cwd,
+      parentSessionId,
+      "subagentura-completion-groups",
+    )}.groups`;
+    const groupFileName = readdirSync(groupDirectory).find((name) =>
+      name.endsWith(".json"),
+    );
+    expect(groupFileName).toBeDefined();
+    const groupPath = join(groupDirectory, groupFileName!);
+    const validSnapshot = readFileSync(groupPath, "utf8");
+    const invalidSnapshot = "corrupt completion group snapshot\n";
+    clearCompletionCoordinator(owner);
+    writeFileSync(groupPath, invalidSnapshot, { mode: 0o600 });
+    expect(() => restoreDurableCompletionGroupsSync(owner)).toThrow();
+    expect(readFileSync(groupPath, "utf8")).toBe(invalidSnapshot);
+
+    try {
+      mod.rehydrateInteractiveSubagents(
+        cwd,
+        parentSessionId,
+        entries,
+        ownerScope,
+      );
+      flushDeliveries(pi as never, undefined, owner);
+      const errorManifest = prepareCompletionManifest(owner);
+      expect(errorManifest?.details.completionIds).toEqual([deliveryId]);
+      expect(errorManifest?.content).toContain('"status":"error"');
+      entries.push({
+        type: "custom",
+        id: "interactive-error-manifest",
+        parentId: entries.at(-1)?.id ?? null,
+        timestamp: "1970-01-01T00:00:00.000Z",
+        customType: COMPLETION_MANIFEST_TYPE,
+        data: errorManifest!.details,
+      });
+      const acknowledged = loadInteractiveStates(cwd)?.states[id];
+      expect(acknowledged?.pendingDeliveries).toEqual([]);
+      expect(acknowledged?.deliveryReceipts).toContain(deliveryId);
+      expect(readFileSync(groupPath, "utf8")).toBe(invalidSnapshot);
+
+      writeFileSync(groupPath, validSnapshot, { mode: 0o600 });
+      clearCompletionCoordinator(owner);
+      ownerScope.interactiveStates.clear();
+      advanceSessionScopeGeneration(ownerScope.id);
+      const reloadedOwner = sessionOwner(ownerScope);
+      restoreDurableCompletionGroupsSync(reloadedOwner);
+      mod.rehydrateInteractiveSubagents(
+        cwd,
+        parentSessionId,
+        entries,
+        ownerScope,
+      );
+      sealCompletionGroups(reloadedOwner);
+      ownerScope.parentStreaming = false;
+      expect(prepareCompletionManifest(reloadedOwner)).toBeUndefined();
+
+      const workflowCompletionId = `workflow:${workflowId}`;
+      publishCompletion(
+        {
+          schemaVersion: 1,
+          completionId: workflowCompletionId,
+          source: "workflow",
+          sourceId: workflowId,
+          label: "Recovered workflow",
+          status: "done",
+          policy: "group",
+          groupId,
+          references: [{ label: "result", value: "workflow-result" }],
+          completedAt: Date.now(),
+        },
+        reloadedOwner,
+      );
+      const workflowManifest = prepareCompletionManifest(reloadedOwner);
+      expect(workflowManifest?.details.completionIds).toEqual([
+        workflowCompletionId,
+      ]);
+      expect(workflowManifest?.details.groups).toEqual([groupId]);
+      expect(workflowManifest?.details.completionIds).not.toContain(deliveryId);
+      const workflowRecord = entries.find((entry) => {
+        if (
+          entry.type !== "custom" ||
+          entry.customType !== COMPLETION_ENTRY_TYPE ||
+          typeof entry.data !== "object" ||
+          entry.data === null ||
+          !("completionId" in entry.data)
+        ) {
+          return false;
+        }
+        return entry.data.completionId === workflowCompletionId;
+      });
+      expect(workflowRecord).toBeDefined();
+      if (!workflowRecord || workflowRecord.type !== "custom") {
+        throw new Error("Workflow completion record was not persisted.");
+      }
+      expect(workflowRecord.data).toMatchObject({
+        groupId,
+        groupComplete: true,
+      });
+    } finally {
+      clearCompletionCoordinator(sessionOwner(ownerScope));
+    }
+  });
+
   it("downgrades only an over-capacity row and continues rehydrating later states", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");

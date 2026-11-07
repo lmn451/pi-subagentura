@@ -149,6 +149,23 @@ function startSession(
   return ctx;
 }
 
+async function startSessionAndWait(
+  registration: HandlerRegistration,
+  root: string,
+  sessionId: string,
+  ui = { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+  reason = "startup",
+) {
+  const sessionManager = {
+    getSessionId: () => sessionId,
+    getEntries: () => [],
+    getBranch: () => [],
+  };
+  const ctx = { cwd: root, ui, sessionManager };
+  await registration.handlers.get("session_start")![0]({ reason }, ctx);
+  return ctx;
+}
+
 function ownedJob(scope: SessionScope, id: string) {
   const abort = vi.fn().mockResolvedValue(undefined);
   // The lifecycle path only calls abort; constructing a real AgentSession would
@@ -886,30 +903,37 @@ describe("session handler lifecycle callbacks", () => {
     expect(requestOrder).toBeLessThan(completionOrder);
     expect(completionOrder).toBeLessThan(wakeOrder);
 
-    handlers.get("before_agent_start")![0]({
-      messageType: "user",
-      prompt: `Please handle the completion ${wakeId}`,
-    });
-    handlers.get("agent_start")![0]();
-    handlers.get("agent_settled")![0]();
-    expect(pi.appendEntry).toHaveBeenCalledOnce();
-
-    handlers.get("before_agent_start")![0]({
-      messageType: "custom",
+    handlers.get("message_start")![0]({
       message: {
-        customType: "unrelated",
-        content: `An unrelated message mentions completion id ${wakeId}.`,
-        display: false,
-        details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+        role: "user",
+        content: [{ type: "text", text: `Please handle completion ${wakeId}` }],
+        timestamp: Date.now(),
       },
     });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({
-      messageType: "custom",
-      message: wakeMessage,
+    handlers.get("message_start")![0]({
+      message: {
+        role: "custom",
+        customType: "unrelated",
+        content: [
+          {
+            type: "text",
+            text: `An unrelated message mentions completion id ${wakeId}.`,
+          },
+        ],
+        display: false,
+        details: { [ORCHESTRATOR_V2_WAKE_DETAIL_KEY]: wakeId },
+        timestamp: Date.now(),
+      },
+    });
+    handlers.get("agent_start")![0]();
+    handlers.get("agent_settled")![0]();
+    expect(pi.appendEntry).toHaveBeenCalledOnce();
+    handlers.get("message_start")![0]({
+      message: { role: "custom", ...wakeMessage, timestamp: Date.now() },
     });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
@@ -976,9 +1000,8 @@ describe("session handler lifecycle callbacks", () => {
     });
     expect(pi.appendEntry).toHaveBeenCalledOnce();
 
-    handlers.get("before_agent_start")![0]({
-      messageType: "custom",
-      message: recoveredMessage,
+    handlers.get("message_start")![0]({
+      message: { role: "custom", ...recoveredMessage, timestamp: Date.now() },
     });
     handlers.get("agent_start")![0]();
     handlers.get("agent_settled")![0]();
@@ -1083,7 +1106,7 @@ describe("session handler lifecycle callbacks", () => {
         "orchestratorv2",
         telemetryEnabled,
       );
-      const ctx = startSession(registration, root, "session-a");
+      const ctx = await startSessionAndWait(registration, root, "session-a");
       const { sessionScope: scope, handlers } = registration;
       const oldOwner = sessionOwner(scope);
       const oldCorrelationId = scope.telemetry?.correlationId;
@@ -1134,11 +1157,15 @@ describe("session handler lifecycle callbacks", () => {
         original.abort.signal.addEventListener("abort", reentrantAttempt, {
           once: true,
         });
+        let replacementRecovery: Promise<void> | undefined;
 
         if (lifecycle === "session_shutdown") {
           handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
         } else {
-          handlers.get("session_start")![0]({ reason: "new" }, ctx);
+          replacementRecovery = handlers.get("session_start")![0](
+            { reason: "new" },
+            ctx,
+          ) as Promise<void>;
         }
 
         expect(reentrantAttempt).toHaveBeenCalledOnce();
@@ -1174,6 +1201,7 @@ describe("session handler lifecycle callbacks", () => {
         }
 
         if (lifecycle === "replacement session_start") {
+          await replacementRecovery;
           const newOwner = sessionOwner(scope);
           expect(newOwner.generation).not.toBe(oldOwner.generation);
           const newGeneration = startWorkflowJob(
@@ -1231,7 +1259,7 @@ describe("session handler lifecycle callbacks", () => {
         "orchestratorv2",
         true,
       );
-      const ctx = startSession(registration, root, "session-a");
+      const ctx = await startSessionAndWait(registration, root, "session-a");
       const oldOwner = sessionOwner(registration.sessionScope);
       const runner = vi.fn(async () => successfulWorkflowAgentResult("orphan"));
       const builder = vi.fn(() => {

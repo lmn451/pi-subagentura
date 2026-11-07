@@ -1,6 +1,6 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
-  cancelWorkflowJob,
+  cancelWorkflowJobOnce,
   getWorkflowCompletionPresentation,
   workflowJobsForOwner,
   type WorkflowJobState,
@@ -114,7 +114,7 @@ export class WorkflowTreeComponent {
       return;
     }
     if (data === "c") {
-      this.cancel(selected);
+      void this.cancel(selected);
     }
   }
 
@@ -146,17 +146,29 @@ export class WorkflowTreeComponent {
     this.changed();
   }
 
-  private cancel(job: WorkflowJobState): void {
+  private async cancel(job: WorkflowJobState): Promise<void> {
     if (job.status !== "running") {
       this.opts.notify?.(
         `Workflow ${job.id} is ${job.status}; nothing to cancel.`,
       );
       return;
     }
-    cancelWorkflowJob(job, "explicit_cancel");
-    this.opts.notify?.(`Cancelled workflow ${job.id}.`);
-    this.changed();
-    this.opts.done({ kind: "cancel", workflowId: job.id });
+    try {
+      const outcome = await cancelWorkflowJobOnce(job);
+      if (outcome === "already_cancelled") return;
+      if (outcome === "terminal") {
+        this.opts.notify?.(
+          `Workflow ${job.id} finished before cancellation; nothing was cancelled.`,
+        );
+        return;
+      }
+      this.opts.notify?.(`Cancelled workflow ${job.id}.`);
+      this.changed();
+      this.opts.done({ kind: "cancel", workflowId: job.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.opts.notify?.(`Could not cancel workflow ${job.id}: ${message}`);
+    }
   }
 
   private changed(): void {
@@ -228,6 +240,15 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
 
 function formatWorkflowDetails(job: WorkflowJobState): WorkflowRow[] {
   const rows: WorkflowRow[] = [];
+  const steps = job.snapshot.steps ?? [];
+  for (const step of steps.slice(-100)) {
+    rows.push({
+      job,
+      depth: Math.min(8, step.path.length),
+      selectable: false,
+      text: `${step.status === "waiting_for_input" ? "?" : step.status === "completed" || step.status === "restored" ? "✓" : step.status === "failed" ? "✗" : "·"} ${step.title} [${step.status}]`,
+    });
+  }
   const usage = presentWorkflowUsage(job.snapshot.usage);
   if (usage) {
     for (const field of formatWorkflowUsageFields(usage, {

@@ -25,6 +25,14 @@ function snapshotSummary(
     .join("\n");
 }
 
+function failureSummary(
+  result: Awaited<ReturnType<typeof cancelAllFlows>>,
+): string {
+  return result.workflowsFailed > 0
+    ? `Failed to cancel ${result.workflowsFailed} workflow(s). Retry with /cancel-all-flows or cancel_workflow.`
+    : "";
+}
+
 export function registerCancelAllFlows(
   pi: ExtensionAPI,
   sessionScope?: SessionScope,
@@ -39,11 +47,11 @@ export function registerCancelAllFlows(
       description:
         "Cancel all active sub-agent flows (jobs, workflows, running interactive agents)",
       handler: async (ctx) => {
-        // Stop foreground token use before waiting on child cancellations
-        if (typeof ctx.abort === "function") {
+        const result = await cancelAllFlows(owner());
+        // A failed durable intent must leave the foreground run alive for retry.
+        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
           ctx.abort();
         }
-        const result = await cancelAllFlows(owner());
         const parts: string[] = [];
         if (result.jobsAborted > 0) parts.push(`${result.jobsAborted} job(s)`);
         if (result.workflowsAborted > 0)
@@ -53,11 +61,12 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
 
-        if (parts.length === 0) {
+        if (parts.length === 0 && result.workflowsFailed === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
         } else {
           const message = [
-            `Cancelled: ${parts.join(", ")}`,
+            parts.length > 0 ? `Cancelled: ${parts.join(", ")}` : "",
+            failureSummary(result),
             snapshotSummary(result),
           ]
             .filter(Boolean)
@@ -74,11 +83,11 @@ export function registerCancelAllFlows(
       description:
         "Cancel all active sub-agent flows (jobs, workflows, running interactive agents)",
       handler: async (_args, ctx) => {
-        // Stop foreground token use before waiting on child cancellations
-        if (typeof ctx.abort === "function") {
+        const result = await cancelAllFlows(owner());
+        // A failed durable intent must leave the foreground run alive for retry.
+        if (result.workflowsFailed === 0 && typeof ctx.abort === "function") {
           ctx.abort();
         }
-        const result = await cancelAllFlows(owner());
         const parts: string[] = [];
         if (result.jobsAborted > 0) parts.push(`${result.jobsAborted} job(s)`);
         if (result.workflowsAborted > 0)
@@ -88,11 +97,12 @@ export function registerCancelAllFlows(
         if (result.interactivePreserved > 0)
           parts.push(`${result.interactivePreserved} idle agent(s) preserved`);
 
-        if (parts.length === 0) {
+        if (parts.length === 0 && result.workflowsFailed === 0) {
           ctx.ui.notify("No active flows to cancel.", "info");
         } else {
           const message = [
-            `Cancelled: ${parts.join(", ")}`,
+            parts.length > 0 ? `Cancelled: ${parts.join(", ")}` : "",
+            failureSummary(result),
             snapshotSummary(result),
           ]
             .filter(Boolean)

@@ -6,8 +6,8 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 
 - **npm package** `pi-subagentura` — published via OIDC trusted publishing on push of a `v*` tag.
 - **Pi extension** — single entry point: `./src/subagent.ts` (declared in `package.json#pi.extensions`).
-- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 22.23.2, Pi SDK ≥ 1.2.0 (development pin 1.4.0). CI verifies the minimum Node runtime and both the minimum and latest published Pi SDKs.
-- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, and `is-path-inside`. Pi SDKs are peer dependencies.
+- **TypeScript, ESM, strict mode**, `target: ESNext`, Node ≥ 24.12.0, Pi SDK ≥ 1.2.0 (development pin 1.4.0). CI verifies the declared minimum Node runtime and both the minimum and latest published Pi SDKs. V4 workflow definitions use a private, exactly pinned Effect v4 runtime; Effect types do not enter the public SDK.
+- **Runtime deps** are `@juanibiapina/pi-extension-settings`, `acorn`, `effect`, and `is-path-inside`. Effect v4 is pinned and loaded only inside v4 workflow workers. Pi SDKs are peer dependencies.
 - **Tests** are Vitest suites under `tests/` as `*.test.ts`; the npm scripts define the unit, property, multiplexer, Pi-session, and terminal subsets.
 - **CI** is a single GitHub Actions workflow: typecheck → tests → published-tarball smoke → pack dry-run.
 
@@ -37,10 +37,10 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/artifact-poller.ts`                               | Per-tick byte-ordered v2 artifact walk, coordinated delivery enqueue, and UI activity updates.                                                                                                                    |
 | `src/rehydrate.ts`                                     | Reconstruct persisted cursors, queues, and delivery receipts on session start/reload/resume.                                                                                                                      |
 | `src/helpers.ts`                                       | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `formatUsage`, job registry and cleanup.                                                                                              |
-| `src/artifact.ts`                                      | Protocol-v2 artifacts, immutable `outputs/<eventId>.md`, byte readers, and current state-v2 helpers.                                                                                                              |
-| `src/child-protocol.ts`                                | Child-only Pi lifecycle hooks selected by `PI_SUBAGENTURA_CHILD=1`.                                                                                                                                               |
-| `src/delivery.ts`                                      | Bounded durable coordinated delivery queue and deterministic delivery IDs.                                                                                                                                        |
-| `src/completion-coordinator.ts`                        | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and parent continuation.                                                                                |
+| `src/artifact.ts`                                      | Protocol-v2 event/state schemas, bounded NDJSON I/O, immutable snapshots, state locks and persistence.                                                                                                            |
+| `src/child-protocol.ts`                                | Child-only Pi lifecycle hooks; ordinary interactive turns use `cli.mjs done`, while flagged read-only workflow turns use host-owned final-output capture.                                                         |
+| `src/delivery.ts`                                      | Bounded durable interactive intent queue, coordinated publication, and receipt reconciliation.                                                                                                                    |
+| `src/completion-coordinator.ts`                        | Per-session TUI entries, each/group barriers, manual consumption, human-priority manifest attachment, and parent continuation.                                                                                    |
 | `src/interactive-tmux.ts`                              | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
 | `src/multiplexer{,-contracts,-tmux,-zellij,-herdr}.ts` | Dependency-light mux contracts/helpers, pluggable tmux/Zellij/Herdr backends, and runtime backend selection.                                                                                                      |
 | `src/usage.ts`                                         | SDK-free usage normalization and aggregation primitives shared by workflow and Pi helpers.                                                                                                                        |
@@ -48,6 +48,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/notifications.ts`                                 | Shared output sanitization and v2 completion classification.                                                                                                                                                      |
 | `src/rendering.ts`                                     | TUI rendering helpers: `renderSubagentCall`, `renderSubagentResult`, `renderInteractiveStateSummary`.                                                                                                             |
 | `src/schemas.ts`                                       | TypeBox schemas for tool parameter validation (`BaseParams`, `InteractiveParams`, etc.).                                                                                                                          |
+| `src/agent-capabilities.ts`                            | Dependency-free read-only workflow model-tool allowlist and child-mode flag.                                                                                                                                      |
 | `src/workflow*.ts`                                     | Workflow tool/core/worker/job/UI modules. Worker execution is isolated from the parent thread but the VM is not a security boundary.                                                                              |
 | `tests/test-utils.ts`                                  | `importFresh` helper used by tests to reset module-local state; session scopes and mux test state have separate cleanup.                                                                                          |
 
@@ -125,6 +126,25 @@ Snapshot writers must enforce `MAX_OUTPUT_SNAPSHOT_BYTES` before reading or
 copying child-controlled `output.md`. Oversized staging output records explicit
 `outputError` metadata and must never be loaded synchronously into the parent.
 
+### Read-only workflow child output exception
+
+`ctx.agent(..., { readOnly: true })` snapshots the effective capability per
+call. Omitted or false preserves the existing default model-tool access. The
+read-only model allowlist is Pi `read`, `grep`, `find`, and `ls`; in-process
+native schema capture may additionally use the internal `structured_output`
+return tool. Process-selected schema fallback remains final text JSON, captured
+by the trusted host into the existing attempt artifact and validated by the
+parent. Do not ask the child to use forbidden write/shell tools for result
+handoff.
+
+This is model-facing tool dispatch, not an OS sandbox or path confinement.
+Latest SDKs can retain MCP tools despite a positive allowlist, so keep explicit
+exclusions for `mcp__*`, `list_mcp_resources`,
+`list_mcp_resource_templates`, and `read_mcp_resource`. These calls continue to
+use existing workflow step/attempt records; they add no progress ledger or
+scheduler. Prompt sections organize assignments but do not enforce semantic
+scope. Ordinary interactive child completion remains unchanged.
+
 ### `extractJson` in `src/workflow-core.ts` is dependency-free on purpose
 
 The runtime validation in the workflow tool (`validateSchema`, `extractJson`) is a hand-rolled JSON Schema subset, not a dep. This is intentional: the tool is in-process and must not pull `ajv` or similar into the parent Pi install. Don't replace it with a library without a strong reason.
@@ -174,7 +194,9 @@ IDs. A source satisfies a group once; later turns are independent `each` records
 
 ### Background workflows are parent-session scoped
 
-Background workflow jobs and in-process async sub-agent jobs do **not** survive
+Durable workflow storage, recovery, cancellation, and V4 execution invariants
+are documented in [`WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md). In-process
+jobs and non-durable background workflow jobs do **not** survive
 parent session replacement. On every `session_shutdown` reason (`reload`,
 `resume`, `quit`, `new`, and similar), `src/session-handlers.ts` suppresses late
 workflow completion hooks, aborts running workflow workers, and clears
