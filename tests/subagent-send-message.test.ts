@@ -16,6 +16,7 @@ import {
   getSessionScopes,
   sessionOwner,
   type SessionScope,
+  removeSessionScope,
 } from "../src/session-scope";
 
 const {
@@ -65,6 +66,10 @@ vi.mock("../src/multiplexer", async (importOriginal) => {
 });
 
 import registerExtension from "../src/subagent";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { appendInteractiveState, loadInteractiveStates } from "../src/artifact";
 
 function setupExtension() {
   const api = {
@@ -855,4 +860,106 @@ describe("send_interactive_subagent_message", () => {
     expect(mockSendEnterToPane).not.toHaveBeenCalled();
     expect(state.status).toBe("idle");
   });
+  it("describes Herdr dispatch without promising raw fallback", () => {
+    const description = getToolDef(
+      api,
+      "send_interactive_subagent_message",
+    ).description;
+    expect(description).toContain("Herdr");
+    expect(description).toContain("never falls back");
+  });
+  it.each([
+    "generation",
+    "shutdown",
+    "scope_removed",
+    "removed",
+    "replacement",
+    "cancelled",
+    "owner",
+  ] as const)(
+    "keeps accepted pending delivery from changing retired bookkeeping (%s)",
+    async (change) => {
+      const cwd = mkdtempSync(join(tmpdir(), "followup-race-"));
+      try {
+        const state = registerState(api.sessionScope, {
+          mux: "herdr",
+          status: "idle",
+          cwd,
+          parentSessionId: "original-parent",
+          completionOwner: "workflow",
+          workflowId: "original-workflow",
+          workflowResultConsumed: true,
+          completionPolicy: "group",
+          completionGroupId: "original-group",
+        });
+        const capturedKeys = new Set<string>();
+        api.sessionScope.telemetry = {
+          enabled: true,
+          mode: "straight",
+          correlationId: "pending-message-test",
+          trafficOrigin: "development",
+          capturedKeys,
+          active: true,
+        };
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValue({ body: { cancel: vi.fn() } }),
+        );
+        let accept!: (value: { status: "sent" }) => void;
+        mockAgentPrompt.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              accept = resolve;
+            }),
+        );
+        const pending = getToolDef(
+          api,
+          "send_interactive_subagent_message",
+        ).execute("call-pending", { id: state.id, message: "continue" });
+        expect(mockAgentPrompt).toHaveBeenCalledOnce();
+        if (change === "generation") api.sessionScope.generation++;
+        if (change === "shutdown") api.sessionScope.lifecycle = "shutdown";
+        if (change === "scope_removed") removeSessionScope(api.sessionScope.id);
+        if (change === "removed")
+          api.sessionScope.interactiveStates.delete(state.id);
+        if (change === "replacement")
+          registerState(api.sessionScope, {
+            ...state,
+            completionGroupId: "replacement-group",
+          });
+        if (change === "cancelled") state.status = "cancelled";
+        if (change === "owner")
+          state.sessionOwner = { id: api.sessionScope.id, generation: 100 };
+        appendInteractiveState(cwd, {
+          id: state.id,
+          paneId: "w2:p9",
+          mux: "herdr",
+          muxSession: "/tmp/replacement.sock",
+          artifactDir: join(cwd, state.id),
+          sessionFile: join(cwd, "replacement.jsonl"),
+          parentSessionId: "replacement-parent",
+          completionPolicy: "group",
+          completionGroupId: "replacement-group",
+        });
+        const persisted = loadInteractiveStates(cwd);
+        accept({ status: "sent" });
+        const result = await pending;
+        expect(result.isError).toBeFalsy();
+        expect(result.details.status).toBe("sent");
+        expect(state.completionOwner).toBe("workflow");
+        expect(state.workflowId).toBe("original-workflow");
+        expect(state.completionPolicy).toBe("group");
+        expect(state.completionGroupId).toBe("original-group");
+        expect(loadInteractiveStates(cwd)).toEqual(persisted);
+        expect([...capturedKeys]).toEqual([]);
+        expect(result.details.persistenceWarning).toContain(
+          "Do not resend automatically",
+        );
+        expect(mockAgentPrompt).toHaveBeenCalledOnce();
+        expect(mockSendCommandToPane).not.toHaveBeenCalled();
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
 });

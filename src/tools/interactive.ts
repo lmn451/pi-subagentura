@@ -72,6 +72,7 @@ import {
   sessionOwner,
   type SessionScope,
   type SessionToolToken,
+  interactiveStateBelongsToOwner,
 } from "../session-scope";
 import {
   captureTelemetry,
@@ -1389,7 +1390,7 @@ export function registerInteractiveSubagentTools(
     label: "Send Interactive Subagent Message",
     description: [
       "Send a follow-up prompt to a live interactive sub-agent in its existing session, preserving context.",
-      "The persisted mux adapter uses semantic prompt submission when supported and falls back to normal input only when it confirms no submission. Uncertain delivery is never retried; artifacts remain the completion authority.",
+      "Herdr requires semantic agent.prompt submission on version 0.9.0 or newer and never falls back to raw pane input. tmux and Zellij retain text + Enter delivery. Uncertain delivery is never retried; artifacts remain the completion authority.",
       "A workflow-owned child can accept a follow-up only after its completed result was consumed and the pane is idle. It is promoted to standalone only after successful delivery. An idle follow-up resets future completion delivery to independent each; later turns cannot satisfy the prior group again.",
       "The child will run the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use get_interactive_subagent_status if unsure whether it is still alive.",
     ].join("\n"),
@@ -1497,6 +1498,9 @@ export function registerInteractiveSubagentTools(
       }
       // The mux adapter selects the delivery mechanism and returns a structured result.
       const startsNewTurn = state.status === "idle";
+      const dispatchOwner = registration
+        ? sessionOwner(registration.scope)
+        : undefined;
       const delivery = await sendInteractiveSubagentFollowup(
         state,
         params.message + FOLLOWUP_COMPLETION_REMINDER,
@@ -1515,51 +1519,68 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      captureTelemetry(
-        registration?.scope?.telemetry,
-        {
-          event: "interactive_message_sent",
-          direction: "parent_to_child",
-          count: 1,
-        },
-        // Without a usable tool-call id every send collapses onto one constant
-        // key and only the first is ever recorded. Retry protection is worth
-        // having when the id exists and is worth losing when it does not.
-        _toolCallId ? { dedupeKey: `interactive-message:${_toolCallId}` } : {},
-      );
-      // Reaching the send proves both workflow release conditions held at the guard above.
-      if (
-        state.completionOwner === "workflow" &&
-        state.workflowResultConsumed &&
-        startsNewTurn &&
-        (state.status === "idle" || state.status === "running")
-      ) {
-        state.completionOwner = "standalone";
-        state.workflowId = undefined;
-      }
+      const currentRegistration = resolveInteractiveToolStates(toolToken);
+      const bookkeepingCurrent =
+        currentRegistration?.scope === registration?.scope &&
+        currentRegistration?.scope.generation === dispatchOwner?.generation &&
+        currentRegistration?.states === registration?.states &&
+        currentRegistration?.states.get(state.id) === state &&
+        interactiveStateBelongsToOwner(state, dispatchOwner) &&
+        (state.status === "idle" || state.status === "running");
+      // Acceptance cannot be undone or retried, but retired owners must not
+      // change completion policy or workflow ownership after the async send.
       let persistenceWarning: string | undefined;
-      if (startsNewTurn) {
-        state.completionPolicy = "each";
-        // `state.telemetryCompletionPolicy` is deliberately left alone. It is an
-        // agent-creation dimension already reported by `agent_created`, and
-        // re-stamping it here would make one agent id report two values across
-        // its own lifecycle events.
-        state.completionGroupId = undefined;
-        if (state.parentSessionId) {
-          try {
-            updateInteractiveState(state.cwd, state.id, (entry) => {
-              entry.completionPolicy = "each";
-              delete entry.completionGroupId;
-            });
-          } catch (error) {
-            persistenceWarning =
-              "The message was sent, but the new completion policy could not be persisted; reload may require manual recovery.";
-            debugLog("warn", "interactive_followup_policy_persist_failed", {
-              id: state.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
+      if (bookkeepingCurrent) {
+        captureTelemetry(
+          registration?.scope?.telemetry,
+          {
+            event: "interactive_message_sent",
+            direction: "parent_to_child",
+            count: 1,
+          },
+          // Without a usable tool-call id every send collapses onto one constant
+          // key and only the first is ever recorded. Retry protection is worth
+          // having when the id exists and is worth losing when it does not.
+          _toolCallId
+            ? { dedupeKey: `interactive-message:${_toolCallId}` }
+            : {},
+        );
+        // Reaching the send proves both workflow release conditions held at the guard above.
+        if (
+          state.completionOwner === "workflow" &&
+          state.workflowResultConsumed &&
+          startsNewTurn &&
+          (state.status === "idle" || state.status === "running")
+        ) {
+          state.completionOwner = "standalone";
+          state.workflowId = undefined;
+        }
+        if (startsNewTurn) {
+          state.completionPolicy = "each";
+          // `state.telemetryCompletionPolicy` is deliberately left alone. It is an
+          // agent-creation dimension already reported by `agent_created`, and
+          // re-stamping it here would make one agent id report two values across
+          // its own lifecycle events.
+          state.completionGroupId = undefined;
+          if (state.parentSessionId) {
+            try {
+              updateInteractiveState(state.cwd, state.id, (entry) => {
+                entry.completionPolicy = "each";
+                delete entry.completionGroupId;
+              });
+            } catch (error) {
+              persistenceWarning =
+                "The message was sent, but the new completion policy could not be persisted; reload may require manual recovery.";
+              debugLog("warn", "interactive_followup_policy_persist_failed", {
+                id: state.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
           }
         }
+      } else {
+        persistenceWarning =
+          "The message was accepted, but the child or parent session changed during dispatch; stale bookkeeping was skipped. Do not resend automatically.";
       }
       const messagePreview = formatFollowupPreview(params.message);
       const messageTruncated =
