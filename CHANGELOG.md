@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Return recorded terminal error diagnostics verbatim in interactive artifact
+  reads, including for empty snapshots, without parsing or sanitization; existing
+  protocol storage limits still apply.
+- Record actual interactive Pi prompt rejections before a persisted user entry
+  as `prompt_error` completions keyed by Pi-issued custom-entry IDs, with empty
+  immutable snapshots and no credential probe or fabricated user turn.
+- Preserve primary prompt-error attribution through Pi runtime session
+  replacements, and report actual public-main rejections with the reserved
+  `process` identity.
+- Serialize prompt-error publication with all parent cancellation writers so
+  cancellation prevents later errors while earlier committed errors remain.
+
+- Serialize child terminal completions with parent cancellation, preventing
+  late output snapshots while preserving already committed artifact history.
+- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
+  for an uncompleted current turn when `.cancelled` exists, then record
+  `process_exited`.
+- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
+  also retains a nonempty owner-token tombstone until artifact retirement so
+  delayed waiters cannot rename a fresh owner into a vacant path.
+- Preserve terminal `message` and `errorMessage` diagnostics verbatim through
+  event normalization within the existing 1 MiB event-record limit.
+
 ## [4.2.1] - 2026-11-07
 
 ### Added

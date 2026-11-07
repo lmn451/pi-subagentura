@@ -263,6 +263,7 @@ export class TerminalHarness {
     this.serverOwned = false;
     this.version = tmuxVersion();
     activeHarnesses.add(this);
+    this.omitChildApiKey = false;
     installExitCleanup();
   }
 
@@ -335,6 +336,9 @@ export class TerminalHarness {
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
     };
+    if (this.omitChildApiKey) {
+      this._env.SUBAGENTURA_E2E_CHILD_OMIT_API_KEY = "1";
+    }
     this.assertChildCanExecNode(safePath);
     appendFileSync(
       this.providerLog,

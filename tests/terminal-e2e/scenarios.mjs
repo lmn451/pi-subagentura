@@ -97,6 +97,27 @@ export const scenarios = {
     child: "[E2E:CHILD_PROVIDER_ERROR]",
     expected: "Parent settled for [E2E:INTERACTIVE_ERROR_PARENT].",
   },
+  "interactive-prompt-error-each": {
+    name: "interactive-prompt-error-each",
+    marker: "[E2E:INTERACTIVE_PROMPT_ERROR_EACH]",
+    gate: null,
+    prompt:
+      "[E2E:INTERACTIVE_PROMPT_ERROR_EACH] Start the real Anthropic preflight failure fixture.",
+    child: "[E2E:CHILD_PROMPT_ERROR_EACH]",
+    expected: "Parent settled for [E2E:INTERACTIVE_PROMPT_ERROR_EACH].",
+    omitChildApiKey: true,
+  },
+  "interactive-prompt-error-group": {
+    name: "interactive-prompt-error-group",
+    marker: "[E2E:INTERACTIVE_PROMPT_ERROR_GROUP]",
+    gate: "release-prompt-error-group-sibling",
+    prompt:
+      "[E2E:INTERACTIVE_PROMPT_ERROR_GROUP] Start the grouped real Anthropic preflight failure fixture.",
+    child: "[E2E:CHILD_PROMPT_ERROR_GROUP]",
+    sibling: "[E2E:CHILD_PROMPT_ERROR_GROUP_SIBLING]",
+    expected: "Parent settled for [E2E:INTERACTIVE_PROMPT_ERROR_GROUP].",
+    omitChildApiKey: true,
+  },
   cancel: {
     name: "cancel",
     marker: "[E2E:CANCEL]",
