@@ -5,6 +5,12 @@ import { join } from "node:path";
 import { resolveTelemetrySessionHost } from "../src/session-host";
 import { registerSessionHandlers } from "../src/session-handlers";
 import { clearSessionScopes } from "../src/session-scope";
+import {
+  buildTelemetryPayload,
+  createTelemetrySession,
+  sanitizeTelemetryTerminalProgram,
+  TelemetryEvent,
+} from "../src/telemetry";
 
 vi.mock("../src/session-host", () => ({
   resolveTelemetrySessionHost: vi.fn(() => "unknown"),
@@ -175,5 +181,64 @@ describe("session host capture lifecycle", () => {
     expect(
       captured.filter((p) => p.event === "pi_subagentura_session_started"),
     ).toHaveLength(2);
+  });
+});
+describe("terminal program capture", () => {
+  it("reports agterm independently of Orca launch origin", () => {
+    vi.stubEnv("TERM_PROGRAM", "agterm");
+    vi.mocked(resolveTelemetrySessionHost).mockReturnValue("orca");
+    registration().start();
+    expect(captured[0].properties).toMatchObject({
+      session_host: "orca",
+      terminal_program: "agterm",
+    });
+  });
+});
+describe("terminal program privacy", () => {
+  it.each([
+    ["agterm", "agterm"],
+    ["ghostty", "ghostty"],
+    ["iTerm.app", "iterm2"],
+    ["Apple_Terminal", "apple_terminal"],
+    ["vscode", "vscode"],
+    ["WezTerm", "wezterm"],
+    ["wezterm", "wezterm"],
+    ["kitty", "kitty"],
+    [undefined, "unknown"],
+    ["", "unknown"],
+    ["/private/terminal", "unknown"],
+    ["agterm\n", "unknown"],
+    ["agterm".repeat(1000), "unknown"],
+  ])("maps %s to the closed label %s", (raw, expected) => {
+    expect(sanitizeTelemetryTerminalProgram(raw)).toBe(expected);
+  });
+  it("sanitizes untrusted event values", () => {
+    const session = createTelemetrySession(true);
+    const event = {
+      event: "session_started",
+      terminal_program: "/private/raw",
+    } as unknown as TelemetryEvent;
+    expect(
+      buildTelemetryPayload(session, event).properties.terminal_program,
+    ).toBe("unknown");
+    expect(
+      buildTelemetryPayload(session, { event: "session_started" }).properties
+        .terminal_program,
+    ).toBe("unknown");
+  });
+});
+describe("parent multiplexer capture", () => {
+  it("reports parent tmux independently of the terminal and child backend", () => {
+    vi.stubEnv("TMUX", "/private/socket,123,0");
+    vi.stubEnv("ZELLIJ_SESSION_NAME", undefined);
+    vi.stubEnv("HERDR_ENV", undefined);
+    vi.stubEnv("TERM_PROGRAM", "agterm");
+    registration().start();
+    expect(captured[0].properties).toMatchObject({
+      parent_mux: "tmux",
+      terminal_program: "agterm",
+    });
+    expect(captured[0].properties).not.toHaveProperty("mux");
+    expect(JSON.stringify(captured)).not.toContain("/private/socket");
   });
 });

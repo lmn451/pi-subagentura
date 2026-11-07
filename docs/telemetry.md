@@ -101,6 +101,46 @@ spawns, analytics may join that root host evidence to `agent_launch_resolved` by
 and mux fields. This does not measure or infer spawn mechanisms for workers
 launched externally by Orca or Agterm.
 
+### Terminal application
+
+Fresh root `session_started` events also include the additive schema-v6
+`terminal_program` dimension, independently of `session_host` and child `mux`.
+It maps `TERM_PROGRAM` through a closed allowlist: `agterm`, `ghostty`, `iterm2`
+(`iTerm.app`), `apple_terminal` (`Apple_Terminal`), `vscode`, `wezterm`
+(`WezTerm`), `kitty`, or `unknown`. Missing, unsupported, and malformed values
+become `unknown`; historical events without the field are also unknown.
+
+Agterm explicitly sets `TERM_PROGRAM=agterm` in its upstream
+[`SurfaceEnvironment`](https://github.com/umputun/agterm/blob/master/agtermCore/Sources/agtermCore/SurfaceEnvironment.swift)
+builder, including its quick terminal. We do not infer it from Ghostty engine
+markers, installed binaries, socket paths, or session IDs. No raw environment
+value, terminal version, or identifier is sent. Classification is synchronous,
+performs no probes, and shares the existing fresh-root and telemetry opt-out gates.
+
+This measures the environment-advertised terminal application, not unique users
+or proof of the currently active terminal. Multiplexers, SSH, nested terminals,
+and inherited or overridden environments can hide or retain a value. Orca
+launch origin and terminal application can coexist; neither changes backend
+routing.
+
+### Parent multiplexer context
+
+Fresh root `session_started` events include additive schema-v6 `parent_mux`:
+`tmux`, `zellij`, `herdr`, or `unknown`. This observes the parent Pi environment,
+not the child execution backend (`mux`) or requested backend (`requested_mux`).
+It uses a nonempty, bounded, control-character-free `TMUX` or
+`ZELLIJ_SESSION_NAME`, or exact `HERDR_ENV=1`. Exactly one recognized marker
+produces its label. Missing or multiple markers produce `unknown`: nested
+environments do not reliably establish which mux is innermost. Missing
+historical fields are also unknown, not proof that no multiplexer was used.
+
+No command, binary availability check, socket connection, or server probe runs;
+no raw socket path, session name, or other marker value is sent. Classification
+shares fresh-root and telemetry opt-out gates. Inherited or forged markers
+remain possible, so this is observed context, not live ownership verification.
+The field does not alter backend selection. Join root events to child launch
+events by `telemetry_session_id` to compare parent context with child backends.
+
 ### Logical launch resolution
 
 `agent_launch_resolved.outcome` is one of:
