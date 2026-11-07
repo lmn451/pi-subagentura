@@ -205,6 +205,8 @@ export class TmuxMultiplexer implements Multiplexer {
               "-d",
               "-s",
               sessionName,
+              "-n",
+              windowName,
               "-c",
               opts.cwd,
               "-P",
@@ -236,27 +238,6 @@ export class TmuxMultiplexer implements Multiplexer {
         throw new Error(`Unexpected tmux pane id: ${paneId || "(empty)"}`);
       }
       this.detachedSessionName = sessionName;
-      if (isFirstPane) {
-        // Rename the default window to the sub-agent's display name.
-        try {
-          execFileSync(
-            "tmux",
-            withTmuxSocket([
-              "rename-window",
-              "-t",
-              `${sessionName}:0`,
-              windowName,
-            ]),
-            {
-              encoding: "utf8",
-              stdio: "ignore",
-              timeout: 5000,
-            },
-          );
-        } catch {
-          // Cosmetic; don't fail the spawn if rename doesn't take.
-        }
-      }
       settleTmuxSocketPaneForTests();
       return { paneId, windowName, session: sessionName };
     }
@@ -659,38 +640,17 @@ export class TmuxMultiplexer implements Multiplexer {
     attachCommand: string;
     focusCommand: string;
   } {
+    // Window names can collide within a session or change after launch.
+    const location = getPaneLocation(opts.paneId);
+    const targetWindow = `${location.session}:${location.window}`;
+    const tmux = tmuxCommandPrefix();
     if (opts.windowName) {
-      // Background mode: pane lives in a named detached window. Attach
-      // command chains `attach -t <session>` with
-      // `select-window -t <session>:<windowName>` so it works from outside the
-      // session too.
-      //
-      // The window target MUST carry the session qualifier. Window names are
-      // `safeSegment(name)`, so two sub-agents both called "reviewer" collide,
-      // and a bare name target resolves against whichever session tmux scans
-      // first: verified against tmux 3.7b, `select-window -t reviewer` with
-      // `reviewer` windows in both `collide-a` and `collide-b` moves
-      // `collide-b` — the most recently created session — and exits 0. That is
-      // the same silent wrong-agent focus `focusPane` was fixed for, except
-      // here it lands in a string we hand the user to paste.
-      //
-      // Note the `\;` chain is genuinely for outside-tmux use: from inside a
-      // session on the same server, tmux refuses with "sessions should be
-      // nested with care, unset $TMUX to force" and the chained select-window
-      // does NOT run either (verified 3.7b). Inside-tmux callers get
-      // `focusCommand`, which is why it is a standalone command.
-      const location = getPaneLocation(opts.paneId);
-      const tmux = tmuxCommandPrefix();
-      const targetWindow = `${location.session}:${opts.windowName}`;
       return {
         attachCommand: `${tmux} attach -t ${shellEscape(location.session)} \\; select-window -t ${shellEscape(targetWindow)}`,
         focusCommand: `${tmux} select-window -t ${shellEscape(targetWindow)}`,
       };
     }
     // Visible split: attach by pane id inside the parent's window.
-    const location = getPaneLocation(opts.paneId);
-    const targetWindow = `${location.session}:${location.window}`;
-    const tmux = tmuxCommandPrefix();
     return {
       attachCommand: `${tmux} attach -t ${shellEscape(location.session)} \\; select-window -t ${shellEscape(targetWindow)} \\; select-pane -t ${shellEscape(opts.paneId)}`,
       focusCommand: `${tmux} select-pane -t ${shellEscape(opts.paneId)}`,

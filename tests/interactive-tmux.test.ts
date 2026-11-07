@@ -217,7 +217,7 @@ describe("interactive-tmux", () => {
     ).toBe(false);
   });
 
-  it("launches in background mode by default (new-window) and stores window-name attach commands", async () => {
+  it("launches in background mode by default (new-window) and stores index-based attach commands", async () => {
     const tmp = makeTmp();
     process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
     process.env.TMUX = makeArgs().TMUX;
@@ -246,14 +246,11 @@ describe("interactive-tmux", () => {
 
     expect(state.paneId).toBe(MOCK_PANE_ID);
     expect(state.windowName).toBe("demo");
-    // Background mode: attach command should target the named window, not the
-    // pane — and the window target must carry the session qualifier
-    // (MOCK_LOCATION reports session `sess`). A bare `-t 'demo'` resolves
-    // against whichever session tmux scans first, so two agents sharing a
-    // safe-segmented name would send the user to the wrong one.
-    expect(state.attachCommand).toContain("select-window -t 'sess:demo'");
+    // Background commands use the actual session/window index, not the
+    // display name, which can collide or change after launch.
+    expect(state.attachCommand).toContain("select-window -t 'sess:1'");
     expect(state.attachCommand).not.toContain("select-pane");
-    expect(state.selectPaneCommand).toContain("select-window -t 'sess:demo'");
+    expect(state.selectPaneCommand).toContain("select-window -t 'sess:1'");
 
     // new-window was used (not split-window) — the user's tmux layout is undisturbed.
     const usedNewWindow = calls.some((args) => args[0] === "new-window");
