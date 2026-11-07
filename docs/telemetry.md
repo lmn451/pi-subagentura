@@ -95,6 +95,28 @@ UUID remains the only correlation identifier. Host is not propagated to other
 events or persisted in session state; native Orca backend attribution remains
 deferred.
 
+### Terminal application
+
+Fresh root `session_started` events also include the additive schema-v6
+`terminal_program` dimension, independently of `session_host` and child `mux`.
+It maps `TERM_PROGRAM` through a closed allowlist: `agterm`, `ghostty`, `iterm2`
+(`iTerm.app`), `apple_terminal` (`Apple_Terminal`), `vscode`, `wezterm`
+(`WezTerm`), `kitty`, or `unknown`. Missing, unsupported, and malformed values
+become `unknown`; historical events without the field are also unknown.
+
+Agterm explicitly sets `TERM_PROGRAM=agterm` in its upstream
+[`SurfaceEnvironment`](https://github.com/umputun/agterm/blob/master/agtermCore/Sources/agtermCore/SurfaceEnvironment.swift)
+builder, including its quick terminal. We do not infer it from Ghostty engine
+markers, installed binaries, socket paths, or session IDs. No raw environment
+value, terminal version, or identifier is sent. Classification is synchronous,
+performs no probes, and shares the existing fresh-root and telemetry opt-out gates.
+
+This measures the environment-advertised terminal application, not unique users
+or proof of the currently active terminal. Multiplexers, SSH, nested terminals,
+and inherited or overridden environments can hide or retain a value. Orca
+launch origin and terminal application can coexist; neither changes backend
+routing.
+
 ### Logical launch resolution
 
 `agent_launch_resolved.outcome` is one of:

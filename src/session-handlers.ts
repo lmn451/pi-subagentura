@@ -90,6 +90,7 @@ import {
   type TelemetrySession,
   resolveTelemetryTrafficOrigin,
   TELEMETRY_ORIGIN_ENV,
+  sanitizeTelemetryTerminalProgram,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -107,6 +108,9 @@ function captureRootSessionStarted(telemetry: TelemetrySession): void {
   captureTelemetry(telemetry, {
     event: "session_started",
     session_host: resolveTelemetrySessionHost(),
+    terminal_program: sanitizeTelemetryTerminalProgram(
+      process.env.TERM_PROGRAM,
+    ),
   });
 }
 

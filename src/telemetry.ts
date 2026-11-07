@@ -294,7 +294,11 @@ type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
 };
 
 export type TelemetryEvent =
-  | { event: "session_started"; session_host?: TelemetrySessionHost }
+  | {
+      event: "session_started";
+      session_host?: TelemetrySessionHost;
+      terminal_program?: TelemetryTerminalProgram;
+    }
   | {
       event: "session_setup_failed";
       failure_stage: TelemetrySessionFailureStage;
@@ -980,6 +984,9 @@ export function buildTelemetryPayload(
       properties = {
         ...common,
         session_host: event.session_host === "orca" ? "orca" : "unknown",
+        terminal_program: sanitizeTelemetryTerminalProgram(
+          event.terminal_program,
+        ),
       };
       break;
     case "session_setup_failed":
@@ -1337,5 +1344,37 @@ export function captureTelemetry(
   } catch {
     // Best-effort analytics must never affect extension behavior.
     clearTimeout(timeout);
+  }
+}
+export type TelemetryTerminalProgram =
+  | "agterm"
+  | "ghostty"
+  | "iterm2"
+  | "apple_terminal"
+  | "vscode"
+  | "wezterm"
+  | "kitty"
+  | "unknown";
+
+export function sanitizeTelemetryTerminalProgram(
+  value: unknown,
+): TelemetryTerminalProgram {
+  switch (value) {
+    case "agterm":
+    case "ghostty":
+    case "vscode":
+    case "wezterm":
+    case "kitty":
+      return value;
+    case "WezTerm":
+      return "wezterm";
+    case "iTerm.app":
+    case "iterm2":
+      return "iterm2";
+    case "Apple_Terminal":
+    case "apple_terminal":
+      return "apple_terminal";
+    default:
+      return "unknown";
   }
 }
