@@ -31,11 +31,7 @@ import {
   TELEMETRY_OPT_OUT_FLAG,
 } from "../src/settings";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
-import {
-  clearSessionScopes,
-  getActiveSessionScopeId,
-  getSessionScopes,
-} from "../src/session-scope";
+import { clearSessionScopes, getSessionScopes } from "../src/session-scope";
 import { createPiSessionHarness } from "./helpers/pi-session-harness";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
@@ -683,7 +679,7 @@ describe("generic extension settings", () => {
         role: "root",
         maxDepth: 2,
       });
-      expect(getActiveSessionScopeId()).toBe(scope?.id);
+      expect(scope?.pi).toBe(extensionApi);
       expect(notify).toHaveBeenCalledWith(
         expect.stringContaining("max-depth"),
         "warning",

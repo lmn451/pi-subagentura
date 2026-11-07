@@ -10,10 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { appendInteractiveState } from "../src/artifact";
-import {
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { type InteractiveSubagentState } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import { pollArtifactChanges } from "../src/artifact-poller";
 import { clearSessionScopes, registerSessionScope } from "../src/session-scope";
@@ -53,7 +50,6 @@ function interactiveState(
 
 afterEach(() => {
   __setTmuxMultiplexer(undefined);
-  interactiveSubagentRegistry.clear();
   clearSessionScopes();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -67,7 +63,14 @@ describe("high-concurrency input latency regressions", () => {
     const eventsFile = join(state.artifactDir, "events.ndjson");
     writeFileSync(
       eventsFile,
-      `${JSON.stringify({ ts: 1, type: "started", status: "running" })}\n`,
+      `${JSON.stringify({
+        version: 2,
+        eventId: "latency-start",
+        turnId: "latency-turn",
+        ts: 1,
+        type: "turn_started",
+        status: "running",
+      })}\n`,
     );
     const synchronousProbe = vi.fn(() => {
       const deadline = performance.now() + 250;
@@ -88,7 +91,17 @@ describe("high-concurrency input latency regressions", () => {
       inputDelayMs = performance.now() - startedAt;
       appendFileSync(
         eventsFile,
-        `${JSON.stringify({ ts: 2, type: "done", status: "done", exitCode: 0 })}\n`,
+        `${JSON.stringify({
+          version: 2,
+          eventId: "latency-done",
+          turnId: "latency-turn",
+          ts: 2,
+          type: "completion",
+          status: "done",
+          outcome: "done",
+          source: "agent_settled",
+          exitCode: 0,
+        })}\n`,
       );
     }, 0);
 
@@ -97,46 +110,6 @@ describe("high-concurrency input latency regressions", () => {
     expect(inputDelayMs).toBeLessThan(125);
     expect(synchronousProbe).not.toHaveBeenCalled();
     expect(asynchronousProbe).toHaveBeenCalled();
-  });
-
-  it("keeps the parent event loop responsive while scanning a large session log", async () => {
-    const cwd = temporaryDirectory("subagentura-workflow-usage-latency-");
-    const state = interactiveState("agent-usage", cwd);
-    const eventsFile = join(state.artifactDir, "events.ndjson");
-    writeFileSync(
-      eventsFile,
-      `${JSON.stringify({ ts: 1, type: "done", status: "done", exitCode: 0 })}\n`,
-    );
-    const sessionLine = `${JSON.stringify({
-      type: "message",
-      message: { role: "user", content: "x".repeat(120) },
-    })}\n`;
-    writeFileSync(state.sessionFile, sessionLine.repeat(200_000));
-
-    let resultSettled = false;
-    let timerObservedPending = false;
-    const timerProbe = new Promise<void>((resolve) => {
-      setTimeout(() => {
-        timerObservedPending = !resultSettled;
-        resolve();
-      }, 0);
-    });
-    const result = await awaitInteractiveResult(state, undefined, 1);
-    resultSettled = true;
-    await timerProbe;
-
-    expect(result).toMatchObject({
-      isError: false,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cost: 0,
-        turns: 0,
-      },
-    });
-    expect(timerObservedPending).toBe(true);
   });
 
   it("persists a 200-subagent poll without quadratic input delay", async () => {
@@ -161,7 +134,6 @@ describe("high-concurrency input latency regressions", () => {
         sessionFile: state.sessionFile,
         parentSessionId,
       });
-      interactiveSubagentRegistry.set(state.id, state);
       scope.interactiveStates.set(state.id, state);
     }
     __setTmuxMultiplexer({

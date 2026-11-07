@@ -17,6 +17,8 @@ import type {
   CapturePaneResult,
   Multiplexer,
   PaneActivity,
+  PaneLivenessFailureReason,
+  PaneLivenessDiagnostic,
   PaneLiveness,
   PaneRef,
 } from "./multiplexer-contracts";
@@ -99,7 +101,10 @@ interface HerdrCommandResult {
 type PaneLookupResult =
   | { readonly kind: "found"; readonly pane: HerdrPaneInfo }
   | { readonly kind: "missing" }
-  | { readonly kind: "unknown" };
+  | {
+      readonly kind: "unknown";
+      readonly failureReason: PaneLivenessFailureReason;
+    };
 
 interface HerdrSocketResponse {
   readonly id: string;
@@ -296,6 +301,18 @@ function isPaneNotFoundResponse(result: HerdrCommandResult): boolean {
   );
 }
 
+function isHerdrCommandTimeout(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  if (error.code === "ETIMEDOUT") return true;
+  // execFile's configured timeout reports a killed SIGTERM; maxBuffer has its
+  // own code and is excluded so output truncation is not mislabeled as timeout.
+  return (
+    error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" &&
+    error.killed === true &&
+    error.signal === "SIGTERM"
+  );
+}
+
 function isPaneNotFoundError(error: unknown): boolean {
   let current: unknown = error;
   const seen = new Set<object>();
@@ -320,11 +337,18 @@ function isPaneNotFoundError(error: unknown): boolean {
 
 function paneLookupFromCommand(result: HerdrCommandResult): PaneLookupResult {
   if (isPaneNotFoundResponse(result)) return { kind: "missing" };
-  if (result.error !== undefined) return { kind: "unknown" };
+  if (result.error !== undefined) {
+    return {
+      kind: "unknown",
+      failureReason: isHerdrCommandTimeout(result.error)
+        ? "timeout"
+        : "command_error",
+    };
+  }
   try {
     return { kind: "found", pane: parsePaneResult(result.stdout) };
   } catch {
-    return { kind: "unknown" };
+    return { kind: "unknown", failureReason: "malformed_response" };
   }
 }
 
@@ -750,18 +774,26 @@ export class HerdrMultiplexer implements Multiplexer {
     paneId: string,
     session?: string,
   ): Promise<PaneLiveness> {
-    if (!isHerdrPaneId(paneId)) return "unknown";
+    return (await this.getPaneLivenessDiagnosticAsync(paneId, session))
+      .liveness;
+  }
+
+  async getPaneLivenessDiagnosticAsync(
+    paneId: string,
+    session?: string,
+  ): Promise<PaneLivenessDiagnostic> {
+    if (!isHerdrPaneId(paneId)) return { liveness: "unknown" };
     const target = this.canonicalPaneId(paneId, session);
     const result = await this.probeLivenessAsync(target, session);
     if (result.kind === "missing" && target !== paneId) {
       this.retireCanonical(paneId, target, session);
-      return this.livenessFrom(
+      return this.livenessDiagnosticFrom(
         paneId,
         session,
         await this.probeLivenessAsync(paneId, session),
       );
     }
-    return this.livenessFrom(paneId, session, result);
+    return this.livenessDiagnosticFrom(paneId, session, result);
   }
 
   private livenessFrom(
@@ -769,6 +801,14 @@ export class HerdrMultiplexer implements Multiplexer {
     session: string | undefined,
     result: PaneLookupResult,
   ): PaneLiveness {
+    return this.livenessDiagnosticFrom(paneId, session, result).liveness;
+  }
+
+  private livenessDiagnosticFrom(
+    paneId: string,
+    session: string | undefined,
+    result: PaneLookupResult,
+  ): PaneLivenessDiagnostic {
     if (result.kind === "found") {
       // Do not re-trust a remap onto an id the server has reported missing.
       // The record naming it is cached and keeps being read, so without this
@@ -781,9 +821,10 @@ export class HerdrMultiplexer implements Multiplexer {
       ) {
         this.rememberPane(paneId, session, result.pane);
       }
-      return "alive";
+      return { liveness: "alive" };
     }
-    return result.kind === "missing" ? "dead" : "unknown";
+    if (result.kind === "missing") return { liveness: "dead" };
+    return { liveness: "unknown", failureReason: result.failureReason };
   }
 
   private retiredCanonicalFor(

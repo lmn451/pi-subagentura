@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi-version: ["0.80.6", "latest"]
+        pi-version: ["1.2.0", "latest"]
 
     steps:
       - name: Checkout
@@ -72,7 +72,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Check formatting
-        if: matrix.pi-version == '0.80.6'
+        if: matrix.pi-version == '1.2.0'
         run: npm run format:check
 
       - name: Install selected Pi SDK
@@ -85,12 +85,6 @@ jobs:
             "@earendil-works/pi-coding-agent@${PI_VERSION}"
             "@earendil-works/pi-tui@${PI_VERSION}"
           )
-          # Pi 0.85.0 imports pi-server without declaring it. Install it
-          # together with the SDK: a later no-save install can reset the
-          # selected SDK versions to the package.json development pins.
-          if [ "$PI_VERSION" = "latest" ]; then
-            pi_packages+=("@earendil-works/pi-server@${PI_VERSION}")
-          fi
           npm install --no-save --package-lock=false "${pi_packages[@]}"
 
       - name: Verify extension loads in selected Pi
@@ -104,11 +98,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tmux
 
-      # Pi 0.80.6 uses fd and ripgrep to discover the explicitly loaded
+      # Pi 1.2.0 uses fd and ripgrep to discover the explicitly loaded
       # resources shown in the terminal startup screen. The harness asserts
       # that both the fixture provider and extension were loaded.
       - name: Install terminal E2E search tools
-        if: matrix.pi-version == '0.80.6'
+        if: matrix.pi-version == '1.2.0'
         run: |
           sudo apt-get install -y fd-find ripgrep
           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
@@ -144,14 +138,14 @@ jobs:
         if: matrix.pi-version == 'latest'
         run: npm run test:pi
       - name: Run unit and Pi session tests with coverage thresholds
-        if: matrix.pi-version == '0.80.6'
+        if: matrix.pi-version == '1.2.0'
         run: npm run coverage:check
 
       # Shuffle only on nightly/manual runs. The fixed script seed makes failures
       # replayable without adding a duplicate PR test pass.
       - name: Run randomized-order tests
         if: >-
-          matrix.pi-version == '0.80.6' &&
+          matrix.pi-version == '1.2.0' &&
           (github.event_name == 'schedule' ||
           github.event_name == 'workflow_dispatch')
         run: npm run test:random
@@ -160,7 +154,7 @@ jobs:
       # a blocking signal. The script remains available for local investigation.
       - name: Run non-blocking mutation pilot
         if: >-
-          matrix.pi-version == '0.80.6' &&
+          matrix.pi-version == '1.2.0' &&
           (github.event_name == 'schedule' ||
           github.event_name == 'workflow_dispatch')
         continue-on-error: true
@@ -207,7 +201,7 @@ jobs:
       # TUI paint, so a cosmetic floating-SDK change must not turn master red.
       # Unit and integration coverage remains strict on both SDK legs.
       - name: Run terminal visual E2E tests
-        if: matrix.pi-version == '0.80.6'
+        if: matrix.pi-version == '1.2.0'
         timeout-minutes: 8
         env:
           # The harness builds a replacement environment and picks its own
@@ -216,7 +210,7 @@ jobs:
           SUBAGENTURA_E2E_DIAGNOSTICS: ${{ runner.temp }}/subagentura-e2e
         run: npm run test:tui
       - name: Upload terminal E2E diagnostics
-        if: failure() && matrix.pi-version == '0.80.6'
+        if: failure() && matrix.pi-version == '1.2.0'
         uses: actions/upload-artifact@v6
         with:
           name: terminal-e2e-${{ matrix.pi-version }}
@@ -225,5 +219,5 @@ jobs:
 
       # Packaging is SDK-independent, so run each packaging check once.
       - name: "Verify published tarball is loadable (regression: v2.0.0 missing helpers.ts)"
-        if: matrix.pi-version == '0.80.6'
+        if: matrix.pi-version == '1.2.0'
         run: npx vitest run published-tarball.test.ts

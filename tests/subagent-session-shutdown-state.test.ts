@@ -12,10 +12,7 @@ import {
   orchestratorRoutingFilePath,
   upsertOrchestratorRoutingEntry,
 } from "../src/orchestrator-routing";
-import {
-  interactiveSubagentRegistry,
-  registerInteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { registerInteractiveSubagentState } from "../src/interactive-tmux";
 import { importFresh } from "./test-utils";
 import { makeTmp, makeState } from "./subagent-rehydrate-helpers";
 import { clearSessionScopes, type SessionScope } from "../src/session-scope";
@@ -44,12 +41,6 @@ describe("session_shutdown clean-slate on /new and quit", () => {
 
   beforeEach(() => {
     cwd = makeTmp();
-    const g = globalThis as typeof globalThis & {
-      __piSubagenturaInteractiveRegistry?: Map<string, unknown>;
-      __piSubagenturaPiRef?: ExtensionAPI;
-    };
-    g.__piSubagenturaInteractiveRegistry?.clear();
-    g.__piSubagenturaPiRef = undefined;
     clearSessionScopes();
   });
 
@@ -138,9 +129,7 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     expect(loadInteractiveStates(cwd)?.states[ownerState.id]).toBeUndefined();
     expect(loadInteractiveStates(cwd)?.states[peerState.id]).toBeDefined();
     expect(owner.scope.interactiveStates.size).toBe(0);
-    expect(interactiveSubagentRegistry.has(ownerState.id)).toBe(false);
     expect(peer.scope.interactiveStates.get(peerState.id)).toBe(peerState);
-    expect(interactiveSubagentRegistry.get(peerState.id)).toBe(peerState);
 
     peer.shutdownHandlers.at(-1)!(
       { type: "session_shutdown", reason: "new" },
@@ -148,7 +137,6 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     );
     expect(loadInteractiveStates(cwd)).toBeNull();
     expect(peer.scope.interactiveStates.size).toBe(0);
-    expect(interactiveSubagentRegistry.has(peerState.id)).toBe(false);
   });
 
   it("deletes routing metadata on /new shutdown", async () => {
@@ -211,14 +199,12 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     );
 
     expect(firstExtension.scope.interactiveStates.size).toBe(0);
-    expect(interactiveSubagentRegistry.has(id)).toBe(false);
     expect(loadInteractiveStates(cwd)?.states[id]).toBeDefined();
 
     const secondExtension = await setupExtension();
     startSession(secondExtension, "startup", sessionId);
 
     expect(secondExtension.scope.interactiveStates.has(id)).toBe(true);
-    expect(interactiveSubagentRegistry.has(id)).toBe(true);
   });
 
   it("session_shutdown with reason='reload' KEEPS the state file (rehydrate depends on it)", async () => {
@@ -275,7 +261,6 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     );
 
     expect(extension.scope.interactiveStates.size).toBe(0);
-    expect(interactiveSubagentRegistry.has(state.id)).toBe(false);
     expect(execFileSync).not.toHaveBeenCalledWith(
       "tmux",
       expect.arrayContaining(["kill-pane"]),

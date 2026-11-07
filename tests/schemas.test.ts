@@ -191,52 +191,13 @@ describe("BaseParams", () => {
     expect(check(BaseParams)({ task: "t", async: null })).toBe(false);
   });
 
-  /* ---------- optional `notifyOnComplete` (union "notify" | "inject") ---------- */
-
-  it("accepts missing notifyOnComplete", () => {
-    expect(check(BaseParams)({ task: "t" })).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'notify'", () => {
-    expect(
-      check(BaseParams)({ task: "t", notifyOnComplete: "notify" as const }),
-    ).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'inject'", () => {
-    expect(
-      check(BaseParams)({ task: "t", notifyOnComplete: "inject" as const }),
-    ).toBe(true);
-  });
-
-  it("rejects notifyOnComplete 'push'", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: "push" })).toBe(
+  it("rejects deprecated completion controls", () => {
+    expect(check(BaseParams)({ task: "t", notifyOnComplete: "inject" })).toBe(
       false,
     );
-  });
-
-  it("rejects notifyOnComplete empty string", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: "" })).toBe(false);
-  });
-
-  it("rejects notifyOnComplete number", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: 0 })).toBe(false);
-  });
-
-  it("rejects notifyOnComplete boolean", () => {
-    expect(check(BaseParams)({ task: "t", notifyOnComplete: true })).toBe(
+    expect(check(BaseParams)({ task: "t", triggerTurnOnComplete: true })).toBe(
       false,
     );
-  });
-
-  it("produces meaningful errors for invalid notifyOnComplete", () => {
-    const msgs = collectErrorMessages(BaseParams, {
-      task: "t",
-      notifyOnComplete: "bad",
-    });
-    expect(
-      msgs.some((m) => /notify|inject|constant|equal|anyOf/i.test(m)),
-    ).toBe(true);
   });
 
   /* ---------- optional `maxAge` (integer milliseconds) ---------- */
@@ -408,8 +369,6 @@ describe("InteractiveParams", () => {
       routingDescription: "Debug the memory leak",
       routingAliases: ["memory", "leak"],
       background: false,
-      notifyOnComplete: "inject" as const,
-      triggerTurnOnComplete: true,
       completionPolicy: "group" as const,
       completionGroupId: "review-shards",
     };
@@ -624,13 +583,11 @@ describe("InteractiveParams", () => {
         "model",
         "mux",
         "name",
-        "notifyOnComplete",
         "persona",
         "routingAliases",
         "routingDescription",
         "task",
         "thinkingLevel",
-        "triggerTurnOnComplete",
       ].sort(),
     );
     expect(providerSchema.properties.includeContext.type).toBe("boolean");
@@ -740,43 +697,13 @@ describe("InteractiveParams", () => {
     );
   });
 
-  /* ---------- optional `notifyOnComplete` (union "notify" | "inject") ---------- */
-
-  it("accepts missing notifyOnComplete", () => {
-    expect(check(InteractiveParams)({ task: "t" })).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'notify'", () => {
+  it("rejects deprecated completion controls", () => {
     expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "notify" as const,
-      }),
-    ).toBe(true);
-  });
-
-  it("accepts notifyOnComplete 'inject'", () => {
-    expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "inject" as const,
-      }),
-    ).toBe(true);
-  });
-
-  it("rejects notifyOnComplete 'notify-inject'", () => {
-    expect(
-      check(InteractiveParams)({
-        task: "t",
-        notifyOnComplete: "notify-inject",
-      }),
+      check(InteractiveParams)({ task: "t", notifyOnComplete: "inject" }),
     ).toBe(false);
-  });
-
-  it("rejects notifyOnComplete number", () => {
-    expect(check(InteractiveParams)({ task: "t", notifyOnComplete: 1 })).toBe(
-      false,
-    );
+    expect(
+      check(InteractiveParams)({ task: "t", triggerTurnOnComplete: true }),
+    ).toBe(false);
   });
 
   /* ---------- optional `mux` (auto | tmux | zellij | herdr) ---------- */
@@ -868,16 +795,13 @@ describe("Parse (decoding)", () => {
     expect(result).toEqual(value);
   });
 
-  it("BaseParams.Parse passes through unknown properties", () => {
-    const result = parse(BaseParams)({
-      task: "hello",
-      extraField: "should not be removed",
-    });
-    expect(result).toHaveProperty("extraField");
-    expect(result).toMatchObject({
-      task: "hello",
-      extraField: "should not be removed",
-    });
+  it("BaseParams.Parse rejects unknown properties", () => {
+    expect(() =>
+      parse(BaseParams)({
+        task: "hello",
+        extraField: "should be rejected",
+      }),
+    ).toThrow();
   });
 
   it("BaseParams.Parse throws on invalid input", () => {

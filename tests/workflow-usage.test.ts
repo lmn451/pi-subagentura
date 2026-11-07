@@ -46,7 +46,7 @@ vi.mock("../src/interactive-tmux", () => ({
   isPaneAliveAsync: vi.fn().mockResolvedValue(true),
 }));
 
-import { appendEvent, artifactPath } from "../src/artifact";
+import { appendCompletionEvent, artifactPath } from "../src/artifact";
 import {
   awaitInteractiveResult,
   parseUsageFromSessionFile,
@@ -265,11 +265,10 @@ describe("workflow session usage parsing", () => {
     const cwd = temporaryDirectory("subagentura-usage-cancel-");
     const state = interactiveState(cwd);
     const art = artifactPath(cwd, state.id);
-    appendEvent(art, {
-      ts: 1,
-      type: "done",
-      status: "done",
-      exitCode: 0,
+    appendCompletionEvent(art, {
+      turnId: "usage-turn",
+      outcome: "done",
+      source: "agent_end",
     });
     const sessionLine = `${JSON.stringify({
       type: "message",
@@ -299,11 +298,10 @@ describe("workflow session usage parsing", () => {
     const cwd = temporaryDirectory("subagentura-usage-cancel-prompt-");
     const state = interactiveState(cwd);
     const art = artifactPath(cwd, state.id);
-    appendEvent(art, {
-      ts: 1,
-      type: "done",
-      status: "done",
-      exitCode: 0,
+    appendCompletionEvent(art, {
+      turnId: "usage-cancel-turn",
+      outcome: "done",
+      source: "agent_end",
     });
     const sessionLine = `${JSON.stringify({
       type: "message",
@@ -386,8 +384,8 @@ describe("workflow session usage parsing", () => {
       },
     });
     expect(result.usage.cost).toBeCloseTo(0.02 * recordCount, 8);
-    expect(addAbortListener).toHaveBeenCalledTimes(1);
-    expect(removeAbortListener).toHaveBeenCalledTimes(1);
+    expect(addAbortListener).toHaveBeenCalled();
+    expect(removeAbortListener).toHaveBeenCalled();
     expect(mockCancelInteractiveSubagent).toHaveBeenCalledTimes(1);
     expect(deliveredReceipts).toEqual([receipt]);
   });

@@ -11,15 +11,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  jobRegistry,
-  registerInProcessJob,
-  type JobState,
-} from "../src/helpers";
+import { registerInProcessJob, type JobState } from "../src/helpers";
 import { registerInProcessSubagentTools } from "../src/tools/in-process";
 import { cancelAllFlows } from "../src/cancel-all-flows";
 import { registerSessionHandlers } from "../src/session-handlers";
-import { clearSessionScopes, sessionOwner } from "../src/session-scope";
+import {
+  clearSessionScopes,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { startWorkflowJob, workflowJobRegistry } from "../src/workflow-jobs";
 import {
@@ -28,7 +29,6 @@ import {
   type CancellationSnapshotReceipt,
 } from "../src/cancellation-snapshots";
 import type { CancellationSnapshotSource } from "../src/cancellation-snapshots";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 
 const originalEnv = {
@@ -121,11 +121,11 @@ function setSnapshotEnv(dir: string, maxBytes?: number): void {
   else process.env.SUBAGENT_CANCEL_SNAPSHOT_MAX_BYTES = String(maxBytes);
 }
 
+let scope: SessionScope;
 beforeEach(() => {
-  jobRegistry.clear();
   workflowJobRegistry.clear();
   clearSessionScopes();
-  interactiveSubagentRegistry.clear();
+  scope = createTestSessionScope();
   __setTmuxMultiplexer({
     getPaneLiveness: () => "dead",
   } as any);
@@ -143,7 +143,7 @@ afterEach(() => {
   else process.env.SUBAGENT_CANCEL_SNAPSHOT_MAX_BYTES = originalEnv.maxBytes;
   vi.restoreAllMocks();
   workflowJobRegistry.clear();
-  interactiveSubagentRegistry.clear();
+  clearSessionScopes();
   __setTmuxMultiplexer(undefined);
 });
 
@@ -159,7 +159,7 @@ describe("cancellation snapshots", () => {
   it("omits disabled receipts from cancel-all results", async () => {
     delete process.env.SUBAGENT_CANCEL_SNAPSHOT;
     const input = inProcessInput();
-    jobRegistry.set("job-disabled", {
+    scope.inProcessJobs.set("job-disabled", {
       id: "job-disabled",
       status: "running",
       session: { ...input.session, abort: vi.fn() },
@@ -168,7 +168,7 @@ describe("cancellation snapshots", () => {
       modelLabel: input.model,
     } as any);
 
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     expect(result.jobsAborted).toBe(1);
     expect(result.snapshots).toEqual([]);
@@ -305,7 +305,7 @@ describe("cancellation snapshots", () => {
       ".lineage-bootstrap-0123456789abcdef.json",
     );
     writeFileSync(bootstrapPath, "unconsumed", { mode: 0o600 });
-    interactiveSubagentRegistry.set(input.id, {
+    scope.interactiveStates.set(input.id, {
       id: input.id,
       name: "interactive",
       task: "test",
@@ -314,6 +314,7 @@ describe("cancellation snapshots", () => {
       sessionFile: input.sessionFile,
       cwd: input.cwd,
       parentSessionId: input.parentSessionId,
+      sessionOwner: sessionOwner(scope),
       startedAt: input.startedAt,
       status: "running",
       attachCommand: "attach",
@@ -322,7 +323,7 @@ describe("cancellation snapshots", () => {
       artifactDir: input.artifactDir,
     });
 
-    const result = await cancelAllFlows();
+    const result = await cancelAllFlows(sessionOwner(scope));
 
     expect(result.interactiveKilled).toBe(1);
     expect(result.snapshots).toHaveLength(1);
@@ -387,9 +388,9 @@ describe("cancellation snapshots", () => {
       cwd: input.cwd,
       modelLabel: input.model,
     });
-    jobRegistry.set("job-1", makeJob("job-1", abort1) as any);
-    jobRegistry.set("job-2", makeJob("job-2", abort2) as any);
-    const resultPromise = cancelAllFlows();
+    scope.inProcessJobs.set("job-1", makeJob("job-1", abort1) as any);
+    scope.inProcessJobs.set("job-2", makeJob("job-2", abort2) as any);
+    const resultPromise = cancelAllFlows(sessionOwner(scope));
     await pending;
     const result = await resultPromise;
     expect(filesAtFirstAbort).toBeGreaterThanOrEqual(2);
@@ -402,14 +403,17 @@ describe("cancellation snapshots", () => {
     const root = mkdtempSync(join(tmpdir(), "cancel-snapshot-per-id-"));
     setSnapshotEnv(root);
     const tools: Record<string, any> = {};
-    registerInProcessSubagentTools({
-      registerTool: (tool: any) => {
-        tools[tool.name] = tool;
-      },
-    } as any);
+    registerInProcessSubagentTools(
+      {
+        registerTool: (tool: any) => {
+          tools[tool.name] = tool;
+        },
+      } as any,
+      scope,
+    );
     const abort = vi.fn();
     const input = inProcessInput();
-    jobRegistry.set("job-1", {
+    scope.inProcessJobs.set("job-1", {
       id: "job-1",
       status: "running",
       session: { ...input.session, abort },
@@ -483,11 +487,14 @@ describe("cancellation snapshots", () => {
   it("waits for asynchronous workflow snapshot receipts before returning", async () => {
     setSnapshotEnv(mkdtempSync(join(tmpdir(), "workflow-receipt-wait-")));
     const tools: Record<string, any> = {};
-    registerWorkflowTool({
-      registerTool: (tool: any) => {
-        tools[tool.name] = tool;
-      },
-    } as any);
+    registerWorkflowTool(
+      {
+        registerTool: (tool: any) => {
+          tools[tool.name] = tool;
+        },
+      } as any,
+      scope,
+    );
     let markAgentEntered!: () => void;
     const agentEntered = new Promise<void>((resolve) => {
       markAgentEntered = resolve;
@@ -519,6 +526,9 @@ describe("cancellation snapshots", () => {
           });
         },
       },
+      undefined,
+      undefined,
+      sessionOwner(scope),
     );
     await agentEntered;
     const settlement = state.promise.catch((error: unknown) => error);
@@ -614,10 +624,9 @@ describe("cancellation snapshots", () => {
     expect(abort).toHaveBeenCalledOnce();
     expect(job.cancellationSnapshot?.status).toBe("written");
     expect(scope.inProcessJobs.size).toBe(0);
-    expect(jobRegistry.has(job.id)).toBe(false);
+    expect(scope.inProcessJobs.has(job.id)).toBe(false);
     expect(peerAbort).not.toHaveBeenCalled();
     expect(peerScope.inProcessJobs.get(peerJob.id)).toBe(peerJob);
-    expect(jobRegistry.get(peerJob.id)).toBe(peerJob);
 
     await peerHandlers.session_shutdown.at(-1)!(
       { reason: "quit" },

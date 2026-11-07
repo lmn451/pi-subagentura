@@ -1,23 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  mockBuildSessionOptions,
-  mockCreateCompatibleSessionRuntime,
-  mockCreateAgentSession,
-} = vi.hoisted(() => ({
-  mockBuildSessionOptions: vi.fn(),
-  mockCreateCompatibleSessionRuntime: vi.fn(),
+const { mockCreateModelRuntime, mockCreateAgentSession } = vi.hoisted(() => ({
+  mockCreateModelRuntime: vi.fn(),
   mockCreateAgentSession: vi.fn(),
 }));
-
-vi.mock("../src/pi-sdk-compat", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/pi-sdk-compat")>();
-  return {
-    ...actual,
-    buildSessionOptions: mockBuildSessionOptions,
-    createCompatibleSessionRuntime: mockCreateCompatibleSessionRuntime,
-  };
-});
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   const actual =
@@ -25,11 +11,24 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   return {
     ...actual,
     createAgentSession: mockCreateAgentSession,
+    ModelRuntime: { create: mockCreateModelRuntime },
     SessionManager: { inMemory: vi.fn(() => ({})) },
   };
 });
 
-import { jobRegistry, startSubagentJob } from "../src/helpers";
+import {
+  MAX_REGISTRY_SIZE,
+  startSubagentJob,
+  type JobState,
+} from "../src/helpers";
+import {
+  advanceSessionScopeGeneration,
+  clearSessionScopes,
+  removeSessionScope,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 import {
   createTelemetrySession,
   retireTelemetrySession,
@@ -65,19 +64,87 @@ function params(
     signal: undefined,
     onUpdate: undefined,
     defaultModel: undefined,
+    owner: sessionOwner(testScope),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
   };
 }
 
+let testScope: SessionScope;
+
 describe("startSubagentJob effective thinking level", () => {
   beforeEach(() => {
+    clearSessionScopes();
+    testScope = createTestSessionScope();
     vi.clearAllMocks();
-    jobRegistry.clear();
-    mockCreateCompatibleSessionRuntime.mockResolvedValue({
-      kind: "modern",
-      modelRuntime: {},
+    mockCreateModelRuntime.mockResolvedValue({});
+  });
+
+  it("rejects absent and stale owners before runtime preparation", async () => {
+    for (let i = 0; i < MAX_REGISTRY_SIZE; i++) {
+      testScope.inProcessJobs.set(`job-${i}`, {
+        id: `job-${i}`,
+        status: "done",
+      } as JobState);
+    }
+    const firstJobId = testScope.inProcessJobs.keys().next().value;
+    const ownerless = { ...params(), owner: undefined };
+    await expect(startSubagentJob(ownerless)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    const unknownOwner = {
+      ...params(),
+      owner: { id: testScope.id + 100, generation: 1 },
+    };
+    await expect(startSubagentJob(unknownOwner)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    const staleOwner = {
+      ...params(),
+      owner: { id: testScope.id, generation: 0 },
+    };
+    await expect(startSubagentJob(staleOwner)).rejects.toThrow(
+      /live session owner/,
+    );
+
+    testScope.lifecycle = "shutdown";
+    await expect(startSubagentJob(params())).rejects.toThrow(
+      /live session owner/,
+    );
+    expect(testScope.inProcessJobs.size).toBe(MAX_REGISTRY_SIZE);
+    expect(testScope.inProcessJobs.keys().next().value).toBe(firstJobId);
+    expect(mockCreateModelRuntime).not.toHaveBeenCalled();
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("does not start a prepared prompt after its owner generation retires", async () => {
+    const session = createSession("low");
+    mockCreateAgentSession.mockResolvedValue({ session });
+    const prepared = await startSubagentJob(params());
+
+    advanceSessionScopeGeneration(testScope.id);
+    removeSessionScope(testScope.id);
+    prepared.start();
+    const result = await prepared.jobPromise;
+
+    expect(result).toMatchObject({ cancelled: true, isError: false });
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not allocate a session if runtime preparation retires its owner", async () => {
+    mockCreateModelRuntime.mockImplementationOnce(async () => {
+      advanceSessionScopeGeneration(testScope.id);
+      return {};
     });
-    mockBuildSessionOptions.mockReturnValue({});
+
+    await expect(startSubagentJob(params())).rejects.toThrow(
+      /shut down before session creation/,
+    );
+
+    expect(mockCreateModelRuntime).toHaveBeenCalledOnce();
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
   });
 
   it("threads explicit requested options to the SDK and exposes effective level", async () => {
@@ -88,7 +155,7 @@ describe("startSubagentJob effective thinking level", () => {
     started.start();
     const result = await started.jobPromise;
 
-    expect(mockBuildSessionOptions.mock.calls[0][1]).toMatchObject({
+    expect(mockCreateAgentSession.mock.calls[0]?.[0]).toMatchObject({
       thinkingLevel: "high",
     });
     expect(started.thinkingLevel).toBe("low");
@@ -403,7 +470,7 @@ describe("startSubagentJob effective thinking level", () => {
     started.start();
     const result = await started.jobPromise;
 
-    expect(mockBuildSessionOptions.mock.calls[0][1]).not.toHaveProperty(
+    expect(mockCreateAgentSession.mock.calls[0]?.[0]).not.toHaveProperty(
       "thinkingLevel",
     );
     expect(started.thinkingLevel).toBeUndefined();

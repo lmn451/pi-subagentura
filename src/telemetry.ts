@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
+import {
+  getBuiltinModel,
+  getBuiltinProviders,
+  type BuiltinProvider,
+} from "@earendil-works/pi-ai/providers/all";
 import {
   asStringIdentifier,
   type TelemetryCorrelationId,
 } from "./identifier-types";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 4;
+export const TELEMETRY_SCHEMA_VERSION = 6;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -17,15 +21,34 @@ const MAX_TELEMETRY_DEPTH = 64;
 const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
+export type TelemetrySessionHost = "agterm" | "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
 export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
+export type TelemetryTrafficOrigin =
+  | "usage"
+  | "development"
+  | "test"
+  | "unknown";
+export const TELEMETRY_ORIGIN_ENV = "PI_SUBAGENTURA_TELEMETRY_ORIGIN";
+export type TelemetryLaunchOutcome =
+  | "started"
+  | "recovered"
+  | "rejected"
+  | "cancelled";
+export type TelemetryRequestedExecution = TelemetryExecution;
+export type TelemetryRequestedMux =
+  | "none"
+  | "auto"
+  | "tmux"
+  | "zellij"
+  | "herdr";
 export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
   | "with_context"
   | "isolated"
   | "interactive"
   | "workflow";
-export type TelemetryCompletionPolicy = "inline" | "each" | "group" | "legacy";
+export type TelemetryCompletionPolicy = "inline" | "each" | "group";
 export type TelemetryAgentStatus = "success" | "error" | "cancelled";
 export type TelemetryResultSource = "in-process" | "interactive" | "workflow";
 export type TelemetryDelivery = "manifest" | "notification";
@@ -65,6 +88,50 @@ export type TelemetrySpawnFailureStage =
   | "registration"
   | "parent_shutdown"
   | "unknown";
+export type TelemetrySpawnFailureOperation =
+  | "lineage_bootstrap_check"
+  | "routing_metadata_validation"
+  | "explicit_context_limit"
+  | "completion_policy_validation"
+  | "parent_context_serialization"
+  | "cwd_validation"
+  | "persona_limit"
+  | "interactive_path_creation"
+  | "lineage_store_resolution"
+  | "artifact_write"
+  | "system_prompt_write"
+  | "mux_resolution"
+  | "model_resolution"
+  | "pane_launch"
+  | "interactive_state_write"
+  | "lineage_manifest_write"
+  | "child_command_build"
+  | "lineage_bootstrap_write"
+  | "launch_script_write"
+  | "completion_registration";
+export interface TelemetryLaunchResolution {
+  outcome: TelemetryLaunchOutcome;
+  requested_execution: TelemetryRequestedExecution;
+  requested_mux: TelemetryRequestedMux;
+  execution?: TelemetryExecution;
+  mux: TelemetrySpawnFailureMux;
+  invocation_source: TelemetryInvocationSource;
+  async: boolean;
+  depth?: number;
+  depth_bucket: TelemetryDepthBucket;
+  completion_policy: TelemetryCompletionPolicy;
+  duration_ms?: number;
+  fallback_attempted: boolean;
+  initial_failure_stage?: TelemetrySpawnFailureStage;
+  initial_failure_operation?: TelemetrySpawnFailureOperation;
+  final_failure_stage?: TelemetrySpawnFailureStage;
+  final_failure_operation?: TelemetrySpawnFailureOperation;
+}
+
+export type TelemetryAgentLaunchResolvedEvent = {
+  event: "agent_launch_resolved";
+} & TelemetryLaunchResolution;
+
 export type TelemetryTerminalReason =
   | "completed"
   | "agent_error"
@@ -116,6 +183,20 @@ export type TelemetryRuntimeFailureKind =
   | "consumption_persistence"
   | "notification_dispatch"
   | "completion_publication";
+export type TelemetryRuntimeFailureReporter =
+  | "artifact_poller"
+  | "workflow_waiter"
+  | "workflow_runner";
+export type TelemetryRuntimeFailureImpact = "degraded" | "blocked" | "unknown";
+export type TelemetryRuntimeExecution = TelemetryExecution;
+export type TelemetryRuntimeMux = TelemetrySpawnFailureMux;
+export type TelemetryRuntimeImpact = TelemetryRuntimeFailureImpact;
+export interface TelemetryRuntimeFailureDimensions {
+  execution?: TelemetryRuntimeExecution;
+  mux?: TelemetryRuntimeMux;
+  reporter?: TelemetryRuntimeFailureReporter;
+  impact?: TelemetryRuntimeImpact;
+}
 export type TelemetryErrorCountBucket = "0" | "1" | "2+" | "unknown";
 
 export const TELEMETRY_OPERATION_NAMES = {
@@ -137,6 +218,7 @@ export const TELEMETRY_OPERATION_NAMES = {
     "list_subagent_artifacts",
     "list_orchestrator_agents",
     "update_orchestrator_agent_description",
+    "resolve_orchestrator_route",
     "workflow",
     "get_workflow_status",
     "get_workflow_result",
@@ -176,6 +258,7 @@ export type TelemetryOperationResultStatus =
   | "unavailable"
   | "invalid_input"
   | "confirmation_required"
+  | "degraded"
   | "error"
   | "unknown";
 export type TelemetrySessionFailureStage =
@@ -211,7 +294,12 @@ type TelemetrySpawnFailureDimensions = Omit<TelemetryAgentDimensions, "mux"> & {
 };
 
 export type TelemetryEvent =
-  | { event: "session_started" }
+  | {
+      event: "session_started";
+      session_host?: TelemetrySessionHost;
+      terminal_program?: TelemetryTerminalProgram;
+      parent_mux?: TelemetryParentMux;
+    }
   | {
       event: "session_setup_failed";
       failure_stage: TelemetrySessionFailureStage;
@@ -238,8 +326,10 @@ export type TelemetryEvent =
   | ({
       event: "agent_spawn_failed";
       failure_stage: TelemetrySpawnFailureStage;
+      failure_operation?: TelemetrySpawnFailureOperation;
       spawn_duration_ms?: number;
     } & TelemetrySpawnFailureDimensions)
+  | TelemetryAgentLaunchResolvedEvent
   | ({ event: "task_started"; unit: "job" | "turn" } & TelemetryAgentDimensions)
   | {
       event: "interactive_message_sent";
@@ -296,12 +386,12 @@ export type TelemetryEvent =
       failure_stage: TelemetryCompletionFailureStage;
       retry_attempt: number;
     }
-  | {
+  | ({
       event: "runtime_failure";
       error_category: TelemetryErrorCategory;
       error_stage: TelemetryErrorStage;
       failure_kind: TelemetryRuntimeFailureKind;
-    }
+    } & TelemetryRuntimeFailureDimensions)
   | {
       event: "result_read";
       source: TelemetryResultSource;
@@ -313,6 +403,7 @@ export interface TelemetrySession {
   readonly enabled: boolean;
   readonly mode: TelemetryMode;
   readonly correlationId: string;
+  readonly trafficOrigin: TelemetryTrafficOrigin;
   readonly capturedKeys: Set<string>;
   active: boolean;
 }
@@ -369,6 +460,7 @@ export function createTelemetrySession(
   enabled: boolean,
   mode: TelemetryMode | "manual" = "straight",
   inheritedCorrelationId?: string,
+  trafficOrigin?: TelemetryTrafficOrigin,
 ): TelemetrySession {
   return {
     enabled,
@@ -376,6 +468,10 @@ export function createTelemetrySession(
     correlationId:
       validCorrelationId(inheritedCorrelationId) ??
       asStringIdentifier<"telemetry-correlation">(randomUUID()),
+    trafficOrigin:
+      trafficOrigin === undefined
+        ? resolveTelemetryTrafficOrigin()
+        : sanitizeTelemetryTrafficOrigin(trafficOrigin),
     capturedKeys: new Set(),
     active: true,
   };
@@ -413,7 +509,10 @@ export function retireTelemetrySession(
 
 function builtInModel(provider: string, modelId: string): boolean {
   try {
-    return getModel(provider as never, modelId) !== undefined;
+    return (
+      getBuiltinModel(provider as BuiltinProvider, modelId as never) !==
+      undefined
+    );
   } catch {
     return false;
   }
@@ -429,11 +528,10 @@ export function sanitizeTelemetryModel(model: string | undefined): string {
     const modelId = model.slice(separator + 1);
     return builtInModel(provider, modelId) ? model : "custom";
   }
-  // Provider enumeration reaches registry code owned by the host agent. A throw
-  // there must degrade the dimension, never fail the sub-agent launch that only
-  // wanted to label a model.
+  // The generated provider catalog is used only to label telemetry. Any
+  // lookup failure must degrade this dimension, not fail sub-agent launch.
   try {
-    for (const provider of getProviders()) {
+    for (const provider of getBuiltinProviders()) {
       if (builtInModel(provider, model)) return model;
     }
   } catch {
@@ -499,6 +597,201 @@ const TELEMETRY_COMPLETION_FAILURE_STAGES: readonly TelemetryCompletionFailureSt
     "completion_publication",
   ];
 
+const TELEMETRY_SPAWN_FAILURE_OPERATIONS: readonly TelemetrySpawnFailureOperation[] =
+  [
+    "lineage_bootstrap_check",
+    "routing_metadata_validation",
+    "explicit_context_limit",
+    "completion_policy_validation",
+    "parent_context_serialization",
+    "cwd_validation",
+    "persona_limit",
+    "interactive_path_creation",
+    "lineage_store_resolution",
+    "artifact_write",
+    "system_prompt_write",
+    "mux_resolution",
+    "model_resolution",
+    "pane_launch",
+    "interactive_state_write",
+    "lineage_manifest_write",
+    "child_command_build",
+    "lineage_bootstrap_write",
+    "launch_script_write",
+    "completion_registration",
+  ];
+const TELEMETRY_SPAWN_FAILURE_STAGES: readonly TelemetrySpawnFailureStage[] = [
+  "depth_limit",
+  "capacity",
+  "context",
+  "model_resolution",
+  "session_creation",
+  "mux_resolution",
+  "pane_launch",
+  "state_persistence",
+  "registration",
+  "parent_shutdown",
+  "unknown",
+];
+const TELEMETRY_TRAFFIC_ORIGINS: readonly TelemetryTrafficOrigin[] = [
+  "usage",
+  "development",
+  "test",
+  "unknown",
+];
+const TELEMETRY_LAUNCH_OUTCOMES: readonly TelemetryLaunchOutcome[] = [
+  "started",
+  "recovered",
+  "rejected",
+  "cancelled",
+];
+const TELEMETRY_EXECUTIONS: readonly TelemetryExecution[] = [
+  "in-process",
+  "interactive",
+];
+const TELEMETRY_MUXES: readonly TelemetrySpawnFailureMux[] = [
+  "none",
+  "unknown",
+  "tmux",
+  "zellij",
+  "herdr",
+];
+const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
+  "none",
+  "auto",
+  "tmux",
+  "zellij",
+  "herdr",
+];
+const TELEMETRY_INVOCATION_SOURCES: readonly TelemetryInvocationSource[] = [
+  "with_context",
+  "isolated",
+  "interactive",
+  "workflow",
+];
+const TELEMETRY_COMPLETION_POLICIES: readonly TelemetryCompletionPolicy[] = [
+  "inline",
+  "each",
+  "group",
+];
+const TELEMETRY_RUNTIME_FAILURE_REPORTERS: readonly TelemetryRuntimeFailureReporter[] =
+  ["artifact_poller", "workflow_waiter", "workflow_runner"];
+const TELEMETRY_RUNTIME_FAILURE_IMPACTS: readonly TelemetryRuntimeFailureImpact[] =
+  ["degraded", "blocked", "unknown"];
+
+export function sanitizeTelemetryTrafficOrigin(
+  value: unknown,
+): TelemetryTrafficOrigin {
+  return typeof value === "string" &&
+    TELEMETRY_TRAFFIC_ORIGINS.includes(value as TelemetryTrafficOrigin)
+    ? (value as TelemetryTrafficOrigin)
+    : "unknown";
+}
+
+export function resolveTelemetryTrafficOrigin(
+  value: unknown = process.env[TELEMETRY_ORIGIN_ENV],
+): TelemetryTrafficOrigin {
+  const normalizedValue =
+    typeof value === "string" ? value.trim().toLowerCase() : value;
+  return sanitizeTelemetryTrafficOrigin(normalizedValue);
+}
+
+export function sanitizeTelemetryLaunchOutcome(
+  value: unknown,
+): TelemetryLaunchOutcome | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_LAUNCH_OUTCOMES.includes(value as TelemetryLaunchOutcome)
+    ? (value as TelemetryLaunchOutcome)
+    : undefined;
+}
+
+export function sanitizeTelemetryExecution(
+  value: unknown,
+): TelemetryExecution | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_EXECUTIONS.includes(value as TelemetryExecution)
+    ? (value as TelemetryExecution)
+    : undefined;
+}
+
+export function sanitizeTelemetrySpawnFailureStage(
+  value: unknown,
+): TelemetrySpawnFailureStage | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_SPAWN_FAILURE_STAGES.includes(value as TelemetrySpawnFailureStage)
+    ? (value as TelemetrySpawnFailureStage)
+    : undefined;
+}
+
+export function sanitizeTelemetryRequestedMux(
+  value: unknown,
+): TelemetryRequestedMux | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_REQUESTED_MUXES.includes(value as TelemetryRequestedMux)
+    ? (value as TelemetryRequestedMux)
+    : undefined;
+}
+
+export function sanitizeTelemetryInvocationSource(
+  value: unknown,
+): TelemetryInvocationSource | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_INVOCATION_SOURCES.includes(value as TelemetryInvocationSource)
+    ? (value as TelemetryInvocationSource)
+    : undefined;
+}
+
+export function sanitizeTelemetryCompletionPolicy(
+  value: unknown,
+): TelemetryCompletionPolicy | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_COMPLETION_POLICIES.includes(value as TelemetryCompletionPolicy)
+    ? (value as TelemetryCompletionPolicy)
+    : undefined;
+}
+export function sanitizeTelemetrySpawnFailureMux(
+  value: unknown,
+): TelemetrySpawnFailureMux | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_MUXES.includes(value as TelemetrySpawnFailureMux)
+    ? (value as TelemetrySpawnFailureMux)
+    : undefined;
+}
+
+export function sanitizeTelemetryRuntimeFailureExecution(
+  value: unknown,
+): TelemetryExecution | undefined {
+  return sanitizeTelemetryExecution(value);
+}
+
+export function sanitizeTelemetryRuntimeFailureMux(
+  value: unknown,
+): TelemetrySpawnFailureMux | undefined {
+  return sanitizeTelemetrySpawnFailureMux(value);
+}
+
+export function sanitizeTelemetryRuntimeFailureReporter(
+  value: unknown,
+): TelemetryRuntimeFailureReporter | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_RUNTIME_FAILURE_REPORTERS.includes(
+      value as TelemetryRuntimeFailureReporter,
+    )
+    ? (value as TelemetryRuntimeFailureReporter)
+    : undefined;
+}
+
+export function sanitizeTelemetryRuntimeFailureImpact(
+  value: unknown,
+): TelemetryRuntimeFailureImpact | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_RUNTIME_FAILURE_IMPACTS.includes(
+      value as TelemetryRuntimeFailureImpact,
+    )
+    ? (value as TelemetryRuntimeFailureImpact)
+    : undefined;
+}
+
 /** Never forward arbitrary error categories into telemetry. */
 export function sanitizeTelemetryErrorCategory(
   value: unknown,
@@ -560,6 +853,18 @@ export function sanitizeTelemetryCompletionFailureStage(
       value as TelemetryCompletionFailureStage,
     )
     ? (value as TelemetryCompletionFailureStage)
+    : undefined;
+}
+
+/** Never forward arbitrary spawn-operation labels into telemetry. */
+export function sanitizeTelemetrySpawnFailureOperation(
+  value: unknown,
+): TelemetrySpawnFailureOperation | undefined {
+  return typeof value === "string" &&
+    TELEMETRY_SPAWN_FAILURE_OPERATIONS.includes(
+      value as TelemetrySpawnFailureOperation,
+    )
+    ? (value as TelemetrySpawnFailureOperation)
     : undefined;
 }
 
@@ -672,11 +977,24 @@ export function buildTelemetryPayload(
     schema_version: TELEMETRY_SCHEMA_VERSION,
     telemetry_session_id: session.correlationId,
     mode: session.mode,
+    traffic_origin: sanitizeTelemetryTrafficOrigin(session.trafficOrigin),
   };
   let properties: TelemetryPayload["properties"];
   switch (event.event) {
     case "session_started":
-      properties = common;
+      properties = {
+        ...common,
+        session_host:
+          event.session_host === "agterm"
+            ? "agterm"
+            : event.session_host === "orca"
+              ? "orca"
+              : "unknown",
+        terminal_program: sanitizeTelemetryTerminalProgram(
+          event.terminal_program,
+        ),
+        parent_mux: sanitizeTelemetryParentMux(event.parent_mux),
+      };
       break;
     case "session_setup_failed":
       properties = { ...common, failure_stage: event.failure_stage };
@@ -714,7 +1032,10 @@ export function buildTelemetryPayload(
         ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
-    case "agent_spawn_failed":
+    case "agent_spawn_failed": {
+      const failureOperation = sanitizeTelemetrySpawnFailureOperation(
+        event.failure_operation,
+      );
       properties = {
         ...common,
         execution: event.execution,
@@ -726,9 +1047,80 @@ export function buildTelemetryPayload(
         depth_bucket: event.depth_bucket,
         completion_policy: event.completion_policy,
         failure_stage: event.failure_stage,
+        ...(failureOperation === undefined
+          ? {}
+          : { failure_operation: failureOperation }),
         ...durationProperties("spawn_duration", event.spawn_duration_ms),
       };
       break;
+    }
+    case "agent_launch_resolved": {
+      const outcome = sanitizeTelemetryLaunchOutcome(event.outcome);
+      const requestedExecution = sanitizeTelemetryExecution(
+        event.requested_execution,
+      );
+      const requestedMux = sanitizeTelemetryRequestedMux(event.requested_mux);
+      const execution =
+        outcome === "started" || outcome === "recovered"
+          ? sanitizeTelemetryExecution(event.execution)
+          : undefined;
+      const mux = sanitizeTelemetrySpawnFailureMux(event.mux) ?? "unknown";
+      const initialFailureStage = sanitizeTelemetrySpawnFailureStage(
+        event.initial_failure_stage,
+      );
+      const initialFailureOperation = sanitizeTelemetrySpawnFailureOperation(
+        event.initial_failure_operation,
+      );
+      const finalFailureStage = sanitizeTelemetrySpawnFailureStage(
+        event.final_failure_stage,
+      );
+      const finalFailureOperation = sanitizeTelemetrySpawnFailureOperation(
+        event.final_failure_operation,
+      );
+      const failureDimensions = {
+        ...(initialFailureStage === undefined
+          ? {}
+          : { initial_failure_stage: initialFailureStage }),
+        ...(initialFailureOperation === undefined
+          ? {}
+          : { initial_failure_operation: initialFailureOperation }),
+        ...(finalFailureStage === undefined
+          ? {}
+          : { final_failure_stage: finalFailureStage }),
+        ...(finalFailureOperation === undefined
+          ? {}
+          : { final_failure_operation: finalFailureOperation }),
+      };
+      const invocationSource = sanitizeTelemetryInvocationSource(
+        event.invocation_source,
+      );
+      const completionPolicy = sanitizeTelemetryCompletionPolicy(
+        event.completion_policy,
+      );
+      properties = {
+        ...common,
+        ...(outcome === undefined ? {} : { outcome }),
+        ...(requestedExecution === undefined
+          ? {}
+          : { requested_execution: requestedExecution }),
+        ...(requestedMux === undefined ? {} : { requested_mux: requestedMux }),
+        ...(execution === undefined ? {} : { execution }),
+        mux,
+        ...(invocationSource === undefined
+          ? {}
+          : { invocation_source: invocationSource }),
+        async: event.async === true,
+        ...depthProperty(event.depth),
+        depth_bucket: telemetryDepthBucket(telemetryDepth(event.depth)),
+        ...(completionPolicy === undefined
+          ? {}
+          : { completion_policy: completionPolicy }),
+        ...durationProperties("duration", event.duration_ms),
+        fallback_attempted: event.fallback_attempted === true,
+        ...failureDimensions,
+      };
+      break;
+    }
     case "task_started":
       properties = {
         ...common,
@@ -874,11 +1266,21 @@ export function buildTelemetryPayload(
       const failureKind = sanitizeTelemetryRuntimeFailureKind(
         event.failure_kind,
       );
+      const execution = sanitizeTelemetryRuntimeFailureExecution(
+        event.execution,
+      );
+      const mux = sanitizeTelemetryRuntimeFailureMux(event.mux);
+      const reporter = sanitizeTelemetryRuntimeFailureReporter(event.reporter);
+      const impact = sanitizeTelemetryRuntimeFailureImpact(event.impact);
       properties = {
         ...common,
         error_category: errorCategory,
         ...(errorStage === undefined ? {} : { error_stage: errorStage }),
         ...(failureKind === undefined ? {} : { failure_kind: failureKind }),
+        ...(execution === undefined ? {} : { execution }),
+        ...(mux === undefined ? {} : { mux }),
+        ...(reporter === undefined ? {} : { reporter }),
+        ...(impact === undefined ? {} : { impact }),
       };
       break;
     }
@@ -904,7 +1306,13 @@ export function captureTelemetry(
   event: TelemetryEvent,
   options: CaptureOptions = {},
 ): void {
-  if (!session?.enabled || (!session.active && !options.allowInactive)) return;
+  if (
+    !session?.enabled ||
+    (!session.active && !options.allowInactive) ||
+    (session.trafficOrigin === "test" && options.fetchImpl === undefined)
+  ) {
+    return;
+  }
   if (options.dedupeKey) {
     if (session.capturedKeys.has(options.dedupeKey)) return;
     // Retain recent retry protection without making a long session stop
@@ -944,4 +1352,59 @@ export function captureTelemetry(
     // Best-effort analytics must never affect extension behavior.
     clearTimeout(timeout);
   }
+}
+export type TelemetryTerminalProgram =
+  | "agterm"
+  | "ghostty"
+  | "iterm2"
+  | "apple_terminal"
+  | "vscode"
+  | "wezterm"
+  | "kitty"
+  | "unknown";
+
+export function sanitizeTelemetryTerminalProgram(
+  value: unknown,
+): TelemetryTerminalProgram {
+  switch (value) {
+    case "agterm":
+    case "ghostty":
+    case "vscode":
+    case "wezterm":
+    case "kitty":
+      return value;
+    case "WezTerm":
+      return "wezterm";
+    case "iTerm.app":
+    case "iterm2":
+      return "iterm2";
+    case "Apple_Terminal":
+    case "apple_terminal":
+      return "apple_terminal";
+    default:
+      return "unknown";
+  }
+}
+export type TelemetryParentMux = "tmux" | "zellij" | "herdr" | "unknown";
+
+export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
+  return value === "tmux" || value === "zellij" || value === "herdr"
+    ? value
+    : "unknown";
+}
+
+export function resolveTelemetryParentMux(
+  env: NodeJS.ProcessEnv = process.env,
+): TelemetryParentMux {
+  const marker = (value: unknown): boolean =>
+    typeof value === "string" &&
+    value.length <= 4096 &&
+    value.trim().length > 0 &&
+    !/[\x00-\x1f\x7f]/.test(value);
+  const candidates: TelemetryParentMux[] = [];
+  if (marker(env.TMUX)) candidates.push("tmux");
+  if (marker(env.ZELLIJ_SESSION_NAME)) candidates.push("zellij");
+  if (env.HERDR_ENV === "1") candidates.push("herdr");
+  // Multiple markers cannot establish which nested multiplexer owns this process.
+  return candidates.length === 1 ? candidates[0] : "unknown";
 }

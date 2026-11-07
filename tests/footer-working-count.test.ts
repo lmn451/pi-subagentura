@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { updateRunningSubagentFooter } from "../src/artifact-poller";
-import { jobRegistry, type JobState, type JobStatus } from "../src/helpers";
+import { type JobState, type JobStatus } from "../src/helpers";
 import {
-  interactiveSubagentRegistry,
   type InteractiveSubagentState,
   type InteractiveSubagentStatus,
 } from "../src/interactive-tmux";
@@ -92,15 +91,11 @@ function makeWorkflow(id: string, name: string): WorkflowJobState {
 
 beforeEach(() => {
   clearSessionScopes();
-  jobRegistry.clear();
-  interactiveSubagentRegistry.clear();
   workflowJobRegistry.clear();
 });
 
 afterEach(() => {
   clearSessionScopes();
-  jobRegistry.clear();
-  interactiveSubagentRegistry.clear();
   workflowJobRegistry.clear();
 });
 

@@ -31,8 +31,8 @@ const sleep = (ms) =>
  * half-drawn splash does not contain it, so gating `start()` on this string is
  * a real readiness signal rather than "some banner appeared".
  *
- * Verified against pi v0.80.6, which is the only SDK leg that runs `test:tui`
- * (see docs/terminal-e2e.md).
+ * Exercised on the minimum SDK CI leg, where terminal E2E verifies this
+ * readiness marker (see docs/terminal-e2e.md).
  */
 const PI_EDITOR_READY = "ctrl+o";
 

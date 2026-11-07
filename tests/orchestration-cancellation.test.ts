@@ -9,11 +9,16 @@ import {
 import {
   abortJobTree,
   cascadeChildAborts,
-  jobRegistry,
   readCancellationInfo,
   type CancellationInfo,
   type JobState,
 } from "../src/helpers";
+import {
+  clearSessionScopes,
+  sessionOwner,
+  type SessionScope,
+} from "../src/session-scope";
+import { createTestSessionScope } from "./session-scope-fixture";
 
 function fakeJob(overrides: Partial<JobState> & { id: string }): JobState {
   return {
@@ -129,8 +134,12 @@ describe("readCancellationInfo", () => {
 });
 
 describe("transitive cancellation", () => {
-  beforeEach(() => jobRegistry.clear());
-  afterEach(() => jobRegistry.clear());
+  let scope: SessionScope;
+  beforeEach(() => {
+    clearSessionScopes();
+    scope = createTestSessionScope();
+  });
+  afterEach(() => clearSessionScopes());
 
   const info: CancellationInfo = {
     source: "cancel_subagent",
@@ -141,13 +150,13 @@ describe("transitive cancellation", () => {
   it("abortJobTree aborts the target controller and marks children cancelled", () => {
     const parentAbort = new AbortController();
     const childAbort = new AbortController();
-    jobRegistry.set("p", fakeJob({ id: "p", abort: parentAbort }));
-    jobRegistry.set(
+    scope.inProcessJobs.set("p", fakeJob({ id: "p", abort: parentAbort }));
+    scope.inProcessJobs.set(
       "c",
       fakeJob({ id: "c", parentJobId: "p", abort: childAbort }),
     );
 
-    const aborted = abortJobTree("p", info);
+    const aborted = abortJobTree("p", info, sessionOwner(scope));
 
     expect(aborted).toContain("p");
     expect(aborted).toContain("c");
@@ -155,37 +164,58 @@ describe("transitive cancellation", () => {
     expect(childAbort.signal.aborted).toBe(true);
     // The controller reason carries the structured cancellation info.
     expect(parentAbort.signal.reason).toEqual(info);
-    expect(jobRegistry.get("c")!.status).toBe("cancelled");
-    expect(jobRegistry.get("c")!.cancellation?.source).toBe("cancel_subagent");
+    expect(scope.inProcessJobs.get("c")!.status).toBe("cancelled");
+    expect(scope.inProcessJobs.get("c")!.cancellation?.source).toBe(
+      "cancel_subagent",
+    );
   });
 
   it("cascades recursively through controller-less descendants", () => {
     // Sync-spawned descendants have no controller, so cascade recurses directly.
-    jobRegistry.set("p", fakeJob({ id: "p" }));
-    jobRegistry.set("c", fakeJob({ id: "c", parentJobId: "p" }));
-    jobRegistry.set("g", fakeJob({ id: "g", parentJobId: "c" }));
+    scope.inProcessJobs.set("p", fakeJob({ id: "p" }));
+    scope.inProcessJobs.set("c", fakeJob({ id: "c", parentJobId: "p" }));
+    scope.inProcessJobs.set("g", fakeJob({ id: "g", parentJobId: "c" }));
 
-    const signalled = cascadeChildAborts("p", info);
+    const signalled = cascadeChildAborts("p", info, sessionOwner(scope));
 
     expect(signalled).toEqual(expect.arrayContaining(["c", "g"]));
-    expect(jobRegistry.get("c")!.status).toBe("cancelled");
-    expect(jobRegistry.get("g")!.status).toBe("cancelled");
-    expect(jobRegistry.get("c")!.session.abort as any).toHaveBeenCalled();
-    expect(jobRegistry.get("g")!.session.abort as any).toHaveBeenCalled();
+    expect(scope.inProcessJobs.get("c")!.status).toBe("cancelled");
+    expect(scope.inProcessJobs.get("g")!.status).toBe("cancelled");
+    expect(
+      scope.inProcessJobs.get("c")!.session.abort as any,
+    ).toHaveBeenCalled();
+    expect(
+      scope.inProcessJobs.get("g")!.session.abort as any,
+    ).toHaveBeenCalled();
   });
 
   it("ignores unrelated and already-terminal jobs", () => {
-    jobRegistry.set("p", fakeJob({ id: "p" }));
-    jobRegistry.set("other", fakeJob({ id: "other" }));
-    jobRegistry.set(
+    scope.inProcessJobs.set("p", fakeJob({ id: "p" }));
+    scope.inProcessJobs.set("other", fakeJob({ id: "other" }));
+    scope.inProcessJobs.set(
       "done",
       fakeJob({ id: "done", parentJobId: "p", status: "done" }),
     );
 
-    const signalled = cascadeChildAborts("p", info);
+    const signalled = cascadeChildAborts("p", info, sessionOwner(scope));
 
     expect(signalled).toEqual([]);
-    expect(jobRegistry.get("other")!.status).toBe("running");
-    expect(jobRegistry.get("done")!.status).toBe("done");
+    expect(scope.inProcessJobs.get("other")!.status).toBe("running");
+    expect(scope.inProcessJobs.get("done")!.status).toBe("done");
+  });
+
+  it("fails ownerless tree cancellation closed without touching live jobs", () => {
+    const controller = new AbortController();
+    const parent = fakeJob({ id: "p", abort: controller });
+    const child = fakeJob({ id: "c", parentJobId: "p" });
+    scope.inProcessJobs.set(parent.id, parent);
+    scope.inProcessJobs.set(child.id, child);
+
+    expect(abortJobTree(parent.id, info)).toEqual([]);
+    expect(cascadeChildAborts(parent.id, info)).toEqual([]);
+    expect(controller.signal.aborted).toBe(false);
+    expect(parent.status).toBe("running");
+    expect(child.status).toBe("running");
+    expect(child.session.abort).not.toHaveBeenCalled();
   });
 });

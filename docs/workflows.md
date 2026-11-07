@@ -51,7 +51,7 @@ process agents use textual JSON extraction and validation as a fallback.
 | `ralplan-occ.mjs`        | 59.6 KB | Workflow re-implementation of oh-my-claudecode's RALPLAN |
 | `ralplan-from-skill.mjs` | 28.8 KB | Demo: `skill-to-workflow` output for pi-ralplan          |
 
-The demo output of `package-to-skill` is in `skills/ralplan/` — a complete installable skill.
+The generated skill is written to the caller-selected `skillDir`; the repository does not bundle generated skill output.
 
 ## Generic converters
 
@@ -333,8 +333,7 @@ await agent(prompt, { isolation: "in-process", label: "quick-check" });
 1. `launchInteractiveSubagent()` creates a pane via the multiplexer backend
 2. By default (`background: true`) the pane is a detached named window — invisible in the tmux bar
 3. A launch script boots `pi` in that pane with a child-specific system prompt + protocol
-4. The parent polls the artifact directory (`events.ndjson` + `output.md`) awaiting completion
-5. The artifact poller tails the child session log and shows tool activity in a TUI widget
+4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling.
 
 #### TUI widget rows
 

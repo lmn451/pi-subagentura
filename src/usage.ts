@@ -105,6 +105,15 @@ export function usageFromAssistantMessage(
   const output = usageNumber(raw.output);
   const cacheRead = usageNumber(raw.cacheRead);
   const cacheWrite = usageNumber(raw.cacheWrite);
+  const billedCost =
+    rawCost && typeof rawCost === "object"
+      ? (rawCost as Record<string, unknown>)
+      : undefined;
+  const providerReported =
+    billedCost?.totalFromProvider === true &&
+    typeof billedCost.total === "number" &&
+    Number.isFinite(billedCost.total) &&
+    billedCost.total >= 0;
   const rawCostSource = raw.costSource;
   const explicitSource: AssistantCostSource | undefined =
     rawCostSource === "provider" ||
@@ -115,7 +124,8 @@ export function usageFromAssistantMessage(
   const hasAccounting =
     input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0 || cost > 0;
   const costSource = hasAccounting
-    ? (explicitSource ?? (cost > 0 ? "estimated" : "unavailable"))
+    ? (explicitSource ??
+      (providerReported ? "provider" : cost > 0 ? "estimated" : "unavailable"))
     : undefined;
   return {
     input,

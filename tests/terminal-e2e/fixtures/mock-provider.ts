@@ -2,15 +2,16 @@ import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
   type AssistantMessageEvent,
-  type Context,
   type Model,
   type SimpleStreamOptions,
   type ToolCall,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { normalizeProviderContext } from "../../../src/pi-sdk-compat";
 
 export const E2E_PROVIDER = "subagentura-e2e";
 export const E2E_MODEL = "mock";
@@ -39,7 +40,7 @@ function markers(value: unknown): string[] {
   return [...text.matchAll(/\[E2E:[A-Z0-9_:-]+\]/g)].map((match) => match[0]);
 }
 
-function newestMarker(context: Context): string | undefined {
+function newestMarker(context: TranscriptContext): string | undefined {
   const latest = context.messages.at(-1);
   if (!latest) return undefined;
   const values: unknown[] = [];
@@ -52,12 +53,12 @@ function newestMarker(context: Context): string | undefined {
   return found.at(-1);
 }
 
-function latestToolResult(context: Context): string | undefined {
+function latestToolResult(context: TranscriptContext): string | undefined {
   const latest = context.messages.at(-1);
   return latest?.role === "toolResult" ? latest.toolCallId : undefined;
 }
 
-function toolResultText(context: Context, toolName: string): string {
+function toolResultText(context: TranscriptContext, toolName: string): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (current.role !== "toolResult" || current.toolName !== toolName)
@@ -67,7 +68,11 @@ function toolResultText(context: Context, toolName: string): string {
   throw new Error(`mock provider could not find result for ${toolName}`);
 }
 
-function resultId(context: Context, toolName: string, pattern: RegExp): string {
+function resultId(
+  context: TranscriptContext,
+  toolName: string,
+  pattern: RegExp,
+): string {
   const id = toolResultText(context, toolName).match(pattern)?.[0];
   if (!id) throw new Error(`mock provider could not find ${toolName} id`);
   return id;
@@ -76,7 +81,7 @@ function resultId(context: Context, toolName: string, pattern: RegExp): string {
 const INTERACTIVE_ID = /^[a-f0-9]{16}$/;
 const INTERACTIVE_LAUNCH = /^Interactive sub-agent ([a-f0-9]{16}) started \(/;
 
-function interactiveResultId(context: Context): string {
+function interactiveResultId(context: TranscriptContext): string {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const current = context.messages[index];
     if (
@@ -143,6 +148,7 @@ function toolCall(
 
 const KNOWN_MARKERS = new Set([
   "[E2E:SMOKE]",
+  "[E2E:TOOL_PARAMETERS]",
   "[E2E:SYNC_CONTEXT]",
   "[E2E:SYNC_ISOLATED]",
   "[E2E:ASYNC_ISOLATED]",
@@ -412,7 +418,7 @@ export function streamThinkingForTest(text: string) {
 async function runRequest(
   stream: ReturnType<typeof createAssistantMessageEventStream>,
   model: Model<any>,
-  context: Context,
+  context: TranscriptContext,
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
   const toolResultId = latestToolResult(context);
@@ -445,7 +451,8 @@ async function runRequest(
   ) {
     throw new Error("mock provider received a provider/model/API mismatch");
   }
-  const normalizedContext = normalizeProviderContext(context);
+  const systemPrompt = getCurrentSystemPrompt(context.messages);
+  const tools = getCurrentTools(context.messages);
   diagnostic({
     marker,
     requestSeq,
@@ -457,9 +464,9 @@ async function runRequest(
     contextRoles: context.messages.map((entry) => entry.role),
     contextHasParentSentinel: JSON.stringify([
       context.messages,
-      normalizedContext.systemPrompt,
+      systemPrompt,
     ]).includes("PARENT_CONTEXT_SENTINEL"),
-    contextToolNames: normalizedContext.tools.map((tool) => tool.name),
+    contextToolNames: tools.map((tool) => tool.name),
   });
 
   const isChild = marker.includes("CHILD_");
@@ -663,7 +670,13 @@ async function runRequest(
   diagnostic({ marker, requestSeq, afterStage: "complete", eventType: "done" });
 }
 
-function parentTool(marker: string, context: Context): ToolCall {
+function parentTool(marker: string, context: TranscriptContext): ToolCall {
+  if (marker === "[E2E:TOOL_PARAMETERS]") {
+    return toolCall("e2e-tool-parameters-1", "list_available_models", {
+      filter: "subagentura-e2e",
+      authOnly: false,
+    });
+  }
   if (marker.includes("ASYNC_STATUS")) {
     return toolCall("e2e-async-status-1", "get_subagent_status", {
       jobId: resultId(context, "subagent_isolated", /\b[a-f0-9]{16}\b/),
@@ -725,8 +738,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_PROVIDER_ERROR] Fail the provider fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   if (marker.includes("INTERACTIVE")) {
@@ -735,8 +746,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: "[E2E:CHILD_INTERACTIVE] Complete the artifact fixture.",
       model: "subagentura-e2e/mock",
       background: true,
-      notifyOnComplete: "notify",
-      triggerTurnOnComplete: false,
     });
   }
   const isolated = marker.includes("ISOLATED");
@@ -747,9 +756,6 @@ function parentTool(marker: string, context: Context): ToolCall {
       task: `[E2E:CHILD_${marker.replace("[E2E:", "").replace("]", "")}] Return the deterministic fixture.`,
       model: "subagentura-e2e/mock",
       async: marker.includes("ASYNC"),
-      ...(marker.includes("ASYNC")
-        ? { notifyOnComplete: "notify", triggerTurnOnComplete: false }
-        : {}),
     },
   );
 }
@@ -782,7 +788,7 @@ export function createMockProviderConfig() {
     ],
     streamSimple(
       model: Model<any>,
-      context: Context,
+      context: TranscriptContext,
       options?: SimpleStreamOptions,
     ) {
       const stream = createAssistantMessageEventStream();

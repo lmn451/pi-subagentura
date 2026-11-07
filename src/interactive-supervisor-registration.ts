@@ -19,7 +19,6 @@ import {
   captureInteractiveSubagent,
   focusInteractiveSubagent,
   interactiveSubagentHasAttachedClient,
-  interactiveSubagentRegistry,
   showInteractiveSubagentNativeViewer,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -48,7 +47,6 @@ import { updateRunningSubagentFooter } from "./artifact-poller";
 import { cancelWorkflowJob, workflowJobsForOwner } from "./workflow-jobs";
 import {
   interactiveStateBelongsToOwner,
-  ownerlessEntitiesVisible,
   resolveLiveSessionScope,
   type SessionOwnerToken,
   type SessionScope,
@@ -63,15 +61,11 @@ const EMPTY_INTERACTIVE_STATES: ReadonlyMap<string, InteractiveSubagentState> =
 function supervisorInteractiveStates(
   owner: SessionOwnerToken | undefined,
 ): ReadonlyMap<string, InteractiveSubagentState> {
-  if (owner) {
-    return (
-      resolveLiveSessionScope(owner)?.interactiveStates ??
-      EMPTY_INTERACTIVE_STATES
-    );
-  }
-  return ownerlessEntitiesVisible()
-    ? interactiveSubagentRegistry
-    : EMPTY_INTERACTIVE_STATES;
+  if (!owner) return EMPTY_INTERACTIVE_STATES;
+  return (
+    resolveLiveSessionScope(owner)?.interactiveStates ??
+    EMPTY_INTERACTIVE_STATES
+  );
 }
 
 interface SupervisorProjection {

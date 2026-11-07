@@ -24,7 +24,6 @@ import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   type JobState,
   type JobStatus,
-  type NotifyOnComplete,
   type SubagentLiveStatus,
   type SubagentResult,
   type Usage,
@@ -38,6 +37,7 @@ import {
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
+import { isRoutingEnabled } from "./routing-factory";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
@@ -93,6 +93,55 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
+  new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
+  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+
+const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
+## Optional routing advisor
+
+When the user's action, target/scope, deliverable, and required access are clear
+and only the choice of current owner is uncertain, use the advisor to help select
+among current owners. Call list_orchestrator_agents first, then
+resolve_orchestrator_route with the user's original task. The advisor obtains
+current authoritative candidates itself; do not pass it transcripts, file
+contents, secrets, or unrelated context.
+
+On kind="match", use the returned childId as the id of
+send_interactive_subagent_message and send the original task. The recommendation
+does not expand the child's responsibility or permissions. If the send fails
+because the child is unavailable, surface that state instead of replacing it.
+
+On kind="no_match" with reason="new_child_recommended", creation is permitted
+under the existing policy, but the recommendation alone neither mandates nor
+authorizes a spawn. If current authoritative registry metadata shows no suitable
+owner and the request is clear, create one specialist without asking permission
+merely to create it. On low_confidence or ambiguous, abstain: do not route to the
+suggested owner or treat the result as proof that no suitable owner exists. If a
+plausible-owner choice remains unresolved, ask about that choice, not for spawn
+approval.
+
+On kind="error", or when the advisor is unavailable, do not act on an advisor
+recommendation. Fall back to the current authoritative registry metadata and the
+base routing policy: reuse an exact live authorized owner, or, when none is
+suitable and the request is clear, create one specialist without a redundant
+approval prompt. Never let an error or recommendation override current registry
+authority. On kind="cancelled", stop routing that request; do not send a task or
+ask a follow-up about it.
+
+Explicit child identity, explicit new-child instructions, and attach/focus
+requests bypass the advisor and follow the existing policy. A clear exact
+continuation may still route directly. Unclear action, scope, deliverable, or
+access requires clarification; uncertainty only about which current owner fits
+is a routing question, not unclear user scope. Aliases alone never authorize
+reuse. Treat the advisor as a bounded selection aid; all sending, creation, and
+lifecycle control remain with the parent.
+`.trim();
 
 export default function (pi: ExtensionAPI) {
   const isChild = process.env.PI_SUBAGENTURA_CHILD === "1";
@@ -103,11 +152,28 @@ export default function (pi: ExtensionAPI) {
   const initialSpawnTreeContext = childArtifactDir
     ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
+  pi.on("before_agent_start", (event, ctx) => {
+    const prompts: string[] = [];
+    if (!isChild) {
+      if (pi.getFlag("orchestrator") === true) {
+        prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
+      }
+      if (pi.getFlag("orchestratorv2") === true) {
+        prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+        if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
+          prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
+        }
+      }
+    }
+    prompts.push(ORCA_INTERACTIVE_SYSTEM_PROMPT);
+    prompts.push(INTERACTIVE_SUBAGENT_SYSTEM_PROMPT);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
+    };
+  });
   if (isChild) {
     registerChildProtocol(pi);
-    if (typeof pi.registerMessageRenderer === "function") {
-      pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
-    }
+    pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
     const sessionScope = registerSessionHandlers(
       pi,
       initialSpawnTreeContext,
@@ -121,7 +187,7 @@ export default function (pi: ExtensionAPI) {
   }
   if (typeof pi.registerMessageRenderer !== "function") {
     throw new Error(
-      "pi-subagentura requires Pi >= 0.80.6 with agent_settled and custom message renderer support",
+      "pi-subagentura requires Pi >= 1.2.0 with agent_settled and custom message renderer support",
     );
   }
   registerExtensionSettings(pi);
@@ -135,19 +201,7 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
     default: false,
   });
-  pi.on("before_agent_start", (event) => {
-    const prompts: string[] = [];
-    if (pi.getFlag("orchestrator") === true) {
-      prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
-    }
-    if (pi.getFlag("orchestratorv2") === true) {
-      prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
-    }
-    if (prompts.length === 0) return;
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
-    };
-  });
+
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(pi, undefined, true);
   registerInteractiveSubagentTools(pi, sessionScope);
@@ -176,7 +230,6 @@ export {
   SubagentLiveStatus,
   ACTIVE_TOOL_DEBOUNCE_MS,
   // ── Async job machinery ──
-  jobRegistry,
   MAX_REGISTRY_SIZE,
   pruneOldestJob,
   pruneCompletedJobs,
@@ -184,12 +237,7 @@ export {
   startSubagentJob,
   type JobState,
   type JobStatus,
-  type NotifyOnComplete,
 } from "./helpers";
-export { getInjectCount, MAX_INJECT } from "./notifications";
-/** @internal Interactive-subagent registry, consumed by session-handlers and tests */
-export { interactiveSubagentRegistry } from "./interactive-tmux";
-/** @internal Inject-count guard; exported for test assertions */
 /** @internal Artifact-change poller; exported for test access */
 export { pollArtifactChanges } from "./artifact-poller";
 /** @internal Interactive-artifact lookup; exported for test access */

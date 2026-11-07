@@ -40,10 +40,7 @@ import {
   writeOutput,
 } from "../src/artifact";
 import { pollArtifactChanges } from "../src/artifact-poller";
-import {
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "../src/interactive-tmux";
+import { type InteractiveSubagentState } from "../src/interactive-tmux";
 import {
   MAX_ORCHESTRATOR_ROUTING_RECORDS,
   ORCHESTRATOR_ROUTING_AUTHORITY_ENTRY_TYPE,
@@ -104,6 +101,7 @@ function mockContext(root: string, branch: unknown[] = []) {
     },
     sessionManager: {
       getBranch: vi.fn().mockReturnValue(branch),
+      buildSessionProjection: vi.fn().mockReturnValue({ messages: [] }),
       getEntries: vi.fn().mockReturnValue([]),
       getSessionId: vi.fn().mockReturnValue("orchestrator-parent"),
     },
@@ -159,8 +157,6 @@ function makeRuntimeState(
     selectPaneCommand: `tmux select-pane -t %${id.slice(0, 4)}`,
     launchScriptFile: join(params.parentCwd, "launch", `${id}.sh`),
     artifactDir: join(params.parentCwd, ".artifacts", id),
-    notifyOnComplete: params.notifyOnComplete,
-    triggerTurnOnComplete: params.triggerTurnOnComplete,
     completionPolicy: params.completionPolicy,
     completionGroupId: params.completionGroupId,
   };
@@ -207,7 +203,6 @@ async function spawnAgentsAB(environment: ScenarioEnvironment): Promise<void> {
 beforeEach(() => {
   delete process.env.PI_SUBAGENTURA_CHILD;
   clearSessionScopes();
-  interactiveSubagentRegistry.clear();
   vi.clearAllMocks();
   launchIds = [CHILD_A, CHILD_B, CHILD_C];
   __setTmuxMultiplexer({
@@ -227,7 +222,6 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSessionScopes();
-  interactiveSubagentRegistry.clear();
   __resetMuxInstances();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
@@ -449,7 +443,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
   });
 
-  it("represents ambiguity through the v2 prompt and available list without a semantic resolver or model-backed claim", async () => {
+  it("emits ambiguous-owner guidance without registering an unavailable advisor", async () => {
     const environment = setupScenario(true);
     await spawnAgentsAB(environment);
     const list = registeredTool(environment.api, "list_orchestrator_agents");
@@ -470,10 +464,13 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       CHILD_B,
     ]);
     expect(promptResult.systemPrompt).toContain(
-      "If multiple children plausibly match, or the intended action is unclear, ask the user",
+      "When multiple current owners plausibly match and only owner selection is uncertain, use the optional routing advisor when available",
     );
     expect(promptResult.systemPrompt).toContain(
-      "instead of silently selecting, spawning, or fanning out",
+      "Never route a low-confidence or ambiguous recommendation as a match",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "ask a focused question about the plausible owners",
     );
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
@@ -515,51 +512,20 @@ describe("Orchestratorv2 thin-router scenarios", () => {
         actionable: true,
       }),
     ]);
-    expect(promptResult.systemPrompt).toContain(
-      "discovery or presentation hints only; they are never routing authority",
-    );
-    expect(promptResult.systemPrompt).toContain(
+    for (const rule of [
+      "shared domain words, aliases, display names, task previews, footer labels, and mux labels are never routing authority",
       "requested relationship, action, deliverable, and required access",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "Never reuse a read-only audit or review child for new design or implementation work",
-    );
-    expect(promptResult.systemPrompt).toContain(
+      "Never reuse a read-only audit or review child for new design or implementation merely because a domain term overlaps",
       "visibility guard for the current agent or tmux/Zellij pane, tab, or window",
-    );
-    expect(promptResult.systemPrompt).toContain(
       "explicitly asks for a new specialist or new thread",
-    );
-    expect(promptResult.systemPrompt).toContain("no exact owner");
-    expect(promptResult.systemPrompt).toContain(
+      "no suitable exact, live, authorized owner exists",
       "Old completion prose, child output, inherited context, and stale footer text must never select a route",
-    );
+    ]) {
+      expect(promptResult.systemPrompt).toContain(rule);
+    }
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledOnce();
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
-  it("surfaces a zero-match narrow request without spawning or fanning out", async () => {
-    const environment = setupScenario(true);
-    const beforeAgentStart = environment.api.on.mock.calls.find(
-      ([event]) => event === "before_agent_start",
-    )?.[1];
-    const promptResult = await beforeAgentStart(
-      { systemPrompt: "base prompt" },
-      {},
-    );
-
-    expect(promptResult.systemPrompt).toContain(
-      "A narrow, exact, continuation, or delegation request with no matching child must be surfaced to the user",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "must not silently spawn or fan out",
-    );
-    expect(promptResult.systemPrompt).toContain(
-      "A broad user-originated request may be decomposed into multiple interactive children",
-    );
-    expect(mockLaunchInteractiveSubagent).not.toHaveBeenCalled();
-    expect(mockSendCommandToPane).not.toHaveBeenCalled();
-  });
-
   it("delivers an important completion through one compact manifest without auto-spawn", async () => {
     const environment = setupScenario(true);
     const spawn = registeredTool(environment.api, "subagent_interactive");
@@ -593,15 +559,38 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       sessionOwner(environment.scope),
     );
 
-    expect(environment.api.sendMessage).toHaveBeenCalledOnce();
-    const [message, options] = environment.api.sendMessage.mock.calls[0];
-    expect(message).toHaveProperty("customType", "subagent-manifest");
+    const manifestCalls = environment.api.sendMessage.mock.calls.filter(
+      ([message]) => message?.customType === "subagent-manifest",
+    );
+    expect(manifestCalls).toHaveLength(1);
+    const [message, options] = manifestCalls[0];
     expect(message.details).toMatchObject({
+      schemaVersion: 1,
       completionIds: [expect.any(String)],
+      groups: [],
     });
     expect(message.content).toContain("<completion-manifest>");
-    expect(message.content).toContain(CHILD_A);
-    expect(message.content).toContain("read_subagent_artifact");
+    const recordLines = message.content
+      .split("\n")
+      .filter((line: string) => line.startsWith("{"));
+    expect(recordLines).toHaveLength(1);
+    const record = JSON.parse(recordLines[0]);
+    expect(record).toMatchObject({
+      completionId: message.details.completionIds[0],
+      source: "interactive",
+      sourceId: CHILD_A,
+      turnId: "turn-important-concern",
+      status: "done",
+      retrieve: `read_subagent_artifact(id: "${CHILD_A}", turnId: "turn-important-concern")`,
+      references: expect.arrayContaining([
+        {
+          label: "output",
+          value: join(art.dir, "outputs", "completion-important-concern.md"),
+        },
+        { label: "activity", value: art.statusFile },
+      ]),
+    });
+    expect(record.references).toHaveLength(2);
     expect(message.content).not.toContain(
       "PRIVATE CHILD OUTPUT THAT MUST REMAIN POINTER-ONLY",
     );
@@ -609,7 +598,6 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       deliverAs: "followUp",
       triggerTurn: false,
     });
-    expect(environment.api.sendUserMessage).toHaveBeenCalledOnce();
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(1);
     expect(environment.scope.interactiveStates.size).toBe(1);
   });
@@ -737,7 +725,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     );
   });
 
-  it("exercises the registered context schema for legacy, parent-branch, and explicit-context spawns", async () => {
+  it("exercises the registered context schema for legacy, projected, and explicit-context spawns", async () => {
     const environment = setupScenario();
     const spawn = registeredTool(environment.api, "subagent_interactive");
     const compiled = Schema.Compile(spawn.parameters);
@@ -766,9 +754,12 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     const parentCtx = mockContext(environment.root, [
       {
         type: "message",
-        message: { role: "user", content: "PARENT-BRANCH-CONTEXT" },
+        message: { role: "user", content: "RAW-PARENT-BRANCH-CONTEXT" },
       },
     ]);
+    parentCtx.sessionManager.buildSessionProjection.mockReturnValue({
+      messages: [{ role: "user", content: "PARENT-PROJECTED-CONTEXT" }],
+    });
     const explicitCtx = mockContext(environment.root, [
       {
         type: "message",
@@ -781,14 +772,26 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     await executeTool(spawn, explicitParams, explicitCtx);
 
     expect(legacyCtx.sessionManager.getBranch).not.toHaveBeenCalled();
-    expect(parentCtx.sessionManager.getBranch).toHaveBeenCalledOnce();
+    expect(
+      legacyCtx.sessionManager.buildSessionProjection,
+    ).not.toHaveBeenCalled();
+    expect(parentCtx.sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(
+      parentCtx.sessionManager.buildSessionProjection,
+    ).toHaveBeenCalledOnce();
     expect(explicitCtx.sessionManager.getBranch).not.toHaveBeenCalled();
+    expect(
+      explicitCtx.sessionManager.buildSessionProjection,
+    ).not.toHaveBeenCalled();
     expect(
       mockLaunchInteractiveSubagent.mock.calls[0][0].contextText,
     ).toBeNull();
     expect(
       mockLaunchInteractiveSubagent.mock.calls[1][0].contextText,
-    ).toContain("PARENT-BRANCH-CONTEXT");
+    ).toContain("PARENT-PROJECTED-CONTEXT");
+    expect(
+      mockLaunchInteractiveSubagent.mock.calls[1][0].contextText,
+    ).not.toContain("RAW-PARENT-BRANCH-CONTEXT");
     expect(mockLaunchInteractiveSubagent.mock.calls[2][0].contextText).toBe(
       "EXPLICIT-HANDOFF-CONTEXT",
     );

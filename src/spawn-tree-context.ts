@@ -17,7 +17,12 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { debugLog } from "./helpers";
 import { DEFAULT_MAX_DEPTH, DEFAULT_MAX_NODES } from "./interactive-lineage";
-import type { TelemetryMode } from "./telemetry";
+import {
+  resolveTelemetryTrafficOrigin,
+  sanitizeTelemetryTrafficOrigin,
+  type TelemetryMode,
+  type TelemetryTrafficOrigin,
+} from "./telemetry";
 
 export const LINEAGE_BOOTSTRAP_SCHEMA_VERSION = 1;
 export const LINEAGE_BOOTSTRAP_ENV = "PI_SUBAGENTURA_LINEAGE_BOOTSTRAP";
@@ -42,6 +47,8 @@ export interface SpawnTreeContext {
   telemetrySessionId?: string;
   /** Closed analytics mode propagated with the explicit correlation context. */
   telemetryMode?: TelemetryMode;
+  /** Closed traffic provenance carried through explicit child lineage. */
+  telemetryOrigin: TelemetryTrafficOrigin;
   currentAgentId?: string;
   parentAgentId?: string;
   depth: number;
@@ -169,6 +176,7 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   ) {
     throw new Error("Invalid lineage bootstrap telemetrySessionId");
   }
+  const telemetryOrigin = sanitizeTelemetryTrafficOrigin(raw.telemetryOrigin);
   const telemetryMode =
     raw.telemetryMode === "manual" ? "straight" : raw.telemetryMode;
   if (
@@ -200,6 +208,7 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
     ...(telemetrySessionId
       ? { telemetrySessionId: telemetrySessionId.toLowerCase() }
       : {}),
+    telemetryOrigin,
     ...(telemetryMode ? { telemetryMode } : {}),
     ...(currentAgentId ? { currentAgentId } : {}),
     ...(parentAgentId ? { parentAgentId } : {}),
@@ -224,6 +233,7 @@ export function createRootSpawnTreeContext(
   configuredMaxDepth?: number,
   telemetrySessionId?: string,
   telemetryMode?: TelemetryMode,
+  telemetryOrigin?: TelemetryTrafficOrigin,
 ): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
@@ -233,6 +243,7 @@ export function createRootSpawnTreeContext(
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
     ...(telemetrySessionId ? { telemetrySessionId } : {}),
     ...(telemetryMode ? { telemetryMode } : {}),
+    telemetryOrigin: telemetryOrigin ?? resolveTelemetryTrafficOrigin(),
     depth: 0,
     maxDepth: orchestratorV2Mode
       ? (configuredMaxDepth ?? 2)

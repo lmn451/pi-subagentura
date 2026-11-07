@@ -2,7 +2,7 @@
  * Orchestration ownership + depth context.
  *
  * In-process sub-agents run in the SAME process as the parent (they share the
- * global `jobRegistry`), but a spawned child session has no idea it is a child
+ * parent SessionScope), but a spawned child session has no idea it is a child
  * — its tool `execute()` callbacks cannot see who launched them. That blind
  * spot is why nested orchestration was unbounded and why cancellation could
  * not be made transitive.
@@ -45,7 +45,7 @@ export function maxOrchestrationDepth(): number {
 }
 
 // Persist on the global so jiti module reloads don't fork the storage and
-// silently lose the active context mid-run (same pattern as jobRegistry).
+// silently lose the active context mid-run.
 const g = typeof global !== "undefined" ? global : globalThis;
 declare global {
   // eslint-disable-next-line no-var

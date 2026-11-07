@@ -13,6 +13,7 @@ import {
   registerShortcutWithTelemetry,
 } from "../src/telemetry-operations";
 import registerExtension from "../src/subagent";
+import { nativeClassifierRegistry } from "./helpers/native-classifier";
 
 describe("operation telemetry", () => {
   const payloads: any[] = [];
@@ -32,6 +33,7 @@ describe("operation telemetry", () => {
   afterEach(() => {
     clearSessionScopes();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -39,7 +41,12 @@ describe("operation telemetry", () => {
     const pi = { registerTool: vi.fn() } as any;
     const scope = createSessionScope(pi);
     scope.lifecycle = "started";
-    scope.telemetry = createTelemetrySession(enabled);
+    scope.telemetry = createTelemetrySession(
+      enabled,
+      "straight",
+      undefined,
+      "unknown",
+    );
     registerSessionScope(scope);
     return { pi, scope };
   }
@@ -92,9 +99,33 @@ describe("operation telemetry", () => {
         outcome: "returned",
         result_status: "ok",
         duration_ms: 1_200,
+        schema_version: 6,
+        traffic_origin: "unknown",
       },
     });
     expect(JSON.stringify(payloads)).not.toMatch(/private|secret/);
+  });
+
+  it("records routing advisor calls without collecting decision data", async () => {
+    const { pi } = registration();
+    const result = {
+      content: [],
+      details: {
+        status: "advice",
+        decision: { kind: "match", childId: "private-child-id" },
+      },
+    };
+
+    await tool(pi, async () => result, "resolve_orchestrator_route").execute();
+
+    expect(payloads.at(-1)).toMatchObject({
+      properties: {
+        operation: "resolve_orchestrator_route",
+        outcome: "returned",
+        result_status: "completed",
+      },
+    });
+    expect(JSON.stringify(payloads)).not.toContain("private-child-id");
   });
 
   it.each([
@@ -105,6 +136,8 @@ describe("operation telemetry", () => {
     ["wait_timeout", false, "wait_timeout"],
     ["running", false, "running"],
     ["error", false, "error"],
+    ["advice", false, "completed"],
+    ["degraded", false, "degraded"],
     ["private arbitrary status", true, "unknown"],
   ] as const)(
     "reports bounded status %s independently of the tool error flag",
@@ -226,6 +259,7 @@ describe("operation telemetry", () => {
   });
 
   it("keeps every extension entry point on the closed operation allowlist", () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
     const pi = {
       registerTool: vi.fn(),
       registerCommand: vi.fn(),
@@ -233,9 +267,14 @@ describe("operation telemetry", () => {
       registerFlag: vi.fn(),
       registerMessageRenderer: vi.fn(),
       on: vi.fn(),
-      getFlag: vi.fn(),
+      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
     };
     registerExtension(pi as any);
+    const ctx = { modelRegistry: nativeClassifierRegistry() };
+    for (const [event, handler] of pi.on.mock.calls) {
+      if (event === "before_agent_start")
+        handler({ systemPrompt: "base" }, ctx);
+    }
     expect(
       pi.registerTool.mock.calls.map(([entry]) => entry.name).sort(),
     ).toEqual([...TELEMETRY_OPERATION_NAMES.tool].sort());

@@ -85,6 +85,59 @@ const testTheme: Theme = {
   bold: (text: string) => text,
 } as unknown as Theme;
 
+describe("injected expand key hints", () => {
+  it.each([{}, { isError: true }, { details: { usageSummary: "$0.02" } }])(
+    "uses configured keys for collapsed final output %j",
+    (extra) => {
+      const keyHint = vi.fn(() => "alt+e to expand");
+      const context = { keyHint } as unknown as Parameters<
+        typeof renderSubagentResult
+      >[3];
+      const result = renderSubagentResult(
+        {
+          details: undefined,
+          content: [{ type: "text", text: "Result" }],
+          ...extra,
+        },
+        { expanded: false, isPartial: false },
+        testTheme,
+        context,
+      );
+      expect(keyHint).toHaveBeenCalledWith("app.tools.expand", "to expand");
+      expect(t(result)).toContain("\nalt+e to expand");
+    },
+  );
+  it.each([
+    { expanded: true, isPartial: false },
+    { expanded: false, isPartial: true },
+  ])("omits hints for expanded or streaming output %j", (options) => {
+    const keyHint = vi.fn(() => "alt+e to expand");
+    const context = { keyHint } as unknown as Parameters<
+      typeof renderSubagentResult
+    >[3];
+    renderSubagentResult(
+      { details: undefined, content: [{ type: "text", text: "Result" }] },
+      options,
+      testTheme,
+      context,
+    );
+    expect(keyHint).not.toHaveBeenCalled();
+  });
+  it("does not require injected helpers on older runtimes", () => {
+    const context = {} as Parameters<typeof renderSubagentResult>[3];
+    expect(
+      t(
+        renderSubagentResult(
+          { details: undefined, content: [{ type: "text", text: "Result" }] },
+          { expanded: false, isPartial: false },
+          testTheme,
+          context,
+        ),
+      ),
+    ).toBe("Result");
+  });
+});
+
 // ── Shared fixtures ──────────────────────────────────────
 
 const sampleUsage = {
@@ -725,6 +778,23 @@ describe("renderSubagentNotify", () => {
     expect(t(result)).toContain("\u2705 Sub-agent Completed");
     expect(t(result)).toContain("Completed");
     expect(t(result)).toContain("all good");
+  });
+
+  it("renders empty raw output with a human-readable sentinel", () => {
+    sanitizeOutputMock.mockReturnValue("(no output)");
+    const result = renderSubagentNotify(
+      {
+        content: "Completed",
+        details: {
+          mode: "notify",
+          result: { isError: false, output: "" },
+        },
+      },
+      { expanded: true },
+      testTheme,
+    );
+    expect(t(result)).toContain("(no output)");
+    expect(sanitizeOutputMock).toHaveBeenCalledWith("(no output)");
   });
 
   it("renders expanded notification with missing output (falls back to empty)", () => {

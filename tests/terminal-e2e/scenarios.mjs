@@ -15,6 +15,13 @@ export const scenarios = {
     prompt: "[E2E:SMOKE] Show the deterministic idle fixture.",
     expected: "Parent settled for [E2E:SMOKE].",
   },
+  "tool-parameters": {
+    name: "tool-parameters",
+    marker: "[E2E:TOOL_PARAMETERS]",
+    gate: null,
+    prompt: "[E2E:TOOL_PARAMETERS] Call the model listing fixture.",
+    expected: "List Available Models",
+  },
   "sync-context": {
     name: "sync-context",
     marker: "[E2E:SYNC_CONTEXT]",

@@ -7,11 +7,7 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { promises as fs, type promises as fsTypes } from "node:fs";
 import { join } from "node:path";
 import type { JobState } from "./helpers";
-import {
-  cancelInteractiveSubagent,
-  interactiveSubagentRegistry,
-  type InteractiveSubagentState,
-} from "./interactive-tmux";
+import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { SessionOwnerToken } from "./session-scope";
 import type { WorkflowJobState } from "./workflow-jobs";
 import {
@@ -109,7 +105,7 @@ export interface InteractiveSupervisorOptions {
   done: SupervisorDone;
   requestRender?: () => void;
   notify?: (message: string, level?: "info" | "warning" | "error") => void;
-  cancel?: typeof cancelInteractiveSubagent;
+  cancel?: (id: string) => unknown;
   cancelInProcess?: (job: JobState) => boolean;
   cancelWorkflow?: (job: WorkflowJobState) => boolean;
   focus?: (state: InteractiveSubagentState) => void | Promise<void>;
@@ -381,9 +377,7 @@ export class InteractiveSupervisorComponent {
   }
 
   private items(): AsyncSupervisorItem[] {
-    const items = (this.opts.items?.() ?? supervisorItems()).filter(
-      supervisorItemIsActive,
-    );
+    const items = (this.opts.items?.() ?? []).filter(supervisorItemIsActive);
     const stableIndex = this.selectedKey
       ? items.findIndex((item) => supervisorItemKey(item) === this.selectedKey)
       : -1;
@@ -437,9 +431,7 @@ export class InteractiveSupervisorComponent {
       cancelled = this.opts.cancelWorkflow?.(item.job) ?? false;
       label = item.job.name;
     } else {
-      cancelled = Boolean(
-        (this.opts.cancel ?? cancelInteractiveSubagent)(item.state.id),
-      );
+      cancelled = Boolean(this.opts.cancel?.(item.state.id));
       label = item.state.name;
     }
     this.opts.notify?.(
@@ -679,15 +671,15 @@ export async function showInteractiveSupervisor(
   }
 }
 
-/** Close overlays owned by one exact lifecycle, or every overlay for legacy callers. */
+/** Close overlays owned by one exact lifecycle. Missing ownership fails closed. */
 export function closeActiveInteractiveSupervisor(
   owner?: SessionOwnerToken,
 ): void {
+  if (!owner) return;
   for (const [done, overlayOwner] of [...activeDoneHandles]) {
     if (
-      owner &&
-      (overlayOwner?.id !== owner.id ||
-        overlayOwner.generation !== owner.generation)
+      overlayOwner?.id !== owner.id ||
+      overlayOwner.generation !== owner.generation
     ) {
       continue;
     }
@@ -708,10 +700,6 @@ export function formatSupervisorSummary(
   return `${icon} ${state.status} ${compactText(state.name)} (${state.id.slice(0, 8)}) · ${state.mux} · ${elapsed} · ${activity}`;
 }
 
-function supervisorStates(): InteractiveSubagentState[] {
-  return [...interactiveSubagentRegistry.values()].sort(compareByStartedAt);
-}
-
 /** Order by start time, tolerating a non-finite startedAt so the sort stays total. */
 export function compareByStartedAt(
   left: { startedAt: number; id: string },
@@ -723,18 +711,6 @@ export function compareByStartedAt(
 
 function finiteOrZero(value: number): number {
   return Number.isFinite(value) ? value : 0;
-}
-
-function supervisorItems(): AsyncSupervisorItem[] {
-  return supervisorStates().map((state) => ({
-    kind: "interactive",
-    state,
-    depth: 0,
-    actionable:
-      state.status === "running" ||
-      state.status === "idle" ||
-      state.status === "unknown",
-  }));
 }
 
 function supervisorItemKey(item: AsyncSupervisorItem): string {

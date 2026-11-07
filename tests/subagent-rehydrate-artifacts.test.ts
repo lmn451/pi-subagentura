@@ -1,8 +1,7 @@
 /**
- * Tests for artifact-derived rehydrate behavior:
- * inject/notify cursor handling, name recovery from prompt file,
- * startedAt recovery from first event, fallback name/startedAt.
+ * Tests protocol-v2 artifact-derived rehydration and owner-scoped delivery queues.
  */
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,23 +11,22 @@ import {
   artifactPath,
   INTERACTIVE_ARTIFACT_OWNER_FILE,
   loadInteractiveStates,
+  stateFilePath,
 } from "../src/artifact";
 import {
   clearCompletionCoordinator,
   completionLatencyForIds,
-  MAX_COMPLETION_RECORDS,
   prepareCompletionManifest,
   registerCompletionCoordinator,
   sealCompletionGroups,
 } from "../src/completion-coordinator";
 import { sessionLedgerPath } from "../src/completion-ledger";
 import { flushDeliveries } from "../src/delivery";
-import { interactiveSubagentRegistry } from "../src/interactive-tmux";
+import { createTestSessionScope } from "./session-scope-fixture";
 import {
   clearSessionScopes,
   registerSessionScope,
   sessionOwner,
-  setLegacyActiveSessionRefs,
   type SessionScope,
 } from "../src/session-scope";
 import { importFresh } from "./test-utils";
@@ -36,6 +34,7 @@ import { makeTmp } from "./subagent-rehydrate-helpers";
 
 describe("rehydrateInteractiveSubagents", () => {
   let cwd: string;
+  let scope: SessionScope;
   let completionScope: SessionScope | undefined;
   beforeEach(() => {
     cwd = makeTmp();
@@ -46,10 +45,8 @@ describe("rehydrateInteractiveSubagents", () => {
         throw new Error("mock: child_process unavailable");
       },
     }));
-    const g = globalThis as any;
-    g.__piSubagenturaInteractiveRegistry?.clear?.();
     clearSessionScopes();
-    g.__piSubagenturaPiRef = undefined;
+    scope = createTestSessionScope({ cwd });
   });
 
   afterEach(() => {
@@ -60,55 +57,6 @@ describe("rehydrateInteractiveSubagents", () => {
     rmSync(cwd, { recursive: true, force: true });
     clearSessionScopes();
     vi.doUnmock("node:child_process");
-  });
-
-  it("inject-mode orphans DO re-inject their existing terminal event on the first poll after rehydrate", async () => {
-    // Behavior change: we no longer suppress re-injection here. The inject-mode path
-    // fires on every NEW `done` event. On rehydrate, lastInjectedEventTs starts as
-    // undefined, so the first poll will re-inject the latest terminal event. This means
-    // exactly one extra inject per sub-agent on parent reload, which is acceptable —
-    // it's better than silently dropping a result that completed during the reload downtime.
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const id = "inject-orphan";
-    const artDir = join(cwd, id);
-    appendInteractiveState(cwd, {
-      id,
-      paneId: "%77",
-      mux: "tmux",
-      artifactDir: artDir,
-      sessionFile: "/tmp/sess.jsonl",
-      notifyOnComplete: "inject",
-    });
-    // Add a done event to the artifact (what an orphan-with-completed-work looks like).
-    const art = artifactPath(cwd, id);
-    appendEvent(art, { ts: 1, type: "started", status: "running" });
-    appendEvent(art, { ts: 2, type: "done", status: "done", exitCode: 0 });
-
-    mod.rehydrateInteractiveSubagents(cwd);
-
-    const rehydrated = interactiveSubagentRegistry.get(id);
-    expect(rehydrated).toBeDefined();
-    // lastInjectedEventTs should remain undefined — we no longer suppress re-injection.
-    expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
-  });
-
-  it("notify-mode orphans leave lastInjectedEventTs undefined (inject path is irrelevant)", async () => {
-    const mod =
-      await importFresh<typeof import("../src/subagent")>("../src/subagent");
-    const id = "notify-orphan";
-    const artDir = join(cwd, id);
-    appendInteractiveState(cwd, {
-      id,
-      paneId: "%88",
-      mux: "tmux",
-      artifactDir: artDir,
-      sessionFile: "/tmp/sess.jsonl",
-      notifyOnComplete: "notify",
-    });
-    mod.rehydrateInteractiveSubagents(cwd);
-    const rehydrated = interactiveSubagentRegistry.get(id);
-    expect(rehydrated?.lastInjectedEventTs).toBeUndefined();
   });
 
   it("recovers name from prompt file and startedAt from first event", async () => {
@@ -131,7 +79,6 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: artDir,
       sessionFile: "/tmp/sess.jsonl",
       eventByteCursor: 0,
-      sessionByteCursor: 0,
       pendingDeliveries: [],
       deliveryReceipts: [],
       lifecycle: { startedAt: 1000 },
@@ -139,12 +86,29 @@ describe("rehydrateInteractiveSubagents", () => {
 
     // Event history remains available without being reparsed during rehydrate.
     const art = artifactPath(cwd, id);
-    appendEvent(art, { ts: 1000, type: "started", status: "running" });
-    appendEvent(art, { ts: 2000, type: "done", status: "done", exitCode: 0 });
+    appendEvent(art, {
+      version: 2,
+      eventId: "recover-start",
+      turnId: "recover-turn",
+      ts: 1000,
+      type: "turn_started",
+      status: "running",
+    });
+    appendEvent(art, {
+      version: 2,
+      eventId: "recover-done",
+      turnId: "recover-turn",
+      ts: 2000,
+      type: "completion",
+      status: "done",
+      outcome: "done",
+      source: "agent_settled",
+      exitCode: 0,
+    });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(id);
+    const rehydrated = scope.interactiveStates.get(id);
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.name).toBe("my-agent"); // from prompt file label
     expect(rehydrated?.startedAt).toBe(1000);
@@ -164,9 +128,9 @@ describe("rehydrateInteractiveSubagents", () => {
       sessionFile: "/tmp/sess.jsonl",
     });
 
-    mod.rehydrateInteractiveSubagents(cwd);
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
 
-    const rehydrated = interactiveSubagentRegistry.get(id);
+    const rehydrated = scope.interactiveStates.get(id);
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.name).toBe(id); // falls back to entry.id
     expect(rehydrated?.startedAt).toBe(0); // falls back to 0
@@ -185,8 +149,8 @@ describe("rehydrateInteractiveSubagents", () => {
       parentSessionId: "reload-parent",
       completionTombstone: "failed",
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(true);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(true);
   });
 
   it("does not rehydrate a failed completion-registration tombstone", async () => {
@@ -205,8 +169,8 @@ describe("rehydrateInteractiveSubagents", () => {
       completionTombstone: "failed",
       completionTombstoneAt: Date.now(),
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(false);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(false);
   });
 
   it("allows an expired failed tombstone to be recovered", async () => {
@@ -223,8 +187,8 @@ describe("rehydrateInteractiveSubagents", () => {
       completionTombstone: "failed",
       completionTombstoneAt: Date.now() - 6 * 60 * 1000,
     });
-    mod.rehydrateInteractiveSubagents(cwd, "reload-parent");
-    expect(interactiveSubagentRegistry.has(id)).toBe(true);
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
+    expect(scope.interactiveStates.has(id)).toBe(true);
   });
 
   it("rehydrates same-session artifacts into the current scope generation", async () => {
@@ -252,7 +216,7 @@ describe("rehydrateInteractiveSubagents", () => {
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
     const rehydrated = scope.interactiveStates.get(id);
-    expect(rehydrated).toBe(interactiveSubagentRegistry.get(id));
+    expect(rehydrated).toBeDefined();
     expect(rehydrated?.sessionOwner).toEqual({ id: 710, generation: 9 });
     expect(rehydrated?.artifactDir).toBe(artDir);
   });
@@ -263,10 +227,17 @@ describe("rehydrateInteractiveSubagents", () => {
     const id = "pending-group-membership";
     const artDir = join(cwd, id);
     mkdirSync(artDir, { recursive: true });
-    const entries: unknown[] = [];
+    const entries: SessionEntry[] = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       }),
       sendMessage: vi.fn(),
     };
@@ -296,8 +267,6 @@ describe("rehydrateInteractiveSubagents", () => {
           subagentId: id,
           turnId: "turn-grouped",
           eventId: "event-grouped",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
           completionPolicy: "group",
@@ -318,12 +287,10 @@ describe("rehydrateInteractiveSubagents", () => {
     flushDeliveries(pi as never, undefined, sessionOwner(completionScope));
 
     const completion = entries.find(
-      (entry) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        (entry as { customType?: unknown }).customType ===
-          "subagentura-completion",
-    ) as { data?: unknown } | undefined;
+      (entry): entry is Extract<SessionEntry, { type: "custom" }> =>
+        entry.type === "custom" &&
+        entry.customType === "subagentura-completion",
+    );
     expect(completion?.data).toMatchObject({
       source: "interactive",
       sourceId: id,
@@ -339,6 +306,125 @@ describe("rehydrateInteractiveSubagents", () => {
       ),
     ).toBeUndefined();
   });
+  it("flushes both queued each-policy completion notices after dropping stale group metadata", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const id = "pending-each-stale-group";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+    const entries: SessionEntry[] = [];
+    const pi = {
+      appendEntry: vi.fn((customType: string, data: unknown) => {
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
+      }),
+      sendMessage: vi.fn(),
+    };
+    const testScope = registerSessionScope({
+      id: 722,
+      generation: 1,
+      lifecycle: "started",
+      pi: pi as never,
+      parentStreaming: false,
+      sessionManager: {
+        getSessionId: () => "reload-parent",
+        getEntries: () => entries,
+      },
+    });
+    completionScope = testScope;
+    registerCompletionCoordinator(pi as never, testScope);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      stateFilePath(cwd),
+      JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [id]: {
+            id,
+            paneId: "%106",
+            mux: "tmux",
+            artifactDir: artDir,
+            sessionFile: join(cwd, "child-each-stale-group.jsonl"),
+            parentSessionId: "reload-parent",
+            eventByteCursor: 0,
+            pendingDeliveries: [
+              {
+                deliveryId: "stale-each-delivery",
+                subagentId: id,
+                turnId: "stale-each-turn",
+                eventId: "stale-each-event",
+                mode: "notify",
+                triggerTurn: true,
+                status: "done",
+                artifactDir: artDir,
+                completionPolicy: "each",
+                completionGroupId: "stale-each-group",
+                state: "queued",
+              },
+              {
+                deliveryId: "valid-each-delivery",
+                subagentId: id,
+                turnId: "valid-each-turn",
+                eventId: "valid-each-event",
+                status: "done",
+                artifactDir: artDir,
+                completionPolicy: "each",
+                state: "queued",
+              },
+            ],
+            deliveryReceipts: [],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    mod.rehydrateInteractiveSubagents(cwd, "reload-parent", entries, testScope);
+    expect(
+      testScope.interactiveStates.get(id)?.pendingDeliveries?.[0],
+    ).not.toHaveProperty("completionGroupId");
+
+    sealCompletionGroups(sessionOwner(testScope));
+    expect(() =>
+      flushDeliveries(pi as never, undefined, sessionOwner(testScope)),
+    ).not.toThrow();
+
+    const completions = entries
+      .filter(
+        (
+          entry,
+        ): entry is Extract<SessionEntry, { type: "custom" }> & {
+          data: unknown;
+        } =>
+          entry.type === "custom" &&
+          entry.customType === "subagentura-completion" &&
+          "data" in entry,
+      )
+      .map((entry) => entry.data);
+    expect(completions).toHaveLength(2);
+    expect(completions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          completionId: "stale-each-delivery",
+          policy: "each",
+        }),
+        expect.objectContaining({
+          completionId: "valid-each-delivery",
+          policy: "each",
+        }),
+      ]),
+    );
+    for (const completion of completions) {
+      expect(completion).not.toHaveProperty("groupId");
+    }
+  });
 
   it("registers pending receipt expectations before scanning fallback history", async () => {
     const mod =
@@ -347,10 +433,17 @@ describe("rehydrateInteractiveSubagents", () => {
     const artDir = join(cwd, id);
     mkdirSync(artDir, { recursive: true });
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    const entries: unknown[] = [];
+    const entries: SessionEntry[] = [];
     const pi = {
       appendEntry: vi.fn((customType: string, data: unknown) => {
-        entries.push({ type: "custom", customType, data });
+        entries.push({
+          type: "custom",
+          id: `test-entry-${entries.length}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          customType,
+          data,
+        });
       }),
       sendMessage: vi.fn(),
     };
@@ -382,8 +475,6 @@ describe("rehydrateInteractiveSubagents", () => {
           subagentId: id,
           turnId: "receipt-turn",
           eventId: "receipt-event",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
           completionPolicy: "each",
@@ -428,10 +519,8 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(
       entries.filter(
         (entry) =>
-          typeof entry === "object" &&
-          entry !== null &&
-          (entry as { customType?: unknown }).customType ===
-            "subagentura-completion",
+          entry.type === "custom" &&
+          entry.customType === "subagentura-completion",
       ),
     ).toHaveLength(1);
     expect(
@@ -471,8 +560,6 @@ describe("rehydrateInteractiveSubagents", () => {
                   subagentId: id,
                   turnId: "over-capacity-turn",
                   eventId: "over-capacity-event",
-                  mode: "notify" as const,
-                  triggerTurn: false,
                   status: "done" as const,
                   artifactDir: artDir,
                   completionPolicy: "group" as const,
@@ -532,11 +619,11 @@ describe("rehydrateInteractiveSubagents", () => {
       persisted?.states["group-member-32"]?.pendingDeliveries,
     ).toMatchObject([{ completionPolicy: "each" }]);
     expect(
-      persisted?.states["group-member-32"]?.pendingDeliveries[0]
+      persisted?.states["group-member-32"]?.pendingDeliveries?.[0]
         ?.completionGroupId,
     ).toBeUndefined();
   });
-  it("requeues a rehydrated delivery using its own streaming state", async () => {
+  it("rehydrates a pending delivery using its owning scope state", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const id = "rehydrated-delivery";
@@ -549,19 +636,18 @@ describe("rehydrateInteractiveSubagents", () => {
       artifactDir: artDir,
       sessionFile: join(cwd, "child-delivery.jsonl"),
       parentSessionId: "reload-parent",
+      completionPolicy: "each",
       eventByteCursor: 0,
-      sessionByteCursor: 0,
       pendingDeliveries: [
         {
           deliveryId: "delivery-a",
           subagentId: id,
           turnId: "turn-a",
           eventId: "event-a",
-          mode: "notify",
-          triggerTurn: false,
           status: "done",
           artifactDir: artDir,
-          state: "dispatchAttempted",
+          completionPolicy: "each",
+          state: "queued",
         },
       ],
       deliveryReceipts: [],
@@ -581,7 +667,7 @@ describe("rehydrateInteractiveSubagents", () => {
       pi: {} as never,
       parentStreaming: true,
     });
-    setLegacyActiveSessionRefs(peer);
+    expect(peer.parentStreaming).toBe(true);
 
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
@@ -590,7 +676,7 @@ describe("rehydrateInteractiveSubagents", () => {
     );
   });
 
-  it("rehydrates into the exact scope despite a stale aggregate id", async () => {
+  it("rehydrates into the exact scope despite a colliding peer id", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const id = "colliding-state";
@@ -615,12 +701,14 @@ describe("rehydrateInteractiveSubagents", () => {
       id,
       artifactDir: join(cwd, "stale", id),
     } as never;
-    interactiveSubagentRegistry.set(id, stale);
+    const peer = createTestSessionScope();
+    peer.interactiveStates.set(id, stale);
 
     mod.rehydrateInteractiveSubagents(cwd, "reload-parent", [], scope);
 
     expect(scope.interactiveStates.get(id)).toBeDefined();
     expect(scope.interactiveStates.get(id)).not.toBe(stale);
+    expect(peer.interactiveStates.get(id)).toBe(stale);
   });
   it("rejects a persisted entry with a foreign artifact marker", async () => {
     const mod =

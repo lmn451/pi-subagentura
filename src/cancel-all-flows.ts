@@ -10,10 +10,7 @@
  * represents potentially active work.
  */
 import { inProcessJobsForOwner, scheduleJobCleanup } from "./helpers";
-import {
-  cancelInteractiveSubagent,
-  interactiveSubagentRegistry,
-} from "./interactive-tmux";
+import { cancelInteractiveSubagent } from "./interactive-tmux";
 import {
   cancelWorkflowJob,
   normalizeCancelledWorkflowState,
@@ -60,7 +57,7 @@ export async function cancelAllFlows(
   // Snapshot every known child before the first potentially slow abort.
   const interactiveRegistry = owner
     ? resolveLiveSessionScope(owner)?.interactiveStates
-    : interactiveSubagentRegistry;
+    : undefined;
   const interactiveStates = [...(interactiveRegistry?.values() ?? [])].filter(
     (state) => interactiveStateBelongsToOwner(state, owner),
   );
