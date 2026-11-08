@@ -8,3 +8,4 @@ logs/
 coverage/
 terminal-e2e-recordings/
 /monitoring/
+.context/

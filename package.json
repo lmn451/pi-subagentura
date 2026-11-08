@@ -192,21 +192,33 @@
     "@earendil-works/pi-ai": "1.5.0",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "@earendil-works/pi-tui": "1.5.0",
-    "@stryker-mutator/core": "^10.0.0",
-    "@types/node": "^26.0.0",
-    "@vitest/coverage-v8": "^5.0.0",
-    "fast-check": "^4.10.0",
-    "lint-staged": "^17.0.7",
-    "oxfmt": "^0.68.0",
-    "simple-git-hooks": "^2.13.1",
+    "@stryker-mutator/core": "^10.1.1",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.1.0",
+    "fast-check": "^4.10.2",
+    "lint-staged": "^17.6.0",
+    "oxfmt": "^0.77.0",
+    "simple-git-hooks": "^2.14.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0",
+    "vitest": "^5.1.0",
     "yaml": "^2.9.1"
   },
   "dependencies": {
-    "@juanibiapina/pi-extension-settings": "^0.9.1",
-    "acorn": "^8.14.0",
+    "@juanibiapina/pi-extension-settings": "^0.10.0",
+    "acorn": "^8.19.0",
     "effect": "4.0.0-rc.117",
     "is-path-inside": "^4.0.0"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent@1.5.0": {
+      "minimatch": "11.0.5",
+      "undici": "8.12.4"
+    },
+    "@stryker-mutator/core@^10.1.1": {
+      "minimatch": "11.0.5",
+      "typed-rest-client": {
+        "qs": "6.17.1"
+      }
+    }
   }
 }
