@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  mkdirSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -12,10 +13,18 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
+  artifactPath,
   MAX_EVENT_TEXT_LENGTH,
   MAX_OUTPUT_SNAPSHOT_BYTES,
+  readEvents,
 } from "../src/artifact";
-
+const platformSignals = constants.signals as Record<string, number>;
+const hostSignalName =
+  platformSignals.SIGINFO !== undefined
+    ? "SIGINFO"
+    : platformSignals.SIGSTKFLT !== undefined
+      ? "SIGSTKFLT"
+      : undefined;
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-cli-"));
 }
@@ -414,6 +423,73 @@ describe("platform process-exit signals", () => {
           exitCode,
           signal,
         });
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(hostSignalName === undefined)(
+    `preserves host-only ${hostSignalName ?? "signal"} through readEvents`,
+    () => {
+      const tmp = makeTmp();
+      try {
+        const art = artifactPath(tmp, "child");
+        mkdirSync(art.dir);
+        const signalName = hostSignalName!;
+        const signalNumber = platformSignals[signalName];
+        const exitCode = 128 + signalNumber;
+        expect(runCli(art.dir, ["process-exit", String(exitCode)]).status).toBe(
+          0,
+        );
+
+        const signalAliases = Object.entries(platformSignals)
+          .filter(([, number]) => number === signalNumber)
+          .map(([signal]) => signal);
+        const event = readEvents(art).at(-1);
+        expect(event).toMatchObject({
+          type: "process_exited",
+          exitCode,
+          terminationReason: "signal",
+        });
+        expect(event?.type === "process_exited" ? signalAliases : []).toContain(
+          event?.type === "process_exited" ? event.signal : undefined,
+        );
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["SIGINFO", "SIGSTKFLT"] as const)(
+    "normalizes portable platform signal %s",
+    (signal) => {
+      const tmp = makeTmp();
+      try {
+        const art = artifactPath(tmp, "child");
+        mkdirSync(art.dir);
+        writeFileSync(
+          art.statusFile,
+          `${JSON.stringify({
+            version: 2,
+            eventId: `event-${signal}`,
+            turnId: "turn",
+            ts: 1,
+            type: "process_exited",
+            status: "error",
+            exitCode: 157,
+            terminationReason: "signal",
+            signal,
+          })}\n`,
+        );
+
+        expect(readEvents(art)).toMatchObject([
+          {
+            type: "process_exited",
+            terminationReason: "signal",
+            signal,
+          },
+        ]);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
