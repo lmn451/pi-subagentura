@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import type * as InteractiveTmux from "../src/interactive-tmux";
 import {
   afterAll,
@@ -11,6 +13,8 @@ import {
 import {
   deriveInteractiveSubagentStatus,
   deriveInteractiveSubagentStatusFromEvents,
+  deriveInteractiveSubagentStatusFromLifecycle,
+  foldInteractiveLifecycle,
 } from "../src/interactive-tmux";
 import {
   mkdtempSync,
@@ -25,6 +29,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importFresh } from "./test-utils";
+import { writeCliScript } from "../src/subagent-artifact-cli";
 import { hashLineageRoot } from "../src/interactive-lineage";
 import {
   createRootSpawnTreeContext,
@@ -33,7 +38,10 @@ import {
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
 
-import { loadInteractiveStates } from "../src/artifact";
+import {
+  loadInteractiveStates,
+  type PersistedLifecycleFold,
+} from "../src/artifact";
 import { createTestSessionScope } from "./session-scope-fixture";
 import { clearSessionScopes, type SessionScope } from "../src/session-scope";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -1001,6 +1009,95 @@ describe("interactive-tmux", () => {
     }
   });
 
+  it("keeps cancellation marker and kills pane when active-turn lock is unavailable", async () => {
+    const tmp = makeTmp();
+    const artifactDir = join(tmp, "agent");
+    mkdirSync(artifactDir, { recursive: true });
+    process.env.TMUX = makeArgs().TMUX;
+    const paneCalls: string[][] = [];
+    installMockExec((_file, args) => {
+      const command = args.find((arg) =>
+        ["kill-pane", "list-panes"].includes(arg),
+      );
+      if (command === "list-panes") return `${MOCK_PANE_ID}\n`;
+      if (command === "kill-pane") paneCalls.push(args);
+      return "";
+    });
+
+    try {
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const lockPath = join(artifactDir, ".active-turn.lock");
+      mkdirSync(lockPath, { mode: 0o700 });
+      writeFileSync(
+        join(lockPath, "owner.json"),
+        JSON.stringify({
+          pid: process.pid,
+          token: randomUUID(),
+          createdAt: Date.now(),
+        }),
+        { mode: 0o600 },
+      );
+      const state: InteractiveTmux.InteractiveSubagentState = {
+        id: "cancel-lock-timeout",
+        name: "cancel lock timeout",
+        task: "exercise cancellation fallback",
+        paneId: MOCK_PANE_ID,
+        mux: "tmux",
+        sessionFile: join(tmp, "session.jsonl"),
+        cwd: tmp,
+        startedAt: Date.now(),
+        status: "running",
+        attachCommand: "",
+        selectPaneCommand: "",
+        launchScriptFile: join(tmp, "launch.sh"),
+        artifactDir,
+      };
+
+      expect(() =>
+        mod.cancelInteractiveSubagentByState(state, {
+          origin: "cancel_interactive_subagent",
+        }),
+      ).toThrow(/timed out acquiring active-turn lock/);
+      expect(paneCalls.some((args) => args.includes("kill-pane"))).toBe(true);
+      expect(existsSync(join(artifactDir, ".cancelled"))).toBe(true);
+
+      rmSync(lockPath, { recursive: true });
+      const cliPath = join(artifactDir, "cli.mjs");
+      writeCliScript(cliPath);
+      const exit = spawnSync(
+        process.execPath,
+        [cliPath, "process-exit", "143"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: artifactDir },
+          encoding: "utf8",
+        },
+      );
+      expect(exit.status, exit.stderr).toBe(0);
+      const events = readFileSync(join(artifactDir, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "completion",
+            outcome: "cancelled",
+            source: "parent",
+          }),
+          expect.objectContaining({
+            type: "process_exited",
+            status: "cancelled",
+            terminationReason: "cancelled",
+          }),
+        ]),
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("pruneDeadInteractiveSubagents uses the incremental lifecycle fold", async () => {
     process.env.PI_CODING_AGENT_SESSION_DIR = makeTmp();
     process.env.TMUX = makeArgs().TMUX;
@@ -1134,6 +1231,85 @@ describe("interactive-tmux", () => {
       expect(deriveInteractiveSubagentStatus(v2ErrorCompletion, true)).toBe(
         "idle",
       );
+    });
+    it("uses prompt_error as the latest attempt after a real turn", () => {
+      const priorStart = {
+        version: 2 as const,
+        eventId: "start-old-turn",
+        turnId: "old-turn",
+        ts: 1,
+        type: "turn_started" as const,
+        status: "running" as const,
+      };
+      const priorCompletion = {
+        version: 2 as const,
+        eventId: "completion-old-turn",
+        turnId: "old-turn",
+        ts: 2,
+        type: "completion" as const,
+        status: "done" as const,
+        outcome: "done" as const,
+        source: "agent_settled" as const,
+      };
+      const runningStart = {
+        version: 2 as const,
+        eventId: "start-running-turn",
+        turnId: "running-old-turn",
+        ts: 3,
+        type: "turn_started" as const,
+        status: "running" as const,
+      };
+      const promptError = {
+        version: 2 as const,
+        eventId: "completion-prompt-error",
+        turnId: "prompt-error-entry",
+        ts: 4,
+        type: "completion" as const,
+        status: "error" as const,
+        outcome: "error" as const,
+        source: "prompt_error" as const,
+      };
+      const lateOldCompletion = {
+        ...priorCompletion,
+        eventId: "late-old-completion",
+        turnId: "running-old-turn",
+        ts: 5,
+      };
+      const lifecycle: PersistedLifecycleFold = {};
+
+      for (const event of [
+        priorStart,
+        priorCompletion,
+        runningStart,
+        promptError,
+        lateOldCompletion,
+      ]) {
+        foldInteractiveLifecycle(lifecycle, event);
+      }
+
+      expect(lifecycle).toMatchObject({
+        currentTurnId: "prompt-error-entry",
+        completionTurnId: "prompt-error-entry",
+        completionOutcome: "error",
+        completionSource: "prompt_error",
+      });
+      expect(
+        deriveInteractiveSubagentStatusFromLifecycle(lifecycle, true),
+      ).toBe("idle");
+
+      foldInteractiveLifecycle(lifecycle, {
+        version: 2,
+        eventId: "start-new-turn",
+        turnId: "new-turn",
+        ts: 6,
+        type: "turn_started",
+        status: "running",
+      });
+      expect(lifecycle.currentTurnId).toBe("new-turn");
+      expect(lifecycle.completionTurnId).toBeUndefined();
+      expect(
+        deriveInteractiveSubagentStatusFromLifecycle(lifecycle, true),
+      ).toBe("running");
     });
     it("process_exited + pane alive → 'exited' terminal", () => {
       expect(deriveInteractiveSubagentStatus(processExited, true)).toBe(

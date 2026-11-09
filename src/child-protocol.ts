@@ -1,6 +1,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -20,6 +21,7 @@ import {
   appendCompletionEvent,
   appendEvent,
   artifactPath,
+  withActiveTurnLock,
   newEventId,
   writeOutput,
   type SubagentEventV2,
@@ -287,76 +289,6 @@ function appendActivity(
 
 export function registerChildProtocol(pi: ExtensionAPI): void {
   const art = getArtifact();
-  let startupAgentStarted = false;
-  pi.on("session_start", (event, ctx) => {
-    const model = ctx.model;
-    if (event.reason !== "startup" || !model) return;
-    void ctx.modelRegistry
-      .getApiKeyAndHeaders(model)
-      .then((auth) => {
-        if (startupAgentStarted) return;
-        const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
-          getRegisteredNativeProvider?: (provider: string) => unknown;
-        };
-        const isNativeProvider = Boolean(
-          registry.getRegisteredNativeProvider?.(model.provider),
-        );
-        // Legacy fallbacks can expose undefined auth fields, so require
-        // actual request config before trusting a stale auth-status snapshot.
-        const requestAuth = auth as typeof auth & {
-          baseUrl?: string;
-        };
-        const hasResolvedRequestConfig =
-          auth.ok &&
-          Boolean(
-            auth.apiKey ||
-            requestAuth.baseUrl ||
-            Object.keys(auth.headers ?? {}).length ||
-            Object.keys(auth.env ?? {}).length,
-          );
-        const missingLegacyAuth =
-          !isNativeProvider &&
-          typeof registry.hasConfiguredAuth === "function" &&
-          !registry.hasConfiguredAuth(model) &&
-          !hasResolvedRequestConfig;
-        if (auth.ok && !missingLegacyAuth) return;
-        if (!auth.ok) {
-          const missingAuthError =
-            missingLegacyAuth ||
-            /\bno\s+(?:api key|credentials?)\s+(?:found|configured|set|provided|available|present)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:missing|required)\s+(?:api key|credentials?|authentication|auth)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:api key|credentials?)(?:\s+(?:is|are|was|were))?\s+(?:missing|not found|not configured|not provided|not set|unset|required)\b/i.test(
-              auth.error,
-            ) ||
-            /\b(?:authentication|auth)(?:\s+(?:is|are|was|were))?\s+(?:missing|not configured|not provided|required)\b/i.test(
-              auth.error,
-            ) ||
-            /\bno\s+(?:authentication|auth)\s+(?:configured|available|provided|set)\b/i.test(
-              auth.error,
-            );
-          if (!missingAuthError) {
-            debugLog("warn", "child_startup_auth_resolution_unavailable");
-            return;
-          }
-        }
-        const message = "Selected model has no configured authentication.";
-        appendCompletionEvent(art, {
-          turnId: "process",
-          outcome: "error",
-          source: "explicit",
-          exitCode: 1,
-          message,
-          errorMessage: message,
-        });
-      })
-      .catch(() => {
-        debugLog("warn", "child_startup_auth_check_failed");
-      });
-  });
   const startPersistedTurn = (
     turnId: string,
     timestamp: number,
@@ -405,7 +337,6 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
-    startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
       startedAt: Date.now(),
@@ -444,36 +375,39 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     latestAgentMessages = [...event.messages];
   });
   pi.on("agent_settled", (_event, ctx) => {
-    const active = bindPersistedTurn(ctx, Date.now());
-    if (!active) return;
-    const assistant = [...latestAgentMessages]
-      .reverse()
-      .find((message: any) => message?.role === "assistant") as any;
-    const stopReason = assistant?.stopReason;
-    const errorMessage =
-      typeof assistant?.errorMessage === "string"
-        ? assistant.errorMessage
-        : undefined;
-    const failed =
-      Boolean(errorMessage) ||
-      assistant?.stopReason === "error" ||
-      assistant?.stopReason === "aborted";
-    appendCompletionEvent(art, {
-      turnId: active.turnId,
-      outcome: failed ? "error" : "done",
-      source: "agent_settled",
-      exitCode: failed ? 1 : 0,
-      errorMessage,
-      message: errorMessage,
-      agentStopReason:
-        stopReason === "error" || stopReason === "aborted"
-          ? stopReason
-          : undefined,
+    withActiveTurnLock(art, () => {
+      if (existsSync(join(art.dir, ".cancelled"))) return;
+      const active = bindPersistedTurn(ctx, Date.now());
+      if (!active) return;
+      const assistant = [...latestAgentMessages]
+        .reverse()
+        .find((message: any) => message?.role === "assistant") as any;
+      const stopReason = assistant?.stopReason;
+      const errorMessage =
+        typeof assistant?.errorMessage === "string"
+          ? assistant.errorMessage
+          : undefined;
+      const failed =
+        Boolean(errorMessage) ||
+        assistant?.stopReason === "error" ||
+        assistant?.stopReason === "aborted";
+      appendCompletionEvent(art, {
+        turnId: active.turnId,
+        outcome: failed ? "error" : "done",
+        source: "agent_settled",
+        exitCode: failed ? 1 : 0,
+        errorMessage,
+        message: errorMessage,
+        agentStopReason:
+          stopReason === "error" || stopReason === "aborted"
+            ? stopReason
+            : undefined,
+      });
+      const settled = readActiveTurn(art);
+      if (settled?.turnId === active.turnId) {
+        settled.activeTools = [];
+        writeActiveTurn(settled, art);
+      }
     });
-    const settled = readActiveTurn(art);
-    if (settled?.turnId === active.turnId) {
-      settled.activeTools = [];
-      writeActiveTurn(settled, art);
-    }
   });
 }

@@ -801,7 +801,20 @@ after retries, compaction, and queued continuations. When Pi accepts Enter while
 streaming, it treats the message as steering inside the current agent run and
 does not emit another `before_agent_start`. The child protocol therefore detects
 the newly persisted steering user entry before its provider request and starts a
-distinct artifact turn for it. The explicit CLI remains supported:
+distinct artifact turn for it.
+
+A private child-only `--import` companion wraps the actual installed Pi SDK's
+public `AgentSession.prompt` and runs that installation's public root `main`.
+If a prompt rejects before Pi persists a new user entry, it records a
+`prompt_error` completion keyed by the ID Pi returns for the
+`subagentura-prompt-error` custom entry (`schemaVersion: 1`). It does not invent
+a user turn or `turn_started`. Pi may buffer custom entries before a real
+conversation message; the protocol-v2 completion and empty immutable snapshot
+persist independently. This reports Pi's actual rejection, not a credential
+probe or synthesized authentication error. The preloader is attached at child
+launch: reload the extension and spawn a fresh child to obtain it. Already
+running panes cannot gain the hook or recover missed prompt errors retroactively.
+The explicit CLI remains supported:
 
 ```bash
 "${ARTIFACT_DIR}/cli.mjs" done 0       # success — parent reads the literal output.md path baked into the child prompt
@@ -838,6 +851,27 @@ and its observed byte count, but no immutable snapshot is created. The
 coordinated manifest therefore has no snapshot reference. No completion path
 injects mutable output into the parent context. The staging file remains available
 for manual inspection in the artifact directory.
+
+Child terminal completion writers—including explicit `done`/`error`,
+`prompt_error`, process-exit fallback, and lifecycle completion—serialize with
+parent cancellation under `.active-turn.lock`. Cancellation publishes its marker
+and parent completion before releasing the synchronous lock, then tears down the
+mux. A later child completion is suppressed before snapshotting; already
+committed history is retained.
+
+The wrapper's exit command fills in a missing parent-source cancellation
+completion for the current turn when `.cancelled` is present, then records
+`process_exited`.
+
+Stale locks are reclaimed only when their
+recorded owner is old and its PID is dead, by atomically moving the nonempty lock
+to a retained owner-specific quarantine.
+Normal release uses the same tombstone; deleting it could let a delayed waiter
+rename a newly acquired owner's lock into the now-vacant quarantine. Retain
+tombstones until artifact retirement.
+
+Artifact readers preserve recorded terminal `message` and `errorMessage`
+diagnostics verbatim within the existing 1 MiB event-record limit.
 
 #### Coordinated completion delivery
 
@@ -995,15 +1029,23 @@ snapshot; a running turn returns its current staging `output.md`, even when an
 earlier turn has completed. Empty or missing current staging never falls back to
 an earlier snapshot.
 
-For a selected terminal `error`, the model-facing response includes a separate
-status and explicitly untrusted diagnostic, even when the immutable snapshot is
-empty. The recorded `errorMessage` or `message` is passed through without parsing
-or credential redaction; provider diagnostics may include credential-shaped text.
-Markup delimiters are escaped before insertion into the wrapper, and the
-diagnostic is capped at 512 UTF-8 bytes including any truncation marker. The
-boundary labels the text as data but
-is not a prompt-injection defense. Existing snapshot output sanitization,
-snapshots, manifests, and telemetry are unchanged.
+For a selected terminal `error`, the response includes the recorded
+`errorMessage`, falling back to `message`, even when its output snapshot is empty.
+Diagnostic text is untrusted and returned verbatim: no parsing, sanitization,
+redaction, escaping, normalization, or additional truncation. The existing
+1 MiB whole-event record limit still applies. No code probes credential
+availability or synthesizes authentication errors; the bridge records only an
+actual Pi prompt rejection.
+
+A pre-user `prompt_error` uses its Pi-issued custom-entry ID as `turnId` and
+stores an empty immutable snapshot without reading, copying, or clearing
+`output.md`. Pi may buffer that custom entry before a real conversation message,
+but the artifact event and snapshot persist independently.
+
+If failed prompt attempt B follows completed turn A, B is selected as the latest
+attempt; a late normal completion for A cannot replace it. A later real user
+entry starts a separate turn; pass the error's exact `turnId` to select it after
+recovery.
 
 `since` filters only the returned events, not output selection. A successful read
 that returns a terminal snapshot consumes that turn's pending coordinated
