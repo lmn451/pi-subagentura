@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -341,6 +349,38 @@ describe("protocol-v2 artifact delivery", () => {
       "second turn output",
     );
     expect(readFileSync(first.output!.path, "utf8")).toBe("first turn output");
+  });
+
+  it("recovers a recent dead owner of a completion lock", () => {
+    const art = makeArtifact();
+    const turnId = "dead-completion-lock-owner";
+    const lockKey = createHash("sha256")
+      .update(turnId)
+      .digest("hex")
+      .slice(0, 24);
+    const lockPath = join(art.dir, `.completion-${lockKey}.lock`);
+    const exited = spawnSync(process.execPath, ["-e", "process.exit(0)"], {
+      encoding: "utf8",
+    });
+    if (exited.pid === undefined) throw new Error("dead child has no PID");
+    mkdirSync(lockPath, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(lockPath, "owner.json"),
+      JSON.stringify({
+        pid: exited.pid,
+        token: randomUUID(),
+        createdAt: Date.now(),
+      }),
+      { mode: 0o600 },
+    );
+
+    const completion = appendCompletionEvent(art, {
+      turnId,
+      outcome: "done",
+      source: "explicit",
+    });
+
+    expect(completion).toMatchObject({ turnId, outcome: "done" });
   });
 
   it("projects v2 tool activity onto live state without creating a delivery", async () => {

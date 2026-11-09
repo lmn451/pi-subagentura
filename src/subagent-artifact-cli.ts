@@ -20,7 +20,6 @@
  */
 
 import {
-  ACTIVE_TURN_LOCK_STALE_MS,
   ACTIVE_TURN_LOCK_TIMEOUT_MS,
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
@@ -83,9 +82,7 @@ const MAX_EVENT_RECORD_BYTES = ${MAX_EVENT_RECORD_BYTES};
 const MAX_EVENT_TEXT_LENGTH = ${MAX_EVENT_TEXT_LENGTH};
 const MAX_ACTIVE_TURN_BYTES = ${MAX_ACTIVE_TURN_BYTES};
 const ACTIVE_TURN_LOCK_TIMEOUT_MS = ${ACTIVE_TURN_LOCK_TIMEOUT_MS};
-const ACTIVE_TURN_LOCK_STALE_MS = ${ACTIVE_TURN_LOCK_STALE_MS};
 const COMPLETION_LOCK_TIMEOUT_MS = 2000;
-const COMPLETION_LOCK_STALE_MS = 30000;
 const MAX_ACTIVE_TOOL_RECORDS = ${MAX_ACTIVE_TOOL_RECORDS};
 const MAX_ACTIVE_TOOL_ID_LENGTH = ${MAX_ACTIVE_TOOL_ID_LENGTH};
 const MAX_TOOL_NAME_LENGTH = ${MAX_TOOL_NAME_LENGTH};
@@ -286,7 +283,7 @@ const tryAcquireLock = (lockPath) => {
     if (!installed) rmSync(candidatePath, { recursive: true, force: true });
   }
 };
-const reclaimStaleLock = (lockPath, staleMs) => {
+const reclaimDeadLock = (lockPath) => {
   let lockStat;
   try {
     lockStat = lstatSync(lockPath);
@@ -298,8 +295,7 @@ const reclaimStaleLock = (lockPath, staleMs) => {
     throw new Error("lock path is not a directory: " + lockPath);
   }
   const owner = readLockOwner(lockPath);
-  if (!owner || Date.now() - owner.createdAt <= staleMs) return false;
-  if (isLockOwnerProcessAlive(owner.pid)) return false;
+  if (!owner || isLockOwnerProcessAlive(owner.pid)) return false;
   const quarantinePath = lockQuarantinePath(lockPath, owner);
   try {
     renameSync(lockPath, quarantinePath);
@@ -309,29 +305,18 @@ const reclaimStaleLock = (lockPath, staleMs) => {
     throw error;
   }
 };
-const acquireFilesystemLock = (lockPath, timeoutMs, staleMs, timeoutMessage) => {
+const acquireFilesystemLock = (lockPath, timeoutMs, timeoutMessage) => {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const owner = tryAcquireLock(lockPath);
     if (owner) return owner;
-    if (reclaimStaleLock(lockPath, staleMs)) continue;
+    if (reclaimDeadLock(lockPath)) continue;
     if (Date.now() >= deadline) throw new Error(timeoutMessage);
     Atomics.wait(lockWaiter, 0, 0, 10);
   }
 };
-const withFilesystemLock = (
-  lockPath,
-  timeoutMs,
-  staleMs,
-  timeoutMessage,
-  operation,
-) => {
-  const owner = acquireFilesystemLock(
-    lockPath,
-    timeoutMs,
-    staleMs,
-    timeoutMessage,
-  );
+const withFilesystemLock = (lockPath, timeoutMs, timeoutMessage, operation) => {
+  const owner = acquireFilesystemLock(lockPath, timeoutMs, timeoutMessage);
   try {
     return operation();
   } finally {
@@ -344,7 +329,6 @@ const withCompletionLock = (targetTurnId, operation) => {
   return withFilesystemLock(
     completionLock,
     COMPLETION_LOCK_TIMEOUT_MS,
-    COMPLETION_LOCK_STALE_MS,
     "timed out acquiring completion lock for " + targetTurnId,
     operation,
   );
@@ -353,7 +337,6 @@ const withActiveTurnLock = (operation) =>
   withFilesystemLock(
     join(dir, ".active-turn.lock"),
     ACTIVE_TURN_LOCK_TIMEOUT_MS,
-    ACTIVE_TURN_LOCK_STALE_MS,
     "timed out acquiring active-turn lock",
     operation,
   );
@@ -590,17 +573,35 @@ switch (cmd) {
   }
   case "process-exit": {
     const exitCode = Number(arg ?? 0);
-    withActiveTurnLock(() => {
-      const cancelled = isCancelled();
-      const alreadyCompleted = completed(turnId);
+    let cancelledAtExit;
+    let alreadyCompletedAtExit;
+    let exitPublicationAttempted = false;
+    const publishProcessExit = () => {
+      exitPublicationAttempted = true;
+      const cancelled = cancelledAtExit ?? isCancelled();
+      const alreadyCompleted = alreadyCompletedAtExit ?? completed(turnId);
       const diagnostics = processExitDiagnostics(
         exitCode,
         cancelled,
         alreadyCompleted,
       );
-      try {
-        if (!alreadyCompleted) {
-          if (cancelled) {
+      write({
+        version: 2,
+        eventId: randomUUID(),
+        turnId,
+        ts: Date.now(),
+        type: "process_exited",
+        status: cancelled ? "cancelled" : exitCode === 0 ? "done" : "error",
+        exitCode,
+        ...diagnostics,
+      });
+    };
+    try {
+      withActiveTurnLock(() => {
+        cancelledAtExit = isCancelled();
+        alreadyCompletedAtExit = completed(turnId);
+        if (!alreadyCompletedAtExit) {
+          if (cancelledAtExit) {
             completion("cancelled", "parent");
           } else {
             completion("error", "process_exit", {
@@ -609,19 +610,11 @@ switch (cmd) {
             });
           }
         }
-      } finally {
-        write({
-          version: 2,
-          eventId: randomUUID(),
-          turnId,
-          ts: Date.now(),
-          type: "process_exited",
-          status: cancelled ? "cancelled" : exitCode === 0 ? "done" : "error",
-          exitCode,
-          ...diagnostics,
-        });
-      }
-    });
+        publishProcessExit();
+      });
+    } finally {
+      if (!exitPublicationAttempted) publishProcessExit();
+    }
     break;
   }
   default:

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import type * as InteractiveTmux from "../src/interactive-tmux";
 import {
   afterAll,
@@ -27,6 +29,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importFresh } from "./test-utils";
+import { writeCliScript } from "../src/subagent-artifact-cli";
 import { hashLineageRoot } from "../src/interactive-lineage";
 import {
   createRootSpawnTreeContext,
@@ -1003,6 +1006,95 @@ describe("interactive-tmux", () => {
         "stdio must be specified to avoid inheriting stderr",
       ).toBeDefined();
       expect(stdio![2]).toBe("ignore");
+    }
+  });
+
+  it("keeps cancellation marker and kills pane when active-turn lock is unavailable", async () => {
+    const tmp = makeTmp();
+    const artifactDir = join(tmp, "agent");
+    mkdirSync(artifactDir, { recursive: true });
+    process.env.TMUX = makeArgs().TMUX;
+    const paneCalls: string[][] = [];
+    installMockExec((_file, args) => {
+      const command = args.find((arg) =>
+        ["kill-pane", "list-panes"].includes(arg),
+      );
+      if (command === "list-panes") return `${MOCK_PANE_ID}\n`;
+      if (command === "kill-pane") paneCalls.push(args);
+      return "";
+    });
+
+    try {
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const lockPath = join(artifactDir, ".active-turn.lock");
+      mkdirSync(lockPath, { mode: 0o700 });
+      writeFileSync(
+        join(lockPath, "owner.json"),
+        JSON.stringify({
+          pid: process.pid,
+          token: randomUUID(),
+          createdAt: Date.now(),
+        }),
+        { mode: 0o600 },
+      );
+      const state: InteractiveTmux.InteractiveSubagentState = {
+        id: "cancel-lock-timeout",
+        name: "cancel lock timeout",
+        task: "exercise cancellation fallback",
+        paneId: MOCK_PANE_ID,
+        mux: "tmux",
+        sessionFile: join(tmp, "session.jsonl"),
+        cwd: tmp,
+        startedAt: Date.now(),
+        status: "running",
+        attachCommand: "",
+        selectPaneCommand: "",
+        launchScriptFile: join(tmp, "launch.sh"),
+        artifactDir,
+      };
+
+      expect(() =>
+        mod.cancelInteractiveSubagentByState(state, {
+          origin: "cancel_interactive_subagent",
+        }),
+      ).toThrow(/timed out acquiring active-turn lock/);
+      expect(paneCalls.some((args) => args.includes("kill-pane"))).toBe(true);
+      expect(existsSync(join(artifactDir, ".cancelled"))).toBe(true);
+
+      rmSync(lockPath, { recursive: true });
+      const cliPath = join(artifactDir, "cli.mjs");
+      writeCliScript(cliPath);
+      const exit = spawnSync(
+        process.execPath,
+        [cliPath, "process-exit", "143"],
+        {
+          env: { ...process.env, ARTIFACT_DIR: artifactDir },
+          encoding: "utf8",
+        },
+      );
+      expect(exit.status, exit.stderr).toBe(0);
+      const events = readFileSync(join(artifactDir, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "completion",
+            outcome: "cancelled",
+            source: "parent",
+          }),
+          expect.objectContaining({
+            type: "process_exited",
+            status: "cancelled",
+            terminationReason: "cancelled",
+          }),
+        ]),
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 

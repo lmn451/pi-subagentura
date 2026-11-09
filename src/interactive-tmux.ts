@@ -1523,16 +1523,32 @@ function publishCancellation(
     dirname(state.artifactDir),
     basename(state.artifactDir),
   );
-  withActiveTurnLock(art, () => {
-    try {
-      writeFileSync(join(state.artifactDir, ".cancelled"), "", {
-        mode: 0o600,
-      });
-    } catch {
-      /* best effort — dir may not exist yet if the launch script is warming up */
+  let enteredCallback = false;
+  try {
+    withActiveTurnLock(art, () => {
+      enteredCallback = true;
+      try {
+        writeFileSync(join(state.artifactDir, ".cancelled"), "", {
+          mode: 0o600,
+        });
+      } catch {
+        /* best effort — dir may not exist yet if the launch script is warming up */
+      }
+      appendCancellation(state, context);
+    });
+  } catch (error) {
+    if (!enteredCallback) {
+      try {
+        writeFileSync(join(state.artifactDir, ".cancelled"), "", {
+          mode: 0o600,
+          flag: "wx",
+        });
+      } catch {
+        /* preserve the lock error; don't replace an existing cancellation marker */
+      }
     }
-    appendCancellation(state, context);
-  });
+    throw error;
+  }
 }
 
 function appendCancellation(

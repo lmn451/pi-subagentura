@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -24,6 +25,15 @@ import {
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-cli-"));
+}
+
+function seedLockOwner(lockPath: string, pid: number): void {
+  mkdirSync(lockPath, { mode: 0o700 });
+  writeFileSync(
+    join(lockPath, "owner.json"),
+    JSON.stringify({ pid, token: randomUUID(), createdAt: Date.now() }),
+    { mode: 0o600 },
+  );
 }
 
 function runCli(
@@ -1286,6 +1296,102 @@ describe("subagent-artifact CLI", () => {
         terminationReason: "normal_exit",
       });
       expect(events.at(-1)).not.toHaveProperty("lastTool");
+    });
+
+    it("recovers recent dead active-turn and completion lock owners on EXIT", () => {
+      const turnId = "dead-owner-exit-turn";
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, started: true }),
+      );
+      const exited = spawnSync(process.execPath, ["-e", "process.exit(0)"], {
+        encoding: "utf8",
+      });
+      if (exited.pid === undefined) throw new Error("dead child has no PID");
+      seedLockOwner(join(tmp, ".active-turn.lock"), exited.pid);
+      const lockKey = createHash("sha256")
+        .update(turnId)
+        .digest("hex")
+        .slice(0, 24);
+      seedLockOwner(join(tmp, `.completion-${lockKey}.lock`), exited.pid);
+
+      const result = runCli(tmp, ["process-exit", "0"]);
+      expect(result.status, result.stderr).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "completion",
+            turnId,
+            outcome: "error",
+            source: "process_exit",
+          }),
+          expect.objectContaining({
+            type: "process_exited",
+            turnId,
+            exitCode: 0,
+          }),
+        ]),
+      );
+    });
+
+    it("records EXIT after a recent dead active-turn owner when already completed", () => {
+      const turnId = "completed-dead-owner-exit-turn";
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, started: true }),
+      );
+      expect(runCli(tmp, ["done", "0"]).status).toBe(0);
+      const exited = spawnSync(process.execPath, ["-e", "process.exit(0)"], {
+        encoding: "utf8",
+      });
+      if (exited.pid === undefined) throw new Error("dead child has no PID");
+      seedLockOwner(join(tmp, ".active-turn.lock"), exited.pid);
+
+      const result = runCli(tmp, ["process-exit", "0"]);
+      expect(result.status, result.stderr).toBe(0);
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        events.filter(
+          (event) => event.type === "completion" && event.turnId === turnId,
+        ),
+      ).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({
+        type: "process_exited",
+        turnId,
+        terminationReason: "normal_exit",
+      });
+    });
+
+    it("records EXIT diagnostics when a live active-turn owner blocks acquisition", () => {
+      const turnId = "live-owner-exit-turn";
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, started: true }),
+      );
+      seedLockOwner(join(tmp, ".active-turn.lock"), process.pid);
+
+      const result = runCli(tmp, ["process-exit", "17"]);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("timed out acquiring active-turn lock");
+      const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "process_exited",
+          turnId,
+          exitCode: 17,
+        }),
+      );
+      expect(events.some((event) => event.type === "completion")).toBe(false);
     });
 
     it("records a signal alongside an unexpected exit reason", () => {

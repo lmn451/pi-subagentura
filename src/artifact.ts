@@ -467,10 +467,8 @@ export function newEventId(): EventId {
 }
 
 const COMPLETION_LOCK_TIMEOUT_MS = 2_000;
-const COMPLETION_LOCK_STALE_MS = 30_000;
 const completionLockWaiter = new Int32Array(new SharedArrayBuffer(4));
 export const ACTIVE_TURN_LOCK_TIMEOUT_MS = 2_000;
-export const ACTIVE_TURN_LOCK_STALE_MS = 30_000;
 const activeTurnLockWaiter = new Int32Array(new SharedArrayBuffer(4));
 const LOCK_OWNER_FILE = "owner.json";
 const MAX_LOCK_OWNER_BYTES = 1_024;
@@ -597,7 +595,7 @@ function tryAcquireLock(lockPath: string): LockOwner | null {
   }
 }
 
-function reclaimStaleLock(lockPath: string, staleMs: number): boolean {
+function reclaimDeadLock(lockPath: string): boolean {
   let lockStat: Stats;
   try {
     lockStat = lstatSync(lockPath);
@@ -609,8 +607,7 @@ function reclaimStaleLock(lockPath: string, staleMs: number): boolean {
     throw new Error(`lock path is not a directory: ${lockPath}`);
   }
   const owner = readLockOwner(lockPath);
-  if (!owner || Date.now() - owner.createdAt <= staleMs) return false;
-  if (isLockOwnerProcessAlive(owner.pid)) return false;
+  if (!owner || isLockOwnerProcessAlive(owner.pid)) return false;
   const quarantinePath = lockQuarantinePath(lockPath, owner);
   try {
     renameSync(lockPath, quarantinePath);
@@ -629,7 +626,6 @@ function reclaimStaleLock(lockPath: string, staleMs: number): boolean {
 function acquireFilesystemLock(
   lockPath: string,
   timeoutMs: number,
-  staleMs: number,
   waiter: Int32Array,
   timeoutMessage: string,
 ): LockOwner {
@@ -637,7 +633,7 @@ function acquireFilesystemLock(
   while (true) {
     const owner = tryAcquireLock(lockPath);
     if (owner) return owner;
-    if (reclaimStaleLock(lockPath, staleMs)) continue;
+    if (reclaimDeadLock(lockPath)) continue;
     if (Date.now() >= deadline) throw new Error(timeoutMessage);
     Atomics.wait(waiter, 0, 0, 10);
   }
@@ -646,7 +642,6 @@ function acquireFilesystemLock(
 function withFilesystemLock<T>(
   lockPath: string,
   timeoutMs: number,
-  staleMs: number,
   waiter: Int32Array,
   timeoutMessage: string,
   operation: () => T,
@@ -654,7 +649,6 @@ function withFilesystemLock<T>(
   const owner = acquireFilesystemLock(
     lockPath,
     timeoutMs,
-    staleMs,
     waiter,
     timeoutMessage,
   );
@@ -673,7 +667,6 @@ export function withActiveTurnLock<T>(
   return withFilesystemLock(
     join(art.dir, ".active-turn.lock"),
     ACTIVE_TURN_LOCK_TIMEOUT_MS,
-    ACTIVE_TURN_LOCK_STALE_MS,
     activeTurnLockWaiter,
     "timed out acquiring active-turn lock",
     operation,
@@ -694,7 +687,6 @@ function withCompletionLock<T>(
   return withFilesystemLock(
     completionLockPath(art, turnId),
     COMPLETION_LOCK_TIMEOUT_MS,
-    COMPLETION_LOCK_STALE_MS,
     completionLockWaiter,
     `timed out acquiring completion lock for ${turnId}`,
     operation,

@@ -23,12 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Serialize child terminal completions with parent cancellation, preventing
   late output snapshots while preserving already committed artifact history.
-- Preserve the wrapper `EXIT` fallback: publish one parent-source cancellation
-  for an uncompleted current turn when `.cancelled` exists, then record
-  `process_exited`.
-- Reclaim only aged locks whose recorded owner PID is dead; ordinary release
-  also retains a nonempty owner-token tombstone until artifact retirement so
-  delayed waiters cannot rename a fresh owner into a vacant path.
+- Preserve wrapper `EXIT` diagnostics even when the active-turn lock cannot be
+  acquired; keep terminal completions locked and fall back to a durable
+  `.cancelled` marker when cancellation cannot acquire that lock.
+- Reclaim valid locks immediately when the recorded owner PID is dead while
+  keeping malformed and live-owner locks fail-closed; retain owner-token
+  quarantine on release so delayed waiters cannot rename a fresh owner.
 - Preserve terminal `message` and `errorMessage` diagnostics verbatim through
   event normalization within the existing 1 MiB event-record limit.
 

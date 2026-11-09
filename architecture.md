@@ -619,13 +619,20 @@ records; a later child completion is suppressed before snapshotting.
 `process_exited` remains a provenance record after cancellation.
 
 Lock candidates are fully populated, nonempty directories containing owner PID,
-nonce, and creation time before atomic installation. Reclaim only when the owner
-record is old and its PID is proven dead, moving the lock into a deterministic
+nonce, and creation time before atomic installation. Reclaim a valid owner record
+as soon as its PID is proven dead; no age grace period applies. Malformed and
+live-owner records remain fail-closed. Move reclaimed locks into a deterministic
 owner-token quarantine that remains until artifact retirement.
 Normal release also renames its lock into that same tombstone. Deleting it
 would let a delayed waiter holding the old owner record rename a fresh lock
 into the now-vacant path.
 Cancellation releases the lock before lineage cleanup and mux teardown.
+
+If cancellation cannot acquire the lock, it still writes `.cancelled` best-effort
+before pane teardown. Ordinary `process_exited` publication remains serialized;
+the wrapper also attempts that provenance record when lock acquisition fails.
+Acquisition errors remain explicit, and terminal completions are never appended
+without their writer locks.
 
 Cancellation first preserves authority on disk, then tears down the process:
 
