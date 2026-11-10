@@ -1,8 +1,8 @@
 # Bundled workflow examples
 
-These trusted `.mjs` scripts are included in the `pi-subagentura` npm package.
-They demonstrate reusable workflow structure and provide practical planning and
-conversion flows.
+The trusted `.mjs` scripts are included in the `pi-subagentura` npm package and
+demonstrate the legacy injected-global API. The repository also includes a
+TypeScript V4 definition example; it uses the `pi-subagentura/workflow` SDK.
 
 ## Running an example
 
@@ -30,8 +30,87 @@ workflow({
 To reuse a script by name, pass the same source to `save_workflow` once, then
 run it with `workflow({ name, args })` or select it with `/workflows`.
 
-All bundled examples accept either an args object or its JSON-string form. JSON
-strings are useful when another tool boundary serializes the payload:
+## Typed V4 definition
+
+[`review-source.ts`](./review-source.ts) is a TypeScript V4 definition that
+reviews the same supplied files independently across four aspects: intent/design
+alignment, compatibility, unintended behavior changes, and correctness/quality.
+Each reviewer returns a schema-validated verdict and up to 15 findings with
+severity, location, direct evidence, and explanation; the workflow combines
+these results without deduplicating independent evidence.
+
+Pass the full source to the direct `workflow` tool with both `files` and
+`intendedChange`. This example explicitly opts into durable execution:
+
+```js
+workflow({
+  script: "<contents of examples/workflows/review-source.ts>",
+  args: {
+    files: ["src/auth.ts", "src/session.ts"],
+    intendedChange:
+      "Replace the token cache while preserving existing callers.",
+  },
+  durable: true,
+});
+```
+
+Each reviewer in the definition sets `readOnly: true` on its `ctx.agent()` call;
+this is an agent option, not a `workflow()` invocation option, and the example
+leaves the normal isolation default unchanged. The effective capability is
+snapshotted per call; omitted or false preserves the existing default
+model-facing tool set. The allowlist is exactly Pi `read`, `grep`, `find`, and
+`ls`; it excludes `edit`, `write`, `bash`, `powershell`, recursive
+subagent/workflow tools, and arbitrary extension tools, including `mcp__*`,
+`list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource`.
+In-process schema capture additionally permits the internal `structured_output`
+return tool. Process-backed reviewers return final assistant text directly;
+the trusted host captures it into the existing result artifact before the
+attempt settles, and the process-selected schema fallback remains text JSON for
+parent extraction and validation. This is a tool-dispatch restriction, not an
+OS sandbox or path confinement: the host and extensions still execute as the
+same OS user. The shared `# Goal` / `# Contract` context and per-aspect
+`# Target` / `# Change` / `# Acceptance` sections organize the work but do not
+enforce semantic scope.
+
+The existing workflow step records remain the source of progress; the agents
+do not maintain a second todo ledger or scheduler. Read-only capability is
+retained through schema-repair attempts and durable recovery/compatibility
+checks. If a multiplexer is unavailable, non-durable execution falls back to
+in-process execution with the same restriction; durable process launch
+continues to fail closed rather than falling back to an unrestricted child.
+
+`files` accepts 1–40 non-empty paths, each at most 512 characters and 8,192
+characters combined. `intendedChange` must be non-empty and at most 12,000
+characters. The deterministic aggregate reports `pass`, `concern`, `blocking`,
+or `uncertain`. Any `blocking` verdict or critical/high finding yields blocking;
+otherwise failed/uncertain reviews yield uncertain; otherwise a concern verdict
+or any finding yields concern; pass requires four completed pass reviews and no
+findings. Findings sort by severity (critical to low), fixed aspect order,
+location, evidence, and explanation; severity counts include every finding.
+Failed/unknown aspects never pass. After review, the workflow optionally asks
+whether to save the report as a run artifact; it never asks for permission to run
+the read-only review.
+
+V4 definitions use the typed engine with session-scoped in-memory state when
+`durable` is omitted or `false`; a direct workflow-tool call with
+`durable: true` opts into project-scoped storage and restart recovery. Saved
+V4 definitions selected through `/workflows` also run session-scoped. The
+definition uses Node's erasable TypeScript syntax, but the workflow runner does
+not type-check it. Runtime imports must be named `defineWorkflow` / `schema`
+imports from `pi-subagentura/workflow`; other runtime imports are rejected.
+Node.js 24.12 or newer is required. The exact `effect@4.0.0-rc.117` runtime
+dependency remains internal.
+
+To inspect a paused run, use `list_workflow_runs` or `get_workflow_status`, then
+call `respond_workflow_input({workflowId, path})`; Pi asks the person at the UI
+and persists the answer before resuming. With `async: false`, input is collected
+directly by the workflow tool. After interruption, use
+`resume_workflow({workflowId})` while Pi is running. V4 status summaries omit
+step outputs and answers. See the [runtime contract](../../WORKFLOW_RUNTIME.md#v4-definitions).
+
+Legacy `.mjs` examples accept either an args object or its JSON-string form.
+V4 definitions receive schema-validated argument objects. JSON strings are
+useful when another tool boundary serializes a legacy payload:
 
 ```js
 workflow({
@@ -68,7 +147,7 @@ so delivery is at-least-once.
 
 ## Authoring guidance
 
-Write raw JavaScript without fences. Include a top-level pure-literal
+For the legacy `.mjs` examples, write raw JavaScript without fences. Include a top-level pure-literal
 `export const meta = { name, description, phases? }` statement; helper
 declarations may appear before or after it. Do not use TypeScript, imports,
 `require`, filesystem APIs, `Date.now()`, `Math.random()`, or argless `new Date()`.
@@ -171,12 +250,30 @@ source is parsed in the test suite before it is accepted.
 ## Limitations
 
 - Scripts are trusted JavaScript, not untrusted-input sandboxes.
-- Workflow jobs are async by default and live only for the current parent
+- By default, workflow jobs are async and live only for the current parent
   session. Reload, resume, quit, and new-session transitions cancel them.
-- Process-isolated agents require tmux or Zellij; otherwise the runtime falls
-  back to in-process execution.
-- Interactive user-question pauses are represented by pending-approval output;
-  a workflow cannot suspend and later resume at an `AskUserQuestion` checkpoint.
+- Process-isolated agents require tmux or Zellij; non-durable runs otherwise
+  fall back to in-process execution. Durable runs fail closed when the
+  process backend is unavailable.
+- Legacy `.mjs` workflows cannot suspend for interactive user input. V4
+  definitions can pause through `ctx.ask()` / `ctx.gate()` and
+  `respond_workflow_input`.
 - File-writing examples depend on the delegated agents having appropriate read
   and write tools and permissions.
 - Model overrides must name models configured in the active Pi installation.
+
+## Explicit durable execution and retries
+
+`durable-review.mjs` demonstrates stable per-item/per-attempt ids, explicit
+bounded retries, fan-out, and final synthesis. Save it with `save_workflow`, then
+run with `workflow({name: "durable-review", args: {path: "src"}, budget: 20000,
+durable: true})`. Use `async: false` for an immediate result. After an
+interruption, use `resume_workflow({workflowId})` in the same project. This
+legacy `.mjs` example opts into durability; V4 direct launches also require
+`durable: true` to opt into persistence. Saved V4 definitions selected through
+`/workflows` remain session-scoped.
+
+`retry(n => agent(..., {id: "review/" + n}), {attempts: 3})` retries exceptions
+and `null`, but never cancellation. Every attempt may repeat agent side effects;
+use read-only work or application-specific idempotency. See
+[the runtime contract](../../WORKFLOW_RUNTIME.md).

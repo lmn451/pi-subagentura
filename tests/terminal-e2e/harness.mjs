@@ -288,6 +288,15 @@ export class TerminalHarness {
       }),
       { mode: 0o600 },
     );
+    if (process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL === "1") {
+      writeFileSync(
+        join(this.agentDir, "settings.json"),
+        JSON.stringify({
+          extensions: [join(HERE, "fixtures/mock-provider.ts")],
+        }),
+        { mode: 0o600 },
+      );
+    }
     const wrapper = join(this.wrapperBin, "pi");
     cpSync(join(HERE, "fixtures/pi-child-wrapper.sh"), wrapper);
     chmodSync(wrapper, 0o700);
@@ -321,6 +330,9 @@ export class TerminalHarness {
       SUBAGENTURA_E2E_NETWORK_LOG: this.networkLog,
       SUBAGENTURA_E2E_REPO: REPO,
       SUBAGENTURA_E2E_API_KEY: "subagentura-e2e-test-key",
+      ...(process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL === "1"
+        ? { SUBAGENTURA_E2E_READONLY_MCP_TOOL: "1" }
+        : {}),
       SUBAGENTURA_E2E_REAL_PI: resolvePi(),
       NODE_OPTIONS: `--require=${join(HERE, "fixtures/deny-network.cjs")}`,
       // Node ignores these, but tool-issued `curl`/`git`/`wget` do not, so
@@ -335,6 +347,17 @@ export class TerminalHarness {
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
     };
+    if (process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT === "1") {
+      this._env.SUBAGENTURA_E2E_GATE_TIMEOUT_MS = "120000";
+      this._env.SUBAGENTURA_E2E_FAIL_CANCEL_MARKER = join(
+        this.gates,
+        "fail-cancel-write",
+      );
+      this._env.NODE_OPTIONS += ` --import=${join(HERE, "fixtures/fail-cancel-write.mjs")}`;
+      writeFileSync(this._env.SUBAGENTURA_E2E_FAIL_CANCEL_MARKER, "armed\n", {
+        mode: 0o600,
+      });
+    }
     this.assertChildCanExecNode(safePath);
     appendFileSync(
       this.providerLog,

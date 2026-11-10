@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gateForMarker } from "./fixtures/mock-provider";
 import {
@@ -49,6 +55,60 @@ async function startScenario(name: string): Promise<void> {
   harness.scenario = name;
   await harness.start();
   await harness.sendPrompt(scenario.prompt);
+}
+
+type ReadOnlyMode = "process" | "in-process";
+
+async function startReadOnlyWorkflow(mode: ReadOnlyMode) {
+  const suffix = mode === "process" ? "PROCESS" : "IN_PROCESS";
+  const parentMarker = `[E2E:WORKFLOW_READONLY_${suffix}]`;
+  const childMarker = `[E2E:CHILD_WORKFLOW_READONLY_${suffix}]`;
+  harness.scenario = `workflow-readonly-${mode}`;
+  const previous = process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL;
+  process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL = "1";
+  try {
+    await harness.start();
+  } finally {
+    if (previous === undefined)
+      delete process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL;
+    else process.env.SUBAGENTURA_E2E_READONLY_MCP_TOOL = previous;
+  }
+  writeFileSync(
+    join(harness.workspace, "readonly-source.ts"),
+    'export const source = "READ_ONLY_SOURCE_SENTINEL";\n',
+  );
+  await harness.sendPrompt(
+    `${parentMarker} Run a durable workflow review of readonly-source.ts.`,
+  );
+  return { parentMarker, childMarker };
+}
+
+type WorkflowToolResult = {
+  text?: string;
+  details?: unknown;
+};
+
+function workflowResultFor(marker: string): WorkflowToolResult | undefined {
+  for (const event of harness.providerEvents()) {
+    if (event.marker !== marker || !Array.isArray(event.contextToolResults))
+      continue;
+    for (const candidate of event.contextToolResults as unknown[]) {
+      if (!candidate || typeof candidate !== "object") continue;
+      if (!("toolName" in candidate) || candidate.toolName !== "workflow")
+        continue;
+      const rawText =
+        "text" in candidate && typeof candidate.text === "string"
+          ? candidate.text
+          : undefined;
+      const resultSeparator = rawText?.indexOf("\n\n") ?? -1;
+      return {
+        text:
+          resultSeparator >= 0 ? rawText?.slice(resultSeparator + 2) : rawText,
+        details: "details" in candidate ? candidate.details : undefined,
+      };
+    }
+  }
+  return undefined;
 }
 
 async function waitForParentSettled(marker: string): Promise<void> {
@@ -139,7 +199,129 @@ function assertCompletionSnapshot(
   if (expectedSource) expect(event.source).toBe(expectedSource);
 }
 
+function completionForArtifactDir(
+  events: Array<Record<string, unknown>>,
+  artifactDir: string,
+): Record<string, unknown> {
+  const event = events.find(
+    (candidate) =>
+      candidate.type === "completion" &&
+      resolve(dirname(String(candidate.path))) === resolve(artifactDir),
+  );
+  if (!event) throw new Error(`no completion artifact for ${artifactDir}`);
+  return event;
+}
+
+function findWorkflowJournal(root: string): string | undefined {
+  if (!existsSync(root)) return undefined;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isFile() && entry.name === "journal.ndjson") return path;
+    if (entry.isDirectory()) {
+      const nested = findWorkflowJournal(path);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
 describe("real Pi terminal E2E", () => {
+  it(
+    "keeps a synchronous durable V4 workflow and both child modes alive until cancel intent commits",
+    async () => {
+      const previousFault = process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT;
+      process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT = "1";
+      try {
+        await startScenario("durable-cancel-sync");
+        await harness.waitForProvider(
+          (events) =>
+            events.some(
+              (event) =>
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_PROCESS]" &&
+                event.afterStage === "gated",
+            ) &&
+            events.some(
+              (event) =>
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]" &&
+                event.afterStage === "gated",
+            ),
+          "both durable workflow child modes at their wait gates",
+        );
+        const child = childPane();
+        expect(child).toBeDefined();
+        const journal = findWorkflowJournal(
+          join(harness.env.HOME, ".pi-subagentura", "workflow-runs"),
+        );
+        expect(journal).toBeDefined();
+
+        harness.sendKey("C-M-x");
+        await harness.waitForScreen(
+          (screen) => screen.includes("Failed to cancel 1 workflow(s). Retry"),
+          "durable cancellation persistence failure guidance",
+        );
+        const failedAttemptEvents = harness.providerEvents();
+        expect(
+          failedAttemptEvents.some(
+            (event) =>
+              (event.marker === "[E2E:CHILD_DURABLE_CANCEL_PROCESS]" ||
+                event.marker === "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]") &&
+              event.afterStage === "failed",
+          ),
+        ).toBe(false);
+        expect(
+          failedAttemptEvents.some(
+            (event) =>
+              event.marker === "[E2E:DURABLE_CANCEL_SYNC]" &&
+              typeof event.requestSeq === "number" &&
+              event.requestSeq > 1,
+          ),
+        ).toBe(false);
+        expect(harness.panes().some((pane) => pane.id === child?.id)).toBe(
+          true,
+        );
+        expect(
+          readFileSync(journal!, "utf8")
+            .split("\n")
+            .some((line) => {
+              if (!line) return false;
+              return JSON.parse(line).kind === "cancelled";
+            }),
+        ).toBe(false);
+
+        unlinkSync(join(harness.gates, "fail-cancel-write"));
+        harness.sendKey("C-M-x");
+        await harness.waitFor(
+          () =>
+            readFileSync(journal!, "utf8")
+              .split("\n")
+              .some((line) => {
+                if (!line) return false;
+                return JSON.parse(line).kind === "cancelled";
+              }),
+          "durable cancelled intent persisted after retry",
+        );
+        await harness.waitForProvider(
+          (events) =>
+            [
+              "[E2E:CHILD_DURABLE_CANCEL_PROCESS]",
+              "[E2E:CHILD_DURABLE_CANCEL_IN_PROCESS]",
+            ].every((marker) =>
+              events.some(
+                (event) => event.marker === marker && event.abort === true,
+              ),
+            ),
+          "owned process and in-process children aborted after retry",
+        );
+        await harness.assertNoNetwork();
+      } finally {
+        if (previousFault === undefined)
+          delete process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT;
+        else process.env.SUBAGENTURA_E2E_CANCEL_WRITE_FAULT = previousFault;
+      }
+    },
+    timeout,
+  );
+
   it(
     "shows extension tool parameters only after Ctrl+O expansion",
     async () => {
@@ -178,9 +360,10 @@ describe("real Pi terminal E2E", () => {
       // the scripted model is selected and both extensions loaded.
       const screen = harness.renderedScreen();
       expect(screen).toContain("mock • medium");
-      expect(screen).toContain("mock-");
-      expect(screen).toContain("provider.ts");
-      expect(screen).toContain("subagent.ts");
+      // Long checkout paths can wrap a filename across terminal rows.
+      const unwrapped = screen.replace(/\s+/g, "");
+      expect(unwrapped).toContain("mock-provider.ts");
+      expect(unwrapped).toContain("subagent.ts");
       expect(harness.panes()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ session: expect.stringMatching(/^e2e-/) }),
@@ -335,6 +518,236 @@ describe("real Pi terminal E2E", () => {
         "workflow result returned the child output",
       );
       await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
+    "runs a read-only V4 durable process workflow and returns its captured result",
+    async () => {
+      const { parentMarker, childMarker } =
+        await startReadOnlyWorkflow("process");
+      const controlMarker = "[E2E:CHILD_WORKFLOW_MCP_CONTROL_PROCESS]";
+      await harness.waitForProvider(
+        (events) => hasStage(events, childMarker, "complete"),
+        "read-only process workflow child result",
+      );
+      await waitForParentSettled(parentMarker);
+      await harness.assertNoNetwork();
+
+      const events = harness.providerEvents();
+      const parentInitial = events.find(
+        (event) => event.marker === parentMarker && event.requestSeq === 1,
+      );
+      expect(parentInitial?.contextToolNames).toContain("mcp__e2e__mutate");
+      const controlEvents = events.filter(
+        (event) => event.marker === controlMarker,
+      );
+      const initialControl = controlEvents.find(
+        (event) => event.requestSeq === 1,
+      );
+      expect(initialControl?.contextToolNames).toContain("mcp__e2e__mutate");
+      expect(
+        controlEvents
+          .filter((event) => event.eventType === "tool_call")
+          .map((event) => event.toolCallName),
+      ).toEqual(["mcp__e2e__mutate", "write", "bash"]);
+      expect(
+        readFileSync(
+          join(harness.workspace, "readonly-mcp-control.txt"),
+          "utf8",
+        ),
+      ).toBe("PROCESS_MCP_CONTROL_SENTINEL");
+      expect(
+        events.some(
+          (event) => event.marker === "[E2E:CHILD_READONLY_NESTED_SPAWN]",
+        ),
+      ).toBe(false);
+      const childEvents = events.filter(
+        (event) => event.marker === childMarker,
+      );
+      const initialChild = childEvents.find((event) => event.requestSeq === 1);
+      expect(initialChild?.contextToolNames).toEqual(
+        expect.arrayContaining(["read", "grep", "find", "ls"]),
+      );
+      expect(initialChild?.contextToolNames).toHaveLength(4);
+      expect(initialChild?.contextToolNames).not.toContain("structured_output");
+      expect(initialChild?.contextToolNames).not.toContain("mcp__e2e__mutate");
+      expect(
+        childEvents
+          .filter((event) => event.eventType === "tool_call")
+          .map((event) => event.toolCallName),
+      ).toEqual([
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "subagent_interactive",
+        "mcp__e2e__mutate",
+      ]);
+
+      expect(
+        readFileSync(join(harness.workspace, "readonly-source.ts"), "utf8"),
+      ).toBe('export const source = "READ_ONLY_SOURCE_SENTINEL";\n');
+      expect(
+        existsSync(join(harness.workspace, "readonly-mcp-created.txt")),
+      ).toBe(false);
+      const artifactDir = initialChild?.childArtifactDir;
+      expect(typeof artifactDir).toBe("string");
+      const outputPath = join(String(artifactDir), "output.md");
+      const output = existsSync(outputPath)
+        ? readFileSync(outputPath, "utf8")
+        : "";
+      expect(output).not.toContain("FORBIDDEN_OUTPUT_WRITE");
+      const artifactEvents = harness.artifactEvents();
+      const controlArtifactDir = String(initialControl?.childArtifactDir);
+      expect(typeof initialControl?.childArtifactDir).toBe("string");
+      const controlCompletion = completionForArtifactDir(
+        artifactEvents,
+        controlArtifactDir,
+      );
+      const controlOutput = controlCompletion.output as
+        | Record<string, unknown>
+        | undefined;
+      const controlSnapshotPath = resolve(
+        dirname(String(controlCompletion.path)),
+        String(controlOutput?.path),
+      );
+      expect(JSON.parse(readFileSync(controlSnapshotPath, "utf8"))).toEqual({
+        written: true,
+      });
+      assertCompletionSnapshot(controlCompletion, '"written":true');
+      const readOnlyArtifactDir = String(initialChild?.childArtifactDir);
+      expect(typeof initialChild?.childArtifactDir).toBe("string");
+      const readOnlyCompletion = completionForArtifactDir(
+        artifactEvents,
+        readOnlyArtifactDir,
+      );
+      assertCompletionSnapshot(
+        readOnlyCompletion,
+        "READ_ONLY_SOURCE_SENTINEL",
+        "agent_settled",
+      );
+
+      const workflowResult = workflowResultFor(parentMarker);
+      expect(workflowResult).toBeDefined();
+      expect(JSON.parse(String(workflowResult?.text))).toEqual({
+        source: "READ_ONLY_SOURCE_SENTINEL",
+      });
+      expect(workflowResult?.details).toMatchObject({
+        status: "done",
+        durable: true,
+      });
+      expect(
+        (workflowResult?.details as { workflowId?: unknown } | undefined)
+          ?.workflowId,
+      ).toMatch(/^wfd_/);
+
+      const workflowId = String(
+        (workflowResult?.details as { workflowId?: unknown } | undefined)
+          ?.workflowId,
+      );
+      await harness.sendPrompt(
+        "[E2E:WORKFLOW_LIST_RUNS] List the completed durable workflow.",
+      );
+      await waitForParentSettled("[E2E:WORKFLOW_LIST_RUNS]");
+      const listingEvent = harness
+        .providerEvents()
+        .find(
+          (event) =>
+            event.marker === "[E2E:WORKFLOW_LIST_RUNS]" &&
+            event.requestSeq === 2,
+        );
+      const toolResults = listingEvent?.contextToolResults;
+      const listing = Array.isArray(toolResults)
+        ? toolResults.find(
+            (candidate: unknown): candidate is Record<string, unknown> =>
+              typeof candidate === "object" &&
+              candidate !== null &&
+              "toolName" in candidate &&
+              candidate.toolName === "list_workflow_runs",
+          )
+        : undefined;
+      expect(listing?.details).toMatchObject({
+        runs: expect.arrayContaining([
+          expect.objectContaining({ workflowId, status: "done" }),
+        ]),
+      });
+    },
+    timeout,
+  );
+
+  it(
+    "reads and returns SDK structured output for a read-only in-process workflow",
+    async () => {
+      const { parentMarker, childMarker } =
+        await startReadOnlyWorkflow("in-process");
+      await harness.waitForProvider(
+        (events) => hasStage(events, childMarker, "complete"),
+        "read-only in-process workflow child result",
+      );
+      await waitForParentSettled(parentMarker);
+      await harness.assertNoNetwork();
+
+      const events = harness.providerEvents();
+      const parentInitial = events.find(
+        (event) => event.marker === parentMarker && event.requestSeq === 1,
+      );
+      expect(parentInitial?.contextToolNames).toContain("mcp__e2e__mutate");
+      const childEvents = events.filter(
+        (event) => event.marker === childMarker,
+      );
+      expect(
+        events.some(
+          (event) => event.marker === "[E2E:CHILD_READONLY_NESTED_SPAWN]",
+        ),
+      ).toBe(false);
+      const initialChild = childEvents.find((event) => event.requestSeq === 1);
+      expect(initialChild?.contextToolNames).toEqual(
+        expect.arrayContaining([
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "structured_output",
+        ]),
+      );
+      expect(initialChild?.contextToolNames).toHaveLength(5);
+      expect(initialChild?.contextToolNames).not.toContain("write");
+      expect(initialChild?.contextToolNames).not.toContain("edit");
+      expect(initialChild?.contextToolNames).not.toContain("bash");
+      expect(initialChild?.contextToolNames).not.toContain("subagent_isolated");
+      expect(
+        childEvents
+          .filter((event) => event.eventType === "tool_call")
+          .map((event) => event.toolCallName),
+      ).toEqual([
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "subagent_isolated",
+        "mcp__e2e__mutate",
+        "structured_output",
+      ]);
+      expect(
+        readFileSync(join(harness.workspace, "readonly-source.ts"), "utf8"),
+      ).toBe('export const source = "READ_ONLY_SOURCE_SENTINEL";\n');
+      expect(existsSync(join(harness.workspace, "readonly-output.md"))).toBe(
+        false,
+      );
+      expect(
+        existsSync(join(harness.workspace, "readonly-mcp-created.txt")),
+      ).toBe(false);
+      const workflowResult = workflowResultFor(parentMarker);
+      expect(workflowResult).toBeDefined();
+      expect(JSON.parse(String(workflowResult?.text))).toEqual({
+        source: "READ_ONLY_SOURCE_SENTINEL",
+      });
+      expect(workflowResult?.details).toMatchObject({
+        status: "done",
+      });
+      expect(workflowResult?.details).not.toHaveProperty("durable");
     },
     timeout,
   );

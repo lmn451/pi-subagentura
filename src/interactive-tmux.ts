@@ -24,6 +24,8 @@
  * of the codebase compiles unchanged.
  */
 
+import { cancelDurableProcess } from "./workflow-durable-process";
+import { debugLog } from "./helpers";
 import {
   findSessionScope,
   sessionOwner,
@@ -105,6 +107,11 @@ import {
 } from "./spawn-tree-context";
 import { TELEMETRY_ENV } from "./settings";
 import {
+  READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES,
+  READ_ONLY_AGENT_TOOL_NAMES,
+  READ_ONLY_WORKFLOW_FLAG,
+} from "./agent-capabilities";
+import {
   captureTelemetry,
   sanitizeTelemetryModel,
   telemetryDepth,
@@ -127,23 +134,27 @@ import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
 
 /**
- * System prompt sent to every interactive sub-agent. Tells the child how to
- * signal completion so the parent can be notified, and where to write its
- * result. The persona (if provided) is placed ABOVE this so the protocol —
- * the part that keeps the parent-child notification loop working — is the
- * most recent instruction the LLM reads (recency wins for instruction
- * following).
+ * System prompt sent to every interactive sub-agent. The default protocol
+ * requires an output artifact and lifecycle CLI call; read-only workflow mode
+ * instead returns text directly for trusted host capture at settlement. The
+ * persona (if provided) is placed ABOVE this so the protocol is the most
+ * recent instruction the LLM reads.
  *
- * `artifactDir` is the resolved absolute path baked into the prompt so the
- * child can use it directly in `write` tool calls. Bash commands and `cli.mjs`
- * calls still work via the exported `ARTIFACT_DIR` env var from the launch
- * script, but the `write` tool treats its `path` argument as a literal string,
- * so we must give it the absolute path up front.
+ * `artifactDir` is used by the default protocol to provide literal artifact
+ * paths for `write` tool calls.
  */
 export function buildChildSubagentProtocol(
   artifactDir: string,
   requireActivePaneForUserAttention = false,
+  readOnly = false,
 ): string {
+  if (readOnly) {
+    return `You are running inside a Pi sub-agent launched by a parent agent in read-only workflow mode.
+
+Use the available read-only tools to complete the task. Return the requested result directly in your final assistant response. If the task requests JSON, return the JSON itself without surrounding prose or markdown.
+
+The host captures your final assistant text when the turn settles. Do not write a result file or invoke a lifecycle command. After responding, keep the Pi REPL open for possible parent follow-up.`;
+  }
   const cliPath = `${artifactDir}/cli.mjs`;
   const outputPath = `${artifactDir}/output.md`;
   const userAttentionGuidance = requireActivePaneForUserAttention
@@ -250,6 +261,8 @@ export interface InteractiveSubagentState {
   sessionOwner?: SessionOwnerToken;
   /** Workflow that owns this child, when completion is aggregated by the workflow. */
   workflowId?: string;
+  /** Private one-use durable attempt manifest; not a user-controlled pane target. */
+  durableWorkflowAttempt?: string;
   /** Completion is delivered standalone or consumed by a workflow aggregate. */
   completionOwner?: "standalone" | "workflow";
   /** Workflow-runner acknowledgement that this child's result was consumed; runtime-only and intentionally not persisted. */
@@ -409,15 +422,17 @@ export function createInteractiveSubagentPaths(params: {
 export function buildInteractivePrompt(params: {
   task: string;
   contextText?: string | null;
+  readOnly?: boolean;
 }): string {
-  const footer =
-    "\n\n" +
-    "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
-    "write your result to output.md (path from the system prompt), run the command below, " +
-    "and wait for it to succeed. Repeat this for every turn:\n" +
-    '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
-    "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
-    "Do not intentionally exit or close the pane unless explicitly asked.";
+  const footer = params.readOnly
+    ? "\n\nREAD-ONLY COMPLETION: return the requested result directly as your final assistant response. Preserve the requested format; if JSON is requested, return JSON without surrounding prose or markdown. The host captures this response when the turn settles. Keep the Pi REPL open for parent follow-up."
+    : "\n\n" +
+      "MANDATORY COMPLETION PROTOCOL: before sending your final assistant response, " +
+      "write your result to output.md (path from the system prompt), run the command below, " +
+      "and wait for it to succeed. Repeat this for every turn:\n" +
+      '  "$ARTIFACT_DIR/cli.mjs" done 0\n' +
+      "After completion is recorded, remain in the Pi REPL and wait for follow-up. " +
+      "Do not intentionally exit or close the pane unless explicitly asked.";
 
   if (!params.contextText) return params.task + footer;
   return (
@@ -443,6 +458,7 @@ export function buildPiInteractiveCommand(params: {
   model?: string;
   cwd: string;
   thinkingLevel?: ThinkingLevel;
+  readOnly?: boolean;
 }): string {
   const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
   const parts = [
@@ -460,6 +476,15 @@ export function buildPiInteractiveCommand(params: {
   }
   if (params.systemPromptFile) {
     parts.push("--append-system-prompt", escape(params.systemPromptFile));
+  }
+  if (params.readOnly) {
+    parts.push(
+      "--tools",
+      escape(READ_ONLY_AGENT_TOOL_NAMES.join(",")),
+      "--exclude-tools",
+      escape(READ_ONLY_AGENT_EXCLUDED_TOOL_NAMES.join(",")),
+      `--${READ_ONLY_WORKFLOW_FLAG}`,
+    );
   }
   parts.push(escape(`@${params.promptFile}`));
   return `cd ${escape(params.cwd)} && ${parts.join(" ")}`;
@@ -585,11 +610,16 @@ export function captureInteractiveSubagentCreatedTelemetry(
 }
 
 export function launchInteractiveSubagent(params: {
+  /** Internal durable launcher hooks, executed before any provider work starts. */
+  wrapCommand?: (command: string) => string;
+  beforeDispatch?: (state: InteractiveSubagentState) => void;
   name: string;
   task: string;
   persona?: string;
   model?: string;
   cwd: string;
+  /** Restrict model-facing tools to the read-only workflow allowlist. */
+  readOnly?: boolean;
   contextText?: string | null;
   /** Spawn in a detached named window (invisible) instead of a visible split. */
   background?: boolean;
@@ -641,6 +671,9 @@ export function launchInteractiveSubagent(params: {
   /** Caller-observed attempt start; direct callers default to launcher entry. */
   spawnRequestedAt?: number;
 }): InteractiveSubagentState {
+  if (params.readOnly !== undefined && typeof params.readOnly !== "boolean") {
+    throw new TypeError("readOnly must be a boolean");
+  }
   const completionPolicy = params.completionPolicy ?? "each";
   const spawnStartedAt = params.spawnRequestedAt ?? Date.now();
   let spawnFailureReported = false;
@@ -820,6 +853,7 @@ export function launchInteractiveSubagent(params: {
   const prompt = buildInteractivePrompt({
     task: params.task,
     contextText: params.contextText,
+    readOnly: params.readOnly === true,
   });
   try {
     mkdirSync(paths.artifactDir, { recursive: true });
@@ -866,6 +900,7 @@ export function launchInteractiveSubagent(params: {
     const protocol = buildChildSubagentProtocol(
       paths.artifactDir,
       params.requireActivePaneForUserAttention,
+      params.readOnly === true,
     );
     const systemPromptContent = params.persona
       ? `# Persona\n\n${params.persona}\n\n${protocol}`
@@ -1081,6 +1116,7 @@ export function launchInteractiveSubagent(params: {
       model: params.model,
       cwd,
       thinkingLevel: params.thinkingLevel,
+      readOnly: params.readOnly === true,
     });
   } catch (err) {
     reportSpawnFailure("state_persistence", mux.name, "child_command_build");
@@ -1121,13 +1157,6 @@ export function launchInteractiveSubagent(params: {
     throw err;
   }
   try {
-    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-    mux.sendKeys(
-      paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
-      muxSession,
-    );
-    mux.sendEnter(paneId, muxSession);
     attach = mux.buildAttachCommands({
       paneId,
       terminalId: muxTerminalId,
@@ -1184,6 +1213,17 @@ export function launchInteractiveSubagent(params: {
       spawnStartedAt: spawnStartedAt,
       captured: false,
     });
+  }
+  try {
+    params.beforeDispatch?.(state);
+    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+    const launch = `exec bash ${escape(paths.launchScriptFile)}`;
+    mux.sendKeys(paneId, params.wrapCommand?.(launch) ?? launch, muxSession);
+    mux.sendEnter(paneId, muxSession);
+  } catch (error) {
+    reportSpawnFailure("pane_launch", mux.name);
+    cleanupFailedSpawn();
+    throw error;
   }
   try {
     registerInteractiveSubagentState(state, liveScope);
@@ -1459,6 +1499,16 @@ interface ParentCancellationContext {
   lifecycleReason?: ParentCancellationLifecycleReason;
 }
 
+function terminateOwnedInteractivePane(state: InteractiveSubagentState): void {
+  if (state.durableWorkflowAttempt) {
+    cancelDurableProcess(state.durableWorkflowAttempt);
+    return;
+  }
+  const mux = getMuxForState(state);
+  if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead")
+    mux.killPane(state.paneId, state.muxSession);
+}
+
 export function cancelInteractiveSubagent(
   id: string,
   source: CancellationSnapshotSource = "cancel_interactive_subagent",
@@ -1496,10 +1546,7 @@ export function cancelInteractiveSubagent(
   } finally {
     // A failed artifact write must not prevent the requested stop.
     state.status = "cancelled";
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
-    }
+    terminateOwnedInteractivePane(state);
   }
   return state;
 }
@@ -1570,10 +1617,7 @@ export function cancelInteractiveDescendantByState(
     appendCancellation(state, { origin: "supervisor_descendant" });
   } finally {
     state.status = "cancelled";
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
-    }
+    terminateOwnedInteractivePane(state);
   }
   return state;
 }
@@ -1630,13 +1674,12 @@ export function cancelInteractiveSubagentByState(
     appendCancellation(state, context);
   } finally {
     // Teardown must outlive artifact failures during destructive transitions.
-    const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      try {
-        mux.killPane(state.paneId, state.muxSession);
-      } catch {
-        /* best-effort */
-      }
+    try {
+      terminateOwnedInteractivePane(state);
+    } catch (error) {
+      debugLog("warn", "interactive_cancel_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   // Does NOT update state.status — see JSDoc point 2.

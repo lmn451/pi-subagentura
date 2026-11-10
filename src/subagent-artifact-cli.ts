@@ -184,10 +184,54 @@ const withCompletionLock = (operation) => {
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);
+const processSignalNames = [
+  "SIGHUP",
+  "SIGINT",
+  "SIGQUIT",
+  "SIGILL",
+  "SIGTRAP",
+  "SIGABRT",
+  "SIGBUS",
+  "SIGFPE",
+  "SIGKILL",
+  "SIGUSR1",
+  "SIGSEGV",
+  "SIGUSR2",
+  "SIGPIPE",
+  "SIGALRM",
+  "SIGTERM",
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGSTOP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGURG",
+  "SIGXCPU",
+  "SIGXFSZ",
+  "SIGVTALRM",
+  "SIGPROF",
+  "SIGWINCH",
+  "SIGIO",
+  "SIGPWR",
+  "SIGSYS",
+];
+const signalNamesByNumber = new Map();
+for (const name of processSignalNames) {
+  const signalNumber = osConstants.signals[name];
+  if (
+    Number.isSafeInteger(signalNumber) &&
+    !signalNamesByNumber.has(signalNumber)
+  ) {
+    signalNamesByNumber.set(signalNumber, name);
+  }
+}
 const signalForExitCode = (exitCode) => {
   if (!Number.isSafeInteger(exitCode)) return undefined;
   const signalNumber = exitCode - 128;
-  return Object.entries(osConstants.signals).find(([, number]) => number === signalNumber)?.[0];
+  return Number.isSafeInteger(exitCode) && signalNumber > 0
+    ? signalNamesByNumber.get(signalNumber)
+    : undefined;
 };
 const processExitDiagnostics = (exitCode, cancelled, alreadyCompleted) => {
   const activeTool = activeState?.activeTools?.at(-1);
