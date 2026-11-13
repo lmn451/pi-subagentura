@@ -93,6 +93,33 @@ afterEach(() => {
 // The emitted system prompt is an intentional interface, not proof of model
 // behavior.
 describe("interactive prompt assembly contract", () => {
+  it("requires verified current-session Orca proof or an explicit Orca request", () => {
+    expect(orcaPromptAsset).toContain(
+      "Only use Orca skills or invoke the Orca CLI after current-session/runtime evidence verifies that this Pi caller and terminal belong to the running Orca instance, or when the user explicitly selects Orca.",
+    );
+    expect(orcaPromptAsset).toContain(
+      "An installed CLI or skill, inherited environment marker, cwd, or active UI tab alone is not proof.",
+    );
+    expect(orcaPromptAsset).toContain(
+      "If positively outside Orca, do not use Orca skills or tools unless the user explicitly selected Orca",
+    );
+    expect(orcaPromptAsset).toContain(
+      "If host or surface is ambiguous, ask before launching; do not silently switch or fall back.",
+    );
+    expect(orcaPromptAsset).toContain(
+      "Every explicit user-selected target still wins, including native",
+    );
+    expect(orcaPromptAsset).toContain(
+      "Existing native interactive children remain native",
+    );
+    expect(interactivePromptAsset).toContain(
+      "Every explicit user-selected target still wins, including native",
+    );
+    expect(interactivePromptAsset).toContain(
+      "Use Orca only after current-session/runtime evidence verifies the caller and terminal, or when the user explicitly selects Orca.",
+    );
+  });
+
   const promptCases = [
     { name: "normal parent", child: false, flag: undefined, modeAssets: [] },
     {

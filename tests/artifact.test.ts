@@ -1193,6 +1193,31 @@ describe("persisted interactive state helpers", () => {
 
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
+
+  it("persists the Rex server identity and rejects incomplete Rex state", () => {
+    const rexState: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+      mux: "rex",
+      muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+      muxServer: "unix:///tmp/rex.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { [rexState.id]: rexState },
+    });
+    expect(loadInteractiveStates(root)?.states[rexState.id]).toEqual(rexState);
+
+    const persisted = JSON.parse(readFileSync(stateFilePath(root), "utf8")) as {
+      states: Record<string, Record<string, unknown>>;
+    };
+    delete persisted.states[rexState.id]!.muxServer;
+    writeFileSync(stateFilePath(root), JSON.stringify(persisted), {
+      mode: 0o600,
+    });
+    expect(loadInteractiveStates(root)).toBeNull();
+  });
   it("round-trips only bounded absolute working cwd values", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });

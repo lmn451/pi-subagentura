@@ -9,7 +9,36 @@
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij" | "herdr";
+export type MuxName = "tmux" | "zellij" | "herdr" | "rex";
+const REX_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isRexSessionId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^session:/.test(value) &&
+    REX_UUID_PATTERN.test(value.slice(8))
+  );
+}
+
+export function isRexBlockId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^block:/.test(value) &&
+    REX_UUID_PATTERN.test(value.slice(6))
+  );
+}
+
+export function isRexServerAddress(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 4096 &&
+    value.trim() === value &&
+    !value.startsWith("-") &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 /** Result of a backend pane-listing liveness probe. */
 export type PaneLiveness = "alive" | "dead" | "unknown";
 export type PaneLivenessFailureReason =
@@ -30,6 +59,8 @@ export interface PaneRef {
   readonly muxTerminalId?: string;
   readonly windowName?: string;
   readonly session?: string;
+  /** Stable server endpoint, required by server-scoped backends such as Rex. */
+  readonly server?: string;
 }
 
 /**
@@ -58,19 +89,11 @@ export interface MultiplexerCapabilities {
  * entry directly from a `MuxName` (e.g. `InteractiveSubagentState.mux`) without
  * resolving a backend instance or paying an availability probe.
  *
- * Every flag below is asserted against the real `tmux` / `zellij` / `herdr`
- * binaries in `tests/tmux.integration.test.ts`,
- * `tests/zellij.integration.test.ts` and `tests/herdr.integration.test.ts` —
- * flipping one to `true` without a passing real-binary assertion is how the
- * broken zellij `dump-screen` argv shipped green.
- *
- * Caveat on the Herdr row, stated plainly because a half-kept invariant is
- * worse than none: that suite is wired into CI but SELF-SKIPS on every runner
- * today. Herdr has no headless Linux install and its backend only operates
- * from inside a Herdr-managed pane, so the assertions run only where such an
- * environment exists — `npm run test:herdr` on a Herdr machine. Until a runner
- * can host Herdr, treat the Herdr flags as asserted-on-demand rather than
- * asserted-per-commit, and run that suite by hand when changing them.
+ * Every flag below is asserted against real backend contracts. Rex uses the
+ * documented public CLI; activity remains unknown and capture is bounded by a
+ * hard subprocess buffer ceiling because Rex has no server-side capture limit.
+ * Herdr's real-binary suite is wired into CI but self-skips on runners without
+ * Herdr; run `npm run test:herdr` by hand when changing its row.
  */
 export const MUX_CAPABILITIES: Readonly<
   Record<MuxName, MultiplexerCapabilities>
@@ -100,6 +123,13 @@ export const MUX_CAPABILITIES: Readonly<
     // server-bounded, and the reply carries its own `truncated` flag.
     boundedCapture: true,
     // Herdr has no generic transient content overlay in its public CLI.
+    nativeOverlay: false,
+  },
+  rex: {
+    // `rex focus <block-id> -s <session-id>` targets stable public IDs.
+    structuredFocus: true,
+    // The CLI has no capture limit; the backend enforces a maxBuffer ceiling.
+    boundedCapture: true,
     nativeOverlay: false,
   },
 } as const;
@@ -139,9 +169,9 @@ export interface Multiplexer {
    * running that we can attach to / create panes in. Used by the resolver
    * and by the `subagent_interactive` tool's preflight check.
    *
-   * MUST be cheap (no network, no prompt). Implementations are expected to
-   * probe the env var + run a single `display-message` / `list-sessions`
-   * equivalent with a short timeout.
+   * MUST be bounded and noninteractive. Local backends normally use a short
+   * command probe; Rex additionally verifies the current server/session/block
+   * through its public CLI with bounded timeouts before auto-selection.
    */
   isAvailable(): boolean;
 
@@ -194,6 +224,7 @@ export interface Multiplexer {
     muxTerminalId?: string;
     windowName?: string;
     session?: string;
+    server?: string;
   };
 
   /**
@@ -203,18 +234,27 @@ export interface Multiplexer {
    * `dead` when it is absent. Command, setup, timeout, and parse failures return
    * `unknown`; callers must not mistake an unavailable backend for a dead pane.
    *
-   * @param session  The session returned by `createPane`. zellij needs it to
-   *                 target the right server; tmux pane ids are server-global.
+   * @param session  The session returned by `createPane`. zellij and Rex need it.
+   * @param server   Stable server endpoint returned by `createPane` when needed.
    */
-  getPaneLiveness(paneId: string, session?: string): PaneLiveness;
+  getPaneLiveness(
+    paneId: string,
+    session?: string,
+    server?: string,
+  ): PaneLiveness;
 
   /** Asynchronously perform the same tri-state pane-listing probe. */
-  getPaneLivenessAsync(paneId: string, session?: string): Promise<PaneLiveness>;
+  getPaneLivenessAsync(
+    paneId: string,
+    session?: string,
+    server?: string,
+  ): Promise<PaneLiveness>;
 
   /** Optional closed diagnostic detail for an unknown liveness result. */
   getPaneLivenessDiagnosticAsync?(
     paneId: string,
     session?: string,
+    server?: string,
   ): Promise<PaneLivenessDiagnostic>;
 
   /**
@@ -222,7 +262,11 @@ export interface Multiplexer {
    * client. `inactive` includes a detached session or an unfocused pane;
    * command, setup, timeout, and parse failures return `unknown`.
    */
-  getPaneActivityAsync(paneId: string, session?: string): Promise<PaneActivity>;
+  getPaneActivityAsync(
+    paneId: string,
+    session?: string,
+    server?: string,
+  ): Promise<PaneActivity>;
 
   /**
    * Send literal text to the pane's shell input buffer, character-by-character.
@@ -235,7 +279,12 @@ export interface Multiplexer {
    * @param session  The session returned by `createPane` (zellij needs it;
    *                 tmux ignores it).
    */
-  sendKeys(paneId: string, text: string, session?: string): void;
+  sendKeys(
+    paneId: string,
+    text: string,
+    session?: string,
+    server?: string,
+  ): void;
 
   /**
    * Send a single Enter / Return key to the pane, submitting whatever is
@@ -245,7 +294,7 @@ export interface Multiplexer {
    * @param session  The session returned by `createPane` (zellij needs it;
    *                 tmux ignores it).
    */
-  sendEnter(paneId: string, session?: string): void;
+  sendEnter(paneId: string, session?: string, server?: string): void;
 
   /**
    * Kill the pane. MUST be best-effort: no throw on already-dead panes.
@@ -254,7 +303,7 @@ export interface Multiplexer {
    * @param session  The session returned by `createPane` (zellij needs it;
    *                 tmux ignores it).
    */
-  killPane(paneId: string, session?: string): void;
+  killPane(paneId: string, session?: string, server?: string): void;
 
   /** Focus the referenced pane or its containing window/tab. */
   focusPane(ref: PaneRef): Promise<void>;
@@ -273,7 +322,10 @@ export interface Multiplexer {
    * this backend's panes. `undefined` = cannot determine.
    * MUST NOT throw; resolve undefined on backend errors.
    */
-  hasAttachedClientAsync?(session?: string): Promise<boolean | undefined>;
+  hasAttachedClientAsync?(
+    session?: string,
+    server?: string,
+  ): Promise<boolean | undefined>;
 
   /**
    * Build the user-facing commands to attach to (or focus) the child's pane.
@@ -296,6 +348,7 @@ export interface Multiplexer {
     terminalId?: string;
     windowName?: string;
     session?: string;
+    server?: string;
   }): {
     attachCommand: string;
     focusCommand: string;
@@ -449,9 +502,9 @@ export function shellEscape(value: string): string {
  * and relevant stderr/stdout/exit-status details from the underlying exec
  * failure. The original error is preserved as `cause`.
  *
- * @param muxName   Backend name ("tmux", "zellij", or "herdr") — identifies the tool in the error.
+ * @param muxName   Backend name ("tmux", "zellij", "herdr", or "rex") — identifies the tool in the error.
  * @param operation Human-readable description (e.g. "new-window", "send-keys").
- * @param cmd       The command binary (e.g. "tmux", "zellij", "herdr").
+ * @param cmd       The command binary (e.g. "tmux", "zellij", "herdr", "rex").
  * @param args      Command arguments (passed through to execFileSync).
  * @param options   execFileSync options (e.g. `{ encoding: "utf8", timeout: 5000 }`).
  * @returns The stdout as a string.
@@ -495,7 +548,7 @@ export function execMuxOrThrow(
   }
 }
 
-/** Upper bound for tmux's `execFile` pane-capture buffer. */
+/** Maximum subprocess output read for bounded pane capture. */
 export const MAX_CAPTURE_READ_BYTES = 1024 * 1024;
 
 /**

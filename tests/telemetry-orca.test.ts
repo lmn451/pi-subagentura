@@ -11,7 +11,13 @@ import {
   type TelemetryMux,
 } from "../src/telemetry";
 
-const childMuxes: readonly TelemetryMux[] = ["none", "tmux", "zellij", "herdr"];
+const childMuxes: readonly TelemetryMux[] = [
+  "none",
+  "tmux",
+  "zellij",
+  "herdr",
+  "rex",
+];
 
 function lifecycleEvents(mux: TelemetryMux): TelemetryEvent[] {
   const dimensions = {
@@ -186,8 +192,10 @@ describe("prompt-only host telemetry attribution boundary", () => {
     expect(telemetryOperationName("tool", "bash")).toBeUndefined();
   });
 
-  it("does not recognize Orca as a currently supported child backend", () => {
+  it("keeps Orca separate and recognizes Rex as a child backend", () => {
     expect(sanitizeTelemetryRequestedMux("orca")).toBeUndefined();
+    expect(sanitizeTelemetryRequestedMux("rex")).toBe("rex");
+    expect(sanitizeTelemetrySpawnFailureMux("rex")).toBe("rex");
     expect(sanitizeTelemetrySpawnFailureMux("orca")).toBeUndefined();
     expect(sanitizeTelemetryRuntimeFailureMux("orca")).toBeUndefined();
   });

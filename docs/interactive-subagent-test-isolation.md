@@ -149,8 +149,10 @@ real child state in a shared fixture registry merely to inspect its status.
 ## Real multiplexer tests
 
 The ordinary `npm test` command excludes the real tmux, Zellij, and Herdr
-integration files. Use the backend-specific scripts when command and process
-behavior matters:
+integration files. Rex CLI behavior is tested with mocked public-command
+contracts; any real Rex integration must be opt-in and use an isolated Rex
+session, never the user's working session. Use the backend-specific scripts when
+command and process behavior matters:
 
 ```bash
 npm run test:tmux

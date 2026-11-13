@@ -96,6 +96,34 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(rehydrated?.completionPolicy).toBe("group");
     expect(rehydrated?.completionGroupId).toBe("review");
   });
+
+  it("rehydrates Rex server/session identity for later backend operations", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const state = makeState(cwd, "rex-child");
+    const rexSession = "session:01234567-89ab-cdef-0123-456789abcdef";
+    const rexBlock = "block:01234567-89ab-cdef-0123-456789abcdef";
+    const rexServer = "unix:///tmp/rex.sock";
+    appendInteractiveState(cwd, {
+      id: state.id,
+      paneId: rexBlock,
+      mux: "rex",
+      muxSession: rexSession,
+      muxServer: rexServer,
+      artifactDir: state.artifactDir,
+      sessionFile: state.sessionFile,
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
+
+    expect(scope.interactiveStates.get(state.id)).toMatchObject({
+      paneId: rexBlock,
+      mux: "rex",
+      muxSession: rexSession,
+      muxServer: rexServer,
+    });
+  });
+
   it("rehydrates parent state cwd separately from the child working cwd", async () => {
     const mod =
       await importFresh<typeof import("../src/subagent")>("../src/subagent");

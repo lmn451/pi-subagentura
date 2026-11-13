@@ -285,9 +285,11 @@ Use `/workflow-status` for the full textual status dump, or `/workflow-tree` for
 #### 2. Per-agent visibility
 
 Workflow `agent()` calls default to process isolation. Each process-backed agent
-runs in tmux, Zellij, or Herdr and is also shown by the interactive sub-agent widget below
-the editor. In-process agents still forward live `activeTool` / output-preview
-updates as workflow log events when the underlying runner exposes them.
+runs in tmux, Zellij, Herdr, or Rex when the current Rex context is verified and
+is also shown by the interactive sub-agent widget below the editor. A recognized
+but unsupported host is not replaced with another mux. In-process agents still
+forward live `activeTool` / output-preview updates as workflow log events when
+the underlying runner exposes them.
 
 #### 3. Interactive drill-down overlay
 
@@ -315,7 +317,7 @@ are still deferred because widgets are intentionally passive status surfaces.
 ### Process isolation
 
 By default, each `agent()` call spawns a separate `pi` process inside tmux,
-Zellij, or Herdr:
+Zellij, Herdr, or Rex when the current Rex context is verified:
 
 ```js
 await agent(prompt, { label: "verify:claim-x" });

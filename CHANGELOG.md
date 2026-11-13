@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add Superlogical Rex as a validated interactive mux backend with persisted
+  server/session/block identity, bounded capture, and conservative unknown
+  liveness/activity behavior.
+- Fail closed rather than silently selecting another mux when a recognized host
+  context is incomplete or unsupported; explicit mux choices still take priority.
+- Clarify and test when Orca skills may be used versus when native delegation or
+  a user clarification is required.
+
+### Changed
+
+- Extend closed mux and parent-mux telemetry enums with Rex (schema v7).
+
 ## [4.2.1] - 2026-11-07
 
 ### Added

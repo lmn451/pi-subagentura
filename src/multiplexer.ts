@@ -8,16 +8,17 @@
  *
  * Resolution order (`getMux`):
  *   1. Explicit `preference` arg from the tool (forces one backend).
- *   2. Auto-detect: prefer the mux already attached to the parent process
- *      (env var heuristic: HERDR_ENV, ZELLIJ_SESSION_NAME, then TMUX).
- *   3. Fall back to whichever backend has a binary + active server, tmux first
- *      for backward compatibility.
+ *   2. A verified current host context (Herdr, Rex, Zellij, then tmux).
+ *      A recognized but unverified context fails closed rather than falling
+ *      through to an unrelated installed backend.
+ *   3. When no host context is present, fall back to installed tmux then
+ *      Zellij for backward compatibility.
  *   4. Throw with a setup hint pointing at the supported backends.
  */
-
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
+import { probeRexContext, RexMultiplexer } from "./multiplexer-rex";
 import type { MuxName, Multiplexer } from "./multiplexer-contracts";
 
 export * from "./multiplexer-contracts";
@@ -42,52 +43,83 @@ export interface GetMuxOptions {
 export class NoMultiplexerAvailableError extends Error {
   constructor() {
     super(
-      "No multiplexer available. Start pi inside tmux, zellij, or Herdr, " +
+      "No multiplexer available. Start pi inside tmux, zellij, Herdr, or Rex, " +
         "for example: tmux new -A -s pi 'pi'  —  or install one and ensure its server is running.",
     );
     this.name = "NoMultiplexerAvailableError";
   }
 }
 
+export class MultiplexerContextUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MultiplexerContextUnavailableError";
+  }
+}
+
 /**
  * Resolve a multiplexer instance.
  *
- * Returns a long-lived `Multiplexer` — implementations are stateless after
- * construction (the resolver holds one per backend so the env-var probe is
- * paid once per process). Callers may cache the result, but `getMux` itself
- * is cheap on the hot path because it just looks up the cached instance.
+ * Returns a cached backend instance. Auto resolution performs bounded host
+ * checks before selection; an explicit preference skips host detection. Backend
+ * instances keep no per-pane state, which remains persisted on child records.
  */
-export function getMux(opts: GetMuxOptions = {}): Multiplexer {
+function resolveAutoMux(): Multiplexer {
   const tmux = getOrCreate("tmux", () => new TmuxMultiplexer());
   const zellij = getOrCreate("zellij", () => new ZellijMultiplexer());
   const herdr = getOrCreate("herdr", () => new HerdrMultiplexer());
+  const rex = getOrCreate("rex", () => new RexMultiplexer());
 
+  // Herdr's exact managed-pane marker remains the most specific legacy signal.
+  if (process.env.HERDR_ENV === "1") {
+    if (herdr.isAvailable()) return herdr;
+    throw new MultiplexerContextUnavailableError(
+      "Herdr context is present but unavailable; refusing to fall back to another multiplexer.",
+    );
+  }
+
+  const rexContext = probeRexContext();
+  if (rexContext.kind === "invalid") {
+    throw new MultiplexerContextUnavailableError(rexContext.message);
+  }
+  if (rexContext.kind === "ready") return rex;
+
+  if (process.env.ZELLIJ_SESSION_NAME) {
+    if (zellij.isAvailable()) return zellij;
+    throw new MultiplexerContextUnavailableError(
+      "Zellij context is present but unavailable; refusing to fall back to another multiplexer.",
+    );
+  }
+  if (process.env.ZELLIJ) {
+    throw new MultiplexerContextUnavailableError(
+      "Zellij context marker is present without a session identity; refusing to fall back.",
+    );
+  }
+  if (process.env.TMUX) {
+    if (tmux.isAvailable()) return tmux;
+    throw new MultiplexerContextUnavailableError(
+      "tmux context is present but unavailable; refusing to fall back to another multiplexer.",
+    );
+  }
+
+  if (tmux.isAvailable()) return tmux;
+  if (zellij.isAvailable()) return zellij;
+  throw new NoMultiplexerAvailableError();
+}
+
+export function getMux(opts: GetMuxOptions = {}): Multiplexer {
   const preference = opts.preference ?? "auto";
+  if (preference === "auto") return resolveAutoMux();
+
   switch (preference) {
     case "tmux":
-      return tmux;
+      return getOrCreate("tmux", () => new TmuxMultiplexer());
     case "zellij":
-      return zellij;
+      return getOrCreate("zellij", () => new ZellijMultiplexer());
     case "herdr":
-      return herdr;
-    case "auto": {
-      // Prefer the mux already attached to this process. We check env vars
-      // (cheap) before probing availability (one exec call each). If both env
-      // vars are set (nested sessions are possible), Herdr wins because its
-      // managed-pane marker is the most specific signal. Zellij remains ahead
-      // of tmux because TMUX is commonly inherited through nested sessions.
-      if (process.env.HERDR_ENV === "1" && herdr.isAvailable()) return herdr;
-      if (process.env.ZELLIJ_SESSION_NAME && zellij.isAvailable())
-        return zellij;
-      if (process.env.TMUX && tmux.isAvailable()) return tmux;
-
-      // Neither env var matched. Fall back to whichever backend is available;
-      // tmux first to preserve existing user setups.
-      if (tmux.isAvailable()) return tmux;
-      if (zellij.isAvailable()) return zellij;
-
-      throw new NoMultiplexerAvailableError();
-    }
+      return getOrCreate("herdr", () => new HerdrMultiplexer());
+    case "rex":
+      return getOrCreate("rex", () => new RexMultiplexer());
     default:
       return assertNever(preference);
   }
@@ -118,6 +150,12 @@ export function __setTmuxMultiplexer(impl: Multiplexer | undefined): void {
 export function __setZellijMultiplexer(impl: Multiplexer | undefined): void {
   if (impl) instances.set("zellij", impl);
   else instances.delete("zellij");
+}
+
+/** Test seam: replace the cached Rex backend. Pass `undefined` to restore. */
+export function __setRexMultiplexer(impl: Multiplexer | undefined): void {
+  if (impl) instances.set("rex", impl);
+  else instances.delete("rex");
 }
 
 /** Test seam: clear all cached backend instances (forces re-instantiation). */

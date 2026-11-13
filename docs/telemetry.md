@@ -3,8 +3,9 @@
 The event schema is defined by `TELEMETRY_SCHEMA_VERSION` in
 [`src/telemetry.ts`](../src/telemetry.ts). See [CHANGELOG.md](../CHANGELOG.md)
 for release attribution. Schema v6 adds logical launch resolution, closed traffic
-provenance, and attributed runtime observations. It cannot reconstruct those
-facts for historical schema-v5 events.
+provenance, and attributed runtime observations; those facts cannot be reconstructed
+for historical schema-v5 events. Schema v7 adds Rex to the closed multiplexer
+dimensions; Rex cannot be reconstructed for historical schema-v6 events.
 
 ## Measurement contract
 
@@ -30,13 +31,13 @@ not a linked cohort. A runtime success does not measure answer usefulness.
 ### Child backend versus terminal host
 
 `mux` attributes the extension-managed child execution backend, not the terminal
-hosting Pi. A tmux child remains `mux=tmux` inside Orca or Agterm; an in-process
-child remains `mux=none`. On `agent_launch_resolved`, `requested_execution` and
-`requested_mux` record the request, while `execution` and `mux` record the
-resolved extension launch (or `unknown` where no backend was established).
-These fields remain independent of the outer-host label. Nested or inherited
-host, tmux and Zellij markers must not make these dimensions mutually exclusive
-or select a target in place of an explicit mux choice.
+hosting Pi. A tmux child remains `mux=tmux` inside Orca or Agterm; a Rex child
+uses `mux=rex`; an in-process child remains `mux=none`. On `agent_launch_resolved`,
+`requested_execution` and `requested_mux` record the request, while `execution` and
+`mux` record the resolved extension launch (or `unknown` where no backend was
+established). These fields remain independent of the outer-host label. Nested or
+inherited host, tmux, Zellij, and Rex markers must not make these dimensions
+mutually exclusive or select a target in place of an explicit mux choice.
 
 The shared host-aware guidance is prompt/skill-based in ordinary sessions,
 interactive children/nested contexts, and both orchestration modes. Orca's
@@ -125,14 +126,16 @@ routing.
 
 ### Parent multiplexer context
 
-Fresh root `session_started` events include additive schema-v6 `parent_mux`:
-`tmux`, `zellij`, `herdr`, or `unknown`. This observes the parent Pi environment,
-not the child execution backend (`mux`) or requested backend (`requested_mux`).
-It uses a nonempty, bounded, control-character-free `TMUX` or
-`ZELLIJ_SESSION_NAME`, or exact `HERDR_ENV=1`. Exactly one recognized marker
-produces its label. Missing or multiple markers produce `unknown`: nested
-environments do not reliably establish which mux is innermost. Missing
-historical fields are also unknown, not proof that no multiplexer was used.
+Fresh root `session_started` events include the schema-v6 `parent_mux` dimension,
+with `rex` added as an allowed value in schema v7: `tmux`, `zellij`, `herdr`,
+`rex`, or `unknown`. This observes the parent Pi environment, not the child
+execution backend (`mux`) or requested backend (`requested_mux`). It uses a
+nonempty, bounded, control-character-free `TMUX` or `ZELLIJ_SESSION_NAME`, exact
+`HERDR_ENV=1`, or a complete nonempty `REX_SESSION`/`REX_BLOCK`/`REX_SERVER`
+marker set. Exactly one recognized marker produces its label. Missing, partial,
+or multiple markers produce `unknown`: nested environments do not reliably
+establish which mux is innermost. Missing historical fields are also unknown, not
+proof that no multiplexer was used.
 
 No command, binary availability check, socket connection, or server probe runs;
 no raw socket path, session name, or other marker value is sent. Classification
@@ -155,9 +158,9 @@ a provider error. A later LLM/tool call is a new request, not inferred recovery.
 Automatic mux candidate selection is not itself a rejected launch attempt.
 
 The event carries `requested_execution` (`in-process` or `interactive`),
-`requested_mux` (`none`, `auto`, `tmux`, `zellij`, or `herdr`), accepted `execution`
-when known, `mux` (`none`, `unknown`, `tmux`, `zellij`, or `herdr`),
-`invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
+`requested_mux` (`none`, `auto`, `tmux`, `zellij`, `herdr`, or `rex`), accepted
+`execution` when known, and `mux` (`none`, `unknown`, `tmux`, `zellij`, `herdr`,
+or `rex`), `invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
 `fallback_attempted`. An unresolved interactive backend is `unknown`, not
 `none`; an in-process path needs no mux and uses `none`. Optional
 `initial_failure_stage` / `initial_failure_operation` explain the first rejection,

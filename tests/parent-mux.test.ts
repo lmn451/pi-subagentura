@@ -12,6 +12,21 @@ describe("parent multiplexer environment observation", () => {
     [{ TMUX: "/private/socket,123,0" }, "tmux"],
     [{ ZELLIJ_SESSION_NAME: "private-session" }, "zellij"],
     [{ HERDR_ENV: "1" }, "herdr"],
+    [
+      {
+        REX_SESSION: "session:01234567-89ab-cdef-0123-456789abcdef",
+        REX_BLOCK: "block:01234567-89ab-cdef-0123-456789abcdef",
+        REX_SERVER: "unix:///tmp/rex.sock",
+      },
+      "rex",
+    ],
+    [
+      {
+        REX_SESSION: "session:01234567-89ab-cdef-0123-456789abcdef",
+        REX_BLOCK: "block:01234567-89ab-cdef-0123-456789abcdef",
+      },
+      "unknown",
+    ],
     [{ HERDR_ENV: "0" }, "unknown"],
     [{ HERDR_SOCKET_PATH: "/private/socket" }, "unknown"],
     [{ TMUX: "" }, "unknown"],
@@ -20,6 +35,15 @@ describe("parent multiplexer environment observation", () => {
     [{ ZELLIJ_SESSION_NAME: "x".repeat(4097) }, "unknown"],
     [{ TMUX: "socket", ZELLIJ_SESSION_NAME: "name" }, "unknown"],
     [{ TMUX: "socket", HERDR_ENV: "1" }, "unknown"],
+    [
+      {
+        TMUX: "socket",
+        REX_SESSION: "session:01234567-89ab-cdef-0123-456789abcdef",
+        REX_BLOCK: "block:01234567-89ab-cdef-0123-456789abcdef",
+        REX_SERVER: "unix:///tmp/rex.sock",
+      },
+      "unknown",
+    ],
     [{ ZELLIJ_SESSION_NAME: "name", HERDR_ENV: "1" }, "unknown"],
     [
       { TMUX: "socket", ZELLIJ_SESSION_NAME: "name", HERDR_ENV: "1" },

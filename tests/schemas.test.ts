@@ -706,7 +706,7 @@ describe("InteractiveParams", () => {
     ).toBe(false);
   });
 
-  /* ---------- optional `mux` (auto | tmux | zellij | herdr) ---------- */
+  /* ---------- optional `mux` (auto | tmux | zellij | herdr | rex) ---------- */
 
   it("accepts missing mux", () => {
     expect(check(InteractiveParams)({ task: "t" })).toBe(true);
@@ -736,6 +736,12 @@ describe("InteractiveParams", () => {
     );
   });
 
+  it("accepts mux 'rex'", () => {
+    expect(check(InteractiveParams)({ task: "t", mux: "rex" as const })).toBe(
+      true,
+    );
+  });
+
   it("rejects mux 'screen'", () => {
     expect(check(InteractiveParams)({ task: "t", mux: "screen" })).toBe(false);
   });
@@ -754,7 +760,7 @@ describe("InteractiveParams", () => {
       mux: "hyper",
     });
     expect(
-      msgs.some((m) => /auto|tmux|zellij|herdr|constant|anyOf/i.test(m)),
+      msgs.some((m) => /auto|tmux|zellij|herdr|rex|constant|anyOf/i.test(m)),
     ).toBe(true);
   });
 

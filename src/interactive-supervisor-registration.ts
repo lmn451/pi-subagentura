@@ -243,6 +243,7 @@ function muxNameForManifest(manifest: LineageManifest): MuxName | undefined {
   if (manifest.pane.backend === "tmux") return "tmux";
   if (manifest.pane.backend === "zellij") return "zellij";
   if (manifest.pane.backend === "herdr") return "herdr";
+  if (manifest.pane.backend === "rex") return "rex";
   return undefined;
 }
 
@@ -273,6 +274,9 @@ function stateForNode(
         paneId: manifest.pane.paneId,
         windowName: manifest.pane.windowName,
         session: manifest.pane.muxSession,
+        ...(manifest.pane.muxServer === undefined
+          ? {}
+          : { server: manifest.pane.muxServer }),
       });
     } catch {
       const target = manifest.pane.windowName ?? manifest.pane.paneId;
@@ -298,6 +302,9 @@ function stateForNode(
     windowName: manifest.pane.windowName,
     mux,
     muxSession: manifest.pane.muxSession,
+    ...(manifest.pane.muxServer === undefined
+      ? {}
+      : { muxServer: manifest.pane.muxServer }),
     sessionFile: manifest.childSessionFile ?? "unknown",
     cwd: manifest.cwd,
     ...(isAbsolute(manifest.cwd) && !manifest.cwd.includes("\0")
@@ -348,7 +355,8 @@ async function loadSupervisorProjection(
     if (
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij" &&
-      manifest.pane.backend !== "herdr"
+      manifest.pane.backend !== "herdr" &&
+      manifest.pane.backend !== "rex"
     ) {
       paneLivenessById.set(manifest.agentId, "unknown");
       return false;
@@ -357,7 +365,13 @@ async function loadSupervisorProjection(
     try {
       paneLiveness = await getMux({
         preference: manifest.pane.backend,
-      }).getPaneLivenessAsync(manifest.pane.paneId, manifest.pane.muxSession);
+      }).getPaneLivenessAsync(
+        manifest.pane.paneId,
+        manifest.pane.muxSession,
+        ...(manifest.pane.muxServer === undefined
+          ? []
+          : [manifest.pane.muxServer]),
+      );
     } catch {
       paneLiveness = "unknown";
     }

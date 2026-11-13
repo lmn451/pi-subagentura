@@ -1951,7 +1951,7 @@ export function registerWorkflowTool(
       "3. Save the script with `save_workflow` using a lowercase slug name.",
       "4. Immediately start it with the `workflow` tool by saved `name` and suitable `args`.",
       "5. Do not use Node APIs inside the workflow script; file I/O must happen inside sub-agents via tools.",
-      "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation and fall back to in-process automatically.",
+      "6. Do not set `isolation` unless the workflow explicitly needs to opt out; workflow agents default to tmux/Zellij/Herdr process isolation, or Rex when the current Rex context is verified. A recognized but unsupported host is never replaced by another mux; existing in-process fallback remains for ordinary no-mux contexts.",
       "7. Report the saved workflow name and returned workflowId.",
       "",
       "User task:",
