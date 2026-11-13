@@ -180,7 +180,9 @@ function parseClientListing(output: string): boolean {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  if (lines.length === 0 || lines[0] !== ZELLIJ_CLIENT_HEADER) {
+  // Zellij 0.44 emits no header when detached; newer versions emit only the header.
+  if (lines.length === 0) return false;
+  if (lines[0] !== ZELLIJ_CLIENT_HEADER) {
     throw new Error("Malformed zellij client listing");
   }
   return lines.length > 1;

@@ -365,4 +365,60 @@ describe("current pane activity", () => {
       /inactive or unknown, do not open a prompt here/,
     );
   });
+  it("reports a detached zellij 0.44 session inactive for an empty client listing", async () => {
+    process.env.ZELLIJ = "0";
+    process.env.ZELLIJ_SESSION_NAME = "main";
+    process.env.ZELLIJ_PANE_ID = "42";
+    installMockChildProcess((args) => {
+      if (args.includes("list-clients")) return "";
+      if (args.includes("list-tabs"))
+        return JSON.stringify([{ position: 0, tab_id: 7, active: false }]);
+      if (args.includes("list-panes"))
+        return JSON.stringify([
+          {
+            id: 42,
+            is_plugin: false,
+            is_focused: true,
+            is_floating: false,
+            is_suppressed: false,
+            tab_id: 7,
+            tab_position: 0,
+          },
+        ]);
+      return "";
+    });
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "inactive",
+      mux: "zellij",
+      paneId: "42",
+      session: "main",
+    });
+  });
+  it.each(["failed", "malformed"] as const)(
+    "keeps zellij activity unknown for a %s client probe",
+    async (kind) => {
+      process.env.ZELLIJ = "0";
+      process.env.ZELLIJ_SESSION_NAME = "main";
+      process.env.ZELLIJ_PANE_ID = "42";
+      installMockChildProcess((args) => {
+        if (args.includes("list-clients")) {
+          if (kind === "failed") throw new Error("client probe unavailable");
+          return "unexpected client listing";
+        }
+        return "[]";
+      });
+      const { getCurrentPaneActivity } = await importFresh<
+        typeof import("../src/interactive-tmux")
+      >("../src/interactive-tmux");
+      await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+        status: "unknown",
+        mux: "zellij",
+        paneId: "42",
+        session: "main",
+      });
+    },
+  );
 });
