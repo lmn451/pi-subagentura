@@ -27,6 +27,7 @@
     "tmux",
     "zellij",
     "herdr",
+    "rex",
     "swarm",
     "crew"
   ],
@@ -48,6 +49,7 @@
     "docs/workflows.md",
     "docs/jev-routing.md",
     "docs/telemetry.md",
+    "docs/rex-multiplexer.md",
     "docs/protocol-v1-compatibility.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
@@ -90,6 +92,7 @@
     "src/multiplexer-tmux.ts",
     "src/multiplexer-zellij.ts",
     "src/multiplexer-herdr.ts",
+    "src/multiplexer-rex.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
     "src/session-host.ts",

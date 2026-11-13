@@ -124,7 +124,7 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 6,
+      schema_version: 7,
       mode: "orchestrator_v2",
       traffic_origin: "unknown",
     });
@@ -914,7 +914,7 @@ describe("anonymous product telemetry", () => {
       failure_operation: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 6,
+      schema_version: 7,
     });
   });
 
@@ -1228,7 +1228,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("keeps every schema-v6 event within the privacy allowlist", () => {
+  it("keeps every schema-v7 event within the privacy allowlist", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
     const dimensions = {
       execution: "in-process" as const,
@@ -1408,7 +1408,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(6);
+      expect(payload.properties.schema_version).toBe(7);
     }
   });
 

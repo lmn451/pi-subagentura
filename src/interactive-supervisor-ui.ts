@@ -924,6 +924,9 @@ function focusReturnHint(state: InteractiveSubagentState): string {
   if (state.mux === "herdr") {
     return "Herdr native pane focus; use the terminal attach command above";
   }
+  if (state.mux === "rex") {
+    return "Rex block focus; use the terminal focus command above";
+  }
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"
     : "Ctrl+p, then p (previous pane)";

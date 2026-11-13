@@ -36,6 +36,11 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
+import {
+  isRexBlockId,
+  isRexServerAddress,
+  isRexSessionId,
+} from "./multiplexer-contracts";
 import { asStringIdentifier, type EventId } from "./identifier-types";
 import {
   sanitizeTelemetryModel,
@@ -1398,6 +1403,8 @@ export interface InteractiveSubagentPersistedStateV2 {
   windowName?: string;
   mux: MuxName;
   muxSession?: string;
+  /** Stable endpoint for the Rex server that owns this block. */
+  muxServer?: string;
   artifactDir: string;
   sessionFile: string;
   /** Resolved child process working directory. */
@@ -1763,7 +1770,14 @@ function normalizeV2StatePayload(
         basename(raw.artifactDir) !== id ||
         typeof raw.paneId !== "string" ||
         typeof raw.sessionFile !== "string" ||
-        (raw.mux !== "tmux" && raw.mux !== "zellij" && raw.mux !== "herdr")
+        (raw.mux !== "tmux" &&
+          raw.mux !== "zellij" &&
+          raw.mux !== "herdr" &&
+          raw.mux !== "rex") ||
+        (raw.mux === "rex" &&
+          (!isRexBlockId(raw.paneId) ||
+            !isRexSessionId(raw.muxSession) ||
+            !isRexServerAddress(raw.muxServer)))
       ) {
         return null;
       }
@@ -1969,9 +1983,13 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "none" ||
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
-        rawEntryTelemetry?.mux === "herdr"
+        rawEntryTelemetry?.mux === "herdr" ||
+        rawEntryTelemetry?.mux === "rex"
           ? rawEntryTelemetry.mux
-          : entry.mux === "tmux" || entry.mux === "zellij"
+          : entry.mux === "tmux" ||
+              entry.mux === "zellij" ||
+              entry.mux === "herdr" ||
+              entry.mux === "rex"
             ? entry.mux
             : "none";
       const entryTelemetry: PersistedInteractiveTelemetry | undefined =
@@ -2062,6 +2080,10 @@ function normalizeV2StatePayload(
         mux: entry.mux,
         ...(typeof entry.muxSession === "string"
           ? { muxSession: entry.muxSession }
+          : {}),
+        ...(typeof entry.muxServer === "string" &&
+        isRexServerAddress(entry.muxServer)
+          ? { muxServer: entry.muxServer }
           : {}),
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,

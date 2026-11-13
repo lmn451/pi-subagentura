@@ -13,6 +13,10 @@ const PANE_ENVIRONMENT_KEYS = [
   "HERDR_ENV",
   "HERDR_SOCKET_PATH",
   "HERDR_PANE_ID",
+  "REX_SESSION",
+  "REX_BLOCK",
+  "REX_SERVER",
+  "TERM_PROGRAM",
   "PI_SUBAGENTURA_CHILD",
 ] as const;
 const originalPaneEnvironment = new Map(
@@ -189,6 +193,30 @@ describe("current pane activity", () => {
     });
     // Herdr wins the backend race over the inherited TMUX/ZELLIJ markers, so
     // neither of those backends gets probed either.
+    expect(commands).toEqual([]);
+  });
+
+  it("reports Rex as unknown without probing undocumented focus activity", async () => {
+    process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    process.env.TMUX = "/tmp/tmux.sock,123,0";
+    const commands: string[][] = [];
+    installMockChildProcess((args) => {
+      commands.push([...args]);
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
+      mux: "rex",
+      paneId: process.env.REX_BLOCK,
+      session: process.env.REX_SESSION,
+    });
     expect(commands).toEqual([]);
   });
 

@@ -11,7 +11,7 @@ import {
 } from "./identifier-types";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 6;
+export const TELEMETRY_SCHEMA_VERSION = 7;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -23,7 +23,7 @@ const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetrySessionHost = "agterm" | "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
-export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr";
+export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr" | "rex";
 export type TelemetryTrafficOrigin =
   | "usage"
   | "development"
@@ -41,7 +41,8 @@ export type TelemetryRequestedMux =
   | "auto"
   | "tmux"
   | "zellij"
-  | "herdr";
+  | "herdr"
+  | "rex";
 export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
   | "with_context"
@@ -655,6 +656,7 @@ const TELEMETRY_MUXES: readonly TelemetrySpawnFailureMux[] = [
   "tmux",
   "zellij",
   "herdr",
+  "rex",
 ];
 const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "none",
@@ -662,6 +664,7 @@ const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "tmux",
   "zellij",
   "herdr",
+  "rex",
 ];
 const TELEMETRY_INVOCATION_SOURCES: readonly TelemetryInvocationSource[] = [
   "with_context",
@@ -1385,10 +1388,18 @@ export function sanitizeTelemetryTerminalProgram(
       return "unknown";
   }
 }
-export type TelemetryParentMux = "tmux" | "zellij" | "herdr" | "unknown";
+export type TelemetryParentMux =
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "rex"
+  | "unknown";
 
 export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
-  return value === "tmux" || value === "zellij" || value === "herdr"
+  return value === "tmux" ||
+    value === "zellij" ||
+    value === "herdr" ||
+    value === "rex"
     ? value
     : "unknown";
 }
@@ -1405,6 +1416,13 @@ export function resolveTelemetryParentMux(
   if (marker(env.TMUX)) candidates.push("tmux");
   if (marker(env.ZELLIJ_SESSION_NAME)) candidates.push("zellij");
   if (env.HERDR_ENV === "1") candidates.push("herdr");
+  if (
+    marker(env.REX_SESSION) &&
+    marker(env.REX_BLOCK) &&
+    marker(env.REX_SERVER)
+  ) {
+    candidates.push("rex");
+  }
   // Multiple markers cannot establish which nested multiplexer owns this process.
   return candidates.length === 1 ? candidates[0] : "unknown";
 }

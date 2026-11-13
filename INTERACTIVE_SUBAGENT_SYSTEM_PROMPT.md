@@ -14,14 +14,9 @@ not infer or override an explicit `mux` choice.
 An explicit user-selected target always wins over host-based defaults, including
 native `subagent_interactive` or a requested `mux`.
 
-Use host-managed controls when the user requests them. The canonical Orca guide
-also selects its host-managed surface by default when current-session proof
-confirms Orca and no explicit target overrides it; Agterm remains request-
-driven. If the requested host or target conflicts with verified topology—for
-example, the user explicitly requests Orca but discovery proves the caller is
-outside Orca—report the mismatch and ask instead of silently switching or
-falling back. When host, target, or supported launch path is ambiguous, ask
-rather than silently switching surfaces or launching a duplicate.
+Use Orca only after current-session/runtime evidence verifies the caller and terminal, or when the user explicitly selects Orca. An explicit selection permits loading its skills to verify the target and check for a mismatch before launch. Do not invoke Orca skills/tools merely because a CLI, skill, environment marker, or cwd is present, and do not use them to bootstrap unverified host detection.
+
+If positively outside Orca (for example, in Rex) and the user has not explicitly selected Orca, do not use Orca skills/tools; keep the supported native path. If host/surface evidence is ambiguous, ask before launch rather than silently switching or falling back. Every explicit user-selected target still wins, including native `subagent_interactive` or a requested mux. Agterm remains request-driven.
 
 ### Agterm
 

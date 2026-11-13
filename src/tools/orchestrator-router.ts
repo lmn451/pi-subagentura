@@ -79,6 +79,7 @@ interface RuntimeSnapshot {
   windowName?: string;
   mux: InteractiveSubagentState["mux"];
   muxSession?: string;
+  muxServer?: string;
   sessionFile: string;
   cwd: string;
   workingCwd?: string;
@@ -566,6 +567,7 @@ function snapshotRuntime(state: InteractiveSubagentState): RuntimeSnapshot {
     ...(state.windowName === undefined ? {} : { windowName: state.windowName }),
     mux: state.mux,
     ...(state.muxSession === undefined ? {} : { muxSession: state.muxSession }),
+    ...(state.muxServer === undefined ? {} : { muxServer: state.muxServer }),
     sessionFile: state.sessionFile,
     cwd: state.cwd,
     ...(state.workingCwd === undefined ? {} : { workingCwd: state.workingCwd }),
@@ -607,6 +609,7 @@ function sameRuntimeSnapshot(
     left.windowName === right.windowName &&
     left.mux === right.mux &&
     left.muxSession === right.muxSession &&
+    left.muxServer === right.muxServer &&
     left.sessionFile === right.sessionFile &&
     left.cwd === right.cwd &&
     left.workingCwd === right.workingCwd &&
