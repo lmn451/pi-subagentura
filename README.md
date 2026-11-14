@@ -693,6 +693,11 @@ Parameters:
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, or `"rex"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+
+  Attached Zellij contexts require an explicit `mux: "zellij"` choice: the public
+  pane listing cannot bind a pane to this Pi process, so automatic selection
+  rejects the context rather than trusting inherited session/pane selectors.
+
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)

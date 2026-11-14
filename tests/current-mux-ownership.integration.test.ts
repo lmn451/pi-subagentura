@@ -55,12 +55,10 @@ beforeEach(() => vi.resetAllMocks());
 describe("process snapshot through live pane ownership", () => {
   it.each([
     ["tmux", "zellij"],
-    ["zellij", "tmux"],
     ["herdr", "rex"],
     ["rex", "herdr"],
     ["tmux", "herdr"],
     ["herdr", "tmux"],
-    ["zellij", "rex"],
     ["rex", "zellij"],
   ] as const)(
     "selects inner %s inside %s despite all inherited markers",
@@ -81,6 +79,15 @@ describe("process snapshot through live pane ownership", () => {
               ),
           ),
       ).toBe(true);
+    },
+  );
+
+  it.each(["tmux", "rex"] as const)(
+    "rejects unverified inner Zellij instead of selecting outer %s",
+    (outer) => {
+      installNested("zellij", outer);
+      expect(resolveCurrentMuxContext(env).kind).toBe("unavailable");
+      expect(spawn).not.toHaveBeenCalled();
     },
   );
 

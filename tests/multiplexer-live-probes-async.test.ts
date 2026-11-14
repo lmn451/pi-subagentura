@@ -77,7 +77,7 @@ beforeEach(() => {
 });
 afterEach(() => expect(sync).not.toHaveBeenCalled());
 describe("asynchronous read-only live mux ownership probes", () => {
-  it.each(targets)(
+  it.each(targets.filter((target) => target.mux !== "zellij"))(
     "proves live ownership for $mux without sync calls",
     async (target) => {
       respond(output(target.mux));
@@ -86,7 +86,7 @@ describe("asynchronous read-only live mux ownership probes", () => {
       await expect(pending).resolves.toEqual({
         kind: "match",
         target,
-        distance: target.mux === "zellij" ? 1 : 0,
+        distance: 0,
       });
       expect(exec).toHaveBeenCalledTimes(1);
       expect(exec.mock.calls[0]?.[2]).toEqual(
@@ -174,7 +174,7 @@ describe("asynchronous read-only live mux ownership probes", () => {
       respond(output("zellij"));
       await expect(
         probeLiveMuxTargetAsync(target, context(), {}),
-      ).resolves.toEqual({ kind: "match", target, distance: 1 });
+      ).resolves.toEqual({ kind: "unknown" });
       expect(exec).toHaveBeenCalledWith(
         "zellij",
         ["--session", session, "action", "list-panes", "--json"],
@@ -358,7 +358,7 @@ describe("asynchronous read-only live mux ownership probes", () => {
 
         await expect(
           probeLiveMuxTargetAsync(target, context(), {}),
-        ).resolves.toEqual({ kind: "match", target, distance: 1 });
+        ).resolves.toEqual({ kind: "unknown" });
         expect(exec.mock.calls[0]?.[1]).toEqual([
           "--session",
           session,

@@ -68,10 +68,13 @@ A nearer mux boundary still prevents selecting a verified outer pane.
 An empty `PI_SUBAGENTURA_TMUX_SOCKET` is treated as unset. Nonempty named-socket
 labels are passed literally as one `-L` argument, including spaces and Unicode.
 
-Zellij's public `list-panes --json` does not expose the pane PID. Detection checks
-that the selected terminal pane exists and that the nearest recognized mux
-process ancestor is Zellij. This verifies the enclosing mux type, not the exact
-pane-to-PID association if same-mux session or pane markers were overwritten.
+Zellij's public `list-panes --json` does not expose the pane PID. A live pane and
+a Zellij process ancestor cannot prove the exact session/pane-to-process
+association when inherited selectors were overwritten. Automatic selection
+therefore fails closed for attached Zellij contexts, including when a verified
+outer mux is present. Select `mux: "zellij"` explicitly for an intentional
+Zellij target; its backend launch validation still applies. Existing owned
+Zellij children retain their persisted messaging, status, and cancellation paths.
 Unsupported CLI responses, unavailable process evidence, and unresolved host
 conflicts require an explicit `mux` choice rather than a guessed backend.
 
