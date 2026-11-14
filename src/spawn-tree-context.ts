@@ -43,6 +43,8 @@ export interface SpawnTreeContext {
   artifactDir?: string;
   /** Whether this lineage belongs to an orchestrator-mode parent. */
   orchestratorMode?: boolean;
+  /** Install recursive coordination guidance in every v2 descendant. */
+  orchestratorV2Mode?: boolean;
   /** Anonymous session correlation carried only by the one-use bootstrap. */
   telemetrySessionId?: string;
   /** Closed analytics mode propagated with the explicit correlation context. */
@@ -164,6 +166,13 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   if (orchestratorMode !== undefined && typeof orchestratorMode !== "boolean") {
     throw new Error("Invalid lineage bootstrap orchestratorMode");
   }
+  const orchestratorV2Mode = raw.orchestratorV2Mode;
+  if (
+    orchestratorV2Mode !== undefined &&
+    typeof orchestratorV2Mode !== "boolean"
+  ) {
+    throw new Error("Invalid lineage bootstrap orchestratorV2Mode");
+  }
   const telemetrySessionId =
     raw.telemetrySessionId === undefined
       ? undefined
@@ -205,6 +214,7 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
     sessionRoot,
     ...(artifactDir ? { artifactDir } : {}),
     ...(orchestratorMode ? { orchestratorMode } : {}),
+    ...(orchestratorV2Mode ? { orchestratorV2Mode } : {}),
     ...(telemetrySessionId
       ? { telemetrySessionId: telemetrySessionId.toLowerCase() }
       : {}),
@@ -241,12 +251,13 @@ export function createRootSpawnTreeContext(
     rootId,
     sessionRoot,
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
+    ...(orchestratorV2Mode ? { orchestratorV2Mode: true } : {}),
     ...(telemetrySessionId ? { telemetrySessionId } : {}),
     ...(telemetryMode ? { telemetryMode } : {}),
     telemetryOrigin: telemetryOrigin ?? resolveTelemetryTrafficOrigin(),
     depth: 0,
     maxDepth: orchestratorV2Mode
-      ? (configuredMaxDepth ?? 2)
+      ? (configuredMaxDepth ?? 4)
       : DEFAULT_MAX_DEPTH,
     maxNodes: DEFAULT_MAX_NODES,
   });

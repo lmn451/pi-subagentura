@@ -146,7 +146,7 @@ describe("generic extension settings", () => {
             id: "max-depth",
             label: "Maximum depth",
             description: expect.stringContaining("0-64"),
-            defaultValue: "2",
+            defaultValue: "4",
           },
           {
             id: "hide-agent-list",
@@ -185,7 +185,7 @@ describe("generic extension settings", () => {
     });
 
     expect(readTestSettings(api as any)).toEqual({
-      maxDepth: 2,
+      maxDepth: 4,
       hideAgentList: false,
     });
   });
@@ -506,7 +506,7 @@ describe("generic extension settings", () => {
         const onInvalid = vi.fn();
         expect(
           readExtensionSettings(mockApi() as any, { agentDir, cwd }, onInvalid),
-        ).toEqual({ maxDepth: 2, hideAgentList: false });
+        ).toEqual({ maxDepth: 4, hideAgentList: false });
         expect(onInvalid).toHaveBeenCalledWith(
           expect.stringContaining("max-depth"),
         );
@@ -536,7 +536,7 @@ describe("generic extension settings", () => {
       >[0];
       mockDebugLog.mockClear();
       expect(readExtensionSettings(api, { agentDir, cwd }, onInvalid)).toEqual({
-        maxDepth: 2,
+        maxDepth: 4,
         hideAgentList: false,
       });
       expect(onInvalid).toHaveBeenCalledWith(
@@ -608,7 +608,7 @@ describe("generic extension settings", () => {
         );
       }).not.toThrow();
       expect(settings).toEqual({
-        maxDepth: 2,
+        maxDepth: 4,
         hideAgentList: false,
       });
       expect(onInvalid).toHaveBeenCalledWith(
@@ -677,7 +677,7 @@ describe("generic extension settings", () => {
       expect(scope?.ui).toBe(ctx.ui);
       expect(scope?.spawnTreeContext).toMatchObject({
         role: "root",
-        maxDepth: 2,
+        maxDepth: 4,
       });
       expect(scope?.pi).toBe(extensionApi);
       expect(notify).toHaveBeenCalledWith(

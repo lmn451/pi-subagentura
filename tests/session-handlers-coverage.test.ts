@@ -675,7 +675,7 @@ describe("session handler lifecycle callbacks", () => {
   );
 
   it.each([
-    ["orchestratorv2", 2],
+    ["orchestratorv2", 4],
     ["orchestrator", 8],
   ] as const)(
     "applies the mode-specific root maxDepth on session_start (%s)",
