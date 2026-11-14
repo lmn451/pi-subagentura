@@ -807,13 +807,22 @@ export interface WorkflowCompletionPresentation {
   icon: string;
 }
 
-/** Preserve raw `done` while exposing a warning presentation for resolved errors. */
+/** Preserve raw `done` while warning about resolved child errors or cancellations. */
 export function getWorkflowCompletionPresentation(
   status: WorkflowJobStatus,
   errorCount: number,
+  cancelledCount = 0,
 ): WorkflowCompletionPresentation {
-  if (status === "done" && errorCount > 0) {
-    return { label: "completed with errors", icon: "⚠" };
+  if (status === "done") {
+    if (errorCount > 0 && cancelledCount > 0) {
+      return { label: "completed with errors and cancellations", icon: "⚠" };
+    }
+    if (errorCount > 0) {
+      return { label: "completed with errors", icon: "⚠" };
+    }
+    if (cancelledCount > 0) {
+      return { label: "completed with cancellations", icon: "⚠" };
+    }
   }
   return { label: status, icon: "" };
 }

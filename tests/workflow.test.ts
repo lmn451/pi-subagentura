@@ -69,6 +69,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTelemetrySession } from "../src/telemetry";
 import { createTestSessionScope } from "./session-scope-fixture";
+import { WorkflowTreeComponent } from "../src/workflow-tree-ui";
 
 let workflowScope: SessionScope;
 beforeEach(() => {
@@ -1419,12 +1420,20 @@ describe("saved workflows", () => {
 });
 
 describe("background workflow jobs", () => {
-  it("presents resolved agent errors as a warning", () => {
-    expect(getWorkflowCompletionPresentation("done", 2)).toEqual({
+  it("presents resolved child errors and cancellations as warnings", () => {
+    expect(getWorkflowCompletionPresentation("done", 2, 0)).toEqual({
       label: "completed with errors",
       icon: "⚠",
     });
-    expect(getWorkflowCompletionPresentation("error", 0)).toEqual({
+    expect(getWorkflowCompletionPresentation("done", 0, 1)).toEqual({
+      label: "completed with cancellations",
+      icon: "⚠",
+    });
+    expect(getWorkflowCompletionPresentation("done", 2, 1)).toEqual({
+      label: "completed with errors and cancellations",
+      icon: "⚠",
+    });
+    expect(getWorkflowCompletionPresentation("error", 0, 0)).toEqual({
       label: "error",
       icon: "",
     });
@@ -3276,6 +3285,117 @@ describe("registerWorkflowTool", () => {
     expect(result.content[0].text).toContain("Workflow failed");
   });
 });
+describe("workflow cancellation evidence", () => {
+  it("surfaces child cancellation when a workflow resolves to null", async () => {
+    const tools: Array<{
+      name: string;
+      execute: Function;
+      outputSchema?: TSchema;
+    }> = [];
+    const commands: Array<{ name: string; handler: Function }> = [];
+    const sendUserMessage = vi.fn();
+    const pi = {
+      registerTool: vi.fn(
+        (definition: {
+          name: string;
+          execute: Function;
+          outputSchema?: TSchema;
+        }) => tools.push(definition),
+      ),
+      registerCommand: vi.fn(
+        (name: string, definition: { handler: Function }) =>
+          commands.push({ name, ...definition }),
+      ),
+      sendUserMessage,
+    };
+    registerWorkflowTool(pi as unknown as ExtensionAPI, workflowScope);
+    const job = startWorkflowJob(
+      "cancelled-child",
+      'export const meta = { name: "cancelled-child", description: "d" };\n' +
+        'return await agent("cancelled");',
+      {
+        runAgent: async () => ({
+          isError: false,
+          output: "",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0,
+            turns: 0,
+          },
+          cancelled: true,
+        }),
+      },
+      undefined,
+      undefined,
+      sessionOwner(workflowScope),
+    );
+
+    const run = await job.promise;
+    expect(run).toMatchObject({
+      result: null,
+      errorCount: 0,
+      cancelledCount: 1,
+    });
+
+    const statusTool = tools.find(
+      (tool) => tool.name === "get_workflow_status",
+    )!;
+    const status = await statusTool.execute("", { workflowId: job.id });
+    expect(status.details).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      cancelledCount: 1,
+      errorCount: 0,
+    });
+    expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      cancelledCount: 1,
+      errorCount: 0,
+    });
+    expect(status.content[0].text).toContain("completed with cancellations");
+
+    const resultTool = tools.find(
+      (tool) => tool.name === "get_workflow_result",
+    )!;
+    const result = await resultTool.execute("", { workflowId: job.id });
+    expect(result.details).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      cancelledCount: 1,
+      errorCount: 0,
+    });
+    expect(expectStructuredOutput(resultTool, result)).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      cancelledCount: 1,
+      errorCount: 0,
+    });
+    expect(result.content[0].text).toContain("completed with cancellations");
+    const statusCommand = commands.find(
+      (command) => command.name === "workflow-status",
+    );
+    expect(statusCommand).toBeDefined();
+    await statusCommand!.handler("", { ui: { notify: vi.fn() } });
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("1 cancellation"),
+      { deliverAs: "followUp" },
+    );
+
+    const tree = new WorkflowTreeComponent({
+      done: () => {},
+      owner: sessionOwner(workflowScope),
+    });
+    const treeText = tree.render(120).join("\n");
+    expect(treeText).toContain("completed with cancellations");
+    expect(treeText).toContain("1 cancellation");
+    workflowJobRegistry.delete(job.id);
+  });
+});
+
 describe("WorkflowProgress classification matrix", () => {
   const samples = {
     phase: {

@@ -137,7 +137,12 @@ import {
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { createTelemetrySession } from "../src/telemetry";
-import { registerCompletionCoordinator } from "../src/completion-coordinator";
+import {
+  clearCompletionCoordinator,
+  registerCompletionCoordinator,
+  registerCompletionMember,
+  sealCompletionGroups,
+} from "../src/completion-coordinator";
 import { createTestSessionScope } from "./session-scope-fixture";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
@@ -402,6 +407,159 @@ describe("workflow supervisor integration", () => {
     expect(vi.isMockFunction(socket.connect)).toBe(true);
     socket.destroy();
   });
+  it("reports resolved sync child cancellation with warning presentation", async () => {
+    const { context } = liveSessionContext({
+      id: 44,
+      sessionId: "sync-cancellation-session",
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+    mockAwaitInteractiveResult.mockResolvedValueOnce({
+      isError: false,
+      output: "",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 0,
+      },
+      cancelled: true,
+    });
+
+    const result = await findTool().execute(
+      "call-sync-cancelled-child",
+      { script: SINGLE_AGENT_SCRIPT("sync-cancelled-child"), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    expect(result.details).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      errorCount: 0,
+      cancelledCount: 1,
+    });
+    expect(result.content[0]?.text).toContain("completed with cancellations");
+    expect(result.content[0]?.text).toContain("1 cancellation");
+  });
+
+  it("keeps mixed child errors and cancellations as an error group notice", async () => {
+    const { context } = liveSessionContext({
+      id: 45,
+      sessionId: "mixed-cancellation-session",
+    });
+    const owner = ownerOf(context);
+    const entries: Array<{ customType: string; data: unknown }> = [];
+    const pi = {
+      registerTool: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      sendMessage: vi.fn(),
+      appendEntry: vi.fn((customType: string, data: unknown) =>
+        entries.push({ customType, data }),
+      ),
+    };
+    const findTool = workflowTool(pi);
+    context.pi = pi as never;
+    registerCompletionCoordinator(pi as never, context);
+    registerCompletionMember(
+      "workflow",
+      "unsettled-peer",
+      "group",
+      "mixed-cancellation",
+      owner,
+    );
+    registerWorkflowTool(pi as never, context);
+
+    const usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
+    };
+    const failed: SubagentResult = {
+      isError: true,
+      output: "partial failure",
+      usage,
+      errorMessage: "child failed",
+    };
+    const cancelled: SubagentResult = {
+      isError: false,
+      output: "",
+      usage,
+      cancelled: true,
+    };
+    mockAwaitInteractiveResult.mockImplementation(
+      (state: InteractiveSubagentState) =>
+        Promise.resolve(state.task === "cancelled" ? cancelled : failed),
+    );
+
+    let workflowId: string | undefined;
+    try {
+      const started = await findTool().execute(
+        "call-mixed-cancellation",
+        {
+          script:
+            'export const meta = { name: "mixed-cancellation", description: "d" };\n' +
+            'await agent("failed", { label: "failed" });\n' +
+            'await agent("cancelled", { label: "cancelled" });\n' +
+            'return "finished";',
+          async: true,
+          completionPolicy: "group",
+          completionGroupId: "mixed-cancellation",
+        },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      const id = started.details.workflowId;
+      if (typeof id !== "string") {
+        throw new Error("Workflow tool did not return a workflow ID.");
+      }
+      workflowId = id;
+      const job = workflowJobRegistry.get(id);
+      if (!job) throw new Error("Started workflow job was not registered.");
+      sealCompletionGroups(owner);
+      const run = await job.promise;
+      expect(job.status).toBe("done");
+      expect(run).toMatchObject({
+        errorCount: 1,
+        cancelledCount: 1,
+      });
+
+      await vi.waitFor(() =>
+        expect(
+          entries.some(
+            (entry) => entry.customType === "subagentura-completion",
+          ),
+        ).toBe(true),
+      );
+      const completion = entries.find(
+        (entry) => entry.customType === "subagentura-completion",
+      )?.data;
+      expect(completion).toMatchObject({
+        status: "error",
+        groupId: "mixed-cancellation",
+        references: expect.arrayContaining([
+          {
+            label: "status",
+            value: "completed with errors and cancellations",
+          },
+          { label: "errors", value: "1" },
+          { label: "cancellations", value: "1" },
+        ]),
+      });
+    } finally {
+      if (workflowId) workflowJobRegistry.delete(workflowId);
+      clearCompletionCoordinator(owner);
+    }
+  });
+
   it.each([
     [{ async: true }, "each"],
     [
