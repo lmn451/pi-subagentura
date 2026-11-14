@@ -9,6 +9,7 @@ import {
 } from "./artifact";
 import {
   artifactReadRequest,
+  isMetadataReadPlan,
   planArtifactRead,
   resolveArtifactRead,
   type ArtifactReadResult,
@@ -58,10 +59,9 @@ export function readArtifactDocument(
 ): ArtifactReadDocument {
   const allEvents = readEvents(artifact);
   const plan = planArtifactRead(allEvents, artifactReadRequest(params));
-  const result = resolveArtifactRead(
-    plan,
-    readSelectedOutput(artifact, plan.source),
-  );
+  const result = isMetadataReadPlan(plan)
+    ? resolveArtifactRead(plan, { kind: "not_read" })
+    : resolveArtifactRead(plan, readSelectedOutput(artifact, plan.source));
   const since = params.since;
   const events =
     since === undefined

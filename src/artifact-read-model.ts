@@ -34,11 +34,34 @@ export type ArtifactReadSource =
   | { kind: "staging" }
   | { kind: "unavailable" };
 
-export interface ArtifactReadPlan {
-  readonly request: ArtifactReadRequest;
-  readonly source: ArtifactReadSource;
+interface ArtifactReadPlanContext {
   readonly selection: ReadCompletionSelection;
   readonly terminalEvent: SubagentEvent | null;
+}
+
+export type MetadataReadPlan = ArtifactReadPlanContext & {
+  readonly request: { kind: "metadata" };
+  readonly source: { kind: "not_requested" };
+};
+
+export type TurnReadPlan = ArtifactReadPlanContext & {
+  readonly request: { kind: "turn"; turnId: string };
+  readonly source: { kind: "snapshot"; turnId: string };
+};
+
+export type LatestReadPlan = ArtifactReadPlanContext & {
+  readonly request: { kind: "latest" };
+  readonly source: Exclude<ArtifactReadSource, { kind: "not_requested" }>;
+};
+
+export type OutputReadPlan = TurnReadPlan | LatestReadPlan;
+
+export type ArtifactReadPlan = MetadataReadPlan | OutputReadPlan;
+
+export function isMetadataReadPlan(
+  plan: ArtifactReadPlan,
+): plan is MetadataReadPlan {
+  return plan.request.kind === "metadata";
 }
 
 export type ArtifactReadValue =
@@ -48,7 +71,8 @@ export type ArtifactReadValue =
   | { kind: "error"; error: OutputSnapshotError };
 
 export type ArtifactReadOutput =
-  | { kind: "not_requested" | "pending" | "missing" | "unavailable" }
+  | { kind: "not_requested" }
+  | { kind: "pending" | "missing" | "unavailable" }
   | { kind: "read_error"; error: OutputSnapshotError }
   | { kind: "empty"; content: "" }
   | { kind: "available"; content: string };
@@ -61,12 +85,22 @@ export type ArtifactOutputState =
   | "available"
   | "unavailable";
 
-export interface ArtifactReadResult {
-  readonly plan: ArtifactReadPlan;
-  readonly output: ArtifactReadOutput;
+interface ArtifactReadResultContext {
   readonly status: "running" | "done" | "error" | "cancelled" | "not_found";
   readonly turnId: string | undefined;
 }
+
+export type MetadataReadResult = ArtifactReadResultContext & {
+  readonly plan: MetadataReadPlan;
+  readonly output: { kind: "not_requested" };
+};
+
+export type OutputReadResult = ArtifactReadResultContext & {
+  readonly plan: OutputReadPlan;
+  readonly output: Exclude<ArtifactReadOutput, { kind: "not_requested" }>;
+};
+
+export type ArtifactReadResult = MetadataReadResult | OutputReadResult;
 
 function assertNever(value: never): never {
   throw new Error(`Unexpected artifact read variant: ${String(value)}`);
@@ -165,7 +199,7 @@ function selectedCompletion(
 
 function latestOutputSource(
   selection: ReadCompletionSelection,
-): ArtifactReadSource {
+): Exclude<ArtifactReadSource, { kind: "not_requested" }> {
   if (selection.completion) {
     return { kind: "snapshot", turnId: selection.completion.turnId };
   }
@@ -192,6 +226,22 @@ function resolveReadStatus(
 
 export function planArtifactRead(
   events: readonly SubagentEvent[],
+  request: { kind: "metadata" },
+): MetadataReadPlan;
+export function planArtifactRead(
+  events: readonly SubagentEvent[],
+  request: { kind: "turn"; turnId: string },
+): TurnReadPlan;
+export function planArtifactRead(
+  events: readonly SubagentEvent[],
+  request: { kind: "latest" },
+): LatestReadPlan;
+export function planArtifactRead(
+  events: readonly SubagentEvent[],
+  request: ArtifactReadRequest,
+): ArtifactReadPlan;
+export function planArtifactRead(
+  events: readonly SubagentEvent[],
   request: ArtifactReadRequest,
 ): ArtifactReadPlan {
   const selection = completionForRead(
@@ -202,28 +252,27 @@ export function planArtifactRead(
   const terminalEvent =
     selection.processExitEvent ??
     (lifecycle && isSettled(lifecycle) ? lifecycle : null);
-  let source: ArtifactReadSource;
+  const context = { selection, terminalEvent };
   switch (request.kind) {
     case "metadata":
-      source = { kind: "not_requested" };
-      break;
+      return { ...context, request, source: { kind: "not_requested" } };
     case "turn":
-      source = { kind: "snapshot", turnId: request.turnId };
-      break;
+      return {
+        ...context,
+        request,
+        source: { kind: "snapshot", turnId: request.turnId },
+      };
     case "latest":
-      source = latestOutputSource(selection);
-      break;
+      return { ...context, request, source: latestOutputSource(selection) };
     default:
       return assertNever(request);
   }
-  return { request, source, selection, terminalEvent };
 }
 
 function resolveOutput(
-  plan: ArtifactReadPlan,
+  plan: OutputReadPlan,
   value: ArtifactReadValue,
-): ArtifactReadOutput {
-  if (plan.request.kind === "metadata") return { kind: "not_requested" };
+): OutputReadResult["output"] {
   switch (value.kind) {
     case "error":
       return { kind: "read_error", error: value.error };
@@ -244,20 +293,37 @@ function resolveOutput(
 }
 
 export function resolveArtifactRead(
+  plan: MetadataReadPlan,
+  value: { kind: "not_read" },
+): MetadataReadResult;
+export function resolveArtifactRead(
+  plan: OutputReadPlan,
+  value: ArtifactReadValue,
+): OutputReadResult;
+export function resolveArtifactRead(
+  plan: ArtifactReadPlan,
+  value: { kind: "not_read" },
+): ArtifactReadResult;
+export function resolveArtifactRead(
   plan: ArtifactReadPlan,
   value: ArtifactReadValue,
 ): ArtifactReadResult {
-  const output = resolveOutput(plan, value);
   const completion = plan.selection.completion;
   const unmatchedClosedTurn =
     plan.request.kind === "turn" &&
     plan.selection.artifactClosed &&
     completion === undefined;
-  const status = resolveReadStatus(plan, output, unmatchedClosedTurn);
   const turnId =
     plan.request.kind === "turn"
       ? plan.request.turnId
       : (completion?.turnId ?? plan.selection.lifecycleEvent?.turnId);
+  if (isMetadataReadPlan(plan)) {
+    const output = { kind: "not_requested" } as const;
+    const status = resolveReadStatus(plan, output, false);
+    return { plan, output, status, turnId };
+  }
+  const output = resolveOutput(plan, value);
+  const status = resolveReadStatus(plan, output, unmatchedClosedTurn);
   return { plan, output, status, turnId };
 }
 
