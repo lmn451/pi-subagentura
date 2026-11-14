@@ -44,7 +44,10 @@ import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
 import { registerInteractiveSupervisor } from "./interactive-supervisor-registration";
-import { registerExtensionSettings } from "./settings";
+import {
+  isOrchestratorSplitEnabled,
+  registerExtensionSettings,
+} from "./settings";
 import {
   acquireRuntimeSpawnTreeContext,
   LINEAGE_BOOTSTRAP_ENV,
@@ -92,6 +95,10 @@ const ORCHESTRATOR_SYSTEM_PROMPT = readFileSync(
 ).trim();
 const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+const ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT = readFileSync(
+  new URL("../ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
 const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
@@ -171,6 +178,16 @@ export default function (pi: ExtensionAPI) {
     const includeOrchestrator = !isChild && pi.getFlag("orchestrator") === true;
     const includeOrchestratorV2 =
       !isChild && pi.getFlag("orchestratorv2") === true;
+    let includeSplit = false;
+    if (!isChild) {
+      try {
+        includeSplit = isOrchestratorSplitEnabled(pi);
+      } catch (error) {
+        // Pi catches before_agent_start errors and otherwise continues with the base prompt.
+        ctx.abort();
+        throw error;
+      }
+    }
     if (
       !includeOrchestrator &&
       !includeOrchestratorV2 &&
@@ -184,6 +201,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (includeOrchestratorV2) {
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+      if (includeSplit) prompts.push(ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT);
       if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
         prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
       }

@@ -76,6 +76,7 @@ import {
 } from "./completion-turn";
 import {
   emitExtensionSettingsRegistration,
+  isOrchestratorSplitEnabled,
   isTelemetryEnabled,
   readExtensionSettings,
 } from "./settings";
@@ -503,6 +504,7 @@ export function registerSessionHandlers(
 
   pi.on("session_start", (event, ctx) => {
     scope.workflowAdmissionClosed = true;
+    if (allowRootLineage) isOrchestratorSplitEnabled(pi);
     if (allowRootLineage) emitExtensionSettingsRegistration(pi);
     // A replacement session must never inherit an old wake request or its
     // watchdog while branch recovery reconstructs durable state.
