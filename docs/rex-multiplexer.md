@@ -12,13 +12,21 @@ pi-subagentura child, with its Rex block treated only as the terminal transport.
 
 ## Selection and safety
 
-An explicit `mux` value always wins. With `mux: "auto"`, resolution keeps the
-existing Herdr precedence, then uses Rex only after it validates the complete
-`REX_SESSION`, `REX_BLOCK`, and `REX_SERVER` context against the live Rex CLI and
-server. Validation checks the CLI's documented help contract, confirms `rex
-whoami --json` reports the same session and block, and verifies the block is
-present in that session's JSON listing. Rex is preferred over inherited Zellij
-and tmux markers when that verification succeeds.
+An explicit `mux` value overrides automatic detection, while retaining that
+backend's own launch validation. With `mux: "auto"`, inherited environment
+markers identify candidate panes, not a fixed backend priority. Bounded live
+backend queries and a process ancestry/TTY snapshot must tie a candidate pane
+to the current Pi process. In nested muxes the nearest verified owner wins.
+Equally close matches, stale selectors, missing proof, or an unverified nearer
+mux fail closed rather than selecting an unrelated or outer backend. Current
+UI focus is not evidence that a pane owns this process.
+
+Rex candidates require the complete `REX_SESSION`, `REX_BLOCK`, and `REX_SERVER`
+context. Backend validation also checks the CLI's documented help contract,
+confirms `rex whoami --json` reports the same session and block, and verifies the
+block is present in that session's JSON listing. A Rex process ancestor is
+classified as Rex, not Herdr. Neither a reachable server nor inherited Rex
+markers alone establish ownership of the current process.
 
 A partial/malformed Rex context, an unsupported Rex CLI contract, or a failed
 live probe is an error; automatic selection does not fall through to another
@@ -33,6 +41,21 @@ Rex block IDs, session IDs, and the canonical server endpoint are persisted on
 interactive state and lineage records. Every later focus, send, capture, liveness,
 and cancellation operation uses those saved values rather than ambient Rex
 variables, so a reload cannot redirect an old child to a different server.
+
+## Live ownership evidence and limits
+
+Automatic detection reads a bounded process snapshot on macOS and Linux, then
+queries candidate backends without creating panes or starting servers. tmux's
+pane PID and TTY, Herdr's shell PID, and a local Rex block's child/foreground PID
+are compared with this process's ancestry. Rex endpoints that do not identify a
+local Unix socket cannot supply comparable local PIDs for automatic detection.
+
+Zellij's public `list-panes --json` does not expose the pane PID. Detection checks
+that the selected terminal pane exists and that the nearest recognized mux
+process ancestor is Zellij. This verifies the enclosing mux type, not the exact
+pane-to-PID association if same-mux session or pane markers were overwritten.
+Unsupported CLI responses, unavailable process evidence, and unresolved host
+conflicts require an explicit `mux` choice rather than a guessed backend.
 
 ## Verified and unavailable capabilities
 

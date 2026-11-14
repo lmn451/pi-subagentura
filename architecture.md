@@ -480,8 +480,10 @@ Cancelled entries are scheduled for immediate deletion.
 
 `src/interactive-tmux.ts` is historically named but backend-neutral.
 It owns path and prompt construction, launch ordering, registry publication, status folding, follow-up input, cancellation, and mux routing.
-`src/multiplexer.ts` defines the backend contract.
-`src/multiplexer-tmux.ts` and `src/multiplexer-zellij.ts` own subprocess commands and pane identity.
+`src/multiplexer-contracts.ts` defines the backend contract.
+`src/multiplexer.ts` selects and caches backend instances.
+The tmux, Zellij, Herdr, and Rex backend modules own transport commands and
+persisted pane identity.
 
 ### 6.2 Crash-safe launch ordering
 
@@ -549,10 +551,26 @@ The mux carries control and terminal input only:
 A captured screen is supervisor UX, not lifecycle or output authority.
 The backend recorded at spawn never changes.
 
-In `auto` mode, backend resolution prefers an attached Herdr, Zellij, or tmux
-environment; outside an attached mux it falls back to available tmux before
-Zellij. Herdr requires Pi to run inside a Herdr-managed pane and persists the
-exact socket path for later operations and rehydration.
+In `auto` mode, environment markers provide candidate selectors only.
+`multiplexer-current-context.ts` combines bounded live backend queries from
+`multiplexer-live-probes.ts` with the process ancestry/TTY snapshot from
+`multiplexer-process-context.ts`. A live pane must be tied to this Pi process;
+reachable servers, inherited markers, and current UI focus are not ownership
+proof. The nearest verified owner wins in nested muxes. Ties, missing evidence,
+stale selectors, and an unverified nearer mux fail closed instead of selecting
+an unrelated backend or a verified outer mux. Rex and Herdr are distinct process
+ancestor classifications.
+
+Explicit backend preferences override auto detection but retain backend-specific
+launch validation. Only when no recognized host context is present does auto
+retain the available-tmux-before-Zellij detached fallback. Current-pane activity
+uses the same ownership resolution and remains `unknown` without sufficient
+proof. This runtime routing is independent of measurement-only parent-mux
+telemetry, which still observes environment markers conservatively.
+
+Herdr requires Pi to run inside a Herdr-managed pane and persists the exact
+socket path for later operations and rehydration. Rex requires a validated live
+Rex block and persists its canonical server endpoint, session, and block IDs.
 Detached tmux children use a dedicated session and later windows.
 Detached Zellij children use a background session/tab because detached splits do not materialize reliably.
 All backends establish a stable identity and route every later operation through
@@ -1133,6 +1151,10 @@ The following table inventories the tracked runtime source modules and companion
 |  64 | `src/tools/orchestrator-router.ts`           | Enabled-only advisor with current candidates and state revalidation                                                             | `completion-turn`, `interactive-tmux`, `orchestrator-routing`, `routing-engine`, `routing-factory`, `session-scope`, `tool-guidance`; type-only `pi-ai`                                                                                                                                                       |
 |  65 | `src/completion-contracts.ts`                | Shared completion records, consumption selectors, schema constants and record bounds                                            | None                                                                                                                                                                                                                                                                                                          |
 |  66 | `src/completion-manifest.ts`                 | Pure manifest formatting, retrieval selectors and bounded group-preserving batch selection                                      | `completion-contracts`                                                                                                                                                                                                                                                                                        |
+|  67 | `src/multiplexer-rex.ts`                     | Rex transport with validated CLI contract, persisted server/session/block targeting, and bounded capture                        | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
+|  68 | `src/multiplexer-process-context.ts`         | Bounded process snapshot, ancestry/TTY normalization, and nearest mux ancestor classification                                   | Type-only `multiplexer-contracts`                                                                                                                                                                                                                                                                             |
+|  69 | `src/multiplexer-live-probes.ts`             | Read-only bounded backend queries that verify pane ownership against the current process ancestry                               | `multiplexer-contracts`, `multiplexer-process-context`                                                                                                                                                                                                                                                        |
+|  70 | `src/multiplexer-current-context.ts`         | Shared fail-closed current-pane ownership resolution for auto selection and activity                                            | `multiplexer-contracts`, `multiplexer-live-probes`, `multiplexer-process-context`                                                                                                                                                                                                                             |
 
 ---
 

@@ -123,6 +123,13 @@ describe("interactive-tmux", () => {
   beforeEach(() => {
     clearSessionScopes();
     scope = createTestSessionScope();
+    // Launch fixtures exercise the real resolver with synthetic ownership proof.
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: vi.fn(() => ({
+        kind: "ready",
+        target: { mux: "tmux", paneId: process.env.TMUX_PANE || "%1" },
+      })),
+    }));
     // Isolate auto-selection from ambient Herdr and Zellij identities in this
     // mocked-tmux suite. Individual cases may opt into a backend afterward.
     vi.stubEnv("HERDR_ENV", "");
@@ -149,6 +156,7 @@ describe("interactive-tmux", () => {
     delete process.env.PI_SUBAGENTURA_MAX_DEPTH;
     delete process.env.PI_SUBAGENTURA_MAX_NODES;
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
     vi.doUnmock("node:fs");
     vi.doUnmock("../src/artifact");
     vi.unstubAllGlobals();
@@ -400,6 +408,9 @@ describe("interactive-tmux", () => {
       );
 
       expect(result.isError).not.toBe(true);
+      const { resolveCurrentMuxContext } =
+        await import("../src/multiplexer-current-context");
+      expect(resolveCurrentMuxContext).toHaveBeenCalled();
       expect(result.details).toMatchObject({
         status: "started",
         mux: "tmux",

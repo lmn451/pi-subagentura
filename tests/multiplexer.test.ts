@@ -1,6 +1,146 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
+import type { LiveMuxTarget } from "../src/multiplexer-live-probes";
+
+describe("getMux live process ownership resolution", () => {
+  let savedEnv: NodeJS.ProcessEnv;
+  const probes = vi.fn();
+  const readContext = vi.fn();
+
+  beforeEach(() => {
+    savedEnv = { ...process.env };
+    for (const key of [
+      "TMUX",
+      "TMUX_PANE",
+      "ZELLIJ",
+      "ZELLIJ_SESSION_NAME",
+      "ZELLIJ_PANE_ID",
+      "HERDR_ENV",
+      "HERDR_SOCKET_PATH",
+      "HERDR_PANE_ID",
+      "REX_SESSION",
+      "REX_BLOCK",
+      "REX_SERVER",
+      "TERM_PROGRAM",
+    ])
+      delete process.env[key];
+    probes.mockReset();
+    readContext
+      .mockReset()
+      .mockReturnValue({ pid: 100, ancestors: [], processes: new Map() });
+    vi.doMock("../src/multiplexer-process-context", () => ({
+      readProcessContext: readContext,
+      closestMuxAncestor: () => undefined,
+    }));
+    vi.doMock("../src/multiplexer-live-probes", () => ({
+      probeLiveMuxTarget: probes,
+    }));
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(() => ""),
+      execFile: vi.fn(),
+      spawn: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    process.env = savedEnv;
+    vi.doUnmock("../src/multiplexer-process-context");
+    vi.doUnmock("../src/multiplexer-live-probes");
+    vi.doUnmock("node:child_process");
+  });
+
+  function nestedMarkers(): void {
+    Object.assign(process.env, {
+      TMUX: "/tmp/tmux/default,1,0",
+      TMUX_PANE: "%4",
+      ZELLIJ: "0",
+      ZELLIJ_SESSION_NAME: "outer",
+      ZELLIJ_PANE_ID: "5",
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      HERDR_PANE_ID: "w1:p2",
+    });
+  }
+
+  it.each(["tmux", "zellij", "herdr"] as const)(
+    "selects proven inner %s instead of fixed environment precedence",
+    async (mux) => {
+      nestedMarkers();
+      probes.mockImplementation((target: LiveMuxTarget) =>
+        target.mux === mux
+          ? { kind: "match", target, distance: 0 }
+          : { kind: "mismatch" },
+      );
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(getMux().name).toBe(mux);
+      expect(probes).toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["tmux", "zellij"],
+    ["zellij", "tmux"],
+  ] as const)(
+    "chooses nearer %s over matching outer %s",
+    async (inner, outer) => {
+      nestedMarkers();
+      delete process.env.HERDR_ENV;
+      delete process.env.HERDR_PANE_ID;
+      delete process.env.HERDR_SOCKET_PATH;
+      probes.mockImplementation((target: LiveMuxTarget) => ({
+        kind: "match",
+        target,
+        distance: target.mux === inner ? 0 : 3,
+      }));
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(getMux().name).toBe(inner);
+      expect(probes.mock.calls.some(([target]) => target.mux === outer)).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["mismatch", "unknown"] as const)(
+    "fails closed when all advertised panes return %s",
+    async (kind) => {
+      nestedMarkers();
+      probes.mockReturnValue({ kind });
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(() => getMux()).toThrow(/context|ownership|verif|current/i);
+    },
+  );
+
+  it("fails closed when process inspection is unavailable", async () => {
+    nestedMarkers();
+    readContext.mockReturnValue(undefined);
+    const { getMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(() => getMux()).toThrow(/context|ownership|verif|current/i);
+  });
+
+  it("does not perform live detection for explicit preferences", async () => {
+    nestedMarkers();
+    const { getMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(getMux({ preference: "tmux" }).name).toBe("tmux");
+    expect(readContext).not.toHaveBeenCalled();
+    expect(probes).not.toHaveBeenCalled();
+  });
+});
 
 describe("multiplexer module boundary", () => {
   it("loads concrete backends without importing the registry", async () => {
@@ -72,6 +212,7 @@ describe("getMux relaxed-spawn resolution", () => {
   afterEach(() => {
     process.env = originalEnv;
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
   });
 
   it("getMux auto returns TmuxMultiplexer when TMUX/ZELLIJ env vars unset but tmux binary exists", async () => {
@@ -155,7 +296,13 @@ describe("getMux relaxed-spawn resolution", () => {
     );
   });
 
-  it("getMux auto prefers the Herdr pane over inherited outer mux markers", async () => {
+  it("getMux auto uses a verified Herdr target despite inherited outer markers", async () => {
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: () => ({
+        kind: "ready",
+        target: { mux: "herdr", paneId: "w1:p2", session: "/tmp/herdr.sock" },
+      }),
+    }));
     process.env.HERDR_ENV = "1";
     process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
     process.env.ZELLIJ_SESSION_NAME = "outer-zellij";
@@ -230,6 +377,17 @@ describe("getMux relaxed-spawn resolution", () => {
     },
   );
   it("auto-selects a live Rex context ahead of inherited tmux markers", async () => {
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: () => ({
+        kind: "ready",
+        target: {
+          mux: "rex",
+          paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+          session: "session:01234567-89ab-cdef-0123-456789abcdef",
+          server: "unix:///tmp/rex.sock",
+        },
+      }),
+    }));
     process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
     process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
     process.env.REX_SERVER = "unix:///tmp/rex.sock";
@@ -334,7 +492,6 @@ describe("getMux relaxed-spawn resolution", () => {
 
   it("does not treat a default REX_SERVER alone as a live Rex context", async () => {
     process.env.REX_SERVER = "unix:///tmp/rex.sock";
-    process.env.TMUX = "/tmp/tmux/default,1,0";
     vi.doMock("node:child_process", () => ({
       execFileSync: (file: string, args: string[]) => {
         if (

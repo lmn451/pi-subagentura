@@ -23,6 +23,80 @@ const { mockAwaitInteractiveResult, mockLaunch, mockStartSubagentJob } =
     mockStartSubagentJob: vi.fn(),
   }));
 
+const { mockBackend } = vi.hoisted(() => ({
+  mockBackend: (name: string) => ({
+    name,
+    isAvailable: vi.fn(() => false),
+    createPane: vi.fn(() => {
+      throw new Error(`Unexpected pane creation via ${name}`);
+    }),
+    killPane: vi.fn(),
+    getPaneLiveness: vi.fn(() => "alive"),
+    getPaneLivenessAsync: vi.fn(async () => "alive"),
+  }),
+}));
+
+vi.mock("../src/multiplexer-tmux", () => ({
+  TmuxMultiplexer: vi.fn(function () {
+    return mockBackend("tmux");
+  }),
+}));
+vi.mock("../src/multiplexer-zellij", () => ({
+  ZellijMultiplexer: vi.fn(function () {
+    return mockBackend("zellij");
+  }),
+}));
+vi.mock("../src/multiplexer-herdr", () => ({
+  HerdrMultiplexer: vi.fn(function () {
+    return mockBackend("herdr");
+  }),
+}));
+vi.mock("../src/multiplexer-rex", () => ({
+  RexMultiplexer: vi.fn(function () {
+    return mockBackend("rex");
+  }),
+}));
+
+// This synthetic suite exercises detached launch and fallback, not host probes.
+vi.mock("../src/multiplexer-current-context", () => ({
+  resolveCurrentMuxContext: vi.fn(() => ({ kind: "absent" })),
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const blocked = () => {
+    throw new Error("Unexpected process launch in workflow supervisor fixture");
+  };
+  return {
+    ...actual,
+    exec: vi.fn(blocked),
+    execSync: vi.fn(blocked),
+    execFile: vi.fn(blocked),
+    execFileSync: vi.fn(blocked),
+    spawn: vi.fn(blocked),
+    spawnSync: vi.fn(blocked),
+    fork: vi.fn(blocked),
+  };
+});
+
+vi.mock("node:net", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:net")>();
+  const blocked = () => {
+    throw new Error(
+      "Unexpected socket connection in workflow supervisor fixture",
+    );
+  };
+  class Socket extends actual.Socket {
+    connect = vi.fn(blocked);
+  }
+  return {
+    ...actual,
+    Socket,
+    connect: vi.fn(blocked),
+    createConnection: vi.fn(blocked),
+  };
+});
+
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
@@ -282,6 +356,52 @@ afterEach(() => {
 });
 
 describe("workflow supervisor integration", () => {
+  it("isolates every concrete backend construction and pane creation path", async () => {
+    const backends = [
+      (await import("../src/multiplexer-tmux")).TmuxMultiplexer,
+      (await import("../src/multiplexer-zellij")).ZellijMultiplexer,
+      (await import("../src/multiplexer-herdr")).HerdrMultiplexer,
+      (await import("../src/multiplexer-rex")).RexMultiplexer,
+    ];
+    __resetMuxInstances();
+    const { getMux } = await import("../src/multiplexer");
+    const names = ["tmux", "zellij", "herdr", "rex"] as const;
+    for (const [index, Backend] of backends.entries()) {
+      // Check isolation before constructing anything, so this regression is safe
+      // even before the concrete backend mocks have been installed.
+      expect(vi.isMockFunction(Backend)).toBe(true);
+      const backend = new Backend();
+      expect(vi.isMockFunction(backend.createPane)).toBe(true);
+      expect(backend.isAvailable()).toBe(false);
+      expect(() => backend.createPane({} as never)).toThrow(
+        "Unexpected pane creation",
+      );
+      const selected = getMux({ preference: names[index] });
+      expect(vi.isMockFunction(selected.createPane)).toBe(true);
+      expect(() => selected.createPane({} as never)).toThrow(
+        "Unexpected pane creation",
+      );
+    }
+    const processes = await import("node:child_process");
+    for (const operation of [
+      processes.exec,
+      processes.execSync,
+      processes.execFile,
+      processes.execFileSync,
+      processes.spawn,
+      processes.spawnSync,
+      processes.fork,
+    ]) {
+      expect(vi.isMockFunction(operation)).toBe(true);
+      expect(operation).not.toHaveBeenCalled();
+    }
+    const sockets = await import("node:net");
+    expect(vi.isMockFunction(sockets.connect)).toBe(true);
+    expect(vi.isMockFunction(sockets.createConnection)).toBe(true);
+    const socket = new sockets.Socket();
+    expect(vi.isMockFunction(socket.connect)).toBe(true);
+    socket.destroy();
+  });
   it.each([
     [{ async: true }, "each"],
     [

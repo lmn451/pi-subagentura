@@ -318,6 +318,13 @@ function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
   tmuxMockCalls = [];
   tmuxDisplayMessageCalls = 0;
   vi.resetModules();
+  // Persistence tests need deterministic ownership, not live process discovery.
+  vi.doMock("../src/multiplexer-current-context", () => ({
+    resolveCurrentMuxContext: () => ({
+      kind: "ready",
+      target: { mux: "tmux", paneId: "%1" },
+    }),
+  }));
   vi.doMock("node:child_process", () => ({
     execFileSync: (_file: string, args: string[]) => {
       tmuxMockCalls.push(args);
@@ -410,6 +417,7 @@ describe("spawn-time state persistence", () => {
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
     vi.doUnmock("../src/spawn-tree-context");
     vi.unstubAllGlobals();
     clearSessionScopes();

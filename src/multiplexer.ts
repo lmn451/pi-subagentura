@@ -8,7 +8,7 @@
  *
  * Resolution order (`getMux`):
  *   1. Explicit `preference` arg from the tool (forces one backend).
- *   2. A verified current host context (Herdr, Rex, Zellij, then tmux).
+ *   2. Live process/pane ownership, independent of inherited marker order.
  *      A recognized but unverified context fails closed rather than falling
  *      through to an unrelated installed backend.
  *   3. When no host context is present, fall back to installed tmux then
@@ -18,7 +18,8 @@
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
-import { probeRexContext, RexMultiplexer } from "./multiplexer-rex";
+import { RexMultiplexer } from "./multiplexer-rex";
+import { resolveCurrentMuxContext } from "./multiplexer-current-context";
 import type { MuxName, Multiplexer } from "./multiplexer-contracts";
 
 export * from "./multiplexer-contracts";
@@ -34,8 +35,8 @@ function assertNever(value: never): never {
 
 export interface GetMuxOptions {
   /**
-   * Explicit backend choice. `'auto'` (the default) walks the env-var +
-   * availability chain described in the file header.
+   * Explicit backend choice. `'auto'` (the default) verifies current pane
+   * ownership, then falls back only when no host context is present.
    */
   preference?: MuxName | "auto";
 }
@@ -65,42 +66,15 @@ export class MultiplexerContextUnavailableError extends Error {
  * instances keep no per-pane state, which remains persisted on child records.
  */
 function resolveAutoMux(): Multiplexer {
+  const context = resolveCurrentMuxContext();
+  if (context.kind === "unavailable") {
+    throw new MultiplexerContextUnavailableError(context.message);
+  }
+  if (context.kind === "ready") {
+    return getMux({ preference: context.target.mux });
+  }
   const tmux = getOrCreate("tmux", () => new TmuxMultiplexer());
   const zellij = getOrCreate("zellij", () => new ZellijMultiplexer());
-  const herdr = getOrCreate("herdr", () => new HerdrMultiplexer());
-  const rex = getOrCreate("rex", () => new RexMultiplexer());
-
-  // Herdr's exact managed-pane marker remains the most specific legacy signal.
-  if (process.env.HERDR_ENV === "1") {
-    if (herdr.isAvailable()) return herdr;
-    throw new MultiplexerContextUnavailableError(
-      "Herdr context is present but unavailable; refusing to fall back to another multiplexer.",
-    );
-  }
-
-  const rexContext = probeRexContext();
-  if (rexContext.kind === "invalid") {
-    throw new MultiplexerContextUnavailableError(rexContext.message);
-  }
-  if (rexContext.kind === "ready") return rex;
-
-  if (process.env.ZELLIJ_SESSION_NAME) {
-    if (zellij.isAvailable()) return zellij;
-    throw new MultiplexerContextUnavailableError(
-      "Zellij context is present but unavailable; refusing to fall back to another multiplexer.",
-    );
-  }
-  if (process.env.ZELLIJ) {
-    throw new MultiplexerContextUnavailableError(
-      "Zellij context marker is present without a session identity; refusing to fall back.",
-    );
-  }
-  if (process.env.TMUX) {
-    if (tmux.isAvailable()) return tmux;
-    throw new MultiplexerContextUnavailableError(
-      "tmux context is present but unavailable; refusing to fall back to another multiplexer.",
-    );
-  }
 
   if (tmux.isAvailable()) return tmux;
   if (zellij.isAvailable()) return zellij;

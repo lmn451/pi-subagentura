@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Resolve automatic mux selection and current-pane activity using bounded live
+  backend evidence tied to Pi's process ancestry/TTY, rather than inherited host
+  marker priority or UI focus. Nested muxes use the nearest verified owner;
+  ambiguous or unprovable ownership fails closed. Explicit backend choices and
+  the no-host tmux-then-Zellij detached fallback remain available.
+- Keep Rex process ancestry distinct from Herdr when detecting the current mux.
 - Extend closed mux and parent-mux telemetry enums with Rex (schema v7).
 
 ## [4.2.1] - 2026-11-07
