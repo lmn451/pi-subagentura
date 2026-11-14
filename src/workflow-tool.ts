@@ -130,6 +130,7 @@ const WorkflowStatusOutputSchema = Type.Union([
     agentsSpawned: Type.Number(),
     runningCount: Type.Optional(Type.Number()),
     errorCount: Type.Number(),
+    cancelledCount: Type.Number(),
     usage: Type.Optional(WorkflowUsageOutputSchema),
     liveUsage: Type.Optional(WorkflowUsageOutputSchema),
     budgetTotal: Type.Optional(Type.Number()),
@@ -156,6 +157,7 @@ const WorkflowResultOutputSchema = Type.Object({
   result: Type.Optional(Type.String()),
   agentsSpawned: Type.Optional(Type.Number()),
   errorCount: Type.Optional(Type.Number()),
+  cancelledCount: Type.Optional(Type.Number()),
   usage: Type.Optional(WorkflowUsageOutputSchema),
   budgetTotal: Type.Optional(Type.Number()),
   error: Type.Optional(Type.String()),
@@ -685,9 +687,12 @@ export function registerWorkflowTool(
 
   function notifyWorkflowCompletion(job: WorkflowJobState): void {
     const errorCount = job.result?.errorCount ?? job.snapshot.errorCount;
+    const cancelledCount =
+      job.result?.cancelledCount ?? job.snapshot.cancelledCount ?? 0;
     const presentation = getWorkflowCompletionPresentation(
       job.status,
       errorCount,
+      cancelledCount,
     );
     if (!job.completionPolicy) {
       debugLog("warn", "workflow_completion_policy_missing", {
@@ -705,31 +710,42 @@ export function registerWorkflowTool(
         status:
           job.status === "cancelled"
             ? "cancelled"
-            : job.status === "error" ||
-                presentation.label === "completed with errors"
+            : job.status === "error" || errorCount > 0
               ? "error"
-              : "done",
-        ...(job.status === "done" &&
-        presentation.label === "completed with errors"
+              : cancelledCount > 0
+                ? "cancelled"
+                : "done",
+        ...(job.status === "done" && errorCount > 0
           ? { presentation: "completed-with-errors" as const }
           : {}),
         policy: job.completionPolicy,
         ...(job.completionGroupId ? { groupId: job.completionGroupId } : {}),
-        references:
-          job.status === "cancelled"
+        references: [
+          ...(job.status === "cancelled"
             ? [{ label: "status", value: "cancelled; no result retained" }]
+            : errorCount > 0 || cancelledCount > 0
+              ? [{ label: "status", value: presentation.label }]
+              : []),
+          ...(errorCount > 0
+            ? [{ label: "errors", value: String(errorCount) }]
+            : []),
+          ...(cancelledCount > 0
+            ? [{ label: "cancellations", value: String(cancelledCount) }]
+            : []),
+          ...(job.status === "cancelled"
+            ? []
             : [
                 {
                   label: "result",
                   value: `call get_workflow_result with workflowId ${JSON.stringify(job.id)}`,
                 },
-              ],
+              ]),
+        ],
         completedAt: Date.now(),
       },
       job.parentSessionOwner,
     );
   }
-
   registerToolWithDefaultGuidance(pi, {
     name: "workflow",
     label: "Workflow",
@@ -1067,20 +1083,29 @@ export function registerWorkflowTool(
           workflowOwner,
           resultText.length > 0 ? "consumed" : "empty",
         );
+        const cancelledCount =
+          run.cancelledCount ?? job.snapshot.cancelledCount ?? 0;
         const presentation = getWorkflowCompletionPresentation(
-          "done",
+          job.status,
           run.errorCount,
+          cancelledCount,
         );
         const completionPrefix = presentation.icon
           ? `${presentation.icon} `
           : "";
         const completionLabel = presentation.icon
           ? presentation.label
-          : "complete";
+          : presentation.label === "done"
+            ? "complete"
+            : presentation.label;
+        const cancellationSummary =
+          cancelledCount > 0
+            ? `, ${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"}`
+            : "";
         const usage = presentWorkflowUsage(run.usage);
         const summary =
           `${completionPrefix}Workflow "${run.meta.name}" ${completionLabel} — ` +
-          `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${
+          `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${cancellationSummary}${
             usage
               ? `, ${formatWorkflowUsage(usage, {
                   outputBudget: job.snapshot.budgetTotal,
@@ -1090,11 +1115,12 @@ export function registerWorkflowTool(
         return {
           content: [{ type: "text", text: `${summary}\n\n${resultText}` }],
           details: {
-            status: "done",
+            status: job.status,
             presentationStatus: presentation.label,
             name: run.meta.name,
             agentsSpawned: run.agentsSpawned,
             errorCount: run.errorCount,
+            cancelledCount,
             tokensSpent: run.tokensSpent,
             usage: run.usage,
             budgetTotal: job.snapshot.budgetTotal,
@@ -1111,11 +1137,18 @@ export function registerWorkflowTool(
         const usage = workflowErrorUsage(err);
         const usageDetails = usage ? { usage } : {};
         const budgetTotal = params.budget ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET;
+        const status = job?.status ?? "error";
+        const cancelledCount =
+          job?.result?.cancelledCount ?? job?.snapshot.cancelledCount ?? 0;
+        const cancellationSummary =
+          cancelledCount > 0
+            ? ` (${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"})`
+            : "";
         return {
           content: [
             {
               type: "text",
-              text: `Workflow failed: ${msg}${
+              text: `Workflow ${status === "error" ? "failed" : status}: ${msg}${cancellationSummary}${
                 usage
                   ? ` (${formatWorkflowUsage(usage, {
                       outputBudget: budgetTotal,
@@ -1125,8 +1158,9 @@ export function registerWorkflowTool(
             },
           ],
           details: {
-            status: "error",
+            status,
             error: msg,
+            cancelledCount,
             budgetTotal,
             ...usageDetails,
           },
@@ -1164,11 +1198,18 @@ export function registerWorkflowTool(
         };
       }
       const errorCount = st.result?.errorCount ?? st.snapshot.errorCount;
+      const cancelledCount =
+        st.result?.cancelledCount ?? st.snapshot.cancelledCount ?? 0;
       const presentation = getWorkflowCompletionPresentation(
         st.status,
         errorCount,
+        cancelledCount,
       );
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
+      const cancellationSummary =
+        cancelledCount > 0
+          ? `, ${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"}`
+          : "";
       const usage = presentWorkflowUsage(st.snapshot.usage);
       const liveUsage = presentWorkflowUsage(st.snapshot.liveUsage);
       return {
@@ -1180,7 +1221,7 @@ export function registerWorkflowTool(
               (st.snapshot.runningCount && st.snapshot.runningCount > 0
                 ? `, ${st.snapshot.runningCount} running`
                 : "") +
-              `, ${errorCount} error(s)` +
+              `, ${errorCount} error(s)${cancellationSummary}` +
               (usage
                 ? `, ${formatWorkflowUsage(usage, { outputBudget: st.snapshot.budgetTotal })}`
                 : "") +
@@ -1198,6 +1239,7 @@ export function registerWorkflowTool(
           name: st.name,
           elapsedMs: Date.now() - st.startedAt,
           ...st.snapshot,
+          cancelledCount,
         },
         structuredContent: {
           status: st.status,
@@ -1210,6 +1252,7 @@ export function registerWorkflowTool(
             ? {}
             : { runningCount: st.snapshot.runningCount }),
           errorCount,
+          cancelledCount,
           ...(usage === undefined ? {} : { usage }),
           ...(liveUsage === undefined ? {} : { liveUsage }),
           ...(st.snapshot.budgetTotal == null
@@ -1305,6 +1348,14 @@ export function registerWorkflowTool(
         const usage = presentWorkflowUsage(st.snapshot?.usage);
         const outputBudget = st.snapshot?.budgetTotal;
         const usageDetails = usage ? { usage } : {};
+        const errorCount =
+          st.result?.errorCount ?? st.snapshot?.errorCount ?? 0;
+        const cancelledCount =
+          st.result?.cancelledCount ?? st.snapshot?.cancelledCount ?? 0;
+        const cancellationSummary =
+          cancelledCount > 0
+            ? ` (${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"})`
+            : "";
         consumeCompletionSource(
           pi,
           { source: "workflow", sourceId: st.id },
@@ -1320,7 +1371,7 @@ export function registerWorkflowTool(
           content: [
             {
               type: "text",
-              text: `Workflow ${st.id} ${st.status}: ${msg}${
+              text: `Workflow ${st.id} ${st.status}: ${msg}${cancellationSummary}${
                 usage
                   ? ` (${formatWorkflowUsage(usage, {
                       outputBudget,
@@ -1333,6 +1384,8 @@ export function registerWorkflowTool(
             status: st.status,
             workflowId: st.id,
             error: msg,
+            errorCount,
+            cancelledCount,
             ...(outputBudget == null ? {} : { budgetTotal: outputBudget }),
             ...usageDetails,
           },
@@ -1341,6 +1394,8 @@ export function registerWorkflowTool(
             status: st.status,
             workflowId: st.id,
             error: msg,
+            errorCount,
+            cancelledCount,
             ...(outputBudget == null ? {} : { budgetTotal: outputBudget }),
             ...(usage === undefined ? {} : { usage }),
           },
@@ -1351,11 +1406,19 @@ export function registerWorkflowTool(
         typeof run.result === "string" ? run.result : stringify(run.result);
       const resultText =
         typeof serializedResult === "string" ? serializedResult : "";
+      const errorCount = run.errorCount;
+      const cancelledCount =
+        run.cancelledCount ?? st.snapshot.cancelledCount ?? 0;
       const presentation = getWorkflowCompletionPresentation(
-        "done",
-        run.errorCount,
+        st.status,
+        errorCount,
+        cancelledCount,
       );
       const usage = presentWorkflowUsage(run.usage);
+      const cancellationSummary =
+        cancelledCount > 0
+          ? `, ${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"}`
+          : "";
       consumeCompletionSource(
         pi,
         { source: "workflow", sourceId: st.id },
@@ -1378,10 +1441,14 @@ export function registerWorkflowTool(
             type: "text",
             text: (() => {
               const prefix = presentation.icon ? `${presentation.icon} ` : "";
-              const label = presentation.icon ? presentation.label : "complete";
+              const label = presentation.icon
+                ? presentation.label
+                : presentation.label === "done"
+                  ? "complete"
+                  : presentation.label;
               return (
                 `${prefix}Workflow "${run.meta.name}" ${label} — ` +
-                `${run.agentsSpawned} agent(s), ${run.errorCount} error(s)${
+                `${run.agentsSpawned} agent(s), ${errorCount} error(s)${cancellationSummary}${
                   usage
                     ? `, ${formatWorkflowUsage(usage, {
                         outputBudget: st.snapshot.budgetTotal,
@@ -1393,25 +1460,27 @@ export function registerWorkflowTool(
           },
         ],
         details: {
-          status: "done",
+          status: st.status,
           presentationStatus: presentation.label,
           workflowId: st.id,
           name: run.meta.name,
           agentsSpawned: run.agentsSpawned,
-          errorCount: run.errorCount,
+          errorCount,
+          cancelledCount,
           tokensSpent: run.tokensSpent,
           usage: run.usage,
           budgetTotal: st.snapshot.budgetTotal,
           phases: run.phases,
         },
         structuredContent: {
-          status: "done",
+          status: st.status,
           workflowId: st.id,
           name: run.meta.name,
           presentationStatus: presentation.label,
           result: resultText,
           agentsSpawned: run.agentsSpawned,
-          errorCount: run.errorCount,
+          errorCount,
+          cancelledCount,
           ...(run.usage === undefined ? {} : { usage: run.usage }),
           ...(st.snapshot.budgetTotal == null
             ? {}
@@ -1968,9 +2037,11 @@ export function registerWorkflowTool(
       const elapsed = formatElapsed(now - st.startedAt);
       const s = st.snapshot;
       const errorCount = st.result?.errorCount ?? s.errorCount;
+      const cancelledCount = st.result?.cancelledCount ?? s.cancelledCount ?? 0;
       const presentation = getWorkflowCompletionPresentation(
         st.status,
         errorCount,
+        cancelledCount,
       );
       const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
       const parts: string[] = [
@@ -1981,6 +2052,11 @@ export function registerWorkflowTool(
         parts.push(`⚡ ${s.runningCount} running`);
       }
       if (errorCount > 0) parts.push(`⚠ ${errorCount} error(s)`);
+      if (cancelledCount > 0) {
+        parts.push(
+          `${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"}`,
+        );
+      }
       const usage = presentWorkflowUsage(s.usage);
       if (usage) {
         parts.push(formatWorkflowUsage(usage, { outputBudget: s.budgetTotal }));

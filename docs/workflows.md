@@ -306,7 +306,18 @@ records show phase, label, model, and status, not full tool-call history.
 The overlay is keyboard-driven. Mouse-clickable controls directly on widget rows
 are still deferred because widgets are intentionally passive status surfaces.
 
-#### 4. Remaining gaps
+#### 4. Completion and cancellation
+
+A raw workflow `status: "done"` means its script resolved, not that every child
+completed successfully. Terminal `get_workflow_status` and `get_workflow_result`
+responses expose `cancelledCount` alongside `errorCount`. Cancelled children are
+counted separately from errors, even when their `agent()` result is `null`.
+
+Resolved workflows with cancelled children use a warning presentation in results,
+status, and workflow summaries. Whole-workflow `status: "cancelled"` and an
+interrupted result wait (`wait_cancelled`) remain distinct from child cancellation.
+
+#### 5. Remaining gaps
 
 - Workflow widget rows are summaries, not mouse-clickable controls.
 - Progress event coalescing/rate limiting is still basic.

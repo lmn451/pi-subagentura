@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requests, and documented keep-open and wake handling. Strengthen Rex target
   and caller-block safeguards while allowing necessary private handoff selectors
   without weakening telemetry privacy.
+- Preserve cancelled-child counts in workflow results, status, and completion
+  presentation instead of reporting resolved partial work as a clean completion.
 
 ## [4.2.1] - 2026-11-07
 

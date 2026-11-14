@@ -206,9 +206,11 @@ function selectableJobs(owner?: SessionOwnerToken): WorkflowJobState[] {
 function formatWorkflowSummary(job: WorkflowJobState): string {
   const s = job.snapshot;
   const errorCount = job.result?.errorCount ?? s.errorCount;
+  const cancelledCount = job.result?.cancelledCount ?? s.cancelledCount ?? 0;
   const presentation = getWorkflowCompletionPresentation(
     job.status,
     errorCount,
+    cancelledCount,
   );
   const statusPrefix = presentation.icon ? `${presentation.icon} ` : "";
   const parts = [
@@ -218,6 +220,11 @@ function formatWorkflowSummary(job: WorkflowJobState): string {
     `${s.runningCount ?? 0} running`,
   ];
   if (errorCount > 0) parts.push(`${errorCount} errors`);
+  if (cancelledCount > 0) {
+    parts.push(
+      `${cancelledCount} cancellation${cancelledCount === 1 ? "" : "s"}`,
+    );
+  }
   const usage = presentWorkflowUsage(s.usage);
   if (usage) {
     parts.push(formatWorkflowUsage(usage, { outputBudget: s.budgetTotal }));
