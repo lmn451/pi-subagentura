@@ -14,6 +14,9 @@ npm test
 npm run pack:check
 ```
 
+Vitest discovery is limited to the root `tests/**/*.test.ts` tree, so nested
+repositories and worktrees are not collected as tests.
+
 `npm run typecheck` also runs an incremental strict-core check. The dependency-light
 identifier and usage modules and the public workflow declarations enable
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` in
