@@ -310,6 +310,7 @@ cache is only an untrusted lookup aid.
 ### Host-aware interactive agent spawning
 
 `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` is the detailed Orca host/UX guide.
+`REX_INTERACTIVE_SYSTEM_PROMPT.md` holds Rex-specific external-worker guidance.
 `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` is the shared host layer for recognized
 Orca, Agterm, and Rex parent contexts. Orca skills are external; use the
 installed, version-matched skills for exact commands and live discovery.
@@ -317,9 +318,9 @@ installed, version-matched skills for exact commands and live discovery.
 At extension activation, one bounded environment snapshot captures closed
 prompt-eligibility and telemetry categories. On every parent
 `before_agent_start`, a matching non-child root receives the relevant prompt
-asset through Pi's `systemPrompt`: Orca roots get the Orca guide and shared host
-layer; Agterm and Rex roots get only the shared layer. Unrecognized or unrelated
-roots and native interactive child processes receive no host-specific prompt,
+asset through Pi's `systemPrompt`: Orca and Rex roots get their respective
+host-specific guide and shared host layer; Agterm roots get only the shared
+layer. Unrecognized or unrelated roots and native interactive child processes receive no host-specific prompt,
 even if they inherit host markers. The snapshot retains no raw host values,
 paths, or identifiers; it proves neither current host ownership nor mux
 selection.
@@ -333,6 +334,7 @@ a recognized prompt host, not a native mux backend. Explicit user-selected
 targets take precedence. If live ownership or the requested target is
 uncertain, report that and ask rather than silently switching. See
 [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) and
+[the canonical Rex guide](REX_INTERACTIVE_SYSTEM_PROMPT.md), alongside
 [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
 
 For host attribution and the boundary around extension launch telemetry, see
@@ -691,6 +693,9 @@ Parameters:
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, or `"rex"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+
+  Attached Zellij ownership limits are documented in [Rex multiplexer support](docs/rex-multiplexer.md).
+
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)

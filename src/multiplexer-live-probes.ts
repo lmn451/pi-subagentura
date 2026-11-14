@@ -7,7 +7,6 @@ import {
   type MuxName,
 } from "./multiplexer-contracts";
 import {
-  closestMuxAncestor,
   normalizeProcessTty,
   type ProcessContext,
 } from "./multiplexer-process-context";
@@ -222,7 +221,6 @@ function rexProbe(
 }
 function zellijProbe(
   target: LiveMuxTarget,
-  context: ProcessContext,
   env: NodeJS.ProcessEnv,
 ): ProbePlan | LiveMuxProbe {
   if (
@@ -261,12 +259,9 @@ function zellijProbe(
         )
       )
         return MISMATCH;
-      const owner = closestMuxAncestor(context);
-      if (owner?.mux !== "zellij") return UNKNOWN;
-      const distance = context.ancestors.findIndex(
-        (ancestor) => ancestor.pid === owner.pid,
-      );
-      return distance < 0 ? UNKNOWN : { kind: "match", target, distance };
+      // The public listing exposes no pane PID. A Zellij ancestor cannot bind
+      // these inherited session/pane selectors to the caller's process.
+      return UNKNOWN;
     },
   };
 }
@@ -302,7 +297,7 @@ function prepareProbe(
     case "rex":
       return rexProbe(target, context, env);
     case "zellij":
-      return zellijProbe(target, context, env);
+      return zellijProbe(target, env);
     default:
       return UNKNOWN;
   }

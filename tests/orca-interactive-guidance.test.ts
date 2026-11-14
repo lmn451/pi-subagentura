@@ -26,6 +26,10 @@ const orcaPromptAsset = readFileSync(
   new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const rexPromptAsset = readFileSync(
+  new URL("../REX_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 const interactivePromptAsset = readFileSync(
   new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
@@ -72,6 +76,13 @@ function expectSharedPromptAssets(
 ) {
   expect(countOccurrences(prompt, orcaPromptAsset)).toBe(
     hostAssets.includes(orcaPromptAsset) ? 1 : 0,
+  );
+  expect(countOccurrences(prompt, rexPromptAsset)).toBe(
+    hostAssets.includes(rexPromptAsset) ? 1 : 0,
+  );
+  // Assert the delivered interface does not leak external Rex operations.
+  expect(countOccurrences(prompt, "`rex skill show`")).toBe(
+    hostAssets.includes(rexPromptAsset) ? 1 : 0,
   );
   expect(countOccurrences(prompt, interactivePromptAsset)).toBe(
     hostAssets.includes(interactivePromptAsset) ? 1 : 0,
@@ -191,7 +202,22 @@ describe("interactive prompt assembly contract", () => {
       child: false,
       hostEnv: validRexEnvironment,
       modeAssets: [],
-      hostAssets: [interactivePromptAsset],
+      hostAssets: [rexPromptAsset, interactivePromptAsset],
+    },
+    {
+      name: "Rex-context V2 parent",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: validRexEnvironment,
+      modeAssets: [v2PromptAsset],
+      hostAssets: [rexPromptAsset, interactivePromptAsset],
+    },
+    {
+      name: "interactive child inheriting Rex hints",
+      child: true,
+      hostEnv: validRexEnvironment,
+      modeAssets: [],
+      hostAssets: [],
     },
     {
       name: "unrelated terminal and mux markers",
@@ -269,7 +295,7 @@ describe("interactive prompt assembly contract", () => {
     });
   }
 
-  it("ships both shared prompts and the V2 prompt in npm pack", () => {
+  it("ships host prompts, the shared prompt, and the V2 prompt in npm pack", () => {
     const directory = mkdtempSync(join(tmpdir(), "orca-prompt-contract-"));
     try {
       execFileSync(
@@ -293,6 +319,11 @@ describe("interactive prompt assembly contract", () => {
         ["-xOf", tarball, "package/ORCA_INTERACTIVE_SYSTEM_PROMPT.md"],
         { encoding: "utf8" },
       ).trim();
+      const packedRexPrompt = execFileSync(
+        "tar",
+        ["-xOf", tarball, "package/REX_INTERACTIVE_SYSTEM_PROMPT.md"],
+        { encoding: "utf8" },
+      ).trim();
       const packedInteractivePrompt = execFileSync(
         "tar",
         ["-xOf", tarball, "package/INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md"],
@@ -304,6 +335,7 @@ describe("interactive prompt assembly contract", () => {
         { encoding: "utf8" },
       ).trim();
       expect(packedOrcaPrompt).toBe(orcaPromptAsset);
+      expect(packedRexPrompt).toBe(rexPromptAsset);
       expect(packedInteractivePrompt).toBe(interactivePromptAsset);
       expect(packedV2Prompt).toBe(v2PromptAsset);
     } finally {
@@ -367,7 +399,15 @@ describe("interactive prompts in Pi SDK sessions", () => {
       extensionFlags: {},
       hostEnv: validRexEnvironment,
       modeAssets: [],
-      hostAssets: [interactivePromptAsset],
+      hostAssets: [rexPromptAsset, interactivePromptAsset],
+    },
+    {
+      name: "interactive child inheriting Rex hints",
+      child: true,
+      extensionFlags: { orchestrator: true, orchestratorv2: true },
+      hostEnv: validRexEnvironment,
+      modeAssets: [],
+      hostAssets: [],
     },
   ] as const;
 
