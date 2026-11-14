@@ -11,6 +11,7 @@ import {
   type StartSubagentJobResult,
 } from "./helpers";
 import { launchInteractiveSubagent } from "./interactive-tmux";
+import { MultiplexerContextUnavailableError } from "./multiplexer";
 import {
   DEFAULT_WORKFLOW_OUTPUT_BUDGET,
   MAX_ITEMS_PER_CALL,
@@ -435,6 +436,10 @@ export function registerWorkflowTool(
           initialFailure ??= {
             stage: spawnFailureStage(err) ?? "unknown",
           };
+          if (err instanceof MultiplexerContextUnavailableError) {
+            resolveFailedLaunch("rejected");
+            throw err;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           debugLog("warn", "isolation_process_fallback", { reason: msg });
           onProgress?.({

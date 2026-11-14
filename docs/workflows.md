@@ -323,6 +323,10 @@ Zellij, Herdr, or Rex when the current Rex context is verified:
 await agent(prompt, { label: "verify:claim-x" });
 ```
 
+Ambiguous or unverifiable current-mux ownership rejects the agent attempt; it
+never triggers automatic in-process fallback. Other process-isolation availability
+failures retain the existing fallback, including when no native mux is installed.
+
 Use `isolation: "in-process"` only when the workflow explicitly wants the older
 in-process behavior:
 
