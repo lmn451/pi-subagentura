@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep workflow-visible helpers and copied data in the VM realm so injected
   function constructors do not bypass determinism guards. The workflow VM
   remains a trusted-script aid, not a security boundary.
+- Preserve pane ownership across intermediary PTYs while refusing to cross a
+  nearer mux boundary or accept contradictory pane-root TTY evidence.
+- Keep empty tmux socket overrides equivalent to unset values and preserve valid
+  literal named-socket labels.
+- Preserve nonblank Zellij session names exactly, including leading and trailing
+  whitespace, through candidate selection and live ownership probes.
 
 ## [4.2.1] - 2026-11-07
 

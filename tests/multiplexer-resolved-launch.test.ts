@@ -358,39 +358,56 @@ it("keeps the captured Herdr socket and parent pane", () => {
   );
 });
 
-it("keeps the captured Zellij session after detachment markers change", () => {
-  discover.mockReturnValue({
-    kind: "ready",
-    target: { mux: "zellij", paneId: "1", session: "verified" },
-  });
-  const resolved = resolveMux();
-  vi.stubEnv("ZELLIJ", "");
-  vi.stubEnv("ZELLIJ_SESSION_NAME", "stale");
-  let listing = 0;
-  exec.mockImplementation((command, args) => {
-    if (command === "/bin/sh") return "";
-    if (
-      command === "zellij" &&
-      args[0] === "--session" &&
-      args[1] === "verified"
-    ) {
-      if (args.includes("list-panes"))
-        return JSON.stringify(
-          ++listing === 1 ? [{ id: 1 }] : [{ id: 1 }, { id: 2 }],
-        );
-      if (args.includes("new-pane")) return "";
-    }
-    throw new Error(`unexpected boundary ${command} ${args}`);
-  });
-  expect(
-    resolved.adapter.createPane({
-      name: "child",
-      cwd: "/mock",
-      background: false,
-      context: resolved.context,
-    }),
-  ).toMatchObject({ session: "verified", paneId: "2" });
-});
+it.each(["verified", " project work #1 ", "\u2003项目\u3000"])(
+  "keeps literal Zellij session %j after markers change",
+  (session) => {
+    discover.mockReturnValue({
+      kind: "ready",
+      target: { mux: "zellij", paneId: "1", session },
+    });
+    const resolved = resolveMux();
+    vi.stubEnv("ZELLIJ", "");
+    vi.stubEnv("ZELLIJ_SESSION_NAME", "stale");
+    let listing = 0;
+    exec.mockImplementation((command, args) => {
+      if (command === "/bin/sh") return "";
+      if (
+        command === "zellij" &&
+        args[0] === "--session" &&
+        args[1] === session
+      ) {
+        if (args.includes("list-panes"))
+          return JSON.stringify(
+            ++listing === 1 ? [{ id: 1 }] : [{ id: 1 }, { id: 2 }],
+          );
+        if (args.includes("new-pane")) return "";
+      }
+      throw new Error(`unexpected boundary ${command} ${args}`);
+    });
+    expect(
+      resolved.adapter.createPane({
+        name: "child",
+        cwd: "/mock",
+        background: false,
+        context: resolved.context,
+      }),
+    ).toMatchObject({ session, paneId: "2" });
+  },
+);
+
+it.each(["work space", "项目", "#socket", " socket "])(
+  "preserves literal named socket %j in detached launch authority",
+  (socketName) => {
+    vi.stubEnv("TMUX", "");
+    vi.stubEnv("PI_SUBAGENTURA_TMUX_SOCKET", socketName);
+    expect(resolveMux({ preference: "tmux" }).context).toEqual({
+      kind: "detached",
+      mux: "tmux",
+      socketName,
+    });
+    expect(exec).not.toHaveBeenCalled();
+  },
+);
 
 it.each(["tmux", "zellij"] as const)(
   "launches detached %s despite newly inherited markers",

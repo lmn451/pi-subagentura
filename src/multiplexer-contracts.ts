@@ -10,6 +10,14 @@ import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
 export type MuxName = "tmux" | "zellij" | "herdr" | "rex";
+export function isTmuxSocketLabel(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 export function isMuxSocketPath(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -57,13 +65,6 @@ export function validateMuxLaunchContext(
   context?: MuxLaunchContext,
 ): void {
   if (!context) return;
-  const safe = (value: unknown): value is string =>
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 4096 &&
-    value.trim() === value &&
-    !value.startsWith("-") &&
-    !/[\x00-\x1f\x7f]/.test(value);
   if (
     context.mux !== name ||
     (context.kind !== "attached" && context.kind !== "detached")
@@ -73,7 +74,7 @@ export function validateMuxLaunchContext(
     if (
       (name !== "tmux" && name !== "zellij") ||
       (context.socketName !== undefined &&
-        !/^[A-Za-z0-9_.-]{1,128}$/.test(context.socketName))
+        !isTmuxSocketLabel(context.socketName))
     )
       throw new Error("Invalid detached mux context");
     return;
@@ -83,19 +84,28 @@ export function validateMuxLaunchContext(
       ? /^%\d+$/.test(context.paneId) &&
         isMuxSocketPath(context.server) &&
         (context.socketName === undefined ||
-          /^[A-Za-z0-9_.-]{1,128}$/.test(context.socketName))
+          isTmuxSocketLabel(context.socketName))
       : context.mux === "rex"
         ? isRexBlockId(context.paneId) &&
           isRexSessionId(context.session) &&
           isRexServerAddress(context.server)
         : context.mux === "zellij"
-          ? /^\d+$/.test(context.paneId) && safe(context.session)
+          ? /^\d+$/.test(context.paneId) && isZellijSessionName(context.session)
           : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
             isMuxSocketPath(context.session);
   if (!valid) throw new Error("Invalid multiplexer launch context");
 }
 const REX_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isZellijSessionName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 256 &&
+    /\S/.test(value) &&
+    !value.startsWith("-") &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 
 export function isRexSessionId(value: unknown): value is string {
   return (
