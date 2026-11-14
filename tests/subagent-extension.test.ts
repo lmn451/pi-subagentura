@@ -348,6 +348,17 @@ describe("extension registration", () => {
         "--split",
       );
       expect(abort).toHaveBeenCalledOnce();
+      const inputHook = api.on.mock.calls.find(
+        ([event]) => event === "input",
+      )![1];
+      const notify = vi.fn();
+      expect(
+        inputHook({ text: "Return a short answer." }, { ui: { notify } }),
+      ).toEqual({ action: "handled" });
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining("--split"),
+        "error",
+      );
     },
   );
 
