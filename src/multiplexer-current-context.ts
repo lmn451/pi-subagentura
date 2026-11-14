@@ -2,6 +2,7 @@ import {
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
+  isZellijSessionName,
 } from "./multiplexer-contracts";
 import {
   probeLiveMuxTarget,
@@ -50,7 +51,7 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
   ) {
     names.push("Zellij");
     if (
-      safeSelector(env.ZELLIJ_SESSION_NAME) &&
+      isZellijSessionName(env.ZELLIJ_SESSION_NAME) &&
       /^\d+$/.test(env.ZELLIJ_PANE_ID ?? "")
     ) {
       targets.push({
@@ -154,10 +155,14 @@ function selectCurrentMuxContext(
     : -1;
   if (
     nearest &&
-    nearest.mux !== winner.target.mux &&
     nearestDistance >= 0 &&
-    nearestDistance < winner.distance
-  )
+    (nearestDistance < winner.distance ||
+      (nearestDistance === winner.distance &&
+        (winner.target.mux !== "zellij" || nearest.mux !== "zellij")))
+  ) {
+    // Zellij proves an ancestor relationship, not a pane PID, allowing only
+    // a same-distance Zellij root; PID-backed matches need strict separation.
     return unavailable;
+  }
   return { kind: "ready", target: winner.target };
 }

@@ -264,4 +264,109 @@ describe("asynchronous read-only live mux ownership probes", () => {
       ).resolves.toEqual({ kind: "mismatch" });
     },
   );
+  describe("reviewed mux regressions", () => {
+    it("matches a pane-root PID when a PTY wrapper gives the caller another TTY", async () => {
+      respond("%4\t90\t/dev/pts/1\n");
+      const baseContext = context();
+      const processes = new Map(baseContext.processes);
+      const caller = processes.get(baseContext.pid)!;
+      processes.set(baseContext.pid, { ...caller, tty: "pts/wrapper" });
+      const processContext: ProcessContext = { ...baseContext, processes };
+
+      await expect(
+        probeLiveMuxTargetAsync(targets[0], processContext, env),
+      ).resolves.toEqual({
+        kind: "match",
+        target: targets[0],
+        distance: 0,
+      });
+    });
+
+    it("derives the tmux socket when the named-socket override is empty", async () => {
+      respond(output("tmux"));
+
+      await expect(
+        probeLiveMuxTargetAsync(targets[0], context(), {
+          ...env,
+          PI_SUBAGENTURA_TMUX_SOCKET: "",
+        }),
+      ).resolves.toEqual({ kind: "match", target: targets[0], distance: 0 });
+      expect(exec.mock.calls[0]?.slice(0, 2)).toEqual([
+        "tmux",
+        [
+          "-N",
+          "-S",
+          socket,
+          "display-message",
+          "-p",
+          "-t",
+          "%4",
+          "#{pane_id}\t#{pane_pid}\t#{pane_tty}",
+        ],
+      ]);
+    });
+
+    it.each([
+      "my server",
+      "#server",
+      "π",
+      " server ",
+      "-server",
+      "x".repeat(128),
+    ])("passes literal tmux label %j and proves ownership", async (label) => {
+      respond(output("tmux"));
+
+      await expect(
+        probeLiveMuxTargetAsync(targets[0], context(), {
+          ...env,
+          PI_SUBAGENTURA_TMUX_SOCKET: label,
+        }),
+      ).resolves.toEqual({ kind: "match", target: targets[0], distance: 0 });
+      expect(exec.mock.calls[0]?.slice(0, 2)).toEqual([
+        "tmux",
+        [
+          "-N",
+          "-L",
+          label,
+          "display-message",
+          "-p",
+          "-t",
+          "%4",
+          "#{pane_id}\t#{pane_pid}\t#{pane_tty}",
+        ],
+      ]);
+    });
+
+    it.each(["\x00", "\t", "\n", "\r", "\x1f", "\x7f", "x".repeat(129)])(
+      "rejects unsafe or oversized tmux label %j without backend execution",
+      async (label) => {
+        await expect(
+          probeLiveMuxTargetAsync(targets[0], context(), {
+            ...env,
+            PI_SUBAGENTURA_TMUX_SOCKET: label,
+          }),
+        ).resolves.toEqual({ kind: "unknown" });
+        expect(exec).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([" project", "project ", "  project  "])(
+      "preserves accepted Zellij session name %j literally",
+      async (session) => {
+        const target = { mux: "zellij", paneId: "4", session } as const;
+        respond(output("zellij"));
+
+        await expect(
+          probeLiveMuxTargetAsync(target, context(), {}),
+        ).resolves.toEqual({ kind: "match", target, distance: 1 });
+        expect(exec.mock.calls[0]?.[1]).toEqual([
+          "--session",
+          session,
+          "action",
+          "list-panes",
+          "--json",
+        ]);
+      },
+    );
+  });
 });

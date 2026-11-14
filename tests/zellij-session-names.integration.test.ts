@@ -98,7 +98,15 @@ afterEach(() => {
 });
 
 describe.each(modes)("%s Zellij session-name resolver integration", (mode) => {
-  it.each(["project work", "project#1", "project work #1"])(
+  it.each([
+    "project work",
+    "project#1",
+    "project work #1",
+    " project",
+    "project ",
+    "  project  ",
+    "\u2003项目\u3000",
+  ])(
     "resolves the exact literal session %j using live ancestry",
     async (session) => {
       installResponses(session);
@@ -129,6 +137,7 @@ describe.each(modes)("%s Zellij session-name resolver integration", (mode) => {
   );
 
   it.each([
+    "   ",
     "bad\nname",
     "bad\rname",
     "bad\tname",

@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep Rex process ancestry distinct from Herdr when detecting the current mux.
 - Extend closed mux and parent-mux telemetry enums with Rex (schema v7).
 
+### Fixed
+
+- Preserve pane ownership across intermediary PTYs while refusing to cross a
+  nearer mux boundary or accept contradictory pane-root TTY evidence.
+- Keep empty tmux socket overrides equivalent to unset values and preserve valid
+  literal named-socket labels.
+- Preserve nonblank Zellij session names exactly, including leading and trailing
+  whitespace, through candidate selection and live ownership probes.
+
 ## [4.2.1] - 2026-11-07
 
 ### Added

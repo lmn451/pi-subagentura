@@ -12,6 +12,15 @@ import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 export type MuxName = "tmux" | "zellij" | "herdr" | "rex";
 const REX_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isZellijSessionName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 256 &&
+    /\S/.test(value) &&
+    !value.startsWith("-") &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 
 export function isRexSessionId(value: unknown): value is string {
   return (

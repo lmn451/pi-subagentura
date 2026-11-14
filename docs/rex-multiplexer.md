@@ -53,12 +53,24 @@ pane PID and TTY, Herdr's shell PID, and a local Rex block's child/foreground PI
 are compared with this process's ancestry. Rex endpoints that do not identify a
 local Unix socket cannot supply comparable local PIDs for automatic detection.
 
+For PID-backed ownership, the matched pane-root process remains the anchor when
+descendants allocate another PTY, such as through `script`. tmux's reported TTY
+is compared with that owning process, not every descendant's controlling TTY.
+A nearer mux boundary still prevents selecting a verified outer pane.
+
+An empty `PI_SUBAGENTURA_TMUX_SOCKET` is treated as unset. Nonempty named-socket
+labels are passed literally as one `-L` argument, including spaces and Unicode.
+
 Zellij's public `list-panes --json` does not expose the pane PID. Detection checks
 that the selected terminal pane exists and that the nearest recognized mux
 process ancestor is Zellij. This verifies the enclosing mux type, not the exact
 pane-to-PID association if same-mux session or pane markers were overwritten.
 Unsupported CLI responses, unavailable process evidence, and unresolved host
 conflicts require an explicit `mux` choice rather than a guessed backend.
+
+Nonblank Zellij session names are preserved literally, including leading and
+trailing whitespace. Blank-only names, controls, and unsafe option selectors
+remain invalid.
 
 ## Verified and unavailable capabilities
 

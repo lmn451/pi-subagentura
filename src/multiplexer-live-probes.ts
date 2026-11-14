@@ -2,6 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import {
   isRexBlockId,
   isRexSessionId,
+  isZellijSessionName,
   type MuxName,
 } from "./multiplexer-contracts";
 import {
@@ -42,13 +43,11 @@ function selector(value: unknown): value is string {
     !/[\x00-\x20\x7f#]/.test(value)
   );
 }
-function zellijSession(value: unknown): value is string {
+function tmuxSocketLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
-    value.length <= 256 &&
-    !value.startsWith("-") &&
-    value.trim() === value &&
+    value.length <= 128 &&
     !/[\x00-\x1f\x7f]/.test(value)
   );
 }
@@ -99,18 +98,17 @@ function matchPids(
   pids: number[],
   tty?: string,
 ): LiveMuxProbe {
-  const callerTty = normalizeProcessTty(
-    context.processes.get(context.pid)?.tty,
-  );
-  if (tty && callerTty && tty !== callerTty) return MISMATCH;
-  if (pids.includes(context.pid))
-    return { kind: "match", target, distance: -1 };
-  const distance = context.ancestors.findIndex((ancestor) =>
-    pids.includes(ancestor.pid),
-  );
-  if (distance < 0) return MISMATCH;
-  const ownerTty = normalizeProcessTty(context.ancestors[distance]?.tty);
-  if (callerTty && ownerTty && callerTty !== ownerTty) return MISMATCH;
+  let distance = -1;
+  let paneRoot = context.processes.get(context.pid);
+  if (!pids.includes(context.pid)) {
+    distance = context.ancestors.findIndex((ancestor) =>
+      pids.includes(ancestor.pid),
+    );
+    if (distance < 0) return MISMATCH;
+    paneRoot = context.ancestors[distance];
+  }
+  const rootTty = normalizeProcessTty(paneRoot?.tty);
+  if (tty && rootTty && tty !== rootTty) return MISMATCH;
   return { kind: "match", target, distance };
 }
 function tmuxProbe(
@@ -120,10 +118,9 @@ function tmuxProbe(
 ): ProbePlan | LiveMuxProbe {
   if (!/^%\d+$/.test(target.paneId)) return UNKNOWN;
   let socketArgs: string[];
-  if (env.PI_SUBAGENTURA_TMUX_SOCKET !== undefined) {
-    const name = env.PI_SUBAGENTURA_TMUX_SOCKET;
-    if (!selector(name) || !/^[A-Za-z0-9_.-]{1,128}$/.test(name))
-      return UNKNOWN;
+  const name = env.PI_SUBAGENTURA_TMUX_SOCKET;
+  if (name !== undefined && name !== "") {
+    if (!tmuxSocketLabel(name)) return UNKNOWN;
     socketArgs = ["-L", name];
   } else {
     const path = /^(.*),\d+,\d+$/.exec(env.TMUX ?? "")?.[1];
@@ -232,7 +229,7 @@ function zellijProbe(
 ): ProbePlan | LiveMuxProbe {
   if (
     !/^(?:terminal_)?\d+$/.test(target.paneId) ||
-    !zellijSession(target.session)
+    !isZellijSessionName(target.session)
   )
     return UNKNOWN;
   return {
@@ -287,7 +284,7 @@ function prepareProbe(
       !(target.mux === "herdr"
         ? socket(target.session)
         : target.mux === "zellij"
-          ? zellijSession(target.session)
+          ? isZellijSessionName(target.session)
           : selector(target.session))) ||
     (target.server !== undefined &&
       !(target.mux === "rex"
