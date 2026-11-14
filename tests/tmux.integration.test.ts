@@ -32,6 +32,7 @@ import {
   safeSegment,
 } from "../src/multiplexer";
 import { TmuxMultiplexer } from "../src/multiplexer-tmux";
+import { shellEscape } from "../src/multiplexer-contracts";
 import { clearSessionScopes } from "../src/session-scope";
 import { createTestSessionScope } from "./session-scope-fixture";
 
@@ -176,7 +177,16 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
 
   expect(state.mux).toBe("tmux");
   expect(state.paneId).toMatch(/^%/);
-  expect(state.attachCommand).toContain(`tmux -L '${socket}' attach`);
+  const actualSocket = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    state.paneId,
+    "#{socket_path}",
+  ]).replace(/\r?\n$/, "");
+  expect(state.muxServer).toBe(actualSocket);
+  const commandPrefix = `tmux '-S' ${shellEscape(actualSocket)}`;
+  expect(state.attachCommand).toContain(`${commandPrefix} attach`);
 
   await waitFor(() => {
     const eventsFile = join(state.artifactDir, "events.ndjson");
