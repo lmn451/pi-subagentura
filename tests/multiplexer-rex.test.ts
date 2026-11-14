@@ -27,8 +27,21 @@ function setRexEnvironment(): void {
   delete process.env.TERM_PROGRAM;
 }
 
-function installRexMock(): RexCall[] {
+function installRexMock(
+  options: { serverStartCounter?: { value: number } } = {},
+): RexCall[] {
   const calls: RexCall[] = [];
+  let serverStarted = false;
+  const contactServer = (args: string[]): void => {
+    const counter = options.serverStartCounter;
+    if (!counter || args[0] === "help") return;
+    if (args.includes("--autostart=false"))
+      throw new Error("Rex server is stopped");
+    if (!serverStarted) {
+      serverStarted = true;
+      counter.value += 1;
+    }
+  };
   vi.resetModules();
   vi.doMock("node:child_process", () => ({
     execFileSync: (
@@ -39,6 +52,7 @@ function installRexMock(): RexCall[] {
       calls.push({ file, args: [...args], options });
       if (file === "/bin/sh") return "";
       if (args[0] === "help") return cliHelp;
+      contactServer(args);
       if (args.includes("whoami")) {
         return JSON.stringify({
           endpoint: server,
@@ -57,6 +71,12 @@ function installRexMock(): RexCall[] {
       callback: (error: Error | null, stdout: string, stderr?: string) => void,
     ) => {
       calls.push({ file, args: [...args], options });
+      try {
+        contactServer(args);
+      } catch {
+        callback(new Error("Rex server is stopped"), "", "");
+        return;
+      }
       if (args.includes("capture")) {
         callback(captureError ?? null, captureError ? "" : captureOutput, "");
       } else if (args.includes("ls")) {
@@ -118,7 +138,7 @@ describe("RexMultiplexer", () => {
     });
 
     const run = calls.find(
-      (call) => call.args[0] === "--server" && call.args.includes("run"),
+      (call) => call.args.includes("--server") && call.args.includes("run"),
     );
     expect(run?.args).toContain("--json");
     expect(run?.args).toContain("--focus=false");
@@ -146,7 +166,7 @@ describe("RexMultiplexer", () => {
       parentPane: currentBlockId,
     });
     const run = calls.find(
-      (call) => call.args[0] === "--server" && call.args.includes("run"),
+      (call) => call.args.includes("--server") && call.args.includes("run"),
     );
     expect(run?.args).toContain("--split=right");
     expect(run?.args).toContain("--block");
@@ -162,6 +182,7 @@ describe("RexMultiplexer", () => {
     const sends = calls.filter((call) => call.file === "rex");
     const textSend = sends.find((call) => call.args.includes("send"));
     expect(textSend?.args).toEqual([
+      "--autostart=false",
       "--server",
       server,
       "send",
@@ -175,6 +196,45 @@ describe("RexMultiplexer", () => {
     expect(() => mux.sendKeys("-bad", "text", sessionId, server)).toThrow(
       /Invalid Rex block id/,
     );
+  });
+  it("does not start a stopped server for verification, liveness, or controls", async () => {
+    const serverStartCounter = { value: 0 };
+    installRexMock({ serverStartCounter });
+    const { RexMultiplexer } = await loadRex();
+    const mux = new RexMultiplexer();
+    const ref = { paneId: childBlockId, session: sessionId, server };
+
+    expect(mux.probeContext().kind).toBe("invalid");
+    expect(mux.getPaneLiveness(childBlockId, sessionId, server)).toBe(
+      "unknown",
+    );
+    await expect(
+      mux.getPaneLivenessAsync(childBlockId, sessionId, server),
+    ).resolves.toBe("unknown");
+
+    expect(() =>
+      mux.createPane({
+        name: "Review agent",
+        cwd: "/workspace/project",
+        background: true,
+      }),
+    ).toThrow(/could not be verified/);
+    expect(() => mux.sendKeys(childBlockId, "text", sessionId, server)).toThrow(
+      /Rex server is stopped/,
+    );
+    expect(() => mux.sendEnter(childBlockId, sessionId, server)).toThrow(
+      /Rex server is stopped/,
+    );
+    mux.killPane(childBlockId, sessionId, server);
+    await expect(mux.focusPane(ref)).rejects.toThrow(/focus failed/);
+    await expect(
+      mux.capturePane(ref, { maxBytes: 64, maxLines: 1 }),
+    ).rejects.toThrow(/capture failed/);
+
+    const commands = mux.buildAttachCommands(ref);
+    expect(commands.attachCommand).toContain("rex --autostart=false");
+    expect(commands.focusCommand).toContain("rex --autostart=false");
+    expect(serverStartCounter.value).toBe(0);
   });
 
   it("uses tri-state liveness, but makes no undocumented activity claim", async () => {
@@ -222,8 +282,8 @@ describe("RexMultiplexer", () => {
     const ref = { paneId: childBlockId, session: sessionId, server };
     await expect(mux.focusPane(ref)).resolves.toBeUndefined();
     expect(mux.buildAttachCommands(ref)).toEqual({
-      attachCommand: `rex --server '${server}' focus '${childBlockId}' --session '${sessionId}'`,
-      focusCommand: `rex --server '${server}' focus '${childBlockId}' --session '${sessionId}'`,
+      attachCommand: `rex --autostart=false --server '${server}' focus '${childBlockId}' --session '${sessionId}'`,
+      focusCommand: `rex --autostart=false --server '${server}' focus '${childBlockId}' --session '${sessionId}'`,
     });
     expect(calls.some((call) => call.args.includes("focus"))).toBe(true);
     expect(() =>

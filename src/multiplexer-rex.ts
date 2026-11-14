@@ -206,22 +206,19 @@ function verifyLiveRexContext(candidate: RexContextCandidate): RexContextProbe {
   }
   try {
     const { sessionId, blockId, serverSelector } = candidate;
-    const whoami = rexExecSync([
-      "--server",
-      serverSelector,
-      "whoami",
-      "--json",
-    ]);
+    const whoami = rexExecSync(
+      contextArgs({ sessionId, server: serverSelector }, ["whoami", "--json"]),
+    );
     const server = parseWhoami(whoami, { sessionId, blockId });
-    const listing = rexExecSync([
-      "--server",
-      server,
-      "block",
-      "ls",
-      "--json",
-      "--session",
-      sessionId,
-    ]);
+    const listing = rexExecSync(
+      contextArgs({ sessionId, server }, [
+        "block",
+        "ls",
+        "--json",
+        "--session",
+        sessionId,
+      ]),
+    );
     if (!parseBlockIds(listing).has(blockId)) {
       throw new Error("Rex context block is not live in the reported session");
     }
@@ -263,7 +260,7 @@ function contextForPane(ref: PaneRef): RexContext {
 }
 
 function contextArgs(context: RexTarget, command: readonly string[]): string[] {
-  return ["--server", context.server, ...command];
+  return ["--autostart=false", "--server", context.server, ...command];
 }
 
 function parseCreatedBlockId(output: string): string {
@@ -560,7 +557,7 @@ export class RexMultiplexer implements Multiplexer {
       server: opts.server,
     });
     const command = [
-      "rex --server",
+      "rex --autostart=false --server",
       shellEscape(context.server),
       "focus",
       shellEscape(context.blockId),

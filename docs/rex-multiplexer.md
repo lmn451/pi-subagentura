@@ -42,6 +42,13 @@ interactive state and lineage records. Every later focus, send, capture, livenes
 and cancellation operation uses those saved values rather than ambient Rex
 variables, so a reload cannot redirect an old child to a different server.
 
+Native Rex operations pass `--autostart=false` rather than the
+[CLI's default autostart behavior](https://www.superlogical.com/rex/docs/reference/cli#global-options).
+This covers context verification, persisted-child probes,
+and generated focus/attach commands. If the server is gone, liveness and activity
+remain `unknown` and control operations fail instead of restarting it. Creating a
+child block also requires the already-live parent server.
+
 ## Live ownership evidence and limits
 
 Automatic detection reads a bounded process snapshot on macOS and Linux, then
