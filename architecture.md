@@ -551,6 +551,19 @@ The mux carries control and terminal input only:
 A captured screen is supervisor UX, not lifecycle or output authority.
 The backend recorded at spawn never changes.
 
+Launch resolution returns both the adapter and a discriminated immutable launch
+context. Attached contexts retain the verified pane and backend-specific
+session/server identity. Detached contexts explicitly name tmux or Zellij.
+The orchestrator passes this context into `createPane`; a backend rejects a
+context for another mux before mutation. It must not rediscover a different
+parent or server from environment variables after resolution. Existing
+persisted-child operations continue to use their recorded backend and identity.
+New tmux panes retain their actual socket path for later control and recovery,
+including literal spaces in that path. Invalid explicit socket identity fails
+closed rather than falling back to ambient routing. Older tmux state without a
+socket remains readable. Detached launches still share a session per captured
+socket selection.
+
 In `auto` mode, environment markers provide candidate selectors only.
 `multiplexer-current-context.ts` combines bounded live backend queries from
 `multiplexer-live-probes.ts` with the process ancestry/TTY snapshot from
@@ -677,6 +690,13 @@ Both the in-package writer and generated `cli.mjs`:
 When snapshot capture succeeds, it writes `outputs/<eventId>.md` and the completion records path, byte length, and SHA-256.
 A completion may instead carry `outputError`, or no output descriptor when staging output is absent.
 A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes.
+
+Active staging reads use the same descriptor-bound byte limit as immutable
+snapshot reads. A no-follow, nonblocking open is followed by a regular-file
+check before allocation. Reads cannot exceed the accepted size plus one growth
+probe byte, even if the file changes after `fstat`. Oversized or unsafe staging
+output returns content-free diagnostics rather than being loaded in full and
+truncated only for presentation. A rejected read cannot consume a completion.
 
 `output.md` is mutable staging and is never historical proof.
 For a completion with captured output, `eventId` names the physical snapshot; `turnId` selects the logical turn.
@@ -858,6 +878,13 @@ The TypeScript bridge is `src/workflow-script.ts`.
 The host starts the worker companion by file URL.
 The worker creates a null-prototype VM context, disables dynamic string/Wasm code generation, injects only the workflow DSL and guarded data/helpers, and applies a synchronous VM timeout.
 `Date.now`, argumentless `new Date`, and `Math.random` are rejected for determinism.
+
+The bootstrap creates user-visible helpers, promises, errors and copied data in
+the VM realm. Its host bridge remains closure-private rather than exposing host
+functions whose constructors bypass the context's code-generation guard.
+Worker RPC uses shared discriminated message contracts and runtime narrowing
+from `unknown`. The worker and decoder implementations are checked through
+`tsconfig.worker.json`, not only described by declaration shims.
 
 This VM is **not a security boundary**.
 It is an accidental-global and deterministic-execution guard for trusted workflow scripts, not a sandbox for hostile code.
@@ -1158,6 +1185,18 @@ The following table inventories the tracked runtime source modules and companion
 
 ---
 
+The inventory also includes these worker protocol companions:
+
+| #   | Source                   | Responsibility                                                       | Direct project dependencies                             |
+| --- | ------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------- |
+| 71  | `src/workflow-rpc.ts`    | Discriminated worker request/response contracts and validator bridge | Type-only `workflow-script`; runtime `workflow-rpc.mjs` |
+| 72  | `src/workflow-rpc.mjs`   | Runtime validation of unknown worker and host messages               | Type-only JSDoc `workflow-rpc.ts`                       |
+| 73  | `src/workflow-rpc.d.mts` | Declaration surface for runtime protocol guards                      | Type-only `workflow-rpc`                                |
+
+Both `workflow-worker.ts` and `workflow-worker-thread.mjs` depend on these
+shared contracts and validators. The worker thread and runtime validators are
+checked as JavaScript by the mandatory worker TypeScript project.
+
 ## 14. Package and runtime companion boundaries
 
 `package.json` maps the package main entry, root export, and Pi extension activation to `./src/subagent.ts`.
@@ -1176,6 +1215,8 @@ Runtime companions have distinct loading/materialization rules:
 | `workflow-worker-thread.mjs`            | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
 | `workflow-script.mjs`                   | Imported by the worker companion and re-exported by the typed TS bridge                                      |
 | `workflow-script.d.mts`                 | Declaration-only surface for the ESM parser companion                                                        |
+| `workflow-rpc.mjs`                      | Shared runtime guards imported directly by the worker and re-exported through the typed host bridge          |
+| `workflow-rpc.d.mts`                    | Declaration-only surface for the runtime message guards                                                      |
 | generated artifact `cli.mjs`            | Source string comes from the installed package but is written into each artifact directory and invoked there |
 | `ORCHESTRATOR_SYSTEM_PROMPT.md`         | Loaded as a package asset by file URL, not a code module                                                     |
 | `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`      | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |

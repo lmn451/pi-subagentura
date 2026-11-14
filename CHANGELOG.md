@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Carry verified, backend-specific mux launch identity from resolution into
+  pane creation instead of selecting a new parent from inherited environment.
+- Type workflow worker messages as a shared discriminated protocol and check
+  the JavaScript worker/decoder implementations during `npm run typecheck`.
+- Preserve awaited pipeline stage/result types beyond three stages, narrow
+  tool result inference, and incrementally enforce stricter optional/indexed
+  types in dependency-light core and public workflow contracts.
 - Resolve automatic mux selection and current-pane activity using bounded live
   backend evidence tied to Pi's process ancestry/TTY, rather than inherited host
   marker priority or UI focus. Nested muxes use the nearest verified owner;
@@ -26,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the no-host tmux-then-Zellij detached fallback remain available.
 - Keep Rex process ancestry distinct from Herdr when detecting the current mux.
 - Extend closed mux and parent-mux telemetry enums with Rex (schema v7).
+
+### Fixed
+
+- Bound active staging and immutable snapshot reads before allocating child
+  output, reject unsafe file types/symlinks without blocking on FIFOs, and
+  surface content-free diagnostics for rejected staging reads.
+- Keep workflow-visible helpers and copied data in the VM realm so injected
+  function constructors do not bypass determinism guards. The workflow VM
+  remains a trusted-script aid, not a security boundary.
 
 ## [4.2.1] - 2026-11-07
 

@@ -27,6 +27,12 @@ appear before or after it. Do not use TypeScript, imports, `require`, filesystem
 APIs, `Date.now()`, `Math.random()`, or argless `new Date()`. For editor support,
 reference the published ambient declarations at `pi-subagentura/workflow`.
 
+Pipeline declarations preserve each awaited stage result instead of falling
+back to `any` after three stages. Inline callbacks have contextual overloads
+through six stages; longer pipelines can pass an explicitly typed stage tuple
+to the variadic contract. A stage must accept the previous stage's awaited
+result, and pipeline result entries remain nullable when a stage fails.
+
 Use workflows only when work decomposes into independent agents or streaming
 stages. The VM globals are `agent`, `parallel`, `pipeline`, `workflow`, `phase`,
 `log`, `args`, immutable `cwd` (the parent execution directory), `budget`,
@@ -204,6 +210,11 @@ The sandbox exposes only the documented workflow helpers plus immutable `cwd`,
 `mkdirSync` or `readFileSync` in the script body throws `ReferenceError`. String
 code generation is disabled, but this VM is still a determinism aid rather than
 a security boundary. All file I/O must happen in sub-agents via tools.
+
+Workflow-visible helpers and copied argument/result data are created in the VM
+realm. Host RPC functions are kept behind a private bootstrap bridge so helper
+constructors do not provide an accidental route around the Date and
+code-generation guards. This hardening does not make hostile JavaScript safe.
 
 ### 6. `additionalProperties: false` rejects unknown keys
 
