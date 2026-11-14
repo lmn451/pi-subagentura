@@ -3,6 +3,7 @@ set -euo pipefail
 
 exec "$SUBAGENTURA_E2E_REAL_PI" \
   --offline \
+  --approve \
   --api-key subagentura-e2e-test-key \
   --no-extensions \
   --no-skills \

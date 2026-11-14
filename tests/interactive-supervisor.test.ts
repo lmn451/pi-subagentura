@@ -320,6 +320,47 @@ describe("interactive supervisor", () => {
     expect(formatSupervisorSummary(item, Date.now())).toContain("tmux");
   });
 
+  it("compresses the shortcut guide so short popups show more work", () => {
+    const items = ["one", "two"].map((id) => ({
+      kind: "interactive" as const,
+      state: state(id),
+      depth: 0,
+      actionable: true,
+    }));
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => items,
+      availableHeight: () => 8,
+    });
+    const lines = component.render(interactiveSupervisorMinimumGridWidth(2));
+    const rendered = lines.join("\n");
+
+    expect(rendered).toContain("↑↓/jk select · enter/→ details · ← collapse");
+    expect(rendered).toContain(
+      "x cancel item · X cancel subtree · r refresh · q/esc close",
+    );
+    expect(rendered).toContain(
+      "Interactive: v snapshot · n native viewer · f focus · a attach",
+    );
+    expect(rendered).toContain(
+      "Expand for return keys · registry=live · lineage=persisted",
+    );
+    expect(lines.filter((line) => line.includes("[registry]"))).toHaveLength(1);
+    expect(rendered).toContain("agent-one");
+    expect(rendered).toContain("agent-two");
+
+    const narrow = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [],
+    })
+      .render(60)
+      .join("\n");
+    expect(narrow).toContain("All: x cancel item · r refresh · q/esc close");
+    expect(narrow).toContain(
+      "Interactive: a show attach cmd · X cancel subtree",
+    );
+  });
+
   it("derives one, two, three, and four columns from readable width", () => {
     const ids = ["zero", "one", "two", "three", "four", "five", "six"];
     const items = ids.map((id) => ({
@@ -503,7 +544,7 @@ describe("interactive supervisor", () => {
       depth: 0,
       actionable: true,
     }));
-    let availableHeight = 8;
+    let availableHeight = 6;
     const component = new InteractiveSupervisorComponent({
       done: vi.fn(),
       items: () => items,
@@ -514,7 +555,7 @@ describe("interactive supervisor", () => {
       component.render(width).filter((line) => line.includes("[registry]"));
 
     expect(itemRows()).toHaveLength(2);
-    availableHeight = 9;
+    availableHeight = 7;
     expect(itemRows()).toHaveLength(1);
   });
 
@@ -1793,7 +1834,10 @@ describe("interactive supervisor", () => {
     const hideBackdrop = vi.fn();
     const showOverlay = vi.fn(
       (
-        _component: { render: (width: number) => string[] },
+        _component: {
+          render: (width: number) => string[];
+          invalidate: () => void;
+        },
         _options: Record<string, unknown>,
       ) => ({ hide: hideBackdrop }),
     );
@@ -1803,12 +1847,13 @@ describe("interactive supervisor", () => {
     const fg = vi.fn(
       (color: string, text: string) => `<${color}>${text}</${color}>`,
     );
+    const terminal = { rows: 3 };
     const custom = vi.fn(async (factory: Function) => {
       factory(
         {
           requestRender: vi.fn(),
           showOverlay,
-          terminal: { rows: 3 },
+          terminal,
         },
         { bg, fg },
         undefined,
@@ -1832,6 +1877,23 @@ describe("interactive supervisor", () => {
       "<customMessageBg><dim>  ░ </dim></customMessageBg>",
       "<customMessageBg><dim>░   </dim></customMessageBg>",
     ]);
+    const firstRender = backdrop.render(4);
+    expect(backdrop.render(4)).toBe(firstRender);
+    expect(fg).toHaveBeenCalledTimes(3);
+    expect(bg).toHaveBeenCalledTimes(3);
+
+    expect(backdrop.render(5)).toHaveLength(3);
+    expect(fg).toHaveBeenCalledTimes(6);
+    expect(bg).toHaveBeenCalledTimes(6);
+
+    terminal.rows = 4;
+    expect(backdrop.render(5)).toHaveLength(4);
+    expect(fg).toHaveBeenCalledTimes(10);
+    expect(bg).toHaveBeenCalledTimes(10);
+    backdrop.invalidate();
+    expect(backdrop.render(5)).toHaveLength(4);
+    expect(fg).toHaveBeenCalledTimes(14);
+    expect(bg).toHaveBeenCalledTimes(14);
     expect(hideBackdrop).toHaveBeenCalledOnce();
   });
 

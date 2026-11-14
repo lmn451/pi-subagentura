@@ -11,7 +11,13 @@ import {
   type TelemetryMux,
 } from "../src/telemetry";
 
-const childMuxes: readonly TelemetryMux[] = ["none", "tmux", "zellij", "herdr"];
+const childMuxes: readonly TelemetryMux[] = [
+  "none",
+  "tmux",
+  "zellij",
+  "herdr",
+  "rex",
+];
 
 function lifecycleEvents(mux: TelemetryMux): TelemetryEvent[] {
   const dimensions = {
@@ -55,18 +61,19 @@ function stubOrcaHost(present = true): void {
     ORCA_TERMINAL_HANDLE: "private-terminal-handle",
     ORCA_WORKTREE_ID: "private-worktree-id",
     ORCA_APP_VERSION: "private-host-version",
+    AGTERM_ENABLED: undefined,
   })) {
     vi.stubEnv(name, present ? value : undefined);
   }
 }
 
-describe("Orca prompt-only telemetry attribution boundary", () => {
+describe("prompt-only host telemetry attribution boundary", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
   it.each(childMuxes)(
-    "keeps the observed %s child backend independent of Orca host markers",
+    "keeps the observed %s child backend independent of host markers",
     (mux) => {
       stubOrcaHost(false);
       const session = createTelemetrySession(
@@ -102,7 +109,7 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
     },
   );
 
-  it.each(["orca", "unknown", "private-host-id", undefined])(
+  it.each(["orca", "agterm", "unknown", "private-host-id", undefined])(
     "allowlists only session-start host attribution: %s",
     (host) => {
       const session = createTelemetrySession(true);
@@ -114,16 +121,48 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
       } as unknown as TelemetryEvent;
       const properties = buildTelemetryPayload(session, event).properties;
       expect(properties.session_host).toBe(
-        host === "orca" ? "orca" : "unknown",
+        host === "orca" || host === "agterm" ? host : "unknown",
       );
       expect(JSON.stringify(properties)).not.toContain("private");
-      for (const child of lifecycleEvents("tmux")) {
-        expect(
-          buildTelemetryPayload(session, {
-            ...child,
-            session_host: "orca",
-          } as TelemetryEvent).properties,
-        ).not.toHaveProperty("session_host");
+      for (const host of ["orca", "agterm"] as const) {
+        for (const child of lifecycleEvents("tmux")) {
+          expect(
+            buildTelemetryPayload(session, {
+              ...child,
+              session_host: host,
+            } as TelemetryEvent).properties,
+          ).not.toHaveProperty("session_host");
+        }
+      }
+    },
+  );
+
+  it.each(["orca", "agterm"] as const)(
+    "keeps %s root host evidence separate from extension launch backends",
+    (host) => {
+      const session = createTelemetrySession(
+        true,
+        "straight",
+        undefined,
+        "development",
+      );
+      const started = buildTelemetryPayload(session, {
+        event: "session_started",
+        session_host: host,
+      }).properties;
+
+      expect(started.session_host).toBe(host);
+      for (const mux of childMuxes) {
+        const resolution = lifecycleEvents(mux).find(
+          (event) => event.event === "agent_launch_resolved",
+        );
+        expect(resolution).toBeDefined();
+        const launch = buildTelemetryPayload(session, resolution!).properties;
+
+        expect(launch.telemetry_session_id).toBe(started.telemetry_session_id);
+        expect(launch.requested_mux).toBe(mux === "none" ? "none" : "auto");
+        expect(launch.mux).toBe(mux);
+        expect(launch).not.toHaveProperty("session_host");
       }
     },
   );
@@ -153,8 +192,10 @@ describe("Orca prompt-only telemetry attribution boundary", () => {
     expect(telemetryOperationName("tool", "bash")).toBeUndefined();
   });
 
-  it("does not recognize Orca as a currently supported child backend", () => {
+  it("keeps Orca separate and recognizes Rex as a child backend", () => {
     expect(sanitizeTelemetryRequestedMux("orca")).toBeUndefined();
+    expect(sanitizeTelemetryRequestedMux("rex")).toBe("rex");
+    expect(sanitizeTelemetrySpawnFailureMux("rex")).toBe("rex");
     expect(sanitizeTelemetrySpawnFailureMux("orca")).toBeUndefined();
     expect(sanitizeTelemetryRuntimeFailureMux("orca")).toBeUndefined();
   });

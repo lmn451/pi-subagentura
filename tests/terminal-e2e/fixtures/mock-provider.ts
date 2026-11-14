@@ -160,6 +160,15 @@ const KNOWN_MARKERS = new Set([
   "[E2E:ASYNC_RESULT]",
   "[E2E:WORKFLOW_STATUS]",
   "[E2E:WORKFLOW_RESULT]",
+  "[E2E:INTERACTIVE_READ_LIFECYCLE]",
+  "[E2E:INTERACTIVE_READ_FOLLOWUP_PARENT]",
+  "[E2E:ARTIFACT_READ_ACTIVE]",
+  "[E2E:ARTIFACT_READ_COMPLETED]",
+  "[E2E:ARTIFACT_READ_FOLLOWUP_ACTIVE]",
+  "[E2E:ARTIFACT_READ_FIRST_TURN]",
+  "[E2E:ARTIFACT_READ_AFTER_RELOAD]",
+  "[E2E:CHILD_INTERACTIVE_READ]",
+  "[E2E:CHILD_INTERACTIVE_READ_FOLLOWUP]",
   "[E2E:INTERACTIVE]",
   "[E2E:INTERACTIVE_FOLLOWUP_PARENT]",
   "[E2E:INTERACTIVE_CANCEL_PARENT]",
@@ -188,6 +197,11 @@ const GATES = new Map<string, string>([
   ["[E2E:CHILD_WORKFLOW]", "release-workflow"],
   ["[E2E:CHILD_WORKFLOW_OK]", "release-workflow"],
   ["[E2E:CHILD_INTERACTIVE_FOLLOWUP]", "release-interactive-followup"],
+  ["[E2E:CHILD_INTERACTIVE_READ]", "release-interactive-read"],
+  [
+    "[E2E:CHILD_INTERACTIVE_READ_FOLLOWUP]",
+    "release-interactive-read-followup",
+  ],
   ["[E2E:CHILD_INTERACTIVE]", "release-interactive"],
   ["[E2E:CHILD_CANCEL]", "release-cancel"],
 ]);
@@ -524,6 +538,11 @@ async function runRequest(
       toolResultId === state.toolCallId &&
       state.toolCallId?.includes("write")
     ) {
+      if (marker.includes("CHILD_INTERACTIVE_READ")) {
+        const gate = `${gateForMarker(marker)}-before-done`;
+        diagnostic({ marker, requestSeq, afterStage: "staging", gate });
+        await waitForGate(gate, options?.signal);
+      }
       const call = toolCall(`e2e-interactive-done-${interactiveTurn}`, "bash", {
         command: `node ${shellQuote(join(artifactDir(), "cli.mjs"))} done 0`,
       });
@@ -662,6 +681,13 @@ async function runRequest(
       `invalid transition for ${marker}: expected tool result ${state.toolCallId ?? "none"}`,
     );
   }
+  if (marker.startsWith("[E2E:ARTIFACT_READ_")) {
+    diagnostic({
+      marker,
+      afterStage: "artifact_read",
+      result: context.messages.at(-1),
+    });
+  }
   const final = message([
     { type: "text", text: `Parent settled for ${marker}.` },
   ]);
@@ -671,6 +697,33 @@ async function runRequest(
 }
 
 function parentTool(marker: string, context: TranscriptContext): ToolCall {
+  if (marker.startsWith("[E2E:ARTIFACT_READ_")) {
+    const latestUser = context.messages.findLast(
+      (entry) => entry.role === "user",
+    );
+    const turnId = JSON.stringify(latestUser?.content).match(
+      /turnId=([a-zA-Z0-9_-]+)/,
+    )?.[1];
+    return toolCall(`e2e-read-${marker}`, "read_subagent_artifact", {
+      id: interactiveResultId(context),
+      ...(turnId === undefined ? {} : { turnId }),
+    });
+  }
+  if (marker === "[E2E:INTERACTIVE_READ_FOLLOWUP_PARENT]") {
+    return toolCall("e2e-read-followup", "send_interactive_subagent_message", {
+      id: interactiveResultId(context),
+      message:
+        "[E2E:CHILD_INTERACTIVE_READ_FOLLOWUP] Complete the follow-up fixture.",
+    });
+  }
+  if (marker === "[E2E:INTERACTIVE_READ_LIFECYCLE]") {
+    return toolCall("e2e-read-spawn", "subagent_interactive", {
+      name: "E2E artifact read lifecycle",
+      task: "[E2E:CHILD_INTERACTIVE_READ] Complete the artifact read fixture.",
+      model: "subagentura-e2e/mock",
+      background: true,
+    });
+  }
   if (marker === "[E2E:TOOL_PARAMETERS]") {
     return toolCall("e2e-tool-parameters-1", "list_available_models", {
       filter: "subagentura-e2e",

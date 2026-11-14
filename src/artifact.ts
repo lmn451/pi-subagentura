@@ -36,6 +36,12 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
+import {
+  isMuxSocketPath,
+  isRexBlockId,
+  isRexServerAddress,
+  isRexSessionId,
+} from "./multiplexer-contracts";
 import { asStringIdentifier, type EventId } from "./identifier-types";
 import {
   sanitizeTelemetryModel,
@@ -717,15 +723,13 @@ export function readOutputForTurnId(
   ) {
     return null;
   }
-  let fd: number | undefined;
   try {
     const realArtifactDir = realpathSync(art.dir);
     const realTarget = realpathSync(target);
     if (!isPathInside(realTarget, realArtifactDir)) return null;
-    fd = openSync(realTarget, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size !== history.output.bytes) return null;
-    const content = readFileSync(fd);
+    const result = readBoundedOutputFile(target);
+    const content = result.content;
+    if (!content) return null;
     if (
       content.byteLength !== history.output.bytes ||
       createHash("sha256").update(content).digest("hex") !==
@@ -735,9 +739,8 @@ export function readOutputForTurnId(
     }
     return content.toString("utf8");
   } catch {
+    // Missing, replaced, or unsafe snapshots are unavailable to the caller.
     return null;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -1123,14 +1126,87 @@ export function eventLogEndOffset(art: SubagentArtifact): number {
   }
 }
 
-/** Returns output.md content, or null if it doesn't exist yet. */
-export function readOutput(art: SubagentArtifact): string | null {
-  if (!existsSync(art.outputFile)) return null;
+type BoundedOutputRead = {
+  content: Buffer | null;
+  outputError?: OutputSnapshotError;
+};
+
+function readBoundedOutputFile(path: string): BoundedOutputRead {
+  let fd: number | undefined;
+  const unavailable: BoundedOutputRead = {
+    content: null,
+    outputError: {
+      code: "output_unavailable",
+      message: "Output could not be read safely",
+    },
+  };
   try {
-    return readFileSync(art.outputFile, "utf8");
-  } catch {
-    return null;
+    // NONBLOCK prevents a child-controlled FIFO from blocking before fstat.
+    fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      return unavailable;
+    }
+    const tooLarge = (bytes: number): BoundedOutputRead => ({
+      content: null,
+      outputError: {
+        code: "output_too_large",
+        bytes,
+        maxBytes: MAX_OUTPUT_SNAPSHOT_BYTES,
+      },
+    });
+    if (stat.size > MAX_OUTPUT_SNAPSHOT_BYTES) return tooLarge(stat.size);
+    // One probe byte detects growth without ever reading an unbounded fd.
+    const content = Buffer.alloc(stat.size + 1);
+    let offset = 0;
+    while (offset < content.length) {
+      const count = readSync(
+        fd,
+        content,
+        offset,
+        content.length - offset,
+        offset,
+      );
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > MAX_OUTPUT_SNAPSHOT_BYTES) return tooLarge(offset);
+    if (offset > stat.size) return unavailable;
+    return { content: content.subarray(0, offset) };
+  } catch (error) {
+    // Missing staging output remains the normal not-yet-written outcome.
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { content: null }
+      : unavailable;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* Closing failure must not turn the nullable read API into a throw. */
+      }
+    }
   }
+}
+
+/** Safely read staging output and expose bounded, content-free diagnostics. */
+export function readOutputWithDiagnostics(art: SubagentArtifact): {
+  content: string | null;
+  outputError?: OutputSnapshotError;
+} {
+  const result = readBoundedOutputFile(art.outputFile);
+  return {
+    content: result.content?.toString("utf8") ?? null,
+    ...(result.outputError ? { outputError: result.outputError } : {}),
+  };
+}
+
+/** Returns bounded output.md content, or null when absent or unsafe. */
+export function readOutput(art: SubagentArtifact): string | null {
+  return readOutputWithDiagnostics(art).content;
 }
 
 /** List all sub-agent artifacts under `rootDir`. Ignores loose files. */
@@ -1412,6 +1488,8 @@ export interface InteractiveSubagentPersistedStateV2 {
   windowName?: string;
   mux: MuxName;
   muxSession?: string;
+  /** Stable endpoint for the Rex server that owns this block. */
+  muxServer?: string;
   artifactDir: string;
   sessionFile: string;
   /** Resolved child process working directory. */
@@ -1708,6 +1786,84 @@ function validatedWorkingCwd(value: unknown): string | undefined {
     : undefined;
 }
 
+type PersistedMuxIdentity = Pick<
+  InteractiveSubagentPersistedStateV2,
+  "paneId" | "muxTerminalId"
+> &
+  (
+    | { mux: "rex"; muxSession: string; muxServer: string }
+    | {
+        mux: Exclude<MuxName, "rex">;
+        muxSession?: string;
+        muxServer?: string;
+      }
+  );
+
+function validatedMuxTerminalId(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    value.includes("\0") ||
+    Buffer.byteLength(value, "utf8") > MAX_MUX_TERMINAL_ID_BYTES
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizePersistedMuxIdentity(
+  raw: Record<string, unknown>,
+): PersistedMuxIdentity | null {
+  if (typeof raw.paneId !== "string") return null;
+  const paneId = raw.paneId;
+  const optional: { muxSession?: string; muxTerminalId?: string } = {};
+  if (typeof raw.muxSession === "string") optional.muxSession = raw.muxSession;
+  const terminalId = validatedMuxTerminalId(raw.muxTerminalId);
+  if (terminalId !== undefined) optional.muxTerminalId = terminalId;
+  switch (raw.mux) {
+    case "tmux": {
+      const server = raw.muxServer;
+      if (server !== undefined && !isMuxSocketPath(server)) return null;
+      const identity: PersistedMuxIdentity = {
+        ...optional,
+        mux: "tmux",
+        paneId,
+      };
+      if (server !== undefined) identity.muxServer = server;
+      return identity;
+    }
+    case "zellij":
+    case "herdr": {
+      const identity: PersistedMuxIdentity = {
+        ...optional,
+        mux: raw.mux,
+        paneId,
+      };
+      // These backends historically ignore malformed optional server metadata.
+      if (isRexServerAddress(raw.muxServer)) identity.muxServer = raw.muxServer;
+      return identity;
+    }
+    case "rex":
+      if (
+        !isRexBlockId(paneId) ||
+        !isRexSessionId(raw.muxSession) ||
+        !isRexServerAddress(raw.muxServer)
+      ) {
+        return null;
+      }
+      return {
+        ...optional,
+        mux: "rex",
+        paneId,
+        muxSession: raw.muxSession,
+        muxServer: raw.muxServer,
+      };
+    default:
+      return null;
+  }
+}
+
 /** Normalize and validate the current protocol-v2 persisted state shape. */
 function normalizeV2StatePayload(
   obj: Record<string, unknown>,
@@ -1775,22 +1931,12 @@ function normalizeV2StatePayload(
         typeof raw.artifactDir !== "string" ||
         !isAbsolute(raw.artifactDir) ||
         basename(raw.artifactDir) !== id ||
-        typeof raw.paneId !== "string" ||
-        typeof raw.sessionFile !== "string" ||
-        (raw.mux !== "tmux" && raw.mux !== "zellij" && raw.mux !== "herdr")
+        typeof raw.sessionFile !== "string"
       ) {
         return null;
       }
-      const terminalIdCandidate = raw.muxTerminalId;
-      const muxTerminalId =
-        typeof terminalIdCandidate === "string" &&
-        terminalIdCandidate.length > 0 &&
-        terminalIdCandidate.trim() === terminalIdCandidate &&
-        !terminalIdCandidate.includes("\0") &&
-        Buffer.byteLength(terminalIdCandidate, "utf8") <=
-          MAX_MUX_TERMINAL_ID_BYTES
-          ? terminalIdCandidate
-          : undefined;
+      const muxIdentity = normalizePersistedMuxIdentity(raw);
+      if (!muxIdentity) return null;
       const entry = raw as unknown as InteractiveSubagentPersistedStateV2;
       const workingCwd = validatedWorkingCwd(entry.workingCwd);
       const completionGroupId =
@@ -1983,9 +2129,13 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "none" ||
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
-        rawEntryTelemetry?.mux === "herdr"
+        rawEntryTelemetry?.mux === "herdr" ||
+        rawEntryTelemetry?.mux === "rex"
           ? rawEntryTelemetry.mux
-          : entry.mux === "tmux" || entry.mux === "zellij"
+          : entry.mux === "tmux" ||
+              entry.mux === "zellij" ||
+              entry.mux === "herdr" ||
+              entry.mux === "rex"
             ? entry.mux
             : "none";
       const entryTelemetry: PersistedInteractiveTelemetry | undefined =
@@ -2068,14 +2218,9 @@ function normalizeV2StatePayload(
           : undefined;
       normalizedStates[id] = {
         id,
-        paneId: entry.paneId,
-        ...(muxTerminalId ? { muxTerminalId } : {}),
+        ...muxIdentity,
         ...(typeof entry.windowName === "string"
           ? { windowName: entry.windowName }
-          : {}),
-        mux: entry.mux,
-        ...(typeof entry.muxSession === "string"
-          ? { muxSession: entry.muxSession }
           : {}),
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,
@@ -2247,122 +2392,60 @@ function releaseStateLock(
   }
 }
 
-function releaseStateRecoveryLock(
-  lock: string,
-  fd: number,
-  ownerMetadata: string,
-): void {
-  closeSync(fd);
-  try {
-    if (readFileSync(lock, "utf8") === ownerMetadata) unlinkSync(lock);
-  } catch {
-    /* A recovery path may have already removed or replaced this claim. */
-  }
+function isStateLockRecoverable(lock: string): boolean {
+  const owner = readStateLockOwner(lock);
+  return owner
+    ? !isProcessAlive(owner.pid)
+    : Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS;
 }
 
-export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
-  const piDir = join(cwd, ".pi");
-  const lock = join(piDir, "subagentura-state.lock");
-  const recoveryLock = `${lock}.recovery`;
-  mkdirSync(piDir, { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+function withStateFileLock<T>(
+  lock: string,
+  deadline: number,
+  action: () => T,
+): T {
   const ownerMetadata = JSON.stringify({
     pid: process.pid,
     token: randomUUID(),
   });
-  const recoveryMetadata = JSON.stringify({
-    pid: process.pid,
-    token: randomUUID(),
-  });
   let fd: number | undefined;
-  let recoveryFd: number | undefined;
   let acquiredDevice = 0;
   let acquiredInode = 0;
   while (fd === undefined) {
     try {
       fd = openSync(lock, "wx", 0o600);
-      writeFileSync(fd, ownerMetadata);
       const acquired = fstatSync(fd);
       acquiredDevice = acquired.dev;
       acquiredInode = acquired.ino;
-      if (recoveryFd !== undefined) {
-        releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        recoveryFd = undefined;
-      }
+      writeFileSync(fd, ownerMetadata);
     } catch (error: any) {
       if (fd !== undefined) {
-        closeSync(fd);
+        releaseStateLock(
+          lock,
+          fd,
+          ownerMetadata,
+          acquiredDevice,
+          acquiredInode,
+        );
         fd = undefined;
-        try {
-          unlinkSync(lock);
-        } catch {
-          /* Another process may have recovered an incomplete lock. */
-        }
+        // A partial metadata write is recovered after its lease, not unlinked blindly.
       }
-      if (error?.code !== "EEXIST") {
-        if (recoveryFd !== undefined) {
-          releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        }
-        throw error;
-      }
-      if (recoveryFd === undefined) {
-        try {
-          recoveryFd = openSync(recoveryLock, "wx", 0o600);
-          writeFileSync(recoveryFd, recoveryMetadata);
-        } catch (recoveryError: any) {
-          if (recoveryFd !== undefined) {
-            closeSync(recoveryFd);
-            recoveryFd = undefined;
-            try {
-              unlinkSync(recoveryLock);
-            } catch {
-              /* Another contender may own the recovery claim. */
-            }
-          }
-          if (recoveryError?.code !== "EEXIST") throw recoveryError;
-          // Existing recovery claims are never reclaimed automatically.
-        }
-      }
-      if (recoveryFd !== undefined) {
-        try {
-          if (!existsSync(lock)) continue;
-          const owner = readStateLockOwner(lock);
-          const lockAge = Date.now() - statSync(lock).mtimeMs;
-          const stale = !owner && lockAge > STATE_LOCK_STALE_MS;
-          if (owner && isProcessAlive(owner.pid)) {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          } else if (stale || (owner && !isProcessAlive(owner.pid))) {
-            unlinkSync(lock);
-            continue;
-          } else {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          }
-        } catch {
-          if (recoveryFd !== undefined) {
-            releaseStateRecoveryLock(
-              recoveryLock,
-              recoveryFd,
-              recoveryMetadata,
-            );
-            recoveryFd = undefined;
-          }
-        }
-      }
-      if (Date.now() >= deadline) {
-        if (recoveryFd !== undefined) {
-          releaseStateRecoveryLock(recoveryLock, recoveryFd, recoveryMetadata);
-        }
+      if (error?.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline)
         throw new Error(`timed out acquiring interactive state lock: ${lock}`);
+      try {
+        if (isStateLockRecoverable(lock)) {
+          // Recover crashed reclaimers under the next claim rather than deleting
+          // their claim without serialization. Live owners are never reclaimed.
+          withStateFileLock(`${lock}.recovery`, deadline, () => {
+            // The owner may have changed while waiting for the recovery claim.
+            if (isStateLockRecoverable(lock)) unlinkSync(lock);
+          });
+          continue;
+        }
+      } catch (recoveryError: any) {
+        if (recoveryError?.code !== "ENOENT") throw recoveryError;
+        // The owner released its lock before the recovery check.
       }
       Atomics.wait(stateLockWaiter, 0, 0, 10);
     }
@@ -2372,6 +2455,13 @@ export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
   } finally {
     releaseStateLock(lock, fd, ownerMetadata, acquiredDevice, acquiredInode);
   }
+}
+
+export function withInteractiveStateLock<T>(cwd: string, action: () => T): T {
+  const piDir = join(cwd, ".pi");
+  const lock = join(piDir, "subagentura-state.lock");
+  mkdirSync(piDir, { recursive: true, mode: 0o700 });
+  return withStateFileLock(lock, Date.now() + STATE_LOCK_TIMEOUT_MS, action);
 }
 
 function writeInteractiveStatesUnlocked(

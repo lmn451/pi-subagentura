@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  appendCompletionEvent,
   artifactPath,
   listOutputHistory,
   readEventRecords,
@@ -94,6 +95,124 @@ async function setupCoordinatorHarness() {
 }
 
 describe("coordinated completion delivery", () => {
+  it.each([false, true])(
+    "withholds artifact output until receipt recovery and preserves consumption after reload (Pi storage blocked=%s)",
+    async (blockPiStorage) => {
+      const root = mkdtempSync(join(tmpdir(), "pi-artifact-receipt-"));
+      artifactRoots.push(root);
+      const manager = SessionManager.create(root, join(root, "sessions"));
+      const existingScopes = new Set(getSessionScopes().map(({ id }) => id));
+      const harness = await createPiSessionHarness(root, {
+        extensionRoot: repoRoot,
+        includeTools: true,
+        sessionManager: manager,
+      });
+      harnesses.push(harness);
+      const scope = resolveHarnessScope(harness, existingScopes);
+      const owner = sessionOwner(scope);
+      const seed = harness.session.prompt(
+        "Initialize artifact receipt session.",
+      );
+      await vi.waitFor(() => expect(harness.contexts).toHaveLength(1));
+      harness.completeNext();
+      await seed;
+      scope.parentStreaming = true;
+      const id = "abcd123400000001";
+      const turnId = "artifact-receipt-turn";
+      const output = "private artifact output retained for recovery";
+      const art = artifactPath(root, id);
+      writeOutput(art, output);
+      appendCompletionEvent(art, {
+        turnId,
+        outcome: "done",
+        source: "agent_settled",
+      });
+      scope.interactiveStates.set(id, {
+        id,
+        name: "Receipt artifact",
+        task: "Retain snapshot",
+        cwd: root,
+        artifactDir: art.dir,
+        status: "exited",
+        mux: "tmux",
+        paneId: "%99",
+        startedAt: Date.now(),
+        sessionFile: join(root, "child.jsonl"),
+        launchScriptFile: join(root, "launch.sh"),
+        attachCommand: "",
+        selectPaneCommand: "",
+      });
+      publishCompletion(
+        {
+          schemaVersion: 1,
+          completionId: `interactive:${id}:${turnId}`,
+          source: "interactive",
+          sourceId: id,
+          turnId,
+          label: "Receipt artifact",
+          status: "done",
+          policy: "each",
+          references: [{ label: "output", value: art.dir }],
+          completedAt: Date.now(),
+        },
+        owner,
+      );
+      const sessionFile = manager.getSessionFile()!;
+      const receiptPath = sessionLedgerPath(
+        manager.getSessionDir(),
+        manager.getSessionId(),
+        "subagentura-completion-consumed",
+      );
+      mkdirSync(receiptPath, { recursive: true });
+      if (blockPiStorage) {
+        renameSync(sessionFile, `${sessionFile}.retained`);
+        mkdirSync(sessionFile);
+      }
+      const tool = harness.session.agent.state.tools.find(
+        (candidate) => candidate.name === "read_subagent_artifact",
+      )!;
+      const read = () => tool.execute("read-artifact", { id, turnId });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let exposed: unknown;
+        await expect(
+          read().then((result) => {
+            exposed = result;
+          }),
+        ).rejects.toThrow(/receipt.*persist|persist.*receipt/i);
+        expect(exposed).toBeUndefined();
+        expect(
+          manager
+            .getEntries()
+            .filter(
+              (entry) =>
+                entry.type === "custom" &&
+                entry.customType === "subagentura-completion-consumed",
+            ),
+        ).toHaveLength(0);
+        clearCompletionCoordinator(owner);
+        expect(prepareCompletionManifest(owner)).toBeDefined();
+      }
+      rmSync(receiptPath, { recursive: true });
+      if (blockPiStorage) {
+        rmSync(sessionFile, { recursive: true });
+        renameSync(`${sessionFile}.retained`, sessionFile);
+      }
+      expect((await read()).details).toMatchObject({
+        id,
+        output,
+      });
+      expect(readFileSync(receiptPath, "utf8")).toContain(id);
+      expect(readFileSync(sessionFile, "utf8")).toContain(
+        "subagentura-completion-consumed",
+      );
+      clearCompletionCoordinator(owner);
+      expect(prepareCompletionManifest(owner)).toBeUndefined();
+      scope.sessionManager = SessionManager.open(sessionFile);
+      clearCompletionCoordinator(owner);
+      expect(prepareCompletionManifest(owner)).toBeUndefined();
+    },
+  );
+
   it.each([false, true])(
     "requires a durable receipt across retries and coordinator reload (Pi storage blocked=%s)",
     async (blockPiStorage) => {
@@ -250,7 +369,11 @@ describe("coordinated completion delivery", () => {
     expect(providerContext).toContain("Completed background work");
     expect(providerContext).toContain("outputs/event-a.md");
     expect(providerContext).toContain("events.ndjson");
-    expect(JSON.stringify(harness.contexts[0].messages)).not.toContain(
+    // Static system guidance can name the entry type without injecting a notice.
+    const conversationMessages = harness.contexts[0].messages.filter(
+      (message) => message.role !== "system",
+    );
+    expect(JSON.stringify(conversationMessages)).not.toContain(
       "subagentura-completion",
     );
     expect(providerContext).not.toContain("untrusted-subagent-output");

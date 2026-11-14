@@ -464,6 +464,60 @@ describe("interactive lineage node cap", () => {
     expect(projection.roots[0]?.manifest).toBe(herdr);
   });
 
+  it.each(["/tmp/tmux work/#socket", "/tmp/tmux work/socket "])(
+    "preserves literal tmux socket %j in lineage",
+    (muxServer) => {
+      const value = manifest("tmux-agent", {
+        pane: { backend: "tmux", paneId: "%42", muxServer },
+      });
+      expect(validateLineageManifest(value).pane.muxServer).toBe(muxServer);
+    },
+  );
+
+  it.each(["relative.sock", "/tmp/bad\npath", "/tmp/bad\0path"])(
+    "rejects unsafe explicit tmux lineage socket %j",
+    (muxServer) => {
+      expect(() =>
+        validateLineageManifest(
+          manifest("tmux-agent", {
+            pane: { backend: "tmux", paneId: "%42", muxServer },
+          }),
+        ),
+      ).toThrow();
+    },
+  );
+
+  it("validates and projects Rex identities only with a persisted server", async () => {
+    const rex = validateLineageManifest(
+      manifest("rex-agent", {
+        pane: {
+          backend: "rex",
+          paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+          muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+          muxServer: "unix:///tmp/rex.sock",
+        },
+      }),
+    );
+    expect(rex.pane.muxServer).toBe("unix:///tmp/rex.sock");
+
+    const projection = await projectManifests([rex], rootHash, () => false, {
+      maxNodes: 1,
+    });
+    expect(projection.roots[0]?.state).toBe("actionable");
+
+    expect(() =>
+      validateLineageManifest(
+        manifest("rex-incomplete", {
+          pane: {
+            backend: "rex",
+            paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+            muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+          },
+        }),
+      ),
+    ).toThrow(/Rex pane identity is incomplete/);
+  });
+
   it("reads manifests newest-first so the read window follows a live tree", async () => {
     const dir = await tempDir();
     const nodesDir = path.join(dir, "nodes");

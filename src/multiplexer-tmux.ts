@@ -24,6 +24,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import type {
+  MuxLaunchContext,
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
@@ -32,6 +33,8 @@ import type {
   PaneRef,
 } from "./multiplexer-contracts";
 import {
+  validateMuxLaunchContext,
+  isMuxSocketPath,
   boundCaptureOutput,
   commandExists,
   execMuxOrThrow,
@@ -72,7 +75,10 @@ function settleTmuxSocketPaneForTests(): void {
  * via `display-message`. Throws if the pane is dead or the response is
  * malformed.
  */
-function getPaneLocation(paneId: string): {
+function getPaneLocation(
+  paneId: string,
+  route: (args: readonly string[]) => string[] = withTmuxSocket,
+): {
   session: string;
   window: string;
   pane: string;
@@ -81,7 +87,7 @@ function getPaneLocation(paneId: string): {
     "tmux",
     "display-message",
     "tmux",
-    withTmuxSocket([
+    route([
       "display-message",
       "-p",
       "-t",
@@ -112,10 +118,80 @@ export class TmuxMultiplexer implements Multiplexer {
   readonly name = "tmux" as const;
   readonly capabilities = MUX_CAPABILITIES.tmux;
 
+  constructor(
+    private readonly launchContext?: MuxLaunchContext,
+    private readonly detachedSessions = new Map<string, string>(),
+  ) {
+    validateMuxLaunchContext("tmux", launchContext);
+  }
+
+  forContext(context: MuxLaunchContext): TmuxMultiplexer {
+    return new TmuxMultiplexer(context, this.detachedSessions);
+  }
+
+  private withSocket(args: readonly string[], server?: string): string[] {
+    if (server !== undefined) {
+      if (!isMuxSocketPath(server))
+        throw new Error("Invalid tmux server socket");
+      return ["-S", server, ...args];
+    }
+    const context = this.launchContext;
+    if (!context) return withTmuxSocket(args);
+    if (context.mux !== "tmux") throw new Error("Invalid tmux context");
+    if (context.kind === "attached") return ["-S", context.server, ...args];
+    return context.socketName ? ["-L", context.socketName, ...args] : [...args];
+  }
+
   /** Shared detached session used when the parent is outside tmux. */
-  private detachedSessionName?: string;
+  private get detachedSessionName(): string | undefined {
+    return this.detachedSessions.get(this.detachedSessionKey());
+  }
+  private set detachedSessionName(value: string | undefined) {
+    const key = this.detachedSessionKey();
+    if (value === undefined) this.detachedSessions.delete(key);
+    else this.detachedSessions.set(key, value);
+  }
+  private detachedSessionKey(): string {
+    const context = this.launchContext;
+    return context?.kind === "detached"
+      ? `name:${context.socketName ?? ""}`
+      : `name:${process.env.PI_SUBAGENTURA_TMUX_SOCKET ?? ""}`;
+  }
+
+  private createdServer(paneId: string): string | undefined {
+    if (!this.launchContext) return undefined;
+    if (
+      this.launchContext.kind === "attached" &&
+      this.launchContext.mux === "tmux"
+    )
+      return this.launchContext.server;
+    try {
+      const output = execMuxOrThrow(
+        "tmux",
+        "read socket path",
+        "tmux",
+        this.withSocket([
+          "display-message",
+          "-p",
+          "-t",
+          paneId,
+          "#{socket_path}",
+        ]),
+        { encoding: "utf8", timeout: 5000 },
+      );
+      const server = output.replace(/\r?\n$/, "");
+      if (!isMuxSocketPath(server))
+        throw new Error("Malformed tmux server socket path");
+      return server;
+    } catch (error) {
+      this.killPane(paneId);
+      throw error;
+    }
+  }
   private paneListingInFlight?: Promise<ReadonlySet<string> | undefined>;
+  private paneListingServer?: string;
   private paneListingCache?: {
+    server?: string;
     at: number;
     panes: ReadonlySet<string> | undefined;
   };
@@ -136,10 +212,14 @@ export class TmuxMultiplexer implements Multiplexer {
 
   private hasSession(sessionName: string): boolean {
     try {
-      execFileSync("tmux", withTmuxSocket(["has-session", "-t", sessionName]), {
-        stdio: "ignore",
-        timeout: 5000,
-      });
+      execFileSync(
+        "tmux",
+        this.withSocket(["has-session", "-t", sessionName]),
+        {
+          stdio: "ignore",
+          timeout: 5000,
+        },
+      );
       return true;
     } catch {
       return false;
@@ -167,13 +247,25 @@ export class TmuxMultiplexer implements Multiplexer {
    * as the `tmux` binary is on PATH. The orchestrator probes both.
    */
   createPane(opts: {
+    context?: MuxLaunchContext;
     name: string;
     cwd: string;
     background: boolean;
     parentPane?: string;
     windowName?: string;
     id?: string; // sub-agent id (8 hex); used for the relaxed-path unique session name
-  }): { paneId: string; windowName?: string; session: string } {
+  }): {
+    paneId: string;
+    windowName?: string;
+    session: string;
+    server?: string;
+  } {
+    validateMuxLaunchContext(this.name, opts.context);
+    if (opts.context && opts.context !== this.launchContext) {
+      const context = Object.freeze({ ...opts.context });
+      return this.forContext(context).createPane({ ...opts, context });
+    }
+    const context = opts.context ?? this.launchContext;
     if (!commandExists("tmux")) {
       throw new Error(
         "tmux is not available. Install tmux or set PATH to include it.",
@@ -183,7 +275,7 @@ export class TmuxMultiplexer implements Multiplexer {
     // Relaxed path: the first child creates a detached session; later children
     // become detached windows in that same session. This keeps plain-terminal
     // usage organized without changing the in-session behavior below.
-    if (!process.env.TMUX) {
+    if (context ? context.kind === "detached" : !process.env.TMUX) {
       let isFirstPane = this.detachedSessionName === undefined;
       const sessionName =
         this.detachedSessionName ??
@@ -200,11 +292,13 @@ export class TmuxMultiplexer implements Multiplexer {
             "tmux",
             "new-session",
             "tmux",
-            withTmuxSocket([
+            this.withSocket([
               "new-session",
               "-d",
               "-s",
               sessionName,
+              "-n",
+              windowName,
               "-c",
               opts.cwd,
               "-P",
@@ -217,7 +311,7 @@ export class TmuxMultiplexer implements Multiplexer {
             "tmux",
             "new-window",
             "tmux",
-            withTmuxSocket([
+            this.withSocket([
               "new-window",
               "-d",
               "-t",
@@ -236,29 +330,13 @@ export class TmuxMultiplexer implements Multiplexer {
         throw new Error(`Unexpected tmux pane id: ${paneId || "(empty)"}`);
       }
       this.detachedSessionName = sessionName;
-      if (isFirstPane) {
-        // Rename the default window to the sub-agent's display name.
-        try {
-          execFileSync(
-            "tmux",
-            withTmuxSocket([
-              "rename-window",
-              "-t",
-              `${sessionName}:0`,
-              windowName,
-            ]),
-            {
-              encoding: "utf8",
-              stdio: "ignore",
-              timeout: 5000,
-            },
-          );
-        } catch {
-          // Cosmetic; don't fail the spawn if rename doesn't take.
-        }
-      }
       settleTmuxSocketPaneForTests();
-      return { paneId, windowName, session: sessionName };
+      return {
+        paneId,
+        windowName,
+        session: sessionName,
+        ...(this.launchContext ? { server: this.createdServer(paneId) } : {}),
+      };
     }
 
     // Standard path: parent is in tmux.
@@ -269,13 +347,21 @@ export class TmuxMultiplexer implements Multiplexer {
       // select it. Each background sub-agent gets its own named window
       // so they don't clobber each other in the tmux window list.
       windowName = opts.windowName ?? safeSegment(opts.name);
+      // new-window takes a window target, not a pane ID. Resolve the parent
+      // on the captured server and require its exact session, not a prefix.
+      const parentSession =
+        context?.kind === "attached"
+          ? getPaneLocation(context.paneId, (args) => this.withSocket(args))
+              .session
+          : undefined;
       paneId = execMuxOrThrow(
         "tmux",
         "new-window",
         "tmux",
-        withTmuxSocket([
+        this.withSocket([
           "new-window",
           "-d",
+          ...(parentSession !== undefined ? ["-t", `=${parentSession}:`] : []),
           "-n",
           windowName,
           "-P",
@@ -299,7 +385,10 @@ export class TmuxMultiplexer implements Multiplexer {
         "-c",
         opts.cwd,
       ];
-      const parent = opts.parentPane ?? process.env.TMUX_PANE;
+      const parent =
+        context?.kind === "attached"
+          ? context.paneId
+          : (opts.parentPane ?? process.env.TMUX_PANE);
       if (parent) {
         args.splice(4, 0, "-t", parent);
       }
@@ -307,7 +396,7 @@ export class TmuxMultiplexer implements Multiplexer {
         "tmux",
         "split-window",
         "tmux",
-        withTmuxSocket(args),
+        this.withSocket(args),
         {
           encoding: "utf8",
           timeout: 10000,
@@ -319,7 +408,10 @@ export class TmuxMultiplexer implements Multiplexer {
     }
     let session: string;
     try {
-      session = getPaneLocation(paneId).session;
+      session =
+        context?.kind === "attached"
+          ? getPaneLocation(paneId, (args) => this.withSocket(args)).session
+          : getPaneLocation(paneId).session;
     } catch (error) {
       this.killPane(paneId);
       throw new Error(`Failed to determine session for tmux pane ${paneId}`, {
@@ -331,7 +423,7 @@ export class TmuxMultiplexer implements Multiplexer {
       try {
         execFileSync(
           "tmux",
-          withTmuxSocket(["select-pane", "-t", paneId, "-T", opts.name]),
+          this.withSocket(["select-pane", "-t", paneId, "-T", opts.name]),
           {
             stdio: "ignore",
             encoding: "utf8",
@@ -342,15 +434,24 @@ export class TmuxMultiplexer implements Multiplexer {
       }
     }
     settleTmuxSocketPaneForTests();
-    return { paneId, windowName, session };
+    return {
+      paneId,
+      windowName,
+      session,
+      ...(this.launchContext ? { server: this.createdServer(paneId) } : {}),
+    };
   }
 
-  getPaneLiveness(paneId: string): PaneLiveness {
+  getPaneLiveness(
+    paneId: string,
+    _session?: string,
+    server?: string,
+  ): PaneLiveness {
     if (!/^%\d+$/.test(paneId)) return "unknown";
     try {
       const output = execFileSync(
         "tmux",
-        withTmuxSocket(["list-panes", "-a", "-F", "#{pane_id}"]),
+        this.withSocket(["list-panes", "-a", "-F", "#{pane_id}"], server),
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
@@ -363,17 +464,24 @@ export class TmuxMultiplexer implements Multiplexer {
     }
   }
 
-  private listPanesAsync(): Promise<ReadonlySet<string> | undefined> {
+  private listPanesAsync(
+    server?: string,
+  ): Promise<ReadonlySet<string> | undefined> {
     const cached = this.paneListingCache;
-    if (cached && Date.now() - cached.at < PANE_LIVENESS_CACHE_MS) {
+    if (
+      cached &&
+      cached.server === server &&
+      Date.now() - cached.at < PANE_LIVENESS_CACHE_MS
+    ) {
       return Promise.resolve(cached.panes);
     }
-    if (this.paneListingInFlight) return this.paneListingInFlight;
+    if (this.paneListingInFlight && this.paneListingServer === server)
+      return this.paneListingInFlight;
     const request = new Promise<ReadonlySet<string> | undefined>((resolve) => {
       try {
         execFile(
           "tmux",
-          withTmuxSocket(["list-panes", "-a", "-F", "#{pane_id}"]),
+          this.withSocket(["list-panes", "-a", "-F", "#{pane_id}"], server),
           { encoding: "utf8", timeout: 5000 },
           (error, stdout) => {
             if (error) {
@@ -392,8 +500,9 @@ export class TmuxMultiplexer implements Multiplexer {
       }
     });
     this.paneListingInFlight = request;
+    this.paneListingServer = server;
     void request.then((panes) => {
-      this.paneListingCache = { at: Date.now(), panes };
+      this.paneListingCache = { at: Date.now(), panes, server };
       if (this.paneListingInFlight === request) {
         this.paneListingInFlight = undefined;
       }
@@ -401,9 +510,13 @@ export class TmuxMultiplexer implements Multiplexer {
     return request;
   }
 
-  async getPaneLivenessAsync(paneId: string): Promise<PaneLiveness> {
+  async getPaneLivenessAsync(
+    paneId: string,
+    _session?: string,
+    server?: string,
+  ): Promise<PaneLiveness> {
     if (!/^%\d+$/.test(paneId)) return "unknown";
-    const panes = await this.listPanesAsync();
+    const panes = await this.listPanesAsync(server);
     return panes ? (panes.has(paneId) ? "alive" : "dead") : "unknown";
   }
 
@@ -414,19 +527,23 @@ export class TmuxMultiplexer implements Multiplexer {
   getPaneActivityAsync(
     paneId: string,
     _session?: string,
+    server?: string,
   ): Promise<PaneActivity> {
     if (!/^%\d+$/.test(paneId)) return Promise.resolve("unknown");
     return new Promise((resolve) => {
       try {
         execFile(
           "tmux",
-          withTmuxSocket([
-            "display-message",
-            "-p",
-            "-t",
-            paneId,
-            "#{window_active_clients}\t#{pane_active}\t#{pane_dead}",
-          ]),
+          this.withSocket(
+            [
+              "display-message",
+              "-p",
+              "-t",
+              paneId,
+              "#{window_active_clients}\t#{pane_active}\t#{pane_dead}",
+            ],
+            server,
+          ),
           { encoding: "utf8", timeout: 5000 },
           (error, stdout) => {
             if (error) {
@@ -458,7 +575,12 @@ export class TmuxMultiplexer implements Multiplexer {
     });
   }
 
-  sendKeys(paneId: string, text: string): void {
+  sendKeys(
+    paneId: string,
+    text: string,
+    _session?: string,
+    server?: string,
+  ): void {
     execMuxOrThrow(
       "tmux",
       "send-keys",
@@ -466,7 +588,7 @@ export class TmuxMultiplexer implements Multiplexer {
       // `--` terminates flag parsing: agent follow-up text is user/model
       // controlled and text starting with `-` would otherwise be read as a
       // send-keys flag (`command send-keys: unknown flag -n`, exit 1).
-      withTmuxSocket(["send-keys", "-t", paneId, "-l", "--", text]),
+      this.withSocket(["send-keys", "-t", paneId, "-l", "--", text], server),
       {
         encoding: "utf8",
         timeout: 5000,
@@ -474,12 +596,12 @@ export class TmuxMultiplexer implements Multiplexer {
     );
   }
 
-  sendEnter(paneId: string): void {
+  sendEnter(paneId: string, _session?: string, server?: string): void {
     execMuxOrThrow(
       "tmux",
       "send-keys Enter",
       "tmux",
-      withTmuxSocket(["send-keys", "-t", paneId, "Enter"]),
+      this.withSocket(["send-keys", "-t", paneId, "Enter"], server),
       {
         encoding: "utf8",
         timeout: 5000,
@@ -487,12 +609,16 @@ export class TmuxMultiplexer implements Multiplexer {
     );
   }
 
-  killPane(paneId: string): void {
+  killPane(paneId: string, _session?: string, server?: string): void {
     try {
-      execFileSync("tmux", withTmuxSocket(["kill-pane", "-t", paneId]), {
-        stdio: "ignore",
-        timeout: 5000,
-      });
+      execFileSync(
+        "tmux",
+        this.withSocket(["kill-pane", "-t", paneId], server),
+        {
+          stdio: "ignore",
+          timeout: 5000,
+        },
+      );
     } catch {
       // Best effort — pane may already be dead.
     }
@@ -516,15 +642,18 @@ export class TmuxMultiplexer implements Multiplexer {
    */
   focusPane(ref: PaneRef): Promise<void> {
     return new Promise((resolve, reject) => {
-      const args = withTmuxSocket([
-        "select-window",
-        "-t",
-        ref.paneId,
-        ";",
-        "select-pane",
-        "-t",
-        ref.paneId,
-      ]);
+      const args = this.withSocket(
+        [
+          "select-window",
+          "-t",
+          ref.paneId,
+          ";",
+          "select-pane",
+          "-t",
+          ref.paneId,
+        ],
+        ref.server,
+      );
       execFile("tmux", args, { timeout: 5000 }, (error) => {
         if (error) reject(error);
         else resolve();
@@ -540,14 +669,10 @@ export class TmuxMultiplexer implements Multiplexer {
     return new Promise((resolve, reject) => {
       execFile(
         "tmux",
-        withTmuxSocket([
-          "capture-pane",
-          "-p",
-          "-t",
-          ref.paneId,
-          "-S",
-          `-${lines}`,
-        ]),
+        this.withSocket(
+          ["capture-pane", "-p", "-t", ref.paneId, "-S", `-${lines}`],
+          ref.server,
+        ),
         {
           encoding: "utf8",
           maxBuffer: MAX_CAPTURE_READ_BYTES,
@@ -583,7 +708,7 @@ export class TmuxMultiplexer implements Multiplexer {
     const command = `printf '%s\\n' ${shellEscape(content)}; printf '\\nPress Enter to close'; read _`;
     return spawnNativeViewer(
       "tmux",
-      withTmuxSocket([
+      this.withSocket([
         "display-popup",
         "-E",
         "-T",
@@ -604,12 +729,15 @@ export class TmuxMultiplexer implements Multiplexer {
    * successful `list-clients` result can then establish attached/no-client
    * state for an existing target.
    */
-  hasAttachedClientAsync(session?: string): Promise<boolean | undefined> {
+  hasAttachedClientAsync(
+    session?: string,
+    server?: string,
+  ): Promise<boolean | undefined> {
     return new Promise((resolve) => {
       try {
         execFile(
           "tmux",
-          withTmuxSocket(["list-sessions", "-F", "#{session_name}"]),
+          this.withSocket(["list-sessions", "-F", "#{session_name}"], server),
           { encoding: "utf8", timeout: 5000 },
           (sessionError, sessionOutput) => {
             if (sessionError) {
@@ -631,12 +759,10 @@ export class TmuxMultiplexer implements Multiplexer {
             try {
               execFile(
                 "tmux",
-                withTmuxSocket([
-                  "list-clients",
-                  ...target,
-                  "-F",
-                  "#{client_name}",
-                ]),
+                this.withSocket(
+                  ["list-clients", ...target, "-F", "#{client_name}"],
+                  server,
+                ),
                 { encoding: "utf8", timeout: 5000 },
                 (clientError, clientOutput) => {
                   resolve(
@@ -655,42 +781,33 @@ export class TmuxMultiplexer implements Multiplexer {
     });
   }
 
-  buildAttachCommands(opts: { paneId: string; windowName?: string }): {
+  buildAttachCommands(opts: {
+    paneId: string;
+    windowName?: string;
+    server?: string;
+  }): {
     attachCommand: string;
     focusCommand: string;
   } {
+    // Window names can collide within a session or change after launch.
+    const location = getPaneLocation(opts.paneId, (args) =>
+      this.withSocket(args, opts.server),
+    );
+    const targetWindow = `${location.session}:${location.window}`;
+    const tmux =
+      this.launchContext || opts.server
+        ? this.withSocket([], opts.server).reduce(
+            (command, arg) => `${command} ${shellEscape(arg)}`,
+            "tmux",
+          )
+        : tmuxCommandPrefix();
     if (opts.windowName) {
-      // Background mode: pane lives in a named detached window. Attach
-      // command chains `attach -t <session>` with
-      // `select-window -t <session>:<windowName>` so it works from outside the
-      // session too.
-      //
-      // The window target MUST carry the session qualifier. Window names are
-      // `safeSegment(name)`, so two sub-agents both called "reviewer" collide,
-      // and a bare name target resolves against whichever session tmux scans
-      // first: verified against tmux 3.7b, `select-window -t reviewer` with
-      // `reviewer` windows in both `collide-a` and `collide-b` moves
-      // `collide-b` — the most recently created session — and exits 0. That is
-      // the same silent wrong-agent focus `focusPane` was fixed for, except
-      // here it lands in a string we hand the user to paste.
-      //
-      // Note the `\;` chain is genuinely for outside-tmux use: from inside a
-      // session on the same server, tmux refuses with "sessions should be
-      // nested with care, unset $TMUX to force" and the chained select-window
-      // does NOT run either (verified 3.7b). Inside-tmux callers get
-      // `focusCommand`, which is why it is a standalone command.
-      const location = getPaneLocation(opts.paneId);
-      const tmux = tmuxCommandPrefix();
-      const targetWindow = `${location.session}:${opts.windowName}`;
       return {
         attachCommand: `${tmux} attach -t ${shellEscape(location.session)} \\; select-window -t ${shellEscape(targetWindow)}`,
         focusCommand: `${tmux} select-window -t ${shellEscape(targetWindow)}`,
       };
     }
     // Visible split: attach by pane id inside the parent's window.
-    const location = getPaneLocation(opts.paneId);
-    const targetWindow = `${location.session}:${location.window}`;
-    const tmux = tmuxCommandPrefix();
     return {
       attachCommand: `${tmux} attach -t ${shellEscape(location.session)} \\; select-window -t ${shellEscape(targetWindow)} \\; select-pane -t ${shellEscape(opts.paneId)}`,
       focusCommand: `${tmux} select-pane -t ${shellEscape(opts.paneId)}`,

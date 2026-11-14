@@ -3,6 +3,7 @@ import type * as InteractiveTools from "../src/tools/interactive";
 import type * as InteractiveTmux from "../src/interactive-tmux";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
+import type { LiveMuxTarget } from "../src/multiplexer-live-probes";
 
 const PANE_ENVIRONMENT_KEYS = [
   "TMUX",
@@ -13,6 +14,10 @@ const PANE_ENVIRONMENT_KEYS = [
   "HERDR_ENV",
   "HERDR_SOCKET_PATH",
   "HERDR_PANE_ID",
+  "REX_SESSION",
+  "REX_BLOCK",
+  "REX_SERVER",
+  "TERM_PROGRAM",
   "PI_SUBAGENTURA_CHILD",
 ] as const;
 const originalPaneEnvironment = new Map(
@@ -28,6 +33,13 @@ function restorePaneEnvironment(): void {
   for (const [key, value] of originalPaneEnvironment) {
     if (value !== undefined) process.env[key] = value;
   }
+}
+
+function mockResolvedPane(target?: LiveMuxTarget): void {
+  vi.doMock("../src/multiplexer-current-context", () => ({
+    resolveCurrentMuxContextAsync: async () =>
+      target ? { kind: "ready", target } : { kind: "absent" },
+  }));
 }
 
 function installMockChildProcess(scenario: (args: string[]) => string): void {
@@ -50,15 +62,153 @@ function installMockChildProcess(scenario: (args: string[]) => string): void {
   }));
 }
 
-describe("current pane activity", () => {
+describe("nonblocking current-pane activity", () => {
   beforeEach(clearPaneEnvironment);
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
+    restorePaneEnvironment();
+  });
+
+  it("awaits asynchronous ownership discovery without calling its sync path", async () => {
+    installMockChildProcess(() => "1\t1\t0\n");
+    let finish!: (context: unknown) => void;
+    const discover = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const sync = vi.fn(() => {
+      throw new Error("blocking discovery called");
+    });
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: sync,
+      resolveCurrentMuxContextAsync: discover,
+    }));
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    const result = getCurrentPaneActivity();
+    void result.catch(() => {
+      /* The assertion below diagnoses an old sync-path rejection. */
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(sync).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledOnce();
+    finish({ kind: "ready", target: { mux: "tmux", paneId: "%42" } });
+    await expect(result).resolves.toMatchObject({
+      status: "active",
+      mux: "tmux",
+      paneId: "%42",
+    });
+  });
+});
+
+describe("current pane live ownership", () => {
+  const probes = vi.fn();
+  const calls: string[][] = [];
+
+  beforeEach(() => {
+    clearPaneEnvironment();
+    calls.length = 0;
+    probes.mockReset();
+    Object.assign(process.env, {
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      HERDR_PANE_ID: "w1:p2",
+      TMUX: "/tmp/tmux.sock,123,0",
+      TMUX_PANE: "%42",
+    });
+    installMockChildProcess((args) => {
+      calls.push(args);
+      return args.includes("display-message") ? "1\t1\t0\n" : "";
+    });
+    vi.doMock("../src/multiplexer-process-context", () => ({
+      readProcessContextAsync: async () => ({
+        pid: 100,
+        ancestors: [],
+        processes: new Map(),
+      }),
+      closestMuxAncestor: () => undefined,
+    }));
+    vi.doMock("../src/multiplexer-live-probes", () => ({
+      probeLiveMuxTargetAsync: probes,
+    }));
+  });
 
   afterEach(() => {
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-process-context");
+    vi.doUnmock("../src/multiplexer-live-probes");
+    restorePaneEnvironment();
+  });
+
+  it("uses the verified inner tmux identity rather than inherited Herdr metadata", async () => {
+    probes.mockImplementation((target: LiveMuxTarget) =>
+      target.mux === "tmux"
+        ? { kind: "match", target, distance: 0 }
+        : { kind: "mismatch" },
+    );
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "active",
+      mux: "tmux",
+      paneId: "%42",
+    });
+    expect(probes).toHaveBeenCalled();
+  });
+
+  it.each(["unknown", "mismatch"] as const)(
+    "does not expose unverified current identity when ownership is %s",
+    async (kind) => {
+      probes.mockReturnValue({ kind });
+      const { getCurrentPaneActivity } = await importFresh<
+        typeof import("../src/interactive-tmux")
+      >("../src/interactive-tmux");
+      await expect(getCurrentPaneActivity()).resolves.toEqual({
+        status: "unknown",
+      });
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("uses a proven Herdr identity with unknown activity without focus commands", async () => {
+    probes.mockImplementation((target: LiveMuxTarget) =>
+      target.mux === "herdr"
+        ? { kind: "match", target, distance: 0 }
+        : { kind: "mismatch" },
+    );
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
+      mux: "herdr",
+      paneId: "w1:p2",
+      session: "/tmp/herdr.sock",
+    });
+    expect(probes).toHaveBeenCalled();
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("current pane activity", () => {
+  beforeEach(() => {
+    clearPaneEnvironment();
+    mockResolvedPane();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
     restorePaneEnvironment();
   });
 
   it("reports an active tmux pane when the user's window has focus", async () => {
+    mockResolvedPane({ mux: "tmux", paneId: "%42" });
     process.env.TMUX = "/tmp/tmux.sock,123,0";
     process.env.TMUX_PANE = "%42";
     const calls: string[][] = [];
@@ -86,6 +236,7 @@ describe("current pane activity", () => {
   });
 
   it("reports an inactive tmux pane when its window is not viewed", async () => {
+    mockResolvedPane({ mux: "tmux", paneId: "%42" });
     process.env.TMUX = "/tmp/tmux.sock,123,0";
     process.env.TMUX_PANE = "%42";
     installMockChildProcess((args) =>
@@ -104,6 +255,7 @@ describe("current pane activity", () => {
   });
 
   it("returns unknown when the tmux activity probe fails", async () => {
+    mockResolvedPane({ mux: "tmux", paneId: "%42" });
     process.env.TMUX = "/tmp/tmux.sock,123,0";
     process.env.TMUX_PANE = "%42";
     installMockChildProcess((args) => {
@@ -123,6 +275,7 @@ describe("current pane activity", () => {
   });
 
   it("reports zellij activity for the current session and pane", async () => {
+    mockResolvedPane({ mux: "zellij", paneId: "42", session: "main" });
     process.env.ZELLIJ = "0";
     process.env.ZELLIJ_SESSION_NAME = "main";
     process.env.ZELLIJ_PANE_ID = "42";
@@ -161,7 +314,12 @@ describe("current pane activity", () => {
     });
   });
 
-  it("prefers Herdr activity over inherited outer mux markers", async () => {
+  it("reports unknown activity for a verified Herdr pane", async () => {
+    mockResolvedPane({
+      mux: "herdr",
+      paneId: "w1:p2",
+      session: "/tmp/herdr.sock",
+    });
     process.env.HERDR_ENV = "1";
     process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
     process.env.HERDR_PANE_ID = "w1:p2";
@@ -187,12 +345,42 @@ describe("current pane activity", () => {
       paneId: "w1:p2",
       session: "/tmp/herdr.sock",
     });
-    // Herdr wins the backend race over the inherited TMUX/ZELLIJ markers, so
-    // neither of those backends gets probed either.
+    // The resolved Herdr backend does not expose client-specific activity.
+    expect(commands).toEqual([]);
+  });
+
+  it("reports Rex as unknown without probing undocumented focus activity", async () => {
+    mockResolvedPane({
+      mux: "rex",
+      paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+      session: "session:01234567-89ab-cdef-0123-456789abcdef",
+      server: "unix:///tmp/rex.sock",
+    });
+    process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    process.env.TMUX = "/tmp/tmux.sock,123,0";
+    const commands: string[][] = [];
+    installMockChildProcess((args) => {
+      commands.push([...args]);
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    });
+
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+
+    await expect(getCurrentPaneActivity()).resolves.toMatchObject({
+      status: "unknown",
+      mux: "rex",
+      paneId: process.env.REX_BLOCK,
+      session: process.env.REX_SESSION,
+    });
     expect(commands).toEqual([]);
   });
 
   it("reports zellij inactive when no client is attached", async () => {
+    mockResolvedPane({ mux: "zellij", paneId: "42", session: "main" });
     process.env.ZELLIJ = "0";
     process.env.ZELLIJ_SESSION_NAME = "main";
     process.env.ZELLIJ_PANE_ID = "42";
@@ -232,6 +420,7 @@ describe("current pane activity", () => {
   });
 
   it("returns unknown when the zellij activity payload is malformed", async () => {
+    mockResolvedPane({ mux: "zellij", paneId: "42", session: "main" });
     process.env.ZELLIJ = "0";
     process.env.ZELLIJ_SESSION_NAME = "main";
     process.env.ZELLIJ_PANE_ID = "42";

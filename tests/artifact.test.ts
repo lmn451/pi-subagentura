@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
   existsSync,
@@ -1100,7 +1100,7 @@ describe("persisted interactive state helpers", () => {
     expect(readFileSync(lock, "utf8")).toBe(replacement);
   });
 
-  it("fails closed when a recovery claim already exists", () => {
+  it("recovers abandoned recovery claims", () => {
     const piDir = join(root, ".pi");
     const lock = join(piDir, "subagentura-state.lock");
     const recoveryLock = `${lock}.recovery`;
@@ -1112,11 +1112,9 @@ describe("persisted interactive state helpers", () => {
     });
     writeFileSync(lock, deadOwner, { mode: 0o600 });
     writeFileSync(recoveryLock, existingRecovery, { mode: 0o600 });
-    expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
-      /timed out acquiring interactive state lock/,
-    );
-    expect(readFileSync(lock, "utf8")).toBe(deadOwner);
-    expect(readFileSync(recoveryLock, "utf8")).toBe(existingRecovery);
+    expect(withInteractiveStateLock(root, () => "acquired")).toBe("acquired");
+    expect(existsSync(lock)).toBe(false);
+    expect(existsSync(recoveryLock)).toBe(false);
   });
 
   it("stateFilePath returns <cwd>/.pi/subagentura-state.json", () => {
@@ -1194,6 +1192,138 @@ describe("persisted interactive state helpers", () => {
     });
 
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
+  });
+
+  it.each([
+    "/tmp/tmux/default",
+    "/tmp/tmux work/#socket",
+    "/tmp/tmux work/socket ",
+  ])("round-trips the exact pinned tmux socket %j", (muxServer) => {
+    const state = { ...SAMPLE, muxServer };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { abc12345: state },
+    });
+    expect(loadInteractiveStates(root)?.states.abc12345).toEqual(state);
+  });
+
+  it.each(["relative.sock", "/tmp/bad\npath", "/tmp/bad\0path"])(
+    "rejects an unsafe persisted tmux socket %j without dropping routing authority",
+    (muxServer) => {
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        stateFilePath(root),
+        JSON.stringify({
+          schemaVersion: 2,
+          parent: "pi",
+          states: { abc12345: { ...SAMPLE, muxServer } },
+        }),
+        { mode: 0o600 },
+      );
+      expect(loadInteractiveStates(root)).toBeNull();
+    },
+  );
+
+  it.each([
+    [{ mux: "tmux" }, true, undefined],
+    [
+      { mux: "tmux", muxServer: "/tmp/pinned socket " },
+      true,
+      "/tmp/pinned socket ",
+    ],
+    [{ mux: "tmux", muxServer: 42 }, false, undefined],
+    [{ mux: "tmux", muxServer: "" }, false, undefined],
+    [
+      { mux: "zellij", muxServer: "unix:///tmp/optional.sock" },
+      true,
+      "unix:///tmp/optional.sock",
+    ],
+    [{ mux: "herdr", muxServer: "bad\naddress" }, true, undefined],
+    [{ mux: "zellij", muxServer: 42, muxSession: 42 }, true, undefined],
+    [{ mux: "herdr", muxServer: "-unsafe" }, true, undefined],
+    [{ mux: "unknown" }, false, undefined],
+  ] as const)(
+    "normalizes mux identity fields without changing stored bytes: %j",
+    (patch, valid, server) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      const contents = JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { [SAMPLE.id]: { ...SAMPLE, ...patch } },
+      });
+      writeFileSync(file, contents, { mode: 0o600 });
+      const loaded = loadInteractiveStates(root);
+      expect(readFileSync(file, "utf8")).toBe(contents);
+      if (!valid) {
+        expect(loaded).toBeNull();
+        return;
+      }
+      const state = loaded?.states[SAMPLE.id];
+      expect(state?.mux).toBe(patch.mux);
+      expect(state?.paneId).toBe(SAMPLE.paneId);
+      if (server === undefined) expect(state).not.toHaveProperty("muxServer");
+      else expect(state?.muxServer).toBe(server);
+      if ("muxSession" in patch) expect(state).not.toHaveProperty("muxSession");
+    },
+  );
+
+  it.each([
+    { paneId: "%1" },
+    { muxSession: "wrong-session" },
+    { muxSession: 42 },
+    { muxServer: undefined },
+    { muxServer: "-unsafe" },
+    { muxServer: "bad\naddress" },
+  ])(
+    "rejects incomplete Rex identities without rewriting state: %j",
+    (patch) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      const contents = JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            mux: "rex",
+            paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+            muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+            muxServer: "unix:///tmp/rex.sock",
+            ...patch,
+          },
+        },
+      });
+      writeFileSync(file, contents, { mode: 0o600 });
+      expect(loadInteractiveStates(root)).toBeNull();
+      expect(readFileSync(file, "utf8")).toBe(contents);
+    },
+  );
+
+  it("persists the Rex server identity and rejects incomplete Rex state", () => {
+    const rexState: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+      mux: "rex",
+      muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+      muxServer: "unix:///tmp/rex.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { [rexState.id]: rexState },
+    });
+    expect(loadInteractiveStates(root)?.states[rexState.id]).toEqual(rexState);
+
+    const persisted = JSON.parse(readFileSync(stateFilePath(root), "utf8")) as {
+      states: Record<string, Record<string, unknown>>;
+    };
+    delete persisted.states[rexState.id]!.muxServer;
+    writeFileSync(stateFilePath(root), JSON.stringify(persisted), {
+      mode: 0o600,
+    });
+    expect(loadInteractiveStates(root)).toBeNull();
   });
   it("round-trips only bounded absolute working cwd values", () => {
     const file = stateFilePath(root);
@@ -2044,6 +2174,81 @@ describe("persisted interactive state helpers", () => {
 
   it("deleteInteractiveStatesFile is a no-op when the file is absent", () => {
     expect(() => deleteInteractiveStatesFile(root)).not.toThrow();
+  });
+  it.each(["", ".recovery"])(
+    "does not steal a live owner at recovery level %s",
+    (suffix) => {
+      const lock = join(root, ".pi", "subagentura-state.lock");
+      mkdirSync(join(root, ".pi"), { recursive: true });
+      const dead = JSON.stringify({ pid: 999_999_999, token: "dead" });
+      const live = JSON.stringify({ pid: process.pid, token: "live-recovery" });
+      writeFileSync(lock, dead);
+      writeFileSync(lock + ".recovery", suffix ? dead : live);
+      if (suffix) writeFileSync(lock + ".recovery.recovery", live);
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lock + ".recovery" + suffix, old, old);
+      expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+        /timed out acquiring interactive state lock/,
+      );
+      expect(readFileSync(lock, "utf8")).toBe(dead);
+      expect(readFileSync(lock + ".recovery" + suffix, "utf8")).toBe(live);
+    },
+  );
+  it.each(["dead", "partial"])("recovers %s nested recovery claims", (kind) => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    for (const suffix of ["", ".recovery", ".recovery.recovery"]) {
+      writeFileSync(
+        lock + suffix,
+        kind === "dead"
+          ? JSON.stringify({ pid: 999_999_999, token: "dead" })
+          : "{",
+      );
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lock + suffix, old, old);
+    }
+    expect(withInteractiveStateLock(root, () => "acquired")).toBe("acquired");
+    for (const suffix of [
+      "",
+      ".recovery",
+      ".recovery.recovery",
+      ".recovery.recovery.recovery",
+    ])
+      expect(existsSync(lock + suffix)).toBe(false);
+  });
+  it("rechecks the main owner after recovering an abandoned claim", () => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    const live = JSON.stringify({ pid: process.pid, token: "replacement" });
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_999, token: "dead" }));
+    writeFileSync(
+      lock + ".recovery",
+      JSON.stringify({ pid: 999_999_998, token: "dead-reclaimer" }),
+    );
+    const originalKill = process.kill;
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === 999_999_998) writeFileSync(lock, live);
+      return originalKill(pid, signal);
+    });
+    try {
+      expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+        /timed out acquiring interactive state lock/,
+      );
+      expect(readFileSync(lock, "utf8")).toBe(live);
+      expect(existsSync(lock + ".recovery")).toBe(false);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+  it("does not reclaim a fresh partial recovery claim", () => {
+    const lock = join(root, ".pi", "subagentura-state.lock");
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_999, token: "dead" }));
+    writeFileSync(lock + ".recovery", "{");
+    expect(() => withInteractiveStateLock(root, () => undefined)).toThrow(
+      /timed out acquiring interactive state lock/,
+    );
+    expect(readFileSync(lock + ".recovery", "utf8")).toBe("{");
   });
 });
 

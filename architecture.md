@@ -5,7 +5,7 @@
 `pi-subagentura` is a Pi extension that runs delegated agents in three execution shapes:
 
 1. an in-process Pi `AgentSession`;
-2. an interactive `pi` process in a tmux, Zellij, or Herdr pane;
+2. an interactive `pi` process in a tmux, Zellij, Herdr, or Rex pane;
 3. a workflow `Worker` plus `node:vm` program whose `agent()` calls use either the in-process or process-backed runner.
 
 These shapes share UI and cancellation surfaces, but they do not share an execution protocol.
@@ -46,7 +46,7 @@ flowchart TB
 
   IntTools[tools/interactive.ts]
   IntKernel[interactive-tmux.ts]
-  Mux[tmux, Zellij, or Herdr]
+  Mux[tmux, Zellij, Herdr, or Rex]
   Child[separate child pi process]
   Artifacts[(events.ndjson + output snapshots)]
   IntJobs[(interactive registry + persisted state)]
@@ -99,13 +99,13 @@ flowchart TB
 
 ### 2.1 The three execution shapes
 
-| Shape                    | Execution location                         | Primary live state                                              | Completion authority                                                          | Default parent-model delivery                                                    |
-| ------------------------ | ------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| In-process, synchronous  | Pi extension process, child `AgentSession` | Child Pi session and execute callback                           | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
-| In-process, asynchronous | Pi extension process, child `AgentSession` | Owning `SessionScope.inProcessJobs` map                         | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
-| Interactive              | Separate `pi` process in tmux/Zellij/Herdr | Owning `SessionScope.interactiveStates` map plus artifact files | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
-| Workflow, foreground     | Worker thread and VM in extension process  | `Engine`, worker RPC state, selected runner                     | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
-| Workflow, background     | Same Worker/VM arrangement                 | Global `workflowJobRegistry`                                    | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
+| Shape                    | Execution location                             | Primary live state                                              | Completion authority                                                          | Default parent-model delivery                                                    |
+| ------------------------ | ---------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| In-process, synchronous  | Pi extension process, child `AgentSession`     | Child Pi session and execute callback                           | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
+| In-process, asynchronous | Pi extension process, child `AgentSession`     | Owning `SessionScope.inProcessJobs` map                         | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
+| Interactive              | Separate `pi` process in tmux/Zellij/Herdr/Rex | Owning `SessionScope.interactiveStates` map plus artifact files | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
+| Workflow, foreground     | Worker thread and VM in extension process      | `Engine`, worker RPC state, selected runner                     | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
+| Workflow, background     | Same Worker/VM arrangement                     | Global `workflowJobRegistry`                                    | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
 
 ### 2.2 Mode comparison
 
@@ -175,23 +175,25 @@ Workflow process-backed calls have a separate bounded `awaitInteractiveResult` l
 `src/subagent.ts` is the composition root and supported runtime entry.
 Registration is mode-gated so a child process does not recursively expose the full parent orchestration surface.
 
-| Condition                           | Registration / behavior                                                                                                                                                                                        | Owner                                                                        |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Every activation                    | Register coordinated completion entry renderers                                                                                                                                                                | `src/subagent.ts`, `registerCompletionCoordinator`                           |
-| Every parent activation             | Register Pi session lifecycle callbacks                                                                                                                                                                        | `registerSessionHandlers`                                                    |
-| Normal parent with `--orchestrator` | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                                                 | `src/subagent.ts:default`                                                    |
-| Normal parent                       | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                                             | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
-| Normal parent                       | Register interactive spawn/status/cancel/send/read/list tools                                                                                                                                                  | `registerInteractiveSubagentTools`                                           |
-| Normal parent                       | Register workflow tools and commands                                                                                                                                                                           | `registerWorkflowTool` through internal `workflow.ts` barrel                 |
-| Normal parent                       | Register cross-mode cancel command/shortcut                                                                                                                                                                    | `registerCancelAllFlows`                                                     |
-| Normal parent                       | Register supervisor command/shortcut/UI routes                                                                                                                                                                 | `registerInteractiveSupervisor`                                              |
-| `PI_SUBAGENTURA_CHILD=1`            | Register child artifact protocol and the restricted child-facing surface, then return                                                                                                                          | `registerChildProtocol` path in `src/subagent.ts`                            |
-| `session_start`                     | Create/replace scope; clear stale wake; rehydrate matching state; seal recovered groups; recover delivered unacknowledged wakes; then ensure the global interval                                               | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| human `input`                       | Mark the coordinator's human-priority fence before the next turn                                                                                                                                               | `src/session-handlers.ts`, `completion-coordinator.ts`                       |
-| `before_agent_start`                | Match only `messageType:"custom"` with type `orchestratorv2-completion-wakeup` and active `details.orchestratorV2WakeId`; set the coordinator turn-start fence and attach a ready manifest to the natural turn | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| `agent_start`                       | Mark this parent as streaming                                                                                                                                                                                  | `src/session-handlers.ts`                                                    |
-| `agent_settled`                     | Settle the exact wake first; clear streaming; then settle coordinator readiness and dispatch remaining work                                                                                                    | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
-| `session_shutdown`                  | Clean owner state and retire scoped completions; clear coordinator and wake state; then fence generation, preserve or kill panes by reason, stop interval only after the last scope                            | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| Condition                            | Registration / behavior                                                                                                                                                                                        | Owner                                                                        |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Every activation                     | Register coordinated completion entry renderers                                                                                                                                                                | `src/subagent.ts`, `registerCompletionCoordinator`                           |
+| Every extension activation           | Capture bounded closed environment categories for prompt eligibility and session telemetry; observations are not live host or mux authority                                                                    | `src/subagent.ts`, `src/environment.ts`                                      |
+| Every parent activation              | Register Pi session lifecycle callbacks                                                                                                                                                                        | `registerSessionHandlers`                                                    |
+| Normal parent with `--orchestrator`  | Append the bundled `ORCHESTRATOR_SYSTEM_PROMPT.md` during `before_agent_start`                                                                                                                                 | `src/subagent.ts:default`                                                    |
+| Eligible parent `before_agent_start` | On every agent start, add host-specific prompt content only for a recognized non-child root: Orca guide plus shared host layer for Orca; shared layer for Agterm/Rex; none for children or unrelated hosts     | `src/subagent.ts`, `src/environment.ts`, `before_agent_start`                |
+| Normal parent                        | Register in-process spawn, status, result, cancel, model, prune, and cleanup tools                                                                                                                             | `registerInProcessSubagentTools`, `registerInProcessMaintenanceTools`        |
+| Normal parent                        | Register interactive spawn/status/cancel/send/read/list tools                                                                                                                                                  | `registerInteractiveSubagentTools`                                           |
+| Normal parent                        | Register workflow tools and commands                                                                                                                                                                           | `registerWorkflowTool` through internal `workflow.ts` barrel                 |
+| Normal parent                        | Register cross-mode cancel command/shortcut                                                                                                                                                                    | `registerCancelAllFlows`                                                     |
+| Normal parent                        | Register supervisor command/shortcut/UI routes                                                                                                                                                                 | `registerInteractiveSupervisor`                                              |
+| `PI_SUBAGENTURA_CHILD=1`             | Register child artifact protocol and the restricted child-facing surface, then return                                                                                                                          | `registerChildProtocol` path in `src/subagent.ts`                            |
+| `session_start`                      | Create/replace scope; clear stale wake; rehydrate matching state; seal recovered groups; recover delivered unacknowledged wakes; then ensure the global interval                                               | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| human `input`                        | Mark the coordinator's human-priority fence before the next turn                                                                                                                                               | `src/session-handlers.ts`, `completion-coordinator.ts`                       |
+| `before_agent_start`                 | Match only `messageType:"custom"` with type `orchestratorv2-completion-wakeup` and active `details.orchestratorV2WakeId`; set the coordinator turn-start fence and attach a ready manifest to the natural turn | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| `agent_start`                        | Mark this parent as streaming                                                                                                                                                                                  | `src/session-handlers.ts`                                                    |
+| `agent_settled`                      | Settle the exact wake first; clear streaming; then settle coordinator readiness and dispatch remaining work                                                                                                    | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
+| `session_shutdown`                   | Clean owner state and retire scoped completions; clear coordinator and wake state; then fence generation, preserve or kill panes by reason, stop interval only after the last scope                            | `src/session-handlers.ts`, `completion-coordinator.ts`, `completion-turn.ts` |
 
 The 11 read-only result tools declare `outputSchema` and return typed
 `structuredContent` alongside existing human-readable content/details. Structured
@@ -213,16 +215,20 @@ the routing-metadata tools `list_orchestrator_agents` and
 enforce a host-level tool allowlist; normal tools remain registered for legacy
 compatibility, while the prompt directs this mode to interactive children.
 
-The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds an advisory
-`resolve_orchestrator_route` tool only in v2 mode when Pi's native classifier API,
-the configured model, and provider authentication are available. There are no
-HTTP adapters or fallback transports. `tools/orchestrator-router.ts` builds
-current candidates from parent authority/runtime state and revalidates authority
-after yielding liveness checks. `system-one-choice.ts` owns bounded Choice
-contexts, redaction, response validation, and deadlines. `jev-routing.ts` uses
-Pi's model registry for classification and request-time authentication;
-`routing-engine.ts` applies confidence and probability-margin policy. Advice
-cannot reserve, send to, create, or attach to a child. See
+The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds the advisory
+`resolve_orchestrator_route` tool only in v2 mode when the native Pi classifier
+API, the configured classifier model, and configured provider authentication
+are available. `PI_ORCHESTRATOR_ROUTER_PROVIDER` and
+`PI_ORCHESTRATOR_ROUTER_MODEL` select an exact classifier entry from Pi's model
+registry (default `openrouter/~typesafe/jev-latest`); Pi's catalog determines
+its transport, such as System One or OpenAI Decisions. This selects the
+classifier, not the parent chat model or child owner. The extension calls Pi's
+native classifier API and has no HTTP adapter or fallback transport.
+`tools/orchestrator-router.ts` constructs candidates from current parent
+authority/runtime state, then revalidates that state after liveness checks;
+the classifier can advise among those eligible live native children but cannot
+reserve, send to, create, or attach to one. Configured authentication is an
+availability gate, not a live provider/credential health check. See
 [Jev routing](docs/jev-routing.md) for configuration and disclosure.
 
 `src/orchestrator-routing.ts` keeps two related representations:
@@ -352,6 +358,10 @@ A live sample combines completed turns with the current partial assistant messag
 `src/session-scope.ts` supplies parent session scopes, ownership tokens, and generation fences.
 `src/completion-coordinator.ts` owns readiness, grouping, consumption, and
 compact manifest claims.
+`src/completion-contracts.ts` defines shared completion records and receipt types;
+the coordinator re-exports them for existing callers.
+`src/completion-manifest.ts` formats model payloads and selects bounded batches
+without session state or delivery side effects.
 `src/completion-turn.ts` is the lower-level idle Orchestratorv2 transport and
 recovery layer; it preserves native non-v2 delivery.
 `src/notifications.ts` provides shared output sanitization and v2 completion classification; it does not broker delivery.
@@ -475,8 +485,10 @@ Cancelled entries are scheduled for immediate deletion.
 
 `src/interactive-tmux.ts` is historically named but backend-neutral.
 It owns path and prompt construction, launch ordering, registry publication, status folding, follow-up input, cancellation, and mux routing.
-`src/multiplexer.ts` defines the backend contract.
-`src/multiplexer-tmux.ts` and `src/multiplexer-zellij.ts` own subprocess commands and pane identity.
+`src/multiplexer-contracts.ts` defines the backend contract.
+`src/multiplexer.ts` selects and caches backend instances.
+The tmux, Zellij, Herdr, and Rex backend modules own transport commands and
+persisted pane identity.
 
 ### 6.2 Crash-safe launch ordering
 
@@ -544,10 +556,40 @@ The mux carries control and terminal input only:
 A captured screen is supervisor UX, not lifecycle or output authority.
 The backend recorded at spawn never changes.
 
-In `auto` mode, backend resolution prefers an attached Herdr, Zellij, or tmux
-environment; outside an attached mux it falls back to available tmux before
-Zellij. Herdr requires Pi to run inside a Herdr-managed pane and persists the
-exact socket path for later operations and rehydration.
+Launch resolution returns both the adapter and a discriminated immutable launch
+context. Attached contexts retain the verified pane and backend-specific
+session/server identity. Detached contexts explicitly name tmux or Zellij.
+The orchestrator passes this context into `createPane`; a backend rejects a
+context for another mux before mutation. It must not rediscover a different
+parent or server from environment variables after resolution. Existing
+persisted-child operations continue to use their recorded backend and identity.
+New tmux panes retain their actual socket path for later control and recovery,
+including literal spaces in that path. Invalid explicit socket identity fails
+closed rather than falling back to ambient routing. Older tmux state without a
+socket remains readable. Detached launches still share a session per captured
+socket selection.
+
+In `auto` mode, current process-environment markers provide bounded candidate
+selectors only. The activation-time prompt/telemetry snapshot is not native mux
+authority. `multiplexer-current-context.ts` combines bounded live backend
+queries from `multiplexer-live-probes.ts` with the process ancestry/TTY snapshot
+from `multiplexer-process-context.ts`. A live pane must be tied to this Pi
+process; reachable servers, inherited markers, and current UI focus are not
+ownership proof. The nearest verified owner wins in nested muxes. Ties, missing
+evidence, stale selectors, and an unverified nearer mux fail closed instead of
+selecting an unrelated backend or a verified outer mux. Rex and Herdr are
+distinct process ancestor classifications.
+
+Explicit backend preferences override auto detection but retain backend-specific
+launch validation. Only when no recognized host context is present does auto
+retain the available-tmux-before-Zellij detached fallback. Current-pane activity
+uses the same ownership resolution and remains `unknown` without sufficient
+proof. This runtime routing is independent of measurement-only parent-mux
+telemetry, which still observes environment markers conservatively.
+
+Herdr requires Pi to run inside a Herdr-managed pane and persists the exact
+socket path for later operations and rehydration. Rex requires a validated live
+Rex block and persists its canonical server endpoint, session, and block IDs.
 Detached tmux children use a dedicated session and later windows.
 Detached Zellij children use a background session/tab because detached splits do not materialize reliably.
 All backends establish a stable identity and route every later operation through
@@ -654,6 +696,13 @@ Both the in-package writer and generated `cli.mjs`:
 When snapshot capture succeeds, it writes `outputs/<eventId>.md` and the completion records path, byte length, and SHA-256.
 A completion may instead carry `outputError`, or no output descriptor when staging output is absent.
 A result reader reconstructs the expected contained path, rejects symlink traversal with no-follow open, requires a regular file, checks declared and actual bounded size, and verifies the hash before returning bytes.
+
+Active staging reads use the same descriptor-bound byte limit as immutable
+snapshot reads. A no-follow, nonblocking open is followed by a regular-file
+check before allocation. Reads cannot exceed the accepted size plus one growth
+probe byte, even if the file changes after `fstat`. Oversized or unsafe staging
+output returns content-free diagnostics rather than being loaded in full and
+truncated only for presentation. A rejected read cannot consume a completion.
 
 `output.md` is mutable staging and is never historical proof.
 For a completion with captured output, `eventId` names the physical snapshot; `turnId` selects the logical turn.
@@ -835,6 +884,13 @@ The TypeScript bridge is `src/workflow-script.ts`.
 The host starts the worker companion by file URL.
 The worker creates a null-prototype VM context, disables dynamic string/Wasm code generation, injects only the workflow DSL and guarded data/helpers, and applies a synchronous VM timeout.
 `Date.now`, argumentless `new Date`, and `Math.random` are rejected for determinism.
+
+The bootstrap creates user-visible helpers, promises, errors and copied data in
+the VM realm. Its host bridge remains closure-private rather than exposing host
+functions whose constructors bypass the context's code-generation guard.
+Worker RPC uses shared discriminated message contracts and runtime narrowing
+from `unknown`. The worker and decoder implementations are checked through
+`tsconfig.worker.json`, not only described by declaration shims.
 
 This VM is **not a security boundary**.
 It is an accidental-global and deterministic-execution guard for trusted workflow scripts, not a sandbox for hostile code.
@@ -1104,7 +1160,7 @@ The following table inventories the tracked runtime source modules and companion
 |  40 | `src/workflow-worker-thread.mjs`             | Worker-side VM, DSL globals, RPC correlation, nested workflow execution and budget observation                                  | `workflow-script.mjs`                                                                                                                                                                                                                                                                                         |
 |  41 | `src/workflow-worker.ts`                     | Host Engine, worker lifecycle/RPC, concurrency/accounting, process artifact wait and usage parsing                              | `artifact`, `helpers`, `workflow-core`, `workflow-script`, `usage`, `interactive-tmux`, `identifier-types`, `telemetry`, `telemetry-runtime`; type-only `cancellation-snapshots`; file-URL `workflow-worker-thread.mjs`                                                                                       |
 |  42 | `src/workflow.ts`                            | Internal workflow barrel and registration re-export                                                                             | `workflow-core`, `workflow-worker`, `workflow-jobs`, `workflow-ui`, `workflow-tree-ui`, `workflow-tool`                                                                                                                                                                                                       |
-|  43 | `src/completion-coordinator.ts`              | Per-session TUI entries, `each`/named-group readiness, manual consumption, human-priority manifest attachment, and continuation | `artifact`, `completion-ledger`, `session-scope`, `helpers`                                                                                                                                                                                                                                                   |
+|  43 | `src/completion-coordinator.ts`              | Per-session TUI entries, `each`/named-group readiness, manual consumption, human-priority manifest attachment, and continuation | `artifact`, `completion-contracts`, `completion-manifest`, `completion-ledger`, `session-scope`, `helpers`                                                                                                                                                                                                    |
 |  44 | `src/spawn-tree-context.ts`                  | Explicit bounded root/descendant spawn authority and one-use lineage bootstrap handling                                         | `helpers`, `interactive-lineage`                                                                                                                                                                                                                                                                              |
 |  45 | `src/tool-guidance.ts`                       | Shared default guidance, expanded JSON parameter rendering, opt-in argument logging, and tool telemetry                         | `helpers`, `telemetry-operations`                                                                                                                                                                                                                                                                             |
 |  46 | `src/completion-ledger.ts`                   | Parent-session-directory receipt ledger with bounded, no-follow scans and lossless receipt appends                              | None                                                                                                                                                                                                                                                                                                          |
@@ -1126,8 +1182,26 @@ The following table inventories the tracked runtime source modules and companion
 |  62 | `src/system-one-choice.ts`                   | Bounded Choice context, redaction, response validation, and deadlines                                                           | `routing-engine`                                                                                                                                                                                                                                                                                              |
 |  63 | `src/jev-routing.ts`                         | Native Pi classifier routing and usage validation; no HTTP fallback                                                             | `routing-engine`, `system-one-choice`; type-only `pi-ai`                                                                                                                                                                                                                                                      |
 |  64 | `src/tools/orchestrator-router.ts`           | Enabled-only advisor with current candidates and state revalidation                                                             | `completion-turn`, `interactive-tmux`, `orchestrator-routing`, `routing-engine`, `routing-factory`, `session-scope`, `tool-guidance`; type-only `pi-ai`                                                                                                                                                       |
+|  65 | `src/completion-contracts.ts`                | Shared completion records, consumption selectors, schema constants and record bounds                                            | None                                                                                                                                                                                                                                                                                                          |
+|  66 | `src/completion-manifest.ts`                 | Pure manifest formatting, retrieval selectors and bounded group-preserving batch selection                                      | `completion-contracts`                                                                                                                                                                                                                                                                                        |
+|  67 | `src/multiplexer-rex.ts`                     | Rex transport with validated CLI contract, persisted server/session/block targeting, and bounded capture                        | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
+|  68 | `src/multiplexer-process-context.ts`         | Bounded process snapshot, ancestry/TTY normalization, and nearest mux ancestor classification                                   | Type-only `multiplexer-contracts`                                                                                                                                                                                                                                                                             |
+|  69 | `src/multiplexer-live-probes.ts`             | Read-only bounded backend queries that verify pane ownership against the current process ancestry                               | `multiplexer-contracts`, `multiplexer-process-context`                                                                                                                                                                                                                                                        |
+|  70 | `src/multiplexer-current-context.ts`         | Shared fail-closed current-pane ownership resolution for auto selection and activity                                            | `multiplexer-contracts`, `multiplexer-live-probes`, `multiplexer-process-context`                                                                                                                                                                                                                             |
 
 ---
+
+The inventory also includes these worker protocol companions:
+
+| #   | Source                   | Responsibility                                                       | Direct project dependencies                             |
+| --- | ------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------- |
+| 71  | `src/workflow-rpc.ts`    | Discriminated worker request/response contracts and validator bridge | Type-only `workflow-script`; runtime `workflow-rpc.mjs` |
+| 72  | `src/workflow-rpc.mjs`   | Runtime validation of unknown worker and host messages               | Type-only JSDoc `workflow-rpc.ts`                       |
+| 73  | `src/workflow-rpc.d.mts` | Declaration surface for runtime protocol guards                      | Type-only `workflow-rpc`                                |
+
+Both `workflow-worker.ts` and `workflow-worker-thread.mjs` depend on these
+shared contracts and validators. The worker thread and runtime validators are
+checked as JavaScript by the mandatory worker TypeScript project.
 
 ## 14. Package and runtime companion boundaries
 
@@ -1142,15 +1216,19 @@ The internal `src/workflow.ts` barrel must not be described as a supported runti
 
 Runtime companions have distinct loading/materialization rules:
 
-| Companion                          | Boundary                                                                                                     |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `workflow-worker-thread.mjs`       | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
-| `workflow-script.mjs`              | Imported by the worker companion and re-exported by the typed TS bridge                                      |
-| `workflow-script.d.mts`            | Declaration-only surface for the ESM parser companion                                                        |
-| generated artifact `cli.mjs`       | Source string comes from the installed package but is written into each artifact directory and invoked there |
-| `ORCHESTRATOR_SYSTEM_PROMPT.md`    | Loaded as a package asset by file URL, not a code module                                                     |
-| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md` | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
-| child Pi session JSONL             | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
+| Companion                               | Boundary                                                                                                     |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `workflow-worker-thread.mjs`            | Loaded by `new Worker(new URL(..., import.meta.url))`; communicates only through worker messages             |
+| `workflow-script.mjs`                   | Imported by the worker companion and re-exported by the typed TS bridge                                      |
+| `workflow-script.d.mts`                 | Declaration-only surface for the ESM parser companion                                                        |
+| `workflow-rpc.mjs`                      | Shared runtime guards imported directly by the worker and re-exported through the typed host bridge          |
+| `workflow-rpc.d.mts`                    | Declaration-only surface for the runtime message guards                                                      |
+| generated artifact `cli.mjs`            | Source string comes from the installed package but is written into each artifact directory and invoked there |
+| `ORCHESTRATOR_SYSTEM_PROMPT.md`         | Loaded as a package asset by file URL, not a code module                                                     |
+| `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`      | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
+| `ORCA_INTERACTIVE_SYSTEM_PROMPT.md`     | Shared prompt-only Orca interactive-delegation guidance asset; not a code module                             |
+| `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` | Shared Agterm, explicit-target, and analytics guidance layer; not a code module                              |
+| child Pi session JSONL                  | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
 
 The restrictive exports map matters: shipping all source files in `package.json#files` does not make every source path a supported public subpath.
 

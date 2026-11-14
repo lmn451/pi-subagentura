@@ -176,14 +176,25 @@ export class InteractiveSupervisorComponent {
     const status = (this.opts.status?.() ?? []).map((line) =>
       trunc(`│ ${compactText(line)}`, width),
     );
+    const helpLines =
+      width >= 68
+        ? [
+            "│ ↑↓/jk select · enter/→ details · ← collapse",
+            "│ x cancel item · X cancel subtree · r refresh · q/esc close",
+            "│ Interactive: v snapshot · n native viewer · f focus · a attach",
+            "│ Expand for return keys · registry=live · lineage=persisted",
+          ]
+        : [
+            "│ All: ↑↓/jk select · enter/→ details · ← collapse",
+            "│ All: x cancel item · r refresh · q/esc close",
+            "│ Interactive: v snapshot · n native viewer · f focus",
+            "│ Interactive: a show attach cmd · X cancel subtree",
+            "│ Focus: expand first to see native return keys",
+            "│ Sources: registry=live · lineage=persisted",
+          ];
     const lines = [
       trunc("┌ Async Subagents", width),
-      trunc("│ All: ↑↓/jk select · enter/→ details · ← collapse", width),
-      trunc("│ All: x cancel item · r refresh · q/esc close", width),
-      trunc("│ Interactive: v snapshot · n native viewer · f focus", width),
-      trunc("│ Interactive: a show attach cmd · X cancel subtree", width),
-      trunc("│ Focus: expand first to see native return keys", width),
-      trunc("│ Sources: registry=live · lineage=persisted", width),
+      ...helpLines.map((line) => trunc(line, width)),
     ];
 
     if (items.length === 0) {
@@ -577,18 +588,38 @@ function ditherBackdropLine(width: number, row: number): string {
 }
 
 class InteractiveSupervisorBackdrop implements Component {
+  private cachedWidth?: number;
+  private cachedRows?: number;
+  private cachedLines?: string[];
+
   constructor(
     private readonly rows: () => number,
     private readonly paint: (text: string) => string,
   ) {}
 
   render(width: number): string[] {
-    return Array.from({ length: this.rows() }, (_, row) =>
+    const rows = Math.max(1, this.rows());
+    if (
+      this.cachedLines &&
+      this.cachedWidth === width &&
+      this.cachedRows === rows
+    ) {
+      return this.cachedLines;
+    }
+    const lines = Array.from({ length: rows }, (_, row) =>
       this.paint(ditherBackdropLine(width, row)),
     );
+    this.cachedWidth = width;
+    this.cachedRows = rows;
+    this.cachedLines = lines;
+    return lines;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedRows = undefined;
+    this.cachedLines = undefined;
+  }
 }
 
 function showSupervisorBackdrop(
@@ -892,6 +923,9 @@ function focusReturnHint(state: InteractiveSubagentState): string {
   }
   if (state.mux === "herdr") {
     return "Herdr native pane focus; use the terminal attach command above";
+  }
+  if (state.mux === "rex") {
+    return "Rex block focus; use the terminal focus command above";
   }
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"

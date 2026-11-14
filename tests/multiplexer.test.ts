@@ -1,6 +1,166 @@
 import { EventEmitter } from "node:events";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { importFresh } from "./test-utils";
+import type { LiveMuxTarget } from "../src/multiplexer-live-probes";
+
+const muxEnvironmentKeys = [
+  "TMUX",
+  "TMUX_PANE",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
+  "REX_SESSION",
+  "REX_BLOCK",
+  "REX_SERVER",
+  "TERM_PROGRAM",
+] as const;
+const inheritedMuxEnvironment = Object.fromEntries(
+  muxEnvironmentKeys.map((key) => [key, process.env[key]]),
+);
+
+afterAll(() => {
+  expect(
+    Object.fromEntries(
+      muxEnvironmentKeys.map((key) => [key, process.env[key]]),
+    ),
+  ).toEqual(inheritedMuxEnvironment);
+});
+
+describe("getMux live process ownership resolution", () => {
+  let savedEnv: NodeJS.ProcessEnv;
+  const probes = vi.fn();
+  const readContext = vi.fn();
+
+  beforeEach(() => {
+    savedEnv = { ...process.env };
+    for (const key of muxEnvironmentKeys) delete process.env[key];
+    probes.mockReset();
+    readContext
+      .mockReset()
+      .mockReturnValue({ pid: 100, ancestors: [], processes: new Map() });
+    vi.doMock("../src/multiplexer-process-context", () => ({
+      readProcessContext: readContext,
+      closestMuxAncestor: () => undefined,
+    }));
+    vi.doMock("../src/multiplexer-live-probes", () => ({
+      probeLiveMuxTarget: probes,
+    }));
+    vi.doMock("node:child_process", () => ({
+      execFileSync: vi.fn(() => ""),
+      execFile: vi.fn(),
+      spawn: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    process.env = savedEnv;
+    vi.doUnmock("../src/multiplexer-process-context");
+    vi.doUnmock("../src/multiplexer-live-probes");
+    vi.doUnmock("node:child_process");
+  });
+
+  function nestedMarkers(): void {
+    Object.assign(process.env, {
+      TMUX: "/tmp/tmux/default,1,0",
+      TMUX_PANE: "%4",
+      ZELLIJ: "0",
+      ZELLIJ_SESSION_NAME: "outer",
+      ZELLIJ_PANE_ID: "5",
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      HERDR_PANE_ID: "w1:p2",
+    });
+  }
+
+  it.each(["tmux", "zellij", "herdr"] as const)(
+    "selects proven inner %s instead of fixed environment precedence",
+    async (mux) => {
+      nestedMarkers();
+      probes.mockImplementation((target: LiveMuxTarget) =>
+        target.mux === mux
+          ? { kind: "match", target, distance: 0 }
+          : { kind: "mismatch" },
+      );
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(getMux().name).toBe(mux);
+      expect(probes).toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["tmux", "zellij"],
+    ["zellij", "tmux"],
+  ] as const)(
+    "chooses nearer %s over matching outer %s",
+    async (inner, outer) => {
+      nestedMarkers();
+      delete process.env.HERDR_ENV;
+      delete process.env.HERDR_PANE_ID;
+      delete process.env.HERDR_SOCKET_PATH;
+      probes.mockImplementation((target: LiveMuxTarget) => ({
+        kind: "match",
+        target,
+        distance: target.mux === inner ? 0 : 3,
+      }));
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(getMux().name).toBe(inner);
+      expect(probes.mock.calls.some(([target]) => target.mux === outer)).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["mismatch", "unknown"] as const)(
+    "fails closed when all advertised panes return %s",
+    async (kind) => {
+      nestedMarkers();
+      probes.mockReturnValue({ kind });
+      const { getMux } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      expect(() => getMux()).toThrow(/context|ownership|verif|current/i);
+    },
+  );
+
+  it("fails closed when process inspection is unavailable", async () => {
+    nestedMarkers();
+    readContext.mockReturnValue(undefined);
+    const { getMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(() => getMux()).toThrow(/context|ownership|verif|current/i);
+  });
+
+  it("does not perform live detection for explicit preferences", async () => {
+    nestedMarkers();
+    const { getMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(getMux({ preference: "tmux" }).name).toBe("tmux");
+    expect(readContext).not.toHaveBeenCalled();
+    expect(probes).not.toHaveBeenCalled();
+  });
+});
 
 describe("multiplexer module boundary", () => {
   it("loads concrete backends without importing the registry", async () => {
@@ -23,6 +183,11 @@ describe("multiplexer module boundary", () => {
         typeof import("../src/multiplexer-herdr")
       >("../src/multiplexer-herdr");
       expect(new HerdrMultiplexer().name).toBe("herdr");
+
+      const { RexMultiplexer } = await importFresh<
+        typeof import("../src/multiplexer-rex")
+      >("../src/multiplexer-rex");
+      expect(new RexMultiplexer().name).toBe("rex");
     } finally {
       vi.doUnmock("../src/multiplexer");
     }
@@ -53,16 +218,25 @@ describe("getMux relaxed-spawn resolution", () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
-    delete process.env.TMUX;
-    delete process.env.ZELLIJ;
-    delete process.env.ZELLIJ_SESSION_NAME;
-    delete process.env.HERDR_ENV;
-    delete process.env.HERDR_SOCKET_PATH;
+    for (const key of muxEnvironmentKeys) delete process.env[key];
   });
 
   afterEach(() => {
     process.env = originalEnv;
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
+  });
+
+  it("clears inherited pane selectors before relaxed-spawn tests", () => {
+    expect({
+      TMUX_PANE: process.env.TMUX_PANE,
+      ZELLIJ_PANE_ID: process.env.ZELLIJ_PANE_ID,
+      HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+    }).toEqual({
+      TMUX_PANE: undefined,
+      ZELLIJ_PANE_ID: undefined,
+      HERDR_PANE_ID: undefined,
+    });
   });
 
   it("getMux auto returns TmuxMultiplexer when TMUX/ZELLIJ env vars unset but tmux binary exists", async () => {
@@ -146,7 +320,13 @@ describe("getMux relaxed-spawn resolution", () => {
     );
   });
 
-  it("getMux auto prefers the Herdr pane over inherited outer mux markers", async () => {
+  it("getMux auto uses a verified Herdr target despite inherited outer markers", async () => {
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: () => ({
+        kind: "ready",
+        target: { mux: "herdr", paneId: "w1:p2", session: "/tmp/herdr.sock" },
+      }),
+    }));
     process.env.HERDR_ENV = "1";
     process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
     process.env.ZELLIJ_SESSION_NAME = "outer-zellij";
@@ -171,19 +351,93 @@ describe("getMux relaxed-spawn resolution", () => {
     expect(getMux({ preference: "auto" }).name).toBe("herdr");
   });
 
-  it("getMux explicit preference bypasses all env checks", async () => {
-    // Even with no env vars and binary unavailable, explicit preference
-    // should return the requested backend (the error comes later at
-    // createPane time, not at resolution time).
-    vi.doMock(
-      "node:child_process",
-      () =>
-        ({
-          execFileSync: () => {
-            throw new Error("ENOENT");
-          },
-        }) as unknown as typeof import("node:child_process"),
-    );
+  it.each([
+    ["Agterm", "tmux", { AGTERM_ENABLED: "1" }],
+    ["Agterm", "zellij", { AGTERM_ENABLED: "1" }],
+    [
+      "Orca",
+      "tmux",
+      {
+        ORCA_RUNTIME_SOURCE_ID: "source",
+        ORCA_RUNTIME_SOURCE_INCARNATION: "incarnation",
+        ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/private/profile",
+      },
+    ],
+    [
+      "Orca",
+      "zellij",
+      {
+        ORCA_RUNTIME_SOURCE_ID: "source",
+        ORCA_RUNTIME_SOURCE_INCARNATION: "incarnation",
+        ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/private/profile",
+      },
+    ],
+  ])(
+    "preserves explicit %s-host %s selection with nested mux markers",
+    async (_host, preference, hostEnv) => {
+      Object.assign(process.env, hostEnv, {
+        TMUX: "/tmp/tmux/default,1,0",
+        ZELLIJ_SESSION_NAME: "outer-zellij",
+      });
+      vi.doMock(
+        "node:child_process",
+        () =>
+          ({
+            execFileSync: () => {
+              throw new Error("explicit mux selection must not probe");
+            },
+          }) as unknown as typeof import("node:child_process"),
+      );
+
+      const { getMux, __resetMuxInstances } =
+        await importFresh<typeof import("../src/multiplexer")>(
+          "../src/multiplexer",
+        );
+      __resetMuxInstances();
+
+      expect(getMux({ preference: preference as "tmux" | "zellij" }).name).toBe(
+        preference,
+      );
+    },
+  );
+  it("auto-selects a live Rex context ahead of inherited tmux markers", async () => {
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: () => ({
+        kind: "ready",
+        target: {
+          mux: "rex",
+          paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+          session: "session:01234567-89ab-cdef-0123-456789abcdef",
+          server: "unix:///tmp/rex.sock",
+        },
+      }),
+    }));
+    process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    process.env.TMUX = "/tmp/tmux/default,1,0";
+    const session = process.env.REX_SESSION;
+    const block = process.env.REX_BLOCK;
+    const server = process.env.REX_SERVER;
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (file: string, args: string[]) => {
+        if (file === "/bin/sh") return "";
+        if (file === "rex" && args[0] === "help") {
+          return "--json --cwd --label --keep-open --shell --focus --split --block --session --trim enter";
+        }
+        if (file === "rex" && args.includes("whoami")) {
+          return JSON.stringify({
+            endpoint: server,
+            session_id: session,
+            block_id: block,
+          });
+        }
+        if (file === "rex" && args.includes("ls")) {
+          return JSON.stringify({ blocks: [{ block_id: block }] });
+        }
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    }));
 
     const { getMux, __resetMuxInstances } =
       await importFresh<typeof import("../src/multiplexer")>(
@@ -191,8 +445,116 @@ describe("getMux relaxed-spawn resolution", () => {
       );
     __resetMuxInstances();
 
-    const mux = getMux({ preference: "tmux" });
-    expect(mux.name).toBe("tmux");
+    expect(getMux({ preference: "auto" }).name).toBe("rex");
+  });
+
+  it("fails closed for a recognized Rex context that cannot be validated", async () => {
+    process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    process.env.TMUX = "/tmp/tmux/default,1,0";
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (file: string, args: string[]) => {
+        if (file === "/bin/sh") return "";
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    }));
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(() => getMux({ preference: "auto" })).toThrow(/Rex.*(context|CLI)/i);
+  });
+
+  it("does not treat TERM_PROGRAM=rex alone as a usable backend", async () => {
+    process.env.TERM_PROGRAM = "rex";
+    process.env.TMUX = "/tmp/tmux/default,1,0";
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (file: string, args: string[]) => {
+        if (file === "/bin/sh") return "";
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    }));
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(() => getMux({ preference: "auto" })).toThrow(/Rex.*(context|CLI)/i);
+  });
+
+  it("fails closed when a recognized Zellij session is unavailable", async () => {
+    process.env.ZELLIJ_SESSION_NAME = "nested";
+    process.env.TMUX = "/tmp/tmux/default,1,0";
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (file: string, args: string[]) => {
+        if (
+          file === "/bin/sh" &&
+          args.join(" ").includes("command -v 'zellij'")
+        ) {
+          throw new Error("zellij binary missing");
+        }
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    }));
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(() => getMux({ preference: "auto" })).toThrow(
+      /Zellij context.*unavailable/i,
+    );
+  });
+
+  it("does not treat a default REX_SERVER alone as a live Rex context", async () => {
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    vi.doMock("node:child_process", () => ({
+      execFileSync: (file: string, args: string[]) => {
+        if (
+          file === "/bin/sh" &&
+          args.join(" ").includes("command -v 'tmux'")
+        ) {
+          return "";
+        }
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    }));
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(getMux({ preference: "auto" }).name).toBe("tmux");
+  });
+
+  it("keeps explicit mux selection authoritative over Rex markers", async () => {
+    process.env.REX_SESSION = "session:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_BLOCK = "block:01234567-89ab-cdef-0123-456789abcdef";
+    process.env.REX_SERVER = "unix:///tmp/rex.sock";
+    vi.doMock("node:child_process", () => ({
+      execFileSync: () => {
+        throw new Error("explicit selection must not probe");
+      },
+    }));
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(getMux({ preference: "tmux" }).name).toBe("tmux");
+    expect(getMux({ preference: "rex" }).name).toBe("rex");
   });
 });
 
@@ -387,12 +749,14 @@ describe("MUX_CAPABILITIES", () => {
       );
     expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
       "herdr",
+      "rex",
       "tmux",
       "zellij",
     ]);
     expect(muxCapabilities("tmux")).toBe(MUX_CAPABILITIES.tmux);
     expect(muxCapabilities("zellij")).toBe(MUX_CAPABILITIES.zellij);
     expect(muxCapabilities("herdr")).toBe(MUX_CAPABILITIES.herdr);
+    expect(muxCapabilities("rex")).toBe(MUX_CAPABILITIES.rex);
   });
 
   it("is the single source of truth both backends expose", async () => {
@@ -415,6 +779,10 @@ describe("MUX_CAPABILITIES", () => {
       MUX_CAPABILITIES.zellij,
     );
     expect(new HerdrMultiplexer().capabilities).toEqual(MUX_CAPABILITIES.herdr);
+    const { RexMultiplexer } = await importFresh<
+      typeof import("../src/multiplexer-rex")
+    >("../src/multiplexer-rex");
+    expect(new RexMultiplexer().capabilities).toEqual(MUX_CAPABILITIES.rex);
   });
 });
 

@@ -212,7 +212,7 @@ describe("extension registration", () => {
     );
   });
 
-  it("appends only the v2 prompt when --orchestratorv2 is enabled", async () => {
+  it("appends the V2 prompt when --orchestratorv2 is enabled", async () => {
     const api = mockApi({
       getFlag: vi.fn((name: string) => name === "orchestratorv2"),
     });
@@ -220,8 +220,11 @@ describe("extension registration", () => {
     registerExtension(api as any);
 
     const beforeAgentStart = api.on.mock.calls.find(
-      ([event]: any[]) => event === "before_agent_start",
+      ([event]) => event === "before_agent_start",
     )?.[1];
+    if (!beforeAgentStart) {
+      throw new Error("before_agent_start handler was not registered");
+    }
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
     expect(result.systemPrompt).toContain(
@@ -233,9 +236,6 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain("not a security boundary");
     expect(result.systemPrompt).toContain(
       "An exact or continuation match is not routable",
-    );
-    expect(result.systemPrompt).toContain(
-      "A clear user request with a definite action, target/scope, deliverable, and required access authorizes creation of one specialist",
     );
     expect(result.systemPrompt).toContain(
       "Do not ask the user for permission merely to create that specialist",

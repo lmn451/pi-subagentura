@@ -30,6 +30,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type {
+  MuxLaunchContext,
   CapturePaneOptions,
   CapturePaneResult,
   Multiplexer,
@@ -38,6 +39,7 @@ import type {
   PaneRef,
 } from "./multiplexer-contracts";
 import {
+  validateMuxLaunchContext,
   boundCaptureOutput,
   commandExists,
   execMuxOrThrow,
@@ -290,6 +292,7 @@ export class ZellijMultiplexer implements Multiplexer {
    * Returns the session the pane lives in so the caller can address it later.
    */
   createPane(opts: {
+    context?: MuxLaunchContext;
     name: string;
     cwd: string;
     background: boolean;
@@ -297,6 +300,7 @@ export class ZellijMultiplexer implements Multiplexer {
     windowName?: string;
     id?: string;
   }): { paneId: string; windowName?: string; session?: string } {
+    validateMuxLaunchContext(this.name, opts.context);
     if (!commandExists("zellij")) {
       throw new Error(
         "zellij is not available. Install zellij or set PATH to include it.",
@@ -304,7 +308,9 @@ export class ZellijMultiplexer implements Multiplexer {
     }
 
     let windowName: string | undefined;
-    const isInZellij = !!process.env.ZELLIJ;
+    const isInZellij = opts.context
+      ? opts.context.kind === "attached"
+      : !!process.env.ZELLIJ;
 
     let session: string;
     if (!isInZellij) {
@@ -321,7 +327,10 @@ export class ZellijMultiplexer implements Multiplexer {
         },
       );
     } else {
-      session = process.env.ZELLIJ_SESSION_NAME ?? "";
+      session =
+        opts.context?.kind === "attached"
+          ? opts.context.session!
+          : (process.env.ZELLIJ_SESSION_NAME ?? "");
     }
 
     const sessionFlag = this.sessionFlag(session);

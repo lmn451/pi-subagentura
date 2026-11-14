@@ -17,7 +17,9 @@
  * spawn check: a child can be created even when the parent is not in a
  * tmux/Zellij session (a new detached session is created on the fly; the user
  * attaches via the returned `attachCommand`). Herdr is selected only from a
- * Herdr-managed pane and targets that pane's persisted socket path.
+ * Herdr-managed pane and targets that pane's persisted socket path. Rex is
+ * selected only from a verified live Rex block and persists the server/session
+ * identity used for later operations.
  *
  * The exports kept here are the public surface consumed by `subagent.ts`
  * and the test suite. Their signatures are preserved verbatim so the rest
@@ -69,6 +71,8 @@ import {
   type CapturePaneOptions,
   type CapturePaneResult,
   getMux,
+  resolveMux,
+  type MuxLaunchContext,
   NoMultiplexerAvailableError,
   type MuxName,
   type Multiplexer,
@@ -78,6 +82,7 @@ import {
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
+import { resolveCurrentMuxContextAsync } from "./multiplexer-current-context";
 import {
   snapshotInteractiveContext,
   type CancellationSnapshotReceipt,
@@ -220,15 +225,14 @@ export interface InteractiveSubagentState {
    */
   mux: MuxName;
   /**
-   * The mux session the pane lives in, as returned by `createPane`. Needed to
-   * address the pane in later ops on backends whose pane ids are scoped to a
-   * session (zellij targets every action with `--session <name>`). Undefined
-   * for tmux (pane ids are server-global). Set once at spawn time; never
-   * changes — like `paneId`/`windowName`, it must be persisted on the state
-   * rather than held on the shared backend instance, which the resolver
-   * reuses across spawns.
+   * The mux session the pane lives in, as returned by `createPane`. Backends
+   * with session-scoped IDs (Zellij, Rex) need it for later operations. Set
+   * once at spawn time and persist it rather than storing it on the shared
+   * backend instance, which the resolver reuses across spawns.
    */
   muxSession?: string;
+  /** Stable server endpoint for server-scoped muxes such as Rex. */
+  muxServer?: string;
   sessionFile: string;
   /**
    * Parent pi session cwd used as the state-file scope. The child process's
@@ -366,10 +370,11 @@ export function isTmuxAvailable(): boolean {
 /** Setup hint shown to the user when no mux is available. Mux-agnostic. */
 export function tmuxSetupHint(): string {
   return (
-    "Start pi inside tmux, zellij, or Herdr, for example:\n" +
+    "Start pi inside tmux, zellij, or Herdr, or start it in a verified live Rex block:\n" +
     "  tmux new -A -s pi 'pi'\n" +
     "  zellij --session pi\n" +
-    "  herdr  (then start pi in a Herdr pane)"
+    "  herdr  (then start pi in a Herdr pane)\n" +
+    "  Rex requires a live REX_SESSION/REX_BLOCK/REX_SERVER context."
   );
 }
 
@@ -597,8 +602,8 @@ export function launchInteractiveSubagent(params: {
   completionPolicy?: CompletionPolicy;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
-  /** Mux preference — passed to getMux(). "auto" (default) = env-var heuristic. */
-  muxPreference?: "auto" | "tmux" | "zellij" | "herdr";
+  /** Mux preference. "auto" verifies live current-pane ownership. */
+  muxPreference?: "auto" | "tmux" | "zellij" | "herdr" | "rex";
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
    * so a parent reload can rehydrate the sub-agent. If omitted, persistence is
@@ -884,8 +889,11 @@ export function launchInteractiveSubagent(params: {
   // before we start writing files. The resolver throws NoMultiplexerAvailableError
   // with a setup hint if neither backend is usable.
   let mux;
+  let muxContext: MuxLaunchContext;
   try {
-    mux = getMux({ preference: params.muxPreference });
+    const resolved = resolveMux({ preference: params.muxPreference });
+    mux = resolved.adapter;
+    muxContext = resolved.context;
   } catch (err) {
     reportSpawnFailure("mux_resolution", undefined, "mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {
@@ -934,15 +942,13 @@ export function launchInteractiveSubagent(params: {
   let muxTerminalId: string | undefined;
   let windowName: string | undefined;
   let muxSession: string | undefined;
+  let muxServer: string | undefined;
   try {
     const created = mux.createPane({
       name: params.name,
       cwd,
       background,
-      parentPane:
-        mux.name === "herdr"
-          ? process.env.HERDR_PANE_ID
-          : process.env.TMUX_PANE,
+      context: muxContext,
       windowName: safeSegment(params.name),
       id,
     });
@@ -950,6 +956,7 @@ export function launchInteractiveSubagent(params: {
     muxTerminalId = created.muxTerminalId;
     windowName = created.windowName;
     muxSession = created.session;
+    muxServer = created.server;
   } catch (error) {
     reportSpawnFailure("pane_launch", mux.name, "pane_launch");
     throw error;
@@ -973,6 +980,7 @@ export function launchInteractiveSubagent(params: {
         windowName,
         mux: mux.name,
         muxSession,
+        ...(muxServer === undefined ? {} : { muxServer }),
         artifactDir: paths.artifactDir,
         sessionFile: paths.sessionFile,
         workingCwd: cwd,
@@ -992,7 +1000,7 @@ export function launchInteractiveSubagent(params: {
         "interactive_state_write",
       );
       try {
-        mux.killPane(paneId, muxSession);
+        mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
       } catch {
         /* best effort — preserve the original persistence error */
       }
@@ -1019,6 +1027,7 @@ export function launchInteractiveSubagent(params: {
             ...(muxTerminalId ? { muxTerminalId } : {}),
             paneId,
             ...(muxSession ? { muxSession } : {}),
+            ...(muxServer ? { muxServer } : {}),
             ...(windowName ? { windowName } : {}),
           },
           artifactDir: paths.artifactDir,
@@ -1038,7 +1047,7 @@ export function launchInteractiveSubagent(params: {
           /* preserve the lineage error */
         }
       }
-      mux.killPane(paneId, muxSession);
+      mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
       throw err;
     }
   }
@@ -1066,7 +1075,7 @@ export function launchInteractiveSubagent(params: {
       }
     }
     try {
-      mux.killPane(paneId, muxSession);
+      mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
     } catch {
       /* best effort — preserve the original spawn error */
     }
@@ -1126,13 +1135,15 @@ export function launchInteractiveSubagent(params: {
       paneId,
       `exec bash ${escape(paths.launchScriptFile)}`,
       muxSession,
+      ...muxServerArgs(muxServer),
     );
-    mux.sendEnter(paneId, muxSession);
+    mux.sendEnter(paneId, muxSession, ...muxServerArgs(muxServer));
     attach = mux.buildAttachCommands({
       paneId,
       terminalId: muxTerminalId,
       windowName,
       session: muxSession,
+      ...(muxServer === undefined ? {} : { server: muxServer }),
     });
   } catch (err) {
     reportSpawnFailure("pane_launch", mux.name, "pane_launch");
@@ -1149,6 +1160,7 @@ export function launchInteractiveSubagent(params: {
     windowName,
     mux: mux.name,
     muxSession,
+    ...(muxServer === undefined ? {} : { muxServer }),
     sessionFile: paths.sessionFile,
     cwd: stateCwd,
     workingCwd: cwd,
@@ -1206,7 +1218,7 @@ export function launchInteractiveSubagent(params: {
       }
     }
     try {
-      mux.killPane(paneId, muxSession);
+      mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
     } catch {
       /* best effort */
     }
@@ -1228,6 +1240,10 @@ function getMuxForState(state: InteractiveSubagentState): Multiplexer {
   return getMux({ preference: state.mux });
 }
 
+function muxServerArgs(server?: string): [] | [string] {
+  return server === undefined ? [] : [server];
+}
+
 export interface CurrentPaneActivity {
   readonly status: PaneActivity;
   readonly mux?: MuxName;
@@ -1235,50 +1251,23 @@ export interface CurrentPaneActivity {
   readonly session?: string;
 }
 
-interface CurrentPaneTarget {
-  readonly mux: MuxName;
-  readonly paneId?: string;
-  readonly session?: string;
-}
-
-function currentPaneTarget(): CurrentPaneTarget | undefined {
-  if (process.env.HERDR_ENV === "1") {
-    return {
-      mux: "herdr",
-      paneId: process.env.HERDR_PANE_ID,
-      session: process.env.HERDR_SOCKET_PATH,
-    };
-  }
-  if (process.env.ZELLIJ) {
-    return {
-      mux: "zellij",
-      paneId: process.env.ZELLIJ_PANE_ID,
-      session: process.env.ZELLIJ_SESSION_NAME,
-    };
-  }
-  if (process.env.TMUX) {
-    return { mux: "tmux", paneId: process.env.TMUX_PANE };
-  }
-  return undefined;
-}
-
 /** Probe whether the current Pi process's mux pane is active for the user. */
 export async function getCurrentPaneActivity(): Promise<CurrentPaneActivity> {
-  const target = currentPaneTarget();
-  const location = target
-    ? {
-        mux: target.mux,
-        ...(target.paneId ? { paneId: target.paneId } : {}),
-        ...(target.session ? { session: target.session } : {}),
-      }
-    : {};
+  const context = await resolveCurrentMuxContextAsync();
+  if (context.kind !== "ready") return { status: "unknown" };
+  const target = context.target;
+  const location = {
+    mux: target.mux,
+    paneId: target.paneId,
+    ...(target.session ? { session: target.session } : {}),
+  };
   let status: PaneActivity;
-  if (!target?.paneId) return { status: "unknown", ...location };
 
   try {
     status = await getMux({ preference: target.mux }).getPaneActivityAsync(
       target.paneId,
       target.session,
+      ...muxServerArgs(target.server),
     );
   } catch {
     // Activity is advisory; an unavailable mux must not break the child.
@@ -1293,6 +1282,7 @@ export function paneRefForState(state: InteractiveSubagentState): PaneRef {
     ...(state.muxTerminalId ? { muxTerminalId: state.muxTerminalId } : {}),
     windowName: state.windowName,
     session: state.muxSession,
+    ...(state.muxServer === undefined ? {} : { server: state.muxServer }),
   };
 }
 
@@ -1320,7 +1310,11 @@ export function showInteractiveSubagentNativeViewer(
 export function getInteractivePaneLiveness(
   state: InteractiveSubagentState,
 ): PaneLiveness {
-  return getMuxForState(state).getPaneLiveness(state.paneId, state.muxSession);
+  return getMuxForState(state).getPaneLiveness(
+    state.paneId,
+    state.muxSession,
+    ...muxServerArgs(state.muxServer),
+  );
 }
 
 /** Preserve active state unless the backend explicitly confirms pane death. */
@@ -1335,6 +1329,7 @@ export function getInteractivePaneLivenessAsync(
   return getMuxForState(state).getPaneLivenessAsync(
     state.paneId,
     state.muxSession,
+    ...muxServerArgs(state.muxServer),
   );
 }
 
@@ -1344,10 +1339,18 @@ export async function getInteractivePaneLivenessDiagnosticAsync(
 ): Promise<PaneLivenessDiagnostic> {
   const mux = getMuxForState(state);
   if (mux.getPaneLivenessDiagnosticAsync) {
-    return mux.getPaneLivenessDiagnosticAsync(state.paneId, state.muxSession);
+    return mux.getPaneLivenessDiagnosticAsync(
+      state.paneId,
+      state.muxSession,
+      ...muxServerArgs(state.muxServer),
+    );
   }
   return {
-    liveness: await mux.getPaneLivenessAsync(state.paneId, state.muxSession),
+    liveness: await mux.getPaneLivenessAsync(
+      state.paneId,
+      state.muxSession,
+      ...muxServerArgs(state.muxServer),
+    ),
   };
 }
 
@@ -1363,13 +1366,19 @@ export function getLineagePaneLiveness(
   manifest: LineageManifest,
 ): PaneLiveness {
   const backend = manifest.pane.backend;
-  if (backend !== "tmux" && backend !== "zellij" && backend !== "herdr") {
+  if (
+    backend !== "tmux" &&
+    backend !== "zellij" &&
+    backend !== "herdr" &&
+    backend !== "rex"
+  ) {
     return "unknown";
   }
   try {
     return getMux({ preference: backend }).getPaneLiveness(
       manifest.pane.paneId,
       manifest.pane.muxSession,
+      ...muxServerArgs(manifest.pane.muxServer),
     );
   } catch {
     return "unknown";
@@ -1394,11 +1403,15 @@ export async function interactiveSubagentHasAttachedClient(
   const mux = getMuxForState(state) as Multiplexer & {
     hasAttachedClientAsync?: (
       session?: string,
+      server?: string,
     ) => Promise<boolean | undefined> | boolean | undefined;
   };
   if (typeof mux.hasAttachedClientAsync !== "function") return undefined;
   try {
-    return await mux.hasAttachedClientAsync(state.muxSession);
+    return await mux.hasAttachedClientAsync(
+      state.muxSession,
+      ...muxServerArgs(state.muxServer),
+    );
   } catch {
     return undefined;
   }
@@ -1413,15 +1426,29 @@ export function sendCommandToPane(
   command: string,
 ): void {
   const mux = getMuxForState(state);
-  mux.sendKeys(state.paneId, command, state.muxSession);
-  mux.sendEnter(state.paneId, state.muxSession);
+  mux.sendKeys(
+    state.paneId,
+    command,
+    state.muxSession,
+    ...muxServerArgs(state.muxServer),
+  );
+  mux.sendEnter(
+    state.paneId,
+    state.muxSession,
+    ...muxServerArgs(state.muxServer),
+  );
 }
 
 /** Rebuild attach/focus commands for a persisted or rehydrated state. */
 export function buildAttachCommandsForState(
   state: Pick<
     InteractiveSubagentState,
-    "paneId" | "muxTerminalId" | "windowName" | "mux" | "muxSession"
+    | "paneId"
+    | "muxTerminalId"
+    | "windowName"
+    | "mux"
+    | "muxSession"
+    | "muxServer"
   >,
 ): { attachCommand: string; focusCommand: string } {
   return getMuxForState(state as InteractiveSubagentState).buildAttachCommands({
@@ -1429,6 +1456,7 @@ export function buildAttachCommandsForState(
     terminalId: state.muxTerminalId,
     windowName: state.windowName,
     session: state.muxSession,
+    ...(state.muxServer === undefined ? {} : { server: state.muxServer }),
   });
 }
 
@@ -1497,8 +1525,18 @@ export function cancelInteractiveSubagent(
     // A failed artifact write must not prevent the requested stop.
     state.status = "cancelled";
     const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
+    if (
+      mux.getPaneLiveness(
+        state.paneId,
+        state.muxSession,
+        ...muxServerArgs(state.muxServer),
+      ) !== "dead"
+    ) {
+      mux.killPane(
+        state.paneId,
+        state.muxSession,
+        ...muxServerArgs(state.muxServer),
+      );
     }
   }
   return state;
@@ -1571,8 +1609,18 @@ export function cancelInteractiveDescendantByState(
   } finally {
     state.status = "cancelled";
     const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
-      mux.killPane(state.paneId, state.muxSession);
+    if (
+      mux.getPaneLiveness(
+        state.paneId,
+        state.muxSession,
+        ...muxServerArgs(state.muxServer),
+      ) !== "dead"
+    ) {
+      mux.killPane(
+        state.paneId,
+        state.muxSession,
+        ...muxServerArgs(state.muxServer),
+      );
     }
   }
   return state;
@@ -1631,9 +1679,19 @@ export function cancelInteractiveSubagentByState(
   } finally {
     // Teardown must outlive artifact failures during destructive transitions.
     const mux = getMuxForState(state);
-    if (mux.getPaneLiveness(state.paneId, state.muxSession) !== "dead") {
+    if (
+      mux.getPaneLiveness(
+        state.paneId,
+        state.muxSession,
+        ...muxServerArgs(state.muxServer),
+      ) !== "dead"
+    ) {
       try {
-        mux.killPane(state.paneId, state.muxSession);
+        mux.killPane(
+          state.paneId,
+          state.muxSession,
+          ...muxServerArgs(state.muxServer),
+        );
       } catch {
         /* best-effort */
       }

@@ -32,6 +32,7 @@ import {
   safeSegment,
 } from "../src/multiplexer";
 import { TmuxMultiplexer } from "../src/multiplexer-tmux";
+import { shellEscape } from "../src/multiplexer-contracts";
 import { clearSessionScopes } from "../src/session-scope";
 import { createTestSessionScope } from "./session-scope-fixture";
 
@@ -176,7 +177,16 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
 
   expect(state.mux).toBe("tmux");
   expect(state.paneId).toMatch(/^%/);
-  expect(state.attachCommand).toContain(`tmux -L '${socket}' attach`);
+  const actualSocket = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    state.paneId,
+    "#{socket_path}",
+  ]).replace(/\r?\n$/, "");
+  expect(state.muxServer).toBe(actualSocket);
+  const commandPrefix = `tmux '-S' ${shellEscape(actualSocket)}`;
+  expect(state.attachCommand).toContain(`${commandPrefix} attach`);
 
   await waitFor(() => {
     const eventsFile = join(state.artifactDir, "events.ndjson");
@@ -195,6 +205,44 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
   expect(events).toContain('"version":2');
   expect(events).toContain('"type":"completion"');
   expect(events).toContain('"outcome":"done"');
+});
+
+test("creates an attached background window in the verified parent's exact session", () => {
+  const parentSession = "parent session";
+  const parentPane = tmux([
+    "new-session",
+    "-d",
+    "-s",
+    parentSession,
+    "-P",
+    "-F",
+    "#{pane_id}",
+  ]).trim();
+  tmux(["new-session", "-d", "-s", `${parentSession}-other`]);
+  const server = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    parentPane,
+    "#{socket_path}",
+  ]).replace(/\r?\n$/, "");
+  const child = new TmuxMultiplexer().createPane({
+    name: "Attached child",
+    cwd: tempRoot,
+    background: true,
+    context: { kind: "attached", mux: "tmux", paneId: parentPane, server },
+  });
+  expect(child.server).toBe(server);
+  expect(child.session).toBe(parentSession);
+  expect(
+    tmux([
+      "display-message",
+      "-p",
+      "-t",
+      child.paneId,
+      "#{session_name}",
+    ]).trim(),
+  ).toBe(parentSession);
 });
 
 test("reports inactive for a pane in a detached session", async () => {
@@ -438,8 +486,15 @@ test("buildAttachCommands emits window targets real tmux resolves unambiguously"
     paneId: panes["attach-a"]!,
     windowName,
   });
-  expect(cmds.focusCommand).toContain(`'attach-a:${windowName}'`);
-  expect(cmds.attachCommand).toContain(`'attach-a:${windowName}'`);
+  const targetIndex = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    panes["attach-a"]!,
+    "#{window_index}",
+  ]).trim();
+  expect(cmds.focusCommand).toContain(`'attach-a:${targetIndex}'`);
+  expect(cmds.attachCommand).toContain(`'attach-a:${targetIndex}'`);
 
   // 1. The focusCommand, run verbatim through a shell, moves the requested
   //    session and leaves the identically-named window in the other one alone.
@@ -590,4 +645,54 @@ test("launches and projects a recursive child hierarchy across cwd values", asyn
     grandchild,
   );
   cancelInteractiveSubagent(child.id, "cancel_interactive_subagent", child);
+});
+
+test("detached windows respect base-index and duplicate names remain addressable", () => {
+  tmux(["new-session", "-d", "-s", "seed"]);
+  tmux(["set-option", "-g", "base-index", "1"]);
+  tmux(["set-window-option", "-g", "automatic-rename", "off"]);
+  const mux = new TmuxMultiplexer();
+  const first = mux.createPane({
+    name: "reviewer",
+    cwd: tempRoot,
+    background: true,
+    id: "duplicate",
+  });
+  const second = mux.createPane({
+    name: "reviewer",
+    cwd: tempRoot,
+    background: true,
+    id: "another",
+  });
+  expect(
+    tmux([
+      "display-message",
+      "-p",
+      "-t",
+      first.paneId,
+      "#{window_index}",
+    ]).trim(),
+  ).toBe("1");
+  for (const pane of [first, second]) {
+    expect(
+      tmux([
+        "display-message",
+        "-p",
+        "-t",
+        pane.paneId,
+        "#{window_name}",
+      ]).trim(),
+    ).toBe("reviewer");
+    const commands = mux.buildAttachCommands(pane);
+    execFileSync("/bin/sh", ["-c", commands.focusCommand], { stdio: "pipe" });
+    expect(
+      tmux([
+        "display-message",
+        "-p",
+        "-t",
+        pane.session + ":",
+        "#{pane_id}",
+      ]).trim(),
+    ).toBe(pane.paneId);
+  }
 });

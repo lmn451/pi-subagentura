@@ -23,6 +23,80 @@ const { mockAwaitInteractiveResult, mockLaunch, mockStartSubagentJob } =
     mockStartSubagentJob: vi.fn(),
   }));
 
+const { mockBackend } = vi.hoisted(() => ({
+  mockBackend: (name: string) => ({
+    name,
+    isAvailable: vi.fn(() => false),
+    createPane: vi.fn(() => {
+      throw new Error(`Unexpected pane creation via ${name}`);
+    }),
+    killPane: vi.fn(),
+    getPaneLiveness: vi.fn(() => "alive"),
+    getPaneLivenessAsync: vi.fn(async () => "alive"),
+  }),
+}));
+
+vi.mock("../src/multiplexer-tmux", () => ({
+  TmuxMultiplexer: vi.fn(function () {
+    return mockBackend("tmux");
+  }),
+}));
+vi.mock("../src/multiplexer-zellij", () => ({
+  ZellijMultiplexer: vi.fn(function () {
+    return mockBackend("zellij");
+  }),
+}));
+vi.mock("../src/multiplexer-herdr", () => ({
+  HerdrMultiplexer: vi.fn(function () {
+    return mockBackend("herdr");
+  }),
+}));
+vi.mock("../src/multiplexer-rex", () => ({
+  RexMultiplexer: vi.fn(function () {
+    return mockBackend("rex");
+  }),
+}));
+
+// This synthetic suite exercises detached launch and fallback, not host probes.
+vi.mock("../src/multiplexer-current-context", () => ({
+  resolveCurrentMuxContext: vi.fn(() => ({ kind: "absent" })),
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const blocked = () => {
+    throw new Error("Unexpected process launch in workflow supervisor fixture");
+  };
+  return {
+    ...actual,
+    exec: vi.fn(blocked),
+    execSync: vi.fn(blocked),
+    execFile: vi.fn(blocked),
+    execFileSync: vi.fn(blocked),
+    spawn: vi.fn(blocked),
+    spawnSync: vi.fn(blocked),
+    fork: vi.fn(blocked),
+  };
+});
+
+vi.mock("node:net", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:net")>();
+  const blocked = () => {
+    throw new Error(
+      "Unexpected socket connection in workflow supervisor fixture",
+    );
+  };
+  class Socket extends actual.Socket {
+    connect = vi.fn(blocked);
+  }
+  return {
+    ...actual,
+    Socket,
+    connect: vi.fn(blocked),
+    createConnection: vi.fn(blocked),
+  };
+});
+
 vi.mock("../src/interactive-tmux", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../src/interactive-tmux")>();
@@ -63,7 +137,12 @@ import {
 } from "../src/workflow-jobs";
 import { registerWorkflowTool } from "../src/workflow-tool";
 import { createTelemetrySession } from "../src/telemetry";
-import { registerCompletionCoordinator } from "../src/completion-coordinator";
+import {
+  clearCompletionCoordinator,
+  registerCompletionCoordinator,
+  registerCompletionMember,
+  sealCompletionGroups,
+} from "../src/completion-coordinator";
 import { createTestSessionScope } from "./session-scope-fixture";
 
 const ACTIVITY_WIDGET_KEY = "subagentura-activity";
@@ -282,6 +361,205 @@ afterEach(() => {
 });
 
 describe("workflow supervisor integration", () => {
+  it("isolates every concrete backend construction and pane creation path", async () => {
+    const backends = [
+      (await import("../src/multiplexer-tmux")).TmuxMultiplexer,
+      (await import("../src/multiplexer-zellij")).ZellijMultiplexer,
+      (await import("../src/multiplexer-herdr")).HerdrMultiplexer,
+      (await import("../src/multiplexer-rex")).RexMultiplexer,
+    ];
+    __resetMuxInstances();
+    const { getMux } = await import("../src/multiplexer");
+    const names = ["tmux", "zellij", "herdr", "rex"] as const;
+    for (const [index, Backend] of backends.entries()) {
+      // Check isolation before constructing anything, so this regression is safe
+      // even before the concrete backend mocks have been installed.
+      expect(vi.isMockFunction(Backend)).toBe(true);
+      const backend = new Backend();
+      expect(vi.isMockFunction(backend.createPane)).toBe(true);
+      expect(backend.isAvailable()).toBe(false);
+      expect(() => backend.createPane({} as never)).toThrow(
+        "Unexpected pane creation",
+      );
+      const selected = getMux({ preference: names[index] });
+      expect(vi.isMockFunction(selected.createPane)).toBe(true);
+      expect(() => selected.createPane({} as never)).toThrow(
+        "Unexpected pane creation",
+      );
+    }
+    const processes = await import("node:child_process");
+    for (const operation of [
+      processes.exec,
+      processes.execSync,
+      processes.execFile,
+      processes.execFileSync,
+      processes.spawn,
+      processes.spawnSync,
+      processes.fork,
+    ]) {
+      expect(vi.isMockFunction(operation)).toBe(true);
+      expect(operation).not.toHaveBeenCalled();
+    }
+    const sockets = await import("node:net");
+    expect(vi.isMockFunction(sockets.connect)).toBe(true);
+    expect(vi.isMockFunction(sockets.createConnection)).toBe(true);
+    const socket = new sockets.Socket();
+    expect(vi.isMockFunction(socket.connect)).toBe(true);
+    socket.destroy();
+  });
+  it("reports resolved sync child cancellation with warning presentation", async () => {
+    const { context } = liveSessionContext({
+      id: 44,
+      sessionId: "sync-cancellation-session",
+    });
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+    mockAwaitInteractiveResult.mockResolvedValueOnce({
+      isError: false,
+      output: "",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        turns: 0,
+      },
+      cancelled: true,
+    });
+
+    const result = await findTool().execute(
+      "call-sync-cancelled-child",
+      { script: SINGLE_AGENT_SCRIPT("sync-cancelled-child"), async: false },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    expect(result.details).toMatchObject({
+      status: "done",
+      presentationStatus: "completed with cancellations",
+      errorCount: 0,
+      cancelledCount: 1,
+    });
+    expect(result.content[0]?.text).toContain("completed with cancellations");
+    expect(result.content[0]?.text).toContain("1 cancellation");
+  });
+
+  it("keeps mixed child errors and cancellations as an error group notice", async () => {
+    const { context } = liveSessionContext({
+      id: 45,
+      sessionId: "mixed-cancellation-session",
+    });
+    const owner = ownerOf(context);
+    const entries: Array<{ customType: string; data: unknown }> = [];
+    const pi = {
+      registerTool: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      sendMessage: vi.fn(),
+      appendEntry: vi.fn((customType: string, data: unknown) =>
+        entries.push({ customType, data }),
+      ),
+    };
+    const findTool = workflowTool(pi);
+    context.pi = pi as never;
+    registerCompletionCoordinator(pi as never, context);
+    registerCompletionMember(
+      "workflow",
+      "unsettled-peer",
+      "group",
+      "mixed-cancellation",
+      owner,
+    );
+    registerWorkflowTool(pi as never, context);
+
+    const usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      turns: 0,
+    };
+    const failed: SubagentResult = {
+      isError: true,
+      output: "partial failure",
+      usage,
+      errorMessage: "child failed",
+    };
+    const cancelled: SubagentResult = {
+      isError: false,
+      output: "",
+      usage,
+      cancelled: true,
+    };
+    mockAwaitInteractiveResult.mockImplementation(
+      (state: InteractiveSubagentState) =>
+        Promise.resolve(state.task === "cancelled" ? cancelled : failed),
+    );
+
+    let workflowId: string | undefined;
+    try {
+      const started = await findTool().execute(
+        "call-mixed-cancellation",
+        {
+          script:
+            'export const meta = { name: "mixed-cancellation", description: "d" };\n' +
+            'await agent("failed", { label: "failed" });\n' +
+            'await agent("cancelled", { label: "cancelled" });\n' +
+            'return "finished";',
+          async: true,
+          completionPolicy: "group",
+          completionGroupId: "mixed-cancellation",
+        },
+        undefined,
+        vi.fn(),
+        { cwd: "/tmp", modelRegistry: {} },
+      );
+      const id = started.details.workflowId;
+      if (typeof id !== "string") {
+        throw new Error("Workflow tool did not return a workflow ID.");
+      }
+      workflowId = id;
+      const job = workflowJobRegistry.get(id);
+      if (!job) throw new Error("Started workflow job was not registered.");
+      sealCompletionGroups(owner);
+      const run = await job.promise;
+      expect(job.status).toBe("done");
+      expect(run).toMatchObject({
+        errorCount: 1,
+        cancelledCount: 1,
+      });
+
+      await vi.waitFor(() =>
+        expect(
+          entries.some(
+            (entry) => entry.customType === "subagentura-completion",
+          ),
+        ).toBe(true),
+      );
+      const completion = entries.find(
+        (entry) => entry.customType === "subagentura-completion",
+      )?.data;
+      expect(completion).toMatchObject({
+        status: "error",
+        groupId: "mixed-cancellation",
+        references: expect.arrayContaining([
+          {
+            label: "status",
+            value: "completed with errors and cancellations",
+          },
+          { label: "errors", value: "1" },
+          { label: "cancellations", value: "1" },
+        ]),
+      });
+    } finally {
+      if (workflowId) workflowJobRegistry.delete(workflowId);
+      clearCompletionCoordinator(owner);
+    }
+  });
+
   it.each([
     [{ async: true }, "each"],
     [
@@ -614,6 +892,65 @@ describe("workflow supervisor integration", () => {
     } finally {
       restoreEnv();
     }
+  });
+
+  it("rejects an unverified mux context without an in-process retry", async () => {
+    const payloads = captureTelemetryPayloads();
+    // Use the same cached multiplexer module instance as workflow-tool.
+    const { MultiplexerContextUnavailableError } =
+      await import("../src/multiplexer");
+    const { context } = liveSessionContext({ id: 15, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
+    const ownershipMessage = "Rex pane context could not be verified";
+    mockLaunch.mockImplementationOnce(
+      (
+        params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
+      ) => {
+        params.onSpawnFailure?.({
+          stage: "mux_resolution",
+          operation: "mux_resolution",
+        });
+        throw new MultiplexerContextUnavailableError(ownershipMessage);
+      },
+    );
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const result = await findTool().execute(
+      "call-unverified-mux",
+      {
+        script:
+          `export const meta = { name: "unverified-mux", description: "d" };\n` +
+          `let message; ` +
+          `try { await agent("inspect"); } catch (error) { ` +
+          `message = error instanceof Error ? error.message : String(error); } ` +
+          `return message;`,
+        async: false,
+      },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    expect(result.details).toMatchObject({ status: "done", errorCount: 1 });
+    expect(result.content[0]?.text).toContain(ownershipMessage);
+    expect(mockLaunch).toHaveBeenCalledOnce();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(context.inProcessJobs.size).toBe(0);
+
+    const resolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0]?.properties).toMatchObject({
+      outcome: "rejected",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      fallback_attempted: false,
+      initial_failure_stage: "mux_resolution",
+      initial_failure_operation: "mux_resolution",
+    });
+    expect(resolutions[0]?.properties).not.toHaveProperty("execution");
   });
 
   it.each(["model_resolution", "session_creation"] as const)(
@@ -1006,6 +1343,17 @@ describe("workflow supervisor integration", () => {
 
     // The blocking sync path must not acquire a new failure mode from being
     // tracked: it always ran before, so it still runs now.
+    const awaitImplementation =
+      mockAwaitInteractiveResult.getMockImplementation()!;
+    let reportChildReady!: () => void;
+    const childReady = new Promise<void>((resolve) => {
+      reportChildReady = resolve;
+    });
+    mockAwaitInteractiveResult.mockImplementationOnce((...args) => {
+      const completion = awaitImplementation(...args);
+      reportChildReady();
+      return completion;
+    });
     const execution = findTool().execute(
       "call-sync-capped",
       { script: SINGLE_AGENT_SCRIPT("sync-capped"), async: false },
@@ -1013,7 +1361,15 @@ describe("workflow supervisor integration", () => {
       vi.fn(),
       { cwd: "/tmp", modelRegistry: {} },
     );
-    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+    await Promise.race([
+      childReady,
+      execution.then((result: unknown) => {
+        throw new Error(
+          `Synchronous workflow completed before launching its process agent: ${JSON.stringify(result)}`,
+        );
+      }),
+    ]);
+    expect(mockLaunch).toHaveBeenCalledOnce();
     releaseAgent(subagentResult("reviewed"));
     const result = await execution;
 

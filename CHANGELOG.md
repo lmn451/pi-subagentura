@@ -7,15 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Add optional Orchestratorv2 child selection through Pi's native classifier
-  API, with bounded inputs, fail-closed selection, and usage accounting.
-
 ### Fixed
 
 - Preserve Node-supported platform signal names and aliases when normalizing
   process-exit artifacts across platforms.
+
+## [4.3.0] - 2026-11-14
+
+### Added
+
+- Add Superlogical Rex as a validated interactive mux backend with persisted
+  server/session/block identity, bounded capture, and conservative unknown
+  liveness/activity behavior.
+- Fail closed rather than silently selecting another mux when a recognized host
+  context is incomplete or unsupported; explicit mux choices still take priority.
+- Clarify and test when Orca skills may be used versus when native delegation or
+  a user clarification is required.
+
+### Changed
+
+- Clarify host-aware Orca/Rex/Agterm guidance and optional Jev/OpenAI Decisions
+  advisor documentation. Jev selects among already-authorized native subagent
+  owners, not models or presets; the parent sends the task, and the documentation
+  makes no claim of live provider-availability verification.
+- Capture bounded host, terminal, and parent-multiplexer environment observations
+  once per extension activation in a shared immutable snapshot for host guidance
+  and telemetry. These observations are metadata, not evidence of live backend
+  availability or mux ownership.
+- Improve interactive supervisor popup rendering and controls.
+- Refresh dependencies and pin development Pi SDK packages to 1.5.0 while
+  retaining Pi 1.2.0 as the minimum supported SDK.
+- Carry verified, backend-specific mux launch identity from resolution into
+  pane creation instead of selecting a new parent from inherited environment.
+- Type workflow worker messages as a shared discriminated protocol and check
+  the JavaScript worker/decoder implementations during `npm run typecheck`.
+- Preserve awaited pipeline stage/result types beyond three stages, narrow
+  tool result inference, and incrementally enforce stricter optional/indexed
+  types in dependency-light core and public workflow contracts.
+- Resolve automatic mux selection and current-pane activity using bounded live
+  backend evidence tied to Pi's process ancestry/TTY, rather than inherited host
+  marker priority or UI focus. Nested muxes use the nearest verified owner;
+  ambiguous or unprovable ownership fails closed. Explicit backend choices and
+  the no-host tmux-then-Zellij detached fallback remain available.
+- Keep Rex process ancestry distinct from Herdr when detecting the current mux.
+- Extend closed mux and parent-mux telemetry enums with Rex (schema v7).
+
+### Fixed
+
+- Isolate test diagnostics from runtime debug logs.
+- Bound active staging and immutable snapshot reads before allocating child
+  output, reject unsafe file types/symlinks without blocking on FIFOs, and
+  surface content-free diagnostics for rejected staging reads.
+- Keep workflow-visible helpers and copied data in the VM realm so injected
+  function constructors do not bypass determinism guards. The workflow VM
+  remains a trusted-script aid, not a security boundary.
+- Preserve cancelled-child counts in workflow results, status, and completion
+  presentation instead of reporting resolved partial work as a clean completion.
+- Restrict Vitest discovery to the root `tests/` tree so nested repository
+  checkouts do not mix revisions or multiply the default test run.
+- Scope Orca guidance to root/parent contexts and reevaluate it on every
+  `before_agent_start`; do not add it to native children or other hosts. Rex and
+  Agterm receive generic guidance.
+- Align Orca launch guidance with configured surfaces, explicit model/effort
+  requests, and documented keep-open and wake handling. Strengthen Rex target
+  and caller-block safeguards while allowing necessary private handoff selectors
+  without weakening telemetry privacy.
+- Preserve pane ownership across intermediary PTYs while refusing to cross a
+  nearer mux boundary or accept contradictory pane-root TTY evidence.
+- Keep empty tmux socket overrides equivalent to unset values and preserve valid
+  literal named-socket labels.
+- Preserve nonblank Zellij session names exactly, including leading and trailing
+  whitespace, through candidate selection and live ownership probes.
+- Reject ambiguous workflow mux ownership instead of silently falling back to an
+  in-process agent.
+- Disable Rex server autostart for context verification, child probes, and
+  control operations so a stopped server is not restarted implicitly.
+
+## [4.2.1] - 2026-11-07
+
+### Added
+
+- Report allowlisted terminal application and observed parent multiplexer context
+  on fresh root telemetry, independently of session host and child execution
+  backend. Missing or ambiguous environment markers remain `unknown`; raw
+  environment values, socket paths, and session names are never uploaded.
+- Document terminal and parent-multiplexer telemetry dimensions, privacy rules,
+  and environment-inheritance limitations.
+
+### Fixed
+
+- Recover abandoned interactive-state locks without taking over a live owner.
+- Target tmux windows reliably when names collide across sessions.
+
+## [4.2.0] - 2026-11-02
+
+### Added
+
+- Show extension update notes on Pi 1.5 using the packaged changelog.
+- Report the saved-workflow picker as waiting for user input on Pi 1.5.
+- Show configured expand shortcuts in collapsed subagent results on Pi 1.5.
+- Recognize provider-billed usage totals, including free requests, while
+  preserving legacy Pi cost accounting.
+
+- Add optional Orchestratorv2 child selection through Pi's native classifier
+  API, with bounded inputs, fail-closed selection, and usage accounting.
+
+### Changed
+
+- Extend shared Orca prompt/skill guidance to interactive delegation in normal
+  Pi parents, interactive children/nested contexts, and Orchestratorv2 without
+  replacing native child execution or changing legacy workflow selection.
+- Layer Agterm guidance and explicit target precedence onto shared Orca
+  delegation, and attribute the closed host label on fresh root telemetry.
 
 ## [4.1.0] - 2026-10-25
 
@@ -314,8 +417,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Promoted `--orchestratorv2` as a routing-first interactive mode. Its prompt
   guides the parent to route work to attachable interactive subagents, ask for
-  clarification when a request is ambiguous or a narrow request has no matching
-  child, and leave
+  clarification when a request is ambiguous, and leave
   specialist work to those children. Compatibility workflow and in-process tools
   remain registered; this is prompt guidance rather than an enforced boundary.
 - Orchestratorv2 routing now treats the current parent branch as the sole authority ledger and the project-local JSON file as repairable untrusted cache data, preventing child-written records from becoming actionable, consuming authority capacity, blocking approved writes, or hiding authoritative stale records.
@@ -464,7 +566,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/lmn451/pi-subagentura/compare/v4.2.1...v4.3.0
 [4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0

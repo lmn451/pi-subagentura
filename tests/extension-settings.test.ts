@@ -196,7 +196,7 @@ describe("generic extension settings", () => {
     );
 
     expect(manifest.dependencies).toMatchObject({
-      "@juanibiapina/pi-extension-settings": "^0.9.1",
+      "@juanibiapina/pi-extension-settings": "^0.10.0",
     });
     expect(manifest.bundledDependencies).toBeUndefined();
     expect(manifest.pi.extensions).toEqual(["./src/subagent.ts"]);

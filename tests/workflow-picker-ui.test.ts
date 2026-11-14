@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import {
+  initTheme,
+  type ExtensionUIContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   WorkflowPickerComponent,
   type WorkflowPickerAction,
+  showWorkflowPicker,
 } from "../src/workflow-picker-ui";
 
 const theme = {
@@ -38,5 +42,34 @@ describe("WorkflowPickerComponent", () => {
     );
 
     expect(component.render(80).join("\n")).toContain("d delete");
+  });
+});
+
+describe("showWorkflowPicker", () => {
+  it("reports an inline user wait and preserves the selected action", async () => {
+    const action = { kind: "run" as const, name: "first" };
+    const custom = vi.fn(async (factory: Function, options: unknown) => {
+      expect(options).toEqual({
+        blocked: { kind: "question", message: "Select a workflow" },
+      });
+      const done = vi.fn();
+      const component = factory(undefined, theme, undefined, done);
+      expect(component).toBeInstanceOf(WorkflowPickerComponent);
+      component.handleInput("\r");
+      expect(done).toHaveBeenCalledWith(action);
+      return action;
+    });
+    await expect(
+      showWorkflowPicker({ custom } as unknown as ExtensionUIContext, [
+        { name: "first", description: "First workflow" },
+      ]),
+    ).resolves.toEqual(action);
+    expect(custom).toHaveBeenCalledOnce();
+  });
+  it("works when an older UI ignores options and the user cancels", async () => {
+    const custom = vi.fn(async (_factory: unknown) => undefined);
+    await expect(
+      showWorkflowPicker({ custom } as unknown as ExtensionUIContext, []),
+    ).resolves.toBeUndefined();
   });
 });

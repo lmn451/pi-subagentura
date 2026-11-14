@@ -318,8 +318,32 @@ function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
   tmuxMockCalls = [];
   tmuxDisplayMessageCalls = 0;
   vi.resetModules();
+  // Persistence tests need deterministic ownership, not live process discovery.
+  vi.doMock("../src/multiplexer-current-context", () => ({
+    resolveCurrentMuxContext: () => ({
+      kind: "ready",
+      target: {
+        mux: "tmux",
+        paneId: "%1",
+        server: "/tmp/tmux-1000/default",
+      },
+    }),
+  }));
   vi.doMock("node:child_process", () => ({
-    execFileSync: (_file: string, args: string[]) => {
+    execFileSync: (file: string, rawArgs: string[]) => {
+      if (
+        file === "/bin/sh" &&
+        rawArgs[0] === "-c" &&
+        rawArgs[1] === "command -v 'tmux'"
+      ) {
+        return "";
+      }
+      if (file !== "tmux") {
+        throw new Error(`Unexpected launch fixture command: ${file}`);
+      }
+      // Resolver-owned launches carry their captured socket explicitly.
+      const args =
+        rawArgs[0] === "-S" || rawArgs[0] === "-L" ? rawArgs.slice(2) : rawArgs;
       tmuxMockCalls.push(args);
       if (args[0] === "send-keys" && tmuxMockOptions.sendKeysError) {
         throw new Error(tmuxMockOptions.sendKeysError);
@@ -334,7 +358,7 @@ function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
         return "%99\n";
       }
       if (args[0] === "display-message") {
-        tmuxDisplayMessageCalls += 1;
+        if (args.includes("%99")) tmuxDisplayMessageCalls += 1;
         if (tmuxDisplayMessageCalls > 1 && tmuxMockOptions.attachError) {
           throw new Error(tmuxMockOptions.attachError);
         }
@@ -410,6 +434,7 @@ describe("spawn-time state persistence", () => {
   afterEach(() => {
     rmSync(cwd, { recursive: true, force: true });
     vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
     vi.doUnmock("../src/spawn-tree-context");
     vi.unstubAllGlobals();
     clearSessionScopes();

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": ["src/workflow-worker-thread.mjs", "src/workflow-rpc.mjs"],
+  "exclude": ["tests"]
+}

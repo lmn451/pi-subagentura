@@ -16,13 +16,20 @@ A public [Pi](https://pi.dev) extension that adds in-process and attachable sub-
 Always run all of these before committing:
 
 ```bash
-npm run typecheck   # tsc --noEmit, catches TDZ / no-use-before-define
+npm run typecheck   # source/test compilation plus scoped boundary checks
 npm test            # vitest run
 npm run format:check  # oxfmt --check
 npm run pack:check  # npm pack --dry-run, mirrors the publish step
 ```
 
 The pre-commit hook (`simple-git-hooks` → `lint-staged` → `oxfmt`) formats staged files. The pre-push hook runs the third command across the repository. Install or refresh both with `npm run hooks:install`. Skip either for emergencies with `SKIP_SIMPLE_GIT_HOOKS=1`.
+
+`tsconfig.core.json` incrementally enables `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes` for dependency-light identifier and usage modules
+and the public workflow declarations. Additional negative compile-time
+contracts live in `typechecks/`, outside the ordinary test compilation.
+`tsconfig.worker.json` checks the JavaScript worker and RPC decoder with
+`checkJs`. Keep both checks in the mandatory `typecheck` script.
 
 ## Source layout (the 30-second tour)
 

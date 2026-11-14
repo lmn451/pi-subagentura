@@ -3,8 +3,9 @@
 The event schema is defined by `TELEMETRY_SCHEMA_VERSION` in
 [`src/telemetry.ts`](../src/telemetry.ts). See [CHANGELOG.md](../CHANGELOG.md)
 for release attribution. Schema v6 adds logical launch resolution, closed traffic
-provenance, and attributed runtime observations. It cannot reconstruct those
-facts for historical schema-v5 events.
+provenance, and attributed runtime observations; those facts cannot be reconstructed
+for historical schema-v5 events. Schema v7 adds Rex to the closed multiplexer
+dimensions; Rex cannot be reconstructed for historical schema-v6 events.
 
 ## Measurement contract
 
@@ -27,73 +28,146 @@ launches, and schema retries can request further child work. Rejected pre-start
 launches need not produce a task completion. Daily start and terminal events are
 not a linked cohort. A runtime success does not measure answer usefulness.
 
-### Child backend versus Orca host
+### Child backend versus terminal host
 
-`mux` attributes the child execution backend, not the application hosting the
-parent. An extension-managed tmux child remains `mux=tmux` even when its parent
-runs in Orca; an in-process child remains `mux=none`. `requested_mux` describes
-the extension launch request, not the host either. For rejected launches, `mux`
-can preserve a selected backend without implying that a child was accepted.
+`mux` attributes the extension-managed child execution backend, not the terminal
+hosting Pi. A tmux child remains `mux=tmux` inside Orca or Agterm; a Rex child
+uses `mux=rex` only after the extension's current ownership resolution accepts
+the native Rex backend; an in-process child remains `mux=none`. On
+`agent_launch_resolved`, `requested_execution` and `requested_mux` record the
+request, while `execution` and `mux` record the resolved extension launch (or
+`unknown` where no backend was established). These fields remain independent
+of the outer-host label. Inherited host, tmux, Zellij, and Rex markers do not
+make these dimensions mutually exclusive or select a target in place of an
+explicit mux choice.
 
-Orca integration in Orchestratorv2 is prompt-only. There is no native Orca
-`subagent_interactive` backend, and `orca` is not currently a supported telemetry
-mux value. Commands executed through the Orca CLI are outside the extension's
-child launch/turn instrumentation: do not manufacture `agent_created`,
-`agent_launch_resolved`, or task lifecycle records from prompt instructions or
-CLI receipts. Consequently, filtering these reports by `mux=orca` cannot measure
-Orca prompt-path adoption or reliability. Enabling `mode=orchestrator_v2` identifies
-the extension mode, not proof that the Orca path was used.
+Host-aware prompts are added per agent start only to matching parent roots:
+Orca roots receive the Orca-specific and shared host guidance; recognized
+Agterm/Rex roots receive shared guidance; children and unmatched roots receive
+no host-specific prompt. This activation-snapshot gate is not proof of a live
+host or mux target. Orca's `agent launch`/supervised orchestration tools and
+Agterm's process-backed `session new --command` plus pane mailboxes are
+host-managed operations, not Subagentura-owned children or extension launch
+instrumentation. Orca and Agterm have no native `subagent_interactive` backend.
+Rex is different: it is a native backend, and a Rex launch is attributed only
+after live ownership resolution. Do not manufacture `agent_created`,
+`agent_launch_resolved`, task, artifact, or completion records from external
+host CLI receipts. `orca` is not a supported telemetry mux value; filtering by
+`mux=orca` cannot measure Orca prompt-path adoption. The `orchestrator_v2` mode
+label is not proof that the Orca path was used.
 
-An independently launched Pi instance that loads this extension can report its
-own observed package activity; that does not reconstruct an Orca CLI launch or
-establish an extension-managed parent/child relationship.
+Fresh root `session_started` records include the additive schema-v6
+`session_host` dimension: `agterm`, `orca`, or `unknown`, regardless of whether
+`mode` is `straight`, `orchestrator`, or `orchestrator_v2`. Earlier v6 releases
+may omit it; a missing historical value means `unknown`, never a known non-host.
+This is outer-host environment/provenance evidence for a logical root session,
+not a person, installation, live terminal, current routing target, or proof that
+a particular host-managed launch occurred. No persistent installation or user
+identifier is created.
 
-Fresh root `session_started` records now include the additive schema-v6
-`session_host` dimension: `orca` or `unknown`. Earlier v6 releases omit it; a
-missing historical value means `unknown`, never non-Orca. This is observed
-**Orca-origin logical sessions**, not unique people, installations, active
-terminals, or proof that a particular prompt/CLI path was used. No persistent
-installation or user identifier is created.
+Root prompt eligibility and legacy telemetry use distinct projections of the
+same bounded activation-time environment snapshot. Guidance can recognize a
+unique Orca, Agterm, or Rex observation; `session_host` remains closed to
+`orca`, `agterm`, or `unknown`, so Rex never becomes a host-telemetry label.
 
-Attribution consumes only the complete, dedicated Orca launch-origin stamp:
+Orca attribution consumes only the complete, dedicated launch-origin stamp:
 `ORCA_RUNTIME_SOURCE_ID`, `ORCA_RUNTIME_SOURCE_INCARNATION`, and
 `ORCA_RUNTIME_SOURCE_PROFILE_PATH`. The Orca 1.4.245 bundled
 `shared/runtime-source-env` contract describes these as which runtime launched
-a process; `stampRuntimeSourceEnv` clears any inherited stamp before setting the
-new source. This implementation matches its trimmed, nonempty, at-most-4096-
-character fields, additionally rejecting control characters and requiring an
-absolute platform-appropriate profile path. The source ID and incarnation are
-opaque local validation inputs, not uploaded identifiers.
+a process; `stampRuntimeSourceEnv` clears inherited stamps before setting the
+new source. Validation matches trimmed, nonempty, at-most-4096-character fields,
+rejects control characters, and requires an absolute platform-appropriate
+profile path. Source ID and incarnation are opaque local validation inputs, not
+uploaded identifiers.
 
-This is measurement-only **launch-origin provenance**, not verification of a
-currently-live runtime, current process, foreground terminal, routing,
-cancellation, or security authority. A standalone root Pi inheriting a complete
-stamp can retain that Orca origin and count as another logical session. This
-is an intentional inheritance limitation, not a claim that the process is an
-Orca-managed agent. Native extension-managed children do not emit root starts.
-Reload/resume preserve existing logical-session suppression and do not
-reclassify the session.
+A standalone root Pi that inherits a complete valid Orca stamp can still classify and count as `orca`; this does not prove that the session remains Orca-managed.
 
-Installed CLI/skills, worktree paths, `ORCA_AGENT_PANE`, terminal handles, and
-other loose markers do not establish attribution. Older launchers, scrubbed,
-missing, partial, malformed, or oversized stamps produce `unknown`. These
-conservative checks can undercount Orca-origin sessions; `unknown` is not a
-non-Orca population. The stamp is not cryptographic proof against forged
-same-user environment variables.
+Agterm attribution uses only the exact `AGTERM_ENABLED=1` marker documented by
+[Agterm's installed skill](https://github.com/umputun/agterm/blob/master/plugins/agterm/skills/agterm/SKILL.md).
+It is set for Agterm shells including the quick terminal; `TERM_PROGRAM=agterm`,
+`AGTERM_SOCKET`, installed CLI/skill, or mux markers alone do not establish the
+host. The marker is inherited by child processes, including long-lived servers,
+so it is an environment observation rather than proof the app or target pane is
+currently live. `TMUX` and `ZELLIJ_SESSION_NAME` do not change `session_host`.
+When a complete Orca stamp and Agterm marker coexist, the single closed host
+dimension cannot express their topology and resolves to `unknown`.
 
-Only telemetry-enabled fresh roots evaluate this pure environment-to-enum
-classification. It runs no command, runtime probe, app launch, filesystem read,
-or network request on any platform; it neither discovers an installed CLI nor
-uses remote/active-tab defaults. No executable or environment-provided command
-is ever loaded. Existing opt-outs suppress classification as well as capture.
-There is no asynchronous detection or startup delay.
+These environment observations are measurement and prompt-eligibility inputs
+only, not live-process, foreground-terminal, routing, cancellation, or security
+authority. Missing, partial, malformed, or oversized Orca stamps and
+missing/non-exact Agterm markers resolve to `unknown`; `unknown` is not a
+non-Agterm or non-Orca population. Same-user environment variables can be
+forged.
 
-No raw stamp, handle, host version, path, Orca/Pi identifier, environment value,
-prompt, or argument is uploaded or logged by this detector; only the closed
-host label enters `session_started`. The existing random logical-tree telemetry
-UUID remains the only correlation identifier. Host is not propagated to other
-events or persisted in session state; native Orca backend attribution remains
-deferred.
+The extension captures one immutable bounded environment snapshot at
+activation, whether or not telemetry is enabled. It retains only closed
+categorical observations, not raw host values, identifiers, paths, or the
+environment object. The snapshot is reused for per-agent-start root prompt
+eligibility and session telemetry; it does not select a native mux. Native mux
+resolution uses separate current process-environment selectors and fresh live
+ownership/availability checks. Snapshot classification runs no command, runtime
+probe, app launch, filesystem read, or network request; it does not discover an
+installed CLI or use remote or active-tab defaults. Telemetry opt-outs suppress
+event capture, and `session_started` remains limited to telemetry-enabled fresh
+roots under the existing session policy. Native extension-managed children do
+not emit root starts, and reload/resume preserve logical-session suppression
+without reclassification. Prompt eligibility does not bypass fresh live
+ownership checks before using host tools or selecting an existing Rex target.
+
+No raw stamp, marker, handle, version, path, host/Pi identifier, environment
+value, prompt, or argument is uploaded or logged. The random
+`telemetry_session_id` remains the only cross-event correlation identifier;
+`session_host` itself is sent only on `session_started`. For extension-managed
+spawns, analytics may join that root host evidence to `agent_launch_resolved` by
+`telemetry_session_id` and group by the existing requested/resolved execution
+and mux fields. This does not measure or infer spawn mechanisms for workers
+launched externally by Orca or Agterm.
+
+### Terminal application
+
+Fresh root `session_started` events also include the additive schema-v6
+`terminal_program` dimension, independently of `session_host` and child `mux`.
+It maps `TERM_PROGRAM` through a closed allowlist: `agterm`, `ghostty`, `iterm2`
+(`iTerm.app`), `apple_terminal` (`Apple_Terminal`), `vscode`, `wezterm`
+(`WezTerm`), `kitty`, or `unknown`. Missing, unsupported, and malformed values
+become `unknown`; historical events without the field are also unknown.
+
+Agterm explicitly sets `TERM_PROGRAM=agterm` in its upstream
+[`SurfaceEnvironment`](https://github.com/umputun/agterm/blob/master/agtermCore/Sources/agtermCore/SurfaceEnvironment.swift)
+builder, including its quick terminal. We do not infer it from Ghostty engine
+markers, installed binaries, socket paths, or session IDs. No raw environment
+value, terminal version, or identifier is sent. Classification occurs
+synchronously as part of the activation snapshot without probes; the event
+remains subject to the existing fresh-root and telemetry opt-out gates.
+
+This measures the environment-advertised terminal application, not unique users
+or proof of the currently active terminal. Multiplexers, SSH, nested terminals,
+and inherited or overridden environments can hide or retain a value. Orca
+launch origin and terminal application can coexist; neither changes backend
+routing.
+
+### Parent multiplexer context
+
+Fresh root `session_started` events include the schema-v6 `parent_mux` dimension,
+with `rex` added as an allowed value in schema v7: `tmux`, `zellij`, `herdr`,
+`rex`, or `unknown`. This observes the parent Pi environment, not the child
+execution backend (`mux`) or requested backend (`requested_mux`). It uses a
+nonempty, bounded, control-character-free `TMUX` or `ZELLIJ_SESSION_NAME`, exact
+`HERDR_ENV=1`, or a complete nonempty `REX_SESSION`/`REX_BLOCK`/`REX_SERVER`
+marker set. Exactly one recognized marker produces its label. Missing, partial,
+or multiple markers produce `unknown`: nested environments do not reliably
+establish which mux is innermost. Missing historical fields are also unknown, not
+proof that no multiplexer was used.
+
+No command, binary availability check, socket connection, or server probe runs
+to classify `parent_mux`; the marker observation is activation-time. The
+separate native auto-backend path keeps its existing current availability and
+ownership checks. No raw socket path, session name, or other marker value is
+sent. The field appears only on events allowed by the existing fresh-root and
+telemetry opt-out gates. Inherited or forged markers remain possible, so this
+is observed context, not live ownership verification. The field does not alter
+backend selection. Join root events to child launch events by
+`telemetry_session_id` to compare parent context with child backends.
 
 ### Logical launch resolution
 
@@ -109,9 +183,9 @@ a provider error. A later LLM/tool call is a new request, not inferred recovery.
 Automatic mux candidate selection is not itself a rejected launch attempt.
 
 The event carries `requested_execution` (`in-process` or `interactive`),
-`requested_mux` (`none`, `auto`, `tmux`, `zellij`, or `herdr`), accepted `execution`
-when known, `mux` (`none`, `unknown`, `tmux`, `zellij`, or `herdr`),
-`invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
+`requested_mux` (`none`, `auto`, `tmux`, `zellij`, `herdr`, or `rex`), accepted
+`execution` when known, and `mux` (`none`, `unknown`, `tmux`, `zellij`, `herdr`,
+or `rex`), `invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
 `fallback_attempted`. An unresolved interactive backend is `unknown`, not
 `none`; an in-process path needs no mux and uses `none`. Optional
 `initial_failure_stage` / `initial_failure_operation` explain the first rejection,
@@ -811,9 +885,9 @@ Count observed `session_started` records by the closed host label. Keep schema,
 release, mode, origin, and UTC date filters explicit. Do not apply child `mux`,
 execution, or operation filters: host is emitted only on root session starts.
 Historical missing and unexpected values stay `unknown`. This report measures
-sessions, not people, installations, all active sessions, native Orca launches,
-or verified current foreground agents. Repeated human use can create many
-sessions; continuing sessions without a fresh start in the window are absent.
+sessions, not people, installations, all active sessions, or verified current
+foreground agents. Repeated human use can create many sessions; continuing
+sessions without a fresh start in the window are absent.
 
 ```sql
 SELECT
@@ -821,7 +895,8 @@ SELECT
   coalesce(properties.$lib_version, 'unknown') AS release,
   coalesce(properties.mode, 'unknown') AS mode,
   coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
-  CASE WHEN properties.session_host = 'orca' THEN 'orca'
+  CASE WHEN properties.session_host = 'agterm' THEN 'agterm'
+    WHEN properties.session_host = 'orca' THEN 'orca'
     ELSE 'unknown' END AS session_host,
   count(*) AS observed_session_starts
 FROM events
@@ -831,7 +906,53 @@ ORDER BY schema_version, release, mode, traffic_origin, observed_session_starts 
 ```
 
 No schema filter is hard-coded so historical missing host values remain visible.
-The additive field does not change schema-v6 event meanings or require rewriting
-the existing five reports. Do not call the `orca` share a unique-user share or
-the `unknown` remainder a non-Orca share, and do not use this event-only property
-as a shared filter on the other reports' active-tree denominators.
+The added host label does not change schema-v6 event shape. Do not call either
+the `agterm` or `orca` share a unique-user share, the `unknown` remainder a
+non-host share, or use this event-only property as a shared filter on the other
+reports' active-tree denominators.
+
+### 7. Extension-managed launch backend by outer host
+
+This is the package's observed spawn mechanism, not host-managed launches. Join
+the root `session_started` observation to `agent_launch_resolved` using the
+random `telemetry_session_id`; do not select or expose that identifier in the
+report. Missing historical host labels remain `unknown`.
+
+```sql
+WITH roots AS (
+  SELECT DISTINCT
+    properties.telemetry_session_id AS tree_id,
+    CASE WHEN properties.session_host = 'agterm' THEN 'agterm'
+      WHEN properties.session_host = 'orca' THEN 'orca'
+      ELSE 'unknown' END AS session_host
+  FROM events
+  WHERE {filters} AND event = 'pi_subagentura_session_started'
+), launches AS (
+  SELECT
+    coalesce(properties.schema_version, 0) AS schema_version,
+    coalesce(properties.$lib_version, 'unknown') AS release,
+    coalesce(properties.mode, 'unknown') AS mode,
+    coalesce(properties.traffic_origin, 'unknown') AS traffic_origin,
+    properties.telemetry_session_id AS tree_id,
+    coalesce(properties.outcome, 'unknown') AS outcome,
+    coalesce(properties.requested_execution, 'unknown') AS requested_execution,
+    coalesce(properties.requested_mux, 'unknown') AS requested_mux,
+    coalesce(properties.execution, 'unknown') AS execution,
+    coalesce(properties.mux, 'unknown') AS mux
+  FROM events
+  WHERE {filters} AND event = 'pi_subagentura_agent_launch_resolved'
+)
+SELECT
+  l.schema_version, l.release, l.mode, l.traffic_origin,
+  coalesce(r.session_host, 'unknown') AS session_host,
+  l.outcome, l.requested_execution, l.requested_mux, l.execution, l.mux,
+  count(*) AS observed_launch_resolutions,
+  count(DISTINCT l.tree_id) AS affected_trees
+FROM launches AS l
+LEFT JOIN roots AS r ON l.tree_id = r.tree_id
+GROUP BY l.schema_version, l.release, l.mode, l.traffic_origin,
+  session_host, l.outcome, l.requested_execution, l.requested_mux,
+  l.execution, l.mux
+ORDER BY l.schema_version, l.release, l.mode, l.traffic_origin,
+  session_host, observed_launch_resolutions DESC
+```

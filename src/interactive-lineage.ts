@@ -12,6 +12,12 @@ import {
   promises as fs,
 } from "node:fs";
 import path from "node:path";
+import {
+  isRexBlockId,
+  isRexServerAddress,
+  isMuxSocketPath,
+  isRexSessionId,
+} from "./multiplexer-contracts";
 
 export const LINEAGE_SCHEMA_VERSION = 1;
 export const DEFAULT_MAX_MANIFEST_BYTES = 16 * 1024;
@@ -49,6 +55,8 @@ export interface LineagePaneRef {
   /** Stable backend terminal identity when available (Herdr). */
   muxTerminalId?: string;
   muxSession?: string;
+  /** Stable server endpoint for server-scoped backends such as Rex. */
+  muxServer?: string;
   windowName?: string;
 }
 
@@ -774,7 +782,8 @@ export async function projectManifests(
     if (
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij" &&
-      manifest.pane.backend !== "herdr"
+      manifest.pane.backend !== "herdr" &&
+      manifest.pane.backend !== "rex"
     ) {
       issues.push({
         kind: "malformed",
@@ -1299,27 +1308,61 @@ function validatePaneRef(
   }
   rejectUnknownKeys(
     value,
-    new Set(["backend", "paneId", "muxTerminalId", "muxSession", "windowName"]),
+    new Set([
+      "backend",
+      "paneId",
+      "muxTerminalId",
+      "muxSession",
+      "muxServer",
+      "windowName",
+    ]),
     "pane",
   );
+  const backend = expectBoundedString(
+    value.backend,
+    "pane.backend",
+    bounds.maxStringBytes,
+  );
+  const paneId = expectBoundedString(
+    value.paneId,
+    "pane.paneId",
+    bounds.maxStringBytes,
+  );
+  const muxSession = optionalObjectString(
+    value,
+    "muxSession",
+    "pane.muxSession",
+    bounds,
+  );
+  const muxServer = (
+    backend === "tmux" ? optionalObjectString : optionalNonEmptyObjectString
+  )(value, "muxServer", "pane.muxServer", bounds);
+  if (
+    backend === "tmux" &&
+    muxServer.muxServer !== undefined &&
+    !isMuxSocketPath(muxServer.muxServer)
+  ) {
+    throw new Error("Tmux pane server socket is malformed");
+  }
+  if (
+    backend === "rex" &&
+    (!isRexBlockId(paneId) ||
+      !isRexSessionId(muxSession.muxSession) ||
+      !isRexServerAddress(muxServer.muxServer))
+  ) {
+    throw new Error("Rex pane identity is incomplete or malformed");
+  }
   return {
-    backend: expectBoundedString(
-      value.backend,
-      "pane.backend",
-      bounds.maxStringBytes,
-    ),
-    paneId: expectBoundedString(
-      value.paneId,
-      "pane.paneId",
-      bounds.maxStringBytes,
-    ),
+    backend,
+    paneId,
     ...optionalNonEmptyObjectString(
       value,
       "muxTerminalId",
       "pane.muxTerminalId",
       bounds,
     ),
-    ...optionalObjectString(value, "muxSession", "pane.muxSession", bounds),
+    ...muxSession,
+    ...muxServer,
     ...optionalObjectString(value, "windowName", "pane.windowName", bounds),
   };
 }
