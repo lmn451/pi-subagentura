@@ -736,6 +736,65 @@ describe("workflow supervisor integration", () => {
     }
   });
 
+  it("rejects an unverified mux context without an in-process retry", async () => {
+    const payloads = captureTelemetryPayloads();
+    // Use the same cached multiplexer module instance as workflow-tool.
+    const { MultiplexerContextUnavailableError } =
+      await import("../src/multiplexer");
+    const { context } = liveSessionContext({ id: 15, sessionId: "session-a" });
+    context.telemetry = createTelemetrySession(true);
+    const ownershipMessage = "Rex pane context could not be verified";
+    mockLaunch.mockImplementationOnce(
+      (
+        params: Parameters<typeof InteractiveTmux.launchInteractiveSubagent>[0],
+      ) => {
+        params.onSpawnFailure?.({
+          stage: "mux_resolution",
+          operation: "mux_resolution",
+        });
+        throw new MultiplexerContextUnavailableError(ownershipMessage);
+      },
+    );
+    const { pi, findTool } = makePi();
+    registerWorkflowTool(pi as never, context);
+
+    const result = await findTool().execute(
+      "call-unverified-mux",
+      {
+        script:
+          `export const meta = { name: "unverified-mux", description: "d" };\n` +
+          `let message; ` +
+          `try { await agent("inspect"); } catch (error) { ` +
+          `message = error instanceof Error ? error.message : String(error); } ` +
+          `return message;`,
+        async: false,
+      },
+      undefined,
+      vi.fn(),
+      { cwd: "/tmp", modelRegistry: {} },
+    );
+
+    expect(result.details).toMatchObject({ status: "done", errorCount: 1 });
+    expect(result.content[0]?.text).toContain(ownershipMessage);
+    expect(mockLaunch).toHaveBeenCalledOnce();
+    expect(mockStartSubagentJob).not.toHaveBeenCalled();
+    expect(context.inProcessJobs.size).toBe(0);
+
+    const resolutions = payloads.filter(
+      (payload) => payload.event === "pi_subagentura_agent_launch_resolved",
+    );
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0]?.properties).toMatchObject({
+      outcome: "rejected",
+      requested_execution: "interactive",
+      requested_mux: "auto",
+      fallback_attempted: false,
+      initial_failure_stage: "mux_resolution",
+      initial_failure_operation: "mux_resolution",
+    });
+    expect(resolutions[0]?.properties).not.toHaveProperty("execution");
+  });
+
   it.each(["model_resolution", "session_creation"] as const)(
     "emits one in-process failure when %s preparation rejects",
     async (failureStage) => {
@@ -1126,6 +1185,17 @@ describe("workflow supervisor integration", () => {
 
     // The blocking sync path must not acquire a new failure mode from being
     // tracked: it always ran before, so it still runs now.
+    const awaitImplementation =
+      mockAwaitInteractiveResult.getMockImplementation()!;
+    let reportChildReady!: () => void;
+    const childReady = new Promise<void>((resolve) => {
+      reportChildReady = resolve;
+    });
+    mockAwaitInteractiveResult.mockImplementationOnce((...args) => {
+      const completion = awaitImplementation(...args);
+      reportChildReady();
+      return completion;
+    });
     const execution = findTool().execute(
       "call-sync-capped",
       { script: SINGLE_AGENT_SCRIPT("sync-capped"), async: false },
@@ -1133,7 +1203,15 @@ describe("workflow supervisor integration", () => {
       vi.fn(),
       { cwd: "/tmp", modelRegistry: {} },
     );
-    await vi.waitFor(() => expect(mockLaunch).toHaveBeenCalledOnce());
+    await Promise.race([
+      childReady,
+      execution.then((result: unknown) => {
+        throw new Error(
+          `Synchronous workflow completed before launching its process agent: ${JSON.stringify(result)}`,
+        );
+      }),
+    ]);
+    expect(mockLaunch).toHaveBeenCalledOnce();
     releaseAgent(subagentResult("reviewed"));
     const result = await execution;
 
