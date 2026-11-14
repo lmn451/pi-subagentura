@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without weakening telemetry privacy.
 - Preserve cancelled-child counts in workflow results, status, and completion
   presentation instead of reporting resolved partial work as a clean completion.
+- Restrict Vitest discovery to the root `tests/` tree so nested repository
+  checkouts do not mix revisions or multiply the default test run.
 
 ## [4.2.1] - 2026-11-07
 

@@ -14,6 +14,9 @@ npm test
 npm run pack:check
 ```
 
+Vitest discovery is limited to the root `tests/**/*.test.ts` tree, so nested
+repositories and worktrees are not collected as tests.
+
 ## CI workflow and merge gates
 
 Pull requests are validated by the `pull_request` workflow trigger; branch pushes
