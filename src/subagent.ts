@@ -178,7 +178,16 @@ export default function (pi: ExtensionAPI) {
     const includeOrchestrator = !isChild && pi.getFlag("orchestrator") === true;
     const includeOrchestratorV2 =
       !isChild && pi.getFlag("orchestratorv2") === true;
-    const includeSplit = !isChild && isOrchestratorSplitEnabled(pi);
+    let includeSplit = false;
+    if (!isChild) {
+      try {
+        includeSplit = isOrchestratorSplitEnabled(pi);
+      } catch (error) {
+        // Pi catches before_agent_start errors and otherwise continues with the base prompt.
+        ctx.abort();
+        throw error;
+      }
+    }
     if (
       !includeOrchestrator &&
       !includeOrchestratorV2 &&

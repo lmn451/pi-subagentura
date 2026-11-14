@@ -343,9 +343,11 @@ describe("extension registration", () => {
       const hook = api.on.mock.calls.find(
         ([event]) => event === "before_agent_start",
       )![1];
-      expect(() => hook({ systemPrompt: "base prompt" }, {})).toThrow(
+      const abort = vi.fn();
+      expect(() => hook({ systemPrompt: "base prompt" }, { abort })).toThrow(
         "--split",
       );
+      expect(abort).toHaveBeenCalledOnce();
     },
   );
 
