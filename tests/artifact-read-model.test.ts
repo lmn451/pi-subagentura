@@ -7,6 +7,7 @@ import {
   artifactReadRequest,
   completionForRead,
   consumableArtifactCompletion,
+  isMetadataReadPlan,
   planArtifactRead,
   resolveArtifactRead,
   type ArtifactConsumption,
@@ -72,7 +73,10 @@ function read(
   request = latest,
   value = missing,
 ) {
-  return resolveArtifactRead(planArtifactRead(events, request), value);
+  const plan = planArtifactRead(events, request);
+  return isMetadataReadPlan(plan)
+    ? resolveArtifactRead(plan, { kind: "not_read" })
+    : resolveArtifactRead(plan, value);
 }
 
 describe("artifact read request", () => {
@@ -198,6 +202,17 @@ describe("artifact read resolution", () => {
       expect(artifactOutputContent(result.output)).toBe(
         output === "empty" ? "" : output === "available" ? "answer" : null,
       );
+    },
+  );
+
+  it.each([content, error])(
+    "ignores unexpected metadata payloads at the runtime boundary (%j)",
+    (value) => {
+      const plan = planArtifactRead([completed()], { kind: "metadata" });
+      // @ts-expect-error Exercise untyped callers without weakening the fixture helpers.
+      const result = resolveArtifactRead(plan, value);
+      expect(result.output).toEqual({ kind: "not_requested" });
+      expect(result.status).toBe("done");
     },
   );
 

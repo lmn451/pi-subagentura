@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SubagentEvent } from "../src/artifact";
 import type { ArtifactReadDocument } from "../src/artifact-read";
 import {
+  isMetadataReadPlan,
   planArtifactRead,
   resolveArtifactRead,
   type ArtifactReadRequest,
@@ -38,8 +39,12 @@ function document(
   request: ArtifactReadRequest = { kind: "latest" },
   value: ArtifactReadValue = { kind: "missing" },
 ): ArtifactReadDocument {
+  const plan = planArtifactRead(events, request);
+  const result = isMetadataReadPlan(plan)
+    ? resolveArtifactRead(plan, { kind: "not_read" })
+    : resolveArtifactRead(plan, value);
   return {
-    result: resolveArtifactRead(planArtifactRead(events, request), value),
+    result,
     events,
     outputHistory: [],
   };
@@ -126,7 +131,10 @@ describe("artifact read rendering", () => {
     const withTerminal = {
       ...doc,
       result: {
-        ...doc.result,
+        ...resolveArtifactRead(
+          planArtifactRead([started], { kind: "latest" }),
+          { kind: "error", error },
+        ),
         plan: planArtifactRead([started, failed], { kind: "latest" }),
       },
     };
@@ -167,9 +175,11 @@ describe("artifact read rendering", () => {
     const mismatched = {
       ...doc,
       result: {
-        ...doc.result,
+        ...resolveArtifactRead(planArtifactRead([failed], { kind: "latest" }), {
+          kind: "missing",
+        }),
         plan: {
-          ...doc.result.plan,
+          ...planArtifactRead([failed], { kind: "latest" }),
           selection: {
             ...doc.result.plan.selection,
             completion: {
