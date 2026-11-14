@@ -4,6 +4,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import isPathInside from "is-path-inside";
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -19,7 +20,7 @@ import {
   MAX_TURN_ID_LENGTH,
   listOutputHistory,
   readEvents,
-  readOutput,
+  readOutputWithDiagnostics,
   readOutputForTurnId,
   updateInteractiveState,
   type SubagentArtifact,
@@ -1222,7 +1223,7 @@ export function registerInteractiveSubagentTools(
     }),
     outputSchema: InteractiveStatusOutputSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const registration = resolveInteractiveToolStates(toolToken);
       const visibleStates = registration?.states;
       if (visibleStates) {
@@ -1319,7 +1320,7 @@ export function registerInteractiveSubagentTools(
       }),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const registration = resolveInteractiveToolStates(toolToken);
       const ownedState = registration?.states.get(params.jobId);
       const state = ownedState
@@ -1414,7 +1415,30 @@ export function registerInteractiveSubagentTools(
       }),
     }),
 
-    async execute(_toolCallId, params): Promise<any> {
+    async execute(
+      _toolCallId,
+      params,
+    ): Promise<
+      AgentToolResult<{
+        id: string;
+        status:
+          | InteractiveSubagentState["status"]
+          | "invalid_id"
+          | "empty_message"
+          | "message_too_large"
+          | "not_found"
+          | "workflow_owned"
+          | "send_failed"
+          | "sent";
+        messageLength?: number;
+        maxBytes?: number;
+        paneId?: string;
+        error?: string;
+        persistenceWarning?: string;
+        messagePreview?: string;
+        messageTruncated?: boolean;
+      }>
+    > {
       // Validate the id shape first for a precise error.
       if (!isValidSubagentId(params.id)) {
         return {
@@ -1641,7 +1665,7 @@ export function registerInteractiveSubagentTools(
     }),
     outputSchema: SubagentArtifactReadOutputSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const registration = resolveInteractiveToolStates(toolToken);
       const staleScope =
         !registration && toolToken ? findSessionScope(toolToken.id) : undefined;
@@ -1746,16 +1770,27 @@ export function registerInteractiveSubagentTools(
         const terminalErrorSummary = formatTerminalErrorSummary(terminalError);
         const lastEventValue =
           events.length > 0 ? events[events.length - 1] : null;
+        const stagingRead =
+          wantsOutput &&
+          params.turnId === undefined &&
+          !selectedCompletion &&
+          readSelection.lifecycleEvent !== null &&
+          readSelection.processExitEvent === null &&
+          !isArtifactOutputSettled(readSelection.lifecycleEvent)
+            ? readOutputWithDiagnostics(art)
+            : undefined;
+        const outputError = stagingRead?.outputError;
+        const outputReadError = outputError
+          ? outputError.code === "output_too_large"
+            ? `Output exceeds the safe read limit (${outputError.bytes} bytes; maximum ${outputError.maxBytes} bytes).`
+            : "Output could not be read safely."
+          : undefined;
         const output = wantsOutput
           ? params.turnId !== undefined
             ? readOutputForTurnId(art, params.turnId)
             : selectedCompletion
               ? readOutputForTurnId(art, selectedCompletion.turnId)
-              : readSelection.lifecycleEvent !== null &&
-                  readSelection.processExitEvent === null &&
-                  !isArtifactOutputSettled(readSelection.lifecycleEvent)
-                ? readOutput(art)
-                : null
+              : (stagingRead?.content ?? null)
           : null;
         // Distinguish three cases when output is missing/empty so the caller
         // doesn't see a misleading "not written yet" after the sub-agent has
@@ -1763,6 +1798,8 @@ export function registerInteractiveSubagentTools(
         let outputText: string;
         if (!wantsOutput) {
           outputText = "(not requested)";
+        } else if (outputReadError) {
+          outputText = outputReadError;
         } else if (output === null) {
           if (params.turnId !== undefined) {
             outputText = `(no immutable snapshot for turnId ${params.turnId})`;
@@ -1801,15 +1838,17 @@ export function registerInteractiveSubagentTools(
             registration?.scope ? sessionOwner(registration.scope) : undefined,
           );
         }
-        const readOutcome = resultReadOutcome({
-          artifactAvailable: true,
-          wantsOutput,
-          output,
-          selectedCompletion: readCompletion,
-          lastEvent:
-            readSelection.processExitEvent ?? readSelection.lifecycleEvent,
-          firstConsumption,
-        });
+        const readOutcome = outputError
+          ? "error"
+          : resultReadOutcome({
+              artifactAvailable: true,
+              wantsOutput,
+              output,
+              selectedCompletion: readCompletion,
+              lastEvent:
+                readSelection.processExitEvent ?? readSelection.lifecycleEvent,
+              firstConsumption,
+            });
         captureResultRead(readOutcome, readCompletion?.terminalTs);
         const terminalReadEvent =
           readSelection.processExitEvent ??
@@ -1821,21 +1860,27 @@ export function registerInteractiveSubagentTools(
           params.turnId !== undefined &&
           readSelection.artifactClosed &&
           readCompletion === undefined;
-        const artifactStatus = unmatchedClosedTurn
-          ? "not_found"
-          : (readCompletion?.outcome ?? terminalReadEvent?.status ?? "running");
+        const artifactStatus = outputError
+          ? "error"
+          : unmatchedClosedTurn
+            ? "not_found"
+            : (readCompletion?.outcome ??
+              terminalReadEvent?.status ??
+              "running");
         const artifactOutput = boundArtifactProviderOutput(output);
         const artifactOutputState = !wantsOutput
           ? "not_requested"
-          : output === null
-            ? readCompletion || terminalReadEvent
-              ? "missing"
-              : readSelection.artifactClosed
-                ? "unavailable"
-                : "pending"
-            : output.length === 0
-              ? "empty"
-              : "available";
+          : outputError
+            ? "unavailable"
+            : output === null
+              ? readCompletion || terminalReadEvent
+                ? "missing"
+                : readSelection.artifactClosed
+                  ? "unavailable"
+                  : "pending"
+              : output.length === 0
+                ? "empty"
+                : "available";
         return {
           content: [
             {
@@ -1861,7 +1906,9 @@ export function registerInteractiveSubagentTools(
             output,
             lastEvent: lastEventValue,
             outputHistory,
+            ...(outputError === undefined ? {} : { outputError }),
           },
+          ...(outputError === undefined ? {} : { isError: true }),
           structuredContent: {
             id: params.id,
             status: artifactStatus,
@@ -1889,7 +1936,9 @@ export function registerInteractiveSubagentTools(
                     selectedCompletion?.turnId ??
                     readSelection.lifecycleEvent?.turnId,
                 }),
-            ...(terminalError === undefined ? {} : { error: terminalError }),
+            ...((outputReadError ?? terminalError) === undefined
+              ? {}
+              : { error: outputReadError ?? terminalError }),
           },
         };
       } catch (error) {
@@ -1911,7 +1960,7 @@ export function registerInteractiveSubagentTools(
     parameters: Type.Object({}),
     outputSchema: SubagentArtifactListOutputSchema,
 
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<any> {
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const registration = resolveInteractiveToolStates(toolToken);
       const visibleStates = registration?.states;
       if (visibleStates) {
