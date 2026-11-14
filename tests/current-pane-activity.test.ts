@@ -37,7 +37,7 @@ function restorePaneEnvironment(): void {
 
 function mockResolvedPane(target?: LiveMuxTarget): void {
   vi.doMock("../src/multiplexer-current-context", () => ({
-    resolveCurrentMuxContext: () =>
+    resolveCurrentMuxContextAsync: async () =>
       target ? { kind: "ready", target } : { kind: "absent" },
   }));
 }
@@ -62,6 +62,49 @@ function installMockChildProcess(scenario: (args: string[]) => string): void {
   }));
 }
 
+describe("nonblocking current-pane activity", () => {
+  beforeEach(clearPaneEnvironment);
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("../src/multiplexer-current-context");
+    restorePaneEnvironment();
+  });
+
+  it("awaits asynchronous ownership discovery without calling its sync path", async () => {
+    installMockChildProcess(() => "1\t1\t0\n");
+    let finish!: (context: unknown) => void;
+    const discover = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const sync = vi.fn(() => {
+      throw new Error("blocking discovery called");
+    });
+    vi.doMock("../src/multiplexer-current-context", () => ({
+      resolveCurrentMuxContext: sync,
+      resolveCurrentMuxContextAsync: discover,
+    }));
+    const { getCurrentPaneActivity } = await importFresh<
+      typeof import("../src/interactive-tmux")
+    >("../src/interactive-tmux");
+    const result = getCurrentPaneActivity();
+    void result.catch(() => {
+      /* The assertion below diagnoses an old sync-path rejection. */
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(sync).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledOnce();
+    finish({ kind: "ready", target: { mux: "tmux", paneId: "%42" } });
+    await expect(result).resolves.toMatchObject({
+      status: "active",
+      mux: "tmux",
+      paneId: "%42",
+    });
+  });
+});
+
 describe("current pane live ownership", () => {
   const probes = vi.fn();
   const calls: string[][] = [];
@@ -82,7 +125,7 @@ describe("current pane live ownership", () => {
       return args.includes("display-message") ? "1\t1\t0\n" : "";
     });
     vi.doMock("../src/multiplexer-process-context", () => ({
-      readProcessContext: () => ({
+      readProcessContextAsync: async () => ({
         pid: 100,
         ancestors: [],
         processes: new Map(),
@@ -90,7 +133,7 @@ describe("current pane live ownership", () => {
       closestMuxAncestor: () => undefined,
     }));
     vi.doMock("../src/multiplexer-live-probes", () => ({
-      probeLiveMuxTarget: probes,
+      probeLiveMuxTargetAsync: probes,
     }));
   });
 

@@ -45,7 +45,10 @@ variables, so a reload cannot redirect an old child to a different server.
 ## Live ownership evidence and limits
 
 Automatic detection reads a bounded process snapshot on macOS and Linux, then
-queries candidate backends without creating panes or starting servers. tmux's
+queries candidate backends without creating panes or starting servers.
+Current-pane activity uses asynchronous process inspection and concurrent bounded
+backend queries, so slow inherited backends do not block Pi's event loop.
+Synchronous launch discovery uses the same validation and response parsers. tmux's
 pane PID and TTY, Herdr's shell PID, and a local Rex block's child/foreground PID
 are compared with this process's ancestry. Rex endpoints that do not identify a
 local Unix socket cannot supply comparable local PIDs for automatic detection.

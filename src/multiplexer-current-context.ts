@@ -5,11 +5,15 @@ import {
 } from "./multiplexer-contracts";
 import {
   probeLiveMuxTarget,
+  probeLiveMuxTargetAsync,
+  type LiveMuxProbe,
   type LiveMuxTarget,
 } from "./multiplexer-live-probes";
 import {
   closestMuxAncestor,
   readProcessContext,
+  readProcessContextAsync,
+  type ProcessContext,
 } from "./multiplexer-process-context";
 
 export type CurrentMuxContext =
@@ -98,14 +102,46 @@ export function resolveCurrentMuxContext(
 ): CurrentMuxContext {
   const { names, targets } = contextCandidates(env);
   if (names.length === 0) return { kind: "absent" };
-  const unavailable: CurrentMuxContext = {
+  const context = readProcessContext();
+  if (!context) return unavailableContext(names);
+  return selectCurrentMuxContext(
+    names,
+    context,
+    targets.map((target) => probeLiveMuxTarget(target, context, env)),
+  );
+}
+
+/** Advisory status checks must not block Pi while host commands are pending. */
+export async function resolveCurrentMuxContextAsync(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CurrentMuxContext> {
+  const observation = { ...env };
+  const { names, targets } = contextCandidates(observation);
+  if (names.length === 0) return { kind: "absent" };
+  const context = await readProcessContextAsync();
+  if (!context) return unavailableContext(names);
+  const probes = await Promise.all(
+    targets.map((target) =>
+      probeLiveMuxTargetAsync(target, context, observation),
+    ),
+  );
+  return selectCurrentMuxContext(names, context, probes);
+}
+
+function unavailableContext(names: string[]): CurrentMuxContext {
+  return {
     kind: "unavailable",
     message: `${names.join("/")} context is unavailable or cannot be tied to this process; refusing to guess. Use an explicit mux preference to override.`,
   };
-  const context = readProcessContext();
-  if (!context) return unavailable;
-  const matches = targets
-    .map((target) => probeLiveMuxTarget(target, context, env))
+}
+
+function selectCurrentMuxContext(
+  names: string[],
+  context: ProcessContext,
+  probes: LiveMuxProbe[],
+): CurrentMuxContext {
+  const unavailable = unavailableContext(names);
+  const matches = probes
     .filter((probe) => probe.kind === "match")
     .sort((a, b) => a.distance - b.distance);
   const winner = matches[0];

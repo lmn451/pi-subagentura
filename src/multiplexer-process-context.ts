@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { basename } from "node:path";
 import type { MuxName } from "./multiplexer-contracts";
 
@@ -63,16 +63,18 @@ function parseProcessTable(
   return processes;
 }
 
+function supportedProcessPid(pid: number): boolean {
+  return (
+    Number.isSafeInteger(pid) &&
+    pid > 0 &&
+    (process.platform === "darwin" || process.platform === "linux")
+  );
+}
+
 export function readProcessContext(
   pid = process.pid,
 ): ProcessContext | undefined {
-  if (
-    !Number.isSafeInteger(pid) ||
-    pid <= 0 ||
-    (process.platform !== "darwin" && process.platform !== "linux")
-  ) {
-    return undefined;
-  }
+  if (!supportedProcessPid(pid)) return undefined;
   let output: string;
   try {
     output = execFileSync("ps", ["-axo", "pid=,ppid=,tty=,comm="], {
@@ -83,9 +85,43 @@ export function readProcessContext(
       shell: false,
     });
   } catch {
-    // Process inspection is optional evidence, never a reason to fail launch.
+    // Failed inspection is missing evidence. Do not surface process output.
     return undefined;
   }
+  return processContextFromTable(output, pid);
+}
+
+export async function readProcessContextAsync(
+  pid = process.pid,
+): Promise<ProcessContext | undefined> {
+  if (!supportedProcessPid(pid)) return undefined;
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(
+        "ps",
+        ["-axo", "pid=,ppid=,tty=,comm="],
+        {
+          encoding: "utf8",
+          timeout: 1500,
+          maxBuffer: MAX_PROCESS_BYTES,
+          shell: false,
+        },
+        (error, output) => {
+          resolve(error ? undefined : processContextFromTable(output, pid));
+        },
+      );
+      child?.stdin?.end();
+    } catch {
+      // Synchronous spawn errors are also missing evidence, not caller errors.
+      resolve(undefined);
+    }
+  });
+}
+
+function processContextFromTable(
+  output: string,
+  pid: number,
+): ProcessContext | undefined {
   const processes = parseProcessTable(output);
   let current = processes?.get(pid);
   if (!processes || !current) return undefined;

@@ -80,7 +80,7 @@ import {
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
-import { resolveCurrentMuxContext } from "./multiplexer-current-context";
+import { resolveCurrentMuxContextAsync } from "./multiplexer-current-context";
 import {
   snapshotInteractiveContext,
   type CancellationSnapshotReceipt,
@@ -1253,7 +1253,7 @@ export interface CurrentPaneActivity {
 
 /** Probe whether the current Pi process's mux pane is active for the user. */
 export async function getCurrentPaneActivity(): Promise<CurrentPaneActivity> {
-  const context = resolveCurrentMuxContext();
+  const context = await resolveCurrentMuxContextAsync();
   if (context.kind !== "ready") return { status: "unknown" };
   const target = context.target;
   const location = {
