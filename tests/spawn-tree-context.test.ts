@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("explicit lineage context", () => {
-  it("uses maxDepth 4 for Orchestrator V2 roots", () => {
+  it("keeps ordinary Orchestrator V2 roots at depth 2 without split policy", () => {
     const root = createRootSpawnTreeContext(
       "orchestrator-root",
       tempDir(),
@@ -54,12 +54,41 @@ describe("explicit lineage context", () => {
       true,
     );
 
-    expect(root.maxDepth).toBe(4);
+    expect(root.maxDepth).toBe(2);
+    expect(root).not.toHaveProperty("splitMode");
+  });
+
+  it("enables split policy and depth four only for split-enabled V2 roots", () => {
+    const root = createRootSpawnTreeContext(
+      "split-root",
+      tempDir(),
+      false,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(root).toMatchObject({ maxDepth: 4, maxNodes: 256, splitMode: true });
+    const legacy = createRootSpawnTreeContext(
+      "legacy-root",
+      tempDir(),
+      true,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(legacy.maxDepth).toBe(8);
+    expect(legacy.splitMode).toBeUndefined();
   });
 
   it("keeps the default maxDepth for legacy roots", () => {
     expect(
-      createRootSpawnTreeContext("legacy", tempDir()).orchestratorV2Mode,
+      createRootSpawnTreeContext("legacy", tempDir()).splitMode,
     ).toBeUndefined();
     expect(createRootSpawnTreeContext("legacy-root", tempDir()).maxDepth).toBe(
       8,
@@ -238,9 +267,9 @@ describe("explicit lineage context", () => {
     expect(() => parseSpawnTreeContext({ ...root, maxDepth: 65 })).toThrow(
       /maxDepth/,
     );
-    expect(() =>
-      parseSpawnTreeContext({ ...root, orchestratorV2Mode: "true" }),
-    ).toThrow(/orchestratorV2Mode/);
+    expect(() => parseSpawnTreeContext({ ...root, splitMode: "true" })).toThrow(
+      /splitMode/,
+    );
   });
 
   it("ignores legacy ambient lineage variables", () => {

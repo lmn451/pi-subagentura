@@ -20,7 +20,8 @@ export const HIDE_AGENT_LIST_FLAG = "subagentura-hide-agent-list";
 export const TELEMETRY_FLAG = "subagentura-telemetry";
 export const TELEMETRY_OPT_OUT_FLAG = "no-subagentura-telemetry";
 export const TELEMETRY_ENV = "PI_SUBAGENTURA_TELEMETRY";
-export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 4;
+export const DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH = 2;
+export const DEFAULT_SPLIT_MAX_DEPTH = 4;
 const MAX_CONFIGURED_DEPTH = 64;
 const SETTINGS_EXTENSION_NAME = "pi-subagentura";
 const SETTINGS_FILE_NAME = "settings-extensions.json";
@@ -64,7 +65,7 @@ export type InvalidSettingReporter = (message: string) => void;
 export function registerExtensionSettings(pi: ExtensionAPI): void {
   pi.registerFlag(SPLIT_FLAG, {
     description:
-      "Automatically split broad requests into coordinated parts (requires --orchestratorv2)",
+      "Automatically split broad requests into coordinated parts, with default depth 4 (requires --orchestratorv2)",
     type: "boolean",
     default: false,
   });
@@ -116,7 +117,9 @@ export function readExtensionSettings(
   storageOptions: SettingStorageOptions = {},
   onInvalidSetting?: InvalidSettingReporter,
 ): ExtensionSettings {
-  isOrchestratorSplitEnabled(pi);
+  const defaultMaxDepth = isOrchestratorSplitEnabled(pi)
+    ? DEFAULT_SPLIT_MAX_DEPTH
+    : DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH;
   const maxDepthValue = readFlag(pi, MAX_DEPTH_FLAG);
   const hideAgentListValue = readFlag(pi, HIDE_AGENT_LIST_FLAG);
   // Parsed unconditionally so persisted validation never depends on whether a
@@ -128,7 +131,11 @@ export function readExtensionSettings(
   return {
     maxDepth:
       maxDepthValue === undefined || maxDepthValue === false
-        ? readPersistedMaxDepth(storageOptions, onInvalidSetting)
+        ? readPersistedMaxDepth(
+            storageOptions,
+            onInvalidSetting,
+            defaultMaxDepth,
+          )
         : parseMaxDepth(maxDepthValue),
     hideAgentList:
       parseHideAgentList(hideAgentListValue) || persistedHideAgentList,
@@ -194,6 +201,7 @@ function parseHideAgentList(value: unknown): boolean {
 function readPersistedMaxDepth(
   storageOptions: SettingStorageOptions,
   onInvalidSetting?: InvalidSettingReporter,
+  defaultMaxDepth = DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH,
 ): number {
   for (const path of settingsFilePaths(resolveStorageOptions(storageOptions))) {
     const raw = readSettingsFile(path, MAX_DEPTH_SETTING, onInvalidSetting)?.[
@@ -213,7 +221,7 @@ function readPersistedMaxDepth(
       );
     }
   }
-  return DEFAULT_ORCHESTRATOR_V2_MAX_DEPTH;
+  return defaultMaxDepth;
 }
 
 /**

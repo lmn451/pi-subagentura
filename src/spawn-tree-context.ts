@@ -43,8 +43,8 @@ export interface SpawnTreeContext {
   artifactDir?: string;
   /** Whether this lineage belongs to an orchestrator-mode parent. */
   orchestratorMode?: boolean;
-  /** Install recursive coordination guidance in every v2 descendant. */
-  orchestratorV2Mode?: boolean;
+  /** Propagate opt-in recursive coordination through the one-use bootstrap. */
+  splitMode?: boolean;
   /** Anonymous session correlation carried only by the one-use bootstrap. */
   telemetrySessionId?: string;
   /** Closed analytics mode propagated with the explicit correlation context. */
@@ -166,12 +166,9 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   if (orchestratorMode !== undefined && typeof orchestratorMode !== "boolean") {
     throw new Error("Invalid lineage bootstrap orchestratorMode");
   }
-  const orchestratorV2Mode = raw.orchestratorV2Mode;
-  if (
-    orchestratorV2Mode !== undefined &&
-    typeof orchestratorV2Mode !== "boolean"
-  ) {
-    throw new Error("Invalid lineage bootstrap orchestratorV2Mode");
+  const splitMode = raw.splitMode;
+  if (splitMode !== undefined && typeof splitMode !== "boolean") {
+    throw new Error("Invalid lineage bootstrap splitMode");
   }
   const telemetrySessionId =
     raw.telemetrySessionId === undefined
@@ -214,7 +211,7 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
     sessionRoot,
     ...(artifactDir ? { artifactDir } : {}),
     ...(orchestratorMode ? { orchestratorMode } : {}),
-    ...(orchestratorV2Mode ? { orchestratorV2Mode } : {}),
+    ...(splitMode ? { splitMode } : {}),
     ...(telemetrySessionId
       ? { telemetrySessionId: telemetrySessionId.toLowerCase() }
       : {}),
@@ -244,6 +241,7 @@ export function createRootSpawnTreeContext(
   telemetrySessionId?: string,
   telemetryMode?: TelemetryMode,
   telemetryOrigin?: TelemetryTrafficOrigin,
+  splitMode = false,
 ): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
@@ -251,13 +249,13 @@ export function createRootSpawnTreeContext(
     rootId,
     sessionRoot,
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
-    ...(orchestratorV2Mode ? { orchestratorV2Mode: true } : {}),
+    ...(orchestratorV2Mode && splitMode ? { splitMode: true } : {}),
     ...(telemetrySessionId ? { telemetrySessionId } : {}),
     ...(telemetryMode ? { telemetryMode } : {}),
     telemetryOrigin: telemetryOrigin ?? resolveTelemetryTrafficOrigin(),
     depth: 0,
     maxDepth: orchestratorV2Mode
-      ? (configuredMaxDepth ?? 4)
+      ? (configuredMaxDepth ?? (splitMode ? 4 : 2))
       : DEFAULT_MAX_DEPTH,
     maxNodes: DEFAULT_MAX_NODES,
   });
