@@ -240,6 +240,12 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain(
       "Do not ask the user for permission merely to create that specialist",
     );
+    expect(result.systemPrompt).not.toContain(
+      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
+    );
+    expect(result.systemPrompt).not.toContain(
+      "exactly one interactive child for each part",
+    );
     expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
@@ -291,6 +297,57 @@ describe("extension registration", () => {
     expect(result.systemPrompt).toContain("inspect the named target");
     expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
+
+  it("appends automatic decomposition only with --orchestratorv2 --split", async () => {
+    const api = mockApi({
+      getFlag: vi.fn((name: string) =>
+        ["orchestratorv2", "split"].includes(name),
+      ),
+    });
+    registerExtension(api as any);
+    expect(api.registerFlag).toHaveBeenCalledWith("split", {
+      description: expect.stringContaining("requires --orchestratorv2"),
+      type: "boolean",
+      default: false,
+    });
+    const hook = api.on.mock.calls.find(
+      ([event]) => event === "before_agent_start",
+    )![1];
+    const result = await hook({ systemPrompt: "base prompt" }, {});
+    expect(result.systemPrompt).toContain("# Orchestratorv2 Split Policy");
+    expect(result.systemPrompt).toContain(
+      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
+    );
+    expect(result.systemPrompt).toContain(
+      "exactly one interactive child for each part",
+    );
+    expect(result.systemPrompt).toContain("execution-surface precedence");
+  });
+
+  it.each([
+    { split: true, v2: false, legacy: false },
+    { split: true, v2: true, legacy: true },
+    { split: "true", v2: true, legacy: false },
+  ])(
+    "rejects invalid split configuration: %j",
+    async ({ split, v2, legacy }) => {
+      const api = mockApi({
+        getFlag: vi.fn(
+          (name: string) =>
+            ({ split, orchestratorv2: v2, orchestrator: legacy })[
+              name as "split" | "orchestratorv2" | "orchestrator"
+            ],
+        ),
+      });
+      registerExtension(api as any);
+      const hook = api.on.mock.calls.find(
+        ([event]) => event === "before_agent_start",
+      )![1];
+      expect(() => hook({ systemPrompt: "base prompt" }, {})).toThrow(
+        "--split",
+      );
+    },
+  );
 
   it("does not consume descendant bootstrap authority in parent mode", () => {
     const root = mkdtempSync(join(tmpdir(), "parent-bootstrap-gate-"));
