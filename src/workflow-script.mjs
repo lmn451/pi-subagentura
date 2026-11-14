@@ -272,25 +272,29 @@ function stripWorkflowExports(script, body, metaNode) {
 }
 
 export function makeGuardedDate() {
+  const NativeDate = Date;
+  const setPrototype = Object.setPrototypeOf;
   const Guard = function (...a) {
     if (a.length === 0) {
       throw new Error(
         "`new Date()` with no args is non-deterministic and unavailable in workflows. Pass a timestamp via `args`.",
       );
     }
-    return new Date(...a);
+    return setPrototype(new NativeDate(...a), Guard.prototype);
   };
   Guard.now = () => {
     throw new Error(
       "`Date.now()` is non-deterministic and unavailable in workflows. Pass a timestamp via `args`.",
     );
   };
-  Guard.parse = Date.parse;
-  Guard.UTC = Date.UTC;
-  // Don't set Guard.prototype = Date.prototype — that leaks host constructors
-  // via Date.prototype.constructor → Function. Use a null-prototype object instead.
-  Guard.prototype = Object.create(null);
-  Guard.prototype.constructor = Guard;
+  Guard.parse = NativeDate.parse;
+  Guard.UTC = NativeDate.UTC;
+  // Instances must lead back to the guard without mutating the native prototype.
+  Guard.prototype = Object.create(
+    Object.prototype,
+    Object.getOwnPropertyDescriptors(NativeDate.prototype),
+  );
+  Object.defineProperty(Guard.prototype, "constructor", { value: Guard });
   return Guard;
 }
 
