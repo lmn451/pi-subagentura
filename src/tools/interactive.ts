@@ -5,7 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import isPathInside from "is-path-inside";
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -212,6 +212,9 @@ const SubagentArtifactReadOutputSchema = Type.Object({
   turnId: Type.Optional(Type.String({ maxLength: MAX_TURN_ID_LENGTH })),
   error: Type.Optional(Type.String({ maxLength: MAX_ARTIFACT_ERROR_CHARS })),
 });
+type SubagentArtifactReadOutput = Static<
+  typeof SubagentArtifactReadOutputSchema
+>;
 
 const FOLLOWUP_COMPLETION_REMINDER =
   ' [MANDATORY COMPLETION PROTOCOL FOR EVERY FOLLOW-UP TURN: Before sending your final assistant response, write the result to output.md; make "$ARTIFACT_DIR/cli.mjs" done 0 your final tool call and wait for success. If it fails, do not send the final response; fix the cause and retry until completion is recorded. Do not rely on the lifecycle hook. After completion is recorded, remain in the Pi REPL and wait for follow-up; do not intentionally exit or close the pane unless explicitly asked.]';
@@ -1233,13 +1236,13 @@ export function registerInteractiveSubagentTools(
           registration.scope ? sessionOwner(registration.scope) : undefined,
         );
       }
-      const states = params.jobId
-        ? [visibleStates?.get(params.jobId)].filter(
-            (s): s is InteractiveSubagentState => Boolean(s),
-          )
-        : visibleStates
-          ? [...visibleStates.values()]
-          : [];
+      let states: InteractiveSubagentState[] = [];
+      if (params.jobId) {
+        const state = visibleStates?.get(params.jobId);
+        if (state) states = [state];
+      } else if (visibleStates) {
+        states = [...visibleStates.values()];
+      }
 
       if (states.length === 0) {
         return {
@@ -1347,11 +1350,13 @@ export function registerInteractiveSubagentTools(
         ctx.ui,
         registration?.scope ? sessionOwner(registration.scope) : undefined,
       );
-      const snapshotText = state.cancellationSnapshot?.path
-        ? ` Snapshot ${state.cancellationSnapshot.status}: ${state.cancellationSnapshot.path}`
-        : state.cancellationSnapshot?.error
-          ? ` Snapshot error: ${state.cancellationSnapshot.error}`
-          : "";
+      let snapshotText = "";
+      if (state.cancellationSnapshot?.path) {
+        snapshotText = ` Snapshot ${state.cancellationSnapshot.status}: ${state.cancellationSnapshot.path}`;
+      } else if (state.cancellationSnapshot?.error) {
+        snapshotText = ` Snapshot error: ${state.cancellationSnapshot.error}`;
+      }
+      const snapshotDescription = snapshotText ? `${snapshotText}.` : "";
       userNotification =
         `Interactive sub-agent ${params.jobId} cancelled; coordinated delivery will use one TUI notice and, when eligible, one compact cancellation selector. ` +
         `Artifacts retained at ${state.artifactDir}.${snapshotText}`;
@@ -1368,11 +1373,7 @@ export function registerInteractiveSubagentTools(
               `Interactive sub-agent ${params.jobId} cancelled. ` +
               `Coordinated delivery will use one TUI notice and, when eligible, one compact cancellation selector. ` +
               `Artifacts retained at ${state.artifactDir}.` +
-              (state.cancellationSnapshot?.path
-                ? ` Snapshot ${state.cancellationSnapshot.status}: ${state.cancellationSnapshot.path}.`
-                : state.cancellationSnapshot?.error
-                  ? ` Snapshot error: ${state.cancellationSnapshot.error}.`
-                  : ""),
+              snapshotDescription,
           },
         ],
         details: { ...state },
@@ -1718,11 +1719,12 @@ export function registerInteractiveSubagentTools(
             scope !== registration.scope &&
             scope.interactiveStates.has(params.id),
         );
-      const art = state
-        ? getArtifactForState(state)
-        : registration && !foreignInMemoryState
-          ? findOwnedDiskArtifact(ctx.cwd, params.id, registration.scope)
-          : null;
+      let art: SubagentArtifact | null = null;
+      if (state) {
+        art = getArtifactForState(state);
+      } else if (registration && !foreignInMemoryState) {
+        art = findOwnedDiskArtifact(ctx.cwd, params.id, registration.scope);
+      }
       if (!art) {
         captureResultRead("unavailable");
         return {
@@ -1768,30 +1770,44 @@ export function registerInteractiveSubagentTools(
             : undefined;
         const terminalError = terminalErrorDetail(selectedTerminalEvent);
         const terminalErrorSummary = formatTerminalErrorSummary(terminalError);
-        const lastEventValue =
-          events.length > 0 ? events[events.length - 1] : null;
-        const stagingRead =
+        const lastEventValue = events.at(-1) ?? null;
+        const lastEventSummary = lastEventValue
+          ? `${lastEventValue.type} @ ${lastEventValue.ts}`
+          : "(none)";
+        let terminalReadEvent = readSelection.processExitEvent;
+        if (
+          !terminalReadEvent &&
+          readSelection.lifecycleEvent &&
+          isArtifactOutputSettled(readSelection.lifecycleEvent)
+        ) {
+          terminalReadEvent = readSelection.lifecycleEvent;
+        }
+        const shouldReadStagingOutput =
           wantsOutput &&
           params.turnId === undefined &&
           !selectedCompletion &&
           readSelection.lifecycleEvent !== null &&
           readSelection.processExitEvent === null &&
-          !isArtifactOutputSettled(readSelection.lifecycleEvent)
-            ? readOutputWithDiagnostics(art)
-            : undefined;
-        const outputError = stagingRead?.outputError;
-        const outputReadError = outputError
-          ? outputError.code === "output_too_large"
-            ? `Output exceeds the safe read limit (${outputError.bytes} bytes; maximum ${outputError.maxBytes} bytes).`
-            : "Output could not be read safely."
+          !isArtifactOutputSettled(readSelection.lifecycleEvent);
+        const stagingRead = shouldReadStagingOutput
+          ? readOutputWithDiagnostics(art)
           : undefined;
-        const output = wantsOutput
-          ? params.turnId !== undefined
-            ? readOutputForTurnId(art, params.turnId)
-            : selectedCompletion
-              ? readOutputForTurnId(art, selectedCompletion.turnId)
-              : (stagingRead?.content ?? null)
-          : null;
+        const outputError = stagingRead?.outputError;
+        let outputReadError: string | undefined;
+        if (outputError?.code === "output_too_large") {
+          outputReadError = `Output exceeds the safe read limit (${outputError.bytes} bytes; maximum ${outputError.maxBytes} bytes).`;
+        } else if (outputError) {
+          outputReadError = "Output could not be read safely.";
+        }
+        const outputTurnId = params.turnId ?? selectedCompletion?.turnId;
+        let output: string | null = null;
+        if (wantsOutput) {
+          if (outputTurnId !== undefined) {
+            output = readOutputForTurnId(art, outputTurnId);
+          } else {
+            output = stagingRead?.content ?? null;
+          }
+        }
         // Distinguish three cases when output is missing/empty so the caller
         // doesn't see a misleading "not written yet" after the sub-agent has
         // already exited (the common case: model finished without writing).
@@ -1803,16 +1819,10 @@ export function registerInteractiveSubagentTools(
         } else if (output === null) {
           if (params.turnId !== undefined) {
             outputText = `(no immutable snapshot for turnId ${params.turnId})`;
+          } else if (terminalReadEvent) {
+            outputText = `(sub-agent exited without writing output.md — last event: ${terminalReadEvent.type} @ ${terminalReadEvent.ts})`;
           } else {
-            const settledEvent =
-              readSelection.processExitEvent ??
-              (readSelection.lifecycleEvent &&
-              isArtifactOutputSettled(readSelection.lifecycleEvent)
-                ? readSelection.lifecycleEvent
-                : null);
-            outputText = settledEvent
-              ? `(sub-agent exited without writing output.md — last event: ${settledEvent.type} @ ${settledEvent.ts})`
-              : `(${events.length} events, last: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"} — output.md not written yet)`;
+            outputText = `(${events.length} events, last: ${lastEventSummary} — output.md not written yet)`;
           }
         } else if (output.length === 0) {
           outputText = "(empty — 0 chars)";
@@ -1850,44 +1860,46 @@ export function registerInteractiveSubagentTools(
               firstConsumption,
             });
         captureResultRead(readOutcome, readCompletion?.terminalTs);
-        const terminalReadEvent =
-          readSelection.processExitEvent ??
-          (readSelection.lifecycleEvent &&
-          isArtifactOutputSettled(readSelection.lifecycleEvent)
-            ? readSelection.lifecycleEvent
-            : null);
         const unmatchedClosedTurn =
           params.turnId !== undefined &&
           readSelection.artifactClosed &&
           readCompletion === undefined;
-        const artifactStatus = outputError
-          ? "error"
-          : unmatchedClosedTurn
-            ? "not_found"
-            : (readCompletion?.outcome ??
-              terminalReadEvent?.status ??
-              "running");
+        let artifactStatus: SubagentArtifactReadOutput["status"];
+        if (outputError) {
+          artifactStatus = "error";
+        } else if (unmatchedClosedTurn) {
+          artifactStatus = "not_found";
+        } else {
+          artifactStatus =
+            readCompletion?.outcome ?? terminalReadEvent?.status ?? "running";
+        }
         const artifactOutput = boundArtifactProviderOutput(output);
-        const artifactOutputState = !wantsOutput
-          ? "not_requested"
-          : outputError
-            ? "unavailable"
-            : output === null
-              ? readCompletion || terminalReadEvent
-                ? "missing"
-                : readSelection.artifactClosed
-                  ? "unavailable"
-                  : "pending"
-              : output.length === 0
-                ? "empty"
-                : "available";
+        let artifactOutputState: SubagentArtifactReadOutput["outputState"];
+        if (!wantsOutput) {
+          artifactOutputState = "not_requested";
+        } else if (outputError) {
+          artifactOutputState = "unavailable";
+        } else if (output === null) {
+          if (readCompletion || terminalReadEvent) {
+            artifactOutputState = "missing";
+          } else if (readSelection.artifactClosed) {
+            artifactOutputState = "unavailable";
+          } else {
+            artifactOutputState = "pending";
+          }
+        } else {
+          artifactOutputState = output.length === 0 ? "empty" : "available";
+        }
+        const artifactTurnId =
+          outputTurnId ?? readSelection.lifecycleEvent?.turnId;
+        const artifactError = outputReadError ?? terminalError;
         return {
           content: [
             {
               type: "text",
               text:
                 `Artifact for ${params.id} (${events.length} event${events.length === 1 ? "" : "s"}${params.since ? ` since ${params.since}` : ""}).\n` +
-                `Last event: ${lastEventValue ? `${lastEventValue.type} @ ${lastEventValue.ts}` : "(none)"}\n` +
+                `Last event: ${lastEventSummary}\n` +
                 (params.turnId !== undefined
                   ? `Reading turnId: ${params.turnId}\n`
                   : "") +
@@ -1926,19 +1938,8 @@ export function registerInteractiveSubagentTools(
                     turnId: lastEventValue.turnId,
                   },
                 }),
-            ...((params.turnId ??
-              selectedCompletion?.turnId ??
-              readSelection.lifecycleEvent?.turnId) === undefined
-              ? {}
-              : {
-                  turnId:
-                    params.turnId ??
-                    selectedCompletion?.turnId ??
-                    readSelection.lifecycleEvent?.turnId,
-                }),
-            ...((outputReadError ?? terminalError) === undefined
-              ? {}
-              : { error: outputReadError ?? terminalError }),
+            ...(artifactTurnId === undefined ? {} : { turnId: artifactTurnId }),
+            ...(artifactError === undefined ? {} : { error: artifactError }),
           },
         };
       } catch (error) {
@@ -1996,10 +1997,14 @@ export function registerInteractiveSubagentTools(
       const lines = summary.map((s) => {
         const ev = s.lastEvent;
         const taskPreview = (s.task ?? "").replace(/\s+/g, " ").slice(0, 60);
-        const evStr = ev
-          ? `last: ${ev.type}${ev.message ? ` (${ev.message.slice(0, 60)})` : ""}`
-          : "no events yet";
-        return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${evStr}`;
+        let eventSummary = "no events yet";
+        if (ev) {
+          const messagePreview = ev.message
+            ? ` (${ev.message.slice(0, 60)})`
+            : "";
+          eventSummary = `last: ${ev.type}${messagePreview}`;
+        }
+        return `${s.id}  ${s.name}  [${s.status}]  ${taskPreview} — ${eventSummary}`;
       });
       return {
         content: [{ type: "text", text: lines.join("\n") }],
