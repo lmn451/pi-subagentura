@@ -316,93 +316,104 @@ describe("result collection during receipt storage failure", () => {
     expect(missing.isError).toBe(true);
   });
 
-  it("preserves an interactive snapshot for retry", async () => {
-    const id = "abcd123400000001";
-    const art = artifactPath(root, id);
-    writeOutput(art, "retained snapshot");
-    appendCompletionEvent(art, {
-      turnId: "turn-result",
-      outcome: "done",
-      source: "agent_settled",
-    });
-    scope.interactiveStates.set(id, {
-      id,
-      name: "Result",
-      task: "task",
-      cwd: root,
-      artifactDir: art.dir,
-      status: "exited",
-      mux: "tmux",
-      paneId: "%99",
-      startedAt: Date.now(),
-      sessionFile: join(root, "session.jsonl"),
-      launchScriptFile: join(root, "launch.sh"),
-      attachCommand: "",
-      selectPaneCommand: "",
-    } satisfies InteractiveSubagentState);
-    const statusTool = tools.get("get_interactive_subagent_status")!;
-    const status = await statusTool.execute(
-      "status-populated",
-      {},
-      undefined,
-      undefined,
-      { cwd: root, ui: { setStatus: vi.fn() } },
-    );
-    expect(expectStructuredOutput(statusTool, status)).toMatchObject({
-      status: "ok",
-      count: 1,
-      subagents: [
-        expect.objectContaining({
-          id,
-          name: "Result",
-          status: "exited",
-        }),
-      ],
-    });
-    const listTool = tools.get("list_subagent_artifacts")!;
-    const listed = await listTool.execute(
-      "list-populated",
-      {},
-      undefined,
-      undefined,
-      { cwd: root, ui: { setStatus: vi.fn() } },
-    );
-    const listedData = expectStructuredOutput(listTool, listed);
-    expect(listedData).toMatchObject({
-      status: "ok",
-      count: 1,
-      artifacts: [
-        expect.objectContaining({
-          id,
-          name: "Result",
-          status: "exited",
-        }),
-      ],
-    });
-    expect(JSON.stringify(listedData)).not.toContain(art.dir);
-    expect(JSON.stringify(listedData)).not.toContain("task");
-    publish("interactive", id);
-    const read = () =>
-      tools
-        .get("read_subagent_artifact")!
-        .execute("read", { id, turnId: "turn-result" }, undefined, undefined, {
-          cwd: root,
-        });
+  it.each(["retained snapshot", ""])(
+    "preserves an interactive snapshot for retry (%j)",
+    async (snapshot) => {
+      const id = "abcd123400000001";
+      const art = artifactPath(root, id);
+      writeOutput(art, snapshot);
+      appendCompletionEvent(art, {
+        turnId: "turn-result",
+        outcome: "done",
+        source: "agent_settled",
+      });
+      scope.interactiveStates.set(id, {
+        id,
+        name: "Result",
+        task: "task",
+        cwd: root,
+        artifactDir: art.dir,
+        status: "exited",
+        mux: "tmux",
+        paneId: "%99",
+        startedAt: Date.now(),
+        sessionFile: join(root, "session.jsonl"),
+        launchScriptFile: join(root, "launch.sh"),
+        attachCommand: "",
+        selectPaneCommand: "",
+      } satisfies InteractiveSubagentState);
+      const statusTool = tools.get("get_interactive_subagent_status")!;
+      const status = await statusTool.execute(
+        "status-populated",
+        {},
+        undefined,
+        undefined,
+        { cwd: root, ui: { setStatus: vi.fn() } },
+      );
+      expect(expectStructuredOutput(statusTool, status)).toMatchObject({
+        status: "ok",
+        count: 1,
+        subagents: [
+          expect.objectContaining({
+            id,
+            name: "Result",
+            status: "exited",
+          }),
+        ],
+      });
+      const listTool = tools.get("list_subagent_artifacts")!;
+      const listed = await listTool.execute(
+        "list-populated",
+        {},
+        undefined,
+        undefined,
+        { cwd: root, ui: { setStatus: vi.fn() } },
+      );
+      const listedData = expectStructuredOutput(listTool, listed);
+      expect(listedData).toMatchObject({
+        status: "ok",
+        count: 1,
+        artifacts: [
+          expect.objectContaining({
+            id,
+            name: "Result",
+            status: "exited",
+          }),
+        ],
+      });
+      expect(JSON.stringify(listedData)).not.toContain(art.dir);
+      expect(JSON.stringify(listedData)).not.toContain("task");
+      publish("interactive", id);
+      const read = () =>
+        tools
+          .get("read_subagent_artifact")!
+          .execute(
+            "read",
+            { id, turnId: "turn-result" },
+            undefined,
+            undefined,
+            {
+              cwd: root,
+            },
+          );
 
-    await expect(read()).rejects.toThrow(/receipt.*persist|persist.*receipt/i);
-    restoreStorage();
-    const collected = await read();
-    expect(collected.details.output).toBe("retained snapshot");
-    expect(
-      expectStructuredOutput(tools.get("read_subagent_artifact")!, collected),
-    ).toMatchObject({
-      id,
-      status: "done",
-      outputState: "available",
-      output: "retained snapshot",
-    });
-    expectDurableConsumption();
-  });
+      await expect(read()).rejects.toThrow(
+        /receipt.*persist|persist.*receipt/i,
+      );
+      restoreStorage();
+      const collected = await read();
+      expect(collected.details.output).toBe(snapshot);
+      expect(
+        expectStructuredOutput(tools.get("read_subagent_artifact")!, collected),
+      ).toMatchObject({
+        id,
+        status: "done",
+        outputState: snapshot.length === 0 ? "empty" : "available",
+        output: snapshot,
+      });
+      expectDurableConsumption();
+    },
+  );
 
   it("does not treat an unmatched turn as pending after process exit", async () => {
     const id = "abcd123400000003";
