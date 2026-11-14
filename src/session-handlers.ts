@@ -652,6 +652,7 @@ export function registerSessionHandlers(
         scope.telemetry.enabled ? scope.telemetry.correlationId : undefined,
         scope.telemetry.mode,
         scope.telemetry.trafficOrigin,
+        isOrchestratorSplitEnabled(pi),
       );
     }
     scope.isParentIdle =

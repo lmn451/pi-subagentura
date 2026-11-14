@@ -36,9 +36,11 @@ import { shellEscape } from "../src/multiplexer-contracts";
 import { clearSessionScopes } from "../src/session-scope";
 import { createTestSessionScope } from "./session-scope-fixture";
 
-const socket =
+const socketPrefix =
   process.env.PI_SUBAGENTURA_TMUX_SOCKET ??
   `pi-subagentura-test-${process.pid}`;
+let socket: string;
+let socketSequence = 0;
 
 const savedEnv = {
   PATH: process.env.PATH,
@@ -114,6 +116,8 @@ async function waitFor(
 }
 
 beforeEach(() => {
+  // Never reuse a preceding test's server identity during its shutdown.
+  socket = `${socketPrefix}-${++socketSequence}`;
   tempRoot = mkdtempSync(join(tmpdir(), "pi-subagentura-tmux-"));
   installFakePiBin(tempRoot);
 
