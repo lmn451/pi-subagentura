@@ -13,7 +13,7 @@ export const TOOL_DEFAULT_GUIDANCE =
 export function registerToolWithDefaultGuidance<
   TParams extends TSchema,
   TDetails = unknown,
-  TState = any,
+  TState = unknown,
 >(pi: ExtensionAPI, tool: ToolDefinition<TParams, TDetails, TState>): void {
   const executeWithTelemetry = withOperationTelemetry(
     pi,
