@@ -15,6 +15,7 @@ import { resolveTelemetryTrafficOrigin } from "./telemetry";
 export { TELEMETRY_ORIGIN_ENV } from "./telemetry";
 
 export const MAX_DEPTH_FLAG = "subagentura-max-depth";
+export const SPLIT_FLAG = "split";
 export const HIDE_AGENT_LIST_FLAG = "subagentura-hide-agent-list";
 export const TELEMETRY_FLAG = "subagentura-telemetry";
 export const TELEMETRY_OPT_OUT_FLAG = "no-subagentura-telemetry";
@@ -61,6 +62,12 @@ export interface ExtensionSettings {
 export type InvalidSettingReporter = (message: string) => void;
 
 export function registerExtensionSettings(pi: ExtensionAPI): void {
+  pi.registerFlag(SPLIT_FLAG, {
+    description:
+      "Automatically split broad requests into coordinated parts (requires --orchestratorv2)",
+    type: "boolean",
+    default: false,
+  });
   pi.registerFlag(MAX_DEPTH_FLAG, {
     description: `Override the persisted Orchestratorv2 max-depth setting for this run (0-${MAX_CONFIGURED_DEPTH}); legacy orchestration stays at 8`,
     type: "string",
@@ -109,6 +116,7 @@ export function readExtensionSettings(
   storageOptions: SettingStorageOptions = {},
   onInvalidSetting?: InvalidSettingReporter,
 ): ExtensionSettings {
+  isOrchestratorSplitEnabled(pi);
   const maxDepthValue = readFlag(pi, MAX_DEPTH_FLAG);
   const hideAgentListValue = readFlag(pi, HIDE_AGENT_LIST_FLAG);
   // Parsed unconditionally so persisted validation never depends on whether a
@@ -125,6 +133,19 @@ export function readExtensionSettings(
     hideAgentList:
       parseHideAgentList(hideAgentListValue) || persistedHideAgentList,
   };
+}
+
+export function isOrchestratorSplitEnabled(pi: ExtensionAPI): boolean {
+  const split = readFlag(pi, SPLIT_FLAG);
+  if (split === undefined || split === false) return false;
+  if (split !== true) throw new Error("--split must be a boolean");
+  if (
+    readFlag(pi, "orchestratorv2") !== true ||
+    readFlag(pi, "orchestrator") === true
+  ) {
+    throw new Error("--split requires --orchestratorv2 without --orchestrator");
+  }
+  return true;
 }
 
 function readFlag(pi: ExtensionAPI, name: string): unknown {
