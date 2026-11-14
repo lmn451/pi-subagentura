@@ -36,7 +36,12 @@ function selector(value: unknown): value is string {
   );
 }
 function socket(value: unknown): value is string {
-  return selector(value) && value.startsWith("/");
+  return (
+    typeof value === "string" &&
+    value.length <= 4096 &&
+    value.startsWith("/") &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
 }
 function pid(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -147,7 +152,7 @@ function rexProbe(
     return UNKNOWN;
   const server = target.server;
   if (
-    !selector(server) ||
+    typeof server !== "string" ||
     !(
       (server.startsWith("unix:///") && socket(server.slice(7))) ||
       socket(server)
@@ -239,8 +244,16 @@ export function probeLiveMuxTarget(
 ): LiveMuxProbe {
   if (
     !selector(target.paneId) ||
-    (target.session !== undefined && !selector(target.session)) ||
-    (target.server !== undefined && !selector(target.server))
+    (target.session !== undefined &&
+      !(target.mux === "herdr"
+        ? socket(target.session)
+        : selector(target.session))) ||
+    (target.server !== undefined &&
+      !(target.mux === "rex"
+        ? (target.server.startsWith("unix:///") &&
+            socket(target.server.slice(7))) ||
+          socket(target.server)
+        : selector(target.server)))
   )
     return UNKNOWN;
   try {

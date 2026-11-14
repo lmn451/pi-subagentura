@@ -64,6 +64,53 @@ describe("read-only live mux ownership probes", () => {
     );
     expect(spawn).not.toHaveBeenCalled();
   });
+  it.each(["/tmp/mux sockets/live.sock", "/tmp/mux #1/live.sock"])(
+    "accepts exact spaced Unix socket paths %s without shell parsing",
+    (path) => {
+      exec.mockReturnValue("%4\t90\t/dev/pts/1\n");
+      expect
+        .soft(
+          probeLiveMuxTarget(tmux, context(), { TMUX: `${path},20,0` }).kind,
+        )
+        .toBe("match");
+      expect
+        .soft(exec.mock.calls.at(-1)?.[1])
+        .toEqual(expect.arrayContaining(["-S", path]));
+      exec.mockReturnValue(
+        JSON.stringify({ result: { process_info: { shell_pid: 90 } } }),
+      );
+      expect
+        .soft(
+          probeLiveMuxTarget(
+            { mux: "herdr", paneId: "w1:p2", session: path },
+            context(),
+            {},
+          ).kind,
+        )
+        .toBe("match");
+      expect
+        .soft(exec.mock.calls.at(-1)?.[2])
+        .toEqual(expect.objectContaining({ env: { HERDR_SOCKET_PATH: path } }));
+      exec.mockReturnValue(JSON.stringify({ child: { pid: 90 } }));
+      for (const server of [path, `unix://${path}`]) {
+        expect
+          .soft(
+            probeLiveMuxTarget(
+              { mux: "rex", paneId, session, server },
+              context(),
+              {},
+            ).kind,
+          )
+          .toBe("match");
+        expect
+          .soft(exec.mock.calls.at(-1)?.[1])
+          .toEqual(expect.arrayContaining(["--server", server]));
+      }
+      for (const call of exec.mock.calls) {
+        expect(call[2]).toEqual(expect.objectContaining({ shell: false }));
+      }
+    },
+  );
   it("accepts a directly execed agent as the pane root process", () => {
     exec.mockReturnValue("%4\t100\t/dev/pts/1\n");
     expect(probeLiveMuxTarget(tmux, context(), env)).toEqual({
@@ -144,6 +191,24 @@ describe("read-only live mux ownership probes", () => {
       "process",
     ]);
   });
+  it.each(["\x00", "\t", "\n", "\r", "\x1f", "\x7f"])(
+    "rejects control characters in socket paths %j without exec",
+    (control) => {
+      const path = `/tmp/mux${control}/live.sock`;
+      const targets = [
+        { mux: "tmux", paneId: "%4" },
+        { mux: "herdr", paneId: "w1:p2", session: path },
+        { mux: "rex", paneId, session, server: path },
+        { mux: "rex", paneId, session, server: `unix://${path}` },
+      ] as const;
+      for (const target of targets) {
+        expect(
+          probeLiveMuxTarget(target, context(), { TMUX: `${path},20,0` }).kind,
+        ).toBe("unknown");
+      }
+      expect(exec).not.toHaveBeenCalled();
+    },
+  );
   it("never compares remote Rex PIDs", () => {
     expect(
       probeLiveMuxTarget(
@@ -199,6 +264,8 @@ describe("read-only live mux ownership probes", () => {
     { mux: "herdr", paneId: "--help", session: "/tmp/herdr.sock" },
     { mux: "herdr", paneId: "w1:p1", session: "--help" },
     { mux: "zellij", paneId: "4", session: "--help" },
+    { mux: "zellij", paneId: "4", session: "work space" },
+    { mux: "herdr", paneId: "pane space", session: "/tmp/herdr.sock" },
     { mux: "rex", paneId, session: "--help", server: "/tmp/rex.sock" },
     { mux: "rex", paneId, session, server: "unix:///tmp/rex.sock\n--help" },
   ] as const)("rejects injected backend selectors %j", (target) => {
