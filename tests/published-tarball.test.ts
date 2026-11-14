@@ -228,6 +228,7 @@ describe("published tarball", () => {
       expect.arrayContaining([
         "ORCHESTRATOR_SYSTEM_PROMPT.md",
         "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+        "ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md",
         "ORCA_INTERACTIVE_SYSTEM_PROMPT.md",
         "REX_INTERACTIVE_SYSTEM_PROMPT.md",
         "INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
@@ -251,6 +252,10 @@ describe("published tarball", () => {
         },
         {
           specifier: "../ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+          runtime: true,
+        },
+        {
+          specifier: "../ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md",
           runtime: true,
         },
         { specifier: "./tools/orchestrator", runtime: true },

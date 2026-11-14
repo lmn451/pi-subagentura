@@ -307,6 +307,17 @@ surface is selected, Orchestratorv2 directs delegation through native attachable
 specialists using its parent-session authority ledger; the project-local routing
 cache is only an untrusted lookup aid.
 
+Add `--split` to opt into automatic decomposition of broad requests:
+
+```bash
+pi --orchestratorv2 --split
+```
+
+This appends `ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md`, which requires routing
+each independent part to a specialist while preserving the base routing and
+host safeguards. Without `--split`, decomposition remains optional. The flag
+requires `--orchestratorv2` and cannot be combined with `--orchestrator`.
+
 ### Host-aware interactive agent spawning
 
 `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` is the detailed Orca host/UX guide.
@@ -423,6 +434,7 @@ persisted extension settings, and launch flags. The extension also exposes these
 validated launch flags for advanced configurations:
 
 - `--subagentura-max-depth <n>` — override `max-depth` for the current run; legacy orchestration keeps its existing depth of `8`. Unlike the persisted setting, an invalid value here fails fast.
+- `--split` — automatically decompose broad requests; requires `--orchestratorv2` without `--orchestrator`.
 - `--subagentura-hide-agent-list` — force `hide-agent-list` on for the current run without changing the persisted global setting. It also works without the optional settings panel. The flag is on-only: it cannot override a persisted `hide-agent-list` of `true`, so to show the rows again clear the global setting.
 - `--subagentura-telemetry` — presence-only boolean flag, enabled by default; it
   is not an opt-out and does not bypass persisted telemetry precedence.
