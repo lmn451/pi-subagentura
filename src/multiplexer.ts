@@ -20,9 +20,107 @@ import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
 import { RexMultiplexer } from "./multiplexer-rex";
 import { resolveCurrentMuxContext } from "./multiplexer-current-context";
-import type { MuxName, Multiplexer } from "./multiplexer-contracts";
+import {
+  validateMuxLaunchContext,
+  type MuxName,
+  type Multiplexer,
+  type MuxLaunchContext,
+} from "./multiplexer-contracts";
 
 export * from "./multiplexer-contracts";
+
+export interface ResolvedMux {
+  readonly adapter: Multiplexer;
+  readonly context: MuxLaunchContext;
+}
+
+/** Capture launch authority once, independently of persisted-job dispatch. */
+export function resolveMux(opts: GetMuxOptions = {}): ResolvedMux {
+  const env = { ...process.env };
+  const preference = opts.preference ?? "auto";
+  let adapter: Multiplexer;
+  let context: MuxLaunchContext;
+  if (preference === "auto") {
+    const current = resolveCurrentMuxContext(env);
+    if (current.kind === "unavailable")
+      throw new MultiplexerContextUnavailableError(current.message);
+    if (current.kind === "ready") {
+      adapter = getMux({ preference: current.target.mux });
+      context = { ...current.target, kind: "attached" };
+    } else {
+      const tmux = getMux({ preference: "tmux" });
+      const zellij = getMux({ preference: "zellij" });
+      adapter = tmux.isAvailable()
+        ? tmux
+        : zellij.isAvailable()
+          ? zellij
+          : (() => {
+              throw new NoMultiplexerAvailableError();
+            })();
+      context = detachedContext(adapter.name, env);
+    }
+  } else {
+    adapter = getMux({ preference });
+    if (adapter.name === "rex") {
+      const probe = (adapter as RexMultiplexer).probeContext(env);
+      if (probe.kind !== "ready")
+        throw new MultiplexerContextUnavailableError(
+          "No verified Rex context is available for this launch",
+        );
+      context = {
+        kind: "attached",
+        mux: "rex",
+        paneId: probe.context.blockId,
+        session: probe.context.sessionId,
+        server: probe.context.server,
+      };
+    } else if (adapter.name === "herdr") {
+      context = {
+        kind: "attached",
+        mux: "herdr",
+        paneId: env.HERDR_PANE_ID!,
+        session: env.HERDR_SOCKET_PATH!,
+      };
+    } else if (adapter.name === "zellij" && env.ZELLIJ) {
+      context = {
+        kind: "attached",
+        mux: "zellij",
+        paneId: env.ZELLIJ_PANE_ID ?? "0",
+        session: env.ZELLIJ_SESSION_NAME!,
+      };
+    } else if (adapter.name === "tmux" && env.TMUX) {
+      context = {
+        kind: "attached",
+        mux: "tmux",
+        paneId: env.TMUX_PANE!,
+        server: /^(.*),\d+,\d+$/.exec(env.TMUX)?.[1]!,
+        ...(env.PI_SUBAGENTURA_TMUX_SOCKET
+          ? { socketName: env.PI_SUBAGENTURA_TMUX_SOCKET }
+          : {}),
+      };
+    } else {
+      context = detachedContext(adapter.name, env);
+    }
+  }
+  validateMuxLaunchContext(adapter.name, context);
+  if (adapter instanceof TmuxMultiplexer) adapter = adapter.forContext(context);
+  return Object.freeze({ adapter, context: Object.freeze(context) });
+}
+
+function detachedContext(
+  mux: MuxName,
+  env: NodeJS.ProcessEnv,
+): MuxLaunchContext {
+  if (mux !== "tmux" && mux !== "zellij")
+    throw new Error("Backend requires attached launch context");
+  return {
+    kind: "detached",
+    mux,
+    ...(mux === "tmux" && env.PI_SUBAGENTURA_TMUX_SOCKET
+      ? { socketName: env.PI_SUBAGENTURA_TMUX_SOCKET }
+      : {}),
+  };
+}
 
 /** Exhaustiveness checker for the supported resolver preferences. */
 function assertNever(value: never): never {

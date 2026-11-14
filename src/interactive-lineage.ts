@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   isRexBlockId,
   isRexServerAddress,
+  isMuxSocketPath,
   isRexSessionId,
 } from "./multiplexer-contracts";
 
@@ -1333,12 +1334,16 @@ function validatePaneRef(
     "pane.muxSession",
     bounds,
   );
-  const muxServer = optionalNonEmptyObjectString(
-    value,
-    "muxServer",
-    "pane.muxServer",
-    bounds,
-  );
+  const muxServer = (
+    backend === "tmux" ? optionalObjectString : optionalNonEmptyObjectString
+  )(value, "muxServer", "pane.muxServer", bounds);
+  if (
+    backend === "tmux" &&
+    muxServer.muxServer !== undefined &&
+    !isMuxSocketPath(muxServer.muxServer)
+  ) {
+    throw new Error("Tmux pane server socket is malformed");
+  }
   if (
     backend === "rex" &&
     (!isRexBlockId(paneId) ||

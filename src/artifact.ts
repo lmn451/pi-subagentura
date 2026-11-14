@@ -37,6 +37,7 @@ import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import {
+  isMuxSocketPath,
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
@@ -708,15 +709,13 @@ export function readOutputForTurnId(
   ) {
     return null;
   }
-  let fd: number | undefined;
   try {
     const realArtifactDir = realpathSync(art.dir);
     const realTarget = realpathSync(target);
     if (!isPathInside(realTarget, realArtifactDir)) return null;
-    fd = openSync(realTarget, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size !== history.output.bytes) return null;
-    const content = readFileSync(fd);
+    const result = readBoundedOutputFile(target);
+    const content = result.content;
+    if (!content) return null;
     if (
       content.byteLength !== history.output.bytes ||
       createHash("sha256").update(content).digest("hex") !==
@@ -726,9 +725,8 @@ export function readOutputForTurnId(
     }
     return content.toString("utf8");
   } catch {
+    // Missing, replaced, or unsafe snapshots are unavailable to the caller.
     return null;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -1114,14 +1112,87 @@ export function eventLogEndOffset(art: SubagentArtifact): number {
   }
 }
 
-/** Returns output.md content, or null if it doesn't exist yet. */
-export function readOutput(art: SubagentArtifact): string | null {
-  if (!existsSync(art.outputFile)) return null;
+type BoundedOutputRead = {
+  content: Buffer | null;
+  outputError?: OutputSnapshotError;
+};
+
+function readBoundedOutputFile(path: string): BoundedOutputRead {
+  let fd: number | undefined;
+  const unavailable: BoundedOutputRead = {
+    content: null,
+    outputError: {
+      code: "output_unavailable",
+      message: "Output could not be read safely",
+    },
+  };
   try {
-    return readFileSync(art.outputFile, "utf8");
-  } catch {
-    return null;
+    // NONBLOCK prevents a child-controlled FIFO from blocking before fstat.
+    fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      return unavailable;
+    }
+    const tooLarge = (bytes: number): BoundedOutputRead => ({
+      content: null,
+      outputError: {
+        code: "output_too_large",
+        bytes,
+        maxBytes: MAX_OUTPUT_SNAPSHOT_BYTES,
+      },
+    });
+    if (stat.size > MAX_OUTPUT_SNAPSHOT_BYTES) return tooLarge(stat.size);
+    // One probe byte detects growth without ever reading an unbounded fd.
+    const content = Buffer.alloc(stat.size + 1);
+    let offset = 0;
+    while (offset < content.length) {
+      const count = readSync(
+        fd,
+        content,
+        offset,
+        content.length - offset,
+        offset,
+      );
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > MAX_OUTPUT_SNAPSHOT_BYTES) return tooLarge(offset);
+    if (offset > stat.size) return unavailable;
+    return { content: content.subarray(0, offset) };
+  } catch (error) {
+    // Missing staging output remains the normal not-yet-written outcome.
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { content: null }
+      : unavailable;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* Closing failure must not turn the nullable read API into a throw. */
+      }
+    }
   }
+}
+
+/** Safely read staging output and expose bounded, content-free diagnostics. */
+export function readOutputWithDiagnostics(art: SubagentArtifact): {
+  content: string | null;
+  outputError?: OutputSnapshotError;
+} {
+  const result = readBoundedOutputFile(art.outputFile);
+  return {
+    content: result.content?.toString("utf8") ?? null,
+    ...(result.outputError ? { outputError: result.outputError } : {}),
+  };
+}
+
+/** Returns bounded output.md content, or null when absent or unsafe. */
+export function readOutput(art: SubagentArtifact): string | null {
+  return readOutputWithDiagnostics(art).content;
 }
 
 /** List all sub-agent artifacts under `rootDir`. Ignores loose files. */
@@ -1774,6 +1845,9 @@ function normalizeV2StatePayload(
           raw.mux !== "zellij" &&
           raw.mux !== "herdr" &&
           raw.mux !== "rex") ||
+        (raw.mux === "tmux" &&
+          raw.muxServer !== undefined &&
+          !isMuxSocketPath(raw.muxServer)) ||
         (raw.mux === "rex" &&
           (!isRexBlockId(raw.paneId) ||
             !isRexSessionId(raw.muxSession) ||
@@ -2082,7 +2156,9 @@ function normalizeV2StatePayload(
           ? { muxSession: entry.muxSession }
           : {}),
         ...(typeof entry.muxServer === "string" &&
-        isRexServerAddress(entry.muxServer)
+        (entry.mux === "tmux"
+          ? isMuxSocketPath(entry.muxServer)
+          : isRexServerAddress(entry.muxServer))
           ? { muxServer: entry.muxServer }
           : {}),
         artifactDir: entry.artifactDir,

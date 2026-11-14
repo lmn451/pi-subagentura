@@ -55,7 +55,7 @@ function installMockExec(scenario: (file: string, args: string[]) => string) {
   vi.resetModules();
   vi.doMock("node:child_process", () => ({
     execFileSync: (_file: string, args: string[]) =>
-      scenario("tmux", args as string[]),
+      scenario("tmux", args[0] === "-S" ? args.slice(2) : args),
   }));
 }
 
@@ -127,7 +127,11 @@ describe("interactive-tmux", () => {
     vi.doMock("../src/multiplexer-current-context", () => ({
       resolveCurrentMuxContext: vi.fn(() => ({
         kind: "ready",
-        target: { mux: "tmux", paneId: process.env.TMUX_PANE || "%1" },
+        target: {
+          mux: "tmux",
+          paneId: process.env.TMUX_PANE || "%1",
+          server: "/tmp/tmux-1000/default",
+        },
       })),
     }));
     // Isolate auto-selection from ambient Herdr and Zellij identities in this
@@ -496,9 +500,11 @@ describe("interactive-tmux", () => {
 
     expect(state.cwd).toBe(parentCwd);
     expect(state.workingCwd).toBe(childCwd);
+    expect(state.muxServer).toBe("/tmp/tmux-1000/default");
     expect(loadInteractiveStates(parentCwd)?.states[state.id]).toMatchObject({
       parentSessionId: "parent-session",
       workingCwd: childCwd,
+      muxServer: "/tmp/tmux-1000/default",
     });
     expect(loadInteractiveStates(childCwd)).toBeNull();
   });
@@ -825,7 +831,9 @@ describe("interactive-tmux", () => {
     expect(state.paneId).toBe(MOCK_PANE_ID);
     expect(state.windowName).toBeUndefined();
     expect(state.attachCommand).toContain("select-pane -t '%42'");
-    expect(state.selectPaneCommand).toBe("tmux select-pane -t '%42'");
+    expect(state.selectPaneCommand).toBe(
+      "tmux '-S' '/tmp/tmux-1000/default' select-pane -t '%42'",
+    );
 
     const usedSplitWindow = calls.some((args) => args[0] === "split-window");
     const usedNewWindow = calls.some((args) => args[0] === "new-window");

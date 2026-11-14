@@ -14,6 +14,19 @@ npm test
 npm run pack:check
 ```
 
+`npm run typecheck` also runs an incremental strict-core check. The dependency-light
+identifier and usage modules and the public workflow declarations enable
+`noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` in
+`tsconfig.core.json`; compile-only negative contracts live under `typechecks/`
+and in the public workflow declaration tests. Expand that scope only after
+fixing the newly included modules, rather than weakening their checks or
+enabling both flags across unrelated SDK integration code in one change.
+
+`tsconfig.worker.json` separately checks the JavaScript worker and RPC decoder
+with `allowJs` and `checkJs`. Keep that check in `npm run typecheck`: a
+hand-maintained declaration describes a JavaScript module's exports but does
+not check its implementation.
+
 ## CI workflow and merge gates
 
 Pull requests are validated by the `pull_request` workflow trigger; branch pushes

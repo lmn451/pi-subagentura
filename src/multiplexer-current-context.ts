@@ -2,6 +2,9 @@ import {
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
+  isMuxSocketPath,
+  validateMuxLaunchContext,
+  type MuxTarget,
   isZellijSessionName,
 } from "./multiplexer-contracts";
 import {
@@ -19,7 +22,7 @@ import {
 
 export type CurrentMuxContext =
   | { readonly kind: "absent" }
-  | { readonly kind: "ready"; readonly target: LiveMuxTarget }
+  | { readonly kind: "ready"; readonly target: MuxTarget }
   | { readonly kind: "unavailable"; readonly message: string };
 
 function safeSelector(value: string | undefined): value is string {
@@ -40,8 +43,14 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
   const targets: LiveMuxTarget[] = [];
   if (env.TMUX !== undefined || env.TMUX_PANE !== undefined) {
     names.push("tmux");
-    if (safeSelector(env.TMUX) && /^%\d+$/.test(env.TMUX_PANE ?? "")) {
-      targets.push({ mux: "tmux", paneId: env.TMUX_PANE! });
+    if (/^%\d+$/.test(env.TMUX_PANE ?? "")) {
+      const server = /^(.*),\d+,\d+$/.exec(env.TMUX ?? "")?.[1];
+      if (isMuxSocketPath(server))
+        targets.push({
+          mux: "tmux",
+          paneId: env.TMUX_PANE!,
+          server,
+        });
     }
   }
   if (
@@ -65,7 +74,7 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
     names.push("Herdr");
     if (
       env.HERDR_ENV === "1" &&
-      safeSelector(env.HERDR_SOCKET_PATH) &&
+      isMuxSocketPath(env.HERDR_SOCKET_PATH) &&
       /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(env.HERDR_PANE_ID ?? "")
     ) {
       targets.push({
@@ -164,5 +173,12 @@ function selectCurrentMuxContext(
     // a same-distance Zellij root; PID-backed matches need strict separation.
     return unavailable;
   }
-  return { kind: "ready", target: winner.target };
+  const target = winner.target as MuxTarget;
+  try {
+    validateMuxLaunchContext(target.mux, { ...target, kind: "attached" });
+  } catch {
+    // A malformed probe result cannot grant launch authority.
+    return unavailable;
+  }
+  return { kind: "ready", target: Object.freeze({ ...target }) };
 }

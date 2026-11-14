@@ -61,6 +61,12 @@ import {
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
 import {
+  isWorkerParentMessage,
+  type WorkerRpcRequest,
+  type WorkerRpcResponse,
+  type ParentWorkerMessage,
+} from "./workflow-rpc";
+import {
   cancelInteractiveSubagent,
   getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
@@ -268,15 +274,6 @@ export async function runWorkflow(
     opts.signal?.removeEventListener("abort", forwardAbort);
   }
 }
-
-type WorkerRpcRequest = { id: number; method: string; payload: any };
-type WorkerRpcResponse = {
-  id: number;
-  ok: boolean;
-  value?: unknown;
-  error?: string;
-  tokensDelta: number;
-};
 
 class WorkerRpcFailure extends Error {
   readonly tokensDelta: number;
@@ -635,13 +632,13 @@ function runWorkflowWorker(
       return;
     }
 
-    worker.on("message", (msg: WorkerRpcRequest | WorkerRpcResponse | any) => {
-      if (settled || !msg || typeof msg !== "object") return;
-      if (msg.type === "result") {
+    worker.on("message", (msg: unknown) => {
+      if (settled || !isWorkerParentMessage(msg)) return;
+      if ("type" in msg && msg.type === "result") {
         done(msg.value);
         return;
       }
-      if (msg.type === "error") {
+      if ("type" in msg && msg.type === "error") {
         const message = String(msg.error ?? "Workflow worker failed.");
         if (typeof msg.rpcId === "number" && runnerFailures.has(msg.rpcId)) {
           fail(
@@ -652,17 +649,12 @@ function runWorkflowWorker(
         }
         return;
       }
-      if (msg.type === "progress") {
+      if ("type" in msg && msg.type === "progress") {
         emit(msg.payload);
         return;
       }
-      if (typeof msg.id !== "number" || typeof msg.method !== "string") return;
-      handleWorkerRpc(
-        msg as WorkerRpcRequest,
-        worker,
-        engine,
-        runAgentCall,
-      ).catch((err) => {
+      if (!("method" in msg)) return;
+      handleWorkerRpc(msg, worker, engine, runAgentCall).catch((err) => {
         if (err instanceof WorkerRpcFailure && err.runnerFailure) {
           runnerFailures.set(msg.id, err.runnerFailure.cause);
         } else if (workflowFailureClassification(err)) {
@@ -693,7 +685,7 @@ function runWorkflowWorker(
       syncTimeoutMs: WORKFLOW_SYNC_TIMEOUT_MS,
       maxItemsPerCall: MAX_ITEMS_PER_CALL,
       maxWorkflowDepth: MAX_WORKFLOW_DEPTH,
-    });
+    } satisfies ParentWorkerMessage);
   });
 }
 
@@ -729,7 +721,7 @@ async function handleWorkerRpc(
     });
     return;
   }
-  throw new Error(`Unknown workflow worker RPC method: ${msg.method}`);
+  assertNever(msg);
 }
 
 function postWorkerResponse(worker: Worker, msg: WorkerRpcResponse): void {

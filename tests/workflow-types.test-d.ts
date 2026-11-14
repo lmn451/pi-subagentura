@@ -52,3 +52,87 @@ async function authorWorkflow(): Promise<unknown> {
 cwd = "/different";
 
 void authorWorkflow;
+
+async function pipelineContracts() {
+  const unchanged: Array<number | null> = await pipeline([1]);
+  const awaitedUnchanged = await pipeline([Promise.resolve("input")]);
+  const zeroStageStrings: Array<string | null> = awaitedUnchanged;
+  // @ts-expect-error Zero-stage pipelines preserve awaited input types.
+  const zeroStageNumbers: Array<number | null> = awaitedUnchanged;
+  void unchanged;
+  void zeroStageStrings;
+  void zeroStageNumbers;
+  const increment = async (value: number) => value + 1;
+  const longResult = await pipeline(
+    [1],
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    (value: number) => `${value}`,
+  );
+  const longStrings: Array<string | null> = longResult;
+  // @ts-expect-error Variadic results retain the final string type.
+  const longNumbers: Array<number | null> = longResult;
+  pipeline(
+    [1],
+    // @ts-expect-error The variadic path rejects a mismatched final stage.
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    increment,
+    (value: string) => value,
+  );
+  void longStrings;
+  void longNumbers;
+  const result = await pipeline(
+    [1],
+    async (value) => `${value}`,
+    (value) => value.length,
+    async (value) => ({ count: value }),
+    (value, item, index) => {
+      // @ts-expect-error Awaited intermediate objects retain their exact shape.
+      value.notARealProperty;
+      // @ts-expect-error The original item remains numeric at every stage.
+      item.toUpperCase();
+      // @ts-expect-error The index remains numeric at every stage.
+      index.toUpperCase();
+      return value.count + item + index;
+    },
+    (value) => value.toFixed(),
+    async (value) => value.length,
+  );
+  const numbers: Array<number | null> = result;
+  // @ts-expect-error The final numeric result must not degrade to any.
+  result[0]?.notARealMethod();
+  // @ts-expect-error The final result is not a string array.
+  const strings: Array<string | null> = result;
+  pipeline(
+    [1],
+    // @ts-expect-error Adjacent stages must accept the awaited previous result.
+    (value) => `${value}`,
+    (value: number) => value + 1,
+    (value: number) => value,
+    (value: number) => value,
+  );
+  void numbers;
+  void strings;
+}
+
+void pipelineContracts;

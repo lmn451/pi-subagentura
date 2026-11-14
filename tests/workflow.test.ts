@@ -387,6 +387,113 @@ describe("determinism guards", () => {
     expect(r.result).toBe("undefined,undefined");
   });
 
+  it.each([
+    "agent",
+    "parallel",
+    "pipeline",
+    "phase",
+    "log",
+    "workflow",
+    "console.log",
+    "console.error",
+    "console.warn",
+    "budget.spent",
+    "budget.remaining",
+    "Math.floor",
+    "Date.parse",
+    "Date.UTC",
+  ])("blocks host constructors on %s", async (callable) => {
+    await expect(
+      run(`return ${callable}.constructor('return typeof process')();`),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+  });
+
+  it("blocks Date instance constructor guard bypass", async () => {
+    await expect(
+      run(`return typeof new Date(0).constructor.now();`),
+    ).rejects.toThrow(/Date\.now/);
+  });
+
+  it("converts the args object graph to VM-owned prototypes", async () => {
+    await expect(
+      runWorkflow(
+        meta +
+          `return args.nested[0].constructor.constructor('return typeof process')();`,
+        { runAgent: echoRunner(), args: { nested: [{}] } },
+      ),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+  });
+
+  it("preserves argument cycles, shared Dates and sparse arrays", async () => {
+    const date = new Date(0);
+    const args: {
+      self?: unknown;
+      date: Date;
+      dates: Date[];
+      sparse: unknown[];
+    } = {
+      date,
+      dates: [date],
+      sparse: new Array(3),
+    };
+    args.self = args;
+    const result = await runWorkflow(
+      meta +
+        `return args.self === args &&
+      args.date === args.dates[0] && args.sparse.length === 3 &&
+      args.date.getTime() === 0 && args.date instanceof Date;`,
+      { runAgent: echoRunner(), args },
+    );
+    expect(result.result).toBe(true);
+  });
+
+  it("keeps helper promises and aggregate results in the VM realm", async () => {
+    await expect(
+      run(`const pending = agent('literal');
+      return pending.constructor.constructor('return typeof process')();`),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+    await expect(
+      run(`const values = await parallel([() => agent('literal')]);
+      return values.constructor.constructor('return typeof process')();`),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+  });
+
+  it("preserves VM-owned values returned by aggregate callbacks", async () => {
+    const result = await run(`const value = {};
+      const p = await parallel([() => value]);
+      const q = await pipeline([value], (item) => item);
+      return p[0] === value && q[0] === value;`);
+    expect(result.result).toBe(true);
+  });
+
+  it.each(["parallel", "pipeline"])(
+    "keeps %s map callbacks in the VM realm",
+    async (helper) => {
+      const result = await run(`let blocked = false;
+      const items = [];
+      items.map = (callback) => {
+        try { callback.constructor('return typeof process')(); }
+        catch { blocked = true; }
+        return [];
+      };
+      await ${helper}(items);
+      return blocked;`);
+      expect(result.result).toBe(true);
+    },
+  );
+
+  it("keeps RPC result and error prototypes in the VM realm", async () => {
+    await expect(
+      run(`const value = await agent('literal');
+      return value.constructor.constructor('return typeof process')();`),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+    await expect(
+      run(`try { await agent(''); } catch (error) {
+      return error.constructor.constructor('return typeof process')();
+    }`),
+    ).rejects.toThrow(/Code generation from strings disallowed/);
+  });
+
   it("blocks constructor-chain access to host process", async () => {
     await expect(
       run(`return this.constructor.constructor("return process.version")();`),

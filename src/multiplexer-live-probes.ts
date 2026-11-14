@@ -3,6 +3,7 @@ import {
   isRexBlockId,
   isRexSessionId,
   isZellijSessionName,
+  isTmuxSocketLabel,
   type MuxName,
 } from "./multiplexer-contracts";
 import {
@@ -16,6 +17,7 @@ export interface LiveMuxTarget {
   readonly paneId: string;
   readonly session?: string;
   readonly server?: string;
+  readonly socketName?: string;
 }
 export type LiveMuxProbe =
   | { kind: "match"; target: LiveMuxTarget; distance: number }
@@ -41,14 +43,6 @@ function selector(value: unknown): value is string {
     value.length <= 4096 &&
     !value.startsWith("-") &&
     !/[\x00-\x20\x7f#]/.test(value)
-  );
-}
-function tmuxSocketLabel(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 128 &&
-    !/[\x00-\x1f\x7f]/.test(value)
   );
 }
 function socket(value: unknown): value is string {
@@ -118,9 +112,13 @@ function tmuxProbe(
 ): ProbePlan | LiveMuxProbe {
   if (!/^%\d+$/.test(target.paneId)) return UNKNOWN;
   let socketArgs: string[];
+  const actualServer = target.server;
   const name = env.PI_SUBAGENTURA_TMUX_SOCKET;
-  if (name !== undefined && name !== "") {
-    if (!tmuxSocketLabel(name)) return UNKNOWN;
+  if (actualServer !== undefined) {
+    if (!socket(actualServer)) return UNKNOWN;
+    socketArgs = ["-S", actualServer];
+  } else if (name !== undefined && name !== "") {
+    if (!isTmuxSocketLabel(name)) return UNKNOWN;
     socketArgs = ["-L", name];
   } else {
     const path = /^(.*),\d+,\d+$/.exec(env.TMUX ?? "")?.[1];
@@ -291,7 +289,9 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : selector(target.server)))
+        : target.mux === "tmux"
+          ? socket(target.server)
+          : selector(target.server)))
   )
     return UNKNOWN;
   switch (target.mux) {
