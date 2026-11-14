@@ -310,6 +310,7 @@ cache is only an untrusted lookup aid.
 ### Host-aware interactive agent spawning
 
 `ORCA_INTERACTIVE_SYSTEM_PROMPT.md` is the detailed Orca host/UX guide.
+`REX_INTERACTIVE_SYSTEM_PROMPT.md` holds Rex-specific external-worker guidance.
 `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` is the shared host layer for recognized
 Orca, Agterm, and Rex parent contexts. Orca skills are external; use the
 installed, version-matched skills for exact commands and live discovery.
@@ -317,9 +318,9 @@ installed, version-matched skills for exact commands and live discovery.
 At extension activation, one bounded environment snapshot captures closed
 prompt-eligibility and telemetry categories. On every parent
 `before_agent_start`, a matching non-child root receives the relevant prompt
-asset through Pi's `systemPrompt`: Orca roots get the Orca guide and shared host
-layer; Agterm and Rex roots get only the shared layer. Unrecognized or unrelated
-roots and native interactive child processes receive no host-specific prompt,
+asset through Pi's `systemPrompt`: Orca and Rex roots get their respective
+host-specific guide and shared host layer; Agterm roots get only the shared
+layer. Unrecognized or unrelated roots and native interactive child processes receive no host-specific prompt,
 even if they inherit host markers. The snapshot retains no raw host values,
 paths, or identifiers; it proves neither current host ownership nor mux
 selection.
@@ -333,6 +334,7 @@ a recognized prompt host, not a native mux backend. Explicit user-selected
 targets take precedence. If live ownership or the requested target is
 uncertain, report that and ask rather than silently switching. See
 [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) and
+[the canonical Rex guide](REX_INTERACTIVE_SYSTEM_PROMPT.md), alongside
 [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
 
 For host attribution and the boundary around extension launch telemetry, see

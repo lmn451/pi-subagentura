@@ -98,6 +98,10 @@ const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const REX_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
+  new URL("../REX_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
 const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
   new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
@@ -158,10 +162,11 @@ export default function (pi: ExtensionAPI) {
     ? []
     : environment.guidanceHost === "orca"
       ? [ORCA_INTERACTIVE_SYSTEM_PROMPT, INTERACTIVE_SUBAGENT_SYSTEM_PROMPT]
-      : environment.guidanceHost === "agterm" ||
-          environment.guidanceHost === "rex"
-        ? [INTERACTIVE_SUBAGENT_SYSTEM_PROMPT]
-        : [];
+      : environment.guidanceHost === "rex"
+        ? [REX_INTERACTIVE_SYSTEM_PROMPT, INTERACTIVE_SUBAGENT_SYSTEM_PROMPT]
+        : environment.guidanceHost === "agterm"
+          ? [INTERACTIVE_SUBAGENT_SYSTEM_PROMPT]
+          : [];
   pi.on("before_agent_start", (event, ctx) => {
     const includeOrchestrator = !isChild && pi.getFlag("orchestrator") === true;
     const includeOrchestratorV2 =
