@@ -67,6 +67,35 @@ function signalWithCompetingListener(position: "before" | "after") {
 }
 
 describe("terminal harness lifecycle", () => {
+  it("approves only the isolated fixture project when launching children", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagentura-wrapper-contract-"));
+    const fakePi = join(root, "pi");
+    writeFileSync(fakePi, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o700 });
+    try {
+      const args = execFileSync(
+        "bash",
+        [
+          new URL("./fixtures/pi-child-wrapper.sh", import.meta.url).pathname,
+          "--session",
+          "fixture-session.jsonl",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SUBAGENTURA_E2E_REAL_PI: fakePi,
+            SUBAGENTURA_E2E_REPO: root,
+          },
+        },
+      )
+        .trim()
+        .split("\n");
+      expect(args.slice(0, 2)).toEqual(["--offline", "--approve"]);
+      expect(args.slice(-2)).toEqual(["--session", "fixture-session.jsonl"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("kills a server created before pane discovery fails", async () => {
     const harness = createHarness({ scenario: "startup-failure" });
     const runTmux = harness.tmux.bind(harness);
