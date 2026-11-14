@@ -31,16 +31,48 @@ const interactivePromptAsset = readFileSync(
   "utf8",
 ).trim();
 const childArtifactDirs: string[] = [];
+const hostEnvironmentVariables = [
+  "ORCA_RUNTIME_SOURCE_ID",
+  "ORCA_RUNTIME_SOURCE_INCARNATION",
+  "ORCA_RUNTIME_SOURCE_PROFILE_PATH",
+  "AGTERM_ENABLED",
+  "REX_SESSION",
+  "REX_BLOCK",
+] as const;
+type PromptHostEnvironment = Partial<
+  Record<(typeof hostEnvironmentVariables)[number], string>
+>;
+const validOrcaEnvironment = {
+  ORCA_RUNTIME_SOURCE_ID: "test-source",
+  ORCA_RUNTIME_SOURCE_INCARNATION: "test-incarnation",
+  ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/tmp/test-orca-profile",
+} satisfies PromptHostEnvironment;
+const validRexEnvironment = {
+  REX_SESSION: "test-session",
+  REX_BLOCK: "test-block",
+} satisfies PromptHostEnvironment;
+
 function countOccurrences(text: string, value: string): number {
   return text.split(value).length - 1;
+}
+
+function stubHostEnvironment(environment: PromptHostEnvironment = {}) {
+  for (const name of hostEnvironmentVariables) {
+    vi.stubEnv(name, environment[name]);
+  }
 }
 
 function expectSharedPromptAssets(
   prompt: string,
   modeAssets: readonly string[],
+  hostAssets: readonly string[],
 ) {
-  expect(countOccurrences(prompt, orcaPromptAsset)).toBe(1);
-  expect(countOccurrences(prompt, interactivePromptAsset)).toBe(1);
+  expect(countOccurrences(prompt, orcaPromptAsset)).toBe(
+    hostAssets.includes(orcaPromptAsset) ? 1 : 0,
+  );
+  expect(countOccurrences(prompt, interactivePromptAsset)).toBe(
+    hostAssets.includes(interactivePromptAsset) ? 1 : 0,
+  );
   expect(countOccurrences(prompt, legacyPromptAsset)).toBe(
     modeAssets.includes(legacyPromptAsset) ? 1 : 0,
   );
@@ -54,8 +86,13 @@ type BeforeAgentStart = (
   context: unknown,
 ) => { systemPrompt: string } | undefined;
 
-function emittedPrompt(mode: { flag?: string; child?: boolean }) {
+function emittedPrompt(mode: {
+  flag?: string;
+  child?: boolean;
+  hostEnv?: PromptHostEnvironment;
+}) {
   vi.stubEnv("PI_SUBAGENTURA_CHILD", mode.child ? "1" : undefined);
+  stubHostEnvironment(mode.hostEnv);
   const artifactDir = mode.child
     ? mkdtempSync(join(tmpdir(), "orca-prompt-child-"))
     : undefined;
@@ -79,8 +116,9 @@ function emittedPrompt(mode: { flag?: string; child?: boolean }) {
   if (!handler) {
     throw new Error("before_agent_start handler was not registered");
   }
-  const result = handler({ systemPrompt: "base prompt" }, {});
-  return { api, prompt: result?.systemPrompt };
+  const event = { systemPrompt: "base prompt" };
+  const result = handler(event, {});
+  return { api, prompt: result?.systemPrompt ?? event.systemPrompt };
 }
 
 afterEach(() => {
@@ -94,35 +132,147 @@ afterEach(() => {
 // behavior.
 describe("interactive prompt assembly contract", () => {
   const promptCases = [
-    { name: "normal parent", child: false, flag: undefined, modeAssets: [] },
+    {
+      name: "normal parent",
+      child: false,
+      flag: undefined,
+      hostEnv: {},
+      modeAssets: [],
+      hostAssets: [],
+    },
     {
       name: "legacy root",
       child: false,
       flag: "orchestrator",
+      hostEnv: {},
       modeAssets: [legacyPromptAsset],
+      hostAssets: [],
     },
     {
       name: "V2 root",
       child: false,
       flag: "orchestratorv2",
+      hostEnv: {},
       modeAssets: [v2PromptAsset],
+      hostAssets: [],
     },
-    { name: "interactive child", child: true, flag: undefined, modeAssets: [] },
+    {
+      name: "interactive child",
+      child: true,
+      flag: undefined,
+      hostEnv: {},
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "Orca-context parent",
+      child: false,
+      flag: undefined,
+      hostEnv: validOrcaEnvironment,
+      modeAssets: [],
+      hostAssets: [orcaPromptAsset, interactivePromptAsset],
+    },
+    {
+      name: "Agterm-context parent",
+      child: false,
+      flag: undefined,
+      hostEnv: { AGTERM_ENABLED: "1" },
+      modeAssets: [],
+      hostAssets: [interactivePromptAsset],
+    },
+    {
+      name: "Rex-context parent",
+      child: false,
+      flag: undefined,
+      hostEnv: validRexEnvironment,
+      modeAssets: [],
+      hostAssets: [interactivePromptAsset],
+    },
+    {
+      name: "incomplete Orca launch origin",
+      child: false,
+      flag: undefined,
+      hostEnv: { ORCA_RUNTIME_SOURCE_ID: "test-source" },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "Rex session hint without block hint",
+      child: false,
+      flag: undefined,
+      hostEnv: { REX_SESSION: "test-session" },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "Rex block hint without session hint",
+      child: false,
+      flag: undefined,
+      hostEnv: { REX_BLOCK: "test-block" },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "control character in Rex location hint",
+      child: false,
+      flag: undefined,
+      hostEnv: { REX_SESSION: "test\nsession", REX_BLOCK: "test-block" },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "conflicting Orca and Agterm observations",
+      child: false,
+      flag: undefined,
+      hostEnv: { ...validOrcaEnvironment, AGTERM_ENABLED: "1" },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "conflicting Orca and Rex observations",
+      child: false,
+      flag: undefined,
+      hostEnv: { ...validOrcaEnvironment, ...validRexEnvironment },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "conflicting Agterm and Rex observations",
+      child: false,
+      flag: undefined,
+      hostEnv: { AGTERM_ENABLED: "1", ...validRexEnvironment },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "conflicting Orca, Agterm, and Rex observations",
+      child: false,
+      flag: undefined,
+      hostEnv: {
+        ...validOrcaEnvironment,
+        AGTERM_ENABLED: "1",
+        ...validRexEnvironment,
+      },
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "native child inheriting Orca launch origin",
+      child: true,
+      flag: "orchestratorv2",
+      hostEnv: validOrcaEnvironment,
+      modeAssets: [],
+      hostAssets: [],
+    },
   ] as const;
 
   for (const mode of promptCases) {
     it(`emits exact assembly for ${mode.name}`, () => {
       const { api, prompt } = emittedPrompt(mode);
       expect(prompt).toBe(
-        [
-          "base prompt",
-          ...mode.modeAssets,
-          orcaPromptAsset,
-          interactivePromptAsset,
-        ].join("\n\n"),
+        ["base prompt", ...mode.modeAssets, ...mode.hostAssets].join("\n\n"),
       );
-      expect(countOccurrences(prompt ?? "", orcaPromptAsset)).toBe(1);
-      expect(countOccurrences(prompt ?? "", interactivePromptAsset)).toBe(1);
+      expectSharedPromptAssets(prompt ?? "", mode.modeAssets, mode.hostAssets);
       if (mode.child) {
         expect(api.getFlag).not.toHaveBeenCalled();
       }
@@ -177,30 +327,54 @@ describe("interactive prompts in Pi SDK sessions", () => {
       name: "normal parent",
       child: false,
       extensionFlags: {},
+      hostEnv: {},
       modeAssets: [],
+      hostAssets: [],
     },
     {
       name: "legacy root",
       child: false,
       extensionFlags: { orchestrator: true },
+      hostEnv: {},
       modeAssets: [legacyPromptAsset],
+      hostAssets: [],
     },
     {
       name: "V2 root",
       child: false,
       extensionFlags: { orchestratorv2: true },
+      hostEnv: {},
       modeAssets: [v2PromptAsset],
+      hostAssets: [],
     },
     {
       name: "interactive child",
       child: true,
       extensionFlags: { orchestrator: true, orchestratorv2: true },
+      hostEnv: {},
       modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "Orca-context parent",
+      child: false,
+      extensionFlags: {},
+      hostEnv: validOrcaEnvironment,
+      modeAssets: [],
+      hostAssets: [orcaPromptAsset, interactivePromptAsset],
+    },
+    {
+      name: "native child inheriting Orca launch origin",
+      child: true,
+      extensionFlags: { orchestrator: true, orchestratorv2: true },
+      hostEnv: validOrcaEnvironment,
+      modeAssets: [],
+      hostAssets: [],
     },
   ] as const;
 
   for (const mode of promptCases) {
-    it(`emits stable shared assets for a ${mode.name}`, async () => {
+    it(`emits stable guidance for a ${mode.name}`, async () => {
       const cwd = mkdtempSync(join(tmpdir(), "orca-prompt-session-"));
       const childArtifactDir = mode.child
         ? mkdtempSync(join(tmpdir(), "orca-prompt-session-child-"))
@@ -211,6 +385,7 @@ describe("interactive prompts in Pi SDK sessions", () => {
         : undefined;
       let harness: PiSessionHarness | undefined;
 
+      stubHostEnvironment(mode.hostEnv);
       try {
         const sessionHarness = await createPiSessionHarness(cwd, {
           appendSystemPrompt: childProtocol,
@@ -229,7 +404,7 @@ describe("interactive prompts in Pi SDK sessions", () => {
         const firstPrompt = getCurrentSystemPrompt(
           sessionHarness.contexts[0]!.messages,
         );
-        expectSharedPromptAssets(firstPrompt, mode.modeAssets);
+        expectSharedPromptAssets(firstPrompt, mode.modeAssets, mode.hostAssets);
         if (childProtocol) {
           expect(countOccurrences(firstPrompt, childProtocol)).toBe(1);
         }
@@ -242,7 +417,11 @@ describe("interactive prompts in Pi SDK sessions", () => {
         const secondPrompt = getCurrentSystemPrompt(
           sessionHarness.contexts[1]!.messages,
         );
-        expectSharedPromptAssets(secondPrompt, mode.modeAssets);
+        expectSharedPromptAssets(
+          secondPrompt,
+          mode.modeAssets,
+          mode.hostAssets,
+        );
         expect(secondPrompt).toBe(firstPrompt);
         if (childProtocol) {
           expect(countOccurrences(secondPrompt, childProtocol)).toBe(1);

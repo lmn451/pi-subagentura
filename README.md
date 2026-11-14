@@ -7,21 +7,27 @@
 > injector that can index these files; it does not manage or sync them.
 
 Give the parent Pi agent one task and let it build the team. pi-subagentura adds
-reusable multi-agent workflows, lightweight background delegation, and real
+reusable multi-agent workflows, lightweight background delegation, and native
 child Pi sessions you can watch, attach to, and continue in tmux, Zellij, or
 Herdr.
+
+Host-aware prompt guidance is supplied only to matching root contexts and
+requires live skill/CLI discovery before action. After live verification of an
+Orca session, it may guide the parent to use Orca by default when no explicit
+target is selected; Rex remains request-driven. These host-managed specialists
+are not native backends and receive no native child IDs, artifacts, or
+completion tracking.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
 clarification when a request is ambiguous, and leave repository work to
 specialists. A clear scoped request may create one specialist when fresh
-discovery establishes that no suitable owner exists. Shared host-aware launch
-guidance also applies in regular sessions and `--orchestrator` mode; see
-[host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
-The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
-applies when normal Pi parents or interactive children/nested contexts delegate
-interactively, with or without `--orchestratorv2`. Compatibility workflow and
-in-process tools remain registered.
+discovery establishes that no suitable owner exists. Host-specific prompt
+guidance is supplied only to matching root contexts, regardless of orchestration
+mode; see [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
+The canonical Orca guide is supplied only to matching Orca roots, not native
+interactive children or nested contexts. Compatibility workflow and in-process
+tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -309,21 +315,55 @@ cache is only an untrusted lookup aid.
 
 ### Host-aware interactive agent spawning
 
-`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` provides the canonical detailed Orca
-guidance. `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` layers Agterm guidance,
-explicit target-selection precedence, and analytics boundaries on top. Both
-shared assets are appended exactly once to every root and interactive-child
-prompt; mode-specific prompt assets remain root-only.
+`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` is the canonical detailed Orca guide.
+`INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` contains request-driven Rex and Agterm
+guidance, target-selection precedence, and analytics boundaries.
+The Orca CLI skills are external and are not bundled with pi-subagentura; use
+the installed, version-matched skills for exact commands and live discovery.
 
-Verified Orca selects the host-managed surface as the default interactive
-surface for ordinary parents and interactive children when the user leaves
-target selection open. Any explicit user-selected target wins, including
-native `subagent_interactive` and `mux`; if the user explicitly
-requests Orca but discovery proves the caller is outside Orca, report the
-mismatch and ask rather than silently falling back to native. Host markers never
-choose or override `mux`. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
+The extension captures one immutable `src/environment.ts` snapshot at activation
+and reuses it for root-prompt eligibility, session telemetry, and native
+auto-mux hints. It retains only normalized categorical observations and hint
+booleans, not raw host values, identifiers, paths, or the environment object.
+
+Guidance and legacy telemetry use distinct projections. Guidance recognizes a
+unique valid Orca, Agterm, or Rex observation; conflicting recognized host
+evidence resolves to `unknown`. The existing `session_host` telemetry dimension
+remains closed to `orca`, `agterm`, or `unknown`; Rex does not add a telemetry
+label.
+
+The extension supplies host-specific prompt content only on matching root
+contexts, as a per-turn Pi `systemPrompt` override:
+
+- The Orca asset is included only when the root's guidance host is `orca`, based
+  on the complete existing Orca launch-origin observation.
+- The shared host asset is included for a non-unknown guidance host (`orca`,
+  `agterm`, or `rex`). Rex requires both valid bounded, control-free location
+  hints, `REX_SESSION` and `REX_BLOCK`.
+
+Generic/unmatched roots receive neither asset. Native interactive child
+contexts (`isChild`) receive neither, even if they inherit host markers. These
+observations gate prompt inclusion only; they do not establish a live caller,
+session/resource, target, routing authority, backend availability, or selected
+backend. The parent-mux observation may be `unknown` when markers conflict,
+while native auto selection still prioritizes Herdr, then Zellij, then tmux,
+uses the existing current availability checks, and yields to an explicit mux
+preference. Follow the installed skills and verify live state before acting.
+
+This is prompt/skill guidance, not runtime host selection. Only after live
+skill/runtime discovery confirms the current caller is inside Orca, and no
+explicit target is selected, may the guidance direct the parent to Orca's
+host-managed surface by default. Rex remains request-driven: use its installed
+skill only when the user requests Rex and verify the live session/resource
+before acting. Explicit user-selected targets always win. If the requested
+host conflicts with verified topology or the live target cannot be verified,
+report the mismatch or uncertainty and ask rather than silently switching.
+
+Orca and Rex are not native `subagent_interactive` backends; native interactive
+children use tmux, Zellij, or Herdr and retain Subagentura's own lifecycle.
+Host-managed specialists are not represented by native child IDs, artifacts,
+or completion tracking. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
 and [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
-
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).
 
@@ -506,11 +546,31 @@ and start Pi with:
 PI_ORCHESTRATOR_ROUTER=jev pi --orchestratorv2
 ```
 
-Only live children with confirmed responsibilities can be recommended; the
-parent still sends the original task through its existing messaging tool. This
-opt-in sends bounded task and responsibility text to the configured provider.
-See [Jev routing](docs/jev-routing.md) for provider choices, configuration,
-payload disclosure, and failure behavior.
+The Jev classifier uses Pi's native System One path; OpenAI's `gpt-6-luna` is
+an alternative through Pi's native Decisions classifier API.
+
+For OpenAI Decisions, use Pi 1.4+ when its model catalog exposes
+`openai/gpt-6-luna`:
+
+```bash
+export PI_ORCHESTRATOR_ROUTER=jev
+export PI_ORCHESTRATOR_ROUTER_PROVIDER=openai
+export PI_ORCHESTRATOR_ROUTER_MODEL=gpt-6-luna
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+pi --orchestratorv2
+```
+
+Replace the placeholder with an OpenAI API key; ChatGPT OAuth does not
+authorize Decisions requests. A stored OpenAI login may take precedence over
+`OPENAI_API_KEY`. See [Jev routing](docs/jev-routing.md) for authentication
+details and provider limitations.
+
+Only live native interactive children with confirmed responsibilities can be
+recommended; the advisor cannot select skill-managed Orca or Rex specialists.
+The parent still sends the original task through its existing messaging tool.
+This opt-in sends bounded task and responsibility text to the configured
+provider. See [Jev routing](docs/jev-routing.md) for provider choices,
+configuration, payload disclosure, and failure behavior.
 
 ## Cancellation context snapshots (opt-in)
 

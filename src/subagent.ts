@@ -38,6 +38,7 @@ import {
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
 import { isRoutingEnabled } from "./routing-factory";
+import { detectEnvironment } from "./environment";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
@@ -93,17 +94,12 @@ const ORCHESTRATOR_V2_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
-const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
-  new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
-  "utf8",
-).trim();
-const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
-  new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
-  "utf8",
-).trim();
+let orcaInteractiveSystemPrompt: string | undefined;
+let interactiveSubagentSystemPrompt: string | undefined;
 
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
+This advisor selects existing native Subagentura children only, not execution models. Do not use it for Orca- or Rex-managed workers. Follow the selected host’s skills and verified ownership instead. An empty native registry or a native no-match result says nothing about host-managed owners and never authorizes switching surfaces or creating a duplicate.
 
 When the user's action, target/scope, deliverable, and required access are clear
 and only the choice of current owner is uncertain, use the advisor to help select
@@ -142,8 +138,8 @@ is a routing question, not unclear user scope. Aliases alone never authorize
 reuse. Treat the advisor as a bounded selection aid; all sending, creation, and
 lifecycle control remain with the parent.
 `.trim();
-
 export default function (pi: ExtensionAPI) {
+  const environment = detectEnvironment();
   const isChild = process.env.PI_SUBAGENTURA_CHILD === "1";
   const childArtifactDir = isChild ? process.env.ARTIFACT_DIR : undefined;
   if (!isChild || !childArtifactDir) {
@@ -152,21 +148,54 @@ export default function (pi: ExtensionAPI) {
   const initialSpawnTreeContext = childArtifactDir
     ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
+
+  const hasOrcaHostContext = !isChild && environment.guidanceHost === "orca";
+  const hasOtherHostContext =
+    !isChild &&
+    (environment.guidanceHost === "agterm" ||
+      environment.guidanceHost === "rex");
+  let hostPrompts: readonly string[] = [];
+  if (hasOrcaHostContext || hasOtherHostContext) {
+    interactiveSubagentSystemPrompt ??= readFileSync(
+      new URL("../INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md", import.meta.url),
+      "utf8",
+    ).trim();
+    if (hasOrcaHostContext) {
+      orcaInteractiveSystemPrompt ??= readFileSync(
+        new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
+        "utf8",
+      ).trim();
+      hostPrompts = [
+        orcaInteractiveSystemPrompt,
+        interactiveSubagentSystemPrompt,
+      ];
+    } else {
+      hostPrompts = [interactiveSubagentSystemPrompt];
+    }
+  }
+
   pi.on("before_agent_start", (event, ctx) => {
+    const includeOrchestrator = !isChild && pi.getFlag("orchestrator") === true;
+    const includeOrchestratorV2 =
+      !isChild && pi.getFlag("orchestratorv2") === true;
+    if (
+      !includeOrchestrator &&
+      !includeOrchestratorV2 &&
+      hostPrompts.length === 0
+    ) {
+      return;
+    }
     const prompts: string[] = [];
-    if (!isChild) {
-      if (pi.getFlag("orchestrator") === true) {
-        prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
-      }
-      if (pi.getFlag("orchestratorv2") === true) {
-        prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
-        if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
-          prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
-        }
+    if (includeOrchestrator) {
+      prompts.push(ORCHESTRATOR_SYSTEM_PROMPT);
+    }
+    if (includeOrchestratorV2) {
+      prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
+      if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
+        prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
       }
     }
-    prompts.push(ORCA_INTERACTIVE_SYSTEM_PROMPT);
-    prompts.push(INTERACTIVE_SUBAGENT_SYSTEM_PROMPT);
+    prompts.push(...hostPrompts);
     return {
       systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
     };
@@ -178,6 +207,8 @@ export default function (pi: ExtensionAPI) {
       pi,
       initialSpawnTreeContext,
       false,
+      undefined,
+      environment,
     );
     registerInteractiveSubagentTools(pi, sessionScope);
     registerSubagentArtifactsCleanupTool(pi, sessionScope);
@@ -203,7 +234,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
-  const sessionScope = registerSessionHandlers(pi, undefined, true);
+  const sessionScope = registerSessionHandlers(
+    pi,
+    undefined,
+    true,
+    undefined,
+    environment,
+  );
   registerInteractiveSubagentTools(pi, sessionScope);
   registerOrchestratorTools(pi, sessionScope);
   registerInteractiveSupervisor(pi, sessionScope);

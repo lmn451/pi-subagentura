@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { detectEnvironment } from "../src/environment";
 import {
   buildTelemetryPayload,
   createTelemetrySession,
-  resolveTelemetryParentMux,
   type TelemetryEvent,
 } from "../src/telemetry";
 
@@ -26,9 +26,10 @@ describe("parent multiplexer environment observation", () => {
       "unknown",
     ],
   ] as const)("classifies case %# as %s", (env, expected) => {
-    const input = Object.freeze({ ...env });
-    expect(resolveTelemetryParentMux(input)).toBe(expected);
+    const snapshot = detectEnvironment(env);
+    expect(snapshot.parentMux).toBe(expected);
   });
+
   it("only emits closed labels on root starts", () => {
     const session = createTelemetrySession(true);
     const event = {

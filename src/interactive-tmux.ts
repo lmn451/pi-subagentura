@@ -885,7 +885,10 @@ export function launchInteractiveSubagent(params: {
   // with a setup hint if neither backend is usable.
   let mux;
   try {
-    mux = getMux({ preference: params.muxPreference });
+    mux = getMux({
+      preference: params.muxPreference,
+      environment: liveScope.environment,
+    });
   } catch (err) {
     reportSpawnFailure("mux_resolution", undefined, "mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {

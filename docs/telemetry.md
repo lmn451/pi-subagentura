@@ -58,6 +58,12 @@ not a person, installation, live terminal, current routing target, or proof that
 a particular host-managed launch occurred. No persistent installation or user
 identifier is created.
 
+Root guidance and legacy telemetry intentionally use distinct projections of
+the shared environment snapshot. `guidanceHost` recognizes a unique valid
+Orca, Agterm, or Rex observation; conflicting recognized host evidence resolves
+to `unknown`. `session_host` retains its closed `orca`/`agterm`/`unknown` labels,
+so Rex never becomes a telemetry label.
+
 Orca attribution consumes only the complete, dedicated launch-origin stamp:
 `ORCA_RUNTIME_SOURCE_ID`, `ORCA_RUNTIME_SOURCE_INCARNATION`, and
 `ORCA_RUNTIME_SOURCE_PROFILE_PATH`. The Orca 1.4.245 bundled
@@ -84,22 +90,27 @@ These checks are measurement-only, not live-process, foreground-terminal,
 routing, cancellation or security authority. Missing, partial, malformed or
 oversized Orca stamps and missing/non-exact Agterm markers resolve to `unknown`;
 `unknown` is not a non-Agterm or non-Orca population. Neither source is
-cryptographic proof against forged same-user environment variables. Native
+cryptographic proof against forged same-user environment variables. The
+extension captures one immutable environment snapshot at activation and reuses
+it for root-prompt eligibility, session telemetry, and native auto-mux hints.
+The snapshot retains normalized categorical observations and hint booleans, not
+raw identifiers, host values, paths, or the environment object. Native
 extension-managed children do not emit root starts, and reload/resume preserve
 logical-session suppression without reclassification.
 
-Only telemetry-enabled fresh roots evaluate this pure environment-to-enum
-classification. It runs no command, runtime probe, app launch, filesystem read,
-or network request; it does not discover an installed CLI or use remote or
-active-tab defaults. Existing opt-outs suppress classification and capture.
-No raw stamp, marker, handle, version, path, host/Pi identifier, environment
-value, prompt or argument is uploaded or logged. The random
-`telemetry_session_id` remains the only cross-event correlation identifier;
-`session_host` itself is sent only on `session_started`. For extension-managed
-spawns, analytics may join that root host evidence to `agent_launch_resolved` by
-`telemetry_session_id` and group by the existing requested/resolved execution
-and mux fields. This does not measure or infer spawn mechanisms for workers
-launched externally by Orca or Agterm.
+The snapshot is captured at activation whether or not telemetry is enabled; its
+pure classification runs no command, runtime probe, app launch, filesystem read,
+or network request. Telemetry opt-outs suppress event capture. `session_started`
+remains limited to telemetry-enabled fresh roots under the existing `new`/`fork`
+policy; child, disabled/test, reload, and resume transitions do not add root
+starts. No raw stamp, marker, host value, handle, version, path, host/Pi
+identifier, environment value, prompt or argument is uploaded or logged. The
+random `telemetry_session_id` remains the only cross-event correlation
+identifier; `session_host` itself is sent only on `session_started`. For
+extension-managed spawns, analytics may join that root host evidence to
+`agent_launch_resolved` by `telemetry_session_id` and group by the existing
+requested/resolved execution and mux fields. This does not measure or infer
+spawn mechanisms for workers launched externally by Orca or Agterm.
 
 ### Terminal application
 
@@ -113,9 +124,10 @@ become `unknown`; historical events without the field are also unknown.
 Agterm explicitly sets `TERM_PROGRAM=agterm` in its upstream
 [`SurfaceEnvironment`](https://github.com/umputun/agterm/blob/master/agtermCore/Sources/agtermCore/SurfaceEnvironment.swift)
 builder, including its quick terminal. We do not infer it from Ghostty engine
-markers, installed binaries, socket paths, or session IDs. No raw environment
-value, terminal version, or identifier is sent. Classification is synchronous,
-performs no probes, and shares the existing fresh-root and telemetry opt-out gates.
+markers, installed binaries, socket paths, or session IDs; no raw environment
+value, terminal version, or identifier is sent. This dimension is observed
+synchronously as part of the activation snapshot, without probes; its event
+remains subject to the existing fresh-root and telemetry opt-out gates.
 
 This measures the environment-advertised terminal application, not unique users
 or proof of the currently active terminal. Multiplexers, SSH, nested terminals,
@@ -134,12 +146,22 @@ produces its label. Missing or multiple markers produce `unknown`: nested
 environments do not reliably establish which mux is innermost. Missing
 historical fields are also unknown, not proof that no multiplexer was used.
 
-No command, binary availability check, socket connection, or server probe runs;
-no raw socket path, session name, or other marker value is sent. Classification
-shares fresh-root and telemetry opt-out gates. Inherited or forged markers
-remain possible, so this is observed context, not live ownership verification.
-The field does not alter backend selection. Join root events to child launch
-events by `telemetry_session_id` to compare parent context with child backends.
+No command, binary availability check, socket connection, or server probe runs
+to classify this field; the separate native auto-backend selection path keeps
+its existing current tmux/Zellij availability checks. No raw socket path,
+session name, or other marker value is retained or sent. The field is included
+only on events allowed by the existing fresh-root and telemetry opt-out gates;
+the observation itself is captured in the extension-activation snapshot.
+Inherited or forged markers remain possible, so this is observed context, not
+live ownership verification.
+
+The snapshot also exposes separate native auto-mux hint booleans. Automatic
+selection retains Herdr > Zellij > tmux hint priority, checks current
+availability where applicable, and yields to an explicit mux preference.
+Multiple parent markers can make `parent_mux` unknown without erasing that
+selection priority. Neither host labels nor environment hints authorize routing
+or represent the chosen backend. Join root events to child launch events by
+`telemetry_session_id` to compare parent context with child backends.
 
 ### Logical launch resolution
 

@@ -1,6 +1,22 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFresh } from "./test-utils";
+import type { EnvironmentSnapshot } from "../src/environment";
+
+function environmentSnapshot(
+  overrides: Partial<EnvironmentSnapshot> = {},
+): EnvironmentSnapshot {
+  return Object.freeze({
+    guidanceHost: "unknown" as const,
+    telemetryHost: "unknown" as const,
+    terminalProgram: "unknown" as const,
+    parentMux: "unknown" as const,
+    hasTmuxHint: false,
+    hasZellijHint: false,
+    hasHerdrHint: false,
+    ...overrides,
+  });
+}
 
 describe("multiplexer module boundary", () => {
   it("loads concrete backends without importing the registry", async () => {
@@ -122,6 +138,31 @@ describe("getMux relaxed-spawn resolution", () => {
     expect(mux.name).toBe("zellij");
   });
 
+  it("uses current availability after a captured Zellij hint stops working", async () => {
+    const environment = environmentSnapshot({ hasZellijHint: true });
+    vi.doMock(
+      "node:child_process",
+      () =>
+        ({
+          execFileSync: (_file: string, args: string[]) => {
+            const joined = args.join(" ");
+            if (joined.includes("command -v 'zellij'"))
+              throw new Error("zellij is no longer available");
+            if (joined.includes("command -v 'tmux'")) return "";
+            throw new Error("unexpected exec: " + joined);
+          },
+        }) as unknown as typeof import("node:child_process"),
+    );
+
+    const { getMux, __resetMuxInstances } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    __resetMuxInstances();
+
+    expect(getMux({ preference: "auto", environment }).name).toBe("tmux");
+  });
+
   it("getMux throws NoMultiplexerAvailableError when neither binary exists", async () => {
     // Arrange: mock execFileSync so commandExists always throws.
     vi.doMock(
@@ -146,7 +187,7 @@ describe("getMux relaxed-spawn resolution", () => {
     );
   });
 
-  it("getMux auto prefers the Herdr pane over inherited outer mux markers", async () => {
+  it("prefers a supplied nested Herdr hint over inherited outer mux markers", async () => {
     process.env.HERDR_ENV = "1";
     process.env.HERDR_SOCKET_PATH = "/tmp/herdr.sock";
     process.env.ZELLIJ_SESSION_NAME = "outer-zellij";
@@ -168,7 +209,17 @@ describe("getMux relaxed-spawn resolution", () => {
       );
     __resetMuxInstances();
 
-    expect(getMux({ preference: "auto" }).name).toBe("herdr");
+    expect(
+      getMux({
+        preference: "auto",
+        environment: environmentSnapshot({
+          guidanceHost: "orca",
+          hasHerdrHint: true,
+          hasZellijHint: true,
+          hasTmuxHint: true,
+        }),
+      }).name,
+    ).toBe("herdr");
   });
 
   it.each([
@@ -215,9 +266,16 @@ describe("getMux relaxed-spawn resolution", () => {
         );
       __resetMuxInstances();
 
-      expect(getMux({ preference: preference as "tmux" | "zellij" }).name).toBe(
-        preference,
-      );
+      expect(
+        getMux({
+          preference: preference as "tmux" | "zellij",
+          environment: environmentSnapshot({
+            hasHerdrHint: true,
+            hasZellijHint: true,
+            hasTmuxHint: true,
+          }),
+        }).name,
+      ).toBe(preference);
     },
   );
 });

@@ -9,6 +9,10 @@ import {
   asStringIdentifier,
   type TelemetryCorrelationId,
 } from "./identifier-types";
+import {
+  sanitizeTelemetryParentMux,
+  sanitizeTelemetryTerminalProgram,
+} from "./environment";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
 export const TELEMETRY_SCHEMA_VERSION = 6;
@@ -1363,48 +1367,4 @@ export type TelemetryTerminalProgram =
   | "kitty"
   | "unknown";
 
-export function sanitizeTelemetryTerminalProgram(
-  value: unknown,
-): TelemetryTerminalProgram {
-  switch (value) {
-    case "agterm":
-    case "ghostty":
-    case "vscode":
-    case "wezterm":
-    case "kitty":
-      return value;
-    case "WezTerm":
-      return "wezterm";
-    case "iTerm.app":
-    case "iterm2":
-      return "iterm2";
-    case "Apple_Terminal":
-    case "apple_terminal":
-      return "apple_terminal";
-    default:
-      return "unknown";
-  }
-}
 export type TelemetryParentMux = "tmux" | "zellij" | "herdr" | "unknown";
-
-export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
-  return value === "tmux" || value === "zellij" || value === "herdr"
-    ? value
-    : "unknown";
-}
-
-export function resolveTelemetryParentMux(
-  env: NodeJS.ProcessEnv = process.env,
-): TelemetryParentMux {
-  const marker = (value: unknown): boolean =>
-    typeof value === "string" &&
-    value.length <= 4096 &&
-    value.trim().length > 0 &&
-    !/[\x00-\x1f\x7f]/.test(value);
-  const candidates: TelemetryParentMux[] = [];
-  if (marker(env.TMUX)) candidates.push("tmux");
-  if (marker(env.ZELLIJ_SESSION_NAME)) candidates.push("zellij");
-  if (env.HERDR_ENV === "1") candidates.push("herdr");
-  // Multiple markers cannot establish which nested multiplexer owns this process.
-  return candidates.length === 1 ? candidates[0] : "unknown";
-}

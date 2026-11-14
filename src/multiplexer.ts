@@ -8,9 +8,9 @@
  *
  * Resolution order (`getMux`):
  *   1. Explicit `preference` arg from the tool (forces one backend).
- *   2. Auto-detect: prefer the mux already attached to the parent process
- *      (env var heuristic: HERDR_ENV, ZELLIJ_SESSION_NAME, then TMUX).
- *   3. Fall back to whichever backend has a binary + active server, tmux first
+ *   2. Auto-detect: use a supplied or fresh snapshot's valid parent mux hints,
+ *      preferring Herdr > Zellij > tmux when nested markers are present.
+ *   3. Fall back to freshly available tmux or Zellij backends, tmux first.
  *      for backward compatibility.
  *   4. Throw with a setup hint pointing at the supported backends.
  */
@@ -18,6 +18,7 @@
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
+import { detectEnvironment, type EnvironmentSnapshot } from "./environment";
 import type { MuxName, Multiplexer } from "./multiplexer-contracts";
 
 export * from "./multiplexer-contracts";
@@ -33,10 +34,12 @@ function assertNever(value: never): never {
 
 export interface GetMuxOptions {
   /**
-   * Explicit backend choice. `'auto'` (the default) walks the env-var +
-   * availability chain described in the file header.
+   * Explicit backend choice. `'auto'` (the default) uses captured host hints,
+   * then fresh availability probes.
    */
   preference?: MuxName | "auto";
+  /** Reuse an activation/session observation when resolving the auto preference. */
+  environment?: EnvironmentSnapshot;
 }
 
 export class NoMultiplexerAvailableError extends Error {
@@ -52,10 +55,8 @@ export class NoMultiplexerAvailableError extends Error {
 /**
  * Resolve a multiplexer instance.
  *
- * Returns a long-lived `Multiplexer` — implementations are stateless after
- * construction (the resolver holds one per backend so the env-var probe is
- * paid once per process). Callers may cache the result, but `getMux` itself
- * is cheap on the hot path because it just looks up the cached instance.
+ * Returns a long-lived `Multiplexer` instance. Auto resolution uses supplied
+ * hints or freshly detects them, and always probes backend availability live.
  */
 export function getMux(opts: GetMuxOptions = {}): Multiplexer {
   const tmux = getOrCreate("tmux", () => new TmuxMultiplexer());
@@ -71,17 +72,14 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
     case "herdr":
       return herdr;
     case "auto": {
-      // Prefer the mux already attached to this process. We check env vars
-      // (cheap) before probing availability (one exec call each). If both env
-      // vars are set (nested sessions are possible), Herdr wins because its
-      // managed-pane marker is the most specific signal. Zellij remains ahead
-      // of tmux because TMUX is commonly inherited through nested sessions.
-      if (process.env.HERDR_ENV === "1" && herdr.isAvailable()) return herdr;
-      if (process.env.ZELLIJ_SESSION_NAME && zellij.isAvailable())
-        return zellij;
-      if (process.env.TMUX && tmux.isAvailable()) return tmux;
+      const environment = opts.environment ?? detectEnvironment();
+      // Prefer the mux already attached to this process. Snapshot hints encode
+      // validated parent markers; nested sessions keep Herdr > Zellij > tmux.
+      if (environment.hasHerdrHint && herdr.isAvailable()) return herdr;
+      if (environment.hasZellijHint && zellij.isAvailable()) return zellij;
+      if (environment.hasTmuxHint && tmux.isAvailable()) return tmux;
 
-      // Neither env var matched. Fall back to whichever backend is available;
+      // No hinted backend is available; keep availability fresh and preserve
       // tmux first to preserve existing user setups.
       if (tmux.isAvailable()) return tmux;
       if (zellij.isAvailable()) return zellij;

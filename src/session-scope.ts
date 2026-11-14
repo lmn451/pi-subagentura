@@ -7,6 +7,7 @@ import type { JobState } from "./helpers";
 import type { InteractiveSubagentState } from "./interactive-tmux";
 import type { ParsedSpawnTreeContext } from "./spawn-tree-context";
 import type { TelemetrySession } from "./telemetry";
+import { detectEnvironment, type EnvironmentSnapshot } from "./environment";
 
 const SESSION_SCOPE_REGISTRY_KEY = "__piSubagenturaSessionScopes";
 const SESSION_SCOPE_ID_COUNTER_KEY = "__piSubagenturaSessionScopeIdCounter";
@@ -32,6 +33,8 @@ export interface SessionScope {
   workflowAdmissionClosed: boolean;
   sessionManager?: SessionScopeManager;
   spawnTreeContext?: ParsedSpawnTreeContext;
+  /** Activation-scoped observation; never re-resolved across generations. */
+  readonly environment: EnvironmentSnapshot;
   lineageMode?: "root" | "child";
   isParentIdle?: () => boolean;
   /** True while Pi is waiting on a blocking extension UI prompt. */
@@ -54,6 +57,7 @@ export interface SessionScopeRegistration {
   workflowAdmissionClosed?: boolean;
   sessionManager?: SessionScopeManager;
   spawnTreeContext?: ParsedSpawnTreeContext;
+  environment?: EnvironmentSnapshot;
   lineageMode?: "root" | "child";
   isParentIdle?: () => boolean;
   /** True while Pi is waiting on a blocking extension UI prompt. */
@@ -110,6 +114,7 @@ export function createSessionScope(
   pi: ExtensionAPI,
   spawnTreeContext?: ParsedSpawnTreeContext,
   lineageMode: "root" | "child" = "root",
+  environment: EnvironmentSnapshot = detectEnvironment(),
 ): SessionScope {
   return {
     id: nextSessionScopeId(),
@@ -118,6 +123,7 @@ export function createSessionScope(
     workflowAdmissionClosed: false,
     pi,
     spawnTreeContext,
+    environment,
     lineageMode,
     parentStreaming: false,
     uiPromptActive: false,
@@ -137,6 +143,7 @@ function isCompleteSessionScope(
     typeof registration.workflowAdmissionClosed === "boolean" &&
     typeof registration.parentStreaming === "boolean" &&
     registration.inProcessJobs instanceof Map &&
+    registration.environment !== undefined &&
     registration.interactiveStates instanceof Map
   );
 }
@@ -207,6 +214,7 @@ export function registerSessionScope(
         parentStreaming: registration.parentStreaming ?? false,
         inProcessJobs: registration.inProcessJobs ?? new Map(),
         interactiveStates: registration.interactiveStates ?? new Map(),
+        environment: registration.environment ?? detectEnvironment(),
         telemetry: registration.telemetry,
       };
   registry.set(scope.id, scope);

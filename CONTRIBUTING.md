@@ -29,7 +29,7 @@ The `Protect master` repository ruleset must require these stable CI check names
 
 The separate minimum-Node check makes runtime support visible rather than hiding
 it inside the Pi SDK matrix. `Test (Pi 1.2.0)` tests the minimum supported Pi
-SDK, 1.2.0; development dependencies pin Pi SDK 1.4.0, and `Test (Pi latest)`
+SDK, 1.2.0; development dependencies pin Pi SDK 1.5.0, and `Test (Pi latest)`
 tests the latest published SDK. Keep all three check names synchronized with
 the repository ruleset.
 

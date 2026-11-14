@@ -1,14 +1,29 @@
 ---
 title: "Optional native classifier routing"
-keywords: [orchestratorv2, jev, classifier, routing, agents, configuration]
+keywords:
+  [
+    orchestratorv2,
+    jev,
+    openai-decisions,
+    classifier,
+    routing,
+    agents,
+    configuration,
+  ]
 ---
 
 # Optional native classifier routing
 
-Orchestratorv2 can ask a Pi classifier to select an existing interactive child
-when the requested work is clear but its owner is ambiguous. **Pi's native
-classifier API is the only backend.** There are no direct TypeSafe/OpenRouter
-HTTP adapters and no fallback transport.
+Orchestratorv2 can ask a Pi classifier to recommend one existing, live,
+authorized native interactive child when the requested work is clear but its
+owner is ambiguous. Candidates come from the current parent session's native
+routing registry; the classifier cannot select skill-managed Orca or Rex
+specialists. **Pi's native classifier API is the only backend.** There is no
+direct extension HTTP transport or fallback.
+
+Jev models such as `~typesafe/jev-latest` use Pi's native System One classifier
+path. OpenAI's `gpt-6-luna` is a separate alternative through Pi's native
+Decisions classifier API; neither path is an extension-built HTTP adapter.
 
 The parent lists agents, asks the advisor, and sends the original task through
 `send_interactive_subagent_message`. The classifier cannot send messages, spawn,
@@ -41,14 +56,22 @@ pi --orchestratorv2
 
 Provider/model selection does not authenticate the provider. Use Pi's normal
 configuration for TypeSafe, another Jev provider, or a llama.cpp classifier.
-Changing the provider does not automatically change the model ID.
 
-To use OpenAI's Decisions API with Pi 1.4.0 or another version whose catalog
-includes `gpt-6-luna`, set `PI_ORCHESTRATOR_ROUTER_PROVIDER=openai` and
-`PI_ORCHESTRATOR_ROUTER_MODEL=gpt-6-luna`. OpenAI requires an API key; Pi's
-ChatGPT OAuth login does not authorize Decisions API requests. A stored OpenAI
-login can take precedence over `OPENAI_API_KEY`; consult Pi's model documentation.
-The provider can charge for classification requests.
+For an OpenAI Decisions quick start, use Pi 1.4+ when its model catalog exposes
+`openai/gpt-6-luna` (or another Pi version with that classifier model):
+
+```bash
+export PI_ORCHESTRATOR_ROUTER="jev"
+export PI_ORCHESTRATOR_ROUTER_PROVIDER="openai"
+export PI_ORCHESTRATOR_ROUTER_MODEL="gpt-6-luna"
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+pi --orchestratorv2
+```
+
+Replace the API-key placeholder with an OpenAI API key; ChatGPT OAuth does not
+authorize Decisions API requests. A stored OpenAI login can take precedence
+over `OPENAI_API_KEY`, so consult Pi's model documentation to verify which
+credential Pi resolves. Classification requests may incur provider charges.
 
 If the host lacks the classifier APIs, the configured model is absent, or
 provider authentication is not configured, advisor registration and guidance are
@@ -97,7 +120,8 @@ conservative defaults, not measured accuracy guarantees.
 1. Call `list_orchestrator_agents` and inspect current authoritative
    responsibilities and runtimes before deciding whether to reuse or create a
    native specialist. For Orca, first discover currently owned agents through
-   the version-matched skills.
+   the version-matched skills. `resolve_orchestrator_route` covers native
+   registry children only, never skill-managed Orca or Rex workers.
 2. Reuse an exact, live, authorized owner when its confirmed responsibility
    covers the requested action, scope, deliverable, and access. When only the
    choice among plausible owners is uncertain, call

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-11-13
+
+### Added
+
+- Request-driven Rex interactive delegation guidance through Rex's installed
+  skill and live CLI discovery. Rex-managed workers remain separate from native
+  Subagentura children; Rex is not a new `mux` backend.
+
+### Changed
+
+- Clarify Orca and Rex host-aware support and the optional Jev/OpenAI Decisions
+  classifier setup. The advisor recommends an existing authorized native child;
+  the parent still sends the task, and the child's model is unchanged.
+- Improve interactive supervisor popup rendering and controls.
+- Refresh dependencies and pin development Pi SDK packages to 1.5.0 while
+  retaining Pi 1.2.0 as the minimum supported SDK.
+- Capture host, terminal, and parent-mux observations once per extension
+  activation in a shared typed snapshot. Prompt guidance, telemetry, and native
+  mux selection share those observations without caching live availability or
+  treating host hints as routing authority.
+
+### Fixed
+
+- Isolate test diagnostics from runtime debug logs.
+- Scope Orca guidance to Orca launch-context roots and shared host guidance to
+  matching host roots. Ordinary native sessions and native interactive children
+  no longer receive unrelated host instructions or inherit Orca policy from
+  launch-origin hints. Host hints never authorize routing or override `mux`.
+- Align Orca launch guidance with configured surfaces, explicit model/effort
+  requests, and documented keep-open and wake handling. Strengthen Rex target
+  and caller-block safeguards while allowing necessary private handoff selectors
+  without weakening telemetry privacy.
+
 ## [4.2.1] - 2026-11-07
 
 ### Added
@@ -490,7 +523,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/lmn451/pi-subagentura/compare/v4.2.1...v4.3.0
+[4.2.1]: https://github.com/lmn451/pi-subagentura/compare/v4.2.0...v4.2.1
+[4.2.0]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...v4.2.0
 [4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0

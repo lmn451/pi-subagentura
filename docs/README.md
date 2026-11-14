@@ -1,6 +1,19 @@
 ---
 title: "Documentation Index"
-keywords: [docs, index, workflows, architecture, testing, publishing, runtime]
+keywords:
+  [
+    docs,
+    index,
+    workflows,
+    architecture,
+    testing,
+    publishing,
+    runtime,
+    orca,
+    rex,
+    jev,
+    openai-decisions,
+  ]
 ---
 
 # Documentation
@@ -10,19 +23,20 @@ maintained in this repository and is the documentation source of truth;
 [`pi-docs`](https://github.com/lmn451/pi-docs) indexes these files for its
 published injector.
 
-| Doc                                                                                | Purpose                                                                |
-| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| [README.md](../README.md)                                                          | Installation, configuration, tools, and user-facing behavior           |
-| [architecture.md](../architecture.md)                                              | Runtime boundaries, ownership, completion, and persistence contracts   |
-| [CONTRIBUTING.md](../CONTRIBUTING.md)                                              | Development checks, CI, and release procedure                          |
-| [bun.md](./bun.md)                                                                 | JavaScript runtime and package manager conventions                     |
-| [publish.md](./publish.md)                                                         | OIDC publishing and the authoritative release procedure                |
-| [terminal-e2e.md](./terminal-e2e.md)                                               | Terminal E2E harness, determinism rules, and recording tools           |
-| [telemetry.md](./telemetry.md)                                                     | Telemetry contract, privacy, and PostHog report definitions            |
-| [workflows.md](./workflows.md)                                                     | Workflow execution and bundled script usage                            |
-| [jev-routing.md](./jev-routing.md)                                                 | Optional Jev candidate selection, configuration, and external payload  |
-| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md) | Isolating test sessions, artifacts, environment, and terminal adapters |
-| [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                     | Protocol-v1 compatibility removal status and user-data behavior        |
+| Doc                                                                                     | Purpose                                                                |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| [README.md](../README.md)                                                               | Installation, configuration, tools, and user-facing behavior           |
+| [Host-aware interactive delegation](../README.md#host-aware-interactive-agent-spawning) | Conditional root-only Orca/Rex host guidance; native mux boundary      |
+| [architecture.md](../architecture.md)                                                   | Runtime boundaries, ownership, completion, and persistence contracts   |
+| [CONTRIBUTING.md](../CONTRIBUTING.md)                                                   | Development checks, CI, and release procedure                          |
+| [bun.md](./bun.md)                                                                      | JavaScript runtime and package manager conventions                     |
+| [publish.md](./publish.md)                                                              | OIDC publishing and the authoritative release procedure                |
+| [terminal-e2e.md](./terminal-e2e.md)                                                    | Terminal E2E harness, determinism rules, and recording tools           |
+| [telemetry.md](./telemetry.md)                                                          | Telemetry contract, privacy, and PostHog report definitions            |
+| [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                            |
+| [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions setup, native routing limits, bounded payload     |
+| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters |
+| [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                          | Protocol-v1 compatibility removal status and user-data behavior        |
 
 ## Known limitations
 
