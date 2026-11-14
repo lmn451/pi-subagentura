@@ -244,6 +244,20 @@ export default function (pi: ExtensionAPI) {
     default: false,
   });
 
+  pi.on("input", (_event, ctx) => {
+    try {
+      isOrchestratorSplitEnabled(pi);
+    } catch (error) {
+      ctx.ui.notify(
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
+      // Pi catches hook exceptions. A handled input stops the model request.
+      return { action: "handled" };
+    }
+    return { action: "continue" };
+  });
+
   pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
   const sessionScope = registerSessionHandlers(
     pi,

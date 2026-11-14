@@ -700,6 +700,40 @@ describe("generic extension settings", () => {
     expect(() => readTestSettings(api as any)).toThrow(/hide agent list/i);
   });
 
+  it.each([undefined, "0", "2", "6"])(
+    "uses split depth four unless CLI overrides it with %s",
+    (override) => {
+      const api = mockApi((name) => {
+        if (name === "split" || name === "orchestratorv2") return true;
+        if (name === MAX_DEPTH_FLAG) return override;
+        return undefined;
+      });
+      expect(readTestSettings(api as any).maxDepth).toBe(
+        override === undefined ? 4 : Number(override),
+      );
+    },
+  );
+
+  it("honors persisted depth two in split mode, including a local override", () => {
+    const { agentDir, cwd } = settingsSandbox;
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    const api = mockApi((name) => ["split", "orchestratorv2"].includes(name));
+    writeFileSync(
+      join(agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "2" } }),
+    );
+    expect(readTestSettings(api as any).maxDepth).toBe(2);
+    writeFileSync(
+      join(agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "6" } }),
+    );
+    writeFileSync(
+      join(cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "2" } }),
+    );
+    expect(readTestSettings(api as any).maxDepth).toBe(2);
+  });
+
   it("uses the configured depth only for V2 roots", () => {
     const api = mockApi((name) => (name === MAX_DEPTH_FLAG ? "4" : undefined));
     const settings = readTestSettings(api as any);

@@ -246,6 +246,12 @@ describe("extension registration", () => {
     expect(result.systemPrompt).not.toContain(
       "exactly one interactive child for each part",
     );
+    expect(result.systemPrompt).not.toContain(
+      "Do not ask the user to design the agent tree",
+    );
+    expect(result.systemPrompt).not.toContain(
+      "Synthesize the direct children's verified results into one user-facing answer",
+    );
     expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
@@ -316,6 +322,12 @@ describe("extension registration", () => {
     const result = await hook({ systemPrompt: "base prompt" }, {});
     expect(result.systemPrompt).toContain("# Orchestratorv2 Split Policy");
     expect(result.systemPrompt).toContain(
+      "Do not ask the user to design the agent tree",
+    );
+    expect(result.systemPrompt).toContain(
+      "Synthesize the direct children's verified results into one user-facing answer",
+    );
+    expect(result.systemPrompt).toContain(
       "Every broad user-originated request must be decomposed into the smallest practical independent parts",
     );
     expect(result.systemPrompt).toContain(
@@ -348,6 +360,17 @@ describe("extension registration", () => {
         "--split",
       );
       expect(abort).toHaveBeenCalledOnce();
+      const inputHook = api.on.mock.calls.find(
+        ([event]) => event === "input",
+      )![1];
+      const notify = vi.fn();
+      expect(
+        inputHook({ text: "Return a short answer." }, { ui: { notify } }),
+      ).toEqual({ action: "handled" });
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining("--split"),
+        "error",
+      );
     },
   );
 
