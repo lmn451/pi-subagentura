@@ -8,6 +8,7 @@ import type {
   PaneRef,
 } from "./multiplexer-contracts";
 import {
+  validateMuxLaunchContext,
   boundCaptureOutput,
   commandExists,
   isRexBlockId,
@@ -206,22 +207,19 @@ function verifyLiveRexContext(candidate: RexContextCandidate): RexContextProbe {
   }
   try {
     const { sessionId, blockId, serverSelector } = candidate;
-    const whoami = rexExecSync([
-      "--server",
-      serverSelector,
-      "whoami",
-      "--json",
-    ]);
+    const whoami = rexExecSync(
+      contextArgs({ sessionId, server: serverSelector }, ["whoami", "--json"]),
+    );
     const server = parseWhoami(whoami, { sessionId, blockId });
-    const listing = rexExecSync([
-      "--server",
-      server,
-      "block",
-      "ls",
-      "--json",
-      "--session",
-      sessionId,
-    ]);
+    const listing = rexExecSync(
+      contextArgs({ sessionId, server }, [
+        "block",
+        "ls",
+        "--json",
+        "--session",
+        sessionId,
+      ]),
+    );
     if (!parseBlockIds(listing).has(blockId)) {
       throw new Error("Rex context block is not live in the reported session");
     }
@@ -263,7 +261,7 @@ function contextForPane(ref: PaneRef): RexContext {
 }
 
 function contextArgs(context: RexTarget, command: readonly string[]): string[] {
-  return ["--server", context.server, ...command];
+  return ["--autostart=false", "--server", context.server, ...command];
 }
 
 function parseCreatedBlockId(output: string): string {
@@ -308,13 +306,22 @@ export class RexMultiplexer implements Multiplexer {
   }
 
   createPane(opts: {
+    context?: import("./multiplexer-contracts").MuxLaunchContext;
     name: string;
     cwd: string;
     background: boolean;
     parentPane?: string;
     windowName?: string;
   }): { paneId: string; windowName?: string; session: string; server: string } {
-    const context = this.requireCurrentContext();
+    validateMuxLaunchContext(this.name, opts.context);
+    const context =
+      opts.context?.kind === "attached" && opts.context.mux === "rex"
+        ? {
+            sessionId: opts.context.session,
+            blockId: opts.context.paneId,
+            server: opts.context.server,
+          }
+        : this.requireCurrentContext();
     const label = opts.windowName ?? safeSegment(opts.name);
     const args = [
       "run",
@@ -560,7 +567,7 @@ export class RexMultiplexer implements Multiplexer {
       server: opts.server,
     });
     const command = [
-      "rex --server",
+      "rex --autostart=false --server",
       shellEscape(context.server),
       "focus",
       shellEscape(context.blockId),

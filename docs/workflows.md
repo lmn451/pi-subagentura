@@ -27,6 +27,12 @@ appear before or after it. Do not use TypeScript, imports, `require`, filesystem
 APIs, `Date.now()`, `Math.random()`, or argless `new Date()`. For editor support,
 reference the published ambient declarations at `pi-subagentura/workflow`.
 
+Pipeline declarations preserve each awaited stage result instead of falling
+back to `any` after three stages. Inline callbacks have contextual overloads
+through six stages; longer pipelines can pass an explicitly typed stage tuple
+to the variadic contract. A stage must accept the previous stage's awaited
+result, and pipeline result entries remain nullable when a stage fails.
+
 Use workflows only when work decomposes into independent agents or streaming
 stages. The VM globals are `agent`, `parallel`, `pipeline`, `workflow`, `phase`,
 `log`, `args`, immutable `cwd` (the parent execution directory), `budget`,
@@ -205,6 +211,11 @@ The sandbox exposes only the documented workflow helpers plus immutable `cwd`,
 code generation is disabled, but this VM is still a determinism aid rather than
 a security boundary. All file I/O must happen in sub-agents via tools.
 
+Workflow-visible helpers and copied argument/result data are created in the VM
+realm. Host RPC functions are kept behind a private bootstrap bridge so helper
+constructors do not provide an accidental route around the Date and
+code-generation guards. This hardening does not make hostile JavaScript safe.
+
 ### 6. `additionalProperties: false` rejects unknown keys
 
 The `validateSchema` function in `src/workflow-core.ts` enforces `additionalProperties: false` for object schemas. Any output key not listed in `properties` produces a validation error. Use it when an agent result must not contain undeclared keys; otherwise, extra keys are allowed.
@@ -308,7 +319,19 @@ records show phase, label, model, and status, not full tool-call history.
 The overlay is keyboard-driven. Mouse-clickable controls directly on widget rows
 are still deferred because widgets are intentionally passive status surfaces.
 
-#### 4. Remaining gaps
+#### 4. Completion and cancellation
+
+A raw workflow `status: "done"` means its script resolved, not that every child
+completed successfully. Terminal `get_workflow_status` and `get_workflow_result`
+responses expose `cancelledCount` alongside `errorCount`. Cancelled children are
+counted separately from errors, even when their `agent()` result is `null`.
+
+Resolved workflows with cancelled children use a warning presentation in results,
+status, and workflow summaries. Cancelled children are reported as `cancelled`
+in coordinated completion notices; whole-workflow `status: "cancelled"` and an
+interrupted result wait (`wait_cancelled`) remain distinct from child cancellation.
+
+#### 5. Remaining gaps
 
 - Workflow widget rows are summaries, not mouse-clickable controls.
 - Progress event coalescing/rate limiting is still basic.
@@ -322,6 +345,10 @@ Zellij, Herdr, or Rex when the current Rex context is verified:
 ```js
 await agent(prompt, { label: "verify:claim-x" });
 ```
+
+Ambiguous or unverifiable current-mux ownership rejects the agent attempt; it
+never triggers automatic in-process fallback. Other process-isolation availability
+failures retain the existing fallback, including when no native mux is installed.
 
 Use `isolation: "in-process"` only when the workflow explicitly wants the older
 in-process behavior:

@@ -2205,7 +2205,12 @@ function registerPruneSubagentJobsTool(
     ].join("\n"),
     parameters: Type.Object({}),
 
-    async execute(): Promise<any> {
+    async execute(): Promise<
+      AgentToolResult<
+        | InProcessSubagentDetails
+        | { removed: number; before: number; after: number }
+      >
+    > {
       const execution = resolveExecutionOwner(toolToken);
       if (!execution) return unavailableSessionResult();
       const registry = inProcessJobsForOwner(execution.owner);
@@ -2294,7 +2299,7 @@ function registerCleanupArtifactsTool(
       ),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<any> {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const scope = resolveToolSessionScope(toolToken);
       if (
         !scope &&

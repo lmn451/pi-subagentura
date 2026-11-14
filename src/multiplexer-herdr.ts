@@ -8,6 +8,7 @@
  * focused when Pi restarts.
  */
 
+import { validateMuxLaunchContext } from "./multiplexer-contracts";
 import { execFile, execFileSync } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { asStringIdentifier, type HerdrRequestId } from "./identifier-types";
@@ -564,6 +565,7 @@ export class HerdrMultiplexer implements Multiplexer {
   }
 
   createPane(opts: {
+    context?: import("./multiplexer-contracts").MuxLaunchContext;
     name: string;
     cwd: string;
     background: boolean;
@@ -576,12 +578,16 @@ export class HerdrMultiplexer implements Multiplexer {
     windowName?: string;
     session?: string;
   } {
-    if (!this.isAvailable()) {
+    validateMuxLaunchContext(this.name, opts.context);
+    if (!(opts.context ? commandExists("herdr") : this.isAvailable())) {
       throw new Error(
         "Herdr is not available. Install Herdr and start Pi inside a Herdr pane.",
       );
     }
-    const session = currentSocketPath();
+    const session =
+      opts.context?.kind === "attached"
+        ? opts.context.session!
+        : currentSocketPath();
     // Tab labels are what the user reads in the Herdr tab strip, and
     // `safeSegment(name)` alone collides whenever two sub-agents share a name
     // ("review" twice). Disambiguate with the caller's unique sub-agent id, the
@@ -590,7 +596,10 @@ export class HerdrMultiplexer implements Multiplexer {
     const windowName = opts.id
       ? `${baseName}-${safeSegment(opts.id)}`
       : baseName;
-    const parentPane = opts.parentPane ?? process.env.HERDR_PANE_ID;
+    const parentPane =
+      opts.context?.kind === "attached"
+        ? opts.context.paneId
+        : (opts.parentPane ?? process.env.HERDR_PANE_ID);
     if (!parentPane) throw new Error("Herdr did not provide HERDR_PANE_ID");
     // `pane split` takes this id as its first positional, before its flags.
     // Validate it once and use only that binding for the command below.

@@ -1,18 +1,34 @@
 ---
 title: "Optional native classifier routing"
-keywords: [orchestratorv2, jev, classifier, routing, agents, configuration]
+keywords:
+  [
+    orchestratorv2,
+    jev,
+    openai-decisions,
+    classifier,
+    routing,
+    agents,
+    configuration,
+  ]
 ---
 
 # Optional native classifier routing
 
-Orchestratorv2 can ask a Pi classifier to select an existing interactive child
-when the requested work is clear but its owner is ambiguous. **Pi's native
-classifier API is the only backend.** There are no direct TypeSafe/OpenRouter
-HTTP adapters and no fallback transport.
+Orchestratorv2 can ask a Pi classifier to recommend one existing, live,
+authorized native interactive child when the requested work is clear but its
+owner is ambiguous. The extension builds eligible candidates from the current
+parent session's routing authority and live runtime, then calls Pi's native
+classifier API. The classifier chooses only among those candidates (or `none`);
+it cannot create, message, attach to, or change a child's responsibilities.
 
-The parent lists agents, asks the advisor, and sends the original task through
-`send_interactive_subagent_message`. The classifier cannot send messages, spawn,
-attach, reserve children, or change their responsibilities.
+Jev models such as `~typesafe/jev-latest` use Pi's native System One path.
+`gpt-6-luna` may be used through Pi's native OpenAI Decisions classifier
+support when the installed catalog exposes it under provider `openai`; Pi owns
+the model-to-transport mapping, and the extension does not construct provider
+HTTP requests. Provider/model settings select the classifier, not the child
+owner. Rex is a native mux backend, so a Rex child may be recommended only when
+it is already an eligible, live, authorized native child. Orca host-managed
+agents are outside this registry and cannot be selected by the advisor.
 
 ## Enable
 
@@ -43,12 +59,26 @@ Provider/model selection does not authenticate the provider. Use Pi's normal
 configuration for TypeSafe, another Jev provider, or a llama.cpp classifier.
 Changing the provider does not automatically change the model ID.
 
-To use OpenAI's Decisions API with Pi 1.4.0 or another version whose catalog
-includes `gpt-6-luna`, set `PI_ORCHESTRATOR_ROUTER_PROVIDER=openai` and
-`PI_ORCHESTRATOR_ROUTER_MODEL=gpt-6-luna`. OpenAI requires an API key; Pi's
-ChatGPT OAuth login does not authorize Decisions API requests. A stored OpenAI
-login can take precedence over `OPENAI_API_KEY`; consult Pi's model documentation.
-The provider can charge for classification requests.
+For OpenAI Decisions, configure `openai` and `gpt-6-luna` only if the installed
+Pi model catalog exposes that exact provider/model as a classifier. The
+extension asks Pi's registry for the classifier entry and invokes its native
+classifier API; the package's minimum Pi version does not guarantee that every
+catalog contains this model.
+
+```bash
+export PI_ORCHESTRATOR_ROUTER="jev"
+export PI_ORCHESTRATOR_ROUTER_PROVIDER="openai"
+export PI_ORCHESTRATOR_ROUTER_MODEL="gpt-6-luna"
+pi --orchestratorv2
+```
+
+Provide an OpenAI API key through Pi's normal provider authentication, commonly
+`OPENAI_API_KEY`; ChatGPT OAuth does not authorize Decisions API requests. A
+stored OpenAI login can take precedence over that environment variable. The
+extension checks Pi's configured-auth status but does not verify the key, live
+provider service, permissions, or billing. Classification requests may incur
+provider charges. See Pi's model documentation for which catalog entry and
+credential Pi will use.
 
 If the host lacks the classifier APIs, the configured model is absent, or
 provider authentication is not configured, advisor registration and guidance are

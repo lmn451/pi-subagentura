@@ -15,13 +15,12 @@ For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
 clarification when a request is ambiguous, and leave repository work to
 specialists. A clear scoped request may create one specialist when fresh
-discovery establishes that no suitable owner exists. Shared host-aware launch
-guidance also applies in regular sessions and `--orchestrator` mode; see
+discovery establishes that no suitable owner exists. Shared host-aware parent
+prompt guidance applies in ordinary sessions and both orchestration modes; see
 [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
-The detailed [Orca interactive delegation guidance](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
-applies when normal Pi parents or interactive children/nested contexts delegate
-interactively, with or without `--orchestratorv2`. Compatibility workflow and
-in-process tools remain registered.
+The detailed Orca guide is supplied only to matching Orca parent roots, not
+interactive children or unrelated hosts. Compatibility workflow and in-process
+tools remain registered.
 
 To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `--orchestrator` mode or explicitly ask for a workflow (for example, with
@@ -310,24 +309,31 @@ cache is only an untrusted lookup aid.
 
 ### Host-aware interactive agent spawning
 
-`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` provides the canonical detailed Orca
-guidance. `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` layers Agterm guidance,
-explicit target-selection precedence, and analytics boundaries on top. Both
-shared assets are appended exactly once to every root and interactive-child
-prompt; mode-specific prompt assets remain root-only.
+`ORCA_INTERACTIVE_SYSTEM_PROMPT.md` is the detailed Orca host/UX guide.
+`INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` is the shared host layer for recognized
+Orca, Agterm, and Rex parent contexts. Orca skills are external; use the
+installed, version-matched skills for exact commands and live discovery.
 
-Use Orca skills/tools only after current-session/runtime evidence independently
-verifies that this Pi caller and terminal belong to the running Orca instance, or
-when the user explicitly selects Orca (which authorizes loading the skills to
-verify and mismatch-check). An installed CLI/skill, inherited environment marker,
-cwd, or active UI tab alone is not proof; do not use Orca tools to bootstrap
-unverified host detection. If positively outside Orca (including Rex) and Orca
-was not explicitly selected, do not use Orca tools. If host/surface evidence is
-ambiguous, ask before launch rather than silently switching or falling back. Once
-Orca is verified and no explicit target overrides it, Orca is the default
-interactive surface. Every explicit target wins, including native
-`subagent_interactive` and `mux`. See [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md)
-and [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
+At extension activation, one bounded environment snapshot captures closed
+prompt-eligibility and telemetry categories. On every parent
+`before_agent_start`, a matching non-child root receives the relevant prompt
+asset through Pi's `systemPrompt`: Orca roots get the Orca guide and shared host
+layer; Agterm and Rex roots get only the shared layer. Unrecognized or unrelated
+roots and native interactive child processes receive no host-specific prompt,
+even if they inherit host markers. The snapshot retains no raw host values,
+paths, or identifiers; it proves neither current host ownership nor mux
+selection.
+
+This guidance does not select a backend or authorize an operation. Orca is a
+host/UX context, not a native mux; after fresh live session/runtime evidence
+verifies the current caller, Orca may be the default when no explicit target is
+selected. Rex is a native mux backend, but environment hints alone do not
+establish the active block: current ownership checks must verify it. Agterm is
+a recognized prompt host, not a native mux backend. Explicit user-selected
+targets take precedence. If live ownership or the requested target is
+uncertain, report that and ask rather than silently switching. See
+[the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) and
+[the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
 
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).
@@ -504,18 +510,31 @@ provider authentication through Pi, then ask the parent to use
 The classifier recommends an existing child; it does not replace your chat
 model or automatically send work.
 
-For the default OpenRouter Jev classifier, authenticate with `/login openrouter`
-and start Pi with:
+For the default OpenRouter Jev classifier, configure authentication through Pi
+(for example, `/login openrouter`) and start Pi with:
 
 ```bash
 PI_ORCHESTRATOR_ROUTER=jev pi --orchestratorv2
 ```
 
-Only live children with confirmed responsibilities can be recommended; the
-parent still sends the original task through its existing messaging tool. This
-opt-in sends bounded task and responsibility text to the configured provider.
-See [Jev routing](docs/jev-routing.md) for provider choices, configuration,
-payload disclosure, and failure behavior.
+To select OpenAI's Decisions classifier, use the exact provider/model IDs only
+when the installed Pi classifier catalog exposes `openai/gpt-6-luna`:
+
+```bash
+PI_ORCHESTRATOR_ROUTER=jev \
+PI_ORCHESTRATOR_ROUTER_PROVIDER=openai \
+PI_ORCHESTRATOR_ROUTER_MODEL=gpt-6-luna \
+pi --orchestratorv2
+```
+
+Configure an OpenAI API key through Pi's normal provider authentication;
+ChatGPT OAuth does not authorize Decisions API requests, and a stored OpenAI
+login can take precedence over `OPENAI_API_KEY`. Catalog/auth configuration is
+not a live provider health check. Provider/model settings select the
+classifier, not a child agent: the advisor can recommend only a currently
+authorized native child, and the parent still sends the original task.
+See [Jev routing](docs/jev-routing.md) for provider choices, payload disclosure,
+and failure behavior.
 
 ## Cancellation context snapshots (opt-in)
 
@@ -671,7 +690,7 @@ Parameters:
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
-- `mux` — optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, or `"rex"`. Auto prefers a verified Herdr context, then verifies the complete live Rex context (`REX_SESSION`, `REX_BLOCK`, `REX_SERVER`), then uses Zellij/tmux context markers or the existing tmux/Zellij detached-session fallback. A recognized but incomplete, unsupported, or unavailable host fails closed instead of falling through. `TERM_PROGRAM=rex` alone is not proof of a usable Rex context. Explicit choice forces that backend. Rex requires Pi to be running in a live Rex block and persists the server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for its capability limits.
+- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, or `"rex"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
 - `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
 - `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)

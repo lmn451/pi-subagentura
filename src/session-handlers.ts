@@ -79,7 +79,7 @@ import {
   isTelemetryEnabled,
   readExtensionSettings,
 } from "./settings";
-import { resolveTelemetrySessionHost } from "./session-host";
+import { detectEnvironment, type EnvironmentSnapshot } from "./environment";
 import {
   captureTelemetry,
   createTelemetrySession,
@@ -90,8 +90,6 @@ import {
   type TelemetrySession,
   resolveTelemetryTrafficOrigin,
   TELEMETRY_ORIGIN_ENV,
-  sanitizeTelemetryTerminalProgram,
-  resolveTelemetryParentMux,
 } from "./telemetry";
 
 function getGlobalState() {
@@ -104,15 +102,16 @@ function logSessionError(event: string, error: unknown): void {
   debugLog("error", event, { error: message });
 }
 
-function captureRootSessionStarted(telemetry: TelemetrySession): void {
+function captureRootSessionStarted(
+  telemetry: TelemetrySession,
+  environment: EnvironmentSnapshot,
+): void {
   if (!telemetry.enabled || telemetry.trafficOrigin === "test") return;
   captureTelemetry(telemetry, {
     event: "session_started",
-    session_host: resolveTelemetrySessionHost(),
-    parent_mux: resolveTelemetryParentMux(),
-    terminal_program: sanitizeTelemetryTerminalProgram(
-      process.env.TERM_PROGRAM,
-    ),
+    session_host: environment.telemetryHost,
+    parent_mux: environment.parentMux,
+    terminal_program: environment.terminalProgram,
   });
 }
 
@@ -444,11 +443,13 @@ export function registerSessionHandlers(
    * branch below unreachable.
    */
   resolveTelemetryEnabled: typeof isTelemetryEnabled = isTelemetryEnabled,
+  environment: EnvironmentSnapshot = detectEnvironment(),
 ): SessionScope {
   const scope = createSessionScope(
     pi,
     initialSpawnTreeContext,
     allowRootLineage ? "root" : "child",
+    environment,
   );
   const globalState = getGlobalState() as any;
   registerSessionScope(scope);
@@ -601,7 +602,7 @@ export function registerSessionHandlers(
       });
     }
     if (!isChild && recoveredTelemetry === undefined) {
-      captureRootSessionStarted(scope.telemetry);
+      captureRootSessionStarted(scope.telemetry, scope.environment);
     }
     // With telemetry off there is nothing to persist, so touching `.pi/`, the
     // state lock, and the state file would make the opt-out observable. The one

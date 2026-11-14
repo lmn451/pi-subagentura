@@ -71,6 +71,8 @@ import {
   type CapturePaneOptions,
   type CapturePaneResult,
   getMux,
+  resolveMux,
+  type MuxLaunchContext,
   NoMultiplexerAvailableError,
   type MuxName,
   type Multiplexer,
@@ -80,6 +82,7 @@ import {
   type PaneRef,
   safeSegment,
 } from "./multiplexer";
+import { resolveCurrentMuxContextAsync } from "./multiplexer-current-context";
 import {
   snapshotInteractiveContext,
   type CancellationSnapshotReceipt,
@@ -599,7 +602,7 @@ export function launchInteractiveSubagent(params: {
   completionPolicy?: CompletionPolicy;
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
-  /** Mux preference — passed to getMux(). "auto" (default) = env-var heuristic. */
+  /** Mux preference. "auto" verifies live current-pane ownership. */
   muxPreference?: "auto" | "tmux" | "zellij" | "herdr" | "rex";
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
@@ -886,8 +889,11 @@ export function launchInteractiveSubagent(params: {
   // before we start writing files. The resolver throws NoMultiplexerAvailableError
   // with a setup hint if neither backend is usable.
   let mux;
+  let muxContext: MuxLaunchContext;
   try {
-    mux = getMux({ preference: params.muxPreference });
+    const resolved = resolveMux({ preference: params.muxPreference });
+    mux = resolved.adapter;
+    muxContext = resolved.context;
   } catch (err) {
     reportSpawnFailure("mux_resolution", undefined, "mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {
@@ -942,12 +948,7 @@ export function launchInteractiveSubagent(params: {
       name: params.name,
       cwd,
       background,
-      parentPane:
-        mux.name === "herdr"
-          ? process.env.HERDR_PANE_ID
-          : mux.name === "rex"
-            ? process.env.REX_BLOCK
-            : process.env.TMUX_PANE,
+      context: muxContext,
       windowName: safeSegment(params.name),
       id,
     });
@@ -1250,58 +1251,17 @@ export interface CurrentPaneActivity {
   readonly session?: string;
 }
 
-interface CurrentPaneTarget {
-  readonly mux: MuxName;
-  readonly paneId?: string;
-  readonly session?: string;
-  readonly server?: string;
-}
-
-function currentPaneTarget(): CurrentPaneTarget | undefined {
-  if (process.env.HERDR_ENV === "1") {
-    return {
-      mux: "herdr",
-      paneId: process.env.HERDR_PANE_ID,
-      session: process.env.HERDR_SOCKET_PATH,
-    };
-  }
-  if (
-    process.env.REX_SESSION !== undefined ||
-    process.env.REX_BLOCK !== undefined ||
-    process.env.TERM_PROGRAM?.trim().toLowerCase() === "rex"
-  ) {
-    return {
-      mux: "rex",
-      paneId: process.env.REX_BLOCK,
-      session: process.env.REX_SESSION,
-      server: process.env.REX_SERVER,
-    };
-  }
-  if (process.env.ZELLIJ) {
-    return {
-      mux: "zellij",
-      paneId: process.env.ZELLIJ_PANE_ID,
-      session: process.env.ZELLIJ_SESSION_NAME,
-    };
-  }
-  if (process.env.TMUX) {
-    return { mux: "tmux", paneId: process.env.TMUX_PANE };
-  }
-  return undefined;
-}
-
 /** Probe whether the current Pi process's mux pane is active for the user. */
 export async function getCurrentPaneActivity(): Promise<CurrentPaneActivity> {
-  const target = currentPaneTarget();
-  const location = target
-    ? {
-        mux: target.mux,
-        ...(target.paneId ? { paneId: target.paneId } : {}),
-        ...(target.session ? { session: target.session } : {}),
-      }
-    : {};
+  const context = await resolveCurrentMuxContextAsync();
+  if (context.kind !== "ready") return { status: "unknown" };
+  const target = context.target;
+  const location = {
+    mux: target.mux,
+    paneId: target.paneId,
+    ...(target.session ? { session: target.session } : {}),
+  };
   let status: PaneActivity;
-  if (!target?.paneId) return { status: "unknown", ...location };
 
   try {
     status = await getMux({ preference: target.mux }).getPaneActivityAsync(

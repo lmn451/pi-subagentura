@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": false
+  },
+  "include": [
+    "src/identifier-types.ts",
+    "src/usage.ts",
+    "types/workflow.d.ts",
+    "tests/workflow-types.test-d.ts",
+    "typechecks/core.test-d.ts"
+  ]
+}

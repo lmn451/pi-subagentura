@@ -72,6 +72,31 @@ export type WorkflowPipelineStage<TItem, TPrevious, TResult> = (
   index: number,
 ) => TResult | PromiseLike<TResult>;
 
+export type WorkflowPipelineFunction = (...args: never[]) => unknown;
+
+export type WorkflowPipelineStages<
+  TItem,
+  TPrevious,
+  TStages extends readonly WorkflowPipelineFunction[],
+> = TStages extends readonly [
+  infer THead extends WorkflowPipelineFunction,
+  ...infer TTail extends readonly WorkflowPipelineFunction[],
+]
+  ? readonly [
+      (previous: TPrevious, item: TItem, index: number) => ReturnType<THead>,
+      ...WorkflowPipelineStages<TItem, Awaited<ReturnType<THead>>, TTail>,
+    ]
+  : readonly [];
+
+export type WorkflowPipelineResult<
+  TStages extends readonly WorkflowPipelineFunction[],
+> = TStages extends readonly [
+  ...WorkflowPipelineFunction[],
+  infer TLast extends WorkflowPipelineFunction,
+]
+  ? Awaited<ReturnType<TLast>>
+  : never;
+
 export interface WorkflowBudget {
   readonly total: number | null;
   spent(): number;
@@ -92,6 +117,9 @@ declare global {
     thunks: readonly WorkflowThunk<T>[],
   ): Promise<Array<Awaited<T> | null>>;
 
+  function pipeline<TItem>(
+    items: readonly TItem[],
+  ): Promise<Array<Awaited<TItem> | null>>;
   function pipeline<TItem, TResult>(
     items: readonly TItem[],
     stage: WorkflowPipelineStage<TItem, TItem, TResult>,
@@ -107,10 +135,47 @@ declare global {
     stage2: WorkflowPipelineStage<TItem, Awaited<TResult1>, TResult2>,
     stage3: WorkflowPipelineStage<TItem, Awaited<TResult2>, TResult3>,
   ): Promise<Array<Awaited<TResult3> | null>>;
-  function pipeline<TItem>(
+  // Contextual overloads keep inline callbacks ergonomic. The variadic overload
+  // below also validates longer, explicitly typed stage tuples.
+  function pipeline<TItem, TResult1, TResult2, TResult3, TResult4>(
     items: readonly TItem[],
-    ...stages: Array<WorkflowPipelineStage<TItem, any, any>>
-  ): Promise<Array<any | null>>;
+    stage1: WorkflowPipelineStage<TItem, TItem, TResult1>,
+    stage2: WorkflowPipelineStage<TItem, Awaited<TResult1>, TResult2>,
+    stage3: WorkflowPipelineStage<TItem, Awaited<TResult2>, TResult3>,
+    stage4: WorkflowPipelineStage<TItem, Awaited<TResult3>, TResult4>,
+  ): Promise<Array<Awaited<TResult4> | null>>;
+  function pipeline<TItem, TResult1, TResult2, TResult3, TResult4, TResult5>(
+    items: readonly TItem[],
+    stage1: WorkflowPipelineStage<TItem, TItem, TResult1>,
+    stage2: WorkflowPipelineStage<TItem, Awaited<TResult1>, TResult2>,
+    stage3: WorkflowPipelineStage<TItem, Awaited<TResult2>, TResult3>,
+    stage4: WorkflowPipelineStage<TItem, Awaited<TResult3>, TResult4>,
+    stage5: WorkflowPipelineStage<TItem, Awaited<TResult4>, TResult5>,
+  ): Promise<Array<Awaited<TResult5> | null>>;
+  function pipeline<
+    TItem,
+    TResult1,
+    TResult2,
+    TResult3,
+    TResult4,
+    TResult5,
+    TResult6,
+  >(
+    items: readonly TItem[],
+    stage1: WorkflowPipelineStage<TItem, TItem, TResult1>,
+    stage2: WorkflowPipelineStage<TItem, Awaited<TResult1>, TResult2>,
+    stage3: WorkflowPipelineStage<TItem, Awaited<TResult2>, TResult3>,
+    stage4: WorkflowPipelineStage<TItem, Awaited<TResult3>, TResult4>,
+    stage5: WorkflowPipelineStage<TItem, Awaited<TResult4>, TResult5>,
+    stage6: WorkflowPipelineStage<TItem, Awaited<TResult5>, TResult6>,
+  ): Promise<Array<Awaited<TResult6> | null>>;
+  function pipeline<
+    TItem,
+    const TStages extends readonly WorkflowPipelineFunction[],
+  >(
+    items: readonly TItem[],
+    ...stages: TStages & WorkflowPipelineStages<TItem, TItem, TStages>
+  ): Promise<Array<WorkflowPipelineResult<TStages> | null>>;
 
   function workflow(
     name: string,

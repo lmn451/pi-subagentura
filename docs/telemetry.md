@@ -32,23 +32,29 @@ not a linked cohort. A runtime success does not measure answer usefulness.
 
 `mux` attributes the extension-managed child execution backend, not the terminal
 hosting Pi. A tmux child remains `mux=tmux` inside Orca or Agterm; a Rex child
-uses `mux=rex`; an in-process child remains `mux=none`. On `agent_launch_resolved`,
-`requested_execution` and `requested_mux` record the request, while `execution` and
-`mux` record the resolved extension launch (or `unknown` where no backend was
-established). These fields remain independent of the outer-host label. Nested or
-inherited host, tmux, Zellij, and Rex markers must not make these dimensions
-mutually exclusive or select a target in place of an explicit mux choice.
+uses `mux=rex` only after the extension's current ownership resolution accepts
+the native Rex backend; an in-process child remains `mux=none`. On
+`agent_launch_resolved`, `requested_execution` and `requested_mux` record the
+request, while `execution` and `mux` record the resolved extension launch (or
+`unknown` where no backend was established). These fields remain independent
+of the outer-host label. Inherited host, tmux, Zellij, and Rex markers do not
+make these dimensions mutually exclusive or select a target in place of an
+explicit mux choice.
 
-The shared host-aware guidance is prompt/skill-based in ordinary sessions,
-interactive children/nested contexts, and both orchestration modes. Orca's
-`agent launch`/supervised orchestration tools and Agterm's process-backed
-`session new --command` plus pane mailboxes are host-managed operations, not
-subagentura-owned children or extension launch instrumentation. Do not manufacture
-`agent_created`, `agent_launch_resolved`, task, artifact, or completion records
-from host CLI receipts. There is no native Orca or Agterm
-`subagent_interactive` backend, and `orca` is not a supported telemetry mux
-value; filtering by `mux=orca` cannot measure Orca prompt-path adoption. The
-`orchestrator_v2` mode label is not proof that the Orca path was used.
+Host-aware prompts are added per agent start only to matching parent roots:
+Orca roots receive the Orca-specific and shared host guidance; recognized
+Agterm/Rex roots receive shared guidance; children and unmatched roots receive
+no host-specific prompt. This activation-snapshot gate is not proof of a live
+host or mux target. Orca's `agent launch`/supervised orchestration tools and
+Agterm's process-backed `session new --command` plus pane mailboxes are
+host-managed operations, not Subagentura-owned children or extension launch
+instrumentation. Orca and Agterm have no native `subagent_interactive` backend.
+Rex is different: it is a native backend, and a Rex launch is attributed only
+after live ownership resolution. Do not manufacture `agent_created`,
+`agent_launch_resolved`, task, artifact, or completion records from external
+host CLI receipts. `orca` is not a supported telemetry mux value; filtering by
+`mux=orca` cannot measure Orca prompt-path adoption. The `orchestrator_v2` mode
+label is not proof that the Orca path was used.
 
 Fresh root `session_started` records include the additive schema-v6
 `session_host` dimension: `agterm`, `orca`, or `unknown`, regardless of whether
@@ -58,6 +64,11 @@ This is outer-host environment/provenance evidence for a logical root session,
 not a person, installation, live terminal, current routing target, or proof that
 a particular host-managed launch occurred. No persistent installation or user
 identifier is created.
+
+Root prompt eligibility and legacy telemetry use distinct projections of the
+same bounded activation-time environment snapshot. Guidance can recognize a
+unique Orca, Agterm, or Rex observation; `session_host` remains closed to
+`orca`, `agterm`, or `unknown`, so Rex never becomes a host-telemetry label.
 
 Orca attribution consumes only the complete, dedicated launch-origin stamp:
 `ORCA_RUNTIME_SOURCE_ID`, `ORCA_RUNTIME_SOURCE_INCARNATION`, and
@@ -81,20 +92,30 @@ currently live. `TMUX` and `ZELLIJ_SESSION_NAME` do not change `session_host`.
 When a complete Orca stamp and Agterm marker coexist, the single closed host
 dimension cannot express their topology and resolves to `unknown`.
 
-These checks are measurement-only, not live-process, foreground-terminal,
-routing, cancellation or security authority. Missing, partial, malformed or
-oversized Orca stamps and missing/non-exact Agterm markers resolve to `unknown`;
-`unknown` is not a non-Agterm or non-Orca population. Neither source is
-cryptographic proof against forged same-user environment variables. Native
-extension-managed children do not emit root starts, and reload/resume preserve
-logical-session suppression without reclassification.
+These environment observations are measurement and prompt-eligibility inputs
+only, not live-process, foreground-terminal, routing, cancellation, or security
+authority. Missing, partial, malformed, or oversized Orca stamps and
+missing/non-exact Agterm markers resolve to `unknown`; `unknown` is not a
+non-Agterm or non-Orca population. Same-user environment variables can be
+forged.
 
-Only telemetry-enabled fresh roots evaluate this pure environment-to-enum
-classification. It runs no command, runtime probe, app launch, filesystem read,
-or network request; it does not discover an installed CLI or use remote or
-active-tab defaults. Existing opt-outs suppress classification and capture.
+The extension captures one immutable bounded environment snapshot at
+activation, whether or not telemetry is enabled. It retains only closed
+categorical observations, not raw host values, identifiers, paths, or the
+environment object. The snapshot is reused for per-agent-start root prompt
+eligibility and session telemetry; it does not select a native mux. Native mux
+resolution uses separate current process-environment selectors and fresh live
+ownership/availability checks. Snapshot classification runs no command, runtime
+probe, app launch, filesystem read, or network request; it does not discover an
+installed CLI or use remote or active-tab defaults. Telemetry opt-outs suppress
+event capture, and `session_started` remains limited to telemetry-enabled fresh
+roots under the existing session policy. Native extension-managed children do
+not emit root starts, and reload/resume preserve logical-session suppression
+without reclassification. Prompt eligibility does not bypass fresh live
+ownership checks before using host tools or selecting an existing Rex target.
+
 No raw stamp, marker, handle, version, path, host/Pi identifier, environment
-value, prompt or argument is uploaded or logged. The random
+value, prompt, or argument is uploaded or logged. The random
 `telemetry_session_id` remains the only cross-event correlation identifier;
 `session_host` itself is sent only on `session_started`. For extension-managed
 spawns, analytics may join that root host evidence to `agent_launch_resolved` by
@@ -115,8 +136,9 @@ Agterm explicitly sets `TERM_PROGRAM=agterm` in its upstream
 [`SurfaceEnvironment`](https://github.com/umputun/agterm/blob/master/agtermCore/Sources/agtermCore/SurfaceEnvironment.swift)
 builder, including its quick terminal. We do not infer it from Ghostty engine
 markers, installed binaries, socket paths, or session IDs. No raw environment
-value, terminal version, or identifier is sent. Classification is synchronous,
-performs no probes, and shares the existing fresh-root and telemetry opt-out gates.
+value, terminal version, or identifier is sent. Classification occurs
+synchronously as part of the activation snapshot without probes; the event
+remains subject to the existing fresh-root and telemetry opt-out gates.
 
 This measures the environment-advertised terminal application, not unique users
 or proof of the currently active terminal. Multiplexers, SSH, nested terminals,
@@ -137,12 +159,15 @@ or multiple markers produce `unknown`: nested environments do not reliably
 establish which mux is innermost. Missing historical fields are also unknown, not
 proof that no multiplexer was used.
 
-No command, binary availability check, socket connection, or server probe runs;
-no raw socket path, session name, or other marker value is sent. Classification
-shares fresh-root and telemetry opt-out gates. Inherited or forged markers
-remain possible, so this is observed context, not live ownership verification.
-The field does not alter backend selection. Join root events to child launch
-events by `telemetry_session_id` to compare parent context with child backends.
+No command, binary availability check, socket connection, or server probe runs
+to classify `parent_mux`; the marker observation is activation-time. The
+separate native auto-backend path keeps its existing current availability and
+ownership checks. No raw socket path, session name, or other marker value is
+sent. The field appears only on events allowed by the existing fresh-root and
+telemetry opt-out gates. Inherited or forged markers remain possible, so this
+is observed context, not live ownership verification. The field does not alter
+backend selection. Join root events to child launch events by
+`telemetry_session_id` to compare parent context with child backends.
 
 ### Logical launch resolution
 
