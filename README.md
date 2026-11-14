@@ -12,11 +12,11 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, Herdr,
 or a verified live Superlogical Rex block.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to route clear work to attachable specialists, ask for
-clarification when a request is ambiguous, and leave repository work to
-specialists. A clear scoped request may create one specialist when fresh
-discovery establishes that no suitable owner exists. Shared host-aware parent
-prompt guidance applies in ordinary sessions and both orchestration modes; see
+guides the parent to decompose work across attachable specialists, create routine
+specialists when fresh discovery establishes that no suitable owner exists, and
+synthesize their results. The user only needs to resolve meaningful scope
+decisions or blockers. Shared host-aware parent prompt guidance applies in
+ordinary sessions and both orchestration modes; see
 [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
 The detailed Orca guide is supplied only to matching Orca parent roots, not
 interactive children or unrelated hosts. Compatibility workflow and in-process
@@ -83,10 +83,10 @@ pi --orchestratorv2
 Review the authentication layer across the API and database boundaries.
 ```
 
-The parent routes work to attachable interactive subagents and asks for
-clarification when a request is ambiguous. A clear scoped request may create
-one child when fresh discovery establishes that no suitable owner exists. For
-reusable workflows, use the workflow-oriented `--orchestrator` mode:
+The parent routes work to attachable interactive subagents, creating a
+specialist when fresh discovery establishes that no suitable owner exists, then
+returns one synthesized result. For reusable workflows, use the
+workflow-oriented `--orchestrator` mode:
 
 ```text
 pi --orchestrator
