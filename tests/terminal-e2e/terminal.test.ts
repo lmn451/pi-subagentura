@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gateForMarker } from "./fixtures/mock-provider";
@@ -178,9 +178,10 @@ describe("real Pi terminal E2E", () => {
       // the scripted model is selected and both extensions loaded.
       const screen = harness.renderedScreen();
       expect(screen).toContain("mock • medium");
-      expect(screen).toContain("mock-");
-      expect(screen).toContain("provider.ts");
-      expect(screen).toContain("subagent.ts");
+      // Resource paths can soft-wrap inside a filename at this pane width.
+      const resources = screen.replace(/\s+/g, "");
+      expect(resources).toContain("mock-provider.ts");
+      expect(resources).toContain("subagent.ts");
       expect(harness.panes()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ session: expect.stringMatching(/^e2e-/) }),
@@ -396,6 +397,145 @@ describe("real Pi terminal E2E", () => {
           screen.includes("Child result for [E2E:CHILD_WORKFLOW_OK]."),
         "partial workflow retained successful output",
       );
+      await harness.assertNoNetwork();
+    },
+    timeout,
+  );
+
+  it(
+    "reads active output and immutable turns across follow-up and parent reload",
+    async () => {
+      const firstChild = "[E2E:CHILD_INTERACTIVE_READ]";
+      const nextChild = "[E2E:CHILD_INTERACTIVE_READ_FOLLOWUP]";
+      const firstGate = gateForMarker(firstChild);
+      const nextGate = gateForMarker(nextChild);
+      harness.scenario = "artifact-read-lifecycle";
+      await harness.start();
+      await sendMarker("[E2E:INTERACTIVE_READ_LIFECYCLE]");
+      await harness.waitForProvider(
+        (events) => hasStage(events, firstChild, "staging"),
+        "first turn mutable output",
+      );
+      const pane = childPane();
+      expect(pane).toBeDefined();
+      const started = harness
+        .artifactEvents()
+        .find((event) => event.type === "turn_started");
+      expect(started).toBeDefined();
+      const firstTurnId = String(started!.turnId);
+      const artifactDir = dirname(String(started!.path));
+      const read = async (suffix: string, turnId?: string) => {
+        const marker = `[E2E:ARTIFACT_READ_${suffix}]`;
+        await harness.sendPrompt(
+          `${marker} Read artifact.${turnId === undefined ? "" : ` turnId=${turnId}`}`,
+        );
+        await waitForParentSettled(marker);
+        const record = harness
+          .providerEvents()
+          .find(
+            (event) =>
+              event.marker === marker && event.afterStage === "artifact_read",
+          );
+        expect(record).toBeDefined();
+        return record!.result;
+      };
+      const firstOutput =
+        "interactive child artifact turn 1 [E2E:INTERACTIVE_OUTPUT_1]\n";
+      const nextOutput =
+        "interactive child artifact turn 2 [E2E:INTERACTIVE_OUTPUT_2]\n";
+      expect(await read("ACTIVE")).toMatchObject({
+        isError: false,
+        details: {
+          output: firstOutput,
+          outputHistory: [],
+          lastEvent: { status: "running", turnId: firstTurnId },
+        },
+      });
+      expect(
+        harness.artifactEvents().filter((event) => event.type === "completion"),
+      ).toHaveLength(0);
+      harness.release(`${firstGate}-before-done`);
+      await harness.waitForProvider(
+        (events) => hasStage(events, firstChild, "gated"),
+        "first completion recorded",
+      );
+      harness.release(firstGate);
+      await harness.waitForProvider(
+        (events) => hasStage(events, firstChild, "complete"),
+        "first child settled",
+      );
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.route === "trigger-followup" &&
+              event.marker === "[E2E:ARTIFACT_READ_ACTIVE]",
+          ),
+        "first completion delivered",
+      );
+      writeFileSync(
+        resolve(artifactDir, "output.md"),
+        "unrelated mutable staging bytes\n",
+      );
+      expect(await read("COMPLETED")).toMatchObject({
+        isError: false,
+        details: {
+          output: firstOutput,
+          outputHistory: [{ turnId: firstTurnId }],
+        },
+      });
+      await sendMarker("[E2E:INTERACTIVE_READ_FOLLOWUP_PARENT]");
+      await harness.waitForProvider(
+        (events) => hasStage(events, nextChild, "staging"),
+        "follow-up mutable output",
+      );
+      expect(await read("FOLLOWUP_ACTIVE")).toMatchObject({
+        isError: false,
+        details: { output: nextOutput },
+      });
+      expect(await read("FIRST_TURN", firstTurnId)).toMatchObject({
+        isError: false,
+        details: { output: firstOutput },
+      });
+      harness.release(`${nextGate}-before-done`);
+      await harness.waitForProvider(
+        (events) => hasStage(events, nextChild, "gated"),
+        "follow-up completion recorded",
+      );
+      harness.release(nextGate);
+      await harness.waitForProvider(
+        (events) => hasStage(events, nextChild, "complete"),
+        "follow-up child settled",
+      );
+      await harness.waitForProvider(
+        (events) =>
+          events.some(
+            (event) =>
+              event.route === "trigger-followup" &&
+              event.marker === "[E2E:ARTIFACT_READ_FIRST_TURN]",
+          ),
+        "follow-up completion delivered",
+      );
+      await harness.sendPrompt("/reload");
+      await harness.waitForScreen(
+        (screen) =>
+          screen.includes(
+            "Reloaded keybindings, extensions, skills, prompts, themes, and context files",
+          ),
+        "parent extension reload",
+      );
+      expect(await read("AFTER_RELOAD")).toMatchObject({
+        isError: false,
+        details: { output: nextOutput },
+      });
+      const completions = harness
+        .artifactEvents()
+        .filter((event) => event.type === "completion");
+      expect(completions).toHaveLength(2);
+      expect(new Set(completions.map((event) => event.turnId)).size).toBe(2);
+      expect(
+        harness.panes().some((candidate) => candidate.id === pane?.id),
+      ).toBe(true);
       await harness.assertNoNetwork();
     },
     timeout,
