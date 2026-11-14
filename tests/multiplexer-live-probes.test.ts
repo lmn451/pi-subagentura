@@ -231,6 +231,53 @@ describe("read-only live mux ownership probes", () => {
       probeLiveMuxTarget(target, context(["sh", "tmux", "zellij"]), {}).kind,
     ).not.toBe("match");
   });
+  it.each([
+    "work space",
+    "work#1",
+    "work space #1",
+    "проект #1",
+    "x".repeat(256),
+  ])(
+    "preserves valid Zellij session name %j as one literal argument",
+    (session) => {
+      const target = { mux: "zellij", paneId: "4", session } as const;
+      exec.mockReturnValue(
+        JSON.stringify([{ id: 4, is_plugin: false, exited: false }]),
+      );
+      expect(probeLiveMuxTarget(target, context(["sh", "zellij"]), {})).toEqual(
+        { kind: "match", target, distance: 1 },
+      );
+      expect(exec).toHaveBeenCalledWith(
+        "zellij",
+        ["--session", session, "action", "list-panes", "--json"],
+        expect.objectContaining({ shell: false }),
+      );
+      expect(exec).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    "",
+    " ",
+    "--help",
+    "work\0name",
+    "work\tname",
+    "work\nname",
+    "work\rname",
+    "work\x7fname",
+    "x".repeat(257),
+  ])(
+    "rejects unsafe or oversized Zellij session name %j without exec",
+    (session) => {
+      expect(
+        probeLiveMuxTarget(
+          { mux: "zellij", paneId: "4", session },
+          context(["sh", "zellij"]),
+          {},
+        ).kind,
+      ).toBe("unknown");
+      expect(exec).not.toHaveBeenCalled();
+    },
+  );
   it.each([{ id: 4, is_plugin: true }, { id: 4, exited: true }, { id: 5 }])(
     "rejects unavailable Zellij pane %j",
     (pane) => {
@@ -264,7 +311,7 @@ describe("read-only live mux ownership probes", () => {
     { mux: "herdr", paneId: "--help", session: "/tmp/herdr.sock" },
     { mux: "herdr", paneId: "w1:p1", session: "--help" },
     { mux: "zellij", paneId: "4", session: "--help" },
-    { mux: "zellij", paneId: "4", session: "work space" },
+    { mux: "zellij", paneId: "4", session: "work\nspace" },
     { mux: "herdr", paneId: "pane space", session: "/tmp/herdr.sock" },
     { mux: "rex", paneId, session: "--help", server: "/tmp/rex.sock" },
     { mux: "rex", paneId, session, server: "unix:///tmp/rex.sock\n--help" },

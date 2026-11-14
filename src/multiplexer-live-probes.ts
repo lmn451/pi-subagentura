@@ -42,6 +42,16 @@ function selector(value: unknown): value is string {
     !/[\x00-\x20\x7f#]/.test(value)
   );
 }
+function zellijSession(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    !value.startsWith("-") &&
+    value.trim() === value &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 function socket(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -222,8 +232,7 @@ function zellijProbe(
 ): ProbePlan | LiveMuxProbe {
   if (
     !/^(?:terminal_)?\d+$/.test(target.paneId) ||
-    !selector(target.session) ||
-    target.session.length > 256
+    !zellijSession(target.session)
   )
     return UNKNOWN;
   return {
@@ -277,7 +286,9 @@ function prepareProbe(
     (target.session !== undefined &&
       !(target.mux === "herdr"
         ? socket(target.session)
-        : selector(target.session))) ||
+        : target.mux === "zellij"
+          ? zellijSession(target.session)
+          : selector(target.session))) ||
     (target.server !== undefined &&
       !(target.mux === "rex"
         ? (target.server.startsWith("unix:///") &&

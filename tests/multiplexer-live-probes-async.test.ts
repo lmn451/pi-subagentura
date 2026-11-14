@@ -162,6 +162,52 @@ describe("asynchronous read-only live mux ownership probes", () => {
     },
   );
   it.each([
+    "work space",
+    "work#1",
+    "work space #1",
+    "проект #1",
+    "x".repeat(256),
+  ])(
+    "preserves valid Zellij session name %j as one literal async argument",
+    async (session) => {
+      const target = { mux: "zellij", paneId: "4", session } as const;
+      respond(output("zellij"));
+      await expect(
+        probeLiveMuxTargetAsync(target, context(), {}),
+      ).resolves.toEqual({ kind: "match", target, distance: 1 });
+      expect(exec).toHaveBeenCalledWith(
+        "zellij",
+        ["--session", session, "action", "list-panes", "--json"],
+        expect.objectContaining({ shell: false }),
+        expect.any(Function),
+      );
+      expect(exec).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    "",
+    " ",
+    "--help",
+    "work\0name",
+    "work\tname",
+    "work\nname",
+    "work\rname",
+    "work\x7fname",
+    "x".repeat(257),
+  ])(
+    "rejects unsafe or oversized Zellij session name %j without async exec",
+    async (session) => {
+      await expect(
+        probeLiveMuxTargetAsync(
+          { mux: "zellij", paneId: "4", session },
+          context(),
+          {},
+        ),
+      ).resolves.toEqual({ kind: "unknown" });
+      expect(exec).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
     { mux: "tmux", paneId: "--help" },
     { mux: "tmux", paneId: "%4\n%5" },
     { mux: "herdr", paneId: "w1:p2", session: "/tmp/bad\0.sock" },
@@ -170,7 +216,7 @@ describe("asynchronous read-only live mux ownership probes", () => {
     { mux: "rex", paneId, session, server: "unix:///tmp/bad\n.sock" },
     { mux: "rex", paneId, session: "--help", server: socket },
     { mux: "zellij", paneId: "4", session: "--help" },
-    { mux: "zellij", paneId: "4", session: "opaque name" },
+    { mux: "zellij", paneId: "4", session: "opaque\nname" },
   ] as const)(
     "rejects invalid target $mux $paneId before exec",
     async (target) => {
