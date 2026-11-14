@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFile, spawn } from "node:child_process";
-import { resolveTelemetrySessionHost } from "../src/session-host";
+import {
+  detectEnvironment,
+  sanitizeTelemetryTerminalProgram,
+} from "../src/environment";
 
 vi.mock("node:child_process", () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 
@@ -10,32 +13,39 @@ const launchEnv = {
   ORCA_RUNTIME_SOURCE_PROFILE_PATH: "/private/profile",
 };
 
+const rexEnv = {
+  REX_SESSION: "private-session",
+  REX_BLOCK: "private-block",
+};
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
-describe("session host attribution", () => {
-  it("recognizes the complete verified launch-origin stamp without terminal metadata", () => {
-    expect(resolveTelemetrySessionHost(launchEnv, "darwin")).toBe("orca");
+describe("environment snapshot", () => {
+  it("recognizes the complete Orca origin without terminal metadata", () => {
+    const snapshot = detectEnvironment(launchEnv, "darwin");
+    expect(snapshot.guidanceHost).toBe("orca");
+    expect(snapshot.telemetryHost).toBe("orca");
   });
 
-  it("never executes commands, probes a runtime, or makes a network request", () => {
+  it("does not execute commands, probe a runtime, or make network requests", () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
-    expect(resolveTelemetrySessionHost(launchEnv, "darwin")).toBe("orca");
+    expect(detectEnvironment(launchEnv, "darwin").guidanceHost).toBe("orca");
     expect(execFile).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("recognizes Agterm only from its documented enabled marker", () => {
-    expect(resolveTelemetrySessionHost({ AGTERM_ENABLED: "1" }, "darwin")).toBe(
-      "agterm",
-    );
+  it("recognizes Agterm only from its exact enabled marker", () => {
+    const snapshot = detectEnvironment({ AGTERM_ENABLED: "1" }, "darwin");
+    expect(snapshot.guidanceHost).toBe("agterm");
+    expect(snapshot.telemetryHost).toBe("agterm");
     expect(
-      resolveTelemetrySessionHost({ TERM_PROGRAM: "agterm" }, "darwin"),
+      detectEnvironment({ TERM_PROGRAM: "agterm" }, "darwin").guidanceHost,
     ).toBe("unknown");
   });
 
@@ -43,54 +53,68 @@ describe("session host attribution", () => {
     ["tmux", { TMUX: "/tmp/tmux/default,1,0", TERM_PROGRAM: "tmux" }],
     ["zellij", { ZELLIJ_SESSION_NAME: "outer-zellij", TERM_PROGRAM: "zellij" }],
   ])(
-    "keeps Agterm host evidence independent of inherited %s context",
+    "keeps Agterm evidence independent of inherited %s context",
     (_mux, muxEnv) => {
-      expect(
-        resolveTelemetrySessionHost(
-          {
-            AGTERM_ENABLED: "1",
-            AGTERM_SESSION_ID: "stale-session",
-            AGTERM_PANE_ID: "stale-pane",
-            ...muxEnv,
-          },
-          "darwin",
-        ),
-      ).toBe("agterm");
+      const snapshot = detectEnvironment(
+        {
+          AGTERM_ENABLED: "1",
+          AGTERM_SESSION_ID: "stale-session",
+          AGTERM_PANE_ID: "stale-pane",
+          ...muxEnv,
+        },
+        "darwin",
+      );
+      expect(snapshot.guidanceHost).toBe("agterm");
+      expect(snapshot.telemetryHost).toBe("agterm");
     },
   );
 
   it.each([undefined, "", "0", "true", " 1 ", "1\n"])(
     "fails closed for non-exact Agterm marker %j",
     (value) => {
-      expect(
-        resolveTelemetrySessionHost({ AGTERM_ENABLED: value }, "darwin"),
-      ).toBe("unknown");
+      const snapshot = detectEnvironment(
+        { AGTERM_ENABLED: value } as NodeJS.ProcessEnv,
+        "darwin",
+      );
+      expect(snapshot.guidanceHost).toBe("unknown");
+      expect(snapshot.telemetryHost).toBe("unknown");
     },
   );
 
-  it("returns unknown when valid Orca and Agterm markers conflict", () => {
-    expect(
-      resolveTelemetrySessionHost(
-        { ...launchEnv, AGTERM_ENABLED: "1" },
-        "darwin",
-      ),
-    ).toBe("unknown");
+  it("recognizes complete Rex location hints for guidance, not host telemetry", () => {
+    const snapshot = detectEnvironment(rexEnv, "darwin");
+    expect(snapshot.guidanceHost).toBe("rex");
+    expect(snapshot.telemetryHost).toBe("unknown");
   });
 
-  it.each([
-    ["tmux", { TMUX: "/tmp/tmux/default,1,0", TERM_PROGRAM: "tmux" }],
-    ["zellij", { ZELLIJ_SESSION_NAME: "outer-zellij", TERM_PROGRAM: "zellij" }],
-  ])(
-    "keeps Orca launch origin independent of inherited %s context",
-    (_mux, muxEnv) => {
-      expect(
-        resolveTelemetrySessionHost(
-          { ...launchEnv, ORCA_TERMINAL_HANDLE: "stale", ...muxEnv },
-          "darwin",
-        ),
-      ).toBe("orca");
-    },
-  );
+  it("fails closed for conflicts between recognized host observations", () => {
+    const orcaAndRex = detectEnvironment({ ...launchEnv, ...rexEnv }, "darwin");
+    expect(orcaAndRex.guidanceHost).toBe("unknown");
+    expect(orcaAndRex.telemetryHost).toBe("orca");
+
+    const agtermAndRex = detectEnvironment(
+      { AGTERM_ENABLED: "1", ...rexEnv },
+      "darwin",
+    );
+    expect(agtermAndRex.guidanceHost).toBe("unknown");
+    expect(agtermAndRex.telemetryHost).toBe("agterm");
+
+    const allHosts = detectEnvironment(
+      { ...launchEnv, AGTERM_ENABLED: "1", ...rexEnv },
+      "darwin",
+    );
+    expect(allHosts.guidanceHost).toBe("unknown");
+    expect(allHosts.telemetryHost).toBe("unknown");
+  });
+
+  it("returns unknown telemetry when valid Orca and Agterm markers conflict", () => {
+    const snapshot = detectEnvironment(
+      { ...launchEnv, AGTERM_ENABLED: "1" },
+      "darwin",
+    );
+    expect(snapshot.guidanceHost).toBe("unknown");
+    expect(snapshot.telemetryHost).toBe("unknown");
+  });
 
   it.each([
     {},
@@ -104,23 +128,27 @@ describe("session host attribution", () => {
       ORCA_WORKTREE_ID: "private-worktree",
     },
   ])(
-    "does not infer origin from installed tools, paths, or loose markers: %j",
+    "does not infer host from installed tools, paths, or loose markers: %j",
     (env) => {
-      expect(resolveTelemetrySessionHost(env, "darwin")).toBe("unknown");
+      const snapshot = detectEnvironment(env, "darwin");
+      expect(snapshot.guidanceHost).toBe("unknown");
+      expect(snapshot.telemetryHost).toBe("unknown");
     },
   );
 
   it.each(Object.keys(launchEnv))(
-    "requires every launch-stamp field: %s",
+    "requires every Orca launch-stamp field: %s",
     (key) => {
       const env: NodeJS.ProcessEnv = { ...launchEnv };
       delete env[key];
-      expect(resolveTelemetrySessionHost(env, "darwin")).toBe("unknown");
+      const snapshot = detectEnvironment(env, "darwin");
+      expect(snapshot.guidanceHost).toBe("unknown");
+      expect(snapshot.telemetryHost).toBe("unknown");
     },
   );
 
   it.each(Object.keys(launchEnv))(
-    "rejects malformed or oversized %s",
+    "rejects malformed or oversized Orca %s",
     (key) => {
       for (const value of [
         undefined,
@@ -131,36 +159,39 @@ describe("session host attribution", () => {
         "private\nvalue",
         1,
       ]) {
-        const env = { ...launchEnv, [key]: value } as NodeJS.ProcessEnv;
-        expect(resolveTelemetrySessionHost(env, "darwin")).toBe("unknown");
+        const snapshot = detectEnvironment(
+          { ...launchEnv, [key]: value } as NodeJS.ProcessEnv,
+          "darwin",
+        );
+        expect(snapshot.guidanceHost).toBe("unknown");
+        expect(snapshot.telemetryHost).toBe("unknown");
       }
     },
   );
 
-  it.each(Object.entries(launchEnv))(
+  it.each(Object.keys(launchEnv))(
     "rejects raw control characters around %s",
-    (key, value) => {
+    (key) => {
+      const value = launchEnv[key as keyof typeof launchEnv];
       for (const wrapped of [`\n${value}`, `${value}\n`, `\t${value}\t`]) {
         expect(
-          resolveTelemetrySessionHost(
-            { ...launchEnv, [key]: wrapped },
-            "darwin",
-          ),
+          detectEnvironment({ ...launchEnv, [key]: wrapped }, "darwin")
+            .guidanceHost,
         ).toBe("unknown");
       }
     },
   );
 
-  it("matches the bundled stamp reader's whitespace normalization and bound", () => {
+  it("normalizes Orca source whitespace and accepts the field-length boundary", () => {
     const env = Object.fromEntries(
       Object.entries(launchEnv).map(([key, value]) => [key, `  ${value}  `]),
     );
-    expect(resolveTelemetrySessionHost(env, "darwin")).toBe("orca");
+    expect(detectEnvironment(env, "darwin").guidanceHost).toBe("orca");
     expect(
-      resolveTelemetrySessionHost(
+      detectEnvironment(
         { ...launchEnv, ORCA_RUNTIME_SOURCE_ID: "x".repeat(4096) },
         "darwin",
-      ),
+      ).guidanceHost,
     ).toBe("orca");
   });
 
@@ -168,26 +199,26 @@ describe("session host attribution", () => {
     "rejects relative profile paths: %s",
     (profile) => {
       expect(
-        resolveTelemetrySessionHost(
+        detectEnvironment(
           { ...launchEnv, ORCA_RUNTIME_SOURCE_PROFILE_PATH: profile },
           "darwin",
-        ),
+        ).guidanceHost,
       ).toBe("unknown");
     },
   );
 
   it.each(["darwin", "linux"] as const)(
-    "uses absolute POSIX profile paths on %s without invoking orca",
+    "uses absolute POSIX profile paths on %s without invoking Orca",
     (platform) => {
-      expect(resolveTelemetrySessionHost(launchEnv, platform)).toBe("orca");
+      expect(detectEnvironment(launchEnv, platform).guidanceHost).toBe("orca");
       expect(
-        resolveTelemetrySessionHost(
+        detectEnvironment(
           {
             ...launchEnv,
             ORCA_RUNTIME_SOURCE_PROFILE_PATH: "C:\\private\\profile",
           },
           platform,
-        ),
+        ).guidanceHost,
       ).toBe("unknown");
     },
   );
@@ -196,15 +227,71 @@ describe("session host attribution", () => {
     "accepts an absolute Windows launch profile: %s",
     (profile) => {
       expect(
-        resolveTelemetrySessionHost(
+        detectEnvironment(
           { ...launchEnv, ORCA_RUNTIME_SOURCE_PROFILE_PATH: profile },
           "win32",
-        ),
+        ).guidanceHost,
       ).toBe("orca");
     },
   );
 
-  it("treats inherited valid origin as provenance, never live-process authority", () => {
+  it.each([
+    [{ REX_SESSION: "session", REX_BLOCK: "block" }, "rex"],
+    [{ REX_SESSION: "session" }, "unknown"],
+    [{ REX_BLOCK: "block" }, "unknown"],
+    [{ REX_SESSION: " ", REX_BLOCK: "block" }, "unknown"],
+    [{ REX_SESSION: "x".repeat(4097), REX_BLOCK: "block" }, "unknown"],
+    [{ REX_SESSION: "bad\nvalue", REX_BLOCK: "block" }, "unknown"],
+  ] as const)(
+    "recognizes only complete valid Rex location hints %#",
+    (env, expected) => {
+      expect(detectEnvironment(env, "darwin").guidanceHost).toBe(expected);
+    },
+  );
+
+  it("normalizes terminal labels through the telemetry allowlist", () => {
+    expect(detectEnvironment({ TERM_PROGRAM: "WezTerm" }).terminalProgram).toBe(
+      "wezterm",
+    );
+    expect(
+      detectEnvironment({ TERM_PROGRAM: "iTerm.app" }).terminalProgram,
+    ).toBe("iterm2");
+    expect(
+      detectEnvironment({ TERM_PROGRAM: "private-terminal" }).terminalProgram,
+    ).toBe("unknown");
+  });
+
+  it("retains only an immutable, closed snapshot across later environment changes", () => {
+    const env: NodeJS.ProcessEnv = {
+      ...launchEnv,
+      REX_SESSION: "private-session",
+      REX_BLOCK: "private-block",
+      TMUX: "/private/tmux/socket",
+      TERM_PROGRAM: "WezTerm",
+    };
+    const snapshot = detectEnvironment(env, "darwin");
+    env.ORCA_RUNTIME_SOURCE_ID = "changed";
+    env.ORCA_RUNTIME_SOURCE_INCARNATION = "changed";
+    env.ORCA_RUNTIME_SOURCE_PROFILE_PATH = "/changed";
+    env.REX_SESSION = undefined;
+    env.REX_BLOCK = undefined;
+    env.TMUX = undefined;
+    env.TERM_PROGRAM = "changed";
+
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(snapshot).toEqual({
+      guidanceHost: "unknown",
+      telemetryHost: "orca",
+      terminalProgram: "wezterm",
+      parentMux: "tmux",
+    });
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).not.toContain("private-");
+    expect(serialized).not.toContain("/private");
+    expect(serialized).not.toContain("socket");
+  });
+
+  it("treats inherited valid origin as provenance rather than live authority", () => {
     const inherited = {
       ...launchEnv,
       ORCA_TERMINAL_HANDLE: "stale",
@@ -212,15 +299,26 @@ describe("session host attribution", () => {
       ORCA_ENVIRONMENT: "remote",
       ORCA_CLI_COMMAND: "/private/arbitrary",
     };
-    expect(resolveTelemetrySessionHost(inherited, "darwin")).toBe("orca");
+    expect(detectEnvironment(inherited, "darwin").guidanceHost).toBe("orca");
   });
+});
 
-  it("returns only closed labels and does not mutate, persist, or expose the stamp", () => {
-    const env = Object.freeze({ ...launchEnv });
-    expect(resolveTelemetrySessionHost(env, "darwin")).toBe("orca");
-    expect(Object.keys(env)).toEqual(Object.keys(launchEnv));
-    expect(
-      JSON.stringify(resolveTelemetrySessionHost(env, "darwin")),
-    ).not.toContain("private");
+describe("terminal program labels", () => {
+  it.each([
+    ["agterm", "agterm"],
+    ["ghostty", "ghostty"],
+    ["iTerm.app", "iterm2"],
+    ["Apple_Terminal", "apple_terminal"],
+    ["vscode", "vscode"],
+    ["WezTerm", "wezterm"],
+    ["wezterm", "wezterm"],
+    ["kitty", "kitty"],
+    [undefined, "unknown"],
+    ["", "unknown"],
+    ["/private/terminal", "unknown"],
+    ["agterm\n", "unknown"],
+    ["agterm".repeat(1000), "unknown"],
+  ])("maps %s to the closed label %s", (raw, expected) => {
+    expect(sanitizeTelemetryTerminalProgram(raw)).toBe(expected);
   });
 });

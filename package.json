@@ -27,6 +27,7 @@
     "tmux",
     "zellij",
     "herdr",
+    "orca",
     "rex",
     "swarm",
     "crew"
@@ -101,7 +102,7 @@
     "src/multiplexer-rex.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
-    "src/session-host.ts",
+    "src/environment.ts",
     "src/session-scope.ts",
     "src/settings.ts",
     "src/telemetry.ts",

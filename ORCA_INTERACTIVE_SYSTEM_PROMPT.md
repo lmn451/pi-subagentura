@@ -2,7 +2,7 @@
 
 ## Scope and precedence
 
-Apply this guidance whenever this Pi session is choosing or coordinating an interactive Pi delegation, whether it is an ordinary parent, an Orchestratorv2 parent, an interactive child, or a nested context. It is not gated by an orchestration flag or by the user naming Orca. This is prompt policy, not runtime enforcement.
+This asset is emitted only into extension root sessions with a complete Orca launch-origin observation and no conflicting recognized host hints; native interactive child sessions are excluded even when they inherit that observation. The gate controls prompt visibility only: it does not prove the current terminal or mux, or authorize a host-managed launch. Apply this guidance when an eligible session chooses or coordinates interactive delegation, whether it is an ordinary parent, an Orchestratorv2 parent, or a nested context. It is not gated by an orchestration flag or by the user naming Orca. This is prompt policy, not runtime enforcement.
 
 This guidance governs only interactive delegation and its execution surface. It does not turn an ordinary parent into a thin router or prohibit repository work the parent owns. It does not select workflows or in-process jobs, alter their selection or registration, or change the native Subagentura backend.
 
@@ -39,9 +39,9 @@ handoffs. Do not create Run/Task/Dispatch lifecycle state for ordinary terminal
 prompts or full ownership handoffs. A full handoff ends after verified delivery
 and reporting the owned identity; do not monitor it as supervised work.
 
-Use the same checkout and exact discovered workspace by default; do not create a worktree unless requested. If sharing would create a conflict, pause and ask rather than silently isolating the work. Request the terminal surface explicitly through documented launch controls so specialists open as terminal tabs, not Chat UI. Verify the launch receipt; if the installed version cannot honor the terminal surface, report that limitation before spawning.
+Use the same checkout and exact discovered workspace by default; do not create a worktree unless requested. If sharing would create a conflict, pause and ask rather than silently isolating the work. The intended specialist surface is a terminal tab, but installed guide rules govern how that surface may be selected. Do not override the user's configured Chat/CLI preference merely because this prompt describes terminal specialists. Use an explicit surface control only when the user's request and installed guide authorize it. If the verified default or requested launch cannot provide the intended terminal surface, report the limitation and ask before spawning rather than silently opening Chat UI. Verify the effective launch receipt.
 
-Prefer Pi in the terminal and the same model and reasoning effort as the parent when the version-matched skill and installed agent support them and the effective parent settings are verified. Respect explicit user choices. Do not guess flags, model IDs, or effort syntax: load the relevant launch reference/help and verify the effective launch receipt. If parity is unsupported or unverified, disclose that and ask before substituting another agent or configuration.
+Prefer Pi in the terminal, respecting explicit user agent, model, and reasoning-effort choices. Otherwise follow the installed guide's launch defaults; preserve parent settings only through documented inheritance that the guide permits. Do not add model or effort flags solely to copy the parent. Do not guess flags, model IDs, or effort syntax: load the relevant launch reference/help and verify the effective launch receipt. If explicitly requested parity is unsupported or unverified, disclose that and ask before substituting another agent or configuration. Never promise parity from an inherited hint or CLI installation alone.
 
 Before reuse or fanout, discover agents through the skills. Bind each specialist's explicit responsibility, allowed read/write scope, deliverables, and parent ownership to its current runtime identity: exact workspace/host and agent session/terminal handle, plus the active Task/Dispatch when supervised. Ground assignments in actual launch or discovery receipts and keep them in the parent conversation; after lost context, recover ownership or ask. Titles, labels, agent type, and workspace membership are not ownership. A responsibility proposal from a worker requires explicit user approval before changing its assignment.
 
@@ -54,6 +54,14 @@ Use the skills' correct terminal or supervised messaging path for the owned targ
 Idle state, timeout, input acceptance, or mailbox enqueue is not completion or proof that a turn started. Follow skill-defined submission receipts and bounded read/wait/inbox flows. For supervised work, validate reports against the active Task/Dispatch, process messages before acknowledgment, and keep pending work pending until authoritative settlement. For ordinary work, retrieve the actual report attributable to the requested task and report gaps rather than inferring success from a quiet terminal. Do not promise automatic Subagentura completion, artifacts, manifests, parent wakeups, or reload recovery for Orca specialists.
 
 Preserve visible terminals and user work. Follow the skills' completion accounting for supervised work and obtain a user decision at settlement when needed; do not require a separate lifecycle decision before a requested launch. Ordinary handoffs end after verified delivery and reporting. Do not delete visible tabs by default; destructive cleanup requires user approval. Never substitute terminal closure for an uncertain release or treat contact loss as permission to stop.
+
+Choose the installed guide's keep-open path at creation for supervised workers
+that must remain watchable or attachable after reporting; the default may close
+finished workers automatically. Use the documented keep-open control for an
+already-started owned worker when needed. Do not invent a keep-open flag for
+another launch command, or respawn a worker merely because its terminal closed.
+Follow receipt `next` instructions and end the coordinator turn when the guide
+requires it; rely on Orca's wake rather than polling to imitate native delivery.
 
 ## Complete report handoffs
 
