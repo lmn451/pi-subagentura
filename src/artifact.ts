@@ -128,6 +128,7 @@ export type ProcessSignal =
   | "SIGILL"
   | "SIGTRAP"
   | "SIGABRT"
+  | "SIGIOT"
   | "SIGBUS"
   | "SIGFPE"
   | "SIGKILL"
@@ -138,9 +139,11 @@ export type ProcessSignal =
   | "SIGALRM"
   | "SIGTERM"
   | "SIGCHLD"
+  | "SIGSTKFLT"
   | "SIGCONT"
   | "SIGSTOP"
   | "SIGTSTP"
+  | "SIGBREAK"
   | "SIGTTIN"
   | "SIGTTOU"
   | "SIGURG"
@@ -150,8 +153,12 @@ export type ProcessSignal =
   | "SIGPROF"
   | "SIGWINCH"
   | "SIGIO"
+  | "SIGPOLL"
+  | "SIGLOST"
   | "SIGPWR"
-  | "SIGSYS";
+  | "SIGINFO"
+  | "SIGSYS"
+  | "SIGUNUSED";
 export type SubagentEventV2 =
   | {
       version: 2;
@@ -390,6 +397,7 @@ function normalizeProcessSignal(value: unknown): ProcessSignal | undefined {
     case "SIGILL":
     case "SIGTRAP":
     case "SIGABRT":
+    case "SIGIOT":
     case "SIGBUS":
     case "SIGFPE":
     case "SIGKILL":
@@ -400,9 +408,11 @@ function normalizeProcessSignal(value: unknown): ProcessSignal | undefined {
     case "SIGALRM":
     case "SIGTERM":
     case "SIGCHLD":
+    case "SIGSTKFLT":
     case "SIGCONT":
     case "SIGSTOP":
     case "SIGTSTP":
+    case "SIGBREAK":
     case "SIGTTIN":
     case "SIGTTOU":
     case "SIGURG":
@@ -412,8 +422,12 @@ function normalizeProcessSignal(value: unknown): ProcessSignal | undefined {
     case "SIGPROF":
     case "SIGWINCH":
     case "SIGIO":
+    case "SIGPOLL":
+    case "SIGLOST":
     case "SIGPWR":
+    case "SIGINFO":
     case "SIGSYS":
+    case "SIGUNUSED":
       return value;
     default:
       return undefined;

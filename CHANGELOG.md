@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve Node-supported platform signal names and aliases when normalizing
+  process-exit artifacts across platforms.
 - Require an explicit Zellij mux choice for attached contexts because its public
   pane listing cannot prove which pane owns the caller. Automatic detection no
   longer accepts inherited live selectors or falls through to an outer mux.

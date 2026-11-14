@@ -6,6 +6,7 @@ delete process.env.PI_SUBAGENTURA_CHILD;
 delete process.env.SUBAGENT_DEBUG_LOG_DIR;
 export default defineConfig({
   test: {
+    // Nested worktrees and tool checkpoints belong to separate checkouts.
     include: ["tests/**/*.test.ts"],
     testTimeout: 15_000,
     // `--testTimeout` does not raise this, and the terminal E2E suite tears a
