@@ -47,7 +47,7 @@ describe("bounded artifact output reads", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("reports oversized active staging as a tool error, not pending output", async () => {
+  it("reports unsafe active staging as a tool error, not pending output", async () => {
     const art = artifactPath(root, "deadbeefcafebabe");
     appendEvent(art, {
       version: 2,
@@ -110,13 +110,28 @@ describe("bounded artifact output reads", () => {
         status: "error",
         outputState: "unavailable",
         output: null,
-        error: expect.stringContaining("safe read limit"),
+        error: `Output exceeds the safe read limit (${MAX_OUTPUT_SNAPSHOT_BYTES + 1} bytes; maximum ${MAX_OUTPUT_SNAPSHOT_BYTES} bytes).`,
       },
     });
     expect(captureTelemetry).toHaveBeenCalledWith(
       scope.telemetry,
       expect.objectContaining({ event: "result_read", outcome: "error" }),
     );
+
+    fs.unlinkSync(art.outputFile);
+    const target = join(root, "private-output");
+    fs.writeFileSync(target, "private");
+    fs.symlinkSync(target, art.outputFile);
+    const unreadable = await read();
+    expect(unreadable).toMatchObject({
+      isError: true,
+      structuredContent: {
+        status: "error",
+        outputState: "unavailable",
+        output: null,
+        error: "Output could not be read safely.",
+      },
+    });
   });
 
   it("rejects finite oversized staging output before reading", () => {
