@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-11-14
+
 ### Added
 
 - Add Superlogical Rex as a validated interactive mux backend with persisted
@@ -19,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clarify host-aware Orca/Rex/Agterm guidance and optional Jev/OpenAI Decisions
+  advisor documentation. Jev selects among already-authorized native subagent
+  owners, not models or presets; the parent sends the task, and the documentation
+  makes no claim of live provider-availability verification.
+- Capture bounded host, terminal, and parent-multiplexer environment observations
+  once per extension activation in a shared immutable snapshot for host guidance
+  and telemetry. These observations are metadata, not evidence of live backend
+  availability or mux ownership.
+- Improve interactive supervisor popup rendering and controls.
+- Refresh dependencies and pin development Pi SDK packages to 1.5.0 while
+  retaining Pi 1.2.0 as the minimum supported SDK.
 - Carry verified, backend-specific mux launch identity from resolution into
   pane creation instead of selecting a new parent from inherited environment.
 - Type workflow worker messages as a shared discriminated protocol and check
@@ -36,12 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolate test diagnostics from runtime debug logs.
 - Bound active staging and immutable snapshot reads before allocating child
   output, reject unsafe file types/symlinks without blocking on FIFOs, and
   surface content-free diagnostics for rejected staging reads.
 - Keep workflow-visible helpers and copied data in the VM realm so injected
   function constructors do not bypass determinism guards. The workflow VM
   remains a trusted-script aid, not a security boundary.
+- Preserve cancelled-child counts in workflow results, status, and completion
+  presentation instead of reporting resolved partial work as a clean completion.
+- Restrict Vitest discovery to the root `tests/` tree so nested repository
+  checkouts do not mix revisions or multiply the default test run.
+- Scope Orca guidance to root/parent contexts and reevaluate it on every
+  `before_agent_start`; do not add it to native children or other hosts. Rex and
+  Agterm receive generic guidance.
+- Align Orca launch guidance with configured surfaces, explicit model/effort
+  requests, and documented keep-open and wake handling. Strengthen Rex target
+  and caller-block safeguards while allowing necessary private handoff selectors
+  without weakening telemetry privacy.
 - Preserve pane ownership across intermediary PTYs while refusing to cross a
   nearer mux boundary or accept contradictory pane-root TTY evidence.
 - Keep empty tmux socket overrides equivalent to unset values and preserve valid
@@ -536,7 +561,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/lmn451/pi-subagentura/compare/v4.2.1...v4.3.0
 [4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lmn451/pi-subagentura/compare/v3.6.5...v4.0.0
