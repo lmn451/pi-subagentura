@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   literal named-socket labels.
 - Preserve nonblank Zellij session names exactly, including leading and trailing
   whitespace, through candidate selection and live ownership probes.
+- Reject ambiguous workflow mux ownership instead of silently falling back to an
+  in-process agent.
+- Disable Rex server autostart for context verification, child probes, and
+  control operations so a stopped server is not restarted implicitly.
 
 ## [4.2.1] - 2026-11-07
 
