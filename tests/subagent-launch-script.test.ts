@@ -358,7 +358,7 @@ function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
         return "%99\n";
       }
       if (args[0] === "display-message") {
-        tmuxDisplayMessageCalls += 1;
+        if (args.includes("%99")) tmuxDisplayMessageCalls += 1;
         if (tmuxDisplayMessageCalls > 1 && tmuxMockOptions.attachError) {
           throw new Error(tmuxMockOptions.attachError);
         }

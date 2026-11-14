@@ -347,6 +347,13 @@ export class TmuxMultiplexer implements Multiplexer {
       // select it. Each background sub-agent gets its own named window
       // so they don't clobber each other in the tmux window list.
       windowName = opts.windowName ?? safeSegment(opts.name);
+      // new-window takes a window target, not a pane ID. Resolve the parent
+      // on the captured server and require its exact session, not a prefix.
+      const parentSession =
+        context?.kind === "attached"
+          ? getPaneLocation(context.paneId, (args) => this.withSocket(args))
+              .session
+          : undefined;
       paneId = execMuxOrThrow(
         "tmux",
         "new-window",
@@ -354,7 +361,7 @@ export class TmuxMultiplexer implements Multiplexer {
         this.withSocket([
           "new-window",
           "-d",
-          ...(context?.kind === "attached" ? ["-t", context.paneId] : []),
+          ...(parentSession !== undefined ? ["-t", `=${parentSession}:`] : []),
           "-n",
           windowName,
           "-P",

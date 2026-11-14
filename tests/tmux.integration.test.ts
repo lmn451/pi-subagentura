@@ -207,6 +207,44 @@ test("launches an interactive subagent in an isolated tmux session", async () =>
   expect(events).toContain('"outcome":"done"');
 });
 
+test("creates an attached background window in the verified parent's exact session", () => {
+  const parentSession = "parent session";
+  const parentPane = tmux([
+    "new-session",
+    "-d",
+    "-s",
+    parentSession,
+    "-P",
+    "-F",
+    "#{pane_id}",
+  ]).trim();
+  tmux(["new-session", "-d", "-s", `${parentSession}-other`]);
+  const server = tmux([
+    "display-message",
+    "-p",
+    "-t",
+    parentPane,
+    "#{socket_path}",
+  ]).replace(/\r?\n$/, "");
+  const child = new TmuxMultiplexer().createPane({
+    name: "Attached child",
+    cwd: tempRoot,
+    background: true,
+    context: { kind: "attached", mux: "tmux", paneId: parentPane, server },
+  });
+  expect(child.server).toBe(server);
+  expect(child.session).toBe(parentSession);
+  expect(
+    tmux([
+      "display-message",
+      "-p",
+      "-t",
+      child.paneId,
+      "#{session_name}",
+    ]).trim(),
+  ).toBe(parentSession);
+});
+
 test("reports inactive for a pane in a detached session", async () => {
   const cwd = mkdtempSync(join(tempRoot, "workspace-"));
   const pane = new TmuxMultiplexer().createPane({

@@ -171,8 +171,51 @@ it("carries automatic discovery into createPane without rereading env", () => {
   expect(discover).toHaveBeenCalledOnce();
   expect(exec).toHaveBeenCalledWith(
     "tmux",
-    expect.arrayContaining(["-S", "/verified.sock", "new-window", "-t", "%7"]),
+    expect.arrayContaining([
+      "-S",
+      "/verified.sock",
+      "display-message",
+      "-t",
+      "%7",
+    ]),
     expect.anything(),
+  );
+  expect(exec).toHaveBeenCalledWith(
+    "tmux",
+    expect.arrayContaining([
+      "-S",
+      "/verified.sock",
+      "new-window",
+      "-t",
+      "=work:",
+    ]),
+    expect.anything(),
+  );
+});
+
+it("does not create a background window when its verified parent is gone", () => {
+  exec.mockImplementation((command, args) => {
+    if (command === "/bin/sh") return "/mock/tmux";
+    if (command === "tmux" && args.includes("display-message"))
+      throw new Error("parent pane is gone");
+    if (command === "tmux" && args.includes("new-window")) return "%8";
+    throw new Error(`unexpected boundary ${command} ${args}`);
+  });
+  expect(() =>
+    new TmuxMultiplexer().createPane({
+      name: "child",
+      cwd: "/mock",
+      background: true,
+      context: {
+        kind: "attached",
+        mux: "tmux",
+        paneId: "%7",
+        server: "/verified.sock",
+      },
+    }),
+  ).toThrow(/display-message failed/);
+  expect(exec.mock.calls.some(([, args]) => args.includes("new-window"))).toBe(
+    false,
   );
 });
 
