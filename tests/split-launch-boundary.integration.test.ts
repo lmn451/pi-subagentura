@@ -155,7 +155,18 @@ async function runRequest(
   extensionErrors: string[],
 ) {
   const settledEvents: boolean[] = [];
+  const notices: string[] = [];
+  const runner = harness.session.extensionRunner;
+  const previousUI = runner.getUIContext();
+  let started = 0;
+  runner.setUIContext({
+    ...previousUI,
+    notify: (message, type) => {
+      if (type === "error") notices.push(message);
+    },
+  });
   const unsubscribe = harness.session.subscribe((event) => {
+    if (event.type === "agent_start") started++;
     if (event.type === "agent_settled") settledEvents.push(event.aborted);
   });
   let outcome: RequestOutcome | undefined;
@@ -175,13 +186,16 @@ async function runRequest(
     return {
       context: provider.dispatchedContexts[0],
       outcome: outcome!,
+      started,
       aborted: settledEvents.at(-1) === true,
-      validationReported: extensionErrors.some((message) =>
+      inputHandled: notices.some((message) => message.includes("--split")),
+      validationReported: [...extensionErrors, ...notices].some((message) =>
         message.includes("--split"),
       ),
     };
   } finally {
     unsubscribe();
+    runner.setUIContext(previousUI);
   }
 }
 const noOrchestration = {
@@ -331,10 +345,15 @@ describe("split configuration at the Pi launch boundary", () => {
       try {
         const run = await runRequest(harness, provider, kind, extensionErrors);
         expect(provider.dispatchedContexts).toHaveLength(0);
-        expect(
-          run.validationReported &&
-            (run.outcome.status === "rejected" || run.aborted),
-        ).toBe(true);
+        expect(run.validationReported).toBe(true);
+        if (kind === "user prompt") {
+          expect(run.inputHandled).toBe(true);
+          expect(run.started).toBe(0);
+          expect(run.outcome.status).toBe("fulfilled");
+        } else {
+          expect(run.inputHandled).toBe(false);
+          expect(run.outcome.status === "rejected" || run.aborted).toBe(true);
+        }
       } finally {
         unsubscribe();
       }

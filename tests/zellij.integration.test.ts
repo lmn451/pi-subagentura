@@ -20,7 +20,7 @@
  * `afterEach` deletes).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,6 +118,57 @@ async function spawnPane(mux: ZellijMultiplexer, name: string) {
   return pane;
 }
 
+async function waitForKnownActivity(
+  read: () => ReturnType<ZellijMultiplexer["getPaneActivityAsync"]>,
+): ReturnType<ZellijMultiplexer["getPaneActivityAsync"]> {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      stopped = true;
+      reject(new Error("pane activity remained unknown after 5000ms"));
+    }, 5000);
+  });
+  const poll = async () => {
+    while (!stopped) {
+      const activity = await read();
+      if (activity !== "unknown") return activity;
+      if (!stopped) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return "unknown" as const;
+  };
+  try {
+    return await Promise.race([poll(), deadline]);
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+  }
+}
+
+function activityDiagnostics(session: string | undefined): string {
+  const actions = [
+    ["list-clients"],
+    ["list-tabs", "--json"],
+    ["list-panes", "--all", "--state", "--tab", "--json"],
+  ];
+  return JSON.stringify(
+    actions.map((action) => {
+      const result = spawnSync(
+        "zellij",
+        [...(session ? ["--session", session] : []), "action", ...action],
+        { encoding: "utf8", timeout: 500 },
+      );
+      return {
+        action,
+        status: result.status,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error?.message,
+      };
+    }),
+  );
+}
+
 describe.skipIf(!hasZellij)("zellij backend against the real binary", () => {
   let mux: ZellijMultiplexer;
 
@@ -171,9 +222,22 @@ describe.skipIf(!hasZellij)("zellij backend against the real binary", () => {
 
   it("reports inactive for a pane in a detached session", async () => {
     const pane = await spawnPane(mux, "Activity child");
-    await expect(
-      mux.getPaneActivityAsync(pane.paneId, pane.session),
-    ).resolves.toBe("inactive");
+    let activity: Awaited<
+      ReturnType<ZellijMultiplexer["getPaneActivityAsync"]>
+    > = "unknown";
+    // Liveness does not establish readiness of the three activity CLI reads.
+    try {
+      await waitForKnownActivity(async () => {
+        activity = await mux.getPaneActivityAsync(pane.paneId, pane.session);
+        return activity;
+      });
+    } catch (error) {
+      throw new Error(
+        `${String(error)}; last activity=${activity}; ${activityDiagnostics(pane.session)}`,
+        { cause: error },
+      );
+    }
+    expect(activity).toBe("inactive");
   });
 
   it("reports dead for an id the session never had", async () => {
