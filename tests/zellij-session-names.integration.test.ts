@@ -107,7 +107,7 @@ describe.each(modes)("%s Zellij session-name resolver integration", (mode) => {
     "  project  ",
     "\u2003项目\u3000",
   ])(
-    "resolves the exact literal session %j using live ancestry",
+    "queries the exact literal session %j without claiming pane ownership",
     async (session) => {
       installResponses(session);
       const env = environment(session);
@@ -115,10 +115,7 @@ describe.each(modes)("%s Zellij session-name resolver integration", (mode) => {
         mode === "sync"
           ? resolveCurrentMuxContext(env)
           : await resolveCurrentMuxContextAsync(env);
-      expect(result).toEqual({
-        kind: "ready",
-        target: { mux: "zellij", paneId: "4", session },
-      });
+      expect(result.kind).toBe("unavailable");
       const active = mode === "sync" ? sync : exec;
       const inactive = mode === "sync" ? exec : sync;
       expect(inactive).not.toHaveBeenCalled();

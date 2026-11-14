@@ -231,14 +231,14 @@ describe("read-only live mux ownership probes", () => {
     ).toBe("unknown");
     expect(exec).not.toHaveBeenCalled();
   });
-  it("requires closest Zellij ownership in both nesting directions", () => {
+  it("does not prove exact Zellij ownership in either nesting direction", () => {
     const target = { mux: "zellij", paneId: "4", session: "work" } as const;
     exec.mockReturnValue(
       JSON.stringify([{ id: 4, is_plugin: false, exited: false }]),
     );
     expect(
       probeLiveMuxTarget(target, context(["sh", "zellij", "tmux"]), {}),
-    ).toEqual({ kind: "match", target, distance: 1 });
+    ).toEqual({ kind: "unknown" });
     expect(
       probeLiveMuxTarget(target, context(["sh", "tmux", "zellij"]), {}).kind,
     ).not.toBe("match");
@@ -257,7 +257,7 @@ describe("read-only live mux ownership probes", () => {
         JSON.stringify([{ id: 4, is_plugin: false, exited: false }]),
       );
       expect(probeLiveMuxTarget(target, context(["sh", "zellij"]), {})).toEqual(
-        { kind: "match", target, distance: 1 },
+        { kind: "unknown" },
       );
       expect(exec).toHaveBeenCalledWith(
         "zellij",
@@ -477,7 +477,7 @@ describe("read-only live mux ownership probes", () => {
 
         expect(
           probeLiveMuxTarget(target, context(["sh", "zellij"]), {}),
-        ).toEqual({ kind: "match", target, distance: 1 });
+        ).toEqual({ kind: "unknown" });
         expect(exec.mock.calls[0]?.[1]).toEqual([
           "--session",
           session,
