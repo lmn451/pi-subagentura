@@ -1,7 +1,41 @@
 import { EventEmitter } from "node:events";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { importFresh } from "./test-utils";
 import type { LiveMuxTarget } from "../src/multiplexer-live-probes";
+
+const muxEnvironmentKeys = [
+  "TMUX",
+  "TMUX_PANE",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
+  "REX_SESSION",
+  "REX_BLOCK",
+  "REX_SERVER",
+  "TERM_PROGRAM",
+] as const;
+const inheritedMuxEnvironment = Object.fromEntries(
+  muxEnvironmentKeys.map((key) => [key, process.env[key]]),
+);
+
+afterAll(() => {
+  expect(
+    Object.fromEntries(
+      muxEnvironmentKeys.map((key) => [key, process.env[key]]),
+    ),
+  ).toEqual(inheritedMuxEnvironment);
+});
 
 describe("getMux live process ownership resolution", () => {
   let savedEnv: NodeJS.ProcessEnv;
@@ -10,21 +44,7 @@ describe("getMux live process ownership resolution", () => {
 
   beforeEach(() => {
     savedEnv = { ...process.env };
-    for (const key of [
-      "TMUX",
-      "TMUX_PANE",
-      "ZELLIJ",
-      "ZELLIJ_SESSION_NAME",
-      "ZELLIJ_PANE_ID",
-      "HERDR_ENV",
-      "HERDR_SOCKET_PATH",
-      "HERDR_PANE_ID",
-      "REX_SESSION",
-      "REX_BLOCK",
-      "REX_SERVER",
-      "TERM_PROGRAM",
-    ])
-      delete process.env[key];
+    for (const key of muxEnvironmentKeys) delete process.env[key];
     probes.mockReset();
     readContext
       .mockReset()
@@ -198,21 +218,25 @@ describe("getMux relaxed-spawn resolution", () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
-    delete process.env.TMUX;
-    delete process.env.ZELLIJ;
-    delete process.env.ZELLIJ_SESSION_NAME;
-    delete process.env.HERDR_ENV;
-    delete process.env.HERDR_SOCKET_PATH;
-    delete process.env.REX_SESSION;
-    delete process.env.REX_BLOCK;
-    delete process.env.REX_SERVER;
-    delete process.env.TERM_PROGRAM;
+    for (const key of muxEnvironmentKeys) delete process.env[key];
   });
 
   afterEach(() => {
     process.env = originalEnv;
     vi.doUnmock("node:child_process");
     vi.doUnmock("../src/multiplexer-current-context");
+  });
+
+  it("clears inherited pane selectors before relaxed-spawn tests", () => {
+    expect({
+      TMUX_PANE: process.env.TMUX_PANE,
+      ZELLIJ_PANE_ID: process.env.ZELLIJ_PANE_ID,
+      HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+    }).toEqual({
+      TMUX_PANE: undefined,
+      ZELLIJ_PANE_ID: undefined,
+      HERDR_PANE_ID: undefined,
+    });
   });
 
   it("getMux auto returns TmuxMultiplexer when TMUX/ZELLIJ env vars unset but tmux binary exists", async () => {
