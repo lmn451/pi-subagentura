@@ -880,7 +880,7 @@ export function launchInteractiveSubagent(params: {
     const systemPromptContent = params.persona
       ? `# Persona\n\n${params.persona}\n\n`
       : "";
-    const coordination = spawnTreeContext?.orchestratorV2Mode
+    const coordination = spawnTreeContext?.splitMode
       ? `${CHILD_COORDINATION_PROMPT}\n\n`
       : "";
     writeFileSync(

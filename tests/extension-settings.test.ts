@@ -146,7 +146,7 @@ describe("generic extension settings", () => {
             id: "max-depth",
             label: "Maximum depth",
             description: expect.stringContaining("0-64"),
-            defaultValue: "4",
+            defaultValue: "2",
           },
           {
             id: "hide-agent-list",
@@ -185,7 +185,7 @@ describe("generic extension settings", () => {
     });
 
     expect(readTestSettings(api as any)).toEqual({
-      maxDepth: 4,
+      maxDepth: 2,
       hideAgentList: false,
     });
   });
@@ -506,7 +506,7 @@ describe("generic extension settings", () => {
         const onInvalid = vi.fn();
         expect(
           readExtensionSettings(mockApi() as any, { agentDir, cwd }, onInvalid),
-        ).toEqual({ maxDepth: 4, hideAgentList: false });
+        ).toEqual({ maxDepth: 2, hideAgentList: false });
         expect(onInvalid).toHaveBeenCalledWith(
           expect.stringContaining("max-depth"),
         );
@@ -536,7 +536,7 @@ describe("generic extension settings", () => {
       >[0];
       mockDebugLog.mockClear();
       expect(readExtensionSettings(api, { agentDir, cwd }, onInvalid)).toEqual({
-        maxDepth: 4,
+        maxDepth: 2,
         hideAgentList: false,
       });
       expect(onInvalid).toHaveBeenCalledWith(
@@ -608,7 +608,7 @@ describe("generic extension settings", () => {
         );
       }).not.toThrow();
       expect(settings).toEqual({
-        maxDepth: 4,
+        maxDepth: 2,
         hideAgentList: false,
       });
       expect(onInvalid).toHaveBeenCalledWith(
@@ -677,7 +677,7 @@ describe("generic extension settings", () => {
       expect(scope?.ui).toBe(ctx.ui);
       expect(scope?.spawnTreeContext).toMatchObject({
         role: "root",
-        maxDepth: 4,
+        maxDepth: 2,
       });
       expect(scope?.pi).toBe(extensionApi);
       expect(notify).toHaveBeenCalledWith(
@@ -698,6 +698,40 @@ describe("generic extension settings", () => {
       name === HIDE_AGENT_LIST_FLAG ? "true" : undefined,
     );
     expect(() => readTestSettings(api as any)).toThrow(/hide agent list/i);
+  });
+
+  it.each([undefined, "0", "2", "6"])(
+    "uses split depth four unless CLI overrides it with %s",
+    (override) => {
+      const api = mockApi((name) => {
+        if (name === "split" || name === "orchestratorv2") return true;
+        if (name === MAX_DEPTH_FLAG) return override;
+        return undefined;
+      });
+      expect(readTestSettings(api as any).maxDepth).toBe(
+        override === undefined ? 4 : Number(override),
+      );
+    },
+  );
+
+  it("honors persisted depth two in split mode, including a local override", () => {
+    const { agentDir, cwd } = settingsSandbox;
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    const api = mockApi((name) => ["split", "orchestratorv2"].includes(name));
+    writeFileSync(
+      join(agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "2" } }),
+    );
+    expect(readTestSettings(api as any).maxDepth).toBe(2);
+    writeFileSync(
+      join(agentDir, "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "6" } }),
+    );
+    writeFileSync(
+      join(cwd, ".pi", "settings-extensions.json"),
+      JSON.stringify({ "pi-subagentura": { "max-depth": "2" } }),
+    );
+    expect(readTestSettings(api as any).maxDepth).toBe(2);
   });
 
   it("uses the configured depth only for V2 roots", () => {

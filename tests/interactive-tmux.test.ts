@@ -793,6 +793,10 @@ describe("interactive-tmux", () => {
         true,
         true,
         configuredDepth,
+        undefined,
+        undefined,
+        undefined,
+        true,
       );
       try {
         for (let depth = 1; depth <= expectedDepth; depth++) {
@@ -838,7 +842,7 @@ describe("interactive-tmux", () => {
             depth,
             maxDepth: expectedDepth,
             maxNodes: 256,
-            orchestratorV2Mode: true,
+            splitMode: true,
           });
           expect(child.parentAgentId).toBe(context.currentAgentId);
           expect(existsSync(join(state.artifactDir, bootstrap))).toBe(false);
@@ -863,6 +867,50 @@ describe("interactive-tmux", () => {
         resetRuntimeSpawnTreeContextForTests();
         delete process.env[LINEAGE_BOOTSTRAP_ENV];
       }
+    },
+  );
+
+  it.each([false, true])(
+    "keeps children without --split free of recursive policy (V2=%s)",
+    async (v2) => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      installMockExec((_file, args) => {
+        if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "list-panes") return `${MOCK_PANE_ID}\n`;
+        return "";
+      });
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const context = createRootSpawnTreeContext("ordinary-root", tmp, !v2, v2);
+      const parentScope = createTestSessionScope({
+        cwd: tmp,
+        spawnTreeContext: context,
+      });
+      const state = mod.launchInteractiveSubagent({
+        name: "ordinary-child",
+        task: "Complete the delegated scope",
+        cwd: tmp,
+        spawnTreeContext: context,
+        sessionScope: parentScope,
+      });
+      const prompt = readFileSync(
+        join(state.artifactDir, "ordinary-child-system.md"),
+        "utf8",
+      );
+      expect(prompt).not.toContain("# Recursive coordination");
+      expect(prompt).toContain("COMPLETION IS MANDATORY");
+      const bootstrap = readdirSync(state.artifactDir).find((name) =>
+        /^\.lineage-bootstrap-.*\.json$/.test(name),
+      )!;
+      const child = JSON.parse(
+        readFileSync(join(state.artifactDir, bootstrap), "utf8"),
+      ).context;
+      expect(child.splitMode).toBeUndefined();
+      expect(child.maxDepth).toBe(v2 ? 2 : 8);
     },
   );
 

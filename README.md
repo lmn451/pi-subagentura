@@ -12,10 +12,10 @@ child Pi sessions you can watch, attach to, and continue in tmux, Zellij, Herdr,
 or a verified live Superlogical Rex block.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
-guides the parent to decompose work across attachable specialists, create routine
-specialists when fresh discovery establishes that no suitable owner exists, and
-synthesize their results. The user only needs to resolve meaningful scope
-decisions or blockers. Shared host-aware parent prompt guidance applies in
+guides the parent to route clear work to attachable specialists, ask for
+clarification when a request is ambiguous, and leave repository work to
+specialists. Add `--split` for automatic decomposition, recursive coordination,
+and one synthesized result. Shared host-aware parent prompt guidance applies in
 ordinary sessions and both orchestration modes; see
 [host-aware interactive agent spawning](#host-aware-interactive-agent-spawning).
 The detailed Orca guide is supplied only to matching Orca parent roots, not
@@ -83,10 +83,11 @@ pi --orchestratorv2
 Review the authentication layer across the API and database boundaries.
 ```
 
-The parent routes work to attachable interactive subagents, creating a
-specialist when fresh discovery establishes that no suitable owner exists, then
-returns one synthesized result. For reusable workflows, use the
-workflow-oriented `--orchestrator` mode:
+The parent routes work to attachable interactive subagents and asks for
+clarification when a request is ambiguous. A clear scoped request may create
+one child when fresh discovery establishes that no suitable owner exists.
+Add `--split` for automatic decomposition and recursive coordination. For
+reusable workflows, use the workflow-oriented `--orchestrator` mode:
 
 ```text
 pi --orchestrator
@@ -378,7 +379,9 @@ setting it there is a no-op because that setting is global-only. For a
 session-local `max-depth` or `telemetry`, edit
 `<session-cwd>/.pi/settings-extensions.json` manually, using the exact cwd of
 the Pi session. `max-depth` controls Orchestratorv2 lineage depth and defaults
-to `4`; `hide-agent-list` defaults to `false` and only hides the compact
+to `2`, or `4` with `--orchestratorv2 --split` when no persisted or CLI override
+is set. An explicit persisted `2` still wins in split mode. The settings panel
+shows the ordinary default of `2`. `hide-agent-list` defaults to `false` and only hides the compact
 per-agent activity widget rows. `telemetry` controls anonymous product
 analytics, defaults to the string `"true"` (enabled), and is
 project-overridable. Persisted `telemetry` values must be `"true"` or
@@ -430,7 +433,7 @@ Scope rules:
 An invalid persisted value never aborts a session. Every global or project
 file that is read is validated; malformed files or values are reported without
 exposing file contents, the invalid candidate is ignored, and resolution
-continues to the next applicable scope or documented defaults (`max-depth` `4`,
+continues to the next applicable scope or documented defaults (`max-depth` `2`, or `4` with `--split`,
 `hide-agent-list` `false`, `telemetry` `"true"`). The extension reports the
 ignored setting in the TUI at the start of a root session, and to the debug log
 otherwise.
@@ -463,7 +466,7 @@ This is the core v2 model in miniature: **you can keep talking with the orchestr
 
 > Replays generated with [vibe-replay](https://github.com/tuo-lei/vibe-replay), an interactive replay and sharing tool for AI coding sessions.
 
-The v2 prompt gives the parent a lightweight coordination role: it decomposes
+With `--orchestratorv2 --split`, the parent decomposes
 broad requests into one interactive child per independent part and reuses exact
 live owners. A clear narrow request can create one specialist without another
 spawn approval, including read-only investigation. Explicit stale continuations
@@ -523,15 +526,17 @@ immediate child session and are not automatically actionable in the top-level
 Orchestratorv2 routing registry; their important outcomes return through that
 child or the existing artifact and notification paths.
 
-New native v2 lineages propagate an explicit coordination-mode field through
-their one-use lineage bootstraps. Every native descendant launch includes the
+New native split-enabled v2 lineages propagate an explicit `splitMode` field through
+their one-use lineage bootstraps. Every descendant of that lineage includes the
 bundled [child coordination policy](CHILD_COORDINATION_SYSTEM_PROMPT.md) before
 the lifecycle protocol, independently of persona or conversation-context choice.
 Each parent supplies complete handoffs, reads exact child/turn reports,
 coordinates failures and dependencies, and aggregates its children's results.
 Descendants escalate blockers to their immediate parent. Existing children
 launched without this field must be respawned to receive the policy; reload does
-not replace their launch prompts. Lineage plumbing is not an OS security boundary.
+not replace their launch prompts. Ordinary V2 and legacy orchestration do not
+inject this policy. Their existing ability to launch children remains available.
+Lineage plumbing is not an OS security boundary.
 
 #### Enable the optional classifier advisor
 
@@ -797,10 +802,11 @@ different working directories. Interactive
 children receive a minimal child runtime that can launch more interactive
 children, but does not register in-process or workflow orchestration tools.
 Recursion is bounded by the active orchestration policy: legacy orchestration
-retains its depth of 8, while Orchestratorv2 defaults to depth 4 (main agent at
-depth 0). Three or more descendant levels are available when useful; no minimum
+retains its depth of 8, while Orchestratorv2 defaults to depth 2, or depth 4 with
+`--split` (main agent at depth 0). Three or more descendant levels are available
+with split mode or an explicit override when useful; no minimum
 nesting is required. Set `max-depth` or launch with
-`pi --orchestratorv2 --subagentura-max-depth 6` for a different limit. Explicit
+`pi --orchestratorv2 --split --subagentura-max-depth 6` for a different limit. Explicit
 lower limits, including 0, remain authoritative throughout the native tree. Both
 policies also cap the tree at 256 **live**
 lineage nodes; manifests of exited agents are pruned so a long-lived session's
