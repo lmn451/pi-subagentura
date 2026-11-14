@@ -687,8 +687,25 @@ describe("session handler lifecycle callbacks", () => {
         role: "root",
         maxDepth,
       });
+      expect(
+        registration.sessionScope.spawnTreeContext?.splitMode,
+      ).toBeUndefined();
     },
   );
+
+  it("starts split-enabled V2 with depth four and explicit lineage policy", () => {
+    const registration = registerHandlers();
+    registration.pi.getFlag.mockImplementation((name: string) =>
+      ["orchestratorv2", "split"].includes(name) ? true : undefined,
+    );
+    startSession(registration, root, "split-session");
+    expect(registration.sessionScope.spawnTreeContext).toMatchObject({
+      role: "root",
+      splitMode: true,
+      maxDepth: 4,
+      maxNodes: 256,
+    });
+  });
 
   it("keeps a child without a bootstrap in direct-only mode", () => {
     const registration = registerHandlers(undefined, false);

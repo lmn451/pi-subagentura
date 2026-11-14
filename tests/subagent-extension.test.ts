@@ -246,6 +246,12 @@ describe("extension registration", () => {
     expect(result.systemPrompt).not.toContain(
       "exactly one interactive child for each part",
     );
+    expect(result.systemPrompt).not.toContain(
+      "Do not ask the user to design the agent tree",
+    );
+    expect(result.systemPrompt).not.toContain(
+      "Synthesize the direct children's verified results into one user-facing answer",
+    );
     expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
@@ -315,6 +321,12 @@ describe("extension registration", () => {
     )![1];
     const result = await hook({ systemPrompt: "base prompt" }, {});
     expect(result.systemPrompt).toContain("# Orchestratorv2 Split Policy");
+    expect(result.systemPrompt).toContain(
+      "Do not ask the user to design the agent tree",
+    );
+    expect(result.systemPrompt).toContain(
+      "Synthesize the direct children's verified results into one user-facing answer",
+    );
     expect(result.systemPrompt).toContain(
       "Every broad user-originated request must be decomposed into the smallest practical independent parts",
     );

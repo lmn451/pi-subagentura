@@ -131,6 +131,11 @@ import {
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 export { readPaneExitCode } from "./multiplexer-tmux";
 
+const CHILD_COORDINATION_PROMPT = readFileSync(
+  new URL("../CHILD_COORDINATION_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+
 /**
  * System prompt sent to every interactive sub-agent. Tells the child how to
  * signal completion so the parent can be notified, and where to write its
@@ -873,12 +878,19 @@ export function launchInteractiveSubagent(params: {
       params.requireActivePaneForUserAttention,
     );
     const systemPromptContent = params.persona
-      ? `# Persona\n\n${params.persona}\n\n${protocol}`
-      : protocol;
-    writeFileSync(paths.systemPromptFile, systemPromptContent, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+      ? `# Persona\n\n${params.persona}\n\n`
+      : "";
+    const coordination = spawnTreeContext?.splitMode
+      ? `${CHILD_COORDINATION_PROMPT}\n\n`
+      : "";
+    writeFileSync(
+      paths.systemPromptFile,
+      `${systemPromptContent}${coordination}${protocol}`,
+      {
+        encoding: "utf8",
+        mode: 0o600,
+      },
+    );
     systemPromptFile = paths.systemPromptFile;
   } catch (error) {
     reportSpawnFailure("state_persistence", undefined, "system_prompt_write");

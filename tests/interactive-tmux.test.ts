@@ -27,8 +27,11 @@ import { join } from "node:path";
 import { importFresh } from "./test-utils";
 import { hashLineageRoot } from "../src/interactive-lineage";
 import {
+  acquireRuntimeSpawnTreeContext,
   createRootSpawnTreeContext,
+  LINEAGE_BOOTSTRAP_ENV,
   parseSpawnTreeContext,
+  resetRuntimeSpawnTreeContextForTests,
   type SpawnTreeContext,
   type ParsedSpawnTreeContext,
 } from "../src/spawn-tree-context";
@@ -761,6 +764,155 @@ describe("interactive-tmux", () => {
     expect(calls.some((args) => args[0] === "new-window")).toBe(false);
     expect(readdirSync(nodesDir)).toEqual(["unknown.json"]);
   });
+
+  it.each([
+    [undefined, 4],
+    [2, 2],
+    [6, 6],
+    [0, 0],
+  ])(
+    "carries coordination through launched descendants with max-depth %s",
+    async (configuredDepth, expectedDepth) => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      const calls: string[][] = [];
+      installMockExec((_file, args) => {
+        calls.push(args);
+        if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "list-panes") return `${MOCK_PANE_ID}\n`;
+        return "";
+      });
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      let context = createRootSpawnTreeContext(
+        "recursive-v2",
+        tmp,
+        true,
+        true,
+        configuredDepth,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      try {
+        for (let depth = 1; depth <= expectedDepth; depth++) {
+          const parentScope = createTestSessionScope({
+            cwd: tmp,
+            spawnTreeContext: context,
+          });
+          const state = mod.launchInteractiveSubagent({
+            name: `level${depth}`,
+            task: "Complete the delegated scope",
+            cwd: tmp,
+            sessionScope: parentScope,
+            spawnTreeContext: context,
+            ...(depth === 1 ? { persona: "A focused specialist" } : {}),
+          });
+          const systemFile = join(state.artifactDir, `level${depth}-system.md`);
+          const prompt = readFileSync(systemFile, "utf8");
+          // This is the generated system prompt passed to Pi, not source text.
+          expect(prompt).toContain("# Recursive coordination");
+          expect(prompt).toContain("immediate parent");
+          expect(prompt).toContain("includeContext: false");
+          expect(prompt).toContain("read_subagent_artifact");
+          if (depth === 1) {
+            expect(prompt.indexOf("# Persona")).toBeLessThan(
+              prompt.indexOf("# Recursive coordination"),
+            );
+          }
+          expect(prompt.indexOf("# Recursive coordination")).toBeLessThan(
+            prompt.indexOf("COMPLETION IS MANDATORY"),
+          );
+          expect(readFileSync(state.launchScriptFile, "utf8")).toContain(
+            systemFile,
+          );
+          const bootstrap = readdirSync(state.artifactDir).find((name) =>
+            /^\.lineage-bootstrap-.*\.json$/.test(name),
+          )!;
+          process.env[LINEAGE_BOOTSTRAP_ENV] = join(
+            state.artifactDir,
+            bootstrap,
+          );
+          const child = acquireRuntimeSpawnTreeContext(state.artifactDir)!;
+          expect(child).toMatchObject({
+            depth,
+            maxDepth: expectedDepth,
+            maxNodes: 256,
+            splitMode: true,
+          });
+          expect(child.parentAgentId).toBe(context.currentAgentId);
+          expect(existsSync(join(state.artifactDir, bootstrap))).toBe(false);
+          context = child;
+        }
+        const launches = calls.filter(
+          (args) => args[0] === "new-window",
+        ).length;
+        expect(() =>
+          mod.launchInteractiveSubagent({
+            name: "over-limit",
+            task: "Do not launch",
+            cwd: tmp,
+            spawnTreeContext: context,
+            sessionScope: scope,
+          }),
+        ).toThrow(/exceeds max/);
+        expect(calls.filter((args) => args[0] === "new-window")).toHaveLength(
+          launches,
+        );
+      } finally {
+        resetRuntimeSpawnTreeContextForTests();
+        delete process.env[LINEAGE_BOOTSTRAP_ENV];
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "keeps children without --split free of recursive policy (V2=%s)",
+    async (v2) => {
+      const tmp = makeTmp();
+      process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+      process.env.TMUX = makeArgs().TMUX;
+      installMockExec((_file, args) => {
+        if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+        if (args[0] === "display-message") return MOCK_LOCATION;
+        if (args[0] === "list-panes") return `${MOCK_PANE_ID}\n`;
+        return "";
+      });
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const context = createRootSpawnTreeContext("ordinary-root", tmp, !v2, v2);
+      const parentScope = createTestSessionScope({
+        cwd: tmp,
+        spawnTreeContext: context,
+      });
+      const state = mod.launchInteractiveSubagent({
+        name: "ordinary-child",
+        task: "Complete the delegated scope",
+        cwd: tmp,
+        spawnTreeContext: context,
+        sessionScope: parentScope,
+      });
+      const prompt = readFileSync(
+        join(state.artifactDir, "ordinary-child-system.md"),
+        "utf8",
+      );
+      expect(prompt).not.toContain("# Recursive coordination");
+      expect(prompt).toContain("COMPLETION IS MANDATORY");
+      const bootstrap = readdirSync(state.artifactDir).find((name) =>
+        /^\.lineage-bootstrap-.*\.json$/.test(name),
+      )!;
+      const child = JSON.parse(
+        readFileSync(join(state.artifactDir, bootstrap), "utf8"),
+      ).context;
+      expect(child.splitMode).toBeUndefined();
+      expect(child.maxDepth).toBe(v2 ? 2 : 8);
+    },
+  );
 
   it("still refuses a spawn when every retained lineage node is live", async () => {
     const tmp = makeTmp();

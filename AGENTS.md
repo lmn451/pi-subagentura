@@ -87,7 +87,9 @@ Persisted settings use these precedence rules:
   `"true"`. Both persisted strings `"true"` and `"false"` are valid; a local
   `"true"` can explicitly override a global `"false"`, and a local `"false"`
   can override a global `"true"`.
-- `max-depth`: project-local value, then global value, then the default `2`.
+- `max-depth`: project-local value, then global value, then the default `2`
+  (`4` for `--orchestratorv2 --split`). Explicit values, including `2` and `0`,
+  override the split default.
 - `hide-agent-list`: global-only; any project-local value is ignored.
 
 Environment opt-outs and the `--no-subagentura-telemetry` negative launch flag

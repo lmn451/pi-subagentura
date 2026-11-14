@@ -43,6 +43,8 @@ export interface SpawnTreeContext {
   artifactDir?: string;
   /** Whether this lineage belongs to an orchestrator-mode parent. */
   orchestratorMode?: boolean;
+  /** Propagate opt-in recursive coordination through the one-use bootstrap. */
+  splitMode?: boolean;
   /** Anonymous session correlation carried only by the one-use bootstrap. */
   telemetrySessionId?: string;
   /** Closed analytics mode propagated with the explicit correlation context. */
@@ -164,6 +166,10 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
   if (orchestratorMode !== undefined && typeof orchestratorMode !== "boolean") {
     throw new Error("Invalid lineage bootstrap orchestratorMode");
   }
+  const splitMode = raw.splitMode;
+  if (splitMode !== undefined && typeof splitMode !== "boolean") {
+    throw new Error("Invalid lineage bootstrap splitMode");
+  }
   const telemetrySessionId =
     raw.telemetrySessionId === undefined
       ? undefined
@@ -205,6 +211,7 @@ export function parseSpawnTreeContext(value: unknown): ParsedSpawnTreeContext {
     sessionRoot,
     ...(artifactDir ? { artifactDir } : {}),
     ...(orchestratorMode ? { orchestratorMode } : {}),
+    ...(splitMode ? { splitMode } : {}),
     ...(telemetrySessionId
       ? { telemetrySessionId: telemetrySessionId.toLowerCase() }
       : {}),
@@ -234,6 +241,7 @@ export function createRootSpawnTreeContext(
   telemetrySessionId?: string,
   telemetryMode?: TelemetryMode,
   telemetryOrigin?: TelemetryTrafficOrigin,
+  splitMode = false,
 ): ParsedSpawnTreeContext {
   return parseSpawnTreeContext({
     schemaVersion: LINEAGE_BOOTSTRAP_SCHEMA_VERSION,
@@ -241,12 +249,13 @@ export function createRootSpawnTreeContext(
     rootId,
     sessionRoot,
     ...(orchestratorMode ? { orchestratorMode: true } : {}),
+    ...(orchestratorV2Mode && splitMode ? { splitMode: true } : {}),
     ...(telemetrySessionId ? { telemetrySessionId } : {}),
     ...(telemetryMode ? { telemetryMode } : {}),
     telemetryOrigin: telemetryOrigin ?? resolveTelemetryTrafficOrigin(),
     depth: 0,
     maxDepth: orchestratorV2Mode
-      ? (configuredMaxDepth ?? 2)
+      ? (configuredMaxDepth ?? (splitMode ? 4 : 2))
       : DEFAULT_MAX_DEPTH,
     maxNodes: DEFAULT_MAX_NODES,
   });
