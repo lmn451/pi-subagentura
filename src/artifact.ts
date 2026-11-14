@@ -1772,6 +1772,84 @@ function validatedWorkingCwd(value: unknown): string | undefined {
     : undefined;
 }
 
+type PersistedMuxIdentity = Pick<
+  InteractiveSubagentPersistedStateV2,
+  "paneId" | "muxTerminalId"
+> &
+  (
+    | { mux: "rex"; muxSession: string; muxServer: string }
+    | {
+        mux: Exclude<MuxName, "rex">;
+        muxSession?: string;
+        muxServer?: string;
+      }
+  );
+
+function validatedMuxTerminalId(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    value.includes("\0") ||
+    Buffer.byteLength(value, "utf8") > MAX_MUX_TERMINAL_ID_BYTES
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizePersistedMuxIdentity(
+  raw: Record<string, unknown>,
+): PersistedMuxIdentity | null {
+  if (typeof raw.paneId !== "string") return null;
+  const paneId = raw.paneId;
+  const optional: { muxSession?: string; muxTerminalId?: string } = {};
+  if (typeof raw.muxSession === "string") optional.muxSession = raw.muxSession;
+  const terminalId = validatedMuxTerminalId(raw.muxTerminalId);
+  if (terminalId !== undefined) optional.muxTerminalId = terminalId;
+  switch (raw.mux) {
+    case "tmux": {
+      const server = raw.muxServer;
+      if (server !== undefined && !isMuxSocketPath(server)) return null;
+      const identity: PersistedMuxIdentity = {
+        ...optional,
+        mux: "tmux",
+        paneId,
+      };
+      if (server !== undefined) identity.muxServer = server;
+      return identity;
+    }
+    case "zellij":
+    case "herdr": {
+      const identity: PersistedMuxIdentity = {
+        ...optional,
+        mux: raw.mux,
+        paneId,
+      };
+      // These backends historically ignore malformed optional server metadata.
+      if (isRexServerAddress(raw.muxServer)) identity.muxServer = raw.muxServer;
+      return identity;
+    }
+    case "rex":
+      if (
+        !isRexBlockId(paneId) ||
+        !isRexSessionId(raw.muxSession) ||
+        !isRexServerAddress(raw.muxServer)
+      ) {
+        return null;
+      }
+      return {
+        ...optional,
+        mux: "rex",
+        paneId,
+        muxSession: raw.muxSession,
+        muxServer: raw.muxServer,
+      };
+    default:
+      return null;
+  }
+}
+
 /** Normalize and validate the current protocol-v2 persisted state shape. */
 function normalizeV2StatePayload(
   obj: Record<string, unknown>,
@@ -1839,32 +1917,12 @@ function normalizeV2StatePayload(
         typeof raw.artifactDir !== "string" ||
         !isAbsolute(raw.artifactDir) ||
         basename(raw.artifactDir) !== id ||
-        typeof raw.paneId !== "string" ||
-        typeof raw.sessionFile !== "string" ||
-        (raw.mux !== "tmux" &&
-          raw.mux !== "zellij" &&
-          raw.mux !== "herdr" &&
-          raw.mux !== "rex") ||
-        (raw.mux === "tmux" &&
-          raw.muxServer !== undefined &&
-          !isMuxSocketPath(raw.muxServer)) ||
-        (raw.mux === "rex" &&
-          (!isRexBlockId(raw.paneId) ||
-            !isRexSessionId(raw.muxSession) ||
-            !isRexServerAddress(raw.muxServer)))
+        typeof raw.sessionFile !== "string"
       ) {
         return null;
       }
-      const terminalIdCandidate = raw.muxTerminalId;
-      const muxTerminalId =
-        typeof terminalIdCandidate === "string" &&
-        terminalIdCandidate.length > 0 &&
-        terminalIdCandidate.trim() === terminalIdCandidate &&
-        !terminalIdCandidate.includes("\0") &&
-        Buffer.byteLength(terminalIdCandidate, "utf8") <=
-          MAX_MUX_TERMINAL_ID_BYTES
-          ? terminalIdCandidate
-          : undefined;
+      const muxIdentity = normalizePersistedMuxIdentity(raw);
+      if (!muxIdentity) return null;
       const entry = raw as unknown as InteractiveSubagentPersistedStateV2;
       const workingCwd = validatedWorkingCwd(entry.workingCwd);
       const completionGroupId =
@@ -2146,20 +2204,9 @@ function normalizeV2StatePayload(
           : undefined;
       normalizedStates[id] = {
         id,
-        paneId: entry.paneId,
-        ...(muxTerminalId ? { muxTerminalId } : {}),
+        ...muxIdentity,
         ...(typeof entry.windowName === "string"
           ? { windowName: entry.windowName }
-          : {}),
-        mux: entry.mux,
-        ...(typeof entry.muxSession === "string"
-          ? { muxSession: entry.muxSession }
-          : {}),
-        ...(typeof entry.muxServer === "string" &&
-        (entry.mux === "tmux"
-          ? isMuxSocketPath(entry.muxServer)
-          : isRexServerAddress(entry.muxServer))
-          ? { muxServer: entry.muxServer }
           : {}),
         artifactDir: entry.artifactDir,
         sessionFile: entry.sessionFile,

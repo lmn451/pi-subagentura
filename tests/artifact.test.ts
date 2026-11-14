@@ -1225,6 +1225,82 @@ describe("persisted interactive state helpers", () => {
     },
   );
 
+  it.each([
+    [{ mux: "tmux" }, true, undefined],
+    [
+      { mux: "tmux", muxServer: "/tmp/pinned socket " },
+      true,
+      "/tmp/pinned socket ",
+    ],
+    [{ mux: "tmux", muxServer: 42 }, false, undefined],
+    [{ mux: "tmux", muxServer: "" }, false, undefined],
+    [
+      { mux: "zellij", muxServer: "unix:///tmp/optional.sock" },
+      true,
+      "unix:///tmp/optional.sock",
+    ],
+    [{ mux: "herdr", muxServer: "bad\naddress" }, true, undefined],
+    [{ mux: "zellij", muxServer: 42, muxSession: 42 }, true, undefined],
+    [{ mux: "herdr", muxServer: "-unsafe" }, true, undefined],
+    [{ mux: "unknown" }, false, undefined],
+  ] as const)(
+    "normalizes mux identity fields without changing stored bytes: %j",
+    (patch, valid, server) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      const contents = JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { [SAMPLE.id]: { ...SAMPLE, ...patch } },
+      });
+      writeFileSync(file, contents, { mode: 0o600 });
+      const loaded = loadInteractiveStates(root);
+      expect(readFileSync(file, "utf8")).toBe(contents);
+      if (!valid) {
+        expect(loaded).toBeNull();
+        return;
+      }
+      const state = loaded?.states[SAMPLE.id];
+      expect(state?.mux).toBe(patch.mux);
+      expect(state?.paneId).toBe(SAMPLE.paneId);
+      if (server === undefined) expect(state).not.toHaveProperty("muxServer");
+      else expect(state?.muxServer).toBe(server);
+      if ("muxSession" in patch) expect(state).not.toHaveProperty("muxSession");
+    },
+  );
+
+  it.each([
+    { paneId: "%1" },
+    { muxSession: "wrong-session" },
+    { muxSession: 42 },
+    { muxServer: undefined },
+    { muxServer: "-unsafe" },
+    { muxServer: "bad\naddress" },
+  ])(
+    "rejects incomplete Rex identities without rewriting state: %j",
+    (patch) => {
+      const file = stateFilePath(root);
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      const contents = JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [SAMPLE.id]: {
+            ...SAMPLE,
+            mux: "rex",
+            paneId: "block:01234567-89ab-cdef-0123-456789abcdef",
+            muxSession: "session:01234567-89ab-cdef-0123-456789abcdef",
+            muxServer: "unix:///tmp/rex.sock",
+            ...patch,
+          },
+        },
+      });
+      writeFileSync(file, contents, { mode: 0o600 });
+      expect(loadInteractiveStates(root)).toBeNull();
+      expect(readFileSync(file, "utf8")).toBe(contents);
+    },
+  );
+
   it("persists the Rex server identity and rejects incomplete Rex state", () => {
     const rexState: InteractiveSubagentPersistedStateV2 = {
       ...SAMPLE,
