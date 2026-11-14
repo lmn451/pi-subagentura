@@ -322,11 +322,28 @@ function installTmuxMock(options: TmuxMockOptions = {}): string[][] {
   vi.doMock("../src/multiplexer-current-context", () => ({
     resolveCurrentMuxContext: () => ({
       kind: "ready",
-      target: { mux: "tmux", paneId: "%1" },
+      target: {
+        mux: "tmux",
+        paneId: "%1",
+        server: "/tmp/tmux-1000/default",
+      },
     }),
   }));
   vi.doMock("node:child_process", () => ({
-    execFileSync: (_file: string, args: string[]) => {
+    execFileSync: (file: string, rawArgs: string[]) => {
+      if (
+        file === "/bin/sh" &&
+        rawArgs[0] === "-c" &&
+        rawArgs[1] === "command -v 'tmux'"
+      ) {
+        return "";
+      }
+      if (file !== "tmux") {
+        throw new Error(`Unexpected launch fixture command: ${file}`);
+      }
+      // Resolver-owned launches carry their captured socket explicitly.
+      const args =
+        rawArgs[0] === "-S" || rawArgs[0] === "-L" ? rawArgs.slice(2) : rawArgs;
       tmuxMockCalls.push(args);
       if (args[0] === "send-keys" && tmuxMockOptions.sendKeysError) {
         throw new Error(tmuxMockOptions.sendKeysError);

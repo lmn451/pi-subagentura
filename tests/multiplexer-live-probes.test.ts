@@ -140,6 +140,18 @@ describe("read-only live mux ownership probes", () => {
       expect.arrayContaining(["-N", "-L", "my-server"]),
     );
   });
+  it("never lets an inherited named socket override the actual server path", () => {
+    exec.mockReturnValue("%4\t90\t/dev/pts/1\n");
+    const server = "/tmp/actual # socket ";
+    probeLiveMuxTarget({ ...tmux, server }, context(), {
+      TMUX: "/stale.sock,1,0",
+      PI_SUBAGENTURA_TMUX_SOCKET: "contradictory",
+    });
+    expect(exec.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(["-N", "-S", server]),
+    );
+    expect(exec.mock.calls[0]?.[1]).not.toContain("-L");
+  });
   it("reads only the documented Herdr shell PID and pins its socket", () => {
     exec.mockReturnValue(
       JSON.stringify({ result: { process_info: { shell_pid: 90 } } }),

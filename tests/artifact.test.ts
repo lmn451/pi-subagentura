@@ -1194,6 +1194,37 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
 
+  it.each([
+    "/tmp/tmux/default",
+    "/tmp/tmux work/#socket",
+    "/tmp/tmux work/socket ",
+  ])("round-trips the exact pinned tmux socket %j", (muxServer) => {
+    const state = { ...SAMPLE, muxServer };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { abc12345: state },
+    });
+    expect(loadInteractiveStates(root)?.states.abc12345).toEqual(state);
+  });
+
+  it.each(["relative.sock", "/tmp/bad\npath", "/tmp/bad\0path"])(
+    "rejects an unsafe persisted tmux socket %j without dropping routing authority",
+    (muxServer) => {
+      mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        stateFilePath(root),
+        JSON.stringify({
+          schemaVersion: 2,
+          parent: "pi",
+          states: { abc12345: { ...SAMPLE, muxServer } },
+        }),
+        { mode: 0o600 },
+      );
+      expect(loadInteractiveStates(root)).toBeNull();
+    },
+  );
+
   it("persists the Rex server identity and rejects incomplete Rex state", () => {
     const rexState: InteractiveSubagentPersistedStateV2 = {
       ...SAMPLE,

@@ -37,6 +37,7 @@ import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import {
+  isMuxSocketPath,
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
@@ -1774,6 +1775,9 @@ function normalizeV2StatePayload(
           raw.mux !== "zellij" &&
           raw.mux !== "herdr" &&
           raw.mux !== "rex") ||
+        (raw.mux === "tmux" &&
+          raw.muxServer !== undefined &&
+          !isMuxSocketPath(raw.muxServer)) ||
         (raw.mux === "rex" &&
           (!isRexBlockId(raw.paneId) ||
             !isRexSessionId(raw.muxSession) ||
@@ -2082,7 +2086,9 @@ function normalizeV2StatePayload(
           ? { muxSession: entry.muxSession }
           : {}),
         ...(typeof entry.muxServer === "string" &&
-        isRexServerAddress(entry.muxServer)
+        (entry.mux === "tmux"
+          ? isMuxSocketPath(entry.muxServer)
+          : isRexServerAddress(entry.muxServer))
           ? { muxServer: entry.muxServer }
           : {}),
         artifactDir: entry.artifactDir,

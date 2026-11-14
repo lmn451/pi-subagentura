@@ -464,6 +464,29 @@ describe("interactive lineage node cap", () => {
     expect(projection.roots[0]?.manifest).toBe(herdr);
   });
 
+  it.each(["/tmp/tmux work/#socket", "/tmp/tmux work/socket "])(
+    "preserves literal tmux socket %j in lineage",
+    (muxServer) => {
+      const value = manifest("tmux-agent", {
+        pane: { backend: "tmux", paneId: "%42", muxServer },
+      });
+      expect(validateLineageManifest(value).pane.muxServer).toBe(muxServer);
+    },
+  );
+
+  it.each(["relative.sock", "/tmp/bad\npath", "/tmp/bad\0path"])(
+    "rejects unsafe explicit tmux lineage socket %j",
+    (muxServer) => {
+      expect(() =>
+        validateLineageManifest(
+          manifest("tmux-agent", {
+            pane: { backend: "tmux", paneId: "%42", muxServer },
+          }),
+        ),
+      ).toThrow();
+    },
+  );
+
   it("validates and projects Rex identities only with a persisted server", async () => {
     const rex = validateLineageManifest(
       manifest("rex-agent", {

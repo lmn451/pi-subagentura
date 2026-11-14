@@ -71,6 +71,8 @@ import {
   type CapturePaneOptions,
   type CapturePaneResult,
   getMux,
+  resolveMux,
+  type MuxLaunchContext,
   NoMultiplexerAvailableError,
   type MuxName,
   type Multiplexer,
@@ -887,8 +889,11 @@ export function launchInteractiveSubagent(params: {
   // before we start writing files. The resolver throws NoMultiplexerAvailableError
   // with a setup hint if neither backend is usable.
   let mux;
+  let muxContext: MuxLaunchContext;
   try {
-    mux = getMux({ preference: params.muxPreference });
+    const resolved = resolveMux({ preference: params.muxPreference });
+    mux = resolved.adapter;
+    muxContext = resolved.context;
   } catch (err) {
     reportSpawnFailure("mux_resolution", undefined, "mux_resolution");
     if (err instanceof NoMultiplexerAvailableError) {
@@ -943,12 +948,7 @@ export function launchInteractiveSubagent(params: {
       name: params.name,
       cwd,
       background,
-      parentPane:
-        mux.name === "herdr"
-          ? process.env.HERDR_PANE_ID
-          : mux.name === "rex"
-            ? process.env.REX_BLOCK
-            : process.env.TMUX_PANE,
+      context: muxContext,
       windowName: safeSegment(params.name),
       id,
     });

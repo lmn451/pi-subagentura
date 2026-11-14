@@ -15,6 +15,7 @@ export interface LiveMuxTarget {
   readonly paneId: string;
   readonly session?: string;
   readonly server?: string;
+  readonly socketName?: string;
 }
 export type LiveMuxProbe =
   | { kind: "match"; target: LiveMuxTarget; distance: number }
@@ -120,15 +121,18 @@ function tmuxProbe(
 ): ProbePlan | LiveMuxProbe {
   if (!/^%\d+$/.test(target.paneId)) return UNKNOWN;
   let socketArgs: string[];
-  if (env.PI_SUBAGENTURA_TMUX_SOCKET !== undefined) {
+  const actualServer =
+    target.server ?? /^(.*),\d+,\d+$/.exec(env.TMUX ?? "")?.[1];
+  if (actualServer !== undefined) {
+    if (!socket(actualServer)) return UNKNOWN;
+    socketArgs = ["-S", actualServer];
+  } else if (env.PI_SUBAGENTURA_TMUX_SOCKET !== undefined) {
     const name = env.PI_SUBAGENTURA_TMUX_SOCKET;
     if (!selector(name) || !/^[A-Za-z0-9_.-]{1,128}$/.test(name))
       return UNKNOWN;
     socketArgs = ["-L", name];
   } else {
-    const path = /^(.*),\d+,\d+$/.exec(env.TMUX ?? "")?.[1];
-    if (!socket(path)) return UNKNOWN;
-    socketArgs = ["-S", path];
+    return UNKNOWN;
   }
   return {
     command: "tmux",
@@ -294,7 +298,9 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : selector(target.server)))
+        : target.mux === "tmux"
+          ? socket(target.server)
+          : selector(target.server)))
   )
     return UNKNOWN;
   switch (target.mux) {

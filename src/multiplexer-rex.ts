@@ -8,6 +8,7 @@ import type {
   PaneRef,
 } from "./multiplexer-contracts";
 import {
+  validateMuxLaunchContext,
   boundCaptureOutput,
   commandExists,
   isRexBlockId,
@@ -308,13 +309,22 @@ export class RexMultiplexer implements Multiplexer {
   }
 
   createPane(opts: {
+    context?: import("./multiplexer-contracts").MuxLaunchContext;
     name: string;
     cwd: string;
     background: boolean;
     parentPane?: string;
     windowName?: string;
   }): { paneId: string; windowName?: string; session: string; server: string } {
-    const context = this.requireCurrentContext();
+    validateMuxLaunchContext(this.name, opts.context);
+    const context =
+      opts.context?.kind === "attached" && opts.context.mux === "rex"
+        ? {
+            sessionId: opts.context.session,
+            blockId: opts.context.paneId,
+            server: opts.context.server,
+          }
+        : this.requireCurrentContext();
     const label = opts.windowName ?? safeSegment(opts.name);
     const args = [
       "run",

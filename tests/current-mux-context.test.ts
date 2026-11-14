@@ -40,6 +40,32 @@ describe("current mux ownership", () => {
     probe.mockReturnValue({ kind: "unknown" });
   });
 
+  it.each(["/tmp/mux sockets #1/live.sock", "/tmp/live.sock "])(
+    "preserves exact actual tmux socket %s despite a contradictory named socket",
+    (server) => {
+      probe.mockImplementation((target) => ({
+        kind: "match",
+        target,
+        distance: 0,
+      }));
+      expect(
+        resolveCurrentMuxContext({
+          TMUX: `${server},1,0`,
+          TMUX_PANE: "%7",
+          PI_SUBAGENTURA_TMUX_SOCKET: "contradictory",
+        }),
+      ).toEqual({
+        kind: "ready",
+        target: { mux: "tmux", paneId: "%7", server },
+      });
+      expect(probe.mock.calls[0]?.[0]).toEqual({
+        mux: "tmux",
+        paneId: "%7",
+        server,
+      });
+    },
+  );
+
   it("keeps detached fallback free of process and server probes", () => {
     expect(
       resolveCurrentMuxContext({ REX_SERVER: "unix:///tmp/default.sock" }),
