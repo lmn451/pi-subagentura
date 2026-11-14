@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("explicit lineage context", () => {
-  it("uses maxDepth 2 for Orchestrator V2 roots", () => {
+  it("uses maxDepth 4 for Orchestrator V2 roots", () => {
     const root = createRootSpawnTreeContext(
       "orchestrator-root",
       tempDir(),
@@ -54,10 +54,13 @@ describe("explicit lineage context", () => {
       true,
     );
 
-    expect(root.maxDepth).toBe(2);
+    expect(root.maxDepth).toBe(4);
   });
 
   it("keeps the default maxDepth for legacy roots", () => {
+    expect(
+      createRootSpawnTreeContext("legacy", tempDir()).orchestratorV2Mode,
+    ).toBeUndefined();
     expect(createRootSpawnTreeContext("legacy-root", tempDir()).maxDepth).toBe(
       8,
     );
@@ -235,6 +238,9 @@ describe("explicit lineage context", () => {
     expect(() => parseSpawnTreeContext({ ...root, maxDepth: 65 })).toThrow(
       /maxDepth/,
     );
+    expect(() =>
+      parseSpawnTreeContext({ ...root, orchestratorV2Mode: "true" }),
+    ).toThrow(/orchestratorV2Mode/);
   });
 
   it("ignores legacy ambient lineage variables", () => {

@@ -247,6 +247,12 @@ describe("extension registration", () => {
       "exactly one interactive child for each part",
     );
     expect(result.systemPrompt).toContain(
+      "Do not ask the user to design the agent tree",
+    );
+    expect(result.systemPrompt).toContain(
+      "Synthesize the direct children's verified results into one user-facing answer",
+    );
+    expect(result.systemPrompt).toContain(
       "may autonomously create nested children",
     );
     expect(result.systemPrompt).toContain(
