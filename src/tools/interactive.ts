@@ -669,6 +669,35 @@ function resultReadOutcome(params: {
   return "running";
 }
 
+function resolveArtifactReadStatus(params: {
+  hasOutputError: boolean;
+  unmatchedClosedTurn: boolean;
+  completion: SelectedCompletion | undefined;
+  terminalEvent: SubagentEvent | null;
+}): SubagentArtifactReadOutput["status"] {
+  if (params.hasOutputError) return "error";
+  if (params.unmatchedClosedTurn) return "not_found";
+  return (
+    params.completion?.outcome ?? params.terminalEvent?.status ?? "running"
+  );
+}
+
+function resolveArtifactOutputState(params: {
+  wantsOutput: boolean;
+  hasOutputError: boolean;
+  output: string | null;
+  hasTerminalResult: boolean;
+  artifactClosed: boolean;
+}): SubagentArtifactReadOutput["outputState"] {
+  if (!params.wantsOutput) return "not_requested";
+  if (params.hasOutputError) return "unavailable";
+  if (params.output !== null) {
+    return params.output.length === 0 ? "empty" : "available";
+  }
+  if (params.hasTerminalResult) return "missing";
+  return params.artifactClosed ? "unavailable" : "pending";
+}
+
 function resolveInteractiveToolStates(token: SessionToolToken | undefined):
   | {
       scope: SessionScope;
@@ -1864,32 +1893,21 @@ export function registerInteractiveSubagentTools(
           params.turnId !== undefined &&
           readSelection.artifactClosed &&
           readCompletion === undefined;
-        let artifactStatus: SubagentArtifactReadOutput["status"];
-        if (outputError) {
-          artifactStatus = "error";
-        } else if (unmatchedClosedTurn) {
-          artifactStatus = "not_found";
-        } else {
-          artifactStatus =
-            readCompletion?.outcome ?? terminalReadEvent?.status ?? "running";
-        }
+        const artifactStatus = resolveArtifactReadStatus({
+          hasOutputError: outputError !== undefined,
+          unmatchedClosedTurn,
+          completion: readCompletion,
+          terminalEvent: terminalReadEvent,
+        });
         const artifactOutput = boundArtifactProviderOutput(output);
-        let artifactOutputState: SubagentArtifactReadOutput["outputState"];
-        if (!wantsOutput) {
-          artifactOutputState = "not_requested";
-        } else if (outputError) {
-          artifactOutputState = "unavailable";
-        } else if (output === null) {
-          if (readCompletion || terminalReadEvent) {
-            artifactOutputState = "missing";
-          } else if (readSelection.artifactClosed) {
-            artifactOutputState = "unavailable";
-          } else {
-            artifactOutputState = "pending";
-          }
-        } else {
-          artifactOutputState = output.length === 0 ? "empty" : "available";
-        }
+        const artifactOutputState = resolveArtifactOutputState({
+          wantsOutput,
+          hasOutputError: outputError !== undefined,
+          output,
+          hasTerminalResult:
+            readCompletion !== undefined || terminalReadEvent !== null,
+          artifactClosed: readSelection.artifactClosed,
+        });
         const artifactTurnId =
           outputTurnId ?? readSelection.lifecycleEvent?.turnId;
         const artifactError = outputReadError ?? terminalError;
