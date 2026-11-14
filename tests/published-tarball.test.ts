@@ -228,6 +228,8 @@ describe("published tarball", () => {
       expect.arrayContaining([
         "ORCHESTRATOR_SYSTEM_PROMPT.md",
         "ORCHESTRATOR_V2_SYSTEM_PROMPT.md",
+        "ORCA_INTERACTIVE_SYSTEM_PROMPT.md",
+        "REX_INTERACTIVE_SYSTEM_PROMPT.md",
         "INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md",
         "src/completion-coordinator.ts",
         "src/completion-ledger.ts",

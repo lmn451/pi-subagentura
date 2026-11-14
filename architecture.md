@@ -1227,6 +1227,7 @@ Runtime companions have distinct loading/materialization rules:
 | `ORCHESTRATOR_SYSTEM_PROMPT.md`         | Loaded as a package asset by file URL, not a code module                                                     |
 | `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`      | Loaded as a package asset by file URL for the prompt-directed thin router; not a code module                 |
 | `ORCA_INTERACTIVE_SYSTEM_PROMPT.md`     | Shared prompt-only Orca interactive-delegation guidance asset; not a code module                             |
+| `REX_INTERACTIVE_SYSTEM_PROMPT.md`      | Rex-context-only external-worker guidance asset; not a code module                                           |
 | `INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md` | Shared Agterm, explicit-target, and analytics guidance layer; not a code module                              |
 | child Pi session JSONL                  | Runtime data reopened by Pi and used for usage accounting; not an import dependency                          |
 

@@ -42,9 +42,9 @@ make these dimensions mutually exclusive or select a target in place of an
 explicit mux choice.
 
 Host-aware prompts are added per agent start only to matching parent roots:
-Orca roots receive the Orca-specific and shared host guidance; recognized
-Agterm/Rex roots receive shared guidance; children and unmatched roots receive
-no host-specific prompt. This activation-snapshot gate is not proof of a live
+Orca and Rex roots receive their respective host-specific guide and shared host
+guidance; recognized Agterm roots receive shared guidance; children and unmatched
+roots receive no host-specific prompt. This activation-snapshot gate is not proof of a live
 host or mux target. Orca's `agent launch`/supervised orchestration tools and
 Agterm's process-backed `session new --command` plus pane mailboxes are
 host-managed operations, not Subagentura-owned children or extension launch
