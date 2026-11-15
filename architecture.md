@@ -5,7 +5,7 @@
 `pi-subagentura` is a Pi extension that runs delegated agents in three execution shapes:
 
 1. an in-process Pi `AgentSession`;
-2. an interactive `pi` process in a tmux, Zellij, Herdr, or Rex pane;
+2. an interactive `pi` process in a tmux, Zellij, Herdr, WezTerm, or Rex pane;
 3. a workflow `Worker` plus `node:vm` program whose `agent()` calls use either the in-process or process-backed runner.
 
 These shapes share UI and cancellation surfaces, but they do not share an execution protocol.
@@ -17,7 +17,7 @@ In particular, completion and result bytes reach humans and the parent model thr
 - explicit result or artifact retrieval;
 
 The distinction is architectural, not cosmetic.
-A tmux, Zellij, or Herdr screen is not an interactive result store.
+A tmux, Zellij, Herdr, or WezTerm screen is not an interactive result store.
 A child session JSONL is not a completion receipt.
 A successful `sendMessage` call is not yet durable acknowledgement.
 A timestamp is not an artifact cursor.
@@ -46,7 +46,7 @@ flowchart TB
 
   IntTools[tools/interactive.ts]
   IntKernel[interactive-tmux.ts]
-  Mux[tmux, Zellij, Herdr, or Rex]
+  Mux[tmux, Zellij, Herdr, WezTerm, or Rex]
   Child[separate child pi process]
   Artifacts[(events.ndjson + output snapshots)]
   IntJobs[(interactive registry + persisted state)]
@@ -99,13 +99,13 @@ flowchart TB
 
 ### 2.1 The three execution shapes
 
-| Shape                    | Execution location                             | Primary live state                                              | Completion authority                                                          | Default parent-model delivery                                                    |
-| ------------------------ | ---------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| In-process, synchronous  | Pi extension process, child `AgentSession`     | Child Pi session and execute callback                           | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
-| In-process, asynchronous | Pi extension process, child `AgentSession`     | Owning `SessionScope.inProcessJobs` map                         | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
-| Interactive              | Separate `pi` process in tmux/Zellij/Herdr/Rex | Owning `SessionScope.interactiveStates` map plus artifact files | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
-| Workflow, foreground     | Worker thread and VM in extension process      | `Engine`, worker RPC state, selected runner                     | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
-| Workflow, background     | Same Worker/VM arrangement                     | Global `workflowJobRegistry`                                    | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
+| Shape                    | Execution location                                     | Primary live state                                              | Completion authority                                                          | Default parent-model delivery                                                    |
+| ------------------------ | ------------------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| In-process, synchronous  | Pi extension process, child `AgentSession`             | Child Pi session and execute callback                           | Returned `SubagentResult`                                                     | Direct final `AgentToolResult`                                                   |
+| In-process, asynchronous | Pi extension process, child `AgentSession`             | Owning `SessionScope.inProcessJobs` map                         | Settled job promise and stored result                                         | Coordinated manifest references `get_subagent_result`                            |
+| Interactive              | Separate `pi` process in tmux/Zellij/Herdr/WezTerm/Rex | Owning `SessionScope.interactiveStates` map plus artifact files | Physical completion event in `events.ndjson`; immutable v2 snapshot for bytes | Coordinated manifest references the immutable snapshot and activity log          |
+| Workflow, foreground     | Worker thread and VM in extension process              | `Engine`, worker RPC state, selected runner                     | Worker terminal result after outstanding agent calls settle                   | Direct final `workflow` tool result                                              |
+| Workflow, background     | Same Worker/VM arrangement                             | Global `workflowJobRegistry`                                    | Settled workflow job promise                                                  | Coordinated manifest references `get_workflow_result`; owned children suppressed |
 
 ### 2.2 Mode comparison
 
@@ -588,7 +588,9 @@ proof. This runtime routing is independent of measurement-only parent-mux
 telemetry, which still observes environment markers conservatively.
 
 Herdr requires Pi to run inside a Herdr-managed pane and persists the exact
-socket path for later operations and rehydration. Rex requires a validated live
+socket path for later operations and rehydration. WezTerm requires an attached
+pane and persists its Unix socket path for later operations and rehydration;
+pane operations stay pinned to that socket. Rex requires a validated live
 Rex block and persists its canonical server endpoint, session, and block IDs.
 Detached tmux children use a dedicated session and later windows.
 Detached Zellij children use a background session/tab because detached splits do not materialize reliably.
@@ -1135,7 +1137,7 @@ The following table inventories the tracked runtime source modules and companion
 |  13 | `src/interactive-tmux.ts`                    | Backend-neutral interactive launch, registry, lifecycle, follow-up, focus/capture, cancellation and persisted-state bridge      | `subagent-artifact-cli`, `artifact`, `delivery`, `multiplexer`, `cancellation-snapshots`, `interactive-lineage`, `multiplexer-tmux`, `identifier-types`                                                                                                                                                       |
 |  14 | `src/multiplexer-tmux.ts`                    | tmux implementation of pane/session creation, input, liveness, capture, focus and kill                                          | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
 |  15 | `src/multiplexer-zellij.ts`                  | Zellij implementation of pane/tab creation, normalized identity, input, liveness, capture, focus and kill                       | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
-|  16 | `src/multiplexer.ts`                         | Multiplexer backend resolver/cache and registry API                                                                             | `multiplexer-contracts`, `multiplexer-tmux`, `multiplexer-zellij`, `multiplexer-herdr`                                                                                                                                                                                                                        |
+|  16 | `src/multiplexer.ts`                         | Multiplexer backend resolver/cache and registry API                                                                             | `multiplexer-contracts`, `multiplexer-tmux`, `multiplexer-zellij`, `multiplexer-herdr`, `multiplexer-rex`, `multiplexer-wezterm`                                                                                                                                                                              |
 |  17 | `src/notifications.ts`                       | Shared output sanitization and v2 completion classification                                                                     | `artifact`; type-only `interactive-tmux`                                                                                                                                                                                                                                                                      |
 |  19 | `src/orchestration-context.ts`               | Reload-stable `AsyncLocalStorage` lineage/depth propagation and spawn limit                                                     | None                                                                                                                                                                                                                                                                                                          |
 |  21 | `src/rehydrate.ts`                           | Reconstructs interactive state, coordinated group membership, physical cursors, queues, and receipts                            | `artifact`, `completion-coordinator`, `delivery`, `interactive-tmux`                                                                                                                                                                                                                                          |

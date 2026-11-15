@@ -49,7 +49,7 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/delivery.ts`                                      | Bounded durable coordinated delivery queue and deterministic delivery IDs.                                                                                                                                        |
 | `src/completion-coordinator.ts`                        | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and parent continuation.                                                                                |
 | `src/interactive-tmux.ts`                              | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
-| `src/multiplexer{,-contracts,-tmux,-zellij,-herdr}.ts` | Dependency-light mux contracts/helpers, pluggable tmux/Zellij/Herdr backends, and runtime backend selection.                                                                                                      |
+| `src/multiplexer{,-contracts,-tmux,-zellij,-herdr,-rex,-wezterm}.ts` | Dependency-light mux contracts/helpers, pluggable tmux/Zellij/Herdr/Rex/WezTerm backends, and runtime backend selection.                                                                                                      |
 | `src/usage.ts`                                         | SDK-free usage normalization and aggregation primitives shared by workflow and Pi helpers.                                                                                                                        |
 | `src/subagent-artifact-cli.ts`                         | Tiny `cli.mjs` wrapper called by the child: `cli.mjs done N` / `cli.mjs error "msg"`.                                                                                                                             |
 | `src/notifications.ts`                                 | Shared output sanitization and v2 completion classification.                                                                                                                                                      |
@@ -316,7 +316,7 @@ src/
   helpers.ts                       # startSubagentJob, resolveModel, job registry
   artifact.ts                      # v2-only events, immutable outputs, current state schema
   interactive-tmux.ts              # InteractiveSubagentState, registry, mux dispatch
-  multiplexer{,-contracts,-tmux,-zellij,-herdr}.ts # mux contracts/helpers and backends (tmux + Zellij + Herdr)
+  multiplexer{,-contracts,-tmux,-zellij,-herdr,-rex,-wezterm}.ts # mux contracts/helpers and backends (tmux + Zellij + Herdr + Rex + WezTerm)
   subagent-artifact-cli.ts         # cli.mjs wrapper
   notifications.ts                 # shared output sanitization and completion classification
   rendering.ts                     # TUI render helpers
