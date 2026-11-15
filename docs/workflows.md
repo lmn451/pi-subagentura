@@ -296,7 +296,7 @@ Use `/workflow-status` for the full textual status dump, or `/workflow-tree` for
 #### 2. Per-agent visibility
 
 Workflow `agent()` calls default to process isolation. Each process-backed agent
-runs in tmux, Zellij, Herdr, or Rex when the current Rex context is verified and
+runs in tmux, Zellij, Herdr, WezTerm, or Rex when the current Rex context is verified and
 is also shown by the interactive sub-agent widget below the editor. A recognized
 but unsupported host is not replaced with another mux. In-process agents still
 forward live `activeTool` / output-preview updates as workflow log events when
@@ -340,7 +340,7 @@ interrupted result wait (`wait_cancelled`) remain distinct from child cancellati
 ### Process isolation
 
 By default, each `agent()` call spawns a separate `pi` process inside tmux,
-Zellij, Herdr, or Rex when the current Rex context is verified:
+Zellij, Herdr, WezTerm, or Rex when the current Rex context is verified:
 
 ```js
 await agent(prompt, { label: "verify:claim-x" });
@@ -391,12 +391,13 @@ The `list_subagent_artifacts` tool lists all known sub-agents (including past on
 
 #### Backend support
 
-| Backend    | `createPane` behavior                                                                        | Available outside mux?                                           |
-| ---------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **tmux**   | Detached named window (`background: true`) or side-by-side split (`background: false`)       | ✅ Creates a new detached session if `process.env.TMUX` is unset |
-| **zellij** | Detached named tab                                                                           | ✅ Creates a background session if no Zellij session is attached |
-| **herdr**  | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity | ❌ Requires Pi to run inside a Herdr pane                        |
-| **none**   | Throws `NoMultiplexerAvailableError` with setup hint                                         | N/A — falls back to in-process                                   |
+| Backend     | `createPane` behavior                                                                                       | Available outside mux                                            |
+| ----------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **tmux**    | Detached named window (`background: true`) or side-by-side split (`background: false`)                      | ✅ Creates a new detached session if `process.env.TMUX` is unset |
+| **zellij**  | Detached named tab                                                                                          | ✅ Creates a background session if no Zellij session is attached |
+| **herdr**   | Pane in the current Herdr-managed terminal; persists its socket and stable terminal identity                | ❌ Requires Pi to run inside a Herdr pane                        |
+| **wezterm** | Pane in the current attached WezTerm session; persists the socket path for later operations and rehydration | ❌ Requires an attached WezTerm pane                             |
+| **none**    | Throws `NoMultiplexerAvailableError` with setup hint                                                        | N/A — falls back to in-process                                   |
 
 ### Scaling
 

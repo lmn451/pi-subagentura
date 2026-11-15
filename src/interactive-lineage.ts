@@ -783,7 +783,8 @@ export async function projectManifests(
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij" &&
       manifest.pane.backend !== "herdr" &&
-      manifest.pane.backend !== "rex"
+      manifest.pane.backend !== "rex" &&
+      manifest.pane.backend !== "wezterm"
     ) {
       issues.push({
         kind: "malformed",
@@ -1343,6 +1344,12 @@ function validatePaneRef(
     !isMuxSocketPath(muxServer.muxServer)
   ) {
     throw new Error("Tmux pane server socket is malformed");
+  }
+  if (
+    backend === "wezterm" &&
+    (!/^\d+$/.test(paneId) || !isMuxSocketPath(muxServer.muxServer))
+  ) {
+    throw new Error("WezTerm pane identity is incomplete or malformed");
   }
   if (
     backend === "rex" &&

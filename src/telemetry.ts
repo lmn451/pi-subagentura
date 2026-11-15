@@ -15,7 +15,7 @@ import {
 } from "./environment";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 7;
+export const TELEMETRY_SCHEMA_VERSION = 8;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -27,7 +27,13 @@ const MAX_TELEMETRY_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 export type TelemetryMode = "straight" | "orchestrator" | "orchestrator_v2";
 export type TelemetrySessionHost = "agterm" | "orca" | "unknown";
 export type TelemetryExecution = "in-process" | "interactive";
-export type TelemetryMux = "none" | "tmux" | "zellij" | "herdr" | "rex";
+export type TelemetryMux =
+  | "none"
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "rex"
+  | "wezterm";
 export type TelemetryTrafficOrigin =
   | "usage"
   | "development"
@@ -41,6 +47,7 @@ export type TelemetryLaunchOutcome =
   | "cancelled";
 export type TelemetryRequestedExecution = TelemetryExecution;
 export type TelemetryRequestedMux =
+  | "wezterm"
   | "none"
   | "auto"
   | "tmux"
@@ -661,6 +668,7 @@ const TELEMETRY_MUXES: readonly TelemetrySpawnFailureMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "wezterm",
 ];
 const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "none",
@@ -669,6 +677,7 @@ const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "wezterm",
 ];
 const TELEMETRY_INVOCATION_SOURCES: readonly TelemetryInvocationSource[] = [
   "with_context",
@@ -1375,4 +1384,5 @@ export type TelemetryParentMux =
   | "zellij"
   | "herdr"
   | "rex"
+  | "wezterm"
   | "unknown";

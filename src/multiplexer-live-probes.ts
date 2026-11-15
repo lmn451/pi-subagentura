@@ -266,6 +266,35 @@ function zellijProbe(
   };
 }
 
+function weztermProbe(
+  target: LiveMuxTarget,
+  context: ProcessContext,
+  env: NodeJS.ProcessEnv,
+): ProbePlan | LiveMuxProbe {
+  if (!/^\d+$/.test(target.paneId) || !socket(target.server)) return UNKNOWN;
+  return {
+    command: "wezterm",
+    args: ["cli", "--no-auto-start", "list", "--format", "json"],
+    env: { ...env, WEZTERM_UNIX_SOCKET: target.server },
+    parse(output) {
+      const rows: unknown = JSON.parse(output);
+      if (!Array.isArray(rows)) return UNKNOWN;
+      const row = rows.find(
+        (item) => record(item) && item.pane_id === Number(target.paneId),
+      );
+      if (!record(row)) return MISMATCH;
+      const paneTty = normalizeProcessTty(row.tty_name);
+      const ownTty = normalizeProcessTty(
+        context.processes.get(context.pid)?.tty,
+      );
+      if (!paneTty || !ownTty) return UNKNOWN;
+      return paneTty === ownTty
+        ? { kind: "match", target, distance: 0 }
+        : MISMATCH;
+    },
+  };
+}
+
 function prepareProbe(
   target: LiveMuxTarget,
   context: ProcessContext,
@@ -284,7 +313,7 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : target.mux === "tmux"
+        : target.mux === "tmux" || target.mux === "wezterm"
           ? socket(target.server)
           : selector(target.server)))
   )
@@ -298,6 +327,8 @@ function prepareProbe(
       return rexProbe(target, context, env);
     case "zellij":
       return zellijProbe(target, env);
+    case "wezterm":
+      return weztermProbe(target, context, env);
     default:
       return UNKNOWN;
   }

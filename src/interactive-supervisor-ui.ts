@@ -927,6 +927,9 @@ function focusReturnHint(state: InteractiveSubagentState): string {
   if (state.mux === "rex") {
     return "Rex block focus; use the terminal focus command above";
   }
+  if (state.mux === "wezterm") {
+    return "WezTerm pane focus; use the terminal focus command above";
+  }
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"
     : "Ctrl+p, then p (previous pane)";

@@ -1834,14 +1834,21 @@ function normalizePersistedMuxIdentity(
       return identity;
     }
     case "zellij":
-    case "herdr": {
+    case "herdr":
+    case "wezterm": {
+      if (
+        raw.mux === "wezterm" &&
+        (!/^\d+$/.test(paneId) || !isMuxSocketPath(raw.muxServer))
+      )
+        return null;
       const identity: PersistedMuxIdentity = {
         ...optional,
         mux: raw.mux,
         paneId,
       };
       // These backends historically ignore malformed optional server metadata.
-      if (isRexServerAddress(raw.muxServer)) identity.muxServer = raw.muxServer;
+      if (raw.mux === "wezterm" || isRexServerAddress(raw.muxServer))
+        identity.muxServer = raw.muxServer as string;
       return identity;
     }
     case "rex":
@@ -2130,12 +2137,14 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
         rawEntryTelemetry?.mux === "herdr" ||
-        rawEntryTelemetry?.mux === "rex"
+        rawEntryTelemetry?.mux === "rex" ||
+        rawEntryTelemetry?.mux === "wezterm"
           ? rawEntryTelemetry.mux
           : entry.mux === "tmux" ||
               entry.mux === "zellij" ||
               entry.mux === "herdr" ||
-              entry.mux === "rex"
+              entry.mux === "rex" ||
+              entry.mux === "wezterm"
             ? entry.mux
             : "none";
       const entryTelemetry: PersistedInteractiveTelemetry | undefined =

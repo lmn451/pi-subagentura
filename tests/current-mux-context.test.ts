@@ -74,6 +74,26 @@ describe("current mux ownership", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
+  it("selects a verified WezTerm pane and rejects incomplete markers", () => {
+    probe.mockImplementation((target) => ({
+      kind: "match",
+      target,
+      distance: 0,
+    }));
+    expect(
+      resolveCurrentMuxContext({
+        WEZTERM_PANE: "7",
+        WEZTERM_UNIX_SOCKET: "/tmp/wezterm.sock",
+      }),
+    ).toEqual({
+      kind: "ready",
+      target: { mux: "wezterm", paneId: "7", server: "/tmp/wezterm.sock" },
+    });
+    expect(resolveCurrentMuxContext({ WEZTERM_PANE: "7" }).kind).toBe(
+      "unavailable",
+    );
+  });
+
   it.each(["tmux", "zellij", "herdr", "rex"] as const)(
     "selects the live inner %s, not a fixed env priority",
     (mux) => {

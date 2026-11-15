@@ -1325,6 +1325,28 @@ describe("persisted interactive state helpers", () => {
     });
     expect(loadInteractiveStates(root)).toBeNull();
   });
+  it("round-trips a WezTerm pane only with its owning socket", () => {
+    const state: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      mux: "wezterm",
+      paneId: "7",
+      muxServer: "/tmp/wezterm.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { [state.id]: state },
+    });
+    expect(loadInteractiveStates(root)?.states[state.id]).toEqual(state);
+    const persisted = JSON.parse(readFileSync(stateFilePath(root), "utf8")) as {
+      states: Record<string, Record<string, unknown>>;
+    };
+    delete persisted.states[state.id]!.muxServer;
+    writeFileSync(stateFilePath(root), JSON.stringify(persisted), {
+      mode: 0o600,
+    });
+    expect(loadInteractiveStates(root)).toBeNull();
+  });
   it("round-trips only bounded absolute working cwd values", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });
