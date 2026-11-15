@@ -173,8 +173,17 @@ export class WezTermMultiplexer implements Multiplexer {
       const value: unknown = JSON.parse(
         await runAsync(["list-clients", "--format", "json"], server!),
       );
-      if (!Array.isArray(value)) return "unknown";
-      return value.some((row) => row?.focused_pane_id === Number(paneId(id)))
+      if (
+        !Array.isArray(value) ||
+        value.length !== 1 ||
+        value[0] === null ||
+        typeof value[0] !== "object" ||
+        Array.isArray(value[0]) ||
+        !Number.isSafeInteger(value[0].focused_pane_id) ||
+        value[0].focused_pane_id < 0
+      )
+        return "unknown";
+      return value[0].focused_pane_id === Number(paneId(id))
         ? "active"
         : "inactive";
     } catch {
