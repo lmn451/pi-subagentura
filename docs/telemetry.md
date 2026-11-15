@@ -6,6 +6,8 @@ for release attribution. Schema v6 adds logical launch resolution, closed traffi
 provenance, and attributed runtime observations; those facts cannot be reconstructed
 for historical schema-v5 events. Schema v7 adds Rex to the closed multiplexer
 dimensions; Rex cannot be reconstructed for historical schema-v6 events.
+Schema v8 adds WezTerm to the closed mux and parent-mux dimensions; historical
+events cannot distinguish native WezTerm children from unsupported backends.
 
 ## Measurement contract
 
@@ -150,10 +152,11 @@ routing.
 
 Fresh root `session_started` events include the schema-v6 `parent_mux` dimension,
 with `rex` added as an allowed value in schema v7: `tmux`, `zellij`, `herdr`,
-`rex`, or `unknown`. This observes the parent Pi environment, not the child
+`rex`, `wezterm`, or `unknown`. This observes the parent Pi environment, not the child
 execution backend (`mux`) or requested backend (`requested_mux`). It uses a
 nonempty, bounded, control-character-free `TMUX` or `ZELLIJ_SESSION_NAME`, exact
-`HERDR_ENV=1`, or a complete nonempty `REX_SESSION`/`REX_BLOCK`/`REX_SERVER`
+`HERDR_ENV=1`, a complete nonempty `REX_SESSION`/`REX_BLOCK`/`REX_SERVER`,
+or a complete nonempty `WEZTERM_PANE`/`WEZTERM_UNIX_SOCKET`
 marker set. Exactly one recognized marker produces its label. Missing, partial,
 or multiple markers produce `unknown`: nested environments do not reliably
 establish which mux is innermost. Missing historical fields are also unknown, not
@@ -183,9 +186,9 @@ a provider error. A later LLM/tool call is a new request, not inferred recovery.
 Automatic mux candidate selection is not itself a rejected launch attempt.
 
 The event carries `requested_execution` (`in-process` or `interactive`),
-`requested_mux` (`none`, `auto`, `tmux`, `zellij`, `herdr`, or `rex`), accepted
+`requested_mux` (`none`, `auto`, `tmux`, `zellij`, `herdr`, `rex`, or `wezterm`), accepted
 `execution` when known, and `mux` (`none`, `unknown`, `tmux`, `zellij`, `herdr`,
-or `rex`), `invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
+`rex`, or `wezterm`), `invocation_source`, `async`, bounded depth/bucket, `completion_policy`, and
 `fallback_attempted`. An unresolved interactive backend is `unknown`, not
 `none`; an in-process path needs no mux and uses `none`. Optional
 `initial_failure_stage` / `initial_failure_operation` explain the first rejection,

@@ -115,6 +115,7 @@ const CurrentPaneActivityOutputSchema = Type.Object({
       Type.Literal("zellij"),
       Type.Literal("herdr"),
       Type.Literal("rex"),
+      Type.Literal("wezterm"),
     ]),
   ),
   paneId: Type.Optional(Type.String()),
@@ -135,6 +136,7 @@ const InteractiveStatusItemOutputSchema = Type.Object({
     Type.Literal("zellij"),
     Type.Literal("herdr"),
     Type.Literal("rex"),
+    Type.Literal("wezterm"),
   ]),
   paneId: Type.String(),
   startedAt: Type.Number(),
@@ -538,7 +540,7 @@ export function registerInteractiveSubagentTools(
     name: "get_current_pane_activity",
     label: "Current Pane Activity",
     description:
-      "Report whether this Pi process's tmux or Zellij pane is active in the user's current client; Herdr and Rex are reported as unknown without public focused-client proof.",
+      "Report whether this Pi process's tmux, Zellij, or WezTerm pane is active in the user's current client; Herdr and Rex are reported as unknown without public focused-client proof.",
     parameters: Type.Object({}),
     outputSchema: CurrentPaneActivityOutputSchema,
     async execute() {
@@ -567,9 +569,9 @@ export function registerInteractiveSubagentTools(
     name: "subagent_interactive",
     label: "Interactive Subagent",
     description: [
-      "Spawn a separate Pi process in a tmux, Zellij, or Herdr pane, or in a verified live Rex block, and return immediately.",
+      "Spawn a separate Pi process in a tmux, Zellij, Herdr, or WezTerm pane, or in a verified live Rex block, and return immediately.",
       "Use this when the user wants to attach to the sub-agent session and continue follow-ups there.",
-      "Works inside tmux, Zellij, Herdr, or a verified live Rex context. The tool returns attach/focus commands and the child session file.",
+      "Works inside tmux, Zellij, Herdr, WezTerm, or a verified live Rex context. The tool returns attach/focus commands and the child session file.",
       "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
       "By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",

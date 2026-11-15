@@ -751,12 +751,14 @@ describe("MUX_CAPABILITIES", () => {
       "herdr",
       "rex",
       "tmux",
+      "wezterm",
       "zellij",
     ]);
     expect(muxCapabilities("tmux")).toBe(MUX_CAPABILITIES.tmux);
     expect(muxCapabilities("zellij")).toBe(MUX_CAPABILITIES.zellij);
     expect(muxCapabilities("herdr")).toBe(MUX_CAPABILITIES.herdr);
     expect(muxCapabilities("rex")).toBe(MUX_CAPABILITIES.rex);
+    expect(muxCapabilities("wezterm")).toBe(MUX_CAPABILITIES.wezterm);
   });
 
   it("is the single source of truth both backends expose", async () => {

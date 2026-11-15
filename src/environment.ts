@@ -60,7 +60,8 @@ export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
   return value === "tmux" ||
     value === "zellij" ||
     value === "herdr" ||
-    value === "rex"
+    value === "rex" ||
+    value === "wezterm"
     ? value
     : "unknown";
 }
@@ -111,6 +112,11 @@ export function detectEnvironment(
   if (hasNativeMarker(env.TMUX)) muxCandidates.push("tmux");
   if (hasNativeMarker(env.ZELLIJ_SESSION_NAME)) muxCandidates.push("zellij");
   if (env.HERDR_ENV === "1") muxCandidates.push("herdr");
+  if (
+    hasNativeMarker(env.WEZTERM_PANE) &&
+    hasNativeMarker(env.WEZTERM_UNIX_SOCKET)
+  )
+    muxCandidates.push("wezterm");
   if (
     hasNativeMarker(env.REX_SESSION) &&
     hasNativeMarker(env.REX_BLOCK) &&

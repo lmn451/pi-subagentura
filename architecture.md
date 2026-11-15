@@ -487,7 +487,7 @@ Cancelled entries are scheduled for immediate deletion.
 It owns path and prompt construction, launch ordering, registry publication, status folding, follow-up input, cancellation, and mux routing.
 `src/multiplexer-contracts.ts` defines the backend contract.
 `src/multiplexer.ts` selects and caches backend instances.
-The tmux, Zellij, Herdr, and Rex backend modules own transport commands and
+The tmux, Zellij, Herdr, Rex, and WezTerm backend modules own transport commands and
 persisted pane identity.
 
 ### 6.2 Crash-safe launch ordering
@@ -1188,6 +1188,7 @@ The following table inventories the tracked runtime source modules and companion
 |  68 | `src/multiplexer-process-context.ts`         | Bounded process snapshot, ancestry/TTY normalization, and nearest mux ancestor classification                                   | Type-only `multiplexer-contracts`                                                                                                                                                                                                                                                                             |
 |  69 | `src/multiplexer-live-probes.ts`             | Read-only bounded backend queries that verify pane ownership against the current process ancestry                               | `multiplexer-contracts`, `multiplexer-process-context`                                                                                                                                                                                                                                                        |
 |  70 | `src/multiplexer-current-context.ts`         | Shared fail-closed current-pane ownership resolution for auto selection and activity                                            | `multiplexer-contracts`, `multiplexer-live-probes`, `multiplexer-process-context`                                                                                                                                                                                                                             |
+|  71 | `src/multiplexer-wezterm.ts`                 | Native WezTerm CLI pane transport, socket-pinned operations, and bounded screen capture                                         | `multiplexer-contracts`                                                                                                                                                                                                                                                                                       |
 
 ---
 

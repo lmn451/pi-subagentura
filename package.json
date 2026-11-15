@@ -29,6 +29,7 @@
     "herdr",
     "orca",
     "rex",
+    "wezterm",
     "swarm",
     "crew"
   ],
@@ -103,6 +104,7 @@
     "src/multiplexer-zellij.ts",
     "src/multiplexer-herdr.ts",
     "src/multiplexer-rex.ts",
+    "src/multiplexer-wezterm.ts",
     "src/rehydrate.ts",
     "src/session-handlers.ts",
     "src/environment.ts",

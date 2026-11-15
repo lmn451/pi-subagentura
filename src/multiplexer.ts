@@ -19,6 +19,7 @@ import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
 import { RexMultiplexer } from "./multiplexer-rex";
+import { WezTermMultiplexer } from "./multiplexer-wezterm";
 import { resolveCurrentMuxContext } from "./multiplexer-current-context";
 import {
   validateMuxLaunchContext,
@@ -73,6 +74,13 @@ export function resolveMux(opts: GetMuxOptions = {}): ResolvedMux {
         paneId: probe.context.blockId,
         session: probe.context.sessionId,
         server: probe.context.server,
+      };
+    } else if (adapter.name === "wezterm") {
+      context = {
+        kind: "attached",
+        mux: "wezterm",
+        paneId: env.WEZTERM_PANE!,
+        server: env.WEZTERM_UNIX_SOCKET!,
       };
     } else if (adapter.name === "herdr") {
       context = {
@@ -192,6 +200,8 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
       return getOrCreate("herdr", () => new HerdrMultiplexer());
     case "rex":
       return getOrCreate("rex", () => new RexMultiplexer());
+    case "wezterm":
+      return getOrCreate("wezterm", () => new WezTermMultiplexer());
     default:
       return assertNever(preference);
   }

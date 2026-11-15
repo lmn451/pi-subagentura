@@ -67,6 +67,8 @@ function output(mux: LiveMuxTarget["mux"]): string {
       return JSON.stringify({ child: { pid: 90 } });
     case "zellij":
       return JSON.stringify([{ id: 4, is_plugin: false, exited: false }]);
+    case "wezterm":
+      return JSON.stringify([{ pane_id: 4, tty_name: "/dev/pts/1" }]);
   }
 }
 beforeEach(() => {

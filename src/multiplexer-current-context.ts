@@ -103,6 +103,19 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
       });
     }
   }
+  if (env.WEZTERM_PANE !== undefined || env.WEZTERM_UNIX_SOCKET !== undefined) {
+    names.push("WezTerm");
+    if (
+      /^\d+$/.test(env.WEZTERM_PANE ?? "") &&
+      isMuxSocketPath(env.WEZTERM_UNIX_SOCKET)
+    ) {
+      targets.push({
+        mux: "wezterm",
+        paneId: env.WEZTERM_PANE!,
+        server: env.WEZTERM_UNIX_SOCKET,
+      });
+    }
+  }
   return { names, targets };
 }
 

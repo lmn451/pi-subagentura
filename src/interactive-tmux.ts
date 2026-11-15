@@ -375,10 +375,11 @@ export function isTmuxAvailable(): boolean {
 /** Setup hint shown to the user when no mux is available. Mux-agnostic. */
 export function tmuxSetupHint(): string {
   return (
-    "Start pi inside tmux, zellij, or Herdr, or start it in a verified live Rex block:\n" +
+    "Start pi inside tmux, zellij, Herdr, or WezTerm, or start it in a verified live Rex block:\n" +
     "  tmux new -A -s pi 'pi'\n" +
     "  zellij --session pi\n" +
     "  herdr  (then start pi in a Herdr pane)\n" +
+    "  WezTerm requires a live WEZTERM_PANE/WEZTERM_UNIX_SOCKET context.\n" +
     "  Rex requires a live REX_SESSION/REX_BLOCK/REX_SERVER context."
   );
 }
@@ -608,7 +609,7 @@ export function launchInteractiveSubagent(params: {
   /** Required for coordinated grouped completion. */
   completionGroupId?: string;
   /** Mux preference. "auto" verifies live current-pane ownership. */
-  muxPreference?: "auto" | "tmux" | "zellij" | "herdr" | "rex";
+  muxPreference?: "auto" | MuxName;
   /**
    * Parent pi session id. Used as the per-session key for the on-disk state file
    * so a parent reload can rehydrate the sub-agent. If omitted, persistence is
@@ -1382,7 +1383,8 @@ export function getLineagePaneLiveness(
     backend !== "tmux" &&
     backend !== "zellij" &&
     backend !== "herdr" &&
-    backend !== "rex"
+    backend !== "rex" &&
+    backend !== "wezterm"
   ) {
     return "unknown";
   }

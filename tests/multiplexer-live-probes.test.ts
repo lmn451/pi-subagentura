@@ -36,6 +36,32 @@ const tmux = { mux: "tmux", paneId: "%4" } as const;
 const env = { TMUX: "/tmp/tmux-user/default,20,0" };
 beforeEach(() => vi.resetAllMocks());
 describe("read-only live mux ownership probes", () => {
+  it("proves WezTerm ownership with its socket and exact pane TTY", () => {
+    const target = {
+      mux: "wezterm",
+      paneId: "7",
+      server: "/tmp/wezterm.sock",
+    } as const;
+    exec.mockReturnValue(
+      JSON.stringify([{ pane_id: 7, tty_name: "/dev/pts/1" }]),
+    );
+    expect(probeLiveMuxTarget(target, context(), {})).toEqual({
+      kind: "match",
+      target,
+      distance: 0,
+    });
+    expect(exec.mock.calls.at(-1)?.[2]).toEqual(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          WEZTERM_UNIX_SOCKET: "/tmp/wezterm.sock",
+        }),
+      }),
+    );
+    exec.mockReturnValue(
+      JSON.stringify([{ pane_id: 7, tty_name: "/dev/pts/2" }]),
+    );
+    expect(probeLiveMuxTarget(target, context(), {}).kind).toBe("mismatch");
+  });
   it("requires exact tmux pane identity and process ownership", () => {
     exec.mockReturnValue("%4\t90\t/dev/pts/1\n");
     expect(probeLiveMuxTarget(tmux, context(), env)).toEqual({
