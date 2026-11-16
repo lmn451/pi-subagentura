@@ -1132,6 +1132,9 @@ export function launchInteractiveSubagent(params: {
   try {
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
       PI_SUBAGENTURA_MUX: mux.name,
+      ...(process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS === "1"
+        ? { PI_SUBAGENTURA_CHILD_DIAGNOSTICS: "1" }
+        : {}),
       ...(lineageBootstrapPath
         ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
         : {}),

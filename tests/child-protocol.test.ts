@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPath, readEvents } from "../src/artifact";
+import {
+  artifactPath,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
+  readEvents,
+  writeOutput,
+} from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
 
 function registerHandlers() {
@@ -408,6 +413,211 @@ describe("child protocol lifecycle", () => {
       agentStopReason: "aborted",
       errorMessage: "Operation aborted",
     });
+  });
+
+  it("writes only bounded content-free child output diagnostics when opted in", () => {
+    const previousDiagnosticsSetting =
+      process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+    process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS = "1";
+    try {
+      const handlers = registerHandlers();
+      const entries: any[] = [];
+      const ctx = { sessionManager: { getEntries: () => entries } };
+
+      handlers.get("before_agent_start")!({}, ctx);
+      entries.push({
+        id: "user-diagnostic",
+        type: "message",
+        message: { role: "user" },
+      });
+      handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+      vi.runAllTimers();
+      handlers.get("agent_end")!(
+        {
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "toolUse",
+              content: [
+                { type: "text", text: "private assistant text" },
+                { type: "thinking", thinking: "private reasoning" },
+                {
+                  type: "toolCall",
+                  name: "private_tool_name",
+                  arguments: { query: "private tool arguments" },
+                },
+                { type: "image", data: "private image bytes" },
+                { type: "future-part", payload: "private provider data" },
+              ],
+            },
+          ],
+        },
+        ctx,
+      );
+      handlers.get("agent_settled")!({ aborted: false }, ctx);
+
+      const diagnostic = JSON.parse(
+        readFileSync(join(artifactDir, "child-diagnostics.ndjson"), "utf8"),
+      );
+      expect(diagnostic).toMatchObject({
+        version: 1,
+        type: "turn_settled",
+        turnId: "user-diagnostic",
+        finalAssistantMessageFound: true,
+        finalMessageTextBytes: Buffer.byteLength("private assistant text"),
+        stopReason: "toolUse",
+        contentPartTypes: ["text", "thinking", "toolCall", "image", "other"],
+        toolCallCount: 1,
+        aborted: false,
+        error: false,
+        outputWriteSucceeded: false,
+        outputBytes: 0,
+        outputSnapshotState: "empty",
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const secret of [
+        "private assistant text",
+        "private reasoning",
+        "private_tool_name",
+        "private tool arguments",
+        "private image bytes",
+        "private provider data",
+        root,
+      ]) {
+        expect(serialized).not.toContain(secret);
+      }
+    } finally {
+      if (previousDiagnosticsSetting === undefined) {
+        delete process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+      } else {
+        process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS =
+          previousDiagnosticsSetting;
+      }
+    }
+  });
+
+  it("records abort and error flags without storing provider error text", () => {
+    const previousDiagnosticsSetting =
+      process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+    process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS = "1";
+    try {
+      const handlers = registerHandlers();
+      const entries: any[] = [];
+      const ctx = { sessionManager: { getEntries: () => entries } };
+
+      handlers.get("before_agent_start")!({}, ctx);
+      entries.push({
+        id: "user-diagnostic-aborted",
+        type: "message",
+        message: { role: "user" },
+      });
+      handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+      vi.runAllTimers();
+      handlers.get("agent_end")!(
+        {
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "aborted",
+              errorMessage: "private provider error",
+            },
+          ],
+        },
+        ctx,
+      );
+      handlers.get("agent_settled")!({ aborted: true }, ctx);
+
+      const diagnostic = JSON.parse(
+        readFileSync(join(artifactDir, "child-diagnostics.ndjson"), "utf8"),
+      );
+      expect(diagnostic).toMatchObject({
+        stopReason: "aborted",
+        aborted: true,
+        error: true,
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain(
+        "private provider error",
+      );
+    } finally {
+      if (previousDiagnosticsSetting === undefined) {
+        delete process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+      } else {
+        process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS =
+          previousDiagnosticsSetting;
+      }
+    }
+  });
+
+  it("caps content-free diagnostics for oversized assistant and output data", () => {
+    const previousDiagnosticsSetting =
+      process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+    process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS = "1";
+    try {
+      const handlers = registerHandlers();
+      const entries: any[] = [];
+      const ctx = { sessionManager: { getEntries: () => entries } };
+      const oversizedText = `private response ${"x".repeat(
+        MAX_OUTPUT_SNAPSHOT_BYTES,
+      )}`;
+      const oversizedOutput = "o".repeat(MAX_OUTPUT_SNAPSHOT_BYTES + 1);
+
+      handlers.get("before_agent_start")!({}, ctx);
+      entries.push({
+        id: "user-diagnostic-bounded",
+        type: "message",
+        message: { role: "user" },
+      });
+      handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+      vi.runAllTimers();
+      writeOutput(artifactPath(root, "child"), oversizedOutput);
+      handlers.get("agent_end")!(
+        {
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "stop",
+              content: [
+                { type: "text", text: oversizedText },
+                ...Array.from({ length: 128 }, () => ({
+                  type: "toolCall",
+                  name: "private_tool_name",
+                  arguments: { secret: "private tool arguments" },
+                })),
+              ],
+            },
+          ],
+        },
+        ctx,
+      );
+      handlers.get("agent_settled")!({ aborted: false }, ctx);
+
+      const diagnosticsPath = join(artifactDir, "child-diagnostics.ndjson");
+      const diagnostic = JSON.parse(readFileSync(diagnosticsPath, "utf8"));
+      expect(diagnostic).toMatchObject({
+        finalMessageTextBytes: MAX_OUTPUT_SNAPSHOT_BYTES,
+        finalMessageTextBytesCapped: true,
+        contentPartTypesTruncated: true,
+        toolCallCount: 127,
+        toolCallCountTruncated: true,
+        outputWriteSucceeded: false,
+        outputBytes: MAX_OUTPUT_SNAPSHOT_BYTES,
+        outputBytesCapped: true,
+        outputSnapshotState: "too_large",
+      });
+      expect(statSync(diagnosticsPath).size).toBeLessThanOrEqual(64 * 1024);
+      const serialized = JSON.stringify(diagnostic);
+      expect(serialized).not.toContain("private response");
+      expect(serialized).not.toContain("private_tool_name");
+      expect(serialized).not.toContain("private tool arguments");
+      expect(serialized).not.toContain(root);
+    } finally {
+      if (previousDiagnosticsSetting === undefined) {
+        delete process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS;
+      } else {
+        process.env.PI_SUBAGENTURA_CHILD_DIAGNOSTICS =
+          previousDiagnosticsSetting;
+      }
+    }
   });
 
   it("requires ARTIFACT_DIR when registering", () => {

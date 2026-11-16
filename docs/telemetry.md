@@ -273,6 +273,40 @@ Capture remains best-effort: no queue/retry, a 1.5-second timeout, and no durabl
 capture acknowledgement. All reports describe observed telemetry-enabled traffic.
 Missing completion events do not by themselves prove a crash, hang, or data loss.
 
+### Opt-in interactive child-output diagnostics
+
+Set `PI_SUBAGENTURA_CHILD_DIAGNOSTICS=1` in the parent environment before
+launching a child to write bounded, local-only records to that child's
+`child-diagnostics.ndjson` artifact file. The feature is off by default. These
+records are not protocol-v2 events, telemetry, or model context. They contain
+only the local turn ID, final assistant text byte count, allowlisted stop reason
+and content-part types, tool-call count, output snapshot state/byte count, and
+abort/error booleans. Text and output byte counts cap at 1 MiB; content and tool
+call counts inspect at most 128 parts and set truncation flags. Records use only
+closed part-type categories and append up to 64 KiB per child. No message text,
+prompt, tool name or arguments, provider payload, credentials, error text, or
+filesystem path is recorded. A random process nonce is not needed because the
+existing local turn ID joins the diagnostic to its completion event.
+
+`outputWriteSucceeded` means a non-empty `output.md` was safely included in
+the immutable snapshot; `outputBytes` is the observed staging/snapshot byte
+count, capped at 1 MiB with `outputBytesCapped=true` for larger files.
+`outputSnapshotState` distinguishes `written`, `empty`, `missing`, `unavailable`,
+and `too_large` staging output. An empty file may still have a successful
+zero-byte protocol snapshot; the diagnostic reports that as `empty` and
+`outputWriteSucceeded=false`. This is an observation of the file at snapshot
+time, not proof of which tool or process wrote it or that a particular write
+system call succeeded.
+
+The controlled fake-provider test distinguishes: no final assistant text (zero
+text bytes), assistant text without non-empty staged output (positive text bytes,
+zero output bytes), and test-owned non-empty `output.md` that was snapshotted
+(positive output bytes and `outputWriteSucceeded=true`). These signals cannot
+retroactively determine why the historical 2026-11-16 turns had empty output:
+those turns predate the diagnostic record, and their retained files do not
+establish whether final assistant text existed or whether an output write was
+attempted.
+
 ## Repository test isolation
 
 Normal CI/Vitest opt-outs are not a transport guarantee: a fixture can construct

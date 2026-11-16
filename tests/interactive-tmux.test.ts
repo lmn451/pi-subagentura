@@ -296,6 +296,38 @@ describe("interactive-tmux", () => {
     // Omitting parentSessionId keeps workflow-style children out of rehydrate state.
     expect(existsSync(join(tmp, ".pi", "subagentura-state.json"))).toBe(false);
   });
+  it("passes the explicit child diagnostic opt-in to the launch script", async () => {
+    const tmp = makeTmp();
+    process.env.PI_CODING_AGENT_SESSION_DIR = tmp;
+    process.env.TMUX = makeArgs().TMUX;
+    process.env.TMUX_PANE = "%9";
+    vi.stubEnv("PI_SUBAGENTURA_CHILD_DIAGNOSTICS", "1");
+    installMockExec((_file, args) => {
+      if (args[0] === "new-window") return `${MOCK_PANE_ID}\n`;
+      if (args[0] === "display-message") return MOCK_LOCATION;
+      if (args[0] === "show-options") return "0\n";
+      return "";
+    });
+
+    try {
+      const mod = await importFresh<typeof import("../src/interactive-tmux")>(
+        "../src/interactive-tmux",
+      );
+      const state = mod.launchInteractiveSubagent({
+        name: "Diagnostics",
+        task: "Run the synthetic diagnostic",
+        cwd: tmp,
+        sessionScope: scope,
+      });
+      const launchScript = readFileSync(state.launchScriptFile, "utf8");
+      expect(launchScript).toContain(
+        "export PI_SUBAGENTURA_CHILD_DIAGNOSTICS='1'",
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("reports the real automatic mux selection once for a direct launch", async () => {
     const tmp = makeTmp();
     const envNames = [

@@ -1,12 +1,14 @@
 import {
   closeSync,
   constants,
+  fchmodSync,
   fstatSync,
   mkdirSync,
   openSync,
   readSync,
   renameSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -15,12 +17,14 @@ import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
   MAX_ACTIVE_TOOL_RECORDS,
   MAX_ACTIVE_TURN_BYTES,
+  MAX_OUTPUT_SNAPSHOT_BYTES,
   MAX_TOOL_NAME_LENGTH,
   MAX_TURN_ID_LENGTH,
   appendCompletionEvent,
   appendEvent,
   artifactPath,
   newEventId,
+  readEvents,
   writeOutput,
   type SubagentEventV2,
 } from "./artifact";
@@ -64,6 +68,156 @@ function boundedMetadataIdentifier(
     SAFE_METADATA_PATTERN.test(value)
     ? value
     : undefined;
+}
+
+const CHILD_DIAGNOSTICS_ENV = "PI_SUBAGENTURA_CHILD_DIAGNOSTICS";
+const CHILD_DIAGNOSTICS_FILE = "child-diagnostics.ndjson";
+const MAX_CHILD_DIAGNOSTIC_FILE_BYTES = 64 * 1024;
+const MAX_CHILD_DIAGNOSTIC_CONTENT_PARTS = 128;
+const CHILD_DIAGNOSTIC_STOP_REASONS = [
+  "pending",
+  "stop",
+  "length",
+  "toolUse",
+  "error",
+  "aborted",
+  "deferred",
+] as const;
+type ChildDiagnosticStopReason =
+  | (typeof CHILD_DIAGNOSTIC_STOP_REASONS)[number]
+  | "unknown";
+type ChildDiagnosticPartType =
+  | "text"
+  | "toolCall"
+  | "thinking"
+  | "image"
+  | "other";
+type ChildDiagnosticSnapshotState =
+  | "written"
+  | "empty"
+  | "missing"
+  | "unavailable"
+  | "too_large";
+
+function childDiagnosticStopReason(value: unknown): ChildDiagnosticStopReason {
+  return CHILD_DIAGNOSTIC_STOP_REASONS.includes(
+    value as (typeof CHILD_DIAGNOSTIC_STOP_REASONS)[number],
+  )
+    ? (value as ChildDiagnosticStopReason)
+    : "unknown";
+}
+
+function summarizeFinalAssistant(assistant: any) {
+  const content = assistant?.content;
+  const parts = Array.isArray(content) ? content : [];
+  const contentPartTypes = new Set<ChildDiagnosticPartType>();
+  if (typeof content === "string") contentPartTypes.add("text");
+  let finalMessageTextBytes =
+    typeof content === "string" ? Buffer.byteLength(content, "utf8") : 0;
+  let toolCallCount = 0;
+  const inspectedParts = Math.min(
+    parts.length,
+    MAX_CHILD_DIAGNOSTIC_CONTENT_PARTS,
+  );
+  for (let index = 0; index < inspectedParts; index++) {
+    const part = parts[index];
+    const type =
+      part && typeof part === "object" && !Array.isArray(part)
+        ? (part as Record<string, unknown>).type
+        : undefined;
+    const safeType: ChildDiagnosticPartType =
+      type === "text" ||
+      type === "toolCall" ||
+      type === "thinking" ||
+      type === "image"
+        ? type
+        : "other";
+    contentPartTypes.add(safeType);
+    if (safeType === "toolCall") toolCallCount++;
+    if (
+      safeType === "text" &&
+      typeof (part as Record<string, unknown>).text === "string"
+    ) {
+      finalMessageTextBytes += Buffer.byteLength(
+        (part as Record<string, string>).text,
+        "utf8",
+      );
+    }
+  }
+  const stopReason = childDiagnosticStopReason(assistant?.stopReason);
+  const textBytesCapped =
+    finalMessageTextBytes > MAX_OUTPUT_SNAPSHOT_BYTES ||
+    parts.length > MAX_CHILD_DIAGNOSTIC_CONTENT_PARTS;
+  return {
+    finalAssistantMessageFound: Boolean(assistant),
+    finalMessageTextBytes: Math.min(
+      finalMessageTextBytes,
+      MAX_OUTPUT_SNAPSHOT_BYTES,
+    ),
+    finalMessageTextBytesCapped: textBytesCapped,
+    stopReason,
+    contentPartTypes: [...contentPartTypes],
+    contentPartTypesTruncated:
+      parts.length > MAX_CHILD_DIAGNOSTIC_CONTENT_PARTS,
+    toolCallCount,
+    toolCallCountTruncated: parts.length > MAX_CHILD_DIAGNOSTIC_CONTENT_PARTS,
+    aborted: stopReason === "aborted",
+    error:
+      stopReason === "error" ||
+      (typeof assistant?.errorMessage === "string" &&
+        assistant.errorMessage.length > 0),
+  };
+}
+
+function appendChildDiagnostic(
+  art: ReturnType<typeof getArtifact>,
+  record: Record<string, unknown>,
+): void {
+  if (process.env[CHILD_DIAGNOSTICS_ENV] !== "1") return;
+  const content = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  if (content.byteLength > 2048) return;
+  let fd: number | undefined;
+  try {
+    mkdirSync(art.dir, { recursive: true, mode: 0o700 });
+    fd = openSync(
+      join(art.dir, CHILD_DIAGNOSTICS_FILE),
+      constants.O_WRONLY |
+        constants.O_APPEND |
+        constants.O_CREAT |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    const metadata = fstatSync(fd);
+    if (
+      !metadata.isFile() ||
+      metadata.size + content.byteLength > MAX_CHILD_DIAGNOSTIC_FILE_BYTES
+    ) {
+      return;
+    }
+    fchmodSync(fd, 0o600);
+    let offset = 0;
+    while (offset < content.byteLength) {
+      const bytesWritten = writeSync(
+        fd,
+        content,
+        offset,
+        content.byteLength - offset,
+      );
+      if (bytesWritten <= 0)
+        throw new Error("diagnostic write made no progress");
+      offset += bytesWritten;
+    }
+  } catch {
+    debugLog("warn", "child_output_diagnostic_write_failed");
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        debugLog("warn", "child_output_diagnostic_close_failed");
+      }
+    }
+  }
 }
 
 function normalizeActiveTool(value: unknown): ActiveTool | null {
@@ -443,7 +597,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
     bindPersistedTurn(ctx, Date.now());
     latestAgentMessages = [...event.messages];
   });
-  pi.on("agent_settled", (_event, ctx) => {
+  pi.on("agent_settled", (event, ctx) => {
     const active = bindPersistedTurn(ctx, Date.now());
     if (!active) return;
     const assistant = [...latestAgentMessages]
@@ -458,7 +612,7 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
       Boolean(errorMessage) ||
       assistant?.stopReason === "error" ||
       assistant?.stopReason === "aborted";
-    appendCompletionEvent(art, {
+    const completion = appendCompletionEvent(art, {
       turnId: active.turnId,
       outcome: failed ? "error" : "done",
       source: "agent_settled",
@@ -470,6 +624,50 @@ export function registerChildProtocol(pi: ExtensionAPI): void {
           ? stopReason
           : undefined,
     });
+    if (process.env[CHILD_DIAGNOSTICS_ENV] === "1") {
+      const existingCompletion =
+        completion ??
+        readEvents(art).find(
+          (candidate) =>
+            candidate.type === "completion" &&
+            candidate.turnId === active.turnId,
+        );
+      const snapshot =
+        existingCompletion?.type === "completion"
+          ? existingCompletion
+          : undefined;
+      const observedOutputBytes =
+        snapshot?.output?.bytes ??
+        (snapshot?.outputError?.code === "output_too_large"
+          ? snapshot.outputError.bytes
+          : 0);
+      const outputBytesCapped = observedOutputBytes > MAX_OUTPUT_SNAPSHOT_BYTES;
+      const outputBytes = Math.min(
+        observedOutputBytes,
+        MAX_OUTPUT_SNAPSHOT_BYTES,
+      );
+      const outputSnapshotState: ChildDiagnosticSnapshotState = snapshot?.output
+        ? outputBytes > 0
+          ? "written"
+          : "empty"
+        : snapshot?.outputError?.code === "output_too_large"
+          ? "too_large"
+          : snapshot?.outputError
+            ? "unavailable"
+            : "missing";
+      appendChildDiagnostic(art, {
+        version: 1,
+        type: "turn_settled",
+        turnId: active.turnId,
+        ...summarizeFinalAssistant(assistant),
+        aborted: event.aborted || stopReason === "aborted",
+        error: failed,
+        outputWriteSucceeded: outputSnapshotState === "written",
+        outputBytes,
+        outputBytesCapped,
+        outputSnapshotState,
+      });
+    }
     const settled = readActiveTurn(art);
     if (settled?.turnId === active.turnId) {
       settled.activeTools = [];
