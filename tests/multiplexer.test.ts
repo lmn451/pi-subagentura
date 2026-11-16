@@ -23,6 +23,8 @@ const muxEnvironmentKeys = [
   "REX_SESSION",
   "REX_BLOCK",
   "REX_SERVER",
+  "WEZTERM_PANE",
+  "WEZTERM_UNIX_SOCKET",
   "TERM_PROGRAM",
 ] as const;
 const inheritedMuxEnvironment = Object.fromEntries(
@@ -218,6 +220,9 @@ describe("getMux relaxed-spawn resolution", () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
+    // Seed inherited markers so this fixture proves it clears WezTerm context.
+    process.env.WEZTERM_PANE = "10";
+    process.env.WEZTERM_UNIX_SOCKET = "/tmp/wezterm-test.sock";
     for (const key of muxEnvironmentKeys) delete process.env[key];
   });
 
@@ -227,15 +232,19 @@ describe("getMux relaxed-spawn resolution", () => {
     vi.doUnmock("../src/multiplexer-current-context");
   });
 
-  it("clears inherited pane selectors before relaxed-spawn tests", () => {
+  it("clears inherited mux selectors before relaxed-spawn tests", () => {
     expect({
       TMUX_PANE: process.env.TMUX_PANE,
       ZELLIJ_PANE_ID: process.env.ZELLIJ_PANE_ID,
       HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+      WEZTERM_PANE: process.env.WEZTERM_PANE,
+      WEZTERM_UNIX_SOCKET: process.env.WEZTERM_UNIX_SOCKET,
     }).toEqual({
       TMUX_PANE: undefined,
       ZELLIJ_PANE_ID: undefined,
       HERDR_PANE_ID: undefined,
+      WEZTERM_PANE: undefined,
+      WEZTERM_UNIX_SOCKET: undefined,
     });
   });
 

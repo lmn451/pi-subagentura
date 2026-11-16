@@ -29,6 +29,7 @@ published injector.
 | [Host-aware interactive delegation](../README.md#host-aware-interactive-agent-spawning) | Conditional parent-only Orca/Agterm/Rex guidance and native mux boundary            |
 | [architecture.md](../architecture.md)                                                   | Runtime boundaries, ownership, completion, and persistence contracts                |
 | [CONTRIBUTING.md](../CONTRIBUTING.md)                                                   | Development checks, CI, and release procedure                                       |
+| [testing.md](./testing.md)                                                              | Testing checklist for ambient host state                                            |
 | [bun.md](./bun.md)                                                                      | JavaScript runtime and package manager conventions                                  |
 | [publish.md](./publish.md)                                                              | OIDC publishing and the authoritative release procedure                             |
 | [terminal-e2e.md](./terminal-e2e.md)                                                    | Terminal E2E harness, determinism rules, and recording tools                        |
