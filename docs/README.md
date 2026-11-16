@@ -9,6 +9,8 @@ keywords:
     testing,
     publishing,
     runtime,
+    codemode,
+    sub-agent-results,
     orca,
     rex,
     jev,
@@ -35,6 +37,7 @@ published injector.
 | [telemetry.md](./telemetry.md)                                                          | Telemetry contract, privacy, and PostHog report definitions                         |
 | [rex-multiplexer.md](./rex-multiplexer.md)                                              | Rex backend selection, capabilities, and CLI contract                               |
 | [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                                         |
+| [codemode-subagent-results.md](./codemode-subagent-results.md)                          | Opt-in bounded summary and comparison of selected sub-agent results                 |
 | [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions classifier setup, live-owner selection, and payload disclosure |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters              |
 | [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                          | Protocol-v1 compatibility removal status and user-data behavior                     |
