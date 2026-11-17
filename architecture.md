@@ -209,11 +209,13 @@ The child launch wrapper exports `PI_SUBAGENTURA_CHILD=1`, `ARTIFACT_DIR`, and
 bootstrap bound to the exact artifact directory. It does not expire by clock, so
 a delayed launch can still claim it. The child claims and removes it before
 registering lifecycle hooks; cancellation and fresh transitions retire unclaimed
-credentials. Cleanup removes claim files only after their owner process exits. A nested Pi process can inherit the marker
-and artifact path, but not the consumed credential, so it cannot write lifecycle
-events or overwrite the outer child's output and active-turn state. The marker
-and artifact path are not authority. This prevents accidental environment
-inheritance; it is not an OS security boundary against malicious same-UID code.
+credentials. Cleanup removes claim files only after their owner process exits. If
+cleanup runs before exit, it preserves the claim for a later pass; the claimed
+filename cannot authorize hooks. A nested Pi process can inherit the marker and
+artifact path, but not the consumed credential, so it cannot write lifecycle
+events or overwrite the outer child's output and active-turn state. The marker and
+artifact path are not authority. This is an accidental-inheritance boundary, not
+an OS security boundary against malicious same-UID code.
 
 ### 3.1 Orchestratorv2 routing authority
 

@@ -62,3 +62,8 @@ lifecycle issue. Do not infer a model failure from an empty snapshot alone.
 The one-use credential prevents accidental environment inheritance. It is not an
 OS security boundary against malicious code running as the same user. Such code
 can already access the user's files and multiplexer.
+
+A crash during the atomic claim can leave a claim file. Cleanup preserves it while
+the recorded owner process is alive. If that process exits after the first cleanup
+pass, the residue remains until a later cancellation, fresh-session, or artifact
+cleanup pass. The claimed filename cannot authorize lifecycle hooks.

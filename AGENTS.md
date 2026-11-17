@@ -249,8 +249,9 @@ bound to the exact artifact directory. It does not expire by clock, so a delayed
 launch can still claim it. The launcher exports its path in
 `PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP`; the child atomically claims and removes it
 before registering `child-protocol`. Cancellation and fresh transitions retire
-unclaimed credentials; cleanup removes claim files only after their owner process
-has exited. `PI_SUBAGENTURA_CHILD=1` and
+unclaimed credentials. Cleanup removes claim files only after their owner process
+has exited. If cleanup runs before exit, it preserves the claim for a later pass;
+the claimed filename cannot authorize hooks. `PI_SUBAGENTURA_CHILD=1` and
 `ARTIFACT_DIR` are not authority. This prevents nested Pi processes from
 registering hooks under an outer child's artifact identity after inheriting the
 launch environment. It is an accidental-inheritance boundary, not an OS security
