@@ -298,6 +298,30 @@ describe("launch script EXIT trap (idempotency)", () => {
       expect.objectContaining({ exitCode: 7 }),
     ]);
   });
+  it("fails the child launch when its ownership bootstrap is missing", () => {
+    const artDir = join(tmp, "artifacts", "missing-owner");
+    const launchScript = join(artDir, "launch.sh");
+    const startedMarker = join(artDir, "pi-started");
+    const missingBootstrap = join(
+      artDir,
+      ".child-artifact-bootstrap-0000000000000000.json",
+    );
+    writeLaunchScript(launchScript, `touch "${startedMarker}"`, artDir, {
+      [CHILD_ARTIFACT_BOOTSTRAP_ENV]: missingBootstrap,
+    });
+    chmodSync(launchScript, 0o700);
+
+    const result = spawnSync("bash", [launchScript], {
+      encoding: "utf8",
+      env: { ...process.env, ARTIFACT_DIR: artDir },
+    });
+
+    expect(result.status).toBe(2);
+    expect(existsSync(startedMarker)).toBe(false);
+    expect(countEvents(artDir, "process_exited")).toEqual([
+      expect.objectContaining({ exitCode: 2 }),
+    ]);
+  });
 });
 
 // ── Mock tmux exec so launchInteractiveSubagent doesn't create real tmux

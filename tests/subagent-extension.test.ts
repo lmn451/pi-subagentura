@@ -641,6 +641,40 @@ describe("extension registration", () => {
     expect(eventsExistAfter).toBe(false);
   });
 
+  it("fails activation instead of downgrading when a launch credential is invalid", () => {
+    const root = mkdtempSync(join(tmpdir(), "invalid-child-bootstrap-"));
+    const artifactDir = join(root, "child");
+    const previousChild = process.env.PI_SUBAGENTURA_CHILD;
+    const previousArtifactDir = process.env.ARTIFACT_DIR;
+    const previousBootstrap = process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    mkdirSync(artifactDir, { recursive: true });
+    process.env.PI_SUBAGENTURA_CHILD = "1";
+    process.env.ARTIFACT_DIR = artifactDir;
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = join(
+      artifactDir,
+      ".child-artifact-bootstrap-0000000000000000.json",
+    );
+    const api = mockApi();
+
+    try {
+      expect(() => registerExtension(api as any)).toThrow(
+        /refusing to start without validated child artifact ownership/i,
+      );
+      expect(api.registerTool).not.toHaveBeenCalled();
+    } finally {
+      if (previousChild === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
+      else process.env.PI_SUBAGENTURA_CHILD = previousChild;
+      if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
+      else process.env.ARTIFACT_DIR = previousArtifactDir;
+      if (previousBootstrap === undefined) {
+        delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+      } else {
+        process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = previousBootstrap;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("registers a minimal interactive runtime for a credentialed child", () => {
     const previous = process.env.PI_SUBAGENTURA_CHILD;
     const previousArtifactDir = process.env.ARTIFACT_DIR;

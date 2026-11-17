@@ -16,19 +16,18 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 
 export const CHILD_ARTIFACT_BOOTSTRAP_ENV = "PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP";
-export const CHILD_ARTIFACT_BOOTSTRAP_TTL_MS = 60_000;
 
 const CHILD_ARTIFACT_BOOTSTRAP_SCHEMA_VERSION = 1;
 const MAX_BOOTSTRAP_BYTES = 16 * 1024;
 const MAX_ARTIFACT_PATH_BYTES = 4096;
 const BOOTSTRAP_NAME = /^\.child-artifact-bootstrap-[a-f0-9]{16}\.json$/;
+const CLAIM_NAME =
+  /^\.child-artifact-bootstrap-[a-f0-9]{16}\.json\.claimed-(\d+)-[a-f0-9]{16}$/;
 const OWNERS_KEY = "__piSubagenturaRuntimeChildArtifactOwners";
 const ownershipBrand = Symbol("childArtifactOwnership.validated");
 
 type BootstrapEnvelope = {
   schemaVersion: typeof CHILD_ARTIFACT_BOOTSTRAP_SCHEMA_VERSION;
-  issuedAt: number;
-  expiresAt: number;
   artifactDir: string;
 };
 
@@ -70,33 +69,13 @@ function readBoundedJson(descriptor: number): unknown {
   return JSON.parse(buffer.subarray(0, offset).toString("utf8"));
 }
 
-function validateEnvelope(value: unknown, now: number): string {
+function validateEnvelope(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid child artifact bootstrap envelope");
   }
   const raw = value as Record<string, unknown>;
   if (raw.schemaVersion !== CHILD_ARTIFACT_BOOTSTRAP_SCHEMA_VERSION) {
     throw new Error("Unsupported child artifact bootstrap schema");
-  }
-  const issuedAt = raw.issuedAt;
-  const expiresAt = raw.expiresAt;
-  if (
-    !Number.isSafeInteger(issuedAt) ||
-    (issuedAt as number) < 0 ||
-    (issuedAt as number) > now + 5_000
-  ) {
-    throw new Error("Invalid child artifact bootstrap issue time");
-  }
-  if (
-    !Number.isSafeInteger(expiresAt) ||
-    (expiresAt as number) < (issuedAt as number) ||
-    (expiresAt as number) >
-      (issuedAt as number) + CHILD_ARTIFACT_BOOTSTRAP_TTL_MS
-  ) {
-    throw new Error("Invalid child artifact bootstrap expiry");
-  }
-  if (now > (expiresAt as number)) {
-    throw new Error("Child artifact bootstrap expired");
   }
   if (
     typeof raw.artifactDir !== "string" ||
@@ -126,7 +105,7 @@ function readClaimedBootstrap(path: string): string {
       throw new Error("Child artifact bootstrap has the wrong owner");
     }
     rmSync(path);
-    return validateEnvelope(readBoundedJson(descriptor), Date.now());
+    return validateEnvelope(readBoundedJson(descriptor));
   } finally {
     closeSync(descriptor);
   }
@@ -157,11 +136,8 @@ export function writeChildArtifactBootstrap(artifactDir: string): string {
   const suffix = randomBytes(8).toString("hex");
   const path = join(targetDir, `.child-artifact-bootstrap-${suffix}.json`);
   const temporaryPath = `${path}.tmp`;
-  const issuedAt = Date.now();
   const envelope: BootstrapEnvelope = {
     schemaVersion: CHILD_ARTIFACT_BOOTSTRAP_SCHEMA_VERSION,
-    issuedAt,
-    expiresAt: issuedAt + CHILD_ARTIFACT_BOOTSTRAP_TTL_MS,
     artifactDir: targetDir,
   };
   mkdirSync(targetDir, { recursive: true, mode: 0o700 });
@@ -241,17 +217,40 @@ export function isCurrentChildArtifactOwnership(
   );
 }
 
+function claimOwnerIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
 export function retireChildArtifactBootstraps(artifactDir: string): void {
   let names: string[];
   try {
-    names = readdirSync(artifactDir).filter((name) =>
-      BOOTSTRAP_NAME.test(name),
+    names = readdirSync(artifactDir).filter(
+      (name) => BOOTSTRAP_NAME.test(name) || CLAIM_NAME.test(name),
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
   for (const name of names) {
+    const claim = CLAIM_NAME.exec(name);
+    if (claim) {
+      const ownerPid = Number(claim[1]);
+      if (
+        !Number.isSafeInteger(ownerPid) ||
+        ownerPid < 1 ||
+        claimOwnerIsAlive(ownerPid)
+      ) {
+        continue;
+      }
+    }
     rmSync(join(artifactDir, name), { force: true });
   }
 }

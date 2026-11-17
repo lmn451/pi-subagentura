@@ -175,15 +175,16 @@ export default function (pi: ExtensionAPI) {
     childArtifactOwnershipRejected = true;
   }
   const isChild = childArtifactOwnership !== undefined;
+  if (hasChildArtifactBootstrap && !isChild) {
+    debugLog("warn", "child_artifact_ownership_rejected");
+    throw new Error(
+      "Refusing to start without validated child artifact ownership",
+    );
+  }
   if (childArtifactOwnershipRejected) {
     debugLog("warn", "child_artifact_ownership_rejected");
   } else if (inheritedChildMarker && !isChild) {
-    debugLog(
-      "warn",
-      hasChildArtifactBootstrap
-        ? "child_artifact_ownership_rejected"
-        : "child_artifact_ownership_missing",
-    );
+    debugLog("warn", "child_artifact_ownership_missing");
   }
   const childArtifactDir = childArtifactOwnership?.artifactDir;
   if (!childArtifactDir) delete process.env[LINEAGE_BOOTSTRAP_ENV];

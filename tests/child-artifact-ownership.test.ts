@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
   existsSync,
@@ -64,6 +64,21 @@ describe("one-use child artifact ownership", () => {
     expect(process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV]).toBeUndefined();
     expect(acquireRuntimeChildArtifactOwnership()).toBe(ownership);
   });
+  it("accepts a launch credential after a delayed startup", () => {
+    const artifactDir = join(root, "delayed-child");
+    process.env.ARTIFACT_DIR = artifactDir;
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] =
+      writeChildArtifactBootstrap(artifactDir);
+    const delayedTime = Date.now() + 60_001;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(delayedTime);
+    try {
+      expect(acquireRuntimeChildArtifactOwnership()).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("isolates nested no-session Pi while allowing a separately credentialed child", () => {
     const artifactDir = join(root, "outer-child");
@@ -128,6 +143,7 @@ describe("one-use child artifact ownership", () => {
         ...process.env,
         ARTIFACT_DIR: nestedArtifactDir,
         [CHILD_ARTIFACT_BOOTSTRAP_ENV]: nestedBootstrap,
+        NESTED_PI_DELAYED_START: "1",
       },
       timeout: 30_000,
     });
@@ -207,5 +223,30 @@ describe("one-use child artifact ownership", () => {
     retireLineageBootstraps(artifactDir);
 
     expect(existsSync(bootstrap)).toBe(false);
+  });
+  it("removes stale claim files without removing a live claimant's file", () => {
+    const artifactDir = join(root, "claimed-child");
+    mkdirSync(artifactDir, { recursive: true });
+    const child = spawnSync(process.execPath, ["-e", ""], {
+      encoding: "utf8",
+    });
+    if (child.status !== 0 || child.pid === undefined) {
+      throw new Error("Could not create an exited claim owner");
+    }
+    const staleClaim = join(
+      artifactDir,
+      `.child-artifact-bootstrap-${"a".repeat(16)}.json.claimed-${child.pid}-${"b".repeat(16)}`,
+    );
+    const liveClaim = join(
+      artifactDir,
+      `.child-artifact-bootstrap-${"c".repeat(16)}.json.claimed-${process.pid}-${"d".repeat(16)}`,
+    );
+    writeFileSync(staleClaim, "stale", { mode: 0o600 });
+    writeFileSync(liveClaim, "live", { mode: 0o600 });
+
+    retireLineageBootstraps(artifactDir);
+
+    expect(existsSync(staleClaim)).toBe(false);
+    expect(existsSync(liveClaim)).toBe(true);
   });
 });

@@ -206,9 +206,10 @@ receipt-storage failure blocks collection.
 
 The child launch wrapper exports `PI_SUBAGENTURA_CHILD=1`, `ARTIFACT_DIR`, and
 `PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP`. The parent creates a mode-0600, one-use
-bootstrap bound to the exact artifact directory and valid for 60 seconds. The
-child claims and removes it before registering lifecycle hooks; cancellation and
-fresh transitions retire unclaimed credentials. A nested Pi process can inherit the marker
+bootstrap bound to the exact artifact directory. It does not expire by clock, so
+a delayed launch can still claim it. The child claims and removes it before
+registering lifecycle hooks; cancellation and fresh transitions retire unclaimed
+credentials. Cleanup removes claim files only after their owner process exits. A nested Pi process can inherit the marker
 and artifact path, but not the consumed credential, so it cannot write lifecycle
 events or overwrite the outer child's output and active-turn state. The marker
 and artifact path are not authority. This prevents accidental environment

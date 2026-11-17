@@ -523,6 +523,14 @@ export function writeLaunchScript(
     '    exit "$rc"',
     "}",
     "trap on_exit EXIT",
+    ...(internalEnv[CHILD_ARTIFACT_BOOTSTRAP_ENV]
+      ? [
+          `if [ ! -f "$${CHILD_ARTIFACT_BOOTSTRAP_ENV}" ]; then`,
+          '    echo "child artifact ownership bootstrap is missing" >&2',
+          "    exit 2",
+          "fi",
+        ]
+      : []),
     command,
     "",
   ].join("\n");

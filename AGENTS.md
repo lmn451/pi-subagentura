@@ -239,16 +239,18 @@ closed-enum `cancellationOrigin` and `cancellationLifecycleReason` diagnostics.
 Lineage authority is explicit process state, never ambient `PI_SUBAGENTURA_*`
 metadata. The active `SessionScope` carries a typed lineage context. Child launchers
 write that context to a mode-0600 one-use bootstrap and export only its path. The child
-atomically claims and unlinks the bootstrap before registration; credentials expire
+atomically claims and unlinks the bootstrap before registration; lineage credentials expire
 after 60 seconds, cancellation/fresh transitions retire unclaimed files, and reloads
 reuse the process-local copy. Without an explicit context, the supervisor may show
 and act on direct registry entries but must not project persisted lineage.
 
 Child artifact lifecycle authority uses a separate mode-0600 one-use bootstrap,
-bound to the exact artifact directory and valid for 60 seconds. The launcher
-exports its path in `PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP`; the child atomically
-claims and removes it before registering `child-protocol`. Cancellation and fresh
-transitions retire unclaimed credentials. `PI_SUBAGENTURA_CHILD=1` and
+bound to the exact artifact directory. It does not expire by clock, so a delayed
+launch can still claim it. The launcher exports its path in
+`PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP`; the child atomically claims and removes it
+before registering `child-protocol`. Cancellation and fresh transitions retire
+unclaimed credentials; cleanup removes claim files only after their owner process
+has exited. `PI_SUBAGENTURA_CHILD=1` and
 `ARTIFACT_DIR` are not authority. This prevents nested Pi processes from
 registering hooks under an outer child's artifact identity after inheriting the
 launch environment. It is an accidental-inheritance boundary, not an OS security

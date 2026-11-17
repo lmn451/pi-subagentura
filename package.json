@@ -55,6 +55,7 @@
     "docs/jev-routing.md",
     "docs/telemetry.md",
     "docs/rex-multiplexer.md",
+    "docs/ownership.md",
     "docs/protocol-v1-compatibility.md",
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",

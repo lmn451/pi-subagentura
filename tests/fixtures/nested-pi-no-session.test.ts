@@ -29,7 +29,15 @@ nestedPiTest("keeps artifact hooks bound to this process's credential", () => {
   const entries: unknown[] = [];
   const context = { sessionManager: { getEntries: () => entries } };
 
-  registerExtension(api as never);
+  const originalDateNow = Date.now;
+  if (process.env.NESTED_PI_DELAYED_START === "1") {
+    Date.now = () => originalDateNow() + 60_001;
+  }
+  try {
+    registerExtension(api as never);
+  } finally {
+    Date.now = originalDateNow;
+  }
   for (const handler of hooks.get("before_agent_start") ?? []) {
     handler({ systemPrompt: "base prompt" }, context);
   }
