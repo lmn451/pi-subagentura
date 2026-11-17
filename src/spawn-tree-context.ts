@@ -16,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { debugLog } from "./helpers";
+import { retireChildArtifactBootstraps } from "./child-artifact-ownership";
 import { DEFAULT_MAX_DEPTH, DEFAULT_MAX_NODES } from "./interactive-lineage";
 import {
   resolveTelemetryTrafficOrigin,
@@ -454,6 +455,13 @@ export function retireLineageBootstraps(artifactDir: string): void {
         reason: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  try {
+    retireChildArtifactBootstraps(artifactDir);
+  } catch (error) {
+    debugLog("warn", "child_artifact_bootstrap_retire_failed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

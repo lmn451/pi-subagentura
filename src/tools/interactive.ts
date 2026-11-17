@@ -531,6 +531,7 @@ function formatCurrentPaneActivity(activity: CurrentPaneActivity): string {
 export function registerInteractiveSubagentTools(
   pi: ExtensionAPI,
   registrationScope?: SessionScope,
+  isChild = false,
 ): void {
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
@@ -699,7 +700,7 @@ export function registerInteractiveSubagentTools(
       );
       const topLevelOrchestratorV2 =
         registration.scope !== undefined &&
-        process.env.PI_SUBAGENTURA_CHILD !== "1" &&
+        !isChild &&
         isOrchestratorV2Enabled(pi);
       const routingModeError = validateRoutingMetadataMode(
         topLevelOrchestratorV2,

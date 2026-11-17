@@ -8,6 +8,7 @@ export const LIVE_LINEAGE_ENV_NAMES = [
   "PI_SUBAGENTURA_MAX_DEPTH",
   "PI_SUBAGENTURA_MAX_NODES",
   "PI_SUBAGENTURA_LINEAGE_BOOTSTRAP",
+  "PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP",
 ] as const;
 
 export function clearLiveLineageEnvironment(): void {

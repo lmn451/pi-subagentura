@@ -183,28 +183,34 @@ describe("session environment snapshot lifecycle", () => {
     expect(starts[0]?.properties.session_host).toBe("unknown");
   });
 
-  it.each([
-    "explicit child",
-    "environment child",
-    "telemetry off",
-    "test origin",
-  ])("does not submit a root start for %s", (kind) => {
-    if (kind === "environment child") vi.stubEnv("PI_SUBAGENTURA_CHILD", "1");
-    if (kind === "test origin")
-      vi.stubEnv("PI_SUBAGENTURA_TELEMETRY_ORIGIN", "test");
-    registration(
-      kind !== "telemetry off",
-      kind !== "explicit child",
-      undefined,
-      environmentSnapshot({ telemetryHost: "orca" }),
-    ).start();
+  it.each(["explicit child", "telemetry off", "test origin"])(
+    `does not submit a root start for %s`,
+    (kind) => {
+      if (kind === "test origin")
+        vi.stubEnv("PI_SUBAGENTURA_TELEMETRY_ORIGIN", "test");
+      registration(
+        kind !== "telemetry off",
+        kind !== "explicit child",
+        undefined,
+        environmentSnapshot({ telemetryHost: "orca" }),
+      ).start();
+      expect(
+        captured.filter(
+          (payload) => payload.event === "pi_subagentura_session_started",
+        ),
+      ).toHaveLength(0);
+      if (kind === "telemetry off" || kind === "test origin")
+        expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+  it("does not treat an inherited child marker as runtime ownership", () => {
+    vi.stubEnv("PI_SUBAGENTURA_CHILD", "1");
+    registration().start();
     expect(
       captured.filter(
         (payload) => payload.event === "pi_subagentura_session_started",
       ),
-    ).toHaveLength(0);
-    if (kind === "telemetry off" || kind === "test origin")
-      expect(fetch).not.toHaveBeenCalled();
+    ).toHaveLength(1);
   });
 
   it.each(["startup", "reload", "resume"])(

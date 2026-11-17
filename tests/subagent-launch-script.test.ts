@@ -31,6 +31,7 @@ import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { CHILD_ARTIFACT_BOOTSTRAP_ENV } from "../src/child-artifact-ownership";
 import { awaitInteractiveResult } from "../src/workflow-worker";
 import { createTelemetrySession } from "../src/telemetry";
 import {
@@ -456,6 +457,13 @@ describe("spawn-time state persistence", () => {
       parentSessionId: "pi",
       sessionScope: scope,
     });
+    const bootstrapName = readdirSync(state.artifactDir).find((name) =>
+      name.startsWith(".child-artifact-bootstrap-"),
+    );
+    const launchScript = readFileSync(state.launchScriptFile, "utf8");
+    expect(bootstrapName).toBeDefined();
+    expect(launchScript).toContain(`${CHILD_ARTIFACT_BOOTSTRAP_ENV}=`);
+    expect(launchScript).toContain(join(state.artifactDir, bootstrapName!));
     expect(existsSync(stateFilePath(cwd))).toBe(true);
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);

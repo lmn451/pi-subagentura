@@ -463,7 +463,6 @@ describe("current pane activity", () => {
   });
 
   it("keeps activity guidance neutral for non-v2 child agents", async () => {
-    process.env.PI_SUBAGENTURA_CHILD = "1";
     const registerTool = vi.fn();
     // This test exercises only tool registration from the Pi API surface.
     const api = { registerTool } as unknown as ExtensionAPI;
@@ -471,7 +470,7 @@ describe("current pane activity", () => {
       typeof InteractiveTools
     >("../src/tools/interactive");
 
-    registerInteractiveSubagentTools(api);
+    registerInteractiveSubagentTools(api, undefined, true);
     const tool = registerTool.mock.calls
       .map(([definition]) => definition)
       .find((definition) => definition.name === "get_current_pane_activity");

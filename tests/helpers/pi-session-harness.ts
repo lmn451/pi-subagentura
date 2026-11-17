@@ -17,6 +17,10 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 
+import {
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  writeChildArtifactBootstrap,
+} from "../../src/child-artifact-ownership";
 function assistant(text: string): AssistantMessage {
   return {
     role: "assistant",
@@ -241,9 +245,13 @@ export async function createPiSessionHarness(
   } as any);
   const previousChild = process.env.PI_SUBAGENTURA_CHILD;
   const previousArtifactDir = process.env.ARTIFACT_DIR;
+  const previousArtifactBootstrap = process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
   if (options.childArtifactDir) {
     process.env.PI_SUBAGENTURA_CHILD = "1";
     process.env.ARTIFACT_DIR = options.childArtifactDir;
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = writeChildArtifactBootstrap(
+      options.childArtifactDir,
+    );
   }
   try {
     await resourceLoader.reload();
@@ -255,6 +263,11 @@ export async function createPiSessionHarness(
     else process.env.PI_SUBAGENTURA_CHILD = previousChild;
     if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
     else process.env.ARTIFACT_DIR = previousArtifactDir;
+    if (previousArtifactBootstrap === undefined) {
+      delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    } else {
+      process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = previousArtifactBootstrap;
+    }
   }
   const model =
     options.nativeModel ??

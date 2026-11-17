@@ -108,6 +108,10 @@ import {
   writeLineageBootstrap,
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
+import {
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  writeChildArtifactBootstrap,
+} from "./child-artifact-ownership";
 import { TELEMETRY_ENV } from "./settings";
 import {
   captureTelemetry,
@@ -491,7 +495,7 @@ export function writeLaunchScript(
   writeFileSync(cliPath, CLI_SOURCE, { mode: 0o700 });
 
   // 2. Write the launch script. The script:
-  //    - exports ARTIFACT_DIR so the child inherits it;
+  //    - exports ARTIFACT_DIR and the one-use artifact ownership bootstrap;
   //    - traps EXIT to record process exit and, when needed, one lock-protected completion;
   //    - also writes the @pi-exit-code pane option for the readPaneExitCode
   //      fallback when the selected backend is tmux.
@@ -981,6 +985,7 @@ export function launchInteractiveSubagent(params: {
   let persistedState = false;
   let lineageManifestPath: string | undefined;
   let lineageBootstrapPath: string | undefined;
+  let childArtifactBootstrapPath: string | undefined;
   // Persist as soon as the pane is addressable. A crash after this point is
   // recoverable on reload. If persistence itself fails, abort and kill the
   // pane; otherwise the child would be invisible to rehydrate after a restart.
@@ -1087,6 +1092,13 @@ export function launchInteractiveSubagent(params: {
         /* best effort — the pane kill below is the important cleanup */
       }
     }
+    if (childArtifactBootstrapPath) {
+      try {
+        rmSync(childArtifactBootstrapPath, { force: true });
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
     try {
       mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
     } catch {
@@ -1130,8 +1142,16 @@ export function launchInteractiveSubagent(params: {
     }
   }
   try {
+    childArtifactBootstrapPath = writeChildArtifactBootstrap(paths.artifactDir);
+  } catch (err) {
+    reportSpawnFailure("state_persistence", mux.name, "artifact_write");
+    cleanupFailedSpawn();
+    throw err;
+  }
+  try {
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
       PI_SUBAGENTURA_MUX: mux.name,
+      [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
       ...(lineageBootstrapPath
         ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
         : {}),

@@ -9,6 +9,11 @@ import registerExtension from "../src/subagent";
 import { LINEAGE_BOOTSTRAP_ENV } from "../src/spawn-tree-context";
 import { buildChildSubagentProtocol } from "../src/interactive-tmux";
 import {
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  resetRuntimeChildArtifactOwnershipForTests,
+  writeChildArtifactBootstrap,
+} from "../src/child-artifact-ownership";
+import {
   createPiSessionHarness,
   type PiSessionHarness,
 } from "./helpers/pi-session-harness";
@@ -113,6 +118,10 @@ function emittedPrompt(mode: {
   if (artifactDir) childArtifactDirs.push(artifactDir);
   vi.stubEnv("ARTIFACT_DIR", artifactDir);
   vi.stubEnv(LINEAGE_BOOTSTRAP_ENV, undefined);
+  vi.stubEnv(
+    CHILD_ARTIFACT_BOOTSTRAP_ENV,
+    artifactDir ? writeChildArtifactBootstrap(artifactDir) : undefined,
+  );
 
   const api = {
     registerTool: vi.fn(),
@@ -138,6 +147,7 @@ afterEach(() => {
   for (const directory of childArtifactDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+  resetRuntimeChildArtifactOwnershipForTests();
   vi.unstubAllEnvs();
 });
 

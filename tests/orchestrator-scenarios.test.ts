@@ -50,6 +50,17 @@ import {
 import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
 import { InteractiveParams } from "../src/schemas";
 import {
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  resetRuntimeChildArtifactOwnershipForTests,
+  writeChildArtifactBootstrap,
+} from "../src/child-artifact-ownership";
+import {
+  createDescendantSpawnTreeContext,
+  createRootSpawnTreeContext,
+  LINEAGE_BOOTSTRAP_ENV,
+  writeLineageBootstrap,
+} from "../src/spawn-tree-context";
+import {
   clearSessionScopes,
   getSessionScopes,
   sessionOwner,
@@ -110,7 +121,10 @@ function registeredTool(api: ReturnType<typeof mockApi>, name: string): any {
   })?.[0];
 }
 
-function setupScenario(orchestratorv2 = false): ScenarioEnvironment {
+function setupScenario(
+  orchestratorv2 = false,
+  childMode = false,
+): ScenarioEnvironment {
   const root = mkdtempSync(join(tmpdir(), "orchestrator-scenarios-"));
   roots.push(root);
   const api = mockApi(orchestratorv2);
@@ -119,7 +133,48 @@ function setupScenario(orchestratorv2 = false): ScenarioEnvironment {
   api.appendEntry.mockImplementation((customType: string, data: unknown) => {
     branch.push({ type: "custom", customType, data });
   });
-  registerExtension(api as never);
+  const previousChild = process.env.PI_SUBAGENTURA_CHILD;
+  const previousArtifactDir = process.env.ARTIFACT_DIR;
+  const previousArtifactBootstrap = process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+  const previousLineageBootstrap = process.env[LINEAGE_BOOTSTRAP_ENV];
+  try {
+    if (childMode) {
+      const artifactDir = join(root, "child");
+      const parentContext = createRootSpawnTreeContext(
+        "orchestrator-parent",
+        root,
+      );
+      const childContext = createDescendantSpawnTreeContext(
+        parentContext,
+        "child",
+        artifactDir,
+      );
+      process.env.PI_SUBAGENTURA_CHILD = "1";
+      process.env.ARTIFACT_DIR = artifactDir;
+      process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] =
+        writeChildArtifactBootstrap(artifactDir);
+      process.env[LINEAGE_BOOTSTRAP_ENV] = writeLineageBootstrap(
+        artifactDir,
+        childContext,
+      );
+    }
+    registerExtension(api as never);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
+    else process.env.PI_SUBAGENTURA_CHILD = previousChild;
+    if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
+    else process.env.ARTIFACT_DIR = previousArtifactDir;
+    if (previousArtifactBootstrap === undefined) {
+      delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    } else {
+      process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = previousArtifactBootstrap;
+    }
+    if (previousLineageBootstrap === undefined) {
+      delete process.env[LINEAGE_BOOTSTRAP_ENV];
+    } else {
+      process.env[LINEAGE_BOOTSTRAP_ENV] = previousLineageBootstrap;
+    }
+  }
   const scope = getSessionScopes().find(
     (candidate) => candidate.pi === (api as unknown as typeof candidate.pi),
   );
@@ -222,6 +277,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+  resetRuntimeChildArtifactOwnershipForTests();
 });
 
 afterAll(() => {
@@ -822,8 +878,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       legacy.ctx,
     );
 
-    const nested = setupScenario(true);
-    process.env.PI_SUBAGENTURA_CHILD = "1";
+    const nested = setupScenario(true, true);
     const nestedResult = await executeTool(
       registeredTool(nested.api, "subagent_interactive"),
       {

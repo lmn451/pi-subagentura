@@ -537,8 +537,7 @@ export function registerSessionHandlers(
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const orchestratorMode = isOrchestratorMode(pi);
     const orchestratorV2Mode = isOrchestratorV2Enabled(pi);
-    const isChild =
-      !allowRootLineage || process.env.PI_SUBAGENTURA_CHILD === "1";
+    const isChild = !allowRootLineage;
     const persisted =
       allowRootLineage && continuityReason
         ? loadInteractiveStates(ctx.cwd)
@@ -680,7 +679,7 @@ export function registerSessionHandlers(
         terminal: 0,
         unknown: 0,
       };
-      if (process.env.PI_SUBAGENTURA_CHILD !== "1") {
+      if (allowRootLineage) {
         try {
           // Tools reload on demand; startup only validates persistence so the
           // routing overlay never becomes a second runtime registry or cache.

@@ -45,7 +45,8 @@ The table below is abbreviated; see [architecture.md §13](./architecture.md#13-
 | `src/rehydrate.ts`                                                   | Reconstruct persisted cursors, queues, and delivery receipts on session start/reload/resume.                                                                                                                      |
 | `src/helpers.ts`                                                     | `startSubagentJob` primitive (in-process sub-agent runner), `resolveModel`, `formatUsage`, job registry and cleanup.                                                                                              |
 | `src/artifact.ts`                                                    | Protocol-v2 artifacts, immutable `outputs/<eventId>.md`, byte readers, and current state-v2 helpers.                                                                                                              |
-| `src/child-protocol.ts`                                              | Child-only Pi lifecycle hooks selected by `PI_SUBAGENTURA_CHILD=1`.                                                                                                                                               |
+| `src/child-protocol.ts`                                              | Child Pi lifecycle hooks registered only after one-use artifact ownership validation.                                                                                                                             |
+| `src/child-artifact-ownership.ts`                                    | Parent-issued, mode-0600 one-use bootstrap credentials bound to a child artifact directory.                                                                                                                       |
 | `src/delivery.ts`                                                    | Bounded durable coordinated delivery queue and deterministic delivery IDs.                                                                                                                                        |
 | `src/completion-coordinator.ts`                                      | TUI-only completion entries, each/group barriers, manual consumption, human-priority manifest attachment, and parent continuation.                                                                                |
 | `src/interactive-tmux.ts`                                            | `InteractiveSubagentState` and registry, launch-script builder, mux backend dispatch (is-alive, send-keys, kill-pane).                                                                                            |
@@ -240,16 +241,25 @@ metadata. The active `SessionScope` carries a typed lineage context. Child launc
 write that context to a mode-0600 one-use bootstrap and export only its path. The child
 atomically claims and unlinks the bootstrap before registration; credentials expire
 after 60 seconds, cancellation/fresh transitions retire unclaimed files, and reloads
-reuse the
-process-local copy. Without an explicit context, the supervisor may show and act on
-direct registry entries but must not project persisted lineage. Vitest setup strips
-lineage/bootstrap variables globally, and lineage tests opt into temporary contexts.
-Legacy lineage identity/depth environment variables are intentionally ignored. A
-mixed-version child without a bootstrap degrades to direct-registry-only lineage and
-cannot recursively spawn interactive children until it is respawned; it must never
-reconstruct cancellation authority from inherited env.
-This isolates accidental subprocess inheritance; it is not an OS security boundary
-against malicious same-UID code, which can already address the user's mux directly.
+reuse the process-local copy. Without an explicit context, the supervisor may show
+and act on direct registry entries but must not project persisted lineage.
+
+Child artifact lifecycle authority uses a separate mode-0600 one-use bootstrap,
+bound to the exact artifact directory and valid for 60 seconds. The launcher
+exports its path in `PI_SUBAGENTURA_ARTIFACT_BOOTSTRAP`; the child atomically
+claims and removes it before registering `child-protocol`. Cancellation and fresh
+transitions retire unclaimed credentials. `PI_SUBAGENTURA_CHILD=1` and
+`ARTIFACT_DIR` are not authority. This prevents nested Pi processes from
+registering hooks under an outer child's artifact identity after inheriting the
+launch environment. It is an accidental-inheritance boundary, not an OS security
+boundary against malicious same-UID code, which can already access the user's
+files and mux.
+
+Vitest setup strips lineage/bootstrap variables globally, and lineage tests opt into
+temporary contexts. Legacy lineage identity/depth environment variables are
+intentionally ignored. A mixed-version child without a bootstrap degrades to
+direct-registry-only lineage and cannot recursively spawn interactive children until
+it is respawned; it must never reconstruct cancellation authority from inherited env.
 
 **Delivery receipts:** Rehydrate reconciles deterministic interactive
 `deliveryId` values plus coordinated completion, manifest, and consumption
