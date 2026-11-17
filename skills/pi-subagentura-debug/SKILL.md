@@ -1,6 +1,6 @@
 ---
 name: pi-subagentura-debug
-description: Diagnose pi-subagentura sub-agent launches, tool calls, working-directory and multiplexer problems, and artifact delivery. Use when a tool call fails, an interactive child fails before or after pane creation, `.pi/subagentura-state.json` cannot be read or mutated, an unsupported interactive state schema or persistence errors are reported, or completion/artifacts are missing.
+description: Diagnose pi-subagentura sub-agent launches, tool calls, working-directory and multiplexer problems, and artifact delivery. Use when a tool call fails, an interactive child fails before or after pane creation, `.pi/subagentura-state.json` cannot be read or mutated, an unsupported interactive state schema or persistence errors are reported, or completion/artifacts are missing, including suspected nested-Pi artifact-identity contamination.
 level: beginner
 ---
 
@@ -56,6 +56,52 @@ If the error still occurs with a valid path:
 ## Completion or output appears missing
 
 For interactive children, inspect status and artifacts before retrying. A dead pane can still have useful artifact state. Distinguish a child that has not completed from one whose completion was recorded but whose delivery has not been consumed. Follow the tool's returned status and artifact references; do not infer completion from pane disappearance alone.
+
+## Nested Pi process contaminates child artifacts
+
+Older versions had an artifact-ownership gap. A nested
+`pi --no-session --mode json --print` process started by an interactive child
+could inherit `PI_SUBAGENTURA_CHILD=1` and `ARTIFACT_DIR`. The nested process
+could register lifecycle hooks against the outer child's artifacts, replace its
+active turn, and append a false `done` completion with zero-byte output. The
+parent might consume that completion and cancel the real child before its
+handoff. An empty snapshot does not establish provider, authentication, or
+model failure. Treat an earlier authentication error as separate unless
+independent evidence links it.
+
+For retained historical cases:
+
+1. Start from the parent session's reference to the interactive child, then
+   compare the parent and child Pi session histories. The parent history may
+   show launch, messages, artifact reads, or cancellation; the child history
+   may show a Bash/Python subprocess starting nested Pi. A nested
+   `--no-session` process may have no persisted Pi session of its own.
+2. Compare the child's persisted user-entry identity with `turnId` in artifact
+   `turn_started` and `completion` events, and inspect the captured output. A
+   completion without a matching persisted child turn is evidence of an
+   artifact-identity or lifecycle mismatch; it does not prove the nested
+   process produced an answer.
+3. Read artifact NDJSON events in physical file order. Use `eventId` plus the
+   Pi-derived `turnId` to associate a completion with its output snapshot.
+   Timestamps are display/TTL metadata; they do not establish order or identity.
+4. If the child launched nested JSON-print Pi, check the recorded Bash/Python
+   subprocess call and wrapper's temporary-file setup for a JSON trace path. A
+   trace may be in a temporary location or removed by an `EXIT` trap. Preserve
+   any surviving trace privately; its absence is inconclusive.
+
+Do not paste raw session JSONL, prompts, assistant/provider output, credentials,
+or user-specific paths into a report. Report only whether child-turn and
+artifact identities matched, the physical event order, and whether a trace was
+retained.
+
+Current versions use an artifact-specific, one-use bootstrap that the child
+consumes before registering lifecycle hooks. `PI_SUBAGENTURA_CHILD` and
+`ARTIFACT_DIR` alone do not grant authority. See
+[Interactive Child Artifact Ownership](../../docs/ownership.md). This prevents
+accidental environment inheritance; it is not an OS security boundary against
+malicious code running as the same user. Historical artifacts may still need
+investigation. This skill is guidance; it does not add automatic logging or
+repair.
 
 ## Unsupported interactive state or persistence errors
 
