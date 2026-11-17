@@ -4,13 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { artifactPath, readEvents } from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
+import {
+  acquireRuntimeChildArtifactOwnership,
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  resetRuntimeChildArtifactOwnershipForTests,
+  writeChildArtifactBootstrap,
+} from "../src/child-artifact-ownership";
 
 function registerHandlers() {
+  const artifactDir = process.env.ARTIFACT_DIR;
+  if (!artifactDir) {
+    throw new Error("PI_SUBAGENTURA_CHILD requires ARTIFACT_DIR");
+  }
+  process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] =
+    writeChildArtifactBootstrap(artifactDir);
+  const ownership = acquireRuntimeChildArtifactOwnership();
+  if (!ownership) throw new Error("Child artifact ownership was not acquired");
   const handlers = new Map<string, Function>();
   const pi = {
     on: vi.fn((name: string, handler: Function) => handlers.set(name, handler)),
   };
-  registerChildProtocol(pi as any);
+  registerChildProtocol(pi as any, ownership);
   return handlers;
 }
 
@@ -28,6 +42,8 @@ describe("child protocol lifecycle", () => {
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.ARTIFACT_DIR;
+    delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    resetRuntimeChildArtifactOwnershipForTests();
     rmSync(root, { recursive: true, force: true });
   });
 

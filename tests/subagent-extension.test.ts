@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerExtension from "../src/subagent";
 import { nativeClassifierRegistry } from "./helpers/native-classifier";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +18,12 @@ import {
   resetRuntimeSpawnTreeContextForTests,
   writeLineageBootstrap,
 } from "../src/spawn-tree-context";
+import {
+  acquireRuntimeChildArtifactOwnership,
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  resetRuntimeChildArtifactOwnershipForTests,
+  writeChildArtifactBootstrap,
+} from "../src/child-artifact-ownership";
 import {
   clearCompletionTurnWake,
   ORCHESTRATOR_V2_WAKE_ENTRY_TYPE,
@@ -554,11 +567,124 @@ describe("extension registration", () => {
     clearCompletionTurnWake(api as any);
   });
 
-  it("registers a minimal interactive runtime in child mode", () => {
+  it("does not let a nested Pi register child hooks from inherited environment", () => {
+    const root = mkdtempSync(join(tmpdir(), "nested-pi-artifact-identity-"));
+    const artifactDir = join(root, "child");
+    const previousChild = process.env.PI_SUBAGENTURA_CHILD;
+    const previousArtifactDir = process.env.ARTIFACT_DIR;
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, "output.md"), "outer child output", {
+      mode: 0o600,
+    });
+    writeFileSync(
+      join(artifactDir, "active-turn.json"),
+      JSON.stringify({
+        turnId: "outer-turn",
+        startedAt: 1,
+        started: true,
+      }),
+      { mode: 0o600 },
+    );
+    const outputBefore = readFileSync(join(artifactDir, "output.md"), "utf8");
+    const activeTurnBefore = readFileSync(
+      join(artifactDir, "active-turn.json"),
+      "utf8",
+    );
+    const handlers = new Map<string, Function[]>();
+    const api = mockApi({
+      on: vi.fn((name: string, handler: Function) => {
+        const registered = handlers.get(name) ?? [];
+        registered.push(handler);
+        handlers.set(name, registered);
+      }),
+    });
+    process.env.PI_SUBAGENTURA_CHILD = "1";
+    process.env.ARTIFACT_DIR = artifactDir;
+    let outputAfter = "";
+    let activeTurnAfter = "";
+    let eventsExistAfter = false;
+    const run = (name: string, ...args: unknown[]) => {
+      for (const handler of handlers.get(name) ?? []) handler(...args);
+    };
+    try {
+      registerExtension(api as any);
+      const entries: any[] = [];
+      const ctx = { sessionManager: { getEntries: () => entries } };
+      run("before_agent_start", {}, ctx);
+      entries.push({
+        id: "nested-turn",
+        type: "message",
+        message: { role: "user" },
+      });
+      run("turn_start", { timestamp: 2 }, ctx);
+      run(
+        "agent_end",
+        { messages: [{ role: "assistant", stopReason: "stop" }] },
+        ctx,
+      );
+      run("agent_settled", {}, ctx);
+      outputAfter = readFileSync(join(artifactDir, "output.md"), "utf8");
+      activeTurnAfter = readFileSync(
+        join(artifactDir, "active-turn.json"),
+        "utf8",
+      );
+      eventsExistAfter = existsSync(join(artifactDir, "events.ndjson"));
+    } finally {
+      if (previousChild === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
+      else process.env.PI_SUBAGENTURA_CHILD = previousChild;
+      if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
+      else process.env.ARTIFACT_DIR = previousArtifactDir;
+      rmSync(root, { recursive: true, force: true });
+    }
+    expect(outputAfter).toBe(outputBefore);
+    expect(activeTurnAfter).toBe(activeTurnBefore);
+    expect(eventsExistAfter).toBe(false);
+  });
+
+  it("fails activation instead of downgrading when a launch credential is invalid", () => {
+    const root = mkdtempSync(join(tmpdir(), "invalid-child-bootstrap-"));
+    const artifactDir = join(root, "child");
+    const previousChild = process.env.PI_SUBAGENTURA_CHILD;
+    const previousArtifactDir = process.env.ARTIFACT_DIR;
+    const previousBootstrap = process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    mkdirSync(artifactDir, { recursive: true });
+    process.env.PI_SUBAGENTURA_CHILD = "1";
+    process.env.ARTIFACT_DIR = artifactDir;
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = join(
+      artifactDir,
+      ".child-artifact-bootstrap-0000000000000000.json",
+    );
+    const api = mockApi();
+
+    try {
+      expect(() => registerExtension(api as any)).toThrow(
+        /refusing to start without validated child artifact ownership/i,
+      );
+      expect(api.registerTool).not.toHaveBeenCalled();
+    } finally {
+      if (previousChild === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
+      else process.env.PI_SUBAGENTURA_CHILD = previousChild;
+      if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
+      else process.env.ARTIFACT_DIR = previousArtifactDir;
+      if (previousBootstrap === undefined) {
+        delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+      } else {
+        process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = previousBootstrap;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("registers a minimal interactive runtime for a credentialed child", () => {
     const previous = process.env.PI_SUBAGENTURA_CHILD;
     const previousArtifactDir = process.env.ARTIFACT_DIR;
+    const previousBootstrap = process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+    const root = mkdtempSync(join(tmpdir(), "pi-subagentura-extension-child-"));
+    const artifactDir = join(root, "child");
     process.env.PI_SUBAGENTURA_CHILD = "1";
-    process.env.ARTIFACT_DIR = "/tmp/pi-subagentura-extension-test";
+    process.env.ARTIFACT_DIR = artifactDir;
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] =
+      writeChildArtifactBootstrap(artifactDir);
     const api = {
       registerTool: vi.fn(),
       registerMessageRenderer: vi.fn(),
@@ -570,12 +696,20 @@ describe("extension registration", () => {
     };
 
     try {
+      expect(acquireRuntimeChildArtifactOwnership()).toBeDefined();
       registerExtension(api as any);
     } finally {
       if (previous === undefined) delete process.env.PI_SUBAGENTURA_CHILD;
       else process.env.PI_SUBAGENTURA_CHILD = previous;
       if (previousArtifactDir === undefined) delete process.env.ARTIFACT_DIR;
       else process.env.ARTIFACT_DIR = previousArtifactDir;
+      if (previousBootstrap === undefined) {
+        delete process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV];
+      } else {
+        process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = previousBootstrap;
+      }
+      resetRuntimeChildArtifactOwnershipForTests();
+      rmSync(root, { recursive: true, force: true });
     }
 
     const names = api.registerTool.mock.calls

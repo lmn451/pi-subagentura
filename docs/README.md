@@ -13,6 +13,7 @@ keywords:
     rex,
     jev,
     openai-decisions,
+    artifact-ownership,
   ]
 ---
 
@@ -38,11 +39,12 @@ published injector.
 | [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                                         |
 | [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions classifier setup, live-owner selection, and payload disclosure |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters              |
+| [ownership.md](./ownership.md)                                                          | Interactive child artifact identity, completion investigation, and ownership limits |
 | [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                          | Protocol-v1 compatibility removal status and user-data behavior                     |
 
 ## Known limitations
 
-Interactive lineage bootstrap credentials expire 60 seconds after the parent creates them. If child startup takes longer, the child pane remains usable, but recursive `subagent_interactive` spawning is unavailable for that session. Start a fresh child session or respawn the child to recover; no automatic retry occurs.
+The lineage bootstrap for recursive child spawning expires 60 seconds after the parent creates it. The child can keep using its current artifact, but it cannot recursively spawn interactive children without valid lineage context. The separate artifact-ownership credential does not expire by clock. See [ownership.md](./ownership.md) for launch and error behavior.
 
 ## Workflow scripts in `examples/workflows/`
 

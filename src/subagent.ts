@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  debugLog,
   type JobState,
   type JobStatus,
   type SubagentLiveStatus,
@@ -40,6 +41,11 @@ import { registerOrchestratorTools } from "./tools/orchestrator";
 import { isRoutingEnabled } from "./routing-factory";
 import { detectEnvironment } from "./environment";
 import { registerSessionHandlers } from "./session-handlers";
+import {
+  acquireRuntimeChildArtifactOwnership,
+  CHILD_ARTIFACT_BOOTSTRAP_ENV,
+  type ChildArtifactOwnership,
+} from "./child-artifact-ownership";
 import { registerChildProtocol } from "./child-protocol";
 import { registerCancelAllFlows } from "./cancel-all-flows-registration";
 import { renderSubagentNotify } from "./rendering";
@@ -157,11 +163,31 @@ lifecycle control remain with the parent.
 
 export default function (pi: ExtensionAPI) {
   const environment = detectEnvironment();
-  const isChild = process.env.PI_SUBAGENTURA_CHILD === "1";
-  const childArtifactDir = isChild ? process.env.ARTIFACT_DIR : undefined;
-  if (!isChild || !childArtifactDir) {
-    delete process.env[LINEAGE_BOOTSTRAP_ENV];
+  const inheritedChildMarker = process.env.PI_SUBAGENTURA_CHILD === "1";
+  const hasChildArtifactBootstrap = Boolean(
+    process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV],
+  );
+  let childArtifactOwnership: ChildArtifactOwnership | undefined;
+  let childArtifactOwnershipRejected = false;
+  try {
+    childArtifactOwnership = acquireRuntimeChildArtifactOwnership();
+  } catch {
+    childArtifactOwnershipRejected = true;
   }
+  const isChild = childArtifactOwnership !== undefined;
+  if (hasChildArtifactBootstrap && !isChild) {
+    debugLog("warn", "child_artifact_ownership_rejected");
+    throw new Error(
+      "Refusing to start without validated child artifact ownership",
+    );
+  }
+  if (childArtifactOwnershipRejected) {
+    debugLog("warn", "child_artifact_ownership_rejected");
+  } else if (inheritedChildMarker && !isChild) {
+    debugLog("warn", "child_artifact_ownership_missing");
+  }
+  const childArtifactDir = childArtifactOwnership?.artifactDir;
+  if (!childArtifactDir) delete process.env[LINEAGE_BOOTSTRAP_ENV];
   const initialSpawnTreeContext = childArtifactDir
     ? acquireRuntimeSpawnTreeContext(childArtifactDir)
     : undefined;
@@ -211,8 +237,8 @@ export default function (pi: ExtensionAPI) {
       systemPrompt: `${event.systemPrompt}\n\n${prompts.join("\n\n")}`,
     };
   });
-  if (isChild) {
-    registerChildProtocol(pi);
+  if (childArtifactOwnership) {
+    registerChildProtocol(pi, childArtifactOwnership);
     pi.registerMessageRenderer("subagent-notify", renderSubagentNotify);
     const sessionScope = registerSessionHandlers(
       pi,
@@ -221,7 +247,7 @@ export default function (pi: ExtensionAPI) {
       undefined,
       environment,
     );
-    registerInteractiveSubagentTools(pi, sessionScope);
+    registerInteractiveSubagentTools(pi, sessionScope, true);
     registerSubagentArtifactsCleanupTool(pi, sessionScope);
     registerSubagentModelListTool(pi);
     registerInteractiveSupervisor(pi, sessionScope);

@@ -10,6 +10,10 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  isCurrentChildArtifactOwnership,
+  type ChildArtifactOwnership,
+} from "./child-artifact-ownership";
 import { debugLog } from "./helpers";
 import {
   MAX_ACTIVE_TOOL_ID_LENGTH,
@@ -42,13 +46,25 @@ interface ActiveTurn {
 
 let latestAgentMessages: unknown[] = [];
 
-function getArtifact() {
+function getArtifact(ownership: ChildArtifactOwnership) {
+  if (!isCurrentChildArtifactOwnership(ownership)) {
+    throw new Error(
+      "Child protocol requires validated one-use child artifact ownership",
+    );
+  }
+  return artifactPath(
+    dirname(ownership.artifactDir),
+    basename(ownership.artifactDir),
+  );
+}
+
+function artifactFromEnvironment() {
   const dir = process.env.ARTIFACT_DIR;
   if (!dir) throw new Error("PI_SUBAGENTURA_CHILD requires ARTIFACT_DIR");
   return artifactPath(dirname(dir), basename(dir));
 }
 
-function activeTurnPath(art = getArtifact()): string {
+function activeTurnPath(art: ReturnType<typeof artifactPath>): string {
   return join(art.dir, "active-turn.json");
 }
 
@@ -143,7 +159,10 @@ function normalizeActiveTurn(value: unknown): ActiveTurn | null {
   };
 }
 
-function writeActiveTurn(turn: ActiveTurn, art = getArtifact()): void {
+function writeActiveTurn(
+  turn: ActiveTurn,
+  art: ReturnType<typeof artifactPath>,
+): void {
   const normalized = normalizeActiveTurn(turn);
   if (!normalized) return;
   const content = JSON.stringify(normalized);
@@ -155,7 +174,9 @@ function writeActiveTurn(turn: ActiveTurn, art = getArtifact()): void {
   renameSync(tmp, file);
 }
 
-export function readActiveTurn(art = getArtifact()): ActiveTurn | null {
+export function readActiveTurn(
+  art: ReturnType<typeof artifactPath> = artifactFromEnvironment(),
+): ActiveTurn | null {
   let fd: number | undefined;
   try {
     fd = openSync(
@@ -285,8 +306,11 @@ function appendActivity(
   }
 }
 
-export function registerChildProtocol(pi: ExtensionAPI): void {
-  const art = getArtifact();
+export function registerChildProtocol(
+  pi: ExtensionAPI,
+  ownership: ChildArtifactOwnership,
+): void {
+  const art = getArtifact(ownership);
   let startupAgentStarted = false;
   pi.on("session_start", (event, ctx) => {
     const model = ctx.model;

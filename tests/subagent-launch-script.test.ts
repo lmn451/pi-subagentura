@@ -31,6 +31,7 @@ import { stateFilePath, loadInteractiveStates } from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { CHILD_ARTIFACT_BOOTSTRAP_ENV } from "../src/child-artifact-ownership";
 import { awaitInteractiveResult } from "../src/workflow-worker";
 import { createTelemetrySession } from "../src/telemetry";
 import {
@@ -297,6 +298,30 @@ describe("launch script EXIT trap (idempotency)", () => {
       expect.objectContaining({ exitCode: 7 }),
     ]);
   });
+  it("fails the child launch when its ownership bootstrap is missing", () => {
+    const artDir = join(tmp, "artifacts", "missing-owner");
+    const launchScript = join(artDir, "launch.sh");
+    const startedMarker = join(artDir, "pi-started");
+    const missingBootstrap = join(
+      artDir,
+      ".child-artifact-bootstrap-0000000000000000.json",
+    );
+    writeLaunchScript(launchScript, `touch "${startedMarker}"`, artDir, {
+      [CHILD_ARTIFACT_BOOTSTRAP_ENV]: missingBootstrap,
+    });
+    chmodSync(launchScript, 0o700);
+
+    const result = spawnSync("bash", [launchScript], {
+      encoding: "utf8",
+      env: { ...process.env, ARTIFACT_DIR: artDir },
+    });
+
+    expect(result.status).toBe(2);
+    expect(existsSync(startedMarker)).toBe(false);
+    expect(countEvents(artDir, "process_exited")).toEqual([
+      expect.objectContaining({ exitCode: 2 }),
+    ]);
+  });
 });
 
 // ── Mock tmux exec so launchInteractiveSubagent doesn't create real tmux
@@ -456,6 +481,13 @@ describe("spawn-time state persistence", () => {
       parentSessionId: "pi",
       sessionScope: scope,
     });
+    const bootstrapName = readdirSync(state.artifactDir).find((name) =>
+      name.startsWith(".child-artifact-bootstrap-"),
+    );
+    const launchScript = readFileSync(state.launchScriptFile, "utf8");
+    expect(bootstrapName).toBeDefined();
+    expect(launchScript).toContain(`${CHILD_ARTIFACT_BOOTSTRAP_ENV}=`);
+    expect(launchScript).toContain(join(state.artifactDir, bootstrapName!));
     expect(existsSync(stateFilePath(cwd))).toBe(true);
     const loaded = loadInteractiveStates(cwd);
     expect(loaded?.states[state.id]?.paneId).toBe(state.paneId);
