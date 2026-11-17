@@ -301,11 +301,14 @@ system call succeeded.
 The controlled fake-provider test distinguishes: no final assistant text (zero
 text bytes), assistant text without non-empty staged output (positive text bytes,
 zero output bytes), and test-owned non-empty `output.md` that was snapshotted
-(positive output bytes and `outputWriteSucceeded=true`). These signals cannot
-retroactively determine why the historical 2026-11-16 turns had empty output:
-those turns predate the diagnostic record, and their retained files do not
-establish whether final assistant text existed or whether an output write was
-attempted.
+(positive output bytes and `outputWriteSucceeded=true`). Later forensic review
+established that the historical false empty completions came from nested
+`pi --no-session` processes that inherited outer `ARTIFACT_DIR` and
+`PI_SUBAGENTURA_CHILD` values, then wrote under the outer artifact identity.
+One nested run's final text survived in a temporary JSON trace. The first two
+deleted temporary captures do not show whether final assistant text existed.
+This diagnostics change does not recover deleted text or fix artifact ownership;
+the ownership fix is separate.
 
 ## Repository test isolation
 
