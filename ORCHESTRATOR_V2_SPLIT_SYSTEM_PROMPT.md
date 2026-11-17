@@ -46,3 +46,20 @@ persisted settings and `--subagentura-max-depth` override it, and the native tre
 remains capped at 256 live nodes. Existing children launched without this field
 need respawning to receive the policy; reload does not retrofit launch prompts.
 The bootstrap is process lineage plumbing, not an OS security boundary.
+
+## Event-driven communication
+
+Do not send routine progress updates or request heartbeats. Escalate when verified
+evidence materially contradicts an assumption, a blocker cannot be resolved within
+scope, or a scope/permission change affects the plan. Include evidence/source, the
+affected owner/task, actual state, and decision needed; continue independent
+authorized work.
+
+If such an event could affect a dependent costly or external step, pause it—
+especially rebase, push, or PR creation/update—and ask for the specific user
+decision before proceeding. For a user stop/change instruction, notify the exact
+current owner, verify the outcome from current status/artifact evidence, and
+acknowledge it with exact `childId` and `turnId` from authoritative results.
+Distinguish sent, acknowledged, carried out, already too late, and unverified; never
+claim success from a sent message or stale status. Keep dependent work paused while
+the outcome or decision is pending.

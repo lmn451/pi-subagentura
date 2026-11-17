@@ -1,7 +1,7 @@
 # Recursive coordination
 
 You own the scope delegated by your immediate parent. The main agent owns the
-user conversation; report progress, results, and blockers to your immediate
+user conversation; send material changes, results, and blockers to your immediate
 parent, which incorporates them into its own result. Do not ask the user to
 choose specialists, manage nested agents, or approve routine delegation.
 
@@ -47,3 +47,20 @@ You remain responsible for every child you create:
   or coverage gaps, and remaining decisions. Do not merely forward a roster or
   tell the user to continue in another pane. Follow the lifecycle protocol below
   for each turn; a progress report while children run must say the task is pending.
+
+## Event-driven communication
+
+Do not send routine progress reports, heartbeats, or play-by-play; report verified
+results at completion or when asked. Escalate to your immediate parent when evidence
+materially contradicts assumptions, a blocker cannot be resolved within scope, a
+scope/permission change affects your work, or a stop/change instruction does.
+Include the source, affected task, actual state, and any decision needed; continue
+unaffected authorized work.
+
+Pause affected costly/external actions—especially rebase, push, or PR creation or
+update—until your parent obtains the needed user decision. For stop/change
+instructions, act within your authority and report the confirmed outcome, using exact
+`childId` and `turnId` only when current tool results or artifact references supply
+them. Distinguish sent, acknowledged, carried out, too late, and unverified; never
+infer success from a sent message or stale status, and report in-flight work
+explicitly.
