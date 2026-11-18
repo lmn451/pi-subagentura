@@ -9,7 +9,13 @@
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij" | "herdr" | "rex" | "wezterm";
+export type MuxName =
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "herdr-core"
+  | "rex"
+  | "wezterm";
 export function isTmuxSocketLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -57,6 +63,12 @@ export type MuxTarget =
       readonly paneId: string;
       readonly server: string;
       readonly session?: never;
+    }
+  | {
+      readonly mux: "herdr-core";
+      readonly paneId: string;
+      readonly server: string;
+      readonly session?: never;
     };
 export type MuxLaunchContext =
   | (MuxTarget & { readonly kind: "attached" })
@@ -93,15 +105,18 @@ export function validateMuxLaunchContext(
           isTmuxSocketLabel(context.socketName))
       : context.mux === "wezterm"
         ? /^\d+$/.test(context.paneId) && isMuxSocketPath(context.server)
-        : context.mux === "rex"
-          ? isRexBlockId(context.paneId) &&
-            isRexSessionId(context.session) &&
-            isRexServerAddress(context.server)
-          : context.mux === "zellij"
-            ? /^\d+$/.test(context.paneId) &&
-              isZellijSessionName(context.session)
-            : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
-              isMuxSocketPath(context.session);
+        : context.mux === "herdr-core"
+          ? isHerdrCoreTerminalId(context.paneId) &&
+            isMuxSocketPath(context.server)
+          : context.mux === "rex"
+            ? isRexBlockId(context.paneId) &&
+              isRexSessionId(context.session) &&
+              isRexServerAddress(context.server)
+            : context.mux === "zellij"
+              ? /^\d+$/.test(context.paneId) &&
+                isZellijSessionName(context.session)
+              : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
+                isMuxSocketPath(context.session);
   if (!valid) throw new Error("Invalid multiplexer launch context");
 }
 const REX_UUID_PATTERN =
@@ -226,6 +241,11 @@ export const MUX_CAPABILITIES: Readonly<
     // server-bounded, and the reply carries its own `truncated` flag.
     boundedCapture: true,
     // Herdr has no generic transient content overlay in its public CLI.
+    nativeOverlay: false,
+  },
+  "herdr-core": {
+    structuredFocus: false,
+    boundedCapture: true,
     nativeOverlay: false,
   },
   rex: {
@@ -388,7 +408,7 @@ export interface Multiplexer {
    * @param session  The session returned by `createPane` (zellij needs it;
    *                 tmux ignores it).
    */
-  sendKeys(
+  sendKeys?(
     paneId: string,
     text: string,
     session?: string,
@@ -403,7 +423,7 @@ export interface Multiplexer {
    * @param session  The session returned by `createPane` (zellij needs it;
    *                 tmux ignores it).
    */
-  sendEnter(paneId: string, session?: string, server?: string): void;
+  sendEnter?(paneId: string, session?: string, server?: string): void;
 
   /**
    * Kill the pane. MUST be best-effort: no throw on already-dead panes.
@@ -462,6 +482,13 @@ export interface Multiplexer {
     attachCommand: string;
     focusCommand: string;
   };
+  /** For backends that submit text and Enter atomically instead of separate calls. */
+  sendCommand?(
+    paneId: string,
+    text: string,
+    session?: string,
+    server?: string,
+  ): void;
 }
 
 /**
@@ -690,4 +717,24 @@ export function boundCaptureOutput(
     truncated = true;
   }
   return { output: bounded, truncated };
+}
+export function isHerdrCoreTerminalId(value: unknown): value is string {
+  return typeof value === "string" && /^t[0-9a-z]{1,32}$/.test(value);
+}
+
+export function submitMuxCommand(
+  mux: Multiplexer,
+  paneId: string,
+  text: string,
+  session?: string,
+  ...server: [] | [string]
+): void {
+  if (mux.sendCommand) {
+    mux.sendCommand(paneId, text, session, ...server);
+    return;
+  }
+  if (!mux.sendKeys || !mux.sendEnter)
+    throw new Error(`Mux ${mux.name} does not support command input`);
+  mux.sendKeys(paneId, text, session, ...server);
+  mux.sendEnter(paneId, session, ...server);
 }

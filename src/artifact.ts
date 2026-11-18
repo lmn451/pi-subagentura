@@ -41,6 +41,7 @@ import {
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
+  isHerdrCoreTerminalId,
 } from "./multiplexer-contracts";
 import { asStringIdentifier, type EventId } from "./identifier-types";
 import {
@@ -1833,6 +1834,15 @@ function normalizePersistedMuxIdentity(
       if (server !== undefined) identity.muxServer = server;
       return identity;
     }
+    case "herdr-core":
+      if (!isHerdrCoreTerminalId(paneId) || !isMuxSocketPath(raw.muxServer))
+        return null;
+      return {
+        ...optional,
+        mux: "herdr-core",
+        paneId,
+        muxServer: raw.muxServer,
+      };
     case "zellij":
     case "herdr":
     case "wezterm": {
@@ -2138,13 +2148,15 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "zellij" ||
         rawEntryTelemetry?.mux === "herdr" ||
         rawEntryTelemetry?.mux === "rex" ||
-        rawEntryTelemetry?.mux === "wezterm"
+        rawEntryTelemetry?.mux === "wezterm" ||
+        rawEntryTelemetry?.mux === "herdr-core"
           ? rawEntryTelemetry.mux
           : entry.mux === "tmux" ||
               entry.mux === "zellij" ||
               entry.mux === "herdr" ||
               entry.mux === "rex" ||
-              entry.mux === "wezterm"
+              entry.mux === "wezterm" ||
+              entry.mux === "herdr-core"
             ? entry.mux
             : "none";
       const entryTelemetry: PersistedInteractiveTelemetry | undefined =

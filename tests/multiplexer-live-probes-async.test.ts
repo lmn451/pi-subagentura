@@ -8,6 +8,8 @@ import type {
   ProcessContext,
   ProcessIdentity,
 } from "../src/multiplexer-process-context";
+import { statSync } from "node:fs";
+vi.mock("node:fs", () => ({ statSync: vi.fn() }));
 
 const { exec, sync } = vi.hoisted(() => ({
   exec: vi.fn<
@@ -67,6 +69,8 @@ function output(mux: LiveMuxTarget["mux"]): string {
       return JSON.stringify({ child: { pid: 90 } });
     case "zellij":
       return JSON.stringify([{ id: 4, is_plugin: false, exited: false }]);
+    case "herdr-core":
+      return JSON.stringify({ address: "t4", state: "live", pid: 90 });
     case "wezterm":
       return JSON.stringify([{ pane_id: 4, tty_name: "/dev/pts/1" }]);
   }
@@ -371,4 +375,35 @@ describe("asynchronous read-only live mux ownership probes", () => {
       },
     );
   });
+});
+
+it("proves Herdr Core ownership using its exact socket and root PID", async () => {
+  vi.mocked(statSync).mockReturnValue({ isSocket: () => true } as ReturnType<
+    typeof statSync
+  >);
+  const target = { mux: "herdr-core", paneId: "t4", server: socket } as const;
+  respond(output(target.mux));
+  await expect(
+    probeLiveMuxTargetAsync(target, context(), {
+      HC_SOCKET: "/tmp/wrong.sock",
+    }),
+  ).resolves.toEqual({ kind: "match", target, distance: 0 });
+  expect(exec.mock.calls[0]?.slice(0, 2)).toEqual([
+    "hc",
+    ["get", "--json", "t4"],
+  ]);
+  expect(exec.mock.calls[0]?.[2].env).toMatchObject({
+    HC_SOCKET: socket,
+    HC_TERMINAL_SOCKET: socket,
+  });
+  respond(JSON.stringify({ address: "t4", state: "live", pid: 1234 }));
+  await expect(probeLiveMuxTargetAsync(target, context())).resolves.toEqual({
+    kind: "mismatch",
+  });
+  vi.mocked(statSync).mockReturnValue(undefined);
+  exec.mockClear();
+  await expect(probeLiveMuxTargetAsync(target, context())).resolves.toEqual({
+    kind: "unknown",
+  });
+  expect(exec).not.toHaveBeenCalled();
 });

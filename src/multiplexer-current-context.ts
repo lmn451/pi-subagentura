@@ -6,6 +6,7 @@ import {
   validateMuxLaunchContext,
   type MuxTarget,
   isZellijSessionName,
+  isHerdrCoreTerminalId,
 } from "./multiplexer-contracts";
 import {
   probeLiveMuxTarget,
@@ -100,6 +101,19 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
         paneId: env.REX_BLOCK,
         session: env.REX_SESSION,
         server: env.REX_SERVER,
+      });
+    }
+  }
+  if (env.HC_TERMINAL_ID !== undefined) {
+    names.push("Herdr Core");
+    if (
+      isHerdrCoreTerminalId(env.HC_TERMINAL_ID) &&
+      isMuxSocketPath(env.HC_TERMINAL_SOCKET)
+    ) {
+      targets.push({
+        mux: "herdr-core",
+        paneId: env.HC_TERMINAL_ID,
+        server: env.HC_TERMINAL_SOCKET,
       });
     }
   }

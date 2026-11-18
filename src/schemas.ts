@@ -206,6 +206,7 @@ const InteractiveSpawnFields = Type.Object({
         Type.Literal("herdr"),
         Type.Literal("rex"),
         Type.Literal("wezterm"),
+        Type.Literal("herdr-core"),
       ],
       {
         description:

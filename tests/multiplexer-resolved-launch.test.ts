@@ -267,7 +267,7 @@ it.each(["/verified # socket ", "/verified socket"])(
     expect(created.server).toBe(server);
     __resetMuxInstances();
     vi.stubEnv("PI_SUBAGENTURA_TMUX_SOCKET", "stale");
-    getMux({ preference: "tmux" }).sendKeys(
+    getMux({ preference: "tmux" }).sendKeys!(
       created.paneId,
       "followup",
       created.session,

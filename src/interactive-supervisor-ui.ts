@@ -924,6 +924,8 @@ function focusReturnHint(state: InteractiveSubagentState): string {
   if (state.mux === "herdr") {
     return "Herdr native pane focus; use the terminal attach command above";
   }
+  if (state.mux === "herdr-core")
+    return "Ctrl+\\ to detach from the Herdr Core terminal";
   if (state.mux === "rex") {
     return "Rex block focus; use the terminal focus command above";
   }

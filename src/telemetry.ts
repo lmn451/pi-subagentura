@@ -33,6 +33,7 @@ export type TelemetryMux =
   | "zellij"
   | "herdr"
   | "rex"
+  | "herdr-core"
   | "wezterm";
 export type TelemetryTrafficOrigin =
   | "usage"
@@ -47,6 +48,7 @@ export type TelemetryLaunchOutcome =
   | "cancelled";
 export type TelemetryRequestedExecution = TelemetryExecution;
 export type TelemetryRequestedMux =
+  | "herdr-core"
   | "wezterm"
   | "none"
   | "auto"
@@ -668,6 +670,7 @@ const TELEMETRY_MUXES: readonly TelemetrySpawnFailureMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "herdr-core",
   "wezterm",
 ];
 const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
@@ -677,6 +680,7 @@ const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "herdr-core",
   "wezterm",
 ];
 const TELEMETRY_INVOCATION_SOURCES: readonly TelemetryInvocationSource[] = [
@@ -1384,5 +1388,6 @@ export type TelemetryParentMux =
   | "zellij"
   | "herdr"
   | "rex"
+  | "herdr-core"
   | "wezterm"
   | "unknown";
