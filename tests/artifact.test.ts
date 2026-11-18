@@ -1194,6 +1194,25 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
 
+  it("round-trips herdr-core identity and rejects missing server metadata", () => {
+    const state: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      paneId: "t1b",
+      mux: "herdr-core",
+      muxServer: "/tmp/hc.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { abc12345: state },
+    });
+    expect(loadInteractiveStates(root)?.states.abc12345).toEqual(state);
+    const file = JSON.parse(readFileSync(stateFilePath(root), "utf8"));
+    delete file.states.abc12345.muxServer;
+    writeFileSync(stateFilePath(root), JSON.stringify(file));
+    expect(loadInteractiveStates(root)).toBeNull();
+  });
+
   it.each([
     "/tmp/tmux/default",
     "/tmp/tmux work/#socket",

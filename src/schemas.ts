@@ -180,7 +180,7 @@ const InteractiveSpawnFields = Type.Object({
   background: Type.Optional(
     Type.Boolean({
       description:
-        "Spawn the sub-agent in a detached named window (hidden from your mux layout) instead of a visible horizontal split. Default true. Pass background: false for a side-by-side split you can watch in real time.",
+        "Spawn the sub-agent in a detached named window (hidden from your mux layout) instead of a visible horizontal split. Default true. Pass background: false for a side-by-side split you can watch in real time. herdr-core always creates a persistent terminal; use its attach command to view it.",
     }),
   ),
   completionPolicy: Type.Optional(
@@ -204,12 +204,13 @@ const InteractiveSpawnFields = Type.Object({
         Type.Literal("tmux"),
         Type.Literal("zellij"),
         Type.Literal("herdr"),
+        Type.Literal("herdr-core"),
         Type.Literal("rex"),
         Type.Literal("wezterm"),
       ],
       {
         description:
-          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. An explicit value forces that backend.',
+          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. herdr-core requires HC_TERMINAL_ID and HC_TERMINAL_SOCKET from a local terminal. An explicit value forces that backend.',
       },
     ),
   ),

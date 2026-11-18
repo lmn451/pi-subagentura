@@ -4,12 +4,14 @@ import {
   isRexSessionId,
   isZellijSessionName,
   isTmuxSocketLabel,
+  isHerdrCoreTerminalId,
   type MuxName,
 } from "./multiplexer-contracts";
 import {
   normalizeProcessTty,
   type ProcessContext,
 } from "./multiplexer-process-context";
+import { requestHerdrCore, requestHerdrCoreSync } from "./herdr-core-rpc.mjs";
 
 export interface LiveMuxTarget {
   readonly mux: MuxName;
@@ -313,7 +315,9 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : target.mux === "tmux" || target.mux === "wezterm"
+        : target.mux === "tmux" ||
+            target.mux === "wezterm" ||
+            target.mux === "herdr-core"
           ? socket(target.server)
           : selector(target.server)))
   )
@@ -341,6 +345,17 @@ export function probeLiveMuxTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): LiveMuxProbe {
   try {
+    if (target.mux === "herdr-core") {
+      if (!isHerdrCoreTerminalId(target.paneId) || !socket(target.server))
+        return UNKNOWN;
+      return herdrCoreOwnership(
+        target,
+        context,
+        requestHerdrCoreSync(target.server, "terminal.get", {
+          terminal: target.paneId,
+        }),
+      );
+    }
     const plan = prepareProbe(target, context, env);
     return "command" in plan ? plan.parse(query(plan)) : plan;
   } catch {
@@ -356,10 +371,33 @@ export async function probeLiveMuxTargetAsync(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LiveMuxProbe> {
   try {
+    if (target.mux === "herdr-core") {
+      if (!isHerdrCoreTerminalId(target.paneId) || !socket(target.server))
+        return UNKNOWN;
+      return herdrCoreOwnership(
+        target,
+        context,
+        await requestHerdrCore(target.server, "terminal.get", {
+          terminal: target.paneId,
+        }),
+      );
+    }
     const plan = prepareProbe(target, context, env);
     return "command" in plan ? plan.parse(await queryAsync(plan)) : plan;
   } catch {
     // Advisory probes cannot surface process errors or child-controlled output.
     return UNKNOWN;
   }
+}
+
+function herdrCoreOwnership(
+  target: LiveMuxTarget,
+  context: ProcessContext,
+  value: Record<string, unknown>,
+): LiveMuxProbe {
+  if (value.address !== target.paneId || value.state !== "live")
+    return MISMATCH;
+  // The terminal root, rather than whichever unrelated process is foreground,
+  // proves this Pi's ancestry. Lost or recovering terminals have no root PID.
+  return pid(value.pid) ? matchPids(target, context, [value.pid]) : UNKNOWN;
 }

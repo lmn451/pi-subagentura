@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Support `herdr-core` persistent terminals as a separate interactive backend,
+  with verified automatic ownership, durable socket identity, literal input,
+  bounded capture, cancellation, and terminal attach commands.
+
 ### Fixed
 
 - Preserve Node-supported platform signal names and aliases when normalizing

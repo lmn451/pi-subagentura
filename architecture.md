@@ -1206,6 +1206,11 @@ The following table inventories the tracked runtime source modules and companion
 
 ---
 
+Herdr Core additionally uses `src/multiplexer-herdr-core.ts` for socket-pinned
+terminal operations and `src/herdr-core-rpc.mjs` with `src/herdr-core-rpc.d.mts`
+for bounded generation-1 RPC and framed input. The registry and live ownership
+probes import this transport; the worker TypeScript project checks its JavaScript.
+
 The inventory also includes these worker protocol companions:
 
 | #   | Source                   | Responsibility                                                       | Direct project dependencies                             |

@@ -464,6 +464,29 @@ describe("interactive lineage node cap", () => {
     expect(projection.roots[0]?.manifest).toBe(herdr);
   });
 
+  it("validates herdr-core socket identity and keeps its lineage actionable", async () => {
+    const core = validateLineageManifest(
+      manifest("hc-agent", {
+        pane: {
+          backend: "herdr-core",
+          paneId: "t1b",
+          muxServer: "/tmp/hc.sock",
+        },
+      }),
+    );
+    const projection = await projectManifests([core], rootHash, () => false, {
+      maxNodes: 1,
+    });
+    expect(projection.roots[0]?.state).toBe("actionable");
+    expect(() =>
+      validateLineageManifest(
+        manifest("hc-incomplete", {
+          pane: { backend: "herdr-core", paneId: "t1b" },
+        }),
+      ),
+    ).toThrow(/herdr-core terminal identity/);
+  });
+
   it.each(["/tmp/tmux work/#socket", "/tmp/tmux work/socket "])(
     "preserves literal tmux socket %j in lineage",
     (muxServer) => {

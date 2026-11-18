@@ -383,6 +383,7 @@ export function tmuxSetupHint(): string {
     "  tmux new -A -s pi 'pi'\n" +
     "  zellij --session pi\n" +
     "  herdr  (then start pi in a Herdr pane)\n" +
+    "  herdr-core run pi  (persistent terminals; attach to view)\n" +
     "  WezTerm requires a live WEZTERM_PANE/WEZTERM_UNIX_SOCKET context.\n" +
     "  Rex requires a live REX_SESSION/REX_BLOCK/REX_SERVER context."
   );
@@ -1411,6 +1412,7 @@ export function getLineagePaneLiveness(
     backend !== "tmux" &&
     backend !== "zellij" &&
     backend !== "herdr" &&
+    backend !== "herdr-core" &&
     backend !== "rex" &&
     backend !== "wezterm"
   ) {

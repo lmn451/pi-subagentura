@@ -40,6 +40,27 @@ describe("current mux ownership", () => {
     probe.mockReturnValue({ kind: "unknown" });
   });
 
+  it("uses Core's injected terminal socket without treating a standalone CLI override as host authority", () => {
+    probe.mockImplementation((target) => ({
+      kind: "match",
+      target,
+      distance: 0,
+    }));
+    expect(
+      resolveCurrentMuxContext({
+        HC_TERMINAL_ID: "t1",
+        HC_TERMINAL_SOCKET: "/tmp/own.sock",
+        HC_SOCKET: "/tmp/other.sock",
+      }),
+    ).toEqual({
+      kind: "ready",
+      target: { mux: "herdr-core", paneId: "t1", server: "/tmp/own.sock" },
+    });
+    expect(resolveCurrentMuxContext({ HC_SOCKET: "/tmp/other.sock" })).toEqual({
+      kind: "absent",
+    });
+  });
+
   it.each(["/tmp/mux sockets #1/live.sock", "/tmp/live.sock "])(
     "preserves exact actual tmux socket %s despite a contradictory named socket",
     (server) => {
@@ -92,6 +113,34 @@ describe("current mux ownership", () => {
     expect(resolveCurrentMuxContext({ WEZTERM_PANE: "7" }).kind).toBe(
       "unavailable",
     );
+  });
+
+  it("selects the nearest verified herdr-core owner and fails closed on stale or incomplete context", () => {
+    probe.mockImplementation((target) => ({
+      kind: "match",
+      target,
+      distance: target.mux === "herdr-core" ? 0 : 5,
+    }));
+    expect(
+      resolveCurrentMuxContext({
+        ...nested,
+        HC_TERMINAL_ID: "t1b",
+        HC_SOCKET: "/tmp/hc.sock",
+      }),
+    ).toEqual({
+      kind: "ready",
+      target: { mux: "herdr-core", paneId: "t1b", server: "/tmp/hc.sock" },
+    });
+    expect(resolveCurrentMuxContext({ HC_TERMINAL_ID: "t1b" }).kind).toBe(
+      "unavailable",
+    );
+    probe.mockReturnValue({ kind: "mismatch" });
+    expect(
+      resolveCurrentMuxContext({
+        HC_TERMINAL_ID: "t1b",
+        HC_SOCKET: "/tmp/hc.sock",
+      }).kind,
+    ).toBe("unavailable");
   });
 
   it.each(["tmux", "zellij", "herdr", "rex"] as const)(

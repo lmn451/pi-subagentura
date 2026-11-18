@@ -16,6 +16,7 @@ const childMuxes: readonly TelemetryMux[] = [
   "tmux",
   "zellij",
   "herdr",
+  "herdr-core",
   "rex",
 ];
 

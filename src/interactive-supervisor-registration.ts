@@ -243,6 +243,7 @@ function muxNameForManifest(manifest: LineageManifest): MuxName | undefined {
   if (manifest.pane.backend === "tmux") return "tmux";
   if (manifest.pane.backend === "zellij") return "zellij";
   if (manifest.pane.backend === "herdr") return "herdr";
+  if (manifest.pane.backend === "herdr-core") return "herdr-core";
   if (manifest.pane.backend === "rex") return "rex";
   if (manifest.pane.backend === "wezterm") return "wezterm";
   return undefined;
@@ -357,6 +358,7 @@ async function loadSupervisorProjection(
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij" &&
       manifest.pane.backend !== "herdr" &&
+      manifest.pane.backend !== "herdr-core" &&
       manifest.pane.backend !== "rex" &&
       manifest.pane.backend !== "wezterm"
     ) {

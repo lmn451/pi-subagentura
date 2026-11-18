@@ -9,7 +9,17 @@
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij" | "herdr" | "rex" | "wezterm";
+export type MuxName =
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "herdr-core"
+  | "rex"
+  | "wezterm";
+
+export function isHerdrCoreTerminalId(value: unknown): value is string {
+  return typeof value === "string" && /^t[0-9a-z]{1,32}$/.test(value);
+}
 export function isTmuxSocketLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -53,6 +63,12 @@ export type MuxTarget =
       readonly server: string;
     }
   | {
+      readonly mux: "herdr-core";
+      readonly paneId: string;
+      readonly server: string;
+      readonly session?: never;
+    }
+  | {
       readonly mux: "wezterm";
       readonly paneId: string;
       readonly server: string;
@@ -91,17 +107,20 @@ export function validateMuxLaunchContext(
         isMuxSocketPath(context.server) &&
         (context.socketName === undefined ||
           isTmuxSocketLabel(context.socketName))
-      : context.mux === "wezterm"
-        ? /^\d+$/.test(context.paneId) && isMuxSocketPath(context.server)
-        : context.mux === "rex"
-          ? isRexBlockId(context.paneId) &&
-            isRexSessionId(context.session) &&
-            isRexServerAddress(context.server)
-          : context.mux === "zellij"
-            ? /^\d+$/.test(context.paneId) &&
-              isZellijSessionName(context.session)
-            : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
-              isMuxSocketPath(context.session);
+      : context.mux === "herdr-core"
+        ? isHerdrCoreTerminalId(context.paneId) &&
+          isMuxSocketPath(context.server)
+        : context.mux === "wezterm"
+          ? /^\d+$/.test(context.paneId) && isMuxSocketPath(context.server)
+          : context.mux === "rex"
+            ? isRexBlockId(context.paneId) &&
+              isRexSessionId(context.session) &&
+              isRexServerAddress(context.server)
+            : context.mux === "zellij"
+              ? /^\d+$/.test(context.paneId) &&
+                isZellijSessionName(context.session)
+              : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
+                isMuxSocketPath(context.session);
   if (!valid) throw new Error("Invalid multiplexer launch context");
 }
 const REX_UUID_PATTERN =
@@ -232,6 +251,12 @@ export const MUX_CAPABILITIES: Readonly<
     // `rex focus <block-id> -s <session-id>` targets stable public IDs.
     structuredFocus: true,
     // The CLI has no capture limit; the backend enforces a maxBuffer ceiling.
+    boundedCapture: true,
+    nativeOverlay: false,
+  },
+  "herdr-core": {
+    // Core owns persistent terminals; arranging/focusing them belongs to a UI.
+    structuredFocus: false,
     boundedCapture: true,
     nativeOverlay: false,
   },

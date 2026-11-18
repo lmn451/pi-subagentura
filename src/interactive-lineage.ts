@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import {
+  isHerdrCoreTerminalId,
   isRexBlockId,
   isRexServerAddress,
   isMuxSocketPath,
@@ -783,6 +784,7 @@ export async function projectManifests(
       manifest.pane.backend !== "tmux" &&
       manifest.pane.backend !== "zellij" &&
       manifest.pane.backend !== "herdr" &&
+      manifest.pane.backend !== "herdr-core" &&
       manifest.pane.backend !== "rex" &&
       manifest.pane.backend !== "wezterm"
     ) {
@@ -1350,6 +1352,12 @@ function validatePaneRef(
     (!/^\d+$/.test(paneId) || !isMuxSocketPath(muxServer.muxServer))
   ) {
     throw new Error("WezTerm pane identity is incomplete or malformed");
+  }
+  if (
+    backend === "herdr-core" &&
+    (!isHerdrCoreTerminalId(paneId) || !isMuxSocketPath(muxServer.muxServer))
+  ) {
+    throw new Error("herdr-core terminal identity is incomplete or malformed");
   }
   if (
     backend === "rex" &&

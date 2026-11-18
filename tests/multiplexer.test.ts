@@ -20,6 +20,9 @@ const muxEnvironmentKeys = [
   "HERDR_ENV",
   "HERDR_SOCKET_PATH",
   "HERDR_PANE_ID",
+  "HC_TERMINAL_ID",
+  "HC_TERMINAL_SOCKET",
+  "HC_SOCKET",
   "REX_SESSION",
   "REX_BLOCK",
   "REX_SERVER",
@@ -758,6 +761,7 @@ describe("MUX_CAPABILITIES", () => {
       );
     expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
       "herdr",
+      "herdr-core",
       "rex",
       "tmux",
       "wezterm",

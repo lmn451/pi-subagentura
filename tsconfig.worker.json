@@ -4,6 +4,10 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["src/workflow-worker-thread.mjs", "src/workflow-rpc.mjs"],
+  "include": [
+    "src/workflow-worker-thread.mjs",
+    "src/workflow-rpc.mjs",
+    "src/herdr-core-rpc.mjs"
+  ],
   "exclude": ["tests"]
 }

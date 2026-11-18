@@ -709,7 +709,7 @@ paths. The pane is the live view; durable artifacts are the source of truth.
 Starts a separate interactive `pi` process in a tmux, Zellij, Herdr, or WezTerm pane, or a Rex block from a verified current Rex context, and returns immediately with:
 
 - sub-agent id
-- pane/block id and mux backend (tmux, zellij, herdr, rex, or wezterm)
+- pane/block id and mux backend (tmux, zellij, herdr, herdr-core, rex, or wezterm)
 - `attach` command (works from outside the mux session)
 - `focus` command (works from inside the same mux session)
 - child Pi session file path
@@ -727,7 +727,7 @@ Parameters:
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
-- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"herdr-core"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits. Herdr Core requires `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` from `herdr-core run pi`; it creates persistent terminals for either background setting. See [Herdr Core support](docs/herdr-core-multiplexer.md) for attach commands and capability limits.
 
   Attached Zellij ownership limits are documented in [Rex multiplexer support](docs/rex-multiplexer.md).
 

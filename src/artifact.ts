@@ -37,6 +37,7 @@ import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import {
+  isHerdrCoreTerminalId,
   isMuxSocketPath,
   isRexBlockId,
   isRexServerAddress,
@@ -1851,6 +1852,10 @@ function normalizePersistedMuxIdentity(
         identity.muxServer = raw.muxServer as string;
       return identity;
     }
+    case "herdr-core":
+      if (!isHerdrCoreTerminalId(paneId) || !isMuxSocketPath(raw.muxServer))
+        return null;
+      return { mux: "herdr-core", paneId, muxServer: raw.muxServer };
     case "rex":
       if (
         !isRexBlockId(paneId) ||
@@ -2137,12 +2142,14 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
         rawEntryTelemetry?.mux === "herdr" ||
+        rawEntryTelemetry?.mux === "herdr-core" ||
         rawEntryTelemetry?.mux === "rex" ||
         rawEntryTelemetry?.mux === "wezterm"
           ? rawEntryTelemetry.mux
           : entry.mux === "tmux" ||
               entry.mux === "zellij" ||
               entry.mux === "herdr" ||
+              entry.mux === "herdr-core" ||
               entry.mux === "rex" ||
               entry.mux === "wezterm"
             ? entry.mux
