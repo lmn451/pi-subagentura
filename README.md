@@ -299,13 +299,14 @@ Enable the separate prompt-directed thin router with:
 pi --orchestratorv2
 ```
 
-This flag appends `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`; it does not select or
-verify the parent model and does not enforce a host-level tool allowlist. Select
-the intended lightweight model separately, and do not enable
-`--orchestrator` and `--orchestratorv2` together. Normal workflow and in-process
-tools remain registered for compatibility. When no verified host-managed
-surface is selected, Orchestratorv2 directs delegation through native attachable
-specialists using its parent-session authority ledger; the project-local routing
+This flag appends the host-neutral policy in `ORCHESTRATOR_V2_SYSTEM_PROMPT.md`,
+an activation-time execution-context summary, and
+[native guidance](ORCHESTRATOR_V2_NATIVE_GUIDANCE.md) scoped to native
+interactive work. It does not select or verify the parent model or enforce a
+tool allowlist. Select the intended model separately. Do not enable
+`--orchestrator` and `--orchestratorv2` together. Workflow and in-process tools
+remain registered for compatibility, but V2 policy does not use them. Native
+routing uses the parent-session authority ledger; the project-local routing
 cache is only an untrusted lookup aid.
 
 Add `--split` to opt into automatic decomposition of broad requests:
@@ -354,6 +355,12 @@ uncertain, report that and ask rather than silently switching. See
 [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) and
 [the canonical Rex guide](REX_INTERACTIVE_SYSTEM_PROMPT.md), alongside
 [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
+
+The V2 summary reports host-guide eligibility and native mux markers without
+live probes. It does not verify an alternate host, select a default, or prove
+a native backend is available. Native mux verification stays at launch. If
+no applicable guide or live verification is available for an explicit target,
+report that gap and ask instead of launching on another surface.
 
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).

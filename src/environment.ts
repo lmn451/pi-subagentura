@@ -7,11 +7,26 @@ import type {
 
 const MAX_ENV_FIELD_LENGTH = 4_096;
 
+export type GuidanceHostStatus =
+  | "eligible"
+  | "ambiguous"
+  | "unsupported"
+  | "unknown";
+export type ParentMuxObservationStatus =
+  | "candidate"
+  | "ambiguous"
+  | "unsupported"
+  | "unknown";
+
 export interface EnvironmentSnapshot {
   readonly guidanceHost: "orca" | "agterm" | "rex" | "unknown";
+  /** Prompt eligibility only; never proof of current host ownership. */
+  readonly guidanceHostStatus: GuidanceHostStatus;
   readonly telemetryHost: TelemetrySessionHost;
   readonly terminalProgram: TelemetryTerminalProgram;
   readonly parentMux: TelemetryParentMux;
+  /** Marker observation only; never a native backend selection. */
+  readonly parentMuxStatus: ParentMuxObservationStatus;
 }
 
 function boundedField(value: unknown): string | undefined {
@@ -99,6 +114,21 @@ export function detectEnvironment(
         : hasRexLocationHints
           ? "rex"
           : "unknown";
+  const hostHintPresent = Boolean(
+    env.ORCA_RUNTIME_SOURCE_ID !== undefined ||
+    env.ORCA_RUNTIME_SOURCE_INCARNATION !== undefined ||
+    env.ORCA_RUNTIME_SOURCE_PROFILE_PATH !== undefined ||
+    env.AGTERM_ENABLED !== undefined ||
+    env.REX_SESSION !== undefined ||
+    env.REX_BLOCK !== undefined,
+  );
+  const guidanceHostStatus: GuidanceHostStatus = guidanceConflict
+    ? "ambiguous"
+    : guidanceHost !== "unknown"
+      ? "eligible"
+      : hostHintPresent
+        ? "unsupported"
+        : "unknown";
   const telemetryHost: TelemetrySessionHost =
     hasOrcaOrigin && hasAgtermMarker
       ? "unknown"
@@ -108,6 +138,23 @@ export function detectEnvironment(
           ? "agterm"
           : "unknown";
 
+  const isRexTerminalHint =
+    typeof env.TERM_PROGRAM === "string" &&
+    env.TERM_PROGRAM.trim().toLowerCase() === "rex";
+  const muxHintFamilies = [
+    env.TMUX !== undefined || env.TMUX_PANE !== undefined,
+    env.ZELLIJ !== undefined ||
+      env.ZELLIJ_SESSION_NAME !== undefined ||
+      env.ZELLIJ_PANE_ID !== undefined,
+    env.HERDR_ENV !== undefined ||
+      env.HERDR_PANE_ID !== undefined ||
+      env.HERDR_SOCKET_PATH !== undefined,
+    env.WEZTERM_PANE !== undefined || env.WEZTERM_UNIX_SOCKET !== undefined,
+    env.REX_SESSION !== undefined ||
+      env.REX_BLOCK !== undefined ||
+      env.REX_SERVER !== undefined ||
+      isRexTerminalHint,
+  ].filter(Boolean).length;
   const muxCandidates: TelemetryParentMux[] = [];
   if (hasNativeMarker(env.TMUX)) muxCandidates.push("tmux");
   if (hasNativeMarker(env.ZELLIJ_SESSION_NAME)) muxCandidates.push("zellij");
@@ -127,11 +174,45 @@ export function detectEnvironment(
   const parentMux = sanitizeTelemetryParentMux(
     muxCandidates.length === 1 ? muxCandidates[0] : "unknown",
   );
+  const parentMuxStatus: ParentMuxObservationStatus =
+    muxHintFamilies > 1 || muxCandidates.length > 1
+      ? "ambiguous"
+      : muxHintFamilies === 1
+        ? muxCandidates.length === 1
+          ? "candidate"
+          : "unsupported"
+        : "unknown";
 
   return Object.freeze({
     guidanceHost,
+    guidanceHostStatus,
     telemetryHost,
     terminalProgram: sanitizeTelemetryTerminalProgram(env.TERM_PROGRAM),
     parentMux,
+    parentMuxStatus,
   });
+}
+
+export function formatV2ExecutionContextGuidance(
+  environment: EnvironmentSnapshot,
+): string {
+  const hostStatus =
+    environment.guidanceHostStatus === "eligible"
+      ? `eligible (${environment.guidanceHost})`
+      : environment.guidanceHostStatus;
+  const muxStatus =
+    environment.parentMuxStatus === "candidate"
+      ? `candidate (${environment.parentMux})`
+      : environment.parentMuxStatus;
+
+  return [
+    "## Runtime execution context (environment observations only)",
+    "",
+    `- Host-guide eligibility: ${hostStatus}.`,
+    `- Native mux observation: ${muxStatus}.`,
+    "- These activation-time observations do not prove current host or mux ownership, user intent, target identity, or permission. Unsupported or marker-only evidence is not verification; ambiguous evidence does not select an adapter.",
+    "- Unsupported or incomplete evidence does not prove that a host or backend is absent. This snapshot performs no live checks and does not select a default. Apply the guidance for the requested or verified default surface only.",
+    "- The native interactive tool is registered, but this snapshot does not prove backend availability or launch success. Its runtime resolver owns mux selection and validation. An explicit user-selected target takes precedence, and an explicit native mux preference is passed through to the resolver. Do not silently switch surfaces or backends; report unsupported or unverified requests instead of falling back to a different target.",
+    "- Host-guide eligibility describes the current session, not an alternate destination. If you have no applicable guide or means to verify the requested target, report the gap before selecting a different surface.",
+  ].join("\n");
 }

@@ -240,81 +240,54 @@ describe("extension registration", () => {
     }
     const result = await beforeAgentStart({ systemPrompt: "base prompt" }, {});
 
-    expect(result.systemPrompt).toContain(
-      "# Orchestratorv2 Thin Router System Prompt",
+    const prompt: string = result.systemPrompt;
+    const sections = prompt.split(
+      "# Orchestratorv2 Native Interactive Guidance",
     );
-    expect(result.systemPrompt).not.toContain("# Orchestrator System Prompt");
-    expect(result.systemPrompt).toContain("send_interactive_subagent_message");
-    expect(result.systemPrompt).toContain("includeContext");
-    expect(result.systemPrompt).toContain("not a security boundary");
-    expect(result.systemPrompt).toContain(
-      "An exact or continuation match is not routable",
-    );
-    expect(result.systemPrompt).toContain(
-      "Do not ask the user for permission merely to create that specialist",
-    );
-    expect(result.systemPrompt).not.toContain(
-      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
-    );
-    expect(result.systemPrompt).not.toContain(
-      "exactly one interactive child for each part",
-    );
-    expect(result.systemPrompt).not.toContain(
-      "Do not ask the user to design the agent tree",
-    );
-    expect(result.systemPrompt).not.toContain(
-      "Synthesize the direct children's verified results into one user-facing answer",
-    );
-    expect(result.systemPrompt).toContain(
-      "may autonomously create nested children",
-    );
-    expect(result.systemPrompt).toContain(
-      "owned by their immediate parent session",
-    );
-    expect(result.systemPrompt).toContain(
+    expect(sections).toHaveLength(2);
+    const [basePolicy, nativeGuide] = sections as [string, string];
+    expect(basePolicy.startsWith("base prompt\n\n")).toBe(true);
+    expect(basePolicy).toContain("# Orchestratorv2 Thin Router System Prompt");
+    expect(prompt).not.toContain("# Orchestrator System Prompt");
+    expect(prompt).not.toContain("# Orchestratorv2 Split Policy");
+    for (const policy of [
+      "Honor an explicit target selected by the user",
+      "never silently substitute another surface",
+      "must not use workflows or in-process sub-agents",
+      "Do not ask permission merely to create that specialist",
+      "Its immediate coordinator owns that work",
+      "Human input and steering take priority",
+      "the requested relationship, action, deliverable, and access",
+      "explicit request for a new specialist or new thread",
+      "prompt-level interpretation of free-text responsibility descriptions",
+      "retrieve the actual report for every completed scout or planner",
+      "Compare the brief against every retrieved report",
+      "acceptance criteria and expected checks",
+      "authorization to inspect the identified issue and report findings only",
+      "report the gap before selecting a different surface",
+    ]) {
+      expect(basePolicy).toContain(policy);
+    }
+    for (const policy of [
+      "only when the effective execution context selects native",
+      "send_interactive_subagent_message",
+      "application-level authority boundary",
+      "`stale: false`, `actionable: true`, a known current runtime, alive liveness",
       "successful spawn or confirmed update writes the bounded project-local routing",
-    );
-    expect(result.systemPrompt).toContain(
       'reason: "routing_metadata_untrusted"',
-    );
-    expect(result.systemPrompt).toContain(
-      "Human prompts and steering take priority",
-    );
-    expect(result.systemPrompt).toContain(
-      "never auto-delegate, replace, or respawn it",
-    );
-    expect(result.systemPrompt).toContain(
-      "requested relationship, action, deliverable, and required access",
-    );
-    expect(result.systemPrompt).toContain(
-      "explicitly asks for a new specialist or new thread",
-    );
-    expect(result.systemPrompt).toContain(
+      "Never auto-delegate, replace, or respawn an uncertain owner",
       "sourceId` as the child ID and the exact `turnId",
-    );
-    expect(result.systemPrompt).toContain(
-      "Nested children are owned by their immediate parent session",
-    );
-    expect(result.systemPrompt).toContain(
-      "prompt-only routing policy over free-text responsibility descriptions",
-    );
-    expect(result.systemPrompt).toContain(
-      "Retrieve every completed scout/planner report from this request before",
-    );
-    expect(result.systemPrompt).toContain(
-      "compare the handoff against every retrieved report",
-    );
-    expect(result.systemPrompt).toContain("acceptance");
-    expect(result.systemPrompt).toContain("expected tests/commands");
-    expect(result.systemPrompt).toContain("using `includeContext: false`");
-    expect(result.systemPrompt).toContain(
+      "The immediate parent owns those descendants",
+      "using `includeContext: false`",
       "Never rely on implicit sibling transcript visibility",
+    ]) {
+      expect(nativeGuide).toContain(policy);
+    }
+    expect(basePolicy).not.toContain("send_interactive_subagent_message");
+    expect(basePolicy).not.toContain("includeContext");
+    expect(basePolicy).toContain(
+      "do not inspect, edit, test, or otherwise perform repository work yourself",
     );
-    expect(result.systemPrompt).toContain(
-      "not to repeat broad scouting or planning",
-    );
-    expect(result.systemPrompt).toContain("inspect the named target");
-    expect(result.systemPrompt.startsWith("base prompt\n\n")).toBe(true);
   });
 
   it("appends automatic decomposition only with --orchestratorv2 --split", async () => {
@@ -441,66 +414,82 @@ describe("extension registration", () => {
         "resolve_orchestrator_route",
       );
       expect(result?.systemPrompt ?? "").not.toContain(
-        "## Optional routing advisor",
+        "\n## Optional routing advisor\n",
       );
       expect(fetch).not.toHaveBeenCalled();
     },
   );
 
-  it("delivers enabled advisor guidance and registers the tool without making a request", async () => {
-    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
-    const modelRegistry = nativeClassifierRegistry();
-    const fetch = vi.fn();
-    vi.stubGlobal("fetch", fetch);
-    const api = mockApi({
-      getFlag: vi.fn((name: string) => name === "orchestratorv2"),
-    });
+  it.each([undefined, "1"])(
+    "scopes the enabled advisor to native owner selection (Agterm marker: %s)",
+    async (agtermMarker) => {
+      vi.stubEnv("AGTERM_ENABLED", agtermMarker);
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+      const modelRegistry = nativeClassifierRegistry();
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = mockApi({
+        getFlag: vi.fn((name: string) => name === "orchestratorv2"),
+      });
 
-    registerExtension(api as any);
-    const beforeAgentStart = api.on.mock.calls.find(
-      ([event]: any[]) => event === "before_agent_start",
-    )?.[1];
-    // The emitted system prompt is the interface delivered to the parent.
-    // These assertions do not claim to test an LLM's interpretation of it.
-    const ctx = { modelRegistry };
-    const result = await beforeAgentStart({ systemPrompt: "base prompt" }, ctx);
-    for (const [event, handler] of api.on.mock.calls) {
-      if (event === "before_agent_start" && handler !== beforeAgentStart) {
-        await handler({ systemPrompt: "base prompt" }, ctx);
+      registerExtension(api as any);
+      const beforeAgentStart = api.on.mock.calls.find(
+        ([event]: any[]) => event === "before_agent_start",
+      )?.[1];
+      // The emitted system prompt is the interface delivered to the parent.
+      // These assertions do not claim to test an LLM's interpretation of it.
+      const ctx = { modelRegistry };
+      const result = await beforeAgentStart(
+        { systemPrompt: "base prompt" },
+        ctx,
+      );
+      for (const [event, handler] of api.on.mock.calls) {
+        if (event === "before_agent_start" && handler !== beforeAgentStart) {
+          await handler({ systemPrompt: "base prompt" }, ctx);
+        }
       }
-    }
 
-    const normalizedPrompt = result.systemPrompt.replace(/\s+/g, " ");
-    expect(getRegisteredToolNames(api)).toContain("resolve_orchestrator_route");
-    expect(normalizedPrompt).toContain("## Optional routing advisor");
-    expect(
-      normalizedPrompt.indexOf("When multiple current owners plausibly match"),
-    ).toBeLessThan(normalizedPrompt.indexOf("## Optional routing advisor"));
-    expect(normalizedPrompt).not.toContain(
-      "this section overrides the earlier instruction",
-    );
-    for (const policy of [
-      'On kind="match"',
-      'On kind="no_match" with reason="new_child_recommended"',
-      "creation is permitted under the existing policy",
-      "the recommendation alone neither mandates nor authorizes a spawn",
-      "On low_confidence or ambiguous, abstain",
-      "do not route to the suggested owner",
-      'On kind="error", or when the advisor is unavailable',
-      "current authoritative registry metadata",
-      "without a redundant approval prompt",
-      'On kind="cancelled", stop routing that request',
-      "Explicit child identity, explicit new-child instructions, and attach/focus",
-      "uncertainty only about which current owner fits is a routing question",
-    ]) {
-      expect(normalizedPrompt).toContain(policy);
-    }
-    expect(normalizedPrompt).toContain(
-      "send_interactive_subagent_message and send the original task",
-    );
-    expect(normalizedPrompt).toContain("requests bypass the advisor");
-    expect(fetch).not.toHaveBeenCalled();
-  });
+      const normalizedPrompt = result.systemPrompt.replace(/\s+/g, " ");
+      expect(getRegisteredToolNames(api)).toContain(
+        "resolve_orchestrator_route",
+      );
+      expect(result.systemPrompt).toContain("\n## Optional routing advisor\n");
+      expect(normalizedPrompt).toContain(
+        "Use this advisor only for native interactive owner selection. It does not apply to a selected host-managed surface.",
+      );
+      expect(
+        result.systemPrompt.indexOf(
+          "# Orchestratorv2 Native Interactive Guidance",
+        ),
+      ).toBeLessThan(
+        result.systemPrompt.indexOf("\n## Optional routing advisor\n"),
+      );
+      expect(normalizedPrompt).not.toContain(
+        "this section overrides the earlier instruction",
+      );
+      for (const policy of [
+        'On kind="match"',
+        'On kind="no_match" with reason="new_child_recommended"',
+        "creation is permitted under the existing policy",
+        "the recommendation alone neither mandates nor authorizes a spawn",
+        "On low_confidence or ambiguous, abstain",
+        "do not route to the suggested owner",
+        'On kind="error", or when the advisor is unavailable',
+        "current authoritative registry metadata",
+        "without a redundant approval prompt",
+        'On kind="cancelled", stop routing that request',
+        "Explicit child identity, explicit new-child instructions, and attach/focus",
+        "uncertainty only about which current owner fits is a routing question",
+      ]) {
+        expect(normalizedPrompt).toContain(policy);
+      }
+      expect(normalizedPrompt).toContain(
+        "send_interactive_subagent_message and send the original task",
+      );
+      expect(normalizedPrompt).toContain("requests bypass the advisor");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["api", "model", "auth"])(
     "omits advisor guidance and registration when native %s is unavailable",
@@ -522,7 +511,7 @@ describe("extension registration", () => {
           { modelRegistry: missing === "api" ? {} : registry },
         );
         expect(result?.systemPrompt ?? "").not.toContain(
-          "## Optional routing advisor",
+          "\n## Optional routing advisor\n",
         );
       }
       expect(getRegisteredToolNames(api)).not.toContain(

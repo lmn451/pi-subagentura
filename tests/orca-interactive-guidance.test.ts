@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import * as muxContext from "../src/multiplexer-current-context";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import registerExtension from "../src/subagent";
+import {
+  detectEnvironment,
+  formatV2ExecutionContextGuidance,
+} from "../src/environment";
 import { LINEAGE_BOOTSTRAP_ENV } from "../src/spawn-tree-context";
 import { buildChildSubagentProtocol } from "../src/interactive-tmux";
 import {
@@ -27,6 +32,14 @@ const v2PromptAsset = readFileSync(
   new URL("../ORCHESTRATOR_V2_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const v2SplitPromptAsset = readFileSync(
+  new URL("../ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md", import.meta.url),
+  "utf8",
+).trim();
+const v2NativePromptAsset = readFileSync(
+  new URL("../ORCHESTRATOR_V2_NATIVE_GUIDANCE.md", import.meta.url),
+  "utf8",
+).trim();
 const orcaPromptAsset = readFileSync(
   new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
@@ -43,13 +56,22 @@ const hostEnvironmentVariables = [
   "ORCA_RUNTIME_SOURCE_ID",
   "ORCA_RUNTIME_SOURCE_INCARNATION",
   "ORCA_RUNTIME_SOURCE_PROFILE_PATH",
+  "ORCA_PI_STATUS_OWNED",
   "AGTERM_ENABLED",
   "REX_SESSION",
   "REX_BLOCK",
+  "REX_SERVER",
   "TERM_PROGRAM",
   "TMUX",
+  "TMUX_PANE",
+  "ZELLIJ",
   "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
   "HERDR_ENV",
+  "HERDR_PANE_ID",
+  "HERDR_SOCKET_PATH",
+  "WEZTERM_PANE",
+  "WEZTERM_UNIX_SOCKET",
 ] as const;
 type PromptHostEnvironment = Partial<
   Record<(typeof hostEnvironmentVariables)[number], string>
@@ -98,6 +120,23 @@ function expectSharedPromptAssets(
   expect(countOccurrences(prompt, v2PromptAsset)).toBe(
     modeAssets.includes(v2PromptAsset) ? 1 : 0,
   );
+  expect(countOccurrences(prompt, v2SplitPromptAsset)).toBe(
+    modeAssets.includes(v2SplitPromptAsset) ? 1 : 0,
+  );
+  expect(countOccurrences(prompt, v2NativePromptAsset)).toBe(
+    modeAssets.includes(v2NativePromptAsset) ? 1 : 0,
+  );
+}
+
+function v2ExecutionContext(mode: {
+  child?: boolean;
+  modeAssets: readonly string[];
+  hostEnv?: PromptHostEnvironment;
+}): string | undefined {
+  if (mode.child || !mode.modeAssets.includes(v2PromptAsset)) return undefined;
+  return formatV2ExecutionContextGuidance(
+    detectEnvironment(mode.hostEnv ?? {}, "linux"),
+  );
 }
 
 type BeforeAgentStart = (
@@ -107,6 +146,7 @@ type BeforeAgentStart = (
 
 function emittedPrompt(mode: {
   flag?: string;
+  split?: boolean;
   child?: boolean;
   hostEnv?: PromptHostEnvironment;
 }) {
@@ -129,7 +169,9 @@ function emittedPrompt(mode: {
     registerFlag: vi.fn(),
     registerCommand: vi.fn(),
     registerShortcut: vi.fn(),
-    getFlag: vi.fn((name: string) => name === mode.flag),
+    getFlag: vi.fn(
+      (name: string) => name === mode.flag || (mode.split && name === "split"),
+    ),
     on: vi.fn<(event: string, handler: BeforeAgentStart) => void>(),
   };
   registerExtension(api as never);
@@ -174,7 +216,16 @@ describe("interactive prompt assembly contract", () => {
       name: "V2 root",
       child: false,
       flag: "orchestratorv2",
-      modeAssets: [v2PromptAsset],
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostEnv: {},
+      hostAssets: [],
+    },
+    {
+      name: "V2 split root",
+      child: false,
+      flag: "orchestratorv2",
+      split: true,
+      modeAssets: [v2PromptAsset, v2SplitPromptAsset, v2NativePromptAsset],
       hostEnv: {},
       hostAssets: [],
     },
@@ -197,7 +248,7 @@ describe("interactive prompt assembly contract", () => {
       child: false,
       flag: "orchestratorv2",
       hostEnv: validOrcaEnvironment,
-      modeAssets: [v2PromptAsset],
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [orcaPromptAsset, interactivePromptAsset],
     },
     {
@@ -205,6 +256,14 @@ describe("interactive prompt assembly contract", () => {
       child: false,
       hostEnv: { AGTERM_ENABLED: "1" },
       modeAssets: [],
+      hostAssets: [interactivePromptAsset],
+    },
+    {
+      name: "Agterm-context V2 parent",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { AGTERM_ENABLED: "1" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [interactivePromptAsset],
     },
     {
@@ -219,7 +278,7 @@ describe("interactive prompt assembly contract", () => {
       child: false,
       flag: "orchestratorv2",
       hostEnv: validRexEnvironment,
-      modeAssets: [v2PromptAsset],
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [rexPromptAsset, interactivePromptAsset],
     },
     {
@@ -272,10 +331,67 @@ describe("interactive prompt assembly contract", () => {
       hostAssets: [],
     },
     {
+      name: "V2 ambiguous host and native marker observations",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: {
+        ...validOrcaEnvironment,
+        AGTERM_ENABLED: "1",
+        TMUX: "/tmp/tmux.sock,1,0",
+        ZELLIJ_SESSION_NAME: "nested",
+      },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+    },
+    {
+      name: "V2 unsupported partial host and native markers",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { ORCA_RUNTIME_SOURCE_ID: "partial", WEZTERM_PANE: "7" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+    },
+    {
+      name: "V2 reporter marker only",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { ORCA_PI_STATUS_OWNED: "1" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+    },
+    {
+      name: "V2 native marker candidate",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { TMUX: "/tmp/tmux.sock,1,0" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+    },
+    {
+      name: "V2 ambiguous native mux markers",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: {
+        TMUX: "/tmp/tmux.sock,1,0",
+        ZELLIJ_SESSION_NAME: "nested",
+      },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+    },
+    {
       name: "native child inheriting Orca origin and orchestration flags",
       child: true,
       flag: "orchestrator",
       hostEnv: validOrcaEnvironment,
+      modeAssets: [],
+      hostAssets: [],
+    },
+    {
+      name: "native child inheriting Rex hints and V2 split flags",
+      child: true,
+      flag: "orchestratorv2",
+      split: true,
+      hostEnv: validRexEnvironment,
       modeAssets: [],
       hostAssets: [],
     },
@@ -284,11 +400,16 @@ describe("interactive prompt assembly contract", () => {
   for (const mode of promptCases) {
     it(`emits exact assembly for ${mode.name}`, () => {
       const { api, prompt } = emittedPrompt(mode);
-      const expected = [
-        "base prompt",
-        ...mode.modeAssets,
-        ...mode.hostAssets,
-      ].join("\n\n");
+      const executionContext = v2ExecutionContext(mode);
+      const modeAssets = [...mode.modeAssets];
+      if (executionContext) {
+        const nativeGuideIndex = modeAssets.indexOf(v2NativePromptAsset);
+        expect(nativeGuideIndex).toBeGreaterThanOrEqual(0);
+        modeAssets.splice(nativeGuideIndex, 0, executionContext);
+      }
+      const expected = ["base prompt", ...modeAssets, ...mode.hostAssets].join(
+        "\n\n",
+      );
       if (mode.modeAssets.length === 0 && mode.hostAssets.length === 0) {
         expect(prompt).toBeUndefined();
       } else {
@@ -299,13 +420,47 @@ describe("interactive prompt assembly contract", () => {
         mode.modeAssets,
         mode.hostAssets,
       );
+      expect(api.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "subagent_interactive" }),
+      );
       if (mode.child) {
         expect(api.getFlag).not.toHaveBeenCalled();
       }
     });
   }
 
-  it("ships host prompts, the shared prompt, and the V2 prompt in npm pack", () => {
+  it("does not resolve live mux ownership during activation or prompt assembly", () => {
+    const resolve = vi
+      .spyOn(muxContext, "resolveCurrentMuxContext")
+      .mockReturnValue({ kind: "absent" });
+    const resolveAsync = vi
+      .spyOn(muxContext, "resolveCurrentMuxContextAsync")
+      .mockResolvedValue({ kind: "absent" });
+    try {
+      const { prompt } = emittedPrompt({
+        flag: "orchestratorv2",
+        split: true,
+        hostEnv: {
+          ...validRexEnvironment,
+          REX_SERVER: "/private/rex.sock",
+          TMUX: "/tmp/tmux.sock,1,0",
+          TMUX_PANE: "%7",
+        },
+      });
+      expect(prompt).toContain("Host-guide eligibility: eligible (rex).");
+      expect(prompt).toContain("Native mux observation: ambiguous.");
+      expect(prompt).toContain(
+        "this snapshot does not prove backend availability or launch success",
+      );
+      expect(resolve).not.toHaveBeenCalled();
+      expect(resolveAsync).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      resolveAsync.mockRestore();
+    }
+  });
+
+  it("ships host, shared, and V2 guidance assets in npm pack", () => {
     const directory = mkdtempSync(join(tmpdir(), "orca-prompt-contract-"));
     try {
       execFileSync(
@@ -344,10 +499,16 @@ describe("interactive prompt assembly contract", () => {
         ["-xOf", tarball, "package/ORCHESTRATOR_V2_SYSTEM_PROMPT.md"],
         { encoding: "utf8" },
       ).trim();
+      const packedV2NativeGuide = execFileSync(
+        "tar",
+        ["-xOf", tarball, "package/ORCHESTRATOR_V2_NATIVE_GUIDANCE.md"],
+        { encoding: "utf8" },
+      ).trim();
       expect(packedOrcaPrompt).toBe(orcaPromptAsset);
       expect(packedRexPrompt).toBe(rexPromptAsset);
       expect(packedInteractivePrompt).toBe(interactivePromptAsset);
       expect(packedV2Prompt).toBe(v2PromptAsset);
+      expect(packedV2NativeGuide).toBe(v2NativePromptAsset);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -376,7 +537,7 @@ describe("interactive prompts in Pi SDK sessions", () => {
       child: false,
       extensionFlags: { orchestratorv2: true },
       hostEnv: {},
-      modeAssets: [v2PromptAsset],
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
     },
     {
