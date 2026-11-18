@@ -8,6 +8,14 @@ level: beginner
 
 Use this skill for pi-subagentura tool failures, interactive children that fail to spawn or exit, unsupported state-schema or persistence errors, and missing completion or artifacts. If the skill is exposed but not loaded, explicitly invoke `/skill:pi-subagentura-debug`; skill discovery is model guidance, not a runtime error-interception hook. Gather the exact tool name, arguments, visible error, Pi version, and whether the call was in-process or interactive before changing settings.
 
+## Root-cause workflow
+
+1. State the exact symptom and expected behavior; record exact versions and meaningful ambient inputs.
+2. Before proposing a fix, seek a minimal safe reproduction in an isolated scratch/test context, with a control when useful.
+3. At the first failing boundary, list plausible causes and choose distinguishing observations. Change one factor at a time; record each as supported, ruled out, or still untested, with evidence.
+4. A recovered rerun, correlation, vanished error, or workaround does not establish root cause. Verify that a suspected cause explains the observed failure; where safe, show the same reproduction failing before and passing after an isolated correction. Do not risk live state or exhaustively test unrelated possibilities.
+5. If reproduction or verification is blocked, say **root cause unconfirmed**, name the exact blocker, evidence collected or ruled out, and the next discriminating check; do not guess or default to restart advice.
+
 ## Inspect arguments and the loaded extension
 
 See [Inspecting tool arguments in the README](../../README.md#inspecting-tool-arguments)
@@ -92,24 +100,6 @@ Herdr, or other terminal.
      user-entry identity with `turnId` in `turn_started` and `completion`, in
      physical NDJSON order. Timestamps do not establish identity or order; see
      [Interactive Child Artifact Ownership](../../docs/ownership.md).
-
-**Verified redacted examples:** In one historical Core case, Core/hc was
-version 0.1.21; `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` were present, and the
-installed `herdr-core get` query for the inherited terminal reported a live PID
-matching Pi's parent shell. The classic Herdr 0.9.5 server was not running and
-`HERDR_ENV` / `HERDR_PANE_ID` were absent. Before a fix, auto fell back to tmux,
-while explicit `mux=herdr` returned `Invalid multiplexer launch context`. This
-is evidence for that pre-fix case only; verify current versions and help, and do
-not infer post-fix fields, APIs, or behavior.
-
-In a separate verified Core launch, the first two worker terminals were
-allocated, then their wrappers exited 127 before Pi opened because `exec` could
-not find `node`. The interactive parent shell found Node v26 via fnm, but Core's
-direct child launch used Core's base environment, not the shell's `PATH`. That
-launch intentionally passed only the current shell `PATH` through `/usr/bin/env`,
-not the full shell environment. This explains those two exits only. In the
-earlier tmux case, children had `process_exited` and no terminal-turn result;
-why they exited was not established.
 
 For a report, give only the minimal evidence chain: versions and loaded source →
 tool and redacted arguments/mux choice → marker presence and PID/TTY ownership
