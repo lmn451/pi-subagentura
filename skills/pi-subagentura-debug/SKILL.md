@@ -8,6 +8,14 @@ level: beginner
 
 Use this skill for pi-subagentura tool failures, interactive children that fail to spawn or exit, unsupported state-schema or persistence errors, and missing completion or artifacts. If the skill is exposed but not loaded, explicitly invoke `/skill:pi-subagentura-debug`; skill discovery is model guidance, not a runtime error-interception hook. Gather the exact tool name, arguments, visible error, Pi version, and whether the call was in-process or interactive before changing settings.
 
+## Root-cause workflow
+
+1. State the exact symptom and expected behavior; record exact versions and meaningful ambient inputs.
+2. Before proposing a fix, seek a minimal safe reproduction in an isolated scratch/test context, with a control when useful.
+3. At the first failing boundary, list plausible causes and choose distinguishing observations. Change one factor at a time; record each as supported, ruled out, or still untested, with evidence.
+4. A recovered rerun, correlation, vanished error, or workaround does not establish root cause. Verify that a suspected cause explains the observed failure; where safe, show the same reproduction failing before and passing after an isolated correction. Do not risk live state or exhaustively test unrelated possibilities.
+5. If reproduction or verification is blocked, say **root cause unconfirmed**, name the exact blocker, evidence collected or ruled out, and the next discriminating check; do not guess or default to restart advice.
+
 ## Inspect arguments and the loaded extension
 
 See [Inspecting tool arguments in the README](../../README.md#inspecting-tool-arguments)
@@ -30,28 +38,81 @@ jq -c 'select(.event == "extension_tool_call" or .event == "tool_start")' .pi-de
 
 Use each event's `event` and `timestamp` fields to follow a sequence.
 
-## Interactive child starts and exits immediately
+## Interactive child launch triage
 
-First inspect the parent tool call in `extension_tool_call`, especially its `cwd` value. The [README's debug logging section](../../README.md#debug-logging) documents the interactive working-directory validation contract.
+Do not blame the host/backend or ask for a restart before locating the failure
+boundary. Do not stop/restart anything or launch a probe child in a live Core,
+Herdr, or other terminal.
 
-Check the path from the Pi process environment:
+1. **Capture the invocation and provenance.** Expand the Pi-subagentura tool
+   call with Ctrl+O; record the tool name, exact supplied arguments, error,
+   whether a terminal was allocated, Pi version, package version, and loaded
+   extension source. The README documents `pi list` and `pi config`; check the
+   installed Pi help before using them. Ctrl+O shows supplied arguments, not
+   omitted defaults. In versions where `mux` defaults to `auto`, note whether
+   it was omitted or explicitly set.
+2. **Prove process and terminal identity.** From read-only process inspection
+   of the affected Pi PID and its ancestry, record PID, PPID, TTY, and command
+   name. On Darwin/Linux, the runtime's process snapshot uses
+   `ps -axo pid=,ppid=,tty=,comm=`; follow PPID links from the affected Pi PID.
+   Keep raw output private. Check optional host markers by presence only, not
+   by value: for example `HC_TERMINAL_ID` / `HC_TERMINAL_SOCKET`, `HERDR_ENV` /
+   `HERDR_SOCKET_PATH` / `HERDR_PANE_ID`, and relevant `TMUX*`, `ZELLIJ*`,
+   `REX_*`, or `WEZTERM_*` selectors. Check the installed host CLI version and
+   help before using a query; use only its documented read-only query for the
+   inherited terminal. Confirm that its reported live PID matches the Pi
+   process or an ancestor in the observed process chain; compare TTY where
+   available. If ownership cannot be tied to the process chain, report it as
+   unproven. Do not share marker values, full environments, prompt-bearing
+   arguments, or terminal identifiers.
+3. **Separate UI brand from runtime backend.** A Core window or Core marker
+   does not prove that pi-subagentura selected the Herdr backend. Record the
+   explicit `mux` value or that it was omitted; verify the loaded extension's
+   selector/API and the live PID/TTY proof. Auto selection and an explicit
+   backend request are different paths. An explicit `mux=herdr` context error
+   does not prove that auto selected Herdr. Do not assume Core and classic
+   Herdr use the same CLI or protocol.
+4. **Locate the failing stage.**
+   - No terminal was created: confirm this from the launch result, not from a
+     terminal's current absence. If confirmed, the call failed before backend
+     allocation; inspect its arguments, `cwd`, and launch context. This is not
+     a child-process exit.
+     Check the supplied `cwd` from the affected Pi environment, replacing the
+     placeholder below with the exact supplied path:
 
-```bash
-pwd
-ls -ld -- "$EXPECTED_CWD"
-test -d "$EXPECTED_CWD" && test -x "$EXPECTED_CWD"
-```
+     ```bash
+     pwd
+     ls -ld -- "$EXPECTED_CWD"
+     test -d "$EXPECTED_CWD" && test -x "$EXPECTED_CWD"
+     ```
 
-Confirm that the directory exists, is a directory, and can be traversed by the user running Pi. If the request refers to a newly created worktree, create it before spawning the child or pass the correct existing directory. Do not work around a bad `cwd` by opening another pane manually.
+     If the path is a new worktree, create it before spawning. Do not work
+     around a bad `cwd` by opening another pane manually.
 
-If the error still occurs with a valid path:
+   - Terminal allocated, but Pi did not open or no child turn began: allocation
+     succeeded. Inspect the existing wrapper/launcher result and the runtime
+     available in that launch environment (including `node`/`PATH`); do not
+     assume the multiplexer failed. An exit code alone may not identify why.
+   - Pi opened: use `get_interactive_subagent_status` and
+     `list_subagent_artifacts`; use `read_subagent_artifact` when a reference is
+     available. Distinguish a running child, recorded completion, and parent-side
+     delivery/consumption. For suspicious output, compare the child's persisted
+     user-entry identity with `turnId` in `turn_started` and `completion`, in
+     physical NDJSON order. Timestamps do not establish identity or order; see
+     [Interactive Child Artifact Ownership](../../docs/ownership.md).
 
-1. Record the exact tool name, `cwd`, error text, selected mux, and whether a pane was created. A spawn error before pane creation is a launch failure, not an immediate child exit.
-2. Check that the selected multiplexer is available and that the child process can run Pi from that directory.
-3. Use `get_interactive_subagent_status` and `list_subagent_artifacts` to inspect retained state; use `read_subagent_artifact` when an artifact reference is available.
-4. Share the smallest redacted relevant log excerpt and the Pi/extension versions when reporting the issue.
+For a report, give only the minimal evidence chain: versions and loaded source →
+tool and redacted arguments/mux choice → marker presence and PID/TTY ownership
+result → terminal allocation → wrapper/child-start status and exit code →
+turn/completion/delivery state. Name the next missing observation. Keep raw
+traces, prompts, credentials, full environments, and identifiers private. For
+controlled reproductions, snapshot and restore ambient selectors and `PATH` as
+needed; see [Testing with Ambient Host State](../../docs/testing.md). Do not test
+against the live Core or another terminal.
 
-`subagent_isolated` and `subagent_with_context` run in-process and do not create a multiplexer pane. For those, inspect the `extension_tool_call` parameters and returned error/result instead.
+`subagent_isolated` and `subagent_with_context` run in-process and do not create
+a multiplexer pane. For those, inspect the `extension_tool_call` parameters and
+returned error/result instead.
 
 ## Completion or output appears missing
 
@@ -96,12 +157,13 @@ retained.
 
 Current versions use an artifact-specific, one-use bootstrap that the child
 consumes before registering lifecycle hooks. `PI_SUBAGENTURA_CHILD` and
-`ARTIFACT_DIR` alone do not grant authority. See
-[Interactive Child Artifact Ownership](../../docs/ownership.md). This prevents
-accidental environment inheritance; it is not an OS security boundary against
-malicious code running as the same user. Historical artifacts may still need
-investigation. This skill is guidance; it does not add automatic logging or
-repair.
+`ARTIFACT_DIR` alone do not grant authority. Artifact ownership and recursive
+lineage use separate bootstraps; lineage expires after 60 seconds and does not
+grant artifact ownership. See [Interactive Child Artifact Ownership](../../docs/ownership.md).
+This prevents accidental environment inheritance; it is not an OS security
+boundary against malicious code running as the same user. Historical artifacts
+may still need investigation. This skill is guidance; it does not add automatic
+logging or repair.
 
 ## Unsupported interactive state or persistence errors
 
