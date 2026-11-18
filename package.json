@@ -60,6 +60,7 @@
     "examples/workflows/README.md",
     "examples/workflows/*.mjs",
     "skills/pi-subagentura-debug",
+    "skills/pi-herdr-core-standalone-worker",
     "types/workflow.d.ts",
     "src/notifications.ts",
     "src/rendering.ts",
@@ -151,7 +152,8 @@
       "./src/subagent.ts"
     ],
     "skills": [
-      "./skills/pi-subagentura-debug"
+      "./skills/pi-subagentura-debug",
+      "./skills/pi-herdr-core-standalone-worker"
     ]
   },
   "scripts": {

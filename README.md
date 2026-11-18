@@ -1334,6 +1334,18 @@ the package and version Pi actually loaded.
 Interactive spawning also validates that the resolved `cwd` exists and is a
 directory before creating a pane; create a requested worktree before spawning.
 
+## Opt-in standalone workers in Herdr Core
+
+With this Pi package loaded, enter `/skill:pi-herdr-core-standalone-worker`
+to open the [standalone worker guide](./skills/pi-herdr-core-standalone-worker/SKILL.md).
+Pi does not offer this skill to the model for automatic selection.
+
+You start and inspect the worker in your local Core session. This is not a
+native pi-subagentura backend: the worker does not appear in `/subagents` and
+does not have native artifacts, follow-up, cancellation, or completion
+delivery. Default routing is unchanged. No pi-intercom installation is needed.
+The guide was checked with `hc` 0.1.21 on macOS (Darwin 24.6.0).
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md).

@@ -21,6 +21,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  formatSkillsForPrompt,
+  loadSkillsFromDir,
+} from "@earendil-works/pi-coding-agent";
+import {
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -356,6 +360,25 @@ describe("published tarball", () => {
     expect(skill).toContain("private backup");
     expect(skill).toContain("explicit user confirmation");
     expect(skill).toContain("does not stop existing panes or processes");
+  });
+
+  it("loads the packed standalone Core skill as explicit-only Pi guidance", () => {
+    const name = "pi-herdr-core-standalone-worker";
+    const skillPath = `./skills/${name}`;
+    expect(entries).toContain(`skills/${name}/SKILL.md`);
+
+    const packedPackage = JSON.parse(
+      readFileSync(join(pkgDir, "package.json"), "utf8"),
+    );
+    expect(packedPackage.pi.skills).toContain(skillPath);
+
+    const { skills, diagnostics } = loadSkillsFromDir({
+      dir: join(pkgDir, skillPath),
+      source: "package",
+    });
+    expect(diagnostics).toEqual([]);
+    expect(skills).toMatchObject([{ name, disableModelInvocation: true }]);
+    expect(formatSkillsForPrompt(skills)).toBe("");
   });
 
   it("declares every bare runtime source import", () => {
