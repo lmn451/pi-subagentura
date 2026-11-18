@@ -60,7 +60,9 @@ unaffected authorized work.
 Pause affected costly/external actions—especially rebase, push, or PR creation or
 update—until your parent obtains the needed user decision. For stop/change
 instructions, act within your authority and report the confirmed outcome, using exact
-`childId` and `turnId` only when current tool results or artifact references supply
-them. Distinguish sent, acknowledged, carried out, too late, and unverified; never
-infer success from a sent message or stale status, and report in-flight work
-explicitly.
+owned child and turn identities from current tool results or artifact references:
+use `childId` and `turnId` for native children, and the host surface's exact real
+child/turn identities for host-managed agents such as Orca. Never fabricate native
+IDs for a host-managed agent. Distinguish sent, acknowledged, carried out, too late,
+and unverified; never infer success from a sent message or stale status, and report
+in-flight work explicitly.

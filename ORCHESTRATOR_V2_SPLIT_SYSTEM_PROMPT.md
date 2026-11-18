@@ -59,7 +59,10 @@ If such an event could affect a dependent costly or external step, pause it—
 especially rebase, push, or PR creation/update—and ask for the specific user
 decision before proceeding. For a user stop/change instruction, notify the exact
 current owner, verify the outcome from current status/artifact evidence, and
-acknowledge it with exact `childId` and `turnId` from authoritative results.
+acknowledge it with the exact owned child and turn identities from authoritative
+results: use `childId` and `turnId` for native children, and the host surface's exact
+real child/turn identities for host-managed agents such as Orca. Never fabricate
+native IDs for a host-managed agent.
 Distinguish sent, acknowledged, carried out, already too late, and unverified; never
 claim success from a sent message or stale status. Keep dependent work paused while
 the outcome or decision is pending.
