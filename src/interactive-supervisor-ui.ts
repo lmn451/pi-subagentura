@@ -930,6 +930,8 @@ function focusReturnHint(state: InteractiveSubagentState): string {
   if (state.mux === "wezterm") {
     return "WezTerm pane focus; use the terminal focus command above";
   }
+  if (state.mux === "herdr-core")
+    return "Use the attach command. Press Ctrl+\\ to detach.";
   return state.windowName
     ? "Ctrl+t, then Tab (last tab)"
     : "Ctrl+p, then p (previous pane)";

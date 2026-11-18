@@ -1089,11 +1089,13 @@ async function runPollArtifactChanges(
       );
       if (next !== state.status) state.status = next;
       if (next === "exited") {
-        if (lifecycle.processExitCode !== undefined) {
-          state.exitCode = lifecycle.processExitCode;
-        } else if (lifecycle.completionExitCode !== undefined) {
-          state.exitCode = lifecycle.completionExitCode;
-        }
+        const exitCode =
+          lifecycle.processExitCode ??
+          ("exitCode" in livenessDiagnostic
+            ? livenessDiagnostic.exitCode
+            : undefined) ??
+          lifecycle.completionExitCode;
+        if (exitCode !== undefined) state.exitCode = exitCode;
       }
       if (state.parentSessionId) persistedStates.push(state);
     }

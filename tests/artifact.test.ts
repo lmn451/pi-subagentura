@@ -1347,6 +1347,37 @@ describe("persisted interactive state helpers", () => {
     });
     expect(loadInteractiveStates(root)).toBeNull();
   });
+  it("requires a local Herdr Core address, socket and Core identity", () => {
+    const state: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      mux: "herdr-core",
+      paneId: "t1b",
+      muxSession: "a".repeat(32),
+      muxServer: "/tmp/core.sock",
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { [state.id]: state },
+    });
+    expect(loadInteractiveStates(root)?.states[state.id]).toEqual(state);
+    for (const patch of [
+      { paneId: "remote/t1b" },
+      { muxSession: undefined },
+      { muxServer: "relative.sock" },
+    ]) {
+      writeFileSync(
+        stateFilePath(root),
+        JSON.stringify({
+          schemaVersion: 2,
+          parent: "pi",
+          states: { [state.id]: { ...state, ...patch } },
+        }),
+        { mode: 0o600 },
+      );
+      expect(loadInteractiveStates(root)).toBeNull();
+    }
+  });
   it("round-trips only bounded absolute working cwd values", () => {
     const file = stateFilePath(root);
     mkdirSync(join(root, ".pi"), { recursive: true, mode: 0o700 });

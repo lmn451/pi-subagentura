@@ -8,8 +8,33 @@
 
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
+export class MultiplexerContextUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MultiplexerContextUnavailableError";
+  }
+}
+
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij" | "herdr" | "rex" | "wezterm";
+export type MuxName =
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "herdr-core"
+  | "rex"
+  | "wezterm";
+
+export function isHerdrCoreTerminalId(value: unknown): value is string {
+  return typeof value === "string" && /^t[0-9a-z]{1,16}$/.test(value);
+}
+
+export function isHerdrCorePid(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+export function isHerdrCoreId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+}
 export function isTmuxSocketLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -53,6 +78,13 @@ export type MuxTarget =
       readonly server: string;
     }
   | {
+      readonly mux: "herdr-core";
+      readonly paneId: string;
+      readonly server: string;
+      readonly session: string;
+      readonly terminalPid: number;
+    }
+  | {
       readonly mux: "wezterm";
       readonly paneId: string;
       readonly server: string;
@@ -93,15 +125,20 @@ export function validateMuxLaunchContext(
           isTmuxSocketLabel(context.socketName))
       : context.mux === "wezterm"
         ? /^\d+$/.test(context.paneId) && isMuxSocketPath(context.server)
-        : context.mux === "rex"
-          ? isRexBlockId(context.paneId) &&
-            isRexSessionId(context.session) &&
-            isRexServerAddress(context.server)
-          : context.mux === "zellij"
-            ? /^\d+$/.test(context.paneId) &&
-              isZellijSessionName(context.session)
-            : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
-              isMuxSocketPath(context.session);
+        : context.mux === "herdr-core"
+          ? isHerdrCoreTerminalId(context.paneId) &&
+            isMuxSocketPath(context.server) &&
+            isHerdrCoreId(context.session) &&
+            isHerdrCorePid(context.terminalPid)
+          : context.mux === "rex"
+            ? isRexBlockId(context.paneId) &&
+              isRexSessionId(context.session) &&
+              isRexServerAddress(context.server)
+            : context.mux === "zellij"
+              ? /^\d+$/.test(context.paneId) &&
+                isZellijSessionName(context.session)
+              : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
+                isMuxSocketPath(context.session);
   if (!valid) throw new Error("Invalid multiplexer launch context");
 }
 const REX_UUID_PATTERN =
@@ -151,6 +188,7 @@ export type PaneLivenessFailureReason =
 export interface PaneLivenessDiagnostic {
   readonly liveness: PaneLiveness;
   readonly failureReason?: PaneLivenessFailureReason;
+  readonly exitCode?: number;
 }
 /** Result of a pane-focus activity probe for the user's mux client. */
 export type PaneActivity = "active" | "inactive" | "unknown";
@@ -233,6 +271,11 @@ export const MUX_CAPABILITIES: Readonly<
     structuredFocus: true,
     // The CLI has no capture limit; the backend enforces a maxBuffer ceiling.
     boundedCapture: true,
+    nativeOverlay: false,
+  },
+  "herdr-core": {
+    structuredFocus: false,
+    boundedCapture: false,
     nativeOverlay: false,
   },
   wezterm: {
@@ -320,6 +363,8 @@ export interface Multiplexer {
    *                           used to scope later attachment probes.
    */
   createPane(opts: {
+    /** Direct-program backends receive the prepared wrapper instead of shell input. */
+    program?: { readonly script: string; readonly outliveParent: boolean };
     context?: MuxLaunchContext;
     name: string;
     cwd: string;
@@ -404,6 +449,21 @@ export interface Multiplexer {
    *                 tmux ignores it).
    */
   sendEnter(paneId: string, session?: string, server?: string): void;
+
+  /** Optional atomic paste and submit, for backends without a literal paste API. */
+  sendMessage?(
+    paneId: string,
+    text: string,
+    session?: string,
+    server?: string,
+  ): void;
+
+  /** Optional sync diagnostic for explicit status queries. */
+  getPaneLivenessDiagnostic?(
+    paneId: string,
+    session?: string,
+    server?: string,
+  ): PaneLivenessDiagnostic;
 
   /**
    * Kill the pane. MUST be best-effort: no throw on already-dead panes.

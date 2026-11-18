@@ -8,8 +8,9 @@
 
 Give the parent Pi agent one task and let it build the team. pi-subagentura adds
 reusable multi-agent workflows, lightweight background delegation, and real
-child Pi sessions you can watch, attach to, and continue in tmux, Zellij, Herdr,
-WezTerm, or a verified live Superlogical Rex block.
+child Pi sessions you can watch, attach to, and continue in tmux, Zellij,
+classic Herdr, [Herdr Core](docs/herdr-core.md), WezTerm, or a verified live
+Superlogical Rex block.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
@@ -117,7 +118,7 @@ of injected orchestration primitives:
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
 agent tools. Workflow agents default to separate Pi processes in tmux, Zellij,
-Herdr, WezTerm, or Rex when the current Rex block is verified, so they are observable
+classic Herdr, Herdr Core, WezTerm, or Rex when the current Rex block is verified, so they are observable
 and attachable; when no multiplexer is
 available, the runtime falls back to in-process execution. Intermediate agent
 results stay in workflow variables outside the parent model context. Only the
@@ -197,7 +198,7 @@ The extension registers these public tools for parent agents.
 | `get_current_pane_activity`             | Check current pane activity when the mux can verify user focus          |
 | `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers       |
 | `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases              |
-| `subagent_interactive`                  | Launch an attachable Pi session in tmux, Zellij, Herdr, WezTerm, or Rex |
+| `subagent_interactive`                  | Launch an attachable Pi session under any supported multiplexer backend |
 | `get_interactive_subagent_status`       | Inspect attachable child sessions                                       |
 | `cancel_interactive_subagent`           | Kill an attachable child pane                                           |
 | `send_interactive_subagent_message`     | Send a follow-up while preserving child context                         |
@@ -706,12 +707,12 @@ paths. The pane is the live view; durable artifacts are the source of truth.
 
 #### `subagent_interactive`
 
-Starts a separate interactive `pi` process in a tmux, Zellij, Herdr, or WezTerm pane, or a Rex block from a verified current Rex context, and returns immediately with:
+Starts a separate interactive `pi` process in a supported multiplexer, including a verified local Herdr Core terminal or a live Rex block, and returns immediately with:
 
 - sub-agent id
-- pane/block id and mux backend (tmux, zellij, herdr, rex, or wezterm)
+- pane/block id and mux backend (`tmux`, `zellij`, `herdr`, `herdr-core`, `rex`, or `wezterm`)
 - `attach` command (works from outside the mux session)
-- `focus` command (works from inside the same mux session)
+- `focus` command where supported (not available in Herdr Core)
 - child Pi session file path
 - artifact directory (events.ndjson + output.md)
 - the window/tab name (in background mode) so you can find it in your mux UI
@@ -727,7 +728,7 @@ Parameters:
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
-- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"herdr-core"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. Herdr Core requires a verified local terminal and supports background launches only. See the [Herdr Core](docs/herdr-core.md) and [Rex](docs/rex-multiplexer.md) guides for capability limits.
 
   Attached Zellij ownership limits are documented in [Rex multiplexer support](docs/rex-multiplexer.md).
 
@@ -744,7 +745,7 @@ protocol-v1 artifacts are left untouched but are not readable by this runtime.
 
 - Interactive children also have `get_current_pane_activity`, which reports
   whether their tmux, Zellij, or WezTerm pane is active for the user's current client.
-  Herdr and Rex do not expose a verified current-user focused-client probe, so
+  Classic Herdr, Herdr Core, and Rex do not expose a verified current-user focused-client probe, so
   their activity result remains neutral `unknown` rather than claiming user
   attention. Only children launched directly by a top-level Orchestratorv2
   session receive protocol guidance to check this before tools or extensions

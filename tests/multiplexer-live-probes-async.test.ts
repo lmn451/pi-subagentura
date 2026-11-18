@@ -57,7 +57,7 @@ function respond(stdout: string, error: Error | null = null): void {
     return {} as ChildProcess;
   });
 }
-function output(mux: LiveMuxTarget["mux"]): string {
+function output(mux: Exclude<LiveMuxTarget["mux"], "herdr-core">): string {
   switch (mux) {
     case "tmux":
       return "%4\t90\t/dev/pts/1\n";

@@ -1,6 +1,17 @@
+import {
+  coreTerminal,
+  queryCore,
+  queryCoreAsync,
+} from "./multiplexer-herdr-core-client";
+import {
+  coreSocketIdentity,
+  queryCoreId,
+  queryCoreIdAsync,
+} from "./multiplexer-herdr-core-identity";
 import { execFile, execFileSync } from "node:child_process";
 import {
   isRexBlockId,
+  isHerdrCoreTerminalId,
   isRexSessionId,
   isZellijSessionName,
   isTmuxSocketLabel,
@@ -17,6 +28,7 @@ export interface LiveMuxTarget {
   readonly session?: string;
   readonly server?: string;
   readonly socketName?: string;
+  readonly terminalPid?: number;
 }
 export type LiveMuxProbe =
   | { kind: "match"; target: LiveMuxTarget; distance: number }
@@ -295,6 +307,36 @@ function weztermProbe(
   };
 }
 
+function coreOwnership(
+  target: LiveMuxTarget,
+  context: ProcessContext,
+  coreId: string | undefined,
+  reply: ReturnType<typeof queryCore>,
+): LiveMuxProbe {
+  if (!coreId) return UNKNOWN;
+  const terminal = coreTerminal(reply, target.paneId);
+  if (terminal?.state !== "live" || terminal.pid === undefined) return MISMATCH;
+  const self = context.processes.get(context.pid);
+  const distance = context.ancestors.findIndex(
+    ({ pid }) => pid === terminal.pid,
+  );
+  const root =
+    terminal.pid === context.pid ? self : context.ancestors[distance];
+  const tty = normalizeProcessTty(self?.tty);
+  if (!tty || tty !== normalizeProcessTty(root?.tty)) return MISMATCH;
+  return {
+    kind: "match",
+    target: { ...target, session: coreId, terminalPid: terminal.pid },
+    distance: terminal.pid === context.pid ? -1 : distance,
+  };
+}
+
+function coreProbeSocket(target: LiveMuxTarget): string | undefined {
+  return isHerdrCoreTerminalId(target.paneId) && target.server
+    ? target.server
+    : undefined;
+}
+
 function prepareProbe(
   target: LiveMuxTarget,
   context: ProcessContext,
@@ -341,6 +383,18 @@ export function probeLiveMuxTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): LiveMuxProbe {
   try {
+    if (target.mux === "herdr-core") {
+      const socket = coreProbeSocket(target);
+      if (!socket) return UNKNOWN;
+      const identity = coreSocketIdentity(socket);
+      if (!identity) return UNKNOWN;
+      const coreId = queryCoreId(socket);
+      if (!coreId || coreSocketIdentity(socket) !== identity) return UNKNOWN;
+      const reply = queryCore(socket, ["get", target.paneId, "--json"], env);
+      return coreSocketIdentity(socket) === identity
+        ? coreOwnership(target, context, coreId, reply)
+        : UNKNOWN;
+    }
     const plan = prepareProbe(target, context, env);
     return "command" in plan ? plan.parse(query(plan)) : plan;
   } catch {
@@ -356,6 +410,22 @@ export async function probeLiveMuxTargetAsync(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LiveMuxProbe> {
   try {
+    if (target.mux === "herdr-core") {
+      const socket = coreProbeSocket(target);
+      if (!socket) return UNKNOWN;
+      const identity = coreSocketIdentity(socket);
+      if (!identity) return UNKNOWN;
+      const coreId = await queryCoreIdAsync(socket);
+      if (!coreId || coreSocketIdentity(socket) !== identity) return UNKNOWN;
+      const reply = await queryCoreAsync(
+        socket,
+        ["get", target.paneId, "--json"],
+        env,
+      );
+      return coreSocketIdentity(socket) === identity
+        ? coreOwnership(target, context, coreId, reply)
+        : UNKNOWN;
+    }
     const plan = prepareProbe(target, context, env);
     return "command" in plan ? plan.parse(await queryAsync(plan)) : plan;
   } catch {

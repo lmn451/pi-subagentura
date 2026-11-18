@@ -205,11 +205,12 @@ const InteractiveSpawnFields = Type.Object({
         Type.Literal("zellij"),
         Type.Literal("herdr"),
         Type.Literal("rex"),
+        Type.Literal("herdr-core"),
         Type.Literal("wezterm"),
       ],
       {
         description:
-          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. An explicit value forces that backend.',
+          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. Herdr Core requires a verified live local terminal and supports background launches only. An explicit value selects that backend.',
       },
     ),
   ),

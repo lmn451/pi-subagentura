@@ -15,7 +15,7 @@ import {
 } from "./environment";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 8;
+export const TELEMETRY_SCHEMA_VERSION = 9;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;
@@ -32,6 +32,7 @@ export type TelemetryMux =
   | "tmux"
   | "zellij"
   | "herdr"
+  | "herdr-core"
   | "rex"
   | "wezterm";
 export type TelemetryTrafficOrigin =
@@ -53,6 +54,7 @@ export type TelemetryRequestedMux =
   | "tmux"
   | "zellij"
   | "herdr"
+  | "herdr-core"
   | "rex";
 export type TelemetrySpawnFailureMux = TelemetryMux | "unknown";
 export type TelemetryInvocationSource =
@@ -668,6 +670,7 @@ const TELEMETRY_MUXES: readonly TelemetrySpawnFailureMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "herdr-core",
   "wezterm",
 ];
 const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
@@ -677,6 +680,7 @@ const TELEMETRY_REQUESTED_MUXES: readonly TelemetryRequestedMux[] = [
   "zellij",
   "herdr",
   "rex",
+  "herdr-core",
   "wezterm",
 ];
 const TELEMETRY_INVOCATION_SOURCES: readonly TelemetryInvocationSource[] = [
@@ -1383,6 +1387,7 @@ export type TelemetryParentMux =
   | "tmux"
   | "zellij"
   | "herdr"
+  | "herdr-core"
   | "rex"
   | "wezterm"
   | "unknown";

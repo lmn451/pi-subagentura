@@ -68,6 +68,7 @@ import {
 } from "./workflow-rpc";
 import {
   cancelInteractiveSubagent,
+  describeHerdrCoreExit,
   getInteractivePaneLivenessAsync,
   type InteractiveSubagentState,
 } from "./interactive-tmux";
@@ -1112,7 +1113,10 @@ export async function awaitInteractiveResult(
             isError: true,
             output,
             usage,
-            errorMessage: "interactive sub-agent pane exited before completing",
+            errorMessage:
+              state.mux === "herdr-core"
+                ? describeHerdrCoreExit(eventCursor.sawTurnStart)
+                : "interactive sub-agent pane exited before completing",
           };
         }
       } else if (liveness === "unknown") {

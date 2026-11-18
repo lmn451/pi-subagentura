@@ -58,6 +58,7 @@ import {
   type CurrentPaneActivity,
   type InteractiveSubagentState,
 } from "../interactive-tmux";
+import { MultiplexerContextUnavailableError } from "../multiplexer";
 import { debugLog } from "../helpers";
 import { isOrchestratorV2Enabled } from "../completion-turn";
 import { completionDisplayLabel } from "../completion-presentation";
@@ -115,6 +116,7 @@ const CurrentPaneActivityOutputSchema = Type.Object({
       Type.Literal("zellij"),
       Type.Literal("herdr"),
       Type.Literal("rex"),
+      Type.Literal("herdr-core"),
       Type.Literal("wezterm"),
     ]),
   ),
@@ -136,6 +138,7 @@ const InteractiveStatusItemOutputSchema = Type.Object({
     Type.Literal("zellij"),
     Type.Literal("herdr"),
     Type.Literal("rex"),
+    Type.Literal("herdr-core"),
     Type.Literal("wezterm"),
   ]),
   paneId: Type.String(),
@@ -541,7 +544,7 @@ export function registerInteractiveSubagentTools(
     name: "get_current_pane_activity",
     label: "Current Pane Activity",
     description:
-      "Report whether this Pi process's tmux, Zellij, or WezTerm pane is active in the user's current client; Herdr and Rex are reported as unknown without public focused-client proof.",
+      "Report whether this Pi process’s tmux, Zellij, or WezTerm pane is active in the user’s current client. Classic Herdr, Herdr Core, and Rex report unknown.",
     parameters: Type.Object({}),
     outputSchema: CurrentPaneActivityOutputSchema,
     async execute() {
@@ -570,9 +573,9 @@ export function registerInteractiveSubagentTools(
     name: "subagent_interactive",
     label: "Interactive Subagent",
     description: [
-      "Spawn a separate Pi process in a tmux, Zellij, Herdr, or WezTerm pane, or in a verified live Rex block, and return immediately.",
+      "Spawn a separate Pi process in tmux, Zellij, classic Herdr, Herdr Core, WezTerm, or a verified live Rex block, and return immediately.",
       "Use this when the user wants to attach to the sub-agent session and continue follow-ups there.",
-      "Works inside tmux, Zellij, Herdr, WezTerm, or a verified live Rex context. The tool returns attach/focus commands and the child session file.",
+      "Herdr Core requires a verified live local terminal and a background launch. Returns the attach command, any supported focus command, and the child session file.",
       "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
       "By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
@@ -961,11 +964,17 @@ export function registerInteractiveSubagentTools(
         lastFailure ??= { stage: "unknown" };
         resolveFailedLaunch(signal?.aborted ? "cancelled" : "rejected");
         const msg = error instanceof Error ? error.message : String(error);
+        const hint =
+          params.mux === "herdr-core" ||
+          lastFailure.mux === "herdr-core" ||
+          error instanceof MultiplexerContextUnavailableError
+            ? ""
+            : `\n${tmuxSetupHint()}`;
         return {
           content: [
             {
               type: "text",
-              text: `Failed to start interactive sub-agent: ${msg}\n${tmuxSetupHint()}`,
+              text: `Failed to start interactive sub-agent: ${msg}${hint}`,
             },
           ],
           details: { status: "error", error: msg },
@@ -1017,7 +1026,7 @@ export function registerInteractiveSubagentTools(
     name: "get_interactive_subagent_status",
     label: "Get Interactive Subagent Status",
     description:
-      "Inspect tmux-backed interactive subagents. Omit jobId to list all tracked sessions. Returns attach/select commands and session paths without capturing pane output.",
+      "Inspect interactive sub-agents and their multiplexer status. Omit jobId to list all tracked sessions. Returns attach/select commands and session paths without capturing pane output.",
     parameters: Type.Object({
       jobId: Type.Optional(
         Type.String({

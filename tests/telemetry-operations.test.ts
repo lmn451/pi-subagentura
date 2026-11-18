@@ -99,7 +99,7 @@ describe("operation telemetry", () => {
         outcome: "returned",
         result_status: "ok",
         duration_ms: 1_200,
-        schema_version: 8,
+        schema_version: 9,
         traffic_origin: "unknown",
       },
     });

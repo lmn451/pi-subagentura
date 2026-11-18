@@ -5,6 +5,10 @@ for (const key of Object.keys(process.env)) {
     key === "TYPESAFE_API_KEY" ||
     key === "OPENROUTER_API_KEY" ||
     key.startsWith("PI_ORCHESTRATOR_ROUTER") ||
+    key === "HC_TERMINAL_ID" ||
+    key === "HC_TERMINAL_SOCKET" ||
+    key === "HC_SOCKET" ||
+    key === "HC_SESSION" ||
     key === "REX_SESSION" ||
     key === "REX_BLOCK" ||
     key === "REX_SERVER" ||

@@ -38,6 +38,8 @@ import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import {
   isMuxSocketPath,
+  isHerdrCoreId,
+  isHerdrCoreTerminalId,
   isRexBlockId,
   isRexServerAddress,
   isRexSessionId,
@@ -1791,9 +1793,9 @@ type PersistedMuxIdentity = Pick<
   "paneId" | "muxTerminalId"
 > &
   (
-    | { mux: "rex"; muxSession: string; muxServer: string }
+    | { mux: "rex" | "herdr-core"; muxSession: string; muxServer: string }
     | {
-        mux: Exclude<MuxName, "rex">;
+        mux: Exclude<MuxName, "rex" | "herdr-core">;
         muxSession?: string;
         muxServer?: string;
       }
@@ -1833,6 +1835,19 @@ function normalizePersistedMuxIdentity(
       if (server !== undefined) identity.muxServer = server;
       return identity;
     }
+    case "herdr-core":
+      if (
+        !isHerdrCoreTerminalId(paneId) ||
+        !isHerdrCoreId(raw.muxSession) ||
+        !isMuxSocketPath(raw.muxServer)
+      )
+        return null;
+      return {
+        mux: raw.mux,
+        paneId,
+        muxSession: raw.muxSession,
+        muxServer: raw.muxServer,
+      };
     case "zellij":
     case "herdr":
     case "wezterm": {
@@ -2137,12 +2152,14 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
         rawEntryTelemetry?.mux === "herdr" ||
+        rawEntryTelemetry?.mux === "herdr-core" ||
         rawEntryTelemetry?.mux === "rex" ||
         rawEntryTelemetry?.mux === "wezterm"
           ? rawEntryTelemetry.mux
           : entry.mux === "tmux" ||
               entry.mux === "zellij" ||
               entry.mux === "herdr" ||
+              entry.mux === "herdr-core" ||
               entry.mux === "rex" ||
               entry.mux === "wezterm"
             ? entry.mux

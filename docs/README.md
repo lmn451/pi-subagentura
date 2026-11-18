@@ -11,6 +11,7 @@ keywords:
     runtime,
     orca,
     rex,
+    herdr-core,
     jev,
     openai-decisions,
     artifact-ownership,
@@ -36,6 +37,7 @@ published injector.
 | [terminal-e2e.md](./terminal-e2e.md)                                                    | Terminal E2E harness, determinism rules, and recording tools                        |
 | [telemetry.md](./telemetry.md)                                                          | Telemetry contract, privacy, and PostHog report definitions                         |
 | [rex-multiplexer.md](./rex-multiplexer.md)                                              | Rex backend selection, capabilities, and CLI contract                               |
+| [herdr-core.md](./herdr-core.md)                                                        | Local Herdr Core launch, attach, and diagnostics                                    |
 | [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                                         |
 | [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions classifier setup, live-owner selection, and payload disclosure |
 | [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters              |

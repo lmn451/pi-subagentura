@@ -1,5 +1,6 @@
 import {
   isRexBlockId,
+  isHerdrCoreTerminalId,
   isRexServerAddress,
   isRexSessionId,
   isMuxSocketPath,
@@ -103,6 +104,22 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
       });
     }
   }
+  if (
+    env.HC_TERMINAL_ID !== undefined ||
+    env.HC_TERMINAL_SOCKET !== undefined
+  ) {
+    names.push("Herdr Core");
+    if (
+      isHerdrCoreTerminalId(env.HC_TERMINAL_ID) &&
+      isMuxSocketPath(env.HC_TERMINAL_SOCKET)
+    ) {
+      targets.push({
+        mux: "herdr-core",
+        paneId: env.HC_TERMINAL_ID,
+        server: env.HC_TERMINAL_SOCKET,
+      });
+    }
+  }
   if (env.WEZTERM_PANE !== undefined || env.WEZTERM_UNIX_SOCKET !== undefined) {
     names.push("WezTerm");
     if (
@@ -123,7 +140,13 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
 export function resolveCurrentMuxContext(
   env: NodeJS.ProcessEnv = process.env,
 ): CurrentMuxContext {
-  const { names, targets } = contextCandidates(env);
+  return resolveMuxCandidates(contextCandidates(env), env);
+}
+
+function resolveMuxCandidates(
+  { names, targets }: ReturnType<typeof contextCandidates>,
+  env: NodeJS.ProcessEnv,
+): CurrentMuxContext {
   if (names.length === 0) return { kind: "absent" };
   const context = readProcessContext();
   if (!context) return unavailableContext(names);
@@ -167,6 +190,12 @@ function selectCurrentMuxContext(
   const matches = probes
     .filter((probe) => probe.kind === "match")
     .sort((a, b) => a.distance - b.distance);
+  if (
+    names.includes("Herdr Core") &&
+    !matches.some(({ target }) => target.mux === "herdr-core")
+  ) {
+    return unavailable;
+  }
   const winner = matches[0];
   if (!winner || matches[1]?.distance === winner.distance) return unavailable;
   // A verified outer pane is not proof of ownership past a nearer mux whose
@@ -194,4 +223,17 @@ function selectCurrentMuxContext(
     return unavailable;
   }
   return { kind: "ready", target: Object.freeze({ ...target }) };
+}
+
+/** Explicit Core selection still requires proof; ignore other backend markers. */
+export function resolveExplicitHerdrCoreContext(
+  env: NodeJS.ProcessEnv,
+): CurrentMuxContext {
+  return resolveMuxCandidates(
+    contextCandidates({
+      HC_TERMINAL_ID: env.HC_TERMINAL_ID,
+      HC_TERMINAL_SOCKET: env.HC_TERMINAL_SOCKET,
+    }),
+    env,
+  );
 }

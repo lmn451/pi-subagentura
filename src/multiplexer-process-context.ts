@@ -149,6 +149,7 @@ export function closestMuxAncestor(
     if (command === "tmux" || command === "tmux: server") mux = "tmux";
     else if (command === "zellij") mux = "zellij";
     else if (command === "herdr") mux = "herdr";
+    else if (command === "herdr-core") mux = "herdr-core";
     else if (command === "rex" || command === "Rex") mux = "rex";
     if (mux) return { mux, pid: ancestor.pid };
   }

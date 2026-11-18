@@ -379,10 +379,11 @@ export function isTmuxAvailable(): boolean {
 /** Setup hint shown to the user when no mux is available. Mux-agnostic. */
 export function tmuxSetupHint(): string {
   return (
-    "Start pi inside tmux, zellij, Herdr, or WezTerm, or start it in a verified live Rex block:\n" +
+    "Start Pi inside tmux, Zellij, classic Herdr, Herdr Core, or WezTerm, or in a verified live Rex block:\n" +
     "  tmux new -A -s pi 'pi'\n" +
     "  zellij --session pi\n" +
     "  herdr  (then start pi in a Herdr pane)\n" +
+    "  hc run  (open a local Core shell, then start Pi there)\n" +
     "  WezTerm requires a live WEZTERM_PANE/WEZTERM_UNIX_SOCKET context.\n" +
     "  Rex requires a live REX_SESSION/REX_BLOCK/REX_SERVER context."
   );
@@ -961,13 +962,97 @@ export function launchInteractiveSubagent(params: {
     }
   }
 
-  // Create the pane FIRST (so we have a target for the launch script to attach
-  // to). If any later step throws, try to kill the orphan pane and rethrow.
-  let paneId: string;
+  const direct = mux.name === "herdr-core";
+  let paneId: string | undefined;
   let muxTerminalId: string | undefined;
   let windowName: string | undefined;
   let muxSession: string | undefined;
   let muxServer: string | undefined;
+  let persistedState = false;
+  let lineageManifestPath: string | undefined;
+  let lineageBootstrapPath: string | undefined;
+  let childArtifactBootstrapPath: string | undefined;
+  const cleanupFailedSpawn = (): void => {
+    if (persistedState && params.parentSessionId) {
+      try {
+        removeInteractiveState(stateCwd, id);
+      } catch {
+        /* best effort — the pane kill below is the important cleanup */
+      }
+    }
+    for (const path of [
+      lineageManifestPath,
+      lineageBootstrapPath,
+      childArtifactBootstrapPath,
+    ]) {
+      if (!path) continue;
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        /* Best effort; still try to stop the allocated child. */
+      }
+    }
+    if (paneId) {
+      try {
+        mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
+      } catch {
+        /* best effort — preserve the original spawn error */
+      }
+    }
+  };
+  const prepareLaunch = (): void => {
+    let operation: TelemetrySpawnFailureOperation = "child_command_build";
+    try {
+      const command = buildPiInteractiveCommand({
+        sessionFile: paths.sessionFile,
+        name: params.name,
+        promptFile: paths.promptFile,
+        systemPromptFile,
+        model: params.model,
+        cwd,
+        thinkingLevel: params.thinkingLevel,
+      });
+      if (spawnTreeContext) {
+        operation = "lineage_bootstrap_write";
+        lineageBootstrapPath = writeLineageBootstrap(
+          paths.artifactDir,
+          createDescendantSpawnTreeContext(
+            spawnTreeContext,
+            id,
+            paths.artifactDir,
+          ),
+        );
+      }
+      operation = "artifact_write";
+      childArtifactBootstrapPath = writeChildArtifactBootstrap(
+        paths.artifactDir,
+      );
+      operation = "launch_script_write";
+      writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
+        PI_SUBAGENTURA_MUX: mux.name,
+        [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
+        ...(lineageBootstrapPath
+          ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
+          : {}),
+        ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
+      });
+    } catch (error) {
+      reportSpawnFailure("state_persistence", mux.name, operation);
+      cleanupFailedSpawn();
+      throw error;
+    }
+  };
+  if (direct) {
+    if (!background) {
+      reportSpawnFailure("context", mux.name, "mux_resolution");
+      throw new Error(
+        "Herdr Core does not support visible splits. Use background: true and attach to the new terminal.",
+      );
+    }
+    // Core starts the program at allocation, so the one-use credentials must
+    // exist before the terminal can run the wrapper.
+    prepareLaunch();
+  }
   try {
     const created = mux.createPane({
       name: params.name,
@@ -976,6 +1061,16 @@ export function launchInteractiveSubagent(params: {
       context: muxContext,
       windowName: safeSegment(params.name),
       id,
+      ...(direct
+        ? {
+            program: {
+              script: paths.launchScriptFile,
+              outliveParent:
+                params.completionOwner !== "workflow" &&
+                params.workflowId === undefined,
+            },
+          }
+        : {}),
     });
     paneId = created.paneId;
     muxTerminalId = created.muxTerminalId;
@@ -984,16 +1079,14 @@ export function launchInteractiveSubagent(params: {
     muxServer = created.server;
   } catch (error) {
     reportSpawnFailure("pane_launch", mux.name, "pane_launch");
+    cleanupFailedSpawn();
     throw error;
   }
   if (typeof paneId !== "string" || paneId.length === 0) {
     reportSpawnFailure("pane_launch", mux.name, "pane_launch");
+    cleanupFailedSpawn();
     throw new Error("multiplexer returned an invalid pane id");
   }
-  let persistedState = false;
-  let lineageManifestPath: string | undefined;
-  let lineageBootstrapPath: string | undefined;
-  let childArtifactBootstrapPath: string | undefined;
   // Persist as soon as the pane is addressable. A crash after this point is
   // recoverable on reload. If persistence itself fails, abort and kill the
   // pane; otherwise the child would be invisible to rehydrate after a restart.
@@ -1025,11 +1118,7 @@ export function launchInteractiveSubagent(params: {
         mux.name,
         "interactive_state_write",
       );
-      try {
-        mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
-      } catch {
-        /* best effort — preserve the original persistence error */
-      }
+      cleanupFailedSpawn();
       throw err;
     }
   }
@@ -1066,119 +1155,23 @@ export function launchInteractiveSubagent(params: {
         mux.name,
         "lineage_manifest_write",
       );
-      if (persistedState) {
-        try {
-          removeInteractiveState(stateCwd, id);
-        } catch {
-          /* preserve the lineage error */
-        }
-      }
-      mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
-      throw err;
-    }
-  }
-  let attach: { attachCommand: string; focusCommand: string };
-  const cleanupFailedSpawn = (): void => {
-    if (persistedState && params.parentSessionId) {
-      try {
-        removeInteractiveState(stateCwd, id);
-      } catch {
-        /* best effort — the pane kill below is the important cleanup */
-      }
-    }
-    if (lineageManifestPath) {
-      try {
-        rmSync(lineageManifestPath, { force: true });
-      } catch {
-        /* best effort */
-      }
-    }
-    if (lineageBootstrapPath) {
-      try {
-        rmSync(lineageBootstrapPath, { force: true });
-      } catch {
-        /* best effort — the pane kill below is the important cleanup */
-      }
-    }
-    if (childArtifactBootstrapPath) {
-      try {
-        rmSync(childArtifactBootstrapPath, { force: true });
-      } catch {
-        /* best effort — the pane kill below is the important cleanup */
-      }
-    }
-    try {
-      mux.killPane(paneId, muxSession, ...muxServerArgs(muxServer));
-    } catch {
-      /* best effort — preserve the original spawn error */
-    }
-  };
-  let command: string;
-  try {
-    command = buildPiInteractiveCommand({
-      sessionFile: paths.sessionFile,
-      name: params.name,
-      promptFile: paths.promptFile,
-      systemPromptFile,
-      model: params.model,
-      cwd,
-      thinkingLevel: params.thinkingLevel,
-    });
-  } catch (err) {
-    reportSpawnFailure("state_persistence", mux.name, "child_command_build");
-    cleanupFailedSpawn();
-    throw err;
-  }
-  if (spawnTreeContext) {
-    try {
-      lineageBootstrapPath = writeLineageBootstrap(
-        paths.artifactDir,
-        createDescendantSpawnTreeContext(
-          spawnTreeContext,
-          id,
-          paths.artifactDir,
-        ),
-      );
-    } catch (err) {
-      reportSpawnFailure(
-        "state_persistence",
-        mux.name,
-        "lineage_bootstrap_write",
-      );
       cleanupFailedSpawn();
       throw err;
     }
   }
+  let attach: { attachCommand: string; focusCommand: string };
+  if (!direct) prepareLaunch();
   try {
-    childArtifactBootstrapPath = writeChildArtifactBootstrap(paths.artifactDir);
-  } catch (err) {
-    reportSpawnFailure("state_persistence", mux.name, "artifact_write");
-    cleanupFailedSpawn();
-    throw err;
-  }
-  try {
-    writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
-      PI_SUBAGENTURA_MUX: mux.name,
-      [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
-      ...(lineageBootstrapPath
-        ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
-        : {}),
-      ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
-    });
-  } catch (err) {
-    reportSpawnFailure("state_persistence", mux.name, "launch_script_write");
-    cleanupFailedSpawn();
-    throw err;
-  }
-  try {
-    const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-    mux.sendKeys(
-      paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
-      muxSession,
-      ...muxServerArgs(muxServer),
-    );
-    mux.sendEnter(paneId, muxSession, ...muxServerArgs(muxServer));
+    if (!direct) {
+      const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+      mux.sendKeys(
+        paneId,
+        `exec bash ${escape(paths.launchScriptFile)}`,
+        muxSession,
+        ...muxServerArgs(muxServer),
+      );
+      mux.sendEnter(paneId, muxSession, ...muxServerArgs(muxServer));
+    }
     attach = mux.buildAttachCommands({
       paneId,
       terminalId: muxTerminalId,
@@ -1297,6 +1290,8 @@ export async function getCurrentPaneActivity(): Promise<CurrentPaneActivity> {
   const context = await resolveCurrentMuxContextAsync();
   if (context.kind !== "ready") return { status: "unknown" };
   const target = context.target;
+  if (target.mux === "herdr-core")
+    return { status: "unknown", mux: target.mux };
   const location = {
     mux: target.mux,
     paneId: target.paneId,
@@ -1411,6 +1406,7 @@ export function getLineagePaneLiveness(
     backend !== "tmux" &&
     backend !== "zellij" &&
     backend !== "herdr" &&
+    backend !== "herdr-core" &&
     backend !== "rex" &&
     backend !== "wezterm"
   ) {
@@ -1468,6 +1464,15 @@ export function sendCommandToPane(
   command: string,
 ): void {
   const mux = getMuxForState(state);
+  if (mux.sendMessage) {
+    mux.sendMessage(
+      state.paneId,
+      command,
+      state.muxSession,
+      ...muxServerArgs(state.muxServer),
+    );
+    return;
+  }
   mux.sendKeys(
     state.paneId,
     command,
@@ -1849,17 +1854,30 @@ export function pruneDeadInteractiveSubagents(
     ) {
       continue;
     }
-    const paneLiveness = getInteractivePaneLiveness(state);
+    const mux = getMuxForState(state);
+    const probe = mux.getPaneLivenessDiagnostic?.(
+      state.paneId,
+      state.muxSession,
+      ...muxServerArgs(state.muxServer),
+    );
     const next = deriveInteractiveSubagentStatusFromLifecycle(
       state.lifecycle ?? {},
-      paneLiveness,
+      probe?.liveness ?? getInteractivePaneLiveness(state),
     );
     if (next === state.status) continue;
     state.status = next;
     const exitCode =
-      state.lifecycle?.processExitCode ?? state.lifecycle?.completionExitCode;
+      state.lifecycle?.processExitCode ??
+      probe?.exitCode ??
+      state.lifecycle?.completionExitCode;
     if (next === "exited" && exitCode !== undefined) state.exitCode = exitCode;
   }
+}
+
+export function describeHerdrCoreExit(sawTurnStart: boolean): string {
+  return sawTurnStart
+    ? "Herdr Core terminal exited before a result was recorded for this turn. Check the turn artifact before retrying."
+    : "Herdr Core terminal exited before Pi recorded a first turn. Check that Pi and Node run on the parent PATH.";
 }
 
 export function formatInteractiveState(
@@ -1875,13 +1893,21 @@ export function formatInteractiveState(
   ];
   if (state.windowName) lines.push(`Window: ${state.windowName}`);
   if (state.exitCode !== undefined) lines.push(`Exit code: ${state.exitCode}`);
+  if (
+    state.mux === "herdr-core" &&
+    state.status === "exited" &&
+    (!state.lifecycle?.completionOutcome ||
+      state.lifecycle.completionSource === "process_exit")
+  ) {
+    lines.push(describeHerdrCoreExit(!!state.lifecycle?.currentTurnId));
+  }
   lines.push(`Artifact: ${state.artifactDir}`);
   lines.push(`State cwd: ${state.cwd}`);
   lines.push(`Working cwd: ${state.workingCwd ?? "unknown"}`);
   if (!(state.mux === "tmux" && process.env.TMUX)) {
     lines.push(`Attach: ${state.attachCommand}`);
   }
-  lines.push(`Focus: ${state.selectPaneCommand}`);
+  if (state.selectPaneCommand) lines.push(`Focus: ${state.selectPaneCommand}`);
   lines.push(`Session: ${state.sessionFile}`);
   return lines.join("\n");
 }

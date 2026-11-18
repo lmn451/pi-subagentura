@@ -758,6 +758,7 @@ describe("MUX_CAPABILITIES", () => {
       );
     expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
       "herdr",
+      "herdr-core",
       "rex",
       "tmux",
       "wezterm",
@@ -766,6 +767,11 @@ describe("MUX_CAPABILITIES", () => {
     expect(muxCapabilities("tmux")).toBe(MUX_CAPABILITIES.tmux);
     expect(muxCapabilities("zellij")).toBe(MUX_CAPABILITIES.zellij);
     expect(muxCapabilities("herdr")).toBe(MUX_CAPABILITIES.herdr);
+    expect(muxCapabilities("herdr-core")).toEqual({
+      structuredFocus: false,
+      boundedCapture: false,
+      nativeOverlay: false,
+    });
     expect(muxCapabilities("rex")).toBe(MUX_CAPABILITIES.rex);
     expect(muxCapabilities("wezterm")).toBe(MUX_CAPABILITIES.wezterm);
   });

@@ -18,11 +18,16 @@
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
+import { HerdrCoreMultiplexer } from "./multiplexer-herdr-core";
 import { RexMultiplexer } from "./multiplexer-rex";
 import { WezTermMultiplexer } from "./multiplexer-wezterm";
-import { resolveCurrentMuxContext } from "./multiplexer-current-context";
+import {
+  resolveCurrentMuxContext,
+  resolveExplicitHerdrCoreContext,
+} from "./multiplexer-current-context";
 import {
   validateMuxLaunchContext,
+  MultiplexerContextUnavailableError,
   type MuxName,
   type Multiplexer,
   type MuxLaunchContext,
@@ -75,6 +80,13 @@ export function resolveMux(opts: GetMuxOptions = {}): ResolvedMux {
         session: probe.context.sessionId,
         server: probe.context.server,
       };
+    } else if (adapter.name === "herdr-core") {
+      const current = resolveExplicitHerdrCoreContext(env);
+      if (current.kind !== "ready" || current.target.mux !== "herdr-core")
+        throw new MultiplexerContextUnavailableError(
+          "Herdr Core launch requires a verified live local Core terminal. Start Pi inside that terminal and retry.",
+        );
+      context = { ...current.target, kind: "attached" };
     } else if (adapter.name === "wezterm") {
       context = {
         kind: "attached",
@@ -150,17 +162,10 @@ export interface GetMuxOptions {
 export class NoMultiplexerAvailableError extends Error {
   constructor() {
     super(
-      "No multiplexer available. Start pi inside tmux, zellij, Herdr, or Rex, " +
+      "No multiplexer available. Start Pi inside tmux, Zellij, classic Herdr, Herdr Core, WezTerm, or Rex, " +
         "for example: tmux new -A -s pi 'pi'  —  or install one and ensure its server is running.",
     );
     this.name = "NoMultiplexerAvailableError";
-  }
-}
-
-export class MultiplexerContextUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MultiplexerContextUnavailableError";
   }
 }
 
@@ -196,6 +201,8 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
       return getOrCreate("tmux", () => new TmuxMultiplexer());
     case "zellij":
       return getOrCreate("zellij", () => new ZellijMultiplexer());
+    case "herdr-core":
+      return getOrCreate("herdr-core", () => new HerdrCoreMultiplexer());
     case "herdr":
       return getOrCreate("herdr", () => new HerdrMultiplexer());
     case "rex":

@@ -94,6 +94,54 @@ describe("current mux ownership", () => {
     );
   });
 
+  it("selects verified Core and rejects partial, stale or tied evidence", () => {
+    const env = {
+      ...nested,
+      HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      HC_TERMINAL_ID: "t7",
+    };
+    const core = {
+      mux: "herdr-core",
+      paneId: "t7",
+      server: "/tmp/core.sock",
+      session: "a".repeat(32),
+      terminalPid: 99,
+    };
+    probe.mockImplementation((target) =>
+      target.mux === "herdr-core"
+        ? { kind: "match", target: core, distance: -1 }
+        : target.mux === "tmux"
+          ? { kind: "match", target, distance: 0 }
+          : { kind: "mismatch" },
+    );
+    expect(resolveCurrentMuxContext(env)).toEqual({
+      kind: "ready",
+      target: core,
+    });
+    expect(
+      resolveCurrentMuxContext({ ...env, HC_TERMINAL_ID: undefined }).kind,
+    ).toBe("unavailable");
+    expect(
+      resolveCurrentMuxContext({ ...env, HC_TERMINAL_ID: "remote/t7" }).kind,
+    ).toBe("unavailable");
+    probe.mockImplementation((target) =>
+      target.mux === "tmux"
+        ? { kind: "match", target, distance: 0 }
+        : { kind: "mismatch" },
+    );
+    expect(resolveCurrentMuxContext(env).kind).toBe("unavailable");
+    probe.mockImplementation((target) =>
+      target.mux === "herdr-core" || target.mux === "tmux"
+        ? {
+            kind: "match",
+            target: target.mux === "herdr-core" ? core : target,
+            distance: 0,
+          }
+        : { kind: "mismatch" },
+    );
+    expect(resolveCurrentMuxContext(env).kind).toBe("unavailable");
+  });
+
   it.each(["tmux", "zellij", "herdr", "rex"] as const)(
     "selects the live inner %s, not a fixed env priority",
     (mux) => {

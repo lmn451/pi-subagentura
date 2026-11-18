@@ -13,6 +13,19 @@ describe("parent multiplexer environment observation", () => {
     [{ ZELLIJ_SESSION_NAME: "private-session" }, "zellij"],
     [{ HERDR_ENV: "1" }, "herdr"],
     [
+      { HC_TERMINAL_ID: "t7", HC_TERMINAL_SOCKET: "/private/core.sock" },
+      "herdr-core",
+    ],
+    [{ HC_TERMINAL_ID: "t7" }, "unknown"],
+    [
+      {
+        HC_TERMINAL_ID: "t7",
+        HC_TERMINAL_SOCKET: "/private/core.sock",
+        TMUX: "other",
+      },
+      "unknown",
+    ],
+    [
       {
         REX_SESSION: "session:01234567-89ab-cdef-0123-456789abcdef",
         REX_BLOCK: "block:01234567-89ab-cdef-0123-456789abcdef",
