@@ -114,6 +114,7 @@ const CurrentPaneActivityOutputSchema = Type.Object({
       Type.Literal("tmux"),
       Type.Literal("zellij"),
       Type.Literal("herdr"),
+      Type.Literal("herdr-core"),
       Type.Literal("rex"),
       Type.Literal("wezterm"),
     ]),
@@ -135,6 +136,7 @@ const InteractiveStatusItemOutputSchema = Type.Object({
     Type.Literal("tmux"),
     Type.Literal("zellij"),
     Type.Literal("herdr"),
+    Type.Literal("herdr-core"),
     Type.Literal("rex"),
     Type.Literal("wezterm"),
   ]),
@@ -147,8 +149,14 @@ const InteractiveStatusItemOutputSchema = Type.Object({
   ),
   exitCode: Type.Optional(Type.Number()),
   artifactDir: Type.String(),
-  attachCommand: Type.String(),
-  selectPaneCommand: Type.String(),
+  attachCommand: Type.String({
+    description: "Backend-pinned command for attaching to the child session.",
+  }),
+  selectPaneCommand: Type.Optional(
+    Type.String({
+      description: "Native focus command, when this backend supports focus.",
+    }),
+  ),
   sessionFile: Type.String(),
 });
 const InteractiveStatusOutputSchema = Type.Object({
@@ -527,6 +535,19 @@ function formatCurrentPaneActivity(activity: CurrentPaneActivity): string {
     .join(" ");
   return `Current pane activity: ${activity.status}. ${location}`;
 }
+function formatInteractiveStatus(state: InteractiveSubagentState): string {
+  const lines = formatInteractiveState(state).split("\n");
+  if (state.mux !== "herdr-core") return lines.join("\n");
+  return lines
+    .filter((line) => !line.startsWith("Focus:"))
+    .map((line) =>
+      line.startsWith("Pane: ")
+        ? `Core session: ${line.slice("Pane: ".length)}`
+        : line,
+    )
+    .concat("Detach: Ctrl+\\")
+    .join("\n");
+}
 
 export function registerInteractiveSubagentTools(
   pi: ExtensionAPI,
@@ -541,7 +562,7 @@ export function registerInteractiveSubagentTools(
     name: "get_current_pane_activity",
     label: "Current Pane Activity",
     description:
-      "Report whether this Pi process's tmux, Zellij, or WezTerm pane is active in the user's current client; Herdr and Rex are reported as unknown without public focused-client proof.",
+      "Report whether this Pi process's tmux, Zellij, or WezTerm pane is active in the user's current client; legacy Herdr, Herdr Core, and Rex always report unknown because public focused-client proof is unavailable.",
     parameters: Type.Object({}),
     outputSchema: CurrentPaneActivityOutputSchema,
     async execute() {
@@ -570,10 +591,10 @@ export function registerInteractiveSubagentTools(
     name: "subagent_interactive",
     label: "Interactive Subagent",
     description: [
-      "Spawn a separate Pi process in a tmux, Zellij, Herdr, or WezTerm pane, or in a verified live Rex block, and return immediately.",
+      "Spawn a separate Pi process in a tmux, Zellij, legacy Herdr, or WezTerm pane, in a verified live Rex block, or as a Herdr Core terminal session, then return immediately.",
       "Use this when the user wants to attach to the sub-agent session and continue follow-ups there.",
-      "Works inside tmux, Zellij, Herdr, WezTerm, or a verified live Rex context. The tool returns attach/focus commands and the child session file.",
-      "This is intentionally separate from SDK subagents: it favors observability and attachability over in-process execution.",
+      "Works inside tmux, Zellij, legacy Herdr, Herdr Core, WezTerm, or a verified live Rex context. The tool returns an attach command and, where supported, native focus commands.",
+      "Herdr Core is attach-only: it has no visible split, native focus, or native overlay. Attach with the returned socket-pinned `HC_SOCKET=… hc attach <name>` command; press Ctrl+\\ to detach.",
       "By default, prefer the current/parent provider and model.",
       "Honor any provider or model explicitly requested by the user.",
       "If a requested model omits its provider, qualify it with the current/parent provider unless the user explicitly requested another provider.",
@@ -920,14 +941,22 @@ export function registerInteractiveSubagentTools(
           registration.scope ? sessionOwner(registration.scope) : undefined,
         );
 
-        const displayMode = state.windowName
-          ? "background (new window/tab)"
-          : "visible split";
+        const isHerdrCore = state.mux === "herdr-core";
+        const displayMode = isHerdrCore
+          ? "named session"
+          : state.windowName
+            ? "background (new window/tab)"
+            : "visible split";
+        const launchTarget = isHerdrCore
+          ? `Herdr Core session ${state.paneId}`
+          : `${state.mux} pane ${state.paneId}`;
         const locationLines = [`Artifact: ${state.artifactDir}`];
         if (!(state.mux === "tmux" && process.env.TMUX)) {
           locationLines.push(`Attach: ${state.attachCommand}`);
         }
-        locationLines.push(`Focus: ${state.selectPaneCommand}`);
+        if (isHerdrCore) locationLines.push("Detach: Ctrl+\\");
+        else if (state.selectPaneCommand)
+          locationLines.push(`Focus: ${state.selectPaneCommand}`);
         locationLines.push(`Session: ${state.sessionFile}`);
         if (routingMetadata?.status === "warning") {
           locationLines.push(
@@ -939,7 +968,7 @@ export function registerInteractiveSubagentTools(
             {
               type: "text",
               text:
-                `Interactive sub-agent ${state.id} started (${displayMode}) in ${state.mux} pane ${state.paneId}.\n\n` +
+                `Interactive sub-agent ${state.id} started (${displayMode}) in ${launchTarget}.\n\n` +
                 `${
                   completion.policy === "group"
                     ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
@@ -1005,19 +1034,22 @@ export function registerInteractiveSubagentTools(
       return new Text(
         theme.fg("accent", "⚡ ") +
           theme.fg("toolTitle", `Interactive sub-agent ${id}`) +
-          theme.fg("dim", ` — pane ${paneId}${thinking}`),
+          theme.fg(
+            "dim",
+            ` — ${details?.mux === "herdr-core" ? "session" : "pane"} ${paneId}${thinking}`,
+          ),
         0,
         0,
       );
     },
   });
 
-  // ── Tool 8: inspect attachable tmux-backed sessions ────────────────
+  // ── Tool 8: inspect attachable interactive sessions ────────────────
   registerToolWithDefaultGuidance(pi, {
     name: "get_interactive_subagent_status",
     label: "Get Interactive Subagent Status",
     description:
-      "Inspect tmux-backed interactive subagents. Omit jobId to list all tracked sessions. Returns attach/select commands and session paths without capturing pane output.",
+      "Inspect tracked interactive sub-agent sessions. Omit jobId to list all tracked sessions. Returns attach commands and native focus commands where supported, plus session paths; it does not capture terminal output.",
     parameters: Type.Object({
       jobId: Type.Optional(
         Type.String({
@@ -1067,10 +1099,7 @@ export function registerInteractiveSubagentTools(
         };
       }
 
-      const sections = states.map((state) => {
-        return formatInteractiveState(state);
-      });
-
+      const sections = states.map((state) => formatInteractiveStatus(state));
       return {
         content: [{ type: "text", text: sections.join("\n\n---\n\n") }],
         details: {
@@ -1105,19 +1134,21 @@ export function registerInteractiveSubagentTools(
               : { exitCode: state.exitCode }),
             artifactDir: state.artifactDir,
             attachCommand: state.attachCommand,
-            selectPaneCommand: state.selectPaneCommand,
+            ...(state.selectPaneCommand
+              ? { selectPaneCommand: state.selectPaneCommand }
+              : {}),
             sessionFile: state.sessionFile,
           })),
         },
       };
     },
   });
-  // ── Tool 9: cancel an attachable tmux-backed session ───────────────
+  // ── Tool 9: cancel an interactive child process ────────────────────
   registerToolWithDefaultGuidance(pi, {
     name: "cancel_interactive_subagent",
     label: "Cancel Interactive Subagent",
     description:
-      "Kill an interactive sub-agent pane and retain its cancelled artifact. Coordinated delivery still emits one TUI-only terminal notice and may later add a compact cancellation selector; the tool result does not inject a duplicate full-output cancellation message.",
+      "Stop an interactive child process and retain its cancelled artifact. Coordinated delivery still emits one TUI-only terminal notice and may later add a compact cancellation selector; the tool result does not inject a duplicate full-output cancellation message.",
     parameters: Type.Object({
       jobId: Type.String({
         description:
@@ -1185,8 +1216,8 @@ export function registerInteractiveSubagentTools(
 
   // ── Tool: send a follow-up message to a live interactive sub-agent ──────
   // The child REPL stays open after `done` (see buildChildSubagentProtocol in
-  // interactive-tmux.ts), so the parent can push a new prompt into the same
-  // session via tmux send-keys. Model context is preserved across messages —
+  // `interactive-tmux.ts`), so the parent can deliver a new prompt through the
+  // selected backend's input transport. Model context is preserved across messages —
   // this is a true follow-up turn, not a fresh spawn.
   //
   // Caps: the message must be non-empty (an empty Enter in the REPL would submit a
@@ -1198,14 +1229,15 @@ export function registerInteractiveSubagentTools(
     label: "Send Interactive Subagent Message",
     description: [
       "Send a follow-up prompt to a live interactive sub-agent. The message is delivered into the",
-      "child's existing REPL via tmux send-keys, so the child's model context is preserved — this",
-      "is a true follow-up turn, not a fresh spawn. A workflow-owned child can accept a follow-up",
-      "only after its completed turn is idle and its workflow runner has consumed the result. It is",
-      "promoted to standalone only after that follow-up is sent successfully. An idle follow-up resets",
-      "future completion delivery to independent each; a source can satisfy a group only once, so later",
-      "turns from that source/group are also independent. The child will run the new turn and (per its",
-      "system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it finishes. Use",
-      "get_interactive_subagent_status to check the pane state first if you're not sure it's still alive.",
+      "child's existing REPL through the selected backend's terminal-input API, so the child's",
+      "model context is preserved — this is a true follow-up turn, not a fresh spawn. A workflow-owned",
+      "child can accept a follow-up only after its completed turn is idle and its workflow runner has",
+      "consumed the result. It is promoted to standalone only after that follow-up is sent successfully.",
+      "An idle follow-up resets future completion delivery to independent each; a source can satisfy a",
+      "group only once, so later turns from that source/group are also independent. The child will run",
+      "the new turn and (per its system prompt) call '$ARTIFACT_DIR/cli.mjs done 0' again when it",
+      "finishes. Use get_interactive_subagent_status to check its state first if you're not sure it's",
+      "still alive.",
     ].join("\n"),
     parameters: Type.Object({
       id: Type.String({
@@ -1310,16 +1342,15 @@ export function registerInteractiveSubagentTools(
           content: [
             {
               type: "text",
-              text: `Interactive sub-agent ${params.id} is still under workflow ownership; its workflow must consume the current result and the pane must be idle before a follow-up can be sent.`,
+              text: `Interactive sub-agent ${params.id} is still under workflow ownership; its workflow must consume the current result and the child session must be idle before a follow-up can be sent.`,
             },
           ],
           details: { id: params.id, status: "workflow_owned" },
           isError: true,
         };
       }
-      // Standalone panes accept follow-ups while running or idle. Workflow ownership has two
-      // independent release conditions: artifact polling folded the completion into idle, and the
-      // workflow runner acknowledged returning that result.
+      // Standalone child sessions accept follow-ups while running or idle. Workflow
+      // ownership requires both artifact completion and runner result consumption.
       if (state.status !== "running" && state.status !== "idle") {
         return {
           content: [
@@ -1332,9 +1363,8 @@ export function registerInteractiveSubagentTools(
           isError: true,
         };
       }
-      // sendCommandToPane uses send-keys + Enter; it throws synchronously if the
-      // pane is gone (e.g. the child exited between the status check and now).
-      // Wrap so the parent gets a structured error instead of an exception trace.
+      // Backend input dispatch can fail if the child session ends after status is
+      // checked; return a structured failure instead of an exception trace.
       const startsNewTurn = state.status === "idle";
       try {
         sendCommandToPane(state, params.message + FOLLOWUP_COMPLETION_REMINDER);
@@ -1412,7 +1442,7 @@ export function registerInteractiveSubagentTools(
           {
             type: "text",
             text:
-              `Sent follow-up to ${recipientLabel} (${params.message.length} chars) in pane ${state.paneId}.` +
+              `Sent follow-up to ${recipientLabel} (${params.message.length} chars) in ${state.mux === "herdr-core" ? "Herdr Core session" : "pane"} ${state.paneId}.` +
               `\n\nMessage sent:\n${messagePreview}` +
               (persistenceWarning ? `\n\nWarning: ${persistenceWarning}` : ""),
           },

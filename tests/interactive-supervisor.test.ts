@@ -38,7 +38,11 @@ import {
   focusInteractiveSubagent,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
-import { __resetMuxInstances, __setTmuxMultiplexer } from "../src/multiplexer";
+import {
+  __resetMuxInstances,
+  __setHerdrCoreMultiplexer,
+  __setTmuxMultiplexer,
+} from "../src/multiplexer";
 import {
   buildAsyncSupervisorItems,
   directSupervisorItems,
@@ -191,6 +195,7 @@ async function lineageHarness(rootId: string) {
         paneId: string;
         parentAgentId?: string;
         backend?: string;
+        muxServer?: string;
       },
     ) {
       await writeLineageManifestAtomic(paths.nodesDir, {
@@ -209,6 +214,9 @@ async function lineageHarness(rootId: string) {
         pane: {
           backend: options.backend ?? "tmux",
           paneId: options.paneId,
+          ...(options.muxServer === undefined
+            ? {}
+            : { muxServer: options.muxServer }),
         },
         artifactDir: join(sessionRoot, "artifacts", agentId),
       });
@@ -1499,6 +1507,57 @@ describe("interactive supervisor", () => {
     );
     expect(zellijTab).toContain("Return: Ctrl+t, then Tab (last tab)");
   });
+  it("keeps Herdr Core supervisor actions attach-only", () => {
+    const core = state("core", {
+      mux: "herdr-core",
+      paneId: "pi-0123456789abcdef",
+      attachCommand:
+        "HC_SOCKET=/tmp/herdr-core.sock hc attach pi-0123456789abcdef",
+      selectPaneCommand: "",
+    });
+    const notify = vi.fn();
+    const focus = vi.fn();
+    const nativeView = vi.fn();
+    const component = new InteractiveSupervisorComponent({
+      done: vi.fn(),
+      items: () => [
+        { kind: "interactive", state: core, depth: 0, actionable: true },
+      ],
+      notify,
+      focus,
+      nativeView,
+    });
+
+    const guide = component.render(160).join("\n");
+    expect(guide).toContain("Herdr Core: no split/native focus/overlay");
+    expect(guide).not.toContain("n native viewer");
+    expect(guide).not.toContain("· f focus");
+
+    component.handleInput("\r");
+    const details = component.render(160).join("\n");
+    expect(details).toContain("Core session: herdr-core:pi-0123456789abcdef");
+    expect(details).toContain(
+      "Attach: HC_SOCKET=/tmp/herdr-core.sock hc attach pi-0123456789abcdef",
+    );
+    expect(details).toContain("Return: Ctrl+\\ detaches from Herdr Core");
+    expect(details).not.toContain("Focus:");
+
+    component.handleInput("f");
+    expect(focus).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("Herdr Core has no native focus"),
+      "info",
+    );
+    expect(notify.mock.lastCall?.[0]).toContain(
+      "HC_SOCKET=/tmp/herdr-core.sock hc attach pi-0123456789abcdef",
+    );
+    component.handleInput("n");
+    expect(nativeView).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("Herdr Core has no native viewer or overlay"),
+      "info",
+    );
+  });
 
   it("shows why and from where an interactive agent is projected", () => {
     const projected = state("projected", { parentSessionId: "owner-session" });
@@ -2370,6 +2429,48 @@ describe("interactive supervisor", () => {
     await vi.waitFor(() => expect(notify).toHaveBeenCalled());
     expect(notify.mock.calls.at(-1)?.[0]).toContain("Subtree cancellation:");
     expect(killed.sort()).toEqual(["%kid-a", "%kid-b", "%parent"]);
+  });
+
+  it("projects and cancels Herdr Core lineage through its saved server", async () => {
+    const paneId = "pi-0123456789abcdef";
+    const server = "/private/herdr-core.sock";
+    const harness = await lineageHarness("herdr-core-subtree-root");
+    await harness.writeNode("core-agent", {
+      paneId,
+      backend: "herdr-core",
+      muxServer: server,
+    });
+    const getPaneLivenessAsync = vi.fn().mockResolvedValue("alive");
+    const getPaneLiveness = vi.fn().mockReturnValue("alive");
+    const buildAttachCommands = vi.fn(() => ({
+      attachCommand: "herdr-core attach",
+      focusCommand: "herdr-core focus",
+    }));
+    const killPane = vi.fn();
+    __setHerdrCoreMultiplexer({
+      getPaneLivenessAsync,
+      getPaneLiveness,
+      buildAttachCommands,
+      killPane,
+    } as never);
+
+    const { confirm, notify } = await harness.open((component) => {
+      expect(component.render(200).join("\n")).toContain("agent-core-agent");
+      component.handleInput("X");
+    });
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(getPaneLivenessAsync).toHaveBeenCalledWith(
+      paneId,
+      undefined,
+      server,
+    );
+    expect(buildAttachCommands).toHaveBeenCalledWith(
+      expect.objectContaining({ paneId, server }),
+    );
+    expect(getPaneLiveness).toHaveBeenCalledWith(paneId, undefined, server);
+    expect(killPane).toHaveBeenCalledWith(paneId, undefined, server);
   });
 
   it("reports subtree skip reasons in their own buckets", () => {

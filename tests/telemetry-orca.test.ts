@@ -16,7 +16,9 @@ const childMuxes: readonly TelemetryMux[] = [
   "tmux",
   "zellij",
   "herdr",
+  "herdr-core",
   "rex",
+  "wezterm",
 ];
 
 function lifecycleEvents(mux: TelemetryMux): TelemetryEvent[] {
@@ -192,10 +194,13 @@ describe("prompt-only host telemetry attribution boundary", () => {
     expect(telemetryOperationName("tool", "bash")).toBeUndefined();
   });
 
-  it("keeps Orca separate and recognizes Rex as a child backend", () => {
+  it("keeps Orca separate and recognizes Rex and Herdr Core backends", () => {
     expect(sanitizeTelemetryRequestedMux("orca")).toBeUndefined();
     expect(sanitizeTelemetryRequestedMux("rex")).toBe("rex");
+    expect(sanitizeTelemetryRequestedMux("herdr-core")).toBe("herdr-core");
     expect(sanitizeTelemetrySpawnFailureMux("rex")).toBe("rex");
+    expect(sanitizeTelemetrySpawnFailureMux("herdr-core")).toBe("herdr-core");
+    expect(sanitizeTelemetryRuntimeFailureMux("herdr-core")).toBe("herdr-core");
     expect(sanitizeTelemetrySpawnFailureMux("orca")).toBeUndefined();
     expect(sanitizeTelemetryRuntimeFailureMux("orca")).toBeUndefined();
   });

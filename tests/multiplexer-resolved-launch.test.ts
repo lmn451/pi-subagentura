@@ -267,17 +267,10 @@ it.each(["/verified # socket ", "/verified socket"])(
     expect(created.server).toBe(server);
     __resetMuxInstances();
     vi.stubEnv("PI_SUBAGENTURA_TMUX_SOCKET", "stale");
-    getMux({ preference: "tmux" }).sendKeys(
-      created.paneId,
-      "followup",
-      created.session,
-      created.server,
-    );
-    getMux({ preference: "tmux" }).killPane(
-      created.paneId,
-      created.session,
-      created.server,
-    );
+    const mux = getMux({ preference: "tmux" });
+    if (mux.name !== "tmux") throw new Error("Expected tmux backend");
+    mux.sendKeys(created.paneId, "followup", created.session, created.server);
+    mux.killPane(created.paneId, created.session, created.server);
     const calls = exec.mock.calls.filter(([command]) => command === "tmux");
     expect(
       calls.every(([, args]) => args[0] === "-S" && args[1] === server),

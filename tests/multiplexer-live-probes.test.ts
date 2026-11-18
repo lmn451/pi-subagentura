@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { probeLiveMuxTarget } from "../src/multiplexer-live-probes";
 import type {
   ProcessContext,
   ProcessIdentity,
 } from "../src/multiplexer-process-context";
 
+vi.mock("node:fs", () => ({
+  statSync: vi.fn(() => ({ isSocket: () => true })),
+}));
+const statSocket = vi.mocked(statSync);
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
   spawn: vi.fn(),
@@ -34,7 +39,17 @@ function context(commands = ["sh", "tmux", "zellij"]): ProcessContext {
 }
 const tmux = { mux: "tmux", paneId: "%4" } as const;
 const env = { TMUX: "/tmp/tmux-user/default,20,0" };
-beforeEach(() => vi.resetAllMocks());
+const herdrCore = {
+  mux: "herdr-core",
+  paneId: "t1abc",
+  server: "/tmp/core.sock",
+} as const;
+beforeEach(() => {
+  vi.resetAllMocks();
+  statSocket.mockReturnValue({
+    isSocket: () => true,
+  } as unknown as ReturnType<typeof statSync>);
+});
 describe("read-only live mux ownership probes", () => {
   it("proves WezTerm ownership with its socket and exact pane TTY", () => {
     const target = {
@@ -61,6 +76,52 @@ describe("read-only live mux ownership probes", () => {
       JSON.stringify([{ pane_id: 7, tty_name: "/dev/pts/2" }]),
     );
     expect(probeLiveMuxTarget(target, context(), {}).kind).toBe("mismatch");
+  });
+
+  it("proves a live Core terminal using the pinned local socket and PID", () => {
+    exec.mockReturnValue(
+      JSON.stringify({ address: "t1abc", pid: 90, state: "live" }),
+    );
+    expect(
+      probeLiveMuxTarget(herdrCore, context(), {
+        HC_SOCKET: "/tmp/ambient.sock",
+        HC_TERMINAL_ID: "t9other",
+      }),
+    ).toEqual({ kind: "match", target: herdrCore, distance: 0 });
+    expect(statSocket).toHaveBeenCalledWith("/tmp/core.sock");
+    expect(exec).toHaveBeenCalledWith(
+      "hc",
+      ["get", "--json", "--", "t1abc"],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          HC_SOCKET: "/tmp/core.sock",
+          HC_TERMINAL_ID: "t9other",
+        }),
+        shell: false,
+      }),
+    );
+  });
+
+  it.each([
+    { address: "t2other", pid: 90, state: "live" },
+    { address: "t1abc", pid: 90, state: "finished" },
+    { address: "t1abc", pid: 999, state: "live" },
+  ])("rejects stale, mismatched, or foreign Core evidence %j", (response) => {
+    exec.mockReturnValue(JSON.stringify(response));
+    expect(probeLiveMuxTarget(herdrCore, context(), {}).kind).toBe("mismatch");
+  });
+
+  it("does not run hc when the explicit Core socket is absent or not a socket", () => {
+    statSocket.mockImplementation(() => {
+      throw new Error("missing socket");
+    });
+    expect(probeLiveMuxTarget(herdrCore, context(), {}).kind).toBe("unknown");
+    expect(exec).not.toHaveBeenCalled();
+    statSocket.mockReturnValue({
+      isSocket: () => false,
+    } as unknown as ReturnType<typeof statSync>);
+    expect(probeLiveMuxTarget(herdrCore, context(), {}).kind).toBe("unknown");
+    expect(exec).not.toHaveBeenCalled();
   });
   it("requires exact tmux pane identity and process ownership", () => {
     exec.mockReturnValue("%4\t90\t/dev/pts/1\n");

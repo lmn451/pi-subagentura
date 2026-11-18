@@ -685,6 +685,16 @@ describe("InteractiveParams", () => {
     );
   });
 
+  it("rejects background false with the explicit Herdr Core mux", () => {
+    expect(
+      check(InteractiveParams)({
+        task: "t",
+        mux: "herdr-core",
+        background: false,
+      }),
+    ).toBe(false);
+  });
+
   it("rejects background as string", () => {
     expect(check(InteractiveParams)({ task: "t", background: "yes" })).toBe(
       false,
@@ -734,6 +744,12 @@ describe("InteractiveParams", () => {
     expect(check(InteractiveParams)({ task: "t", mux: "herdr" as const })).toBe(
       true,
     );
+  });
+
+  it("accepts mux 'herdr-core'", () => {
+    expect(
+      check(InteractiveParams)({ task: "t", mux: "herdr-core" as const }),
+    ).toBe(true);
   });
 
   it("accepts mux 'rex'", () => {

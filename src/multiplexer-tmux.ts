@@ -27,7 +27,7 @@ import type {
   MuxLaunchContext,
   CapturePaneOptions,
   CapturePaneResult,
-  Multiplexer,
+  SplitInputMultiplexer,
   PaneActivity,
   PaneLiveness,
   PaneRef,
@@ -114,7 +114,7 @@ function parsePaneListing(output: string): ReadonlySet<string> {
   return new Set(paneIds);
 }
 
-export class TmuxMultiplexer implements Multiplexer {
+export class TmuxMultiplexer implements SplitInputMultiplexer {
   readonly name = "tmux" as const;
   readonly capabilities = MUX_CAPABILITIES.tmux;
 

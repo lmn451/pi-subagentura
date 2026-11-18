@@ -3,6 +3,7 @@ import {
   isRexServerAddress,
   isRexSessionId,
   isMuxSocketPath,
+  isHerdrCoreAddress,
   validateMuxLaunchContext,
   type MuxTarget,
   isZellijSessionName,
@@ -24,16 +25,6 @@ export type CurrentMuxContext =
   | { readonly kind: "absent" }
   | { readonly kind: "ready"; readonly target: MuxTarget }
   | { readonly kind: "unavailable"; readonly message: string };
-
-function safeSelector(value: string | undefined): value is string {
-  return (
-    !!value &&
-    value.length <= 4096 &&
-    !value.startsWith("-") &&
-    value.trim() === value &&
-    !/[\x00-\x1f\x7f]/.test(value)
-  );
-}
 
 function contextCandidates(env: NodeJS.ProcessEnv): {
   names: string[];
@@ -116,9 +107,31 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
       });
     }
   }
+  if (
+    env.HC_TERMINAL_ID !== undefined ||
+    env.HC_TERMINAL_SOCKET !== undefined
+  ) {
+    names.push("Herdr Core");
+    const target = herdrCoreTargetFromEnv(env);
+    if (target) targets.push(target);
+  }
   return { names, targets };
 }
 
+function herdrCoreTargetFromEnv(
+  env: NodeJS.ProcessEnv,
+): Extract<MuxTarget, { readonly mux: "herdr-core" }> | undefined {
+  if (
+    !isHerdrCoreAddress(env.HC_TERMINAL_ID) ||
+    !isMuxSocketPath(env.HC_TERMINAL_SOCKET)
+  )
+    return undefined;
+  return {
+    mux: "herdr-core",
+    paneId: env.HC_TERMINAL_ID,
+    server: env.HC_TERMINAL_SOCKET,
+  };
+}
 /** Resolve ownership, not focus or an inherited environment-marker priority. */
 export function resolveCurrentMuxContext(
   env: NodeJS.ProcessEnv = process.env,
@@ -134,6 +147,36 @@ export function resolveCurrentMuxContext(
   );
 }
 
+/** Explicit Core selection proves only the requested local Core terminal. */
+export function resolveExplicitHerdrCoreContext(
+  env: NodeJS.ProcessEnv = process.env,
+): CurrentMuxContext {
+  const unavailable: CurrentMuxContext = {
+    kind: "unavailable",
+    message:
+      "Herdr Core context is unavailable or cannot be tied to this process; refusing to guess.",
+  };
+  const target = herdrCoreTargetFromEnv(env);
+  if (!target) return unavailable;
+  const context = readProcessContext();
+  if (!context) return unavailable;
+  const probe = probeLiveMuxTarget(target, context, env);
+  if (
+    probe.kind !== "match" ||
+    probe.target.mux !== "herdr-core" ||
+    probe.target.paneId !== target.paneId ||
+    probe.target.server !== target.server ||
+    !Number.isSafeInteger(probe.distance) ||
+    probe.distance < -1
+  )
+    return unavailable;
+  try {
+    validateMuxLaunchContext("herdr-core", { ...target, kind: "attached" });
+  } catch {
+    return unavailable;
+  }
+  return { kind: "ready", target: Object.freeze({ ...target }) };
+}
 /** Advisory status checks must not block Pi while host commands are pending. */
 export async function resolveCurrentMuxContextAsync(
   env: NodeJS.ProcessEnv = process.env,

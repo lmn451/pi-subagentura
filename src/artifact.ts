@@ -37,6 +37,7 @@ import isPathInside from "is-path-inside";
 import { debugLog } from "./helpers";
 import type { MuxName } from "./multiplexer";
 import {
+  isHerdrCorePaneName,
   isMuxSocketPath,
   isRexBlockId,
   isRexServerAddress,
@@ -1488,7 +1489,7 @@ export interface InteractiveSubagentPersistedStateV2 {
   windowName?: string;
   mux: MuxName;
   muxSession?: string;
-  /** Stable endpoint for the Rex server that owns this block. */
+  /** Explicit endpoint for server-scoped muxes; required for Rex and Herdr Core. */
   muxServer?: string;
   artifactDir: string;
   sessionFile: string;
@@ -1793,7 +1794,12 @@ type PersistedMuxIdentity = Pick<
   (
     | { mux: "rex"; muxSession: string; muxServer: string }
     | {
-        mux: Exclude<MuxName, "rex">;
+        mux: "herdr-core";
+        muxSession?: never;
+        muxServer: string;
+      }
+    | {
+        mux: Exclude<MuxName, "rex" | "herdr-core">;
         muxSession?: string;
         muxServer?: string;
       }
@@ -1822,6 +1828,20 @@ function normalizePersistedMuxIdentity(
   const terminalId = validatedMuxTerminalId(raw.muxTerminalId);
   if (terminalId !== undefined) optional.muxTerminalId = terminalId;
   switch (raw.mux) {
+    case "herdr-core":
+      if (
+        !isHerdrCorePaneName(paneId) ||
+        raw.muxSession !== undefined ||
+        !isMuxSocketPath(raw.muxServer)
+      ) {
+        return null;
+      }
+      return {
+        ...(terminalId === undefined ? {} : { muxTerminalId: terminalId }),
+        mux: "herdr-core",
+        paneId,
+        muxServer: raw.muxServer,
+      };
     case "tmux": {
       const server = raw.muxServer;
       if (server !== undefined && !isMuxSocketPath(server)) return null;
@@ -2137,12 +2157,14 @@ function normalizeV2StatePayload(
         rawEntryTelemetry?.mux === "tmux" ||
         rawEntryTelemetry?.mux === "zellij" ||
         rawEntryTelemetry?.mux === "herdr" ||
+        rawEntryTelemetry?.mux === "herdr-core" ||
         rawEntryTelemetry?.mux === "rex" ||
         rawEntryTelemetry?.mux === "wezterm"
           ? rawEntryTelemetry.mux
           : entry.mux === "tmux" ||
               entry.mux === "zellij" ||
               entry.mux === "herdr" ||
+              entry.mux === "herdr-core" ||
               entry.mux === "rex" ||
               entry.mux === "wezterm"
             ? entry.mux
@@ -2298,6 +2320,14 @@ function serializeInteractiveStates(
   for (const [, entry] of entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error("invalid interactive state entry");
+    }
+    if (
+      entry.mux === "herdr-core" &&
+      (!isHerdrCorePaneName(entry.paneId) ||
+        entry.muxSession !== undefined ||
+        !isMuxSocketPath(entry.muxServer))
+    ) {
+      throw new Error("invalid herdr-core interactive state identity");
     }
     if (
       "workingCwd" in entry &&

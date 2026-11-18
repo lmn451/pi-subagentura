@@ -180,7 +180,7 @@ const InteractiveSpawnFields = Type.Object({
   background: Type.Optional(
     Type.Boolean({
       description:
-        "Spawn the sub-agent in a detached named window (hidden from your mux layout) instead of a visible horizontal split. Default true. Pass background: false for a side-by-side split you can watch in real time.",
+        "Use the selected backend's background target (default true) rather than a visible horizontal split; pass background: false to request a side-by-side split. Herdr Core has no split mode, so background: false is unsupported there.",
     }),
   ),
   completionPolicy: Type.Optional(
@@ -204,18 +204,26 @@ const InteractiveSpawnFields = Type.Object({
         Type.Literal("tmux"),
         Type.Literal("zellij"),
         Type.Literal("herdr"),
+        Type.Literal("herdr-core"),
         Type.Literal("rex"),
         Type.Literal("wezterm"),
       ],
       {
         description:
-          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. An explicit value forces that backend.',
+          'Which multiplexer backend to use. "auto" (default) verifies live pane ownership using process ancestry and terminal evidence, not fixed environment-marker priority. Conflicting or unverified host context fails closed. With no host context, tmux then Zellij remain the relaxed-spawn choices. Rex requires a live local REX_SESSION/REX_BLOCK/REX_SERVER context. Legacy Herdr and Herdr Core are distinct backends; Core requires verified live ownership and supports attach, not splits, native focus, or a native overlay. An explicit value selects that backend but does not bypass its live ownership checks.',
       },
     ),
   ),
 });
 Object.assign(InteractiveSpawnFields, {
   dependentRequired: { routingAliases: ["routingDescription"] },
+  not: {
+    required: ["mux", "background"],
+    properties: {
+      mux: { const: "herdr-core" },
+      background: { const: false },
+    },
+  },
 });
 
 const InteractiveContextMode = Type.Union([

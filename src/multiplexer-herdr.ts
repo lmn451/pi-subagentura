@@ -15,7 +15,7 @@ import { asStringIdentifier, type HerdrRequestId } from "./identifier-types";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
-  Multiplexer,
+  SplitInputMultiplexer,
   PaneActivity,
   PaneLivenessFailureReason,
   PaneLivenessDiagnostic,
@@ -549,7 +549,7 @@ interface HerdrPaneProbe {
 /** Monotonic issue counter used to order concurrent probes of one pane. */
 let nextProbeSeq = 0;
 
-export class HerdrMultiplexer implements Multiplexer {
+export class HerdrMultiplexer implements SplitInputMultiplexer {
   readonly name = "herdr" as const;
   readonly capabilities = MUX_CAPABILITIES.herdr;
   private readonly paneAliases = new Map<string, string>();

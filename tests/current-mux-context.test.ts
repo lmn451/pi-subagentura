@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveCurrentMuxContext } from "../src/multiplexer-current-context";
-import type { ProcessContext } from "../src/multiplexer-process-context";
+import {
+  resolveCurrentMuxContext,
+  resolveExplicitHerdrCoreContext,
+} from "../src/multiplexer-current-context";
+import type {
+  ProcessContext,
+  ProcessIdentity,
+} from "../src/multiplexer-process-context";
 
 const { readContext, nearest, probe } = vi.hoisted(() => ({
   readContext: vi.fn(),
@@ -14,11 +20,26 @@ vi.mock("../src/multiplexer-process-context", () => ({
 vi.mock("../src/multiplexer-live-probes", () => ({
   probeLiveMuxTarget: probe,
 }));
-const context = {
+const own: ProcessIdentity = {
   pid: 99,
-  processes: new Map(),
-  ancestors: [{ pid: 10, parentPid: 20, command: "zellij" }],
-} as ProcessContext;
+  parentPid: 10,
+  command: "node",
+};
+const muxAncestor: ProcessIdentity = {
+  pid: 10,
+  parentPid: 20,
+  command: "zellij",
+};
+const init: ProcessIdentity = {
+  pid: 20,
+  parentPid: 0,
+  command: "init",
+};
+const context: ProcessContext = {
+  pid: own.pid,
+  processes: new Map([own, muxAncestor, init].map((row) => [row.pid, row])),
+  ancestors: [muxAncestor],
+};
 const nested = {
   TMUX: "/tmp/tmux.sock,1,0",
   TMUX_PANE: "%7",
@@ -184,5 +205,74 @@ describe("current mux ownership", () => {
       }).kind,
     ).toBe("unavailable");
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("selects a verified Herdr Core terminal among nested host markers", () => {
+    nearest.mockReturnValue({ mux: "zellij", pid: 10 });
+    probe.mockImplementation((target) => ({
+      kind: target.mux === "herdr-core" ? "match" : "mismatch",
+      ...(target.mux === "herdr-core" ? { target, distance: -1 } : {}),
+    }));
+    expect(
+      resolveCurrentMuxContext({
+        ...nested,
+        HC_TERMINAL_ID: "t1abc",
+        HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      }),
+    ).toEqual({
+      kind: "ready",
+      target: {
+        mux: "herdr-core",
+        paneId: "t1abc",
+        server: "/tmp/core.sock",
+      },
+    });
+    expect(probe).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not treat a stale Core marker as detached or forward invalid addresses", () => {
+    expect(
+      resolveCurrentMuxContext({
+        HC_TERMINAL_ID: "t1abc",
+        HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      }).kind,
+    ).toBe("unavailable");
+    probe.mockClear();
+    expect(
+      resolveCurrentMuxContext({
+        HC_TERMINAL_ID: "t0not-local",
+        HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      }).kind,
+    ).toBe("unavailable");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("explicit Core verification ignores unrelated mux markers", () => {
+    probe.mockImplementation((target) =>
+      target.mux === "herdr-core"
+        ? { kind: "match", target, distance: -1 }
+        : { kind: "unknown" },
+    );
+    expect(
+      resolveExplicitHerdrCoreContext({
+        ...nested,
+        HC_TERMINAL_ID: "t1abc",
+        HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      }),
+    ).toMatchObject({
+      kind: "ready",
+      target: { mux: "herdr-core", paneId: "t1abc" },
+    });
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe.mock.calls[0]?.[0].mux).toBe("herdr-core");
+  });
+
+  it("requires live Core ownership for explicit Core selection", () => {
+    expect(
+      resolveExplicitHerdrCoreContext({
+        HC_TERMINAL_ID: "t1abc",
+        HC_TERMINAL_SOCKET: "/tmp/core.sock",
+      }).kind,
+    ).toBe("unavailable");
   });
 });

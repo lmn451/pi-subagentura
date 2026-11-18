@@ -9,7 +9,7 @@ import type {
   ProcessIdentity,
 } from "../src/multiplexer-process-context";
 
-const { exec, sync } = vi.hoisted(() => ({
+const { exec, sync, stat } = vi.hoisted(() => ({
   exec: vi.fn<
     (
       command: string,
@@ -19,6 +19,10 @@ const { exec, sync } = vi.hoisted(() => ({
     ) => ChildProcess
   >(),
   sync: vi.fn(),
+  stat: vi.fn(),
+}));
+vi.mock("node:fs", () => ({
+  statSync: stat,
 }));
 vi.mock("node:child_process", () => ({
   execFile: exec,
@@ -33,6 +37,7 @@ const targets = [
   { mux: "herdr", paneId: "w1:p2", session: socket },
   { mux: "rex", paneId, session, server: `unix://${socket}` },
   { mux: "zellij", paneId: "terminal_4", session: "work" },
+  { mux: "herdr-core", paneId: "t1abc", server: "/tmp/core.sock" },
 ] as const;
 function context(): ProcessContext {
   const own: ProcessIdentity = {
@@ -67,12 +72,15 @@ function output(mux: LiveMuxTarget["mux"]): string {
       return JSON.stringify({ child: { pid: 90 } });
     case "zellij":
       return JSON.stringify([{ id: 4, is_plugin: false, exited: false }]);
+    case "herdr-core":
+      return JSON.stringify({ address: "t1abc", pid: 90, state: "live" });
     case "wezterm":
       return JSON.stringify([{ pane_id: 4, tty_name: "/dev/pts/1" }]);
   }
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  stat.mockReturnValue({ isSocket: () => true });
   sync.mockImplementation(() => {
     throw new Error("synchronous child process calls are forbidden");
   });
@@ -136,6 +144,20 @@ describe("asynchronous read-only live mux ownership probes", () => {
     ]);
     expect(exec.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ env: { HERDR_SOCKET_PATH: socket } }),
+    );
+  });
+  it("pins the explicit Core socket and exact terminal address", async () => {
+    respond(output("herdr-core"));
+    await probeLiveMuxTargetAsync(targets[4], context(), {
+      HC_SOCKET: "/tmp/ambient.sock",
+    });
+    expect(exec).toHaveBeenCalledWith(
+      "hc",
+      ["get", "--json", "--", "t1abc"],
+      expect.objectContaining({
+        env: expect.objectContaining({ HC_SOCKET: "/tmp/core.sock" }),
+      }),
+      expect.any(Function),
     );
   });
   it.each([socket, `unix://${socket}`])(
@@ -219,6 +241,8 @@ describe("asynchronous read-only live mux ownership probes", () => {
     { mux: "rex", paneId, session: "--help", server: socket },
     { mux: "zellij", paneId: "4", session: "--help" },
     { mux: "zellij", paneId: "4", session: "opaque\nname" },
+    { mux: "herdr-core", paneId: "t0invalid", server: "/tmp/core.sock" },
+    { mux: "herdr-core", paneId: "t1abc", server: "relative.sock" },
   ] as const)(
     "rejects invalid target $mux $paneId before exec",
     async (target) => {
@@ -256,6 +280,7 @@ describe("asynchronous read-only live mux ownership probes", () => {
       targets[2],
       JSON.stringify({ child: { pid: 999 }, ancestors: [{ pid: 90 }] }),
     ],
+    [targets[4], JSON.stringify({ address: "t1abc", pid: 999, state: "live" })],
     [targets[3], JSON.stringify([{ id: 5 }])],
   ] as const)(
     "rejects foreign or mismatched pane %j",

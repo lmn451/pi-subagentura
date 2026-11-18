@@ -1,5 +1,8 @@
+import { statSync } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
 import {
+  isHerdrCoreAddress,
+  isMuxSocketPath,
   isRexBlockId,
   isRexSessionId,
   isZellijSessionName,
@@ -103,6 +106,37 @@ function matchPids(
   const rootTty = normalizeProcessTty(paneRoot?.tty);
   if (tty && rootTty && tty !== rootTty) return MISMATCH;
   return { kind: "match", target, distance };
+}
+function herdrCoreProbe(
+  target: LiveMuxTarget,
+  context: ProcessContext,
+  env: NodeJS.ProcessEnv,
+): ProbePlan | LiveMuxProbe {
+  const server = target.server;
+  if (
+    target.session !== undefined ||
+    !isHerdrCoreAddress(target.paneId) ||
+    !isMuxSocketPath(server)
+  )
+    return UNKNOWN;
+  try {
+    // Never let an ownership read create a Core server for a stale marker.
+    if (!statSync(server).isSocket()) return UNKNOWN;
+  } catch {
+    return UNKNOWN;
+  }
+  return {
+    command: "hc",
+    args: ["get", "--json", "--", target.paneId],
+    env: { ...env, HC_SOCKET: server },
+    parse(output) {
+      const parsed: unknown = JSON.parse(output);
+      if (!record(parsed) || parsed.address !== target.paneId) return MISMATCH;
+      if (parsed.state !== "live") return MISMATCH;
+      if (!pid(parsed.pid)) return UNKNOWN;
+      return matchPids(target, context, [parsed.pid]);
+    },
+  };
 }
 function tmuxProbe(
   target: LiveMuxTarget,
@@ -313,9 +347,11 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : target.mux === "tmux" || target.mux === "wezterm"
-          ? socket(target.server)
-          : selector(target.server)))
+        : target.mux === "herdr-core"
+          ? isMuxSocketPath(target.server)
+          : target.mux === "tmux" || target.mux === "wezterm"
+            ? socket(target.server)
+            : selector(target.server)))
   )
     return UNKNOWN;
   switch (target.mux) {
@@ -323,6 +359,8 @@ function prepareProbe(
       return tmuxProbe(target, context, env);
     case "herdr":
       return herdrProbe(target, context, env);
+    case "herdr-core":
+      return herdrCoreProbe(target, context, env);
     case "rex":
       return rexProbe(target, context, env);
     case "zellij":

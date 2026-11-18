@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add Herdr Core as a distinct interactive mux with live ownership verification
+  for automatic and explicit selection, socket-pinned named sessions, and
+  attach-only operation (`hc attach`; Ctrl+\ detaches). Core has no split,
+  native focus/overlay, or `background:false`, reports activity as unknown, and
+  adds closed mux dimensions to telemetry schema v9.
+
 ### Fixed
 
 - Preserve Node-supported platform signal names and aliases when normalizing

@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import type {
   CapturePaneOptions,
   CapturePaneResult,
-  Multiplexer,
+  SplitInputMultiplexer,
   PaneActivity,
   PaneLiveness,
   PaneRef,
@@ -286,7 +286,7 @@ function safePaneId(paneId: string): string {
   return paneId;
 }
 
-export class RexMultiplexer implements Multiplexer {
+export class RexMultiplexer implements SplitInputMultiplexer {
   readonly name = "rex" as const;
   readonly capabilities = MUX_CAPABILITIES.rex;
 

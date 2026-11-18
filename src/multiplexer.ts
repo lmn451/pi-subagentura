@@ -18,11 +18,16 @@
 import { TmuxMultiplexer } from "./multiplexer-tmux";
 import { ZellijMultiplexer } from "./multiplexer-zellij";
 import { HerdrMultiplexer } from "./multiplexer-herdr";
+import { HerdrCoreMultiplexer } from "./multiplexer-herdr-core";
 import { RexMultiplexer } from "./multiplexer-rex";
 import { WezTermMultiplexer } from "./multiplexer-wezterm";
-import { resolveCurrentMuxContext } from "./multiplexer-current-context";
+import {
+  resolveCurrentMuxContext,
+  resolveExplicitHerdrCoreContext,
+} from "./multiplexer-current-context";
 import {
   validateMuxLaunchContext,
+  type AtomicInputMultiplexer,
   type MuxName,
   type Multiplexer,
   type MuxLaunchContext,
@@ -62,7 +67,17 @@ export function resolveMux(opts: GetMuxOptions = {}): ResolvedMux {
     }
   } else {
     adapter = getMux({ preference });
-    if (adapter.name === "rex") {
+    if (preference === "herdr-core") {
+      const current = resolveExplicitHerdrCoreContext(env);
+      if (current.kind !== "ready") {
+        throw new MultiplexerContextUnavailableError(
+          current.kind === "unavailable"
+            ? current.message
+            : "No verified Herdr Core context is available for this launch",
+        );
+      }
+      context = { ...current.target, kind: "attached" };
+    } else if (adapter.name === "rex") {
       const probe = (adapter as RexMultiplexer).probeContext(env);
       if (probe.kind !== "ready")
         throw new MultiplexerContextUnavailableError(
@@ -150,7 +165,7 @@ export interface GetMuxOptions {
 export class NoMultiplexerAvailableError extends Error {
   constructor() {
     super(
-      "No multiplexer available. Start pi inside tmux, zellij, Herdr, or Rex, " +
+      "No multiplexer available. Start pi inside tmux, zellij, Herdr, Herdr Core, or Rex, " +
         "for example: tmux new -A -s pi 'pi'  —  or install one and ensure its server is running.",
     );
     this.name = "NoMultiplexerAvailableError";
@@ -168,8 +183,9 @@ export class MultiplexerContextUnavailableError extends Error {
  * Resolve a multiplexer instance.
  *
  * Returns a cached backend instance. Auto resolution performs bounded host
- * checks before selection; an explicit preference skips host detection. Backend
- * instances keep no per-pane state, which remains persisted on child records.
+ * checks before selection; `getMux` does not verify explicit preferences.
+ * `resolveMux` requires live ownership proof for explicit Herdr Core launches.
+ * Backend instances keep no per-pane state, which remains persisted on child records.
  */
 function resolveAutoMux(): Multiplexer {
   const context = resolveCurrentMuxContext();
@@ -198,6 +214,8 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
       return getOrCreate("zellij", () => new ZellijMultiplexer());
     case "herdr":
       return getOrCreate("herdr", () => new HerdrMultiplexer());
+    case "herdr-core":
+      return getOrCreate("herdr-core", () => new HerdrCoreMultiplexer());
     case "rex":
       return getOrCreate("rex", () => new RexMultiplexer());
     case "wezterm":
@@ -238,6 +256,14 @@ export function __setZellijMultiplexer(impl: Multiplexer | undefined): void {
 export function __setRexMultiplexer(impl: Multiplexer | undefined): void {
   if (impl) instances.set("rex", impl);
   else instances.delete("rex");
+}
+
+/** Test seam: replace the cached Herdr Core backend. */
+export function __setHerdrCoreMultiplexer(
+  impl: AtomicInputMultiplexer | undefined,
+): void {
+  if (impl) instances.set("herdr-core", impl);
+  else instances.delete("herdr-core");
 }
 
 /** Test seam: clear all cached backend instances (forces re-instantiation). */

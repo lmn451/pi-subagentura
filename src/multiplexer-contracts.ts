@@ -9,7 +9,13 @@
 import { execFileSync, spawn, type ExecSyncOptions } from "node:child_process";
 
 /** Names of the supported multiplexer backends. Kept narrow on purpose. */
-export type MuxName = "tmux" | "zellij" | "herdr" | "rex" | "wezterm";
+export type MuxName =
+  | "tmux"
+  | "zellij"
+  | "herdr"
+  | "rex"
+  | "wezterm"
+  | "herdr-core";
 export function isTmuxSocketLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -25,6 +31,16 @@ export function isMuxSocketPath(value: unknown): value is string {
     value.length <= 4096 &&
     !/[\x00-\x1f\x7f]/.test(value)
   );
+}
+
+/** A local Herdr Core terminal address, not a remote/core URL. */
+export function isHerdrCoreAddress(value: unknown): value is string {
+  return typeof value === "string" && /^t[1-9][0-9a-z]{0,7}$/.test(value);
+}
+
+/** Persisted names used for Core-owned child terminals. */
+export function isHerdrCorePaneName(value: unknown): value is string {
+  return typeof value === "string" && /^pi-[a-f0-9]{16}$/.test(value);
 }
 export type MuxTarget =
   | {
@@ -54,6 +70,12 @@ export type MuxTarget =
     }
   | {
       readonly mux: "wezterm";
+      readonly paneId: string;
+      readonly server: string;
+      readonly session?: never;
+    }
+  | {
+      readonly mux: "herdr-core";
       readonly paneId: string;
       readonly server: string;
       readonly session?: never;
@@ -100,8 +122,11 @@ export function validateMuxLaunchContext(
           : context.mux === "zellij"
             ? /^\d+$/.test(context.paneId) &&
               isZellijSessionName(context.session)
-            : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
-              isMuxSocketPath(context.session);
+            : context.mux === "herdr-core"
+              ? isHerdrCoreAddress(context.paneId) &&
+                isMuxSocketPath(context.server)
+              : /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(context.paneId) &&
+                isMuxSocketPath(context.session);
   if (!valid) throw new Error("Invalid multiplexer launch context");
 }
 const REX_UUID_PATTERN =
@@ -228,6 +253,11 @@ export const MUX_CAPABILITIES: Readonly<
     // Herdr has no generic transient content overlay in its public CLI.
     nativeOverlay: false,
   },
+  "herdr-core": {
+    structuredFocus: false,
+    boundedCapture: true,
+    nativeOverlay: false,
+  },
   rex: {
     // `rex focus <block-id> -s <session-id>` targets stable public IDs.
     structuredFocus: true,
@@ -265,11 +295,10 @@ export interface CapturePaneResult {
 /**
  * Per-spawn state about how a child pane was created. The state is set on
  * `InteractiveSubagentState.mux` at spawn time and never changes — all later
- * operations on the child (send-keys, kill, attach, focus) route through the
- * same backend that created it.
+ * operations on the child (input, kill, attach, focus) route through the same
+ * backend that created it.
  */
-export interface Multiplexer {
-  readonly name: MuxName;
+export interface MultiplexerBase {
   readonly capabilities: MultiplexerCapabilities;
 
   /**
@@ -302,11 +331,10 @@ export interface Multiplexer {
    *                           window/tab. Backends are free to ignore this
    *                           and generate their own (zellij requires unique
    *                           tab names per session).
-   * @returns paneId           String id usable in subsequent `sendKeys` /
-   *                           `getPaneLiveness` / `killPane` calls. The string
+   * @returns paneId           String id usable in later input dispatch,
+   *                           `getPaneLiveness`, and `killPane` calls. The
    *                           format is backend-specific (tmux uses `%N`,
-   *                           zellij uses `terminal_N` or just an integer
-   *                           stringified).
+   *                           zellij uses `terminal_N` or an integer string).
    * @returns muxTerminalId    Optional stable backend terminal identity. Herdr
    *                           returns this so persisted states never need to
    *                           rediscover an attach target from a transient
@@ -378,34 +406,6 @@ export interface Multiplexer {
   ): Promise<PaneActivity>;
 
   /**
-   * Send literal text to the pane's shell input buffer, character-by-character.
-   * Does NOT submit (no Enter). Callers that want to submit pair this with
-   * a second call to `sendEnter`.
-   *
-   * The text may contain newlines (used by the launch script template);
-   * backends are expected to deliver them verbatim.
-   *
-   * @param session  The session returned by `createPane` (zellij needs it;
-   *                 tmux ignores it).
-   */
-  sendKeys(
-    paneId: string,
-    text: string,
-    session?: string,
-    server?: string,
-  ): void;
-
-  /**
-   * Send a single Enter / Return key to the pane, submitting whatever is
-   * in the input buffer. Kept separate from `sendKeys` because the encoding
-   * differs (tmux uses a key name, zellij uses a byte value).
-   *
-   * @param session  The session returned by `createPane` (zellij needs it;
-   *                 tmux ignores it).
-   */
-  sendEnter(paneId: string, session?: string, server?: string): void;
-
-  /**
    * Kill the pane. MUST be best-effort: no throw on already-dead panes.
    * Used by the cancel path and the orphan-pane guard.
    *
@@ -463,6 +463,34 @@ export interface Multiplexer {
     focusCommand: string;
   };
 }
+export interface SplitInputMultiplexer extends MultiplexerBase {
+  readonly name: Exclude<MuxName, "herdr-core">;
+
+  /** Send literal text to the pane without submitting it. */
+  sendKeys(
+    paneId: string,
+    text: string,
+    session?: string,
+    server?: string,
+  ): void;
+
+  /** Submit the current input buffer with one Enter / Return key. */
+  sendEnter(paneId: string, session?: string, server?: string): void;
+}
+
+export interface AtomicInputMultiplexer extends MultiplexerBase {
+  readonly name: "herdr-core";
+
+  /** Atomically send and submit text to the addressed Core terminal. */
+  sendCommand(
+    paneId: string,
+    text: string,
+    session?: string,
+    server?: string,
+  ): void;
+}
+
+export type Multiplexer = SplitInputMultiplexer | AtomicInputMultiplexer;
 
 /**
  * Test whether a binary is on PATH. Used by backend `isAvailable` probes.

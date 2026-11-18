@@ -4,6 +4,7 @@ import type {
   TelemetrySessionHost,
   TelemetryTerminalProgram,
 } from "./telemetry";
+import { isHerdrCoreAddress, isMuxSocketPath } from "./multiplexer-contracts";
 
 const MAX_ENV_FIELD_LENGTH = 4_096;
 
@@ -60,6 +61,7 @@ export function sanitizeTelemetryParentMux(value: unknown): TelemetryParentMux {
   return value === "tmux" ||
     value === "zellij" ||
     value === "herdr" ||
+    value === "herdr-core" ||
     value === "rex" ||
     value === "wezterm"
     ? value
@@ -112,6 +114,12 @@ export function detectEnvironment(
   if (hasNativeMarker(env.TMUX)) muxCandidates.push("tmux");
   if (hasNativeMarker(env.ZELLIJ_SESSION_NAME)) muxCandidates.push("zellij");
   if (env.HERDR_ENV === "1") muxCandidates.push("herdr");
+  if (
+    isHerdrCoreAddress(env.HC_TERMINAL_ID) &&
+    isMuxSocketPath(env.HC_TERMINAL_SOCKET)
+  ) {
+    muxCandidates.push("herdr-core");
+  }
   if (
     hasNativeMarker(env.WEZTERM_PANE) &&
     hasNativeMarker(env.WEZTERM_UNIX_SOCKET)

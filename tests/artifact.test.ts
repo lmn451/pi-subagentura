@@ -1194,6 +1194,62 @@ describe("persisted interactive state helpers", () => {
     expect(loadInteractiveStates(root)?.states.abc12345).toEqual(herdrState);
   });
 
+  it("persists Herdr Core only with its strict name and pinned socket", () => {
+    const herdrCoreState: InteractiveSubagentPersistedStateV2 = {
+      ...SAMPLE,
+      paneId: "pi-0123456789abcdef",
+      mux: "herdr-core",
+      muxServer: "/tmp/herdr-core.sock",
+      telemetry: {
+        correlationId: "11111111-1111-4111-8111-111111111111",
+        invocationSource: "interactive",
+        async: true,
+        mux: "herdr-core",
+        depth: 1,
+        depthBucket: "1",
+        completionPolicy: "each",
+        model: "custom",
+      },
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "pi",
+      states: { [herdrCoreState.id]: herdrCoreState },
+    });
+    expect(loadInteractiveStates(root)?.states[herdrCoreState.id]).toEqual(
+      herdrCoreState,
+    );
+    expect(() =>
+      saveInteractiveStates(root, {
+        schemaVersion: 2,
+        parent: "pi",
+        states: {
+          [herdrCoreState.id]: {
+            ...herdrCoreState,
+            muxServer: "relative.sock",
+          },
+        },
+      }),
+    ).toThrow(/herdr-core interactive state identity/);
+
+    for (const invalidState of [
+      { ...herdrCoreState, paneId: "t123" },
+      { ...herdrCoreState, muxServer: "relative.sock" },
+      { ...herdrCoreState, muxServer: "/tmp/bad\nsocket" },
+      { ...herdrCoreState, muxServer: undefined },
+      { ...herdrCoreState, muxSession: "/tmp/ambient.sock" },
+    ]) {
+      const contents = JSON.stringify({
+        schemaVersion: 2,
+        parent: "pi",
+        states: { [herdrCoreState.id]: invalidState },
+      });
+      writeFileSync(stateFilePath(root), contents, { mode: 0o600 });
+      expect(loadInteractiveStates(root)).toBeNull();
+      expect(readFileSync(stateFilePath(root), "utf8")).toBe(contents);
+    }
+  });
+
   it.each([
     "/tmp/tmux/default",
     "/tmp/tmux work/#socket",

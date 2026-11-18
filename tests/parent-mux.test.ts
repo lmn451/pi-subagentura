@@ -14,6 +14,40 @@ describe("parent multiplexer environment observation", () => {
     [{ HERDR_ENV: "1" }, "herdr"],
     [
       {
+        HC_TERMINAL_ID: "t123",
+        HC_TERMINAL_SOCKET: "/private/herdr-core.sock",
+      },
+      "herdr-core",
+    ],
+    [{ HC_TERMINAL_ID: "t123" }, "unknown"],
+    [
+      {
+        HC_TERMINAL_ID: "pi-0123456789abcdef",
+        HC_TERMINAL_SOCKET: "/private/herdr-core.sock",
+      },
+      "unknown",
+    ],
+    [
+      { HC_TERMINAL_ID: "t123", HC_TERMINAL_SOCKET: "relative.sock" },
+      "unknown",
+    ],
+    [
+      {
+        HC_TERMINAL_ID: "t123",
+        HC_TERMINAL_SOCKET: "/private/bad\nsocket",
+      },
+      "unknown",
+    ],
+    [
+      {
+        HERDR_ENV: "1",
+        HC_TERMINAL_ID: "t123",
+        HC_TERMINAL_SOCKET: "/private/herdr-core.sock",
+      },
+      "unknown",
+    ],
+    [
+      {
         REX_SESSION: "session:01234567-89ab-cdef-0123-456789abcdef",
         REX_BLOCK: "block:01234567-89ab-cdef-0123-456789abcdef",
         REX_SERVER: "unix:///tmp/rex.sock",
@@ -62,6 +96,19 @@ describe("parent multiplexer environment observation", () => {
     const payload = buildTelemetryPayload(session, event);
     expect(payload.properties.parent_mux).toBe("unknown");
     expect(JSON.stringify(payload)).not.toContain("/private/socket");
+    const coreParentMux = detectEnvironment({
+      HC_TERMINAL_ID: "t123",
+      HC_TERMINAL_SOCKET: "/private/herdr-core.sock",
+    }).parentMux;
+    const corePayload = buildTelemetryPayload(session, {
+      event: "session_started",
+      parent_mux: coreParentMux,
+    });
+    expect(corePayload.properties.parent_mux).toBe("herdr-core");
+    expect(JSON.stringify(corePayload)).not.toContain("t123");
+    expect(JSON.stringify(corePayload)).not.toContain(
+      "/private/herdr-core.sock",
+    );
     expect(
       buildTelemetryPayload(session, { event: "session_started" }).properties
         .parent_mux,

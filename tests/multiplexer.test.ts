@@ -26,6 +26,9 @@ const muxEnvironmentKeys = [
   "WEZTERM_PANE",
   "WEZTERM_UNIX_SOCKET",
   "TERM_PROGRAM",
+  "HC_TERMINAL_ID",
+  "HC_TERMINAL_SOCKET",
+  "HC_SOCKET",
 ] as const;
 const inheritedMuxEnvironment = Object.fromEntries(
   muxEnvironmentKeys.map((key) => [key, process.env[key]]),
@@ -48,9 +51,16 @@ describe("getMux live process ownership resolution", () => {
     savedEnv = { ...process.env };
     for (const key of muxEnvironmentKeys) delete process.env[key];
     probes.mockReset();
-    readContext
-      .mockReset()
-      .mockReturnValue({ pid: 100, ancestors: [], processes: new Map() });
+    const caller = { pid: 100, parentPid: 1, command: "node" };
+    const init = { pid: 1, parentPid: 0, command: "launchd" };
+    readContext.mockReset().mockReturnValue({
+      pid: caller.pid,
+      ancestors: [init],
+      processes: new Map([
+        [caller.pid, caller],
+        [init.pid, init],
+      ]),
+    });
     vi.doMock("../src/multiplexer-process-context", () => ({
       readProcessContext: readContext,
       closestMuxAncestor: () => undefined,
@@ -159,8 +169,92 @@ describe("getMux live process ownership resolution", () => {
         "../src/multiplexer",
       );
     expect(getMux({ preference: "tmux" }).name).toBe("tmux");
+    expect(getMux({ preference: "herdr-core" }).name).toBe("herdr-core");
     expect(readContext).not.toHaveBeenCalled();
     expect(probes).not.toHaveBeenCalled();
+  });
+
+  it("auto-selects Herdr Core only after live terminal ownership proof", async () => {
+    Object.assign(process.env, {
+      HC_TERMINAL_ID: "t1abc",
+      HC_TERMINAL_SOCKET: "/tmp/core.sock",
+    });
+    probes.mockImplementation((target: LiveMuxTarget) =>
+      target.mux === "herdr-core"
+        ? { kind: "match", target, distance: -1 }
+        : { kind: "mismatch" },
+    );
+    const { getMux, resolveMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(getMux().name).toBe("herdr-core");
+    const resolved = resolveMux();
+    expect(resolved.adapter.name).toBe("herdr-core");
+    expect(resolved.context).toEqual({
+      kind: "attached",
+      mux: "herdr-core",
+      paneId: "t1abc",
+      server: "/tmp/core.sock",
+    });
+    expect(probes).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not fall back when a Core terminal marker is stale", async () => {
+    Object.assign(process.env, {
+      HC_TERMINAL_ID: "t1abc",
+      HC_TERMINAL_SOCKET: "/tmp/core.sock",
+    });
+    probes.mockReturnValue({ kind: "mismatch" });
+    const { getMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(() => getMux()).toThrow(/context|ownership|verif|current/i);
+  });
+
+  it("requires an explicit Core preference to prove the Core target only", async () => {
+    Object.assign(process.env, {
+      TMUX: "/tmp/tmux/default,1,0",
+      TMUX_PANE: "%4",
+      HC_TERMINAL_ID: "t1abc",
+      HC_TERMINAL_SOCKET: "/tmp/core.sock",
+    });
+    probes.mockImplementation((target: LiveMuxTarget) =>
+      target.mux === "herdr-core"
+        ? { kind: "match", target, distance: -1 }
+        : { kind: "unknown" },
+    );
+    const { resolveMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(resolveMux({ preference: "herdr-core" })).toMatchObject({
+      adapter: { name: "herdr-core" },
+      context: {
+        kind: "attached",
+        mux: "herdr-core",
+        paneId: "t1abc",
+        server: "/tmp/core.sock",
+      },
+    });
+    expect(probes).toHaveBeenCalledTimes(1);
+    expect(probes.mock.calls[0]?.[0].mux).toBe("herdr-core");
+  });
+
+  it("rejects explicit Core preference without live ownership proof", async () => {
+    Object.assign(process.env, {
+      HC_TERMINAL_ID: "t1abc",
+      HC_TERMINAL_SOCKET: "/tmp/core.sock",
+    });
+    probes.mockReturnValue({ kind: "unknown" });
+    const { resolveMux } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(() => resolveMux({ preference: "herdr-core" })).toThrow(
+      /Herdr Core context|ownership|verif/i,
+    );
   });
 });
 
@@ -758,6 +852,7 @@ describe("MUX_CAPABILITIES", () => {
       );
     expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
       "herdr",
+      "herdr-core",
       "rex",
       "tmux",
       "wezterm",
@@ -768,6 +863,11 @@ describe("MUX_CAPABILITIES", () => {
     expect(muxCapabilities("herdr")).toBe(MUX_CAPABILITIES.herdr);
     expect(muxCapabilities("rex")).toBe(MUX_CAPABILITIES.rex);
     expect(muxCapabilities("wezterm")).toBe(MUX_CAPABILITIES.wezterm);
+    expect(muxCapabilities("herdr-core")).toEqual({
+      structuredFocus: false,
+      boundedCapture: true,
+      nativeOverlay: false,
+    });
   });
 
   it("is the single source of truth both backends expose", async () => {
@@ -794,6 +894,45 @@ describe("MUX_CAPABILITIES", () => {
       typeof import("../src/multiplexer-rex")
     >("../src/multiplexer-rex");
     expect(new RexMultiplexer().capabilities).toEqual(MUX_CAPABILITIES.rex);
+  });
+  it("validates local Core addresses, persisted pane names, and socket servers", async () => {
+    const {
+      isHerdrCoreAddress,
+      isHerdrCorePaneName,
+      isMuxSocketPath,
+      validateMuxLaunchContext,
+    } =
+      await importFresh<typeof import("../src/multiplexer")>(
+        "../src/multiplexer",
+      );
+    expect(isHerdrCoreAddress("t1")).toBe(true);
+    expect(isHerdrCoreAddress("t12345678")).toBe(true);
+    expect(isHerdrCoreAddress("t123456789")).toBe(false);
+    expect(isHerdrCoreAddress("t1234567890")).toBe(false);
+    expect(isHerdrCoreAddress("t1ABC")).toBe(false);
+    expect(isHerdrCoreAddress("t1\u007f")).toBe(false);
+    expect(isHerdrCorePaneName("pi-0123456789abcdef")).toBe(true);
+    expect(isHerdrCorePaneName("pi-0123456789ABCDEf")).toBe(false);
+    expect(isHerdrCorePaneName("pi-0123456789abcde")).toBe(false);
+    expect(isMuxSocketPath("/tmp/core.sock")).toBe(true);
+    expect(isMuxSocketPath("relative.sock")).toBe(false);
+    expect(isMuxSocketPath("/tmp/core\u007f.sock")).toBe(false);
+    expect(() =>
+      validateMuxLaunchContext("herdr-core", {
+        kind: "attached",
+        mux: "herdr-core",
+        paneId: "t1abc",
+        server: "/tmp/core.sock",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateMuxLaunchContext("herdr-core", {
+        kind: "attached",
+        mux: "herdr-core",
+        paneId: "t0abc",
+        server: "relative.sock",
+      }),
+    ).toThrow("Invalid multiplexer launch context");
   });
 });
 

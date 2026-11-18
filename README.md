@@ -8,8 +8,8 @@
 
 Give the parent Pi agent one task and let it build the team. pi-subagentura adds
 reusable multi-agent workflows, lightweight background delegation, and real
-child Pi sessions you can watch, attach to, and continue in tmux, Zellij, Herdr,
-WezTerm, or a verified live Superlogical Rex block.
+child Pi sessions you can watch, attach to, and continue in tmux, Zellij, legacy
+Herdr, Herdr Core, WezTerm, or a verified live Superlogical Rex block.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
@@ -117,12 +117,13 @@ of injected orchestration primitives:
 Execution is async by default: the tool returns a workflow id while Pi remains
 usable, with status and results available through the UI, slash commands, and
 agent tools. Workflow agents default to separate Pi processes in tmux, Zellij,
-Herdr, WezTerm, or Rex when the current Rex block is verified, so they are observable
-and attachable; when no multiplexer is
-available, the runtime falls back to in-process execution. Intermediate agent
-results stay in workflow variables outside the parent model context. Only the
-workflow completion enters coordinated parent delivery; the retained final
-result is available through `get_workflow_result`.
+legacy Herdr, Herdr Core, WezTerm, or Rex, subject to each backend's live
+selection checks. Herdr Core auto-selection requires verified live Core
+ownership. When no multiplexer is available, the runtime falls back to
+in-process execution. Intermediate agent results stay in workflow variables
+outside the parent model context. Only the workflow completion enters
+coordinated parent delivery; the retained final result is available through
+`get_workflow_result`.
 
 An omitted workflow `budget` defaults to the finite `100_000_000_000` completed
 output tokens. This is a high safety ceiling with significant cost/runtime risk,
@@ -147,9 +148,11 @@ See the [workflow guide](./docs/workflows.md) and
 - Resume interactive artifacts, routing state, pending deliveries, and receipts
   within the matching parent session; delivery is bounded and at-least-once,
   while in-process jobs and background workflows remain session-scoped
-- Watch a real child Pi session and its tool activity live in tmux, Zellij, Herdr, WezTerm, or a verified Rex block
+- Watch a child Pi session live in tmux, Zellij, legacy Herdr, Herdr Core,
+  WezTerm, or a verified Rex block
 - Supervise a bounded recursive tree of interactive children and grandchildren
-- Focus or capture a descendant pane locally, or attach from another terminal
+- Focus or capture a descendant where the backend supports it, or attach from
+  another terminal; Herdr Core is attach-only
 - Inspect bounded lifecycle, recent-event, and output previews without leaving Pi
 - Continue true follow-up turns without losing the child's model context
 - Inspect durable per-turn outputs and lifecycle events after detach or restart
@@ -178,32 +181,32 @@ These commands are intended for people at the Pi prompt.
 
 The extension registers these public tools for parent agents.
 
-| Tool                                    | Purpose                                                                 |
-| --------------------------------------- | ----------------------------------------------------------------------- |
-| `workflow`                              | Run a trusted workflow script or saved workflow                         |
-| `save_workflow`                         | Validate and save a reusable workflow                                   |
-| `list_workflows`                        | List saved workflows                                                    |
-| `delete_workflow`                       | Delete a saved workflow                                                 |
-| `get_workflow_status`                   | Inspect a background workflow                                           |
-| `get_workflow_result`                   | Wait for and return a workflow result                                   |
-| `cancel_workflow`                       | Cancel a background workflow                                            |
-| `subagent_with_context`                 | Delegate with the parent conversation                                   |
-| `subagent_isolated`                     | Delegate with a fresh context                                           |
-| `get_subagent_status`                   | Inspect an async in-process job                                         |
-| `get_subagent_result`                   | Retrieve current or final async job output                              |
-| `cancel_subagent`                       | Cancel an async job                                                     |
-| `prune_subagent_jobs`                   | Remove completed and failed jobs                                        |
-| `list_available_models`                 | List configured model identifiers                                       |
-| `get_current_pane_activity`             | Check current pane activity when the mux can verify user focus          |
-| `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers       |
-| `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases              |
-| `subagent_interactive`                  | Launch an attachable Pi session in tmux, Zellij, Herdr, WezTerm, or Rex |
-| `get_interactive_subagent_status`       | Inspect attachable child sessions                                       |
-| `cancel_interactive_subagent`           | Kill an attachable child pane                                           |
-| `send_interactive_subagent_message`     | Send a follow-up while preserving child context                         |
-| `list_subagent_artifacts`               | List durable interactive-agent artifacts                                |
-| `read_subagent_artifact`                | Read lifecycle events and output snapshots                              |
-| `cleanup_subagent_artifacts`            | Remove expired artifact directories and stale registry entries          |
+| Tool                                    | Purpose                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `workflow`                              | Run a trusted workflow script or saved workflow                                            |
+| `save_workflow`                         | Validate and save a reusable workflow                                                      |
+| `list_workflows`                        | List saved workflows                                                                       |
+| `delete_workflow`                       | Delete a saved workflow                                                                    |
+| `get_workflow_status`                   | Inspect a background workflow                                                              |
+| `get_workflow_result`                   | Wait for and return a workflow result                                                      |
+| `cancel_workflow`                       | Cancel a background workflow                                                               |
+| `subagent_with_context`                 | Delegate with the parent conversation                                                      |
+| `subagent_isolated`                     | Delegate with a fresh context                                                              |
+| `get_subagent_status`                   | Inspect an async in-process job                                                            |
+| `get_subagent_result`                   | Retrieve current or final async job output                                                 |
+| `cancel_subagent`                       | Cancel an async job                                                                        |
+| `prune_subagent_jobs`                   | Remove completed and failed jobs                                                           |
+| `list_available_models`                 | List configured model identifiers                                                          |
+| `get_current_pane_activity`             | Report focused-client activity where verifiable; Herdr Core is unknown                     |
+| `list_orchestrator_agents`              | List bounded Orchestratorv2 routing metadata and runtime pointers                          |
+| `update_orchestrator_agent_description` | Update a child's confirmed routing description and aliases                                 |
+| `subagent_interactive`                  | Launch an attachable Pi session in tmux, Zellij, legacy Herdr, Herdr Core, WezTerm, or Rex |
+| `get_interactive_subagent_status`       | Inspect attachable child sessions                                                          |
+| `cancel_interactive_subagent`           | Stop an attachable child process                                                           |
+| `send_interactive_subagent_message`     | Send a follow-up while preserving child context                                            |
+| `list_subagent_artifacts`               | List durable interactive-agent artifacts                                                   |
+| `read_subagent_artifact`                | Read lifecycle events and output snapshots                                                 |
+| `cleanup_subagent_artifacts`            | Remove expired artifact directories and stale registry entries                             |
 
 ### Structured results
 
@@ -354,6 +357,16 @@ uncertain, report that and ask rather than silently switching. See
 [the canonical Orca guide](ORCA_INTERACTIVE_SYSTEM_PROMPT.md) and
 [the canonical Rex guide](REX_INTERACTIVE_SYSTEM_PROMPT.md), alongside
 [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
+
+Herdr Core is a distinct backend from legacy `herdr`. `mux: "auto"` selects
+`herdr-core` only when `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` identify a live
+Core terminal owned by this Pi process. An explicit `mux: "herdr-core"` still
+requires that live proof; inherited environment markers alone are insufficient.
+Core starts named sessions, not visible splits, and has no native focus or mux
+overlay. Its user-activity status is `unknown`, and `background: false` is
+unsupported. The attach command pins the saved socket:
+`HC_SOCKET=… hc attach <name>`; Ctrl+\\ detaches. There is no detached Core
+fallback.
 
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).

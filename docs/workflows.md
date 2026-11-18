@@ -296,11 +296,13 @@ Use `/workflow-status` for the full textual status dump, or `/workflow-tree` for
 #### 2. Per-agent visibility
 
 Workflow `agent()` calls default to process isolation. Each process-backed agent
-runs in tmux, Zellij, Herdr, WezTerm, or Rex when the current Rex context is verified and
-is also shown by the interactive sub-agent widget below the editor. A recognized
-but unsupported host is not replaced with another mux. In-process agents still
-forward live `activeTool` / output-preview updates as workflow log events when
-the underlying runner exposes them.
+uses the selected backend (tmux, Zellij, legacy Herdr, Herdr Core, WezTerm, or
+Rex) subject to its live selection checks; Herdr Core auto-selection requires
+verified live Core ownership. Each agent is also shown by the interactive
+sub-agent widget below the editor. A recognized but unsupported host is not
+replaced with another mux. In-process agents still forward live `activeTool` /
+output-preview updates as workflow log events when the underlying runner exposes
+them.
 
 #### 3. Interactive drill-down overlay
 
@@ -339,8 +341,9 @@ interrupted result wait (`wait_cancelled`) remain distinct from child cancellati
 
 ### Process isolation
 
-By default, each `agent()` call spawns a separate `pi` process inside tmux,
-Zellij, Herdr, WezTerm, or Rex when the current Rex context is verified:
+By default, each `agent()` call starts a separate `pi` process through a
+supported backend—tmux, Zellij, legacy Herdr, Herdr Core, WezTerm, or Rex—
+subject to its live selection checks:
 
 ```js
 await agent(prompt, { label: "verify:claim-x" });
@@ -359,10 +362,15 @@ await agent(prompt, { isolation: "in-process", label: "quick-check" });
 
 #### How it works
 
-1. `launchInteractiveSubagent()` creates a pane via the multiplexer backend
-2. By default (`background: true`) the pane is a detached named window — invisible in the tmux bar
-3. A launch script boots `pi` in that pane with a child-specific system prompt + protocol
-4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling.
+1. `launchInteractiveSubagent()` creates a backend-specific terminal target: a
+   pane, tab, block, or named Herdr Core session.
+2. Pane-based backends use a detached named target by default. Herdr Core
+   creates a named session and does not support `background: false` splits,
+   native focus, or a native overlay.
+3. A launch script boots `pi` in the selected target with a child-specific
+   system prompt and protocol.
+4. The parent polls v2 artifact events and reads immutable terminal snapshots;
+   child session logs are used for usage accounting, not activity polling.
 
 #### TUI widget rows
 

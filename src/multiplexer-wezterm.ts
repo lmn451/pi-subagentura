@@ -9,7 +9,7 @@ import {
   validateMuxLaunchContext,
   type CapturePaneOptions,
   type CapturePaneResult,
-  type Multiplexer,
+  type SplitInputMultiplexer,
   type MuxLaunchContext,
   type PaneActivity,
   type PaneLiveness,
@@ -72,7 +72,7 @@ function runAsync(args: string[], server: string): Promise<string> {
   });
 }
 
-export class WezTermMultiplexer implements Multiplexer {
+export class WezTermMultiplexer implements SplitInputMultiplexer {
   readonly name = "wezterm" as const;
   readonly capabilities = MUX_CAPABILITIES.wezterm;
 

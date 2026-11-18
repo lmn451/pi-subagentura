@@ -11,6 +11,7 @@ keywords:
     runtime,
     orca,
     rex,
+    herdr-core,
     jev,
     openai-decisions,
     artifact-ownership,
@@ -24,23 +25,23 @@ maintained in this repository and is the documentation source of truth;
 [`pi-docs`](https://github.com/lmn451/pi-docs) indexes these files for its
 published injector.
 
-| Doc                                                                                     | Purpose                                                                             |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| [README.md](../README.md)                                                               | Installation, configuration, tools, and user-facing behavior                        |
-| [Host-aware interactive delegation](../README.md#host-aware-interactive-agent-spawning) | Conditional parent-only Orca/Agterm/Rex guidance and native mux boundary            |
-| [architecture.md](../architecture.md)                                                   | Runtime boundaries, ownership, completion, and persistence contracts                |
-| [CONTRIBUTING.md](../CONTRIBUTING.md)                                                   | Development checks, CI, and release procedure                                       |
-| [testing.md](./testing.md)                                                              | Testing checklist for ambient host state                                            |
-| [bun.md](./bun.md)                                                                      | JavaScript runtime and package manager conventions                                  |
-| [publish.md](./publish.md)                                                              | OIDC publishing and the authoritative release procedure                             |
-| [terminal-e2e.md](./terminal-e2e.md)                                                    | Terminal E2E harness, determinism rules, and recording tools                        |
-| [telemetry.md](./telemetry.md)                                                          | Telemetry contract, privacy, and PostHog report definitions                         |
-| [rex-multiplexer.md](./rex-multiplexer.md)                                              | Rex backend selection, capabilities, and CLI contract                               |
-| [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                                         |
-| [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions classifier setup, live-owner selection, and payload disclosure |
-| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters              |
-| [ownership.md](./ownership.md)                                                          | Interactive child artifact identity, completion investigation, and ownership limits |
-| [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                          | Protocol-v1 compatibility removal status and user-data behavior                     |
+| Doc                                                                                     | Purpose                                                                                        |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [README.md](../README.md)                                                               | Installation, configuration, tools, and user-facing behavior                                   |
+| [Host-aware interactive delegation](../README.md#host-aware-interactive-agent-spawning) | Conditional Orca/Agterm/Rex guidance, verified Herdr Core selection, and mux capability limits |
+| [architecture.md](../architecture.md)                                                   | Runtime boundaries, ownership, completion, and persistence contracts                           |
+| [CONTRIBUTING.md](../CONTRIBUTING.md)                                                   | Development checks, CI, and release procedure                                                  |
+| [testing.md](./testing.md)                                                              | Testing checklist for ambient host state                                                       |
+| [bun.md](./bun.md)                                                                      | JavaScript runtime and package manager conventions                                             |
+| [publish.md](./publish.md)                                                              | OIDC publishing and the authoritative release procedure                                        |
+| [terminal-e2e.md](./terminal-e2e.md)                                                    | Terminal E2E harness, determinism rules, and recording tools                                   |
+| [telemetry.md](./telemetry.md)                                                          | Telemetry contract, privacy, and PostHog report definitions                                    |
+| [rex-multiplexer.md](./rex-multiplexer.md)                                              | Rex backend selection, capabilities, and CLI contract                                          |
+| [workflows.md](./workflows.md)                                                          | Workflow execution and bundled script usage                                                    |
+| [jev-routing.md](./jev-routing.md)                                                      | Jev/OpenAI Decisions classifier setup, live-owner selection, and payload disclosure            |
+| [interactive-subagent-test-isolation.md](./interactive-subagent-test-isolation.md)      | Isolating test sessions, artifacts, environment, and terminal adapters                         |
+| [ownership.md](./ownership.md)                                                          | Interactive child artifact identity, completion investigation, and ownership limits            |
+| [protocol-v1-compatibility.md](./protocol-v1-compatibility.md)                          | Protocol-v1 compatibility removal status and user-data behavior                                |
 
 ## Known limitations
 

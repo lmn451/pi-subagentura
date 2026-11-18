@@ -379,10 +379,11 @@ export function isTmuxAvailable(): boolean {
 /** Setup hint shown to the user when no mux is available. Mux-agnostic. */
 export function tmuxSetupHint(): string {
   return (
-    "Start pi inside tmux, zellij, Herdr, or WezTerm, or start it in a verified live Rex block:\n" +
+    "Start pi inside tmux, zellij, Herdr, Herdr Core, WezTerm, or a verified live Rex block:\n" +
     "  tmux new -A -s pi 'pi'\n" +
     "  zellij --session pi\n" +
     "  herdr  (then start pi in a Herdr pane)\n" +
+    "  hc run --bg pi  (then hc attach <address>)\n" +
     "  WezTerm requires a live WEZTERM_PANE/WEZTERM_UNIX_SOCKET context.\n" +
     "  Rex requires a live REX_SESSION/REX_BLOCK/REX_SERVER context."
   );
@@ -1172,13 +1173,13 @@ export function launchInteractiveSubagent(params: {
   }
   try {
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-    mux.sendKeys(
+    sendMuxCommand(
+      mux,
       paneId,
       `exec bash ${escape(paths.launchScriptFile)}`,
       muxSession,
-      ...muxServerArgs(muxServer),
+      muxServer,
     );
-    mux.sendEnter(paneId, muxSession, ...muxServerArgs(muxServer));
     attach = mux.buildAttachCommands({
       paneId,
       terminalId: muxTerminalId,
@@ -1283,6 +1284,21 @@ function getMuxForState(state: InteractiveSubagentState): Multiplexer {
 
 function muxServerArgs(server?: string): [] | [string] {
   return server === undefined ? [] : [server];
+}
+
+function sendMuxCommand(
+  mux: Multiplexer,
+  paneId: string,
+  text: string,
+  session?: string,
+  server?: string,
+): void {
+  if (mux.name === "herdr-core") {
+    mux.sendCommand(paneId, text, session, server);
+  } else {
+    mux.sendKeys(paneId, text, session, ...muxServerArgs(server));
+    mux.sendEnter(paneId, session, ...muxServerArgs(server));
+  }
 }
 
 export interface CurrentPaneActivity {
@@ -1411,6 +1427,7 @@ export function getLineagePaneLiveness(
     backend !== "tmux" &&
     backend !== "zellij" &&
     backend !== "herdr" &&
+    backend !== "herdr-core" &&
     backend !== "rex" &&
     backend !== "wezterm"
   ) {
@@ -1467,17 +1484,12 @@ export function sendCommandToPane(
   state: InteractiveSubagentState,
   command: string,
 ): void {
-  const mux = getMuxForState(state);
-  mux.sendKeys(
+  sendMuxCommand(
+    getMuxForState(state),
     state.paneId,
     command,
     state.muxSession,
-    ...muxServerArgs(state.muxServer),
-  );
-  mux.sendEnter(
-    state.paneId,
-    state.muxSession,
-    ...muxServerArgs(state.muxServer),
+    state.muxServer,
   );
 }
 

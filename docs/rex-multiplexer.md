@@ -14,19 +14,20 @@ pi-subagentura child, with its Rex block treated only as the terminal transport.
 
 An explicit `mux` value overrides automatic detection, while retaining that
 backend's own launch validation. With `mux: "auto"`, inherited environment
-markers identify candidate panes, not a fixed backend priority. Bounded live
-backend queries and a process ancestry/TTY snapshot must tie a candidate pane
+markers identify candidate targets, not a fixed backend priority. Bounded live
+backend queries and a process ancestry/TTY snapshot must tie a candidate target
 to the current Pi process. In nested muxes the nearest verified owner wins.
 Equally close matches, stale selectors, missing proof, or an unverified nearer
 mux fail closed rather than selecting an unrelated or outer backend. Current
-UI focus is not evidence that a pane owns this process.
+UI focus is not evidence that a target owns this process.
 
 Rex candidates require the complete `REX_SESSION`, `REX_BLOCK`, and `REX_SERVER`
 context. Backend validation also checks the CLI's documented help contract,
 confirms `rex whoami --json` reports the same session and block, and verifies the
 block is present in that session's JSON listing. A Rex process ancestor is
-classified as Rex, not Herdr. Neither a reachable server nor inherited Rex
-markers alone establish ownership of the current process.
+classified as Rex, distinct from the legacy Herdr and Herdr Core backends.
+Neither a reachable server nor inherited Rex markers alone establish ownership
+of the current process.
 
 A partial/malformed Rex context, an unsupported Rex CLI contract, or a failed
 live probe is an error; automatic selection does not fall through to another

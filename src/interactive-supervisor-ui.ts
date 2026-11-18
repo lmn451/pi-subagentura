@@ -176,8 +176,25 @@ export class InteractiveSupervisorComponent {
     const status = (this.opts.status?.() ?? []).map((line) =>
       trunc(`│ ${compactText(line)}`, width),
     );
-    const helpLines =
-      width >= 68
+    const selectedItem = items[clampIndex(this.selectedIndex, items.length)];
+    const herdrCoreSelected =
+      selectedItem !== undefined &&
+      interactiveState(selectedItem)?.mux === "herdr-core";
+    const helpLines = herdrCoreSelected
+      ? width >= 68
+        ? [
+            "│ ↑↓/jk select · enter/→ details · ← collapse",
+            "│ x cancel item · X cancel subtree · r refresh · q/esc close",
+            "│ Interactive: v snapshot · a attach",
+            "│ Herdr Core: no split/native focus/overlay · Ctrl+\\ detach",
+          ]
+        : [
+            "│ All: ↑↓/jk select · enter/→ details · ← collapse",
+            "│ All: x cancel item · r refresh · q/esc close",
+            "│ Interactive: v snapshot · a attach · X cancel subtree",
+            "│ Herdr Core: attach only · Ctrl+\\ detach",
+          ]
+      : width >= 68
         ? [
             "│ ↑↓/jk select · enter/→ details · ← collapse",
             "│ x cancel item · X cancel subtree · r refresh · q/esc close",
@@ -357,8 +374,17 @@ export class InteractiveSupervisorComponent {
     }
     if (matchesKey(data, "n")) {
       const state = this.interactiveStateForAction(selectedItem, "native view");
-      if (state)
+      if (state?.mux === "herdr-core") {
+        const attachHint = state.attachCommand
+          ? `\nAttach: ${state.attachCommand}`
+          : "\nUse the attach command shown in details.";
+        this.opts.notify?.(
+          `Herdr Core has no native viewer or overlay.${attachHint}\nPress Ctrl+\\ to detach.`,
+          "info",
+        );
+      } else if (state) {
         void this.runAction("open native view", state, this.opts.nativeView);
+      }
       return;
     }
     if (matchesKey(data, "f")) {
@@ -521,11 +547,18 @@ export class InteractiveSupervisorComponent {
     }
   }
 
-  /**
-   * Focus the pane, then tell the user when the focus landed on a session no
-   * client is attached to — otherwise `f` looks like a silent no-op.
-   */
+  /** Focus only when the backend exposes it; Core sessions are attach-only. */
   private async focusItem(state: InteractiveSubagentState): Promise<void> {
+    if (state.mux === "herdr-core") {
+      const attachHint = state.attachCommand
+        ? ` Attach with:\n${state.attachCommand}`
+        : " Use the attach command shown in details.";
+      this.opts.notify?.(
+        `Herdr Core has no native focus.${attachHint}\nPress Ctrl+\\ to detach.`,
+        "info",
+      );
+      return;
+    }
     if (!this.opts.focus) {
       this.opts.notify?.("focus is not available in this session.", "info");
       return;
@@ -885,7 +918,7 @@ function formatInteractiveDetails(
     `Origin: ${formatInteractiveOrigin(item)}`,
     `Task: ${compactText(state.task)}`,
     `Model: ${compactText(state.model ?? "default")}`,
-    `Pane: ${compactText(`${state.mux}:${state.paneId}${state.muxSession ? ` session=${state.muxSession}` : ""}`)}`,
+    `${state.mux === "herdr-core" ? "Core session" : "Pane"}: ${compactText(`${state.mux}:${state.paneId}${state.muxSession ? ` session=${state.muxSession}` : ""}`)}`,
     `State cwd: ${compactText(state.cwd)}`,
     `Working cwd: ${compactText(state.workingCwd ?? "unknown")}`,
     `Artifact: ${compactText(state.artifactDir)}`,
@@ -897,7 +930,9 @@ function formatInteractiveDetails(
   if (!(state.mux === "tmux" && process.env.TMUX)) {
     fields.push(`Attach: ${compactText(state.attachCommand)}`);
   }
-  fields.push(`Focus: ${compactText(state.selectPaneCommand)}`);
+  if (state.mux !== "herdr-core" && state.selectPaneCommand) {
+    fields.push(`Focus: ${compactText(state.selectPaneCommand)}`);
+  }
   fields.push(`Return: ${focusReturnHint(state)}`);
   return fields.map((field) => trunc(`│     ${field}`, width));
 }
@@ -920,6 +955,9 @@ function focusReturnHint(state: InteractiveSubagentState): string {
     return state.windowName
       ? "tmux prefix + l (last window)"
       : "tmux prefix + ; (last pane)";
+  }
+  if (state.mux === "herdr-core") {
+    return "Ctrl+\\ detaches from Herdr Core; no native focus";
   }
   if (state.mux === "herdr") {
     return "Herdr native pane focus; use the terminal attach command above";

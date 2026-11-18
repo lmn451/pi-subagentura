@@ -464,6 +464,57 @@ describe("interactive lineage node cap", () => {
     expect(projection.roots[0]?.manifest).toBe(herdr);
   });
 
+  it("validates and projects Herdr Core nodes with an explicit server", async () => {
+    const herdrCore = validateLineageManifest(
+      manifest("core-agent", {
+        pane: {
+          backend: "herdr-core",
+          paneId: "pi-0123456789abcdef",
+          muxServer: "/tmp/herdr-core.sock",
+        },
+      }),
+    );
+    expect(herdrCore.pane).toMatchObject({
+      backend: "herdr-core",
+      paneId: "pi-0123456789abcdef",
+      muxServer: "/tmp/herdr-core.sock",
+    });
+
+    const projection = await projectManifests(
+      [herdrCore],
+      rootHash,
+      () => false,
+      { maxNodes: 1 },
+    );
+    expect(projection.roots[0]?.state).toBe("actionable");
+    expect(projection.roots[0]?.manifest.pane.muxServer).toBe(
+      "/tmp/herdr-core.sock",
+    );
+  });
+
+  it.each([
+    { paneId: "t123", muxServer: "/tmp/herdr-core.sock" },
+    { paneId: "pi-0123456789abcdef", muxServer: undefined },
+    { paneId: "pi-0123456789abcdef", muxServer: "relative.sock" },
+    {
+      paneId: "pi-0123456789abcdef",
+      muxServer: "/tmp/bad\nsocket",
+    },
+    {
+      paneId: "pi-0123456789abcdef",
+      muxServer: "/tmp/herdr-core.sock",
+      muxSession: "ambient-session",
+    },
+  ])("rejects incomplete Herdr Core lineage identity: %j", (pane) => {
+    expect(() =>
+      validateLineageManifest(
+        manifest("core-agent", {
+          pane: { backend: "herdr-core", ...pane },
+        }),
+      ),
+    ).toThrow(/Herdr Core pane identity is incomplete or malformed/);
+  });
+
   it.each(["/tmp/tmux work/#socket", "/tmp/tmux work/socket "])(
     "preserves literal tmux socket %j in lineage",
     (muxServer) => {

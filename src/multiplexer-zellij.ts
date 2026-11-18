@@ -33,7 +33,7 @@ import type {
   MuxLaunchContext,
   CapturePaneOptions,
   CapturePaneResult,
-  Multiplexer,
+  SplitInputMultiplexer,
   PaneActivity,
   PaneLiveness,
   PaneRef,
@@ -249,7 +249,7 @@ interface ZellijPaneListingProbe {
   inFlight?: Promise<readonly ZellijPaneRow[] | undefined>;
 }
 
-export class ZellijMultiplexer implements Multiplexer {
+export class ZellijMultiplexer implements SplitInputMultiplexer {
   readonly name = "zellij" as const;
   readonly capabilities = MUX_CAPABILITIES.zellij;
   private readonly paneListingProbes = new Map<
