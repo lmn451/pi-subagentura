@@ -27,6 +27,8 @@ export interface EnvironmentSnapshot {
   readonly parentMux: TelemetryParentMux;
   /** Marker observation only; never a native backend selection. */
   readonly parentMuxStatus: ParentMuxObservationStatus;
+  /** Permission to use the native launcher by default, not live mux proof. */
+  readonly v2NativeDefaultPermitted: boolean;
 }
 
 function boundedField(value: unknown): string | undefined {
@@ -114,14 +116,22 @@ export function detectEnvironment(
         : hasRexLocationHints
           ? "rex"
           : "unknown";
-  const hostHintPresent = Boolean(
+  const hasOrcaHints =
     env.ORCA_RUNTIME_SOURCE_ID !== undefined ||
     env.ORCA_RUNTIME_SOURCE_INCARNATION !== undefined ||
-    env.ORCA_RUNTIME_SOURCE_PROFILE_PATH !== undefined ||
-    env.AGTERM_ENABLED !== undefined ||
-    env.REX_SESSION !== undefined ||
-    env.REX_BLOCK !== undefined,
-  );
+    env.ORCA_RUNTIME_SOURCE_PROFILE_PATH !== undefined;
+  const hasAgtermHint = env.AGTERM_ENABLED !== undefined;
+  const hasRexHints =
+    env.REX_SESSION !== undefined || env.REX_BLOCK !== undefined;
+  const hostHintPresent = hasOrcaHints || hasAgtermHint || hasRexHints;
+  // Orca can establish a host-managed default after verification. External
+  // Agterm and Rex work is request-driven, but incomplete hints still block an
+  // automatic default even if an unrelated host guide is eligible.
+  const hostPermitsNativeDefault =
+    !hasOrcaHints &&
+    !guidanceConflict &&
+    (!hasAgtermHint || hasAgtermMarker) &&
+    (!hasRexHints || hasRexLocationHints);
   const guidanceHostStatus: GuidanceHostStatus = guidanceConflict
     ? "ambiguous"
     : guidanceHost !== "unknown"
@@ -190,6 +200,9 @@ export function detectEnvironment(
     terminalProgram: sanitizeTelemetryTerminalProgram(env.TERM_PROGRAM),
     parentMux,
     parentMuxStatus,
+    v2NativeDefaultPermitted:
+      hostPermitsNativeDefault &&
+      (parentMuxStatus === "unknown" || parentMuxStatus === "candidate"),
   });
 }
 
@@ -204,14 +217,24 @@ export function formatV2ExecutionContextGuidance(
     environment.parentMuxStatus === "candidate"
       ? `candidate (${environment.parentMux})`
       : environment.parentMuxStatus;
+  const defaultGuidance = environment.v2NativeDefaultPermitted
+    ? [
+        "- No-target execution surface: native launcher permitted.",
+        "- For an otherwise authorized request with no explicit target, use the native guidance and launcher. This permits launch-time resolution and verification; it does not select a mux. If verification or launch fails, report the blocker rather than switching to another target.",
+      ]
+    : [
+        "- No-target execution surface: no automatic default from this snapshot.",
+        "- Follow the applicable host guidance under its opt-in and verification rules. If no guidance establishes an authorized surface, report the blocker and ask. Do not fall back automatically.",
+      ];
 
   return [
-    "## Runtime execution context (environment observations only)",
+    "## Runtime execution context and no-target policy",
     "",
     `- Host-guide eligibility: ${hostStatus}.`,
     `- Native mux observation: ${muxStatus}.`,
-    "- These activation-time observations do not prove current host or mux ownership, user intent, target identity, or permission. Unsupported or marker-only evidence is not verification; ambiguous evidence does not select an adapter.",
-    "- Unsupported or incomplete evidence does not prove that a host or backend is absent. This snapshot performs no live checks and does not select a default. Apply the guidance for the requested or verified default surface only.",
+    "- This snapshot performs no live checks. Unknown means no recognized marker was observed in that category; it does not prove that a host or backend is absent. A marker candidate may be incomplete, stale, or unverified.",
+    "- These observations do not prove current host or mux ownership, user intent, target identity, or permission. Ambiguous evidence does not select an adapter.",
+    ...defaultGuidance,
     "- The native interactive tool is registered, but this snapshot does not prove backend availability or launch success. Its runtime resolver owns mux selection and validation. An explicit user-selected target takes precedence, and an explicit native mux preference is passed through to the resolver. Do not silently switch surfaces or backends; report unsupported or unverified requests instead of falling back to a different target.",
     "- Host-guide eligibility describes the current session, not an alternate destination. If you have no applicable guide or means to verify the requested target, report the gap before selecting a different surface.",
   ].join("\n");

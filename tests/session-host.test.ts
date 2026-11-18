@@ -384,6 +384,7 @@ describe("environment snapshot", () => {
       terminalProgram: "wezterm",
       parentMux: "tmux",
       parentMuxStatus: "ambiguous",
+      v2NativeDefaultPermitted: false,
     });
     const serialized = JSON.stringify(snapshot);
     expect(serialized).not.toContain("private-");

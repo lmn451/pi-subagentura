@@ -219,6 +219,7 @@ describe("interactive prompt assembly contract", () => {
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostEnv: {},
       hostAssets: [],
+      surfaceDefault: "native launcher permitted",
     },
     {
       name: "V2 split root",
@@ -228,6 +229,7 @@ describe("interactive prompt assembly contract", () => {
       modeAssets: [v2PromptAsset, v2SplitPromptAsset, v2NativePromptAsset],
       hostEnv: {},
       hostAssets: [],
+      surfaceDefault: "native launcher permitted",
     },
     {
       name: "interactive child inheriting Orca origin",
@@ -250,6 +252,7 @@ describe("interactive prompt assembly contract", () => {
       hostEnv: validOrcaEnvironment,
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [orcaPromptAsset, interactivePromptAsset],
+      surfaceDefault: "no automatic default from this snapshot",
     },
     {
       name: "Agterm-context parent",
@@ -265,6 +268,7 @@ describe("interactive prompt assembly contract", () => {
       hostEnv: { AGTERM_ENABLED: "1" },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [interactivePromptAsset],
+      surfaceDefault: "native launcher permitted",
     },
     {
       name: "Rex-context parent",
@@ -280,6 +284,25 @@ describe("interactive prompt assembly contract", () => {
       hostEnv: validRexEnvironment,
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [rexPromptAsset, interactivePromptAsset],
+      surfaceDefault: "no automatic default from this snapshot",
+    },
+    {
+      name: "V2 Rex guide and native marker candidate",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { ...validRexEnvironment, REX_SERVER: "/private/rex.sock" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [rexPromptAsset, interactivePromptAsset],
+      surfaceDefault: "native launcher permitted",
+    },
+    {
+      name: "V2 Agterm guide and incomplete Orca origin",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { AGTERM_ENABLED: "1", ORCA_RUNTIME_SOURCE_ID: "partial" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [interactivePromptAsset],
+      surfaceDefault: "no automatic default from this snapshot",
     },
     {
       name: "interactive child inheriting Rex hints",
@@ -342,6 +365,7 @@ describe("interactive prompt assembly contract", () => {
       },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
+      surfaceDefault: "no automatic default from this snapshot",
     },
     {
       name: "V2 unsupported partial host and native markers",
@@ -350,6 +374,16 @@ describe("interactive prompt assembly contract", () => {
       hostEnv: { ORCA_RUNTIME_SOURCE_ID: "partial", WEZTERM_PANE: "7" },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
+      surfaceDefault: "no automatic default from this snapshot",
+    },
+    {
+      name: "V2 unsupported native markers without a host hint",
+      child: false,
+      flag: "orchestratorv2",
+      hostEnv: { WEZTERM_PANE: "7" },
+      modeAssets: [v2PromptAsset, v2NativePromptAsset],
+      hostAssets: [],
+      surfaceDefault: "no automatic default from this snapshot",
     },
     {
       name: "V2 reporter marker only",
@@ -358,14 +392,16 @@ describe("interactive prompt assembly contract", () => {
       hostEnv: { ORCA_PI_STATUS_OWNED: "1" },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
+      surfaceDefault: "native launcher permitted",
     },
     {
       name: "V2 native marker candidate",
       child: false,
       flag: "orchestratorv2",
-      hostEnv: { TMUX: "/tmp/tmux.sock,1,0" },
+      hostEnv: { TMUX: "/tmp/tmux.sock,1,0", TMUX_PANE: "%7" },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
+      surfaceDefault: "native launcher permitted",
     },
     {
       name: "V2 ambiguous native mux markers",
@@ -377,6 +413,7 @@ describe("interactive prompt assembly contract", () => {
       },
       modeAssets: [v2PromptAsset, v2NativePromptAsset],
       hostAssets: [],
+      surfaceDefault: "no automatic default from this snapshot",
     },
     {
       name: "native child inheriting Orca origin and orchestration flags",
@@ -414,6 +451,24 @@ describe("interactive prompt assembly contract", () => {
         expect(prompt).toBeUndefined();
       } else {
         expect(prompt).toBe(expected);
+      }
+      if ("surfaceDefault" in mode) {
+        expect(prompt).toContain(
+          `No-target execution surface: ${mode.surfaceDefault}.`,
+        );
+        expect(prompt).toContain(
+          "An explicit user-selected target takes precedence",
+        );
+        expect(prompt).toContain(
+          "does not prove that a host or backend is absent",
+        );
+        expect(prompt).toContain(
+          mode.surfaceDefault === "native launcher permitted"
+            ? "If verification or launch fails, report the blocker rather than switching to another target."
+            : "Do not fall back automatically.",
+        );
+      } else {
+        expect(prompt ?? "").not.toContain("No-target execution surface:");
       }
       expectSharedPromptAssets(
         prompt ?? "base prompt",

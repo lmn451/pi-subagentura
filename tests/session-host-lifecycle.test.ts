@@ -34,6 +34,7 @@ function environmentSnapshot(
     terminalProgram: "unknown",
     parentMux: "unknown",
     parentMuxStatus: "unknown",
+    v2NativeDefaultPermitted: true,
     ...overrides,
   });
 }

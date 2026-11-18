@@ -357,10 +357,14 @@ uncertain, report that and ask rather than silently switching. See
 [the shared host layer](INTERACTIVE_SUBAGENT_SYSTEM_PROMPT.md).
 
 The V2 summary reports host-guide eligibility and native mux markers without
-live probes. It does not verify an alternate host, select a default, or prove
-a native backend is available. Native mux verification stays at launch. If
-no applicable guide or live verification is available for an explicit target,
-report that gap and ask instead of launching on another surface.
+live probes. For an authorized request with no explicit target, it permits the
+native launcher as the default when no recognized host evidence competes with
+that default and the mux observation is neither ambiguous nor unsupported.
+Eligible Orca sessions follow the Orca verification rules. External Agterm and
+Rex work remains request-driven. The summary does not select a mux, verify a
+host, or prove that a backend is absent or available. Native mux verification
+stays at launch. If the explicit target cannot be verified or used, report the
+blocker and ask instead of launching on another surface.
 
 For host attribution and the boundary around extension launch telemetry, see
 [telemetry documentation](docs/telemetry.md).
