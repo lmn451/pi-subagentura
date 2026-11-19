@@ -124,7 +124,7 @@ describe("anonymous product telemetry", () => {
       $geoip_disable: true,
       $ip: "0.0.0.0",
       $lib: "pi-subagentura",
-      schema_version: 8,
+      schema_version: 9,
       mode: "orchestrator_v2",
       traffic_origin: "unknown",
     });
@@ -914,7 +914,7 @@ describe("anonymous product telemetry", () => {
       failure_operation: "pane_launch",
       spawn_duration_ms: 12_300,
       spawn_duration_bucket: "5-30s",
-      schema_version: 8,
+      schema_version: 9,
     });
   });
 
@@ -1228,7 +1228,7 @@ describe("anonymous product telemetry", () => {
     });
   });
 
-  it("keeps every schema-v8 event within the privacy allowlist", () => {
+  it("keeps every schema-v9 event within the privacy allowlist", () => {
     const session = createTelemetrySession(true, "orchestrator_v2");
     const dimensions = {
       execution: "in-process" as const,
@@ -1408,7 +1408,7 @@ describe("anonymous product telemetry", () => {
       expect(JSON.stringify(payload)).not.toMatch(
         /task_text|persona|prompt|output|error_text|cwd|path|artifact_id|agent_id|raw_session_id|token|cost/i,
       );
-      expect(payload.properties.schema_version).toBe(8);
+      expect(payload.properties.schema_version).toBe(9);
     }
   });
 
@@ -1947,5 +1947,36 @@ describe("anonymous product telemetry", () => {
       ),
     } as unknown as Parameters<typeof isTelemetryEnabled>[0];
     expect(isTelemetryEnabled(optedOutPi)).toBe(false);
+  });
+});
+
+it("emits Herdr Core telemetry dimensions under schema v9", () => {
+  const session = createTelemetrySession(true);
+  const started = buildTelemetryPayload(session, {
+    event: "session_started",
+    parent_mux: "herdr-core",
+  });
+  const launch = buildTelemetryPayload(session, {
+    event: "agent_launch_resolved",
+    outcome: "started",
+    requested_execution: "interactive",
+    requested_mux: "herdr-core",
+    execution: "interactive",
+    mux: "herdr-core",
+    invocation_source: "workflow",
+    async: true,
+    depth: 1,
+    depth_bucket: "1",
+    completion_policy: "each",
+    fallback_attempted: false,
+  });
+  expect(started.properties).toMatchObject({
+    schema_version: 9,
+    parent_mux: "herdr-core",
+  });
+  expect(launch.properties).toMatchObject({
+    schema_version: 9,
+    requested_mux: "herdr-core",
+    mux: "herdr-core",
   });
 });

@@ -8,6 +8,9 @@ for historical schema-v5 events. Schema v7 adds Rex to the closed multiplexer
 dimensions; Rex cannot be reconstructed for historical schema-v6 events.
 Schema v8 adds WezTerm to the closed mux and parent-mux dimensions; historical
 events cannot distinguish native WezTerm children from unsupported backends.
+Schema v9 adds Herdr Core (`herdr-core`) to `mux`, `requested_mux`, and
+`parent_mux`. Earlier events do not consistently distinguish Herdr Core:
+some schema-v8 builds emitted the new label before the version bump.
 
 ## Measurement contract
 
