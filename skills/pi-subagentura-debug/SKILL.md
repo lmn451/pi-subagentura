@@ -18,19 +18,25 @@ Use this skill for pi-subagentura tool failures, interactive children that fail 
 
 ## Inspect arguments and the loaded extension
 
-See [Inspecting tool arguments in the README](../../README.md#inspecting-tool-arguments)
-for the expanded-call behavior and its limits.
+In the Pi terminal UI, press **Ctrl+O** to expand the tool call. The
+**Parameters:** block shows the arguments supplied to the tool. It does not
+show omitted defaults.
 
-If the call still shows only its summary, follow the README's
-[checkout instructions](../../README.md#testing-the-checkout-in-pi) to confirm
-which extension source Pi loaded.
+If the block is missing, check `pi list` and `pi config` after you verify that
+your Pi version supports them. Confirm the enabled extension path and package
+version. A source checkout and an installed npm package are separate copies.
 
 ## Enable local debug logs
 
-Use the README's [debug logging instructions](../../README.md#debug-logging) to
-configure the log directory and understand which process produces each event.
+Before starting a scratch Pi process, set `SUBAGENT_DEBUG_LOG_DIR` to a private
+absolute directory. For an interactive child, set it in the isolated
+multiplexer environment that starts the child. A setting on the parent Pi
+command does not necessarily reach the child.
 
-Logs are appended to `debug-YYYY-MM-DD.jsonl`. Find the relevant records with:
+The extension appends logs to `debug-YYYY-MM-DD.jsonl`. `extension_tool_call`
+records calls to this extension in the Pi process that loaded it. `tool_start`
+records tools that in-process subagents call. Logs can contain prompts and
+arguments. Keep them private. For example, if the log directory is `.pi-debug`:
 
 ```bash
 jq -c 'select(.event == "extension_tool_call" or .event == "tool_start")' .pi-debug/debug-*.jsonl
@@ -47,8 +53,8 @@ Herdr, or other terminal.
 1. **Capture the invocation and provenance.** Expand the Pi-subagentura tool
    call with Ctrl+O; record the tool name, exact supplied arguments, error,
    whether a terminal was allocated, Pi version, package version, and loaded
-   extension source. The README documents `pi list` and `pi config`; check the
-   installed Pi help before using them. Ctrl+O shows supplied arguments, not
+   extension source. Check the installed Pi help before using `pi list` or
+   `pi config`. Ctrl+O shows supplied arguments, not
    omitted defaults. In versions where `mux` defaults to `auto`, note whether
    it was omitted or explicitly set.
 2. **Prove process and terminal identity.** From read-only process inspection
@@ -98,24 +104,24 @@ Herdr, or other terminal.
      available. Distinguish a running child, recorded completion, and parent-side
      delivery/consumption. For suspicious output, compare the child's persisted
      user-entry identity with `turnId` in `turn_started` and `completion`, in
-     physical NDJSON order. Timestamps do not establish identity or order; see
-     [Interactive Child Artifact Ownership](../../docs/ownership.md).
+     physical NDJSON order. Timestamps do not establish identity or order.
 
 For a report, give only the minimal evidence chain: versions and loaded source →
 tool and redacted arguments/mux choice → marker presence and PID/TTY ownership
 result → terminal allocation → wrapper/child-start status and exit code →
 turn/completion/delivery state. Name the next missing observation. Keep raw
 traces, prompts, credentials, full environments, and identifiers private. For
-controlled reproductions, snapshot and restore ambient selectors and `PATH` as
-needed; see [Testing with Ambient Host State](../../docs/testing.md). Do not test
-against the live Core or another terminal.
+controlled reproductions, save the original mux selectors and `PATH`. Set or
+unset them for each case. Restore the original values after the test, even if
+the test fails. Do not test against a live user terminal or mux server.
 
 If the failure occurred with an installed extension, reproduce it with the
-installed package in a scratch environment. Do not substitute the source
-checkout. Use the registered `subagent_interactive` tool and a mock provider.
-Record the last stage that passed: terminal allocation, first `turn_started`,
-or successful `completion` with the same `turnId` and expected output. See
-[Verify the installed package through the first child turn](../../docs/testing.md#verify-the-installed-package-through-the-first-child-turn).
+same npm package version in a temporary Pi profile, project, and mux session.
+To test a release candidate, install its `npm pack` archive. Confirm that Pi
+loads the installed package, not the source checkout or a second copy. Use the
+registered `subagent_interactive` tool and a mock provider. Verify terminal
+allocation, the first `turn_started` event, and successful `completion` with
+the same `turnId` and expected saved output. Record the last stage that passed.
 
 `subagent_isolated` and `subagent_with_context` run in-process and do not create
 a multiplexer pane. For those, inspect the `extension_tool_call` parameters and
@@ -166,7 +172,7 @@ Current versions use an artifact-specific, one-use bootstrap that the child
 consumes before registering lifecycle hooks. `PI_SUBAGENTURA_CHILD` and
 `ARTIFACT_DIR` alone do not grant authority. Artifact ownership and recursive
 lineage use separate bootstraps; lineage expires after 60 seconds and does not
-grant artifact ownership. See [Interactive Child Artifact Ownership](../../docs/ownership.md).
+grant artifact ownership.
 This prevents accidental environment inheritance; it is not an OS security
 boundary against malicious code running as the same user. Historical artifacts
 may still need investigation. This skill is guidance; it does not add automatic
