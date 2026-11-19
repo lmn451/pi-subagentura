@@ -29,9 +29,12 @@ function environmentSnapshot(
 ): EnvironmentSnapshot {
   return Object.freeze({
     guidanceHost: "unknown",
+    guidanceHostStatus: "unknown",
     telemetryHost: "unknown",
     terminalProgram: "unknown",
     parentMux: "unknown",
+    parentMuxStatus: "unknown",
+    v2NativeDefaultPermitted: true,
     ...overrides,
   });
 }

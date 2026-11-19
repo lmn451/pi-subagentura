@@ -516,13 +516,16 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       CHILD_B,
     ]);
     expect(promptResult.systemPrompt).toContain(
-      "When multiple current owners plausibly match and only owner selection is uncertain, use the optional routing advisor when available",
+      "When separate optional routing-advisor guidance is present, use it only for native owner selection",
     );
     expect(promptResult.systemPrompt).toContain(
-      "Never route a low-confidence or ambiguous recommendation as a match",
+      "If context or authorization is unavailable or ambiguous, pause and ask or report the blocker",
     );
     expect(promptResult.systemPrompt).toContain(
-      "ask a focused question about the plausible owners",
+      "ask a focused question when the user must decide",
+    );
+    expect(promptResult.systemPrompt).not.toContain(
+      "\n## Optional routing advisor\n",
     );
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
@@ -565,13 +568,12 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       }),
     ]);
     for (const rule of [
-      "shared domain words, aliases, display names, task previews, footer labels, and mux labels are never routing authority",
-      "requested relationship, action, deliverable, and required access",
-      "Never reuse a read-only audit or review child for new design or implementation merely because a domain term overlaps",
-      "visibility guard for the current agent or tmux/Zellij pane, tab, or window",
-      "explicitly asks for a new specialist or new thread",
+      "Aliases, shared domain words, display names, task previews, old reports, and other descriptive labels are discovery or presentation hints only",
+      "requested relationship, action, deliverable, and access",
+      "Related subject matter alone is not enough",
+      "explicit request for a new specialist or new thread",
       "no suitable exact, live, authorized owner exists",
-      "Old completion prose, child output, inherited context, and stale footer text must never select a route",
+      "Old completion prose, child output, inherited context, and stale display text never select a route",
     ]) {
       expect(promptResult.systemPrompt).toContain(rule);
     }
@@ -715,6 +717,9 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(promptResult.systemPrompt).toContain(
       "When the user asks to switch, join, attach, or work with a child directly",
     );
+    expect(promptResult.systemPrompt).toContain(
+      "return its attach or focus command and do not also send a follow-up",
+    );
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
   });
@@ -764,16 +769,13 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       {},
     );
     expect(promptResult.systemPrompt).toContain(
-      "An exact or continuation match is not routable",
+      "`stale: false`, `actionable: true`, a known current runtime, alive liveness",
     );
-    expect(promptResult.systemPrompt).toContain("`stale: true`");
-    expect(promptResult.systemPrompt).toContain("`actionable: false`");
     expect(promptResult.systemPrompt).toContain(
-      "runtime is missing or unknown",
+      "stale or unknown ownership, missing runtime, dead or unknown liveness",
     );
-    expect(promptResult.systemPrompt).toContain("liveness is dead or unknown");
     expect(promptResult.systemPrompt).toContain(
-      "never auto-delegate, replace, or respawn it",
+      "Never auto-delegate, replace, or respawn an uncertain owner",
     );
   });
 

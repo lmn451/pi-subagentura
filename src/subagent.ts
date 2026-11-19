@@ -39,7 +39,10 @@ import {
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
 import { isRoutingEnabled } from "./routing-factory";
-import { detectEnvironment } from "./environment";
+import {
+  detectEnvironment,
+  formatV2ExecutionContextGuidance,
+} from "./environment";
 import { registerSessionHandlers } from "./session-handlers";
 import {
   acquireRuntimeChildArtifactOwnership,
@@ -107,6 +110,10 @@ const ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
 ).trim();
+const ORCHESTRATOR_V2_NATIVE_GUIDANCE = readFileSync(
+  new URL("../ORCHESTRATOR_V2_NATIVE_GUIDANCE.md", import.meta.url),
+  "utf8",
+).trim();
 const ORCA_INTERACTIVE_SYSTEM_PROMPT = readFileSync(
   new URL("../ORCA_INTERACTIVE_SYSTEM_PROMPT.md", import.meta.url),
   "utf8",
@@ -122,6 +129,9 @@ const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
 
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
+
+Use this advisor only for native interactive owner selection. It does not apply
+to a selected host-managed surface.
 
 When the user's action, target/scope, deliverable, and required access are clear
 and only the choice of current owner is uncertain, use the advisor to help select
@@ -228,6 +238,8 @@ export default function (pi: ExtensionAPI) {
     if (includeOrchestratorV2) {
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
       if (includeSplit) prompts.push(ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT);
+      prompts.push(formatV2ExecutionContextGuidance(environment));
+      prompts.push(ORCHESTRATOR_V2_NATIVE_GUIDANCE);
       if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
         prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
       }

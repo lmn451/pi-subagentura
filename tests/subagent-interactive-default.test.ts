@@ -406,6 +406,22 @@ describe("subagent_interactive tool lifecycle", () => {
     );
   });
 
+  it("forwards an explicit native mux preference unchanged", async () => {
+    const toolDef = getInteractiveToolDef(api);
+
+    await toolDef.execute(
+      "call-explicit-mux",
+      { task: "research X", mux: "wezterm" },
+      undefined,
+      undefined,
+      mockCtx(),
+    );
+
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledWith(
+      expect.objectContaining({ muxPreference: "wezterm" }),
+    );
+  });
+
   it("passes explicit context directly without reading the parent branch", async () => {
     const toolDef = getInteractiveToolDef(api);
     const ctx = mockCtx();

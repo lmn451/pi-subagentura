@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFile, spawn } from "node:child_process";
 import {
   detectEnvironment,
+  formatV2ExecutionContextGuidance,
   sanitizeTelemetryTerminalProgram,
 } from "../src/environment";
 
@@ -28,13 +29,16 @@ describe("environment snapshot", () => {
   it("recognizes the complete Orca origin without terminal metadata", () => {
     const snapshot = detectEnvironment(launchEnv, "darwin");
     expect(snapshot.guidanceHost).toBe("orca");
+    expect(snapshot.guidanceHostStatus).toBe("eligible");
     expect(snapshot.telemetryHost).toBe("orca");
   });
 
-  it("does not execute commands, probe a runtime, or make network requests", () => {
+  it("does not probe or launch before emitting execution-context guidance", () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
-    expect(detectEnvironment(launchEnv, "darwin").guidanceHost).toBe("orca");
+    const snapshot = detectEnvironment(launchEnv, "darwin");
+    formatV2ExecutionContextGuidance(snapshot);
+    expect(snapshot.guidanceHost).toBe("orca");
     expect(execFile).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
@@ -43,10 +47,14 @@ describe("environment snapshot", () => {
   it("recognizes Agterm only from its exact enabled marker", () => {
     const snapshot = detectEnvironment({ AGTERM_ENABLED: "1" }, "darwin");
     expect(snapshot.guidanceHost).toBe("agterm");
+    expect(snapshot.guidanceHostStatus).toBe("eligible");
     expect(snapshot.telemetryHost).toBe("agterm");
-    expect(
-      detectEnvironment({ TERM_PROGRAM: "agterm" }, "darwin").guidanceHost,
-    ).toBe("unknown");
+    const terminalOnly = detectEnvironment(
+      { TERM_PROGRAM: "agterm" },
+      "darwin",
+    );
+    expect(terminalOnly.guidanceHost).toBe("unknown");
+    expect(terminalOnly.guidanceHostStatus).toBe("unknown");
   });
 
   it.each([
@@ -90,6 +98,7 @@ describe("environment snapshot", () => {
   it("fails closed for conflicts between recognized host observations", () => {
     const orcaAndRex = detectEnvironment({ ...launchEnv, ...rexEnv }, "darwin");
     expect(orcaAndRex.guidanceHost).toBe("unknown");
+    expect(orcaAndRex.guidanceHostStatus).toBe("ambiguous");
     expect(orcaAndRex.telemetryHost).toBe("orca");
 
     const agtermAndRex = detectEnvironment(
@@ -97,6 +106,7 @@ describe("environment snapshot", () => {
       "darwin",
     );
     expect(agtermAndRex.guidanceHost).toBe("unknown");
+    expect(agtermAndRex.guidanceHostStatus).toBe("ambiguous");
     expect(agtermAndRex.telemetryHost).toBe("agterm");
 
     const allHosts = detectEnvironment(
@@ -104,6 +114,7 @@ describe("environment snapshot", () => {
       "darwin",
     );
     expect(allHosts.guidanceHost).toBe("unknown");
+    expect(allHosts.guidanceHostStatus).toBe("ambiguous");
     expect(allHosts.telemetryHost).toBe("unknown");
   });
 
@@ -114,6 +125,93 @@ describe("environment snapshot", () => {
     );
     expect(snapshot.guidanceHost).toBe("unknown");
     expect(snapshot.telemetryHost).toBe("unknown");
+  });
+
+  it.each([
+    [{ ORCA_RUNTIME_SOURCE_ID: "partial" }, "unsupported"],
+    [{ AGTERM_ENABLED: "0" }, "unsupported"],
+    [{ ORCA_PI_STATUS_OWNED: "1" }, "unknown"],
+    [{ TERM_PROGRAM: "agterm" }, "unknown"],
+  ] as const)(
+    "distinguishes unsupported host markers from no recognized host evidence %#",
+    (env, expected) => {
+      expect(detectEnvironment(env, "darwin").guidanceHostStatus).toBe(
+        expected,
+      );
+    },
+  );
+
+  it.each([
+    [{}, "unknown"],
+    [{ TMUX: "/tmp/tmux/default,1,0" }, "candidate"],
+    [
+      { TMUX: "/tmp/tmux/default,1,0", ZELLIJ_SESSION_NAME: "nested" },
+      "ambiguous",
+    ],
+    [{ WEZTERM_PANE: "7" }, "unsupported"],
+    [{ TERM_PROGRAM: "tmux" }, "unknown"],
+  ] as const)(
+    "classifies native mux marker evidence without claiming availability %#",
+    (env, expected) => {
+      expect(detectEnvironment(env, "darwin").parentMuxStatus).toBe(expected);
+    },
+  );
+
+  it("renders V2 execution context as evidence, not selection authority", () => {
+    const snapshot = detectEnvironment(
+      { ...launchEnv, TMUX: "/tmp/tmux/default,1,0" },
+      "darwin",
+    );
+    const guidance = formatV2ExecutionContextGuidance(snapshot);
+
+    expect(guidance).toContain("Host-guide eligibility: eligible (orca)");
+    expect(guidance).toContain("Native mux observation: candidate (tmux)");
+    expect(guidance).toContain("do not prove current host or mux ownership");
+    expect(guidance).toContain(
+      "does not prove backend availability or launch success",
+    );
+    expect(guidance).toContain(
+      "explicit user-selected target takes precedence",
+    );
+  });
+
+  it("renders ambiguous, unsupported, and unknown observations distinctly", () => {
+    const ambiguous = formatV2ExecutionContextGuidance(
+      detectEnvironment(
+        {
+          ...launchEnv,
+          AGTERM_ENABLED: "1",
+          TMUX: "/tmp/tmux/default,1,0",
+          ZELLIJ_SESSION_NAME: "nested",
+        },
+        "darwin",
+      ),
+    );
+    const unsupported = formatV2ExecutionContextGuidance(
+      detectEnvironment(
+        {
+          ORCA_RUNTIME_SOURCE_ID: "partial",
+          WEZTERM_PANE: "7",
+        },
+        "darwin",
+      ),
+    );
+    const unknown = formatV2ExecutionContextGuidance(
+      detectEnvironment({}, "darwin"),
+    );
+
+    expect(ambiguous).toContain("Host-guide eligibility: ambiguous");
+    expect(ambiguous).toContain("Native mux observation: ambiguous");
+    expect(unsupported).toContain("Host-guide eligibility: unsupported");
+    expect(unsupported).toContain("Native mux observation: unsupported");
+    expect(unsupported).toContain(
+      "does not prove that a host or backend is absent",
+    );
+    expect(unknown).toContain("Host-guide eligibility: unknown");
+    expect(unknown).toContain("Native mux observation: unknown");
+    expect(unknown).toContain(
+      "does not prove that a host or backend is absent",
+    );
   });
 
   it.each([
@@ -281,9 +379,12 @@ describe("environment snapshot", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(snapshot).toEqual({
       guidanceHost: "unknown",
+      guidanceHostStatus: "ambiguous",
       telemetryHost: "orca",
       terminalProgram: "wezterm",
       parentMux: "tmux",
+      parentMuxStatus: "ambiguous",
+      v2NativeDefaultPermitted: false,
     });
     const serialized = JSON.stringify(snapshot);
     expect(serialized).not.toContain("private-");
