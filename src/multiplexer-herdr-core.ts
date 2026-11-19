@@ -79,6 +79,8 @@ export class HerdrCoreMultiplexer implements Multiplexer {
     const name = `${safeSegment(opts.windowName ?? opts.name).slice(0, 20)}-${safeSegment(opts.id ?? randomUUID()).slice(0, 8)}`;
     const value = requestHerdrCoreSync(context.server, "terminal.run", {
       argv: ["bash", "--noprofile", "--norc", "-i"],
+      // The service can predate this Pi session and retain an older PATH.
+      env: process.env.PATH === undefined ? {} : { PATH: process.env.PATH },
       cwd: opts.cwd,
       name,
       parent: terminal(context.paneId),

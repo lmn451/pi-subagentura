@@ -25,6 +25,10 @@ attach action or its generated `HC_SOCKET=... herdr-core attach t...` command to
 view a child. Press Ctrl+\\ to detach. Structured focus and native overlays are
 unavailable; attention and attached-client probes return unknown.
 
+New terminals use the calling Pi session's `PATH` to find Pi and Node, even if
+the Core service started with an older environment. Other parent environment
+variables are not forwarded by the backend.
+
 The backend persists each terminal ID and socket as `paneId` and `muxServer`.
 Input, capture, cancellation, lineage, and reload/rehydration use that endpoint
 even when the parent's environment changes. Children suppress Core's automatic

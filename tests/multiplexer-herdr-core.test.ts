@@ -27,6 +27,31 @@ beforeEach(() => vi.resetAllMocks());
 afterEach(() => vi.unstubAllEnvs());
 
 describe("herdr-core backend", () => {
+  it("starts local terminals with only the calling session's PATH override", () => {
+    vi.stubEnv("PATH", "/caller/pi/bin:/caller/node/bin:/usr/bin:/bin");
+    vi.stubEnv("PARENT_ENV_SENTINEL", "must-not-be-forwarded");
+    requestSync.mockReturnValue({ address: "t1b", state: "live" });
+    const mux = new HerdrCoreMultiplexer();
+    mux.createPane({
+      context,
+      name: "path-regression",
+      cwd: "/work",
+      background: true,
+    });
+    expect(requestSync.mock.calls[0]?.[2].env).toEqual({
+      PATH: process.env.PATH,
+    });
+    expect(requestSync.mock.calls[0]?.[2]).not.toHaveProperty("on");
+    vi.stubEnv("PATH", undefined);
+    mux.createPane({
+      context,
+      name: "default-path",
+      cwd: "/work",
+      background: true,
+    });
+    expect(requestSync.mock.calls[1]?.[2].env).toEqual({});
+  });
+
   it("prefers the injected owning socket over a contradictory CLI override", () => {
     vi.stubEnv("HC_TERMINAL_ID", "t1");
     vi.stubEnv("HC_TERMINAL_SOCKET", server);

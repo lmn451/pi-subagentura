@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Start Herdr Core children with the calling Pi session's `PATH`, so an older
+  Core service environment cannot immediately close the child with
+  `pi: command not found`.
 - Preserve Node-supported platform signal names and aliases when normalizing
   process-exit artifacts across platforms.
 - Require an explicit Zellij mux choice for attached contexts because its public
