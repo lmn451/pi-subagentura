@@ -92,6 +92,24 @@ shell startup files or installed tools.
 ./node_modules/.bin/vitest run tests/herdr-core-launch-path.test.ts
 ```
 
+## Verify the installed package through the first child turn
+
+When a change affects interactive launch or packaging, run the production
+launch path with the package installed from `npm pack` in a scratch consumer.
+Use a temporary Pi agent directory, project, and multiplexer session. Use a
+mock provider so the test needs no live account or model. Confirm that Pi
+loads the installed package, not the source checkout or a second copy.
+
+Call the registered `subagent_interactive` tool. Verify that the terminal
+opens, the child starts its first turn, and that same turn records a
+successful `completion` with the expected output. Check the output through the
+parent tool if the change affects delivery. Terminal allocation, a visible Pi
+UI, or a checkout-only test does not prove the installed package works.
+
+For Herdr Core, `npm run test:herdr-core` checks first-turn completion with
+a real Pi child and a mock provider. It copies the checkout into a temporary
+package directory to simulate installation. It does not test the npm tarball.
+
 ## Verification
 
 Run the focused suite, followed by the standard repository checks:

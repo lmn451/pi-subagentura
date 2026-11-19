@@ -110,6 +110,13 @@ controlled reproductions, snapshot and restore ambient selectors and `PATH` as
 needed; see [Testing with Ambient Host State](../../docs/testing.md). Do not test
 against the live Core or another terminal.
 
+If the failure occurred with an installed extension, reproduce it with the
+installed package in a scratch environment. Do not substitute the source
+checkout. Use the registered `subagent_interactive` tool and a mock provider.
+Record the last stage that passed: terminal allocation, first `turn_started`,
+or successful `completion` with the same `turnId` and expected output. See
+[Verify the installed package through the first child turn](../../docs/testing.md#verify-the-installed-package-through-the-first-child-turn).
+
 `subagent_isolated` and `subagent_with_context` run in-process and do not create
 a multiplexer pane. For those, inspect the `extension_tool_call` parameters and
 returned error/result instead.
