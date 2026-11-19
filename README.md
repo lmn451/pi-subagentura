@@ -308,7 +308,11 @@ surface is selected, Orchestratorv2 directs delegation through native attachable
 specialists using its parent-session authority ledger; the project-local routing
 cache is only an untrusted lookup aid.
 
-Add `--split` to opt into automatic decomposition of broad requests:
+### Split mode: automatic task decomposition
+
+Add `--split` to opt into automatic decomposition of broad requests. This
+option changes how Pi delegates work. It does not split your terminal or
+require a multiplexer that supports pane splits.
 
 ```bash
 pi --orchestratorv2 --split
@@ -729,11 +733,14 @@ Parameters:
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
 - `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"herdr-core"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
 
-  [Herdr Core](https://github.com/herdrdev/herdr-core) is separate from Herdr. On macOS or Linux, start Pi in an `hc` terminal (`hc run --bg pi`, then `hc attach <id>`). The extension verifies the terminal from `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, then persists the child terminal ID and socket for reattachment. Herdr Core always starts an independent terminal, even with `background: false`. Use the returned `hc attach` command to view it and Ctrl+\ to detach. Native focus and overlays are not supported.
+  **Herdr and Herdr Core use different backends.**
+
+  - **Herdr (`herdr`)** uses the `herdr` CLI. Start Pi in a Herdr pane. A child opens in a background tab by default, or to the right of the parent pane with `background: false`.
+  - **[Herdr Core](https://github.com/herdrdev/herdr-core) (`herdr-core`)** uses the `hc` CLI. On macOS or Linux, start Pi with `hc run --bg pi`, then `hc attach <id>`. The extension verifies `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` and saves the child terminal ID and socket for reattachment. Each child gets an independent terminal, even with `background: false`. Use the returned `hc attach` command to view it and Ctrl+\ to detach. There is no pane split, native focus, or overlay.
 
   Attached Zellij ownership limits are documented in [Rex multiplexer support](docs/rex-multiplexer.md).
 
-- `background` — spawn in a detached named window/tab (invisible) instead of a visible horizontal split. Default `true` — your mux layout is undisturbed and you can attach later with the returned `focus` command. Pass `background: false` for a side-by-side split you can watch in real time.
+- `background` — defaults to `true`. On backends that support pane splits, use `false` to open a visible pane beside the parent instead of a background window or tab. Herdr Core opens an independent terminal with either value. Use the returned `attach` command to view it.
 - `completionPolicy` — `"each"` (default) or `"group"`; group errors are eligible before the named barrier, while success and cancellation wait for it
 - `completionGroupId` — caller-declared named group ID required with `completionPolicy: "group"`; safe 1–128 character ID shared by related agents (max 32 members per group, 512 groups per parent session)
 
