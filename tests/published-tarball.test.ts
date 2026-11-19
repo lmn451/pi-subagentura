@@ -347,6 +347,7 @@ describe("published tarball", () => {
       "utf8",
     );
     expect(skill).toMatch(/^---\nname: pi-subagentura-debug\n/);
+    expect(skill).not.toMatch(/\]\(\.\.\//);
     expect(skill).toMatch(
       /^description:.*unsupported.*state.*schema.*persistence error/im,
     );
