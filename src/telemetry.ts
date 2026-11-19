@@ -15,7 +15,7 @@ import {
 } from "./environment";
 
 export const TELEMETRY_ENDPOINT = "https://us.i.posthog.com/i/v0/e/";
-export const TELEMETRY_SCHEMA_VERSION = 8;
+export const TELEMETRY_SCHEMA_VERSION = 9;
 const TELEMETRY_PROJECT_TOKEN =
   "phc_B4H7xPiFbwPJmKbdeQtk7FeP3PnQF5AMpQJXCgGYeqFR";
 const TELEMETRY_TIMEOUT_MS = 1_500;

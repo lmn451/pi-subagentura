@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveCurrentMuxContext } from "../src/multiplexer-current-context";
 import type { ProcessContext } from "../src/multiplexer-process-context";
+import {
+  MultiplexerContextUnavailableError,
+  resolveMux,
+} from "../src/multiplexer";
 
 const { readContext, nearest, probe } = vi.hoisted(() => ({
   readContext: vi.fn(),
@@ -210,4 +214,22 @@ it("binds Herdr Core to its injected terminal socket, not a CLI override", () =>
       HC_SOCKET: "/tmp/other.sock",
     }).kind,
   ).toBe("unavailable");
+});
+
+it("blocks detached auto fallback when only the Herdr Core terminal socket is set", () => {
+  const env = { HC_TERMINAL_SOCKET: "/tmp/herdr-core.sock" };
+  const originalEnv = process.env;
+  process.env = env;
+  try {
+    readContext.mockReturnValue(context);
+    probe.mockClear();
+    expect(resolveCurrentMuxContext(env)).toMatchObject({
+      kind: "unavailable",
+      message: expect.stringContaining("Herdr Core"),
+    });
+    expect(() => resolveMux()).toThrow(MultiplexerContextUnavailableError);
+    expect(probe).not.toHaveBeenCalled();
+  } finally {
+    process.env = originalEnv;
+  }
 });
