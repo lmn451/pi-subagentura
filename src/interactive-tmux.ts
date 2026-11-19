@@ -1161,6 +1161,11 @@ export function launchInteractiveSubagent(params: {
   try {
     writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
       PI_SUBAGENTURA_MUX: mux.name,
+      // Core terminals may start with a restricted PATH. Preserve only the
+      // parent's executable search path for this local wrapper, not its full env.
+      ...(mux.name === "herdr-core" && process.env.PATH !== undefined
+        ? { PATH: process.env.PATH }
+        : {}),
       [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
       ...(lineageBootstrapPath
         ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
@@ -1174,10 +1179,13 @@ export function launchInteractiveSubagent(params: {
   }
   try {
     const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+    // Core already requires /bin/bash to create its terminal. Use that same
+    // interpreter before the wrapper restores the parent PATH.
+    const bash = mux.name === "herdr-core" ? "/bin/bash" : "bash";
     submitMuxCommand(
       mux,
       paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
+      `exec ${bash} ${escape(paths.launchScriptFile)}`,
       muxSession,
       ...muxServerArgs(muxServer),
     );
