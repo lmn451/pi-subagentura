@@ -758,6 +758,7 @@ describe("MUX_CAPABILITIES", () => {
       );
     expect(Object.keys(MUX_CAPABILITIES).sort()).toEqual([
       "herdr",
+      "herdr-core",
       "rex",
       "tmux",
       "wezterm",

@@ -209,11 +209,14 @@ export function isCurrentChildArtifactOwnership(
   value: unknown,
 ): value is ChildArtifactOwnership {
   if (!value || typeof value !== "object") return false;
-  const candidate = value as ChildArtifactOwnership;
+  const candidate = value as Partial<ChildArtifactOwnership>;
+  // Pi can claim ownership through a global package before the trust picker,
+  // then register hooks through a different project copy. Only the exact object
+  // in the process-wide cache is authoritative, not a copy's nominal brand.
   return (
-    candidate[ownershipBrand] === true &&
     candidate.processId === process.pid &&
-    runtimeOwners().get(resolve(candidate.artifactDir)) === candidate
+    typeof candidate.artifactDir === "string" &&
+    runtimeOwners().get(candidate.artifactDir) === candidate
   );
 }
 

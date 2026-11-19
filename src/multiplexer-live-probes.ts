@@ -5,11 +5,13 @@ import {
   isZellijSessionName,
   isTmuxSocketLabel,
   type MuxName,
+  isHerdrCoreTerminalId,
 } from "./multiplexer-contracts";
 import {
   normalizeProcessTty,
   type ProcessContext,
 } from "./multiplexer-process-context";
+import { herdrCoreEnv, parseHerdrCoreTerminal } from "./multiplexer-herdr-core";
 
 export interface LiveMuxTarget {
   readonly mux: MuxName;
@@ -313,7 +315,9 @@ function prepareProbe(
         ? (target.server.startsWith("unix:///") &&
             socket(target.server.slice(7))) ||
           socket(target.server)
-        : target.mux === "tmux" || target.mux === "wezterm"
+        : target.mux === "tmux" ||
+            target.mux === "wezterm" ||
+            target.mux === "herdr-core"
           ? socket(target.server)
           : selector(target.server)))
   )
@@ -327,6 +331,8 @@ function prepareProbe(
       return rexProbe(target, context, env);
     case "zellij":
       return zellijProbe(target, env);
+    case "herdr-core":
+      return herdrCoreProbe(target, context, env);
     case "wezterm":
       return weztermProbe(target, context, env);
     default:
@@ -362,4 +368,23 @@ export async function probeLiveMuxTargetAsync(
     // Advisory probes cannot surface process errors or child-controlled output.
     return UNKNOWN;
   }
+}
+function herdrCoreProbe(
+  target: LiveMuxTarget,
+  context: ProcessContext,
+  env: NodeJS.ProcessEnv,
+): ProbePlan | LiveMuxProbe {
+  if (!isHerdrCoreTerminalId(target.paneId) || !socket(target.server))
+    return UNKNOWN;
+  return {
+    command: "hc",
+    args: ["get", "--json", target.paneId],
+    env: herdrCoreEnv(target.server, env),
+    parse(output) {
+      const terminal = parseHerdrCoreTerminal(output, target.paneId);
+      if (!terminal || !pid(terminal.pid)) return UNKNOWN;
+      if (terminal.state !== "live") return MISMATCH;
+      return matchPids(target, context, [terminal.pid]);
+    },
+  };
 }

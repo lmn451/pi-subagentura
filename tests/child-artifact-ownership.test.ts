@@ -20,6 +20,7 @@ import {
   writeChildArtifactBootstrap,
 } from "../src/child-artifact-ownership";
 import { retireLineageBootstraps } from "../src/spawn-tree-context";
+import { importFresh } from "./test-utils";
 
 let root: string;
 let previousArtifactDir: string | undefined;
@@ -249,4 +250,26 @@ describe("one-use child artifact ownership", () => {
     expect(existsSync(staleClaim)).toBe(false);
     expect(existsSync(liveClaim)).toBe(true);
   });
+});
+
+it("validates the same process-owned object after Pi loads a different copy", async () => {
+  const artifactDir = join(root, "project-child");
+  const bootstrap = writeChildArtifactBootstrap(artifactDir);
+  process.env.ARTIFACT_DIR = artifactDir;
+  process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] = bootstrap;
+  const ownership = acquireRuntimeChildArtifactOwnership();
+  expect(isCurrentChildArtifactOwnership(ownership)).toBe(true);
+  expect(existsSync(bootstrap)).toBe(false);
+
+  const projectCopy = await importFresh<
+    typeof import("../src/child-artifact-ownership")
+  >("../src/child-artifact-ownership");
+  expect(projectCopy.acquireRuntimeChildArtifactOwnership).not.toBe(
+    acquireRuntimeChildArtifactOwnership,
+  );
+  expect(projectCopy.acquireRuntimeChildArtifactOwnership()).toBe(ownership);
+  expect(projectCopy.isCurrentChildArtifactOwnership(ownership)).toBe(true);
+  expect(projectCopy.isCurrentChildArtifactOwnership({ ...ownership })).toBe(
+    false,
+  );
 });

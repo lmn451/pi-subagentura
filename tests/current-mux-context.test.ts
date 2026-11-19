@@ -186,3 +186,28 @@ describe("current mux ownership", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 });
+
+it("binds Herdr Core to its injected terminal socket, not a CLI override", () => {
+  readContext.mockReturnValue(context);
+  probe.mockImplementation((target) => ({
+    kind: "match",
+    target,
+    distance: 0,
+  }));
+  expect(
+    resolveCurrentMuxContext({
+      HC_TERMINAL_ID: "t7",
+      HC_TERMINAL_SOCKET: "/tmp/herdr-core.sock",
+      HC_SOCKET: "/tmp/other.sock",
+    }),
+  ).toEqual({
+    kind: "ready",
+    target: { mux: "herdr-core", paneId: "t7", server: "/tmp/herdr-core.sock" },
+  });
+  expect(
+    resolveCurrentMuxContext({
+      HC_TERMINAL_ID: "t7",
+      HC_SOCKET: "/tmp/other.sock",
+    }).kind,
+  ).toBe("unavailable");
+});

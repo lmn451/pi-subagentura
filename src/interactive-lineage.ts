@@ -17,6 +17,7 @@ import {
   isRexServerAddress,
   isMuxSocketPath,
   isRexSessionId,
+  isHerdrCoreTerminalId,
 } from "./multiplexer-contracts";
 
 export const LINEAGE_SCHEMA_VERSION = 1;
@@ -784,7 +785,8 @@ export async function projectManifests(
       manifest.pane.backend !== "zellij" &&
       manifest.pane.backend !== "herdr" &&
       manifest.pane.backend !== "rex" &&
-      manifest.pane.backend !== "wezterm"
+      manifest.pane.backend !== "wezterm" &&
+      manifest.pane.backend !== "herdr-core"
     ) {
       issues.push({
         kind: "malformed",
@@ -1350,6 +1352,12 @@ function validatePaneRef(
     (!/^\d+$/.test(paneId) || !isMuxSocketPath(muxServer.muxServer))
   ) {
     throw new Error("WezTerm pane identity is incomplete or malformed");
+  }
+  if (
+    backend === "herdr-core" &&
+    (!isHerdrCoreTerminalId(paneId) || !isMuxSocketPath(muxServer.muxServer))
+  ) {
+    throw new Error("Herdr Core terminal identity is incomplete or malformed");
   }
   if (
     backend === "rex" &&

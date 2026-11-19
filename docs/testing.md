@@ -73,6 +73,25 @@ env -u WEZTERM_PANE -u WEZTERM_UNIX_SOCKET \
   ./node_modules/.bin/vitest run tests/multiplexer.test.ts
 ```
 
+## Herdr Core example: test the application launch
+
+A multiplexer smoke test can pass while the real application fails to start.
+The initial Herdr Core integration test used `/bin/sleep` and Bash's built-in
+`printf`. Neither needs `PATH` to find an executable, so the test missed a
+startup failure: the new terminal didn't load the parent's Zsh configuration
+and couldn't find `pi` or `node` on its restricted `PATH`.
+
+Keep the backend smoke test, but also execute the production launch command in
+a child process with a controlled environment. In the regression test, the
+parent's `PATH` points to test doubles for `pi` and `node`, while the child's
+initial `PATH` excludes them. The test verifies that the launch wrapper uses the
+parent's `PATH` and invokes both executables. It does not depend on the host's
+shell startup files or installed tools.
+
+```sh
+./node_modules/.bin/vitest run tests/herdr-core-launch-path.test.ts
+```
+
 ## Verification
 
 Run the focused suite, followed by the standard repository checks:

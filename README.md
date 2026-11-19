@@ -9,7 +9,7 @@
 Give the parent Pi agent one task and let it build the team. pi-subagentura adds
 reusable multi-agent workflows, lightweight background delegation, and real
 child Pi sessions you can watch, attach to, and continue in tmux, Zellij, Herdr,
-WezTerm, or a verified live Superlogical Rex block.
+Herdr Core, WezTerm, or a verified live Superlogical Rex block.
 
 For routing-first delegation, start Pi with `--orchestratorv2`. The prompt
 guides the parent to route clear work to attachable specialists, ask for
@@ -698,7 +698,7 @@ Remove all completed and failed subagent jobs from the registry. Running and can
 
 Observability and attachability are the primary design goals of interactive
 sub-agents—not debugging afterthoughts. Each child is a separate Pi process in a
-tmux, Zellij, Herdr, or WezTerm pane, or a Rex block when the current Rex context is verified:
+tmux, Zellij, Herdr, or WezTerm pane, a Herdr Core terminal, or a verified Rex block:
 watch it live, focus it from the current mux, attach from another terminal, or send
 follow-ups through the parent while preserving child context. Without a verified
 Rex context, a plain terminal can use the existing tmux or Zellij detached-session
@@ -706,10 +706,10 @@ paths. The pane is the live view; durable artifacts are the source of truth.
 
 #### `subagent_interactive`
 
-Starts a separate interactive `pi` process in a tmux, Zellij, Herdr, or WezTerm pane, or a Rex block from a verified current Rex context, and returns immediately with:
+Starts a separate interactive `pi` process in the selected multiplexer and returns immediately with:
 
 - sub-agent id
-- pane/block id and mux backend (tmux, zellij, herdr, rex, or wezterm)
+- pane/block id and mux backend (tmux, zellij, herdr, herdr-core, rex, or wezterm)
 - `attach` command (works from outside the mux session)
 - `focus` command (works from inside the same mux session)
 - child Pi session file path
@@ -727,7 +727,9 @@ Parameters:
 - `context` — optional explicit handoff when `includeContext: false`; capped at 64 KiB and never concatenated with the parent branch
 - `routingDescription` — bounded responsibility persisted for top-level Orchestratorv2 routing; required by Orchestratorv2 policy and rejected outside that top-level mode
 - `routingAliases` — optional bounded exact aliases for the responsibility; requires `routingDescription`
-- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+- `mux`: optional backend: `"auto"` (default), `"tmux"`, `"zellij"`, `"herdr"`, `"herdr-core"`, `"rex"`, or `"wezterm"`. Auto uses environment markers only as candidate selectors, then checks the live backend and this Pi process's ancestry/TTY to prove pane ownership. Nested muxes select the nearest verified owner, not a fixed Herdr/Rex/Zellij/tmux priority or the currently focused pane. Ambiguous, stale, incomplete, unsupported, or unavailable host evidence fails closed instead of falling through to an unrelated backend. An unverified nearer mux also prevents selecting a verified outer one. With no recognized host context, the existing tmux-then-Zellij detached-session fallback remains. Explicit choice overrides auto detection but retains that backend's launch validation. WezTerm requires `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` from an attached pane and persists the socket for later operations. Rex requires a live Rex block and persists its server endpoint, session ID, and block ID for reload/rehydration. See [Rex multiplexer support](docs/rex-multiplexer.md) for capability limits.
+
+  [Herdr Core](https://github.com/herdrdev/herdr-core) is separate from Herdr. On macOS or Linux, start Pi in an `hc` terminal (`hc run --bg pi`, then `hc attach <id>`). The extension verifies the terminal from `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, then persists the child terminal ID and socket for reattachment. Herdr Core always starts an independent terminal, even with `background: false`. Use the returned `hc attach` command to view it and Ctrl+\ to detach. Native focus and overlays are not supported.
 
   Attached Zellij ownership limits are documented in [Rex multiplexer support](docs/rex-multiplexer.md).
 
@@ -744,7 +746,7 @@ protocol-v1 artifacts are left untouched but are not readable by this runtime.
 
 - Interactive children also have `get_current_pane_activity`, which reports
   whether their tmux, Zellij, or WezTerm pane is active for the user's current client.
-  Herdr and Rex do not expose a verified current-user focused-client probe, so
+  Herdr, Herdr Core, and Rex do not expose a verified current-user focused-client probe, so
   their activity result remains neutral `unknown` rather than claiming user
   attention. Only children launched directly by a top-level Orchestratorv2
   session receive protocol guidance to check this before tools or extensions
@@ -820,18 +822,18 @@ descendant past the depth or node cap is still cancelled and reported.
 
 The overlay supports these controls:
 
-| Key                    | Action                                                                                                                                                             |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `↑`/`↓`, `j`/`k`       | Select an async job, workflow, or interactive lineage node                                                                                                         |
-| `Enter`/`→`            | Expand type-specific activity, usage, agent records, or bounded artifact details                                                                                   |
-| `x`                    | Cancel the selected running item; workflow and in-process cancellation propagates to owned agents                                                                  |
-| `v`                    | For interactive agents, capture a bounded terminal snapshot through tmux/Zellij/Herdr/Rex/WezTerm; Rex rejects reads beyond its hard 1 MiB buffer                  |
-| `n`                    | For interactive agents, open the optional native tmux popup or Zellij floating viewer; Herdr, Rex, and WezTerm have no native overlay                              |
-| `f`                    | For interactive agents, focus the persisted pane/window; Herdr uses native `pane.focus`, Rex its public CLI, and WezTerm `activate-pane`                           |
-| `a`                    | For interactive agents, show the terminal-scoped attach command; Herdr uses `herdr terminal attach <terminal-id>`, Rex its public CLI, and WezTerm `activate-pane` |
-| `X`                    | For interactive agents, confirm and cancel an actionable subtree deepest-first                                                                                     |
-| `r`                    | Refresh registries, lineage, and pane liveness                                                                                                                     |
-| `q`/`Esc`/`Ctrl+Alt+A` | Close the overlay without stopping agents                                                                                                                          |
+| Key                    | Action                                                                                                                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `↑`/`↓`, `j`/`k`       | Select an async job, workflow, or interactive lineage node                                                                                                                        |
+| `Enter`/`→`            | Expand type-specific activity, usage, agent records, or bounded artifact details                                                                                                  |
+| `x`                    | Cancel the selected running item; workflow and in-process cancellation propagates to owned agents                                                                                 |
+| `v`                    | For interactive agents, capture a bounded terminal snapshot through tmux/Zellij/Herdr/Herdr Core/Rex/WezTerm; Rex rejects reads beyond its hard 1 MiB buffer                      |
+| `n`                    | For interactive agents, open the optional native tmux popup or Zellij floating viewer; Herdr, Herdr Core, Rex, and WezTerm have no native overlay                                 |
+| `f`                    | For interactive agents, focus the persisted pane/window; Herdr uses native `pane.focus`, Rex its public CLI, and WezTerm `activate-pane`                                          |
+| `a`                    | For interactive agents, show the terminal-scoped attach command; Herdr Core uses `hc attach`, Herdr uses `herdr terminal attach`, Rex its public CLI, and WezTerm `activate-pane` |
+| `X`                    | For interactive agents, confirm and cancel an actionable subtree deepest-first                                                                                                    |
+| `r`                    | Refresh registries, lineage, and pane liveness                                                                                                                                    |
+| `q`/`Esc`/`Ctrl+Alt+A` | Close the overlay without stopping agents                                                                                                                                         |
 
 **Known Herdr limitation:** the supervisor's optional `n` action cannot open
 arbitrary content in a Herdr-native overlay. Herdr currently exposes overlay and

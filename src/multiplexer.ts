@@ -27,6 +27,7 @@ import {
   type Multiplexer,
   type MuxLaunchContext,
 } from "./multiplexer-contracts";
+import { HerdrCoreMultiplexer } from "./multiplexer-herdr-core";
 
 export * from "./multiplexer-contracts";
 
@@ -74,6 +75,13 @@ export function resolveMux(opts: GetMuxOptions = {}): ResolvedMux {
         paneId: probe.context.blockId,
         session: probe.context.sessionId,
         server: probe.context.server,
+      };
+    } else if (adapter.name === "herdr-core") {
+      context = {
+        kind: "attached",
+        mux: "herdr-core",
+        paneId: env.HC_TERMINAL_ID!,
+        server: env.HC_TERMINAL_SOCKET!,
       };
     } else if (adapter.name === "wezterm") {
       context = {
@@ -150,7 +158,7 @@ export interface GetMuxOptions {
 export class NoMultiplexerAvailableError extends Error {
   constructor() {
     super(
-      "No multiplexer available. Start pi inside tmux, zellij, Herdr, or Rex, " +
+      "No multiplexer available. Start pi inside tmux, Zellij, Herdr, Herdr Core, WezTerm, or Rex, " +
         "for example: tmux new -A -s pi 'pi'  —  or install one and ensure its server is running.",
     );
     this.name = "NoMultiplexerAvailableError";
@@ -200,6 +208,8 @@ export function getMux(opts: GetMuxOptions = {}): Multiplexer {
       return getOrCreate("herdr", () => new HerdrMultiplexer());
     case "rex":
       return getOrCreate("rex", () => new RexMultiplexer());
+    case "herdr-core":
+      return getOrCreate("herdr-core", () => new HerdrCoreMultiplexer());
     case "wezterm":
       return getOrCreate("wezterm", () => new WezTermMultiplexer());
     default:
