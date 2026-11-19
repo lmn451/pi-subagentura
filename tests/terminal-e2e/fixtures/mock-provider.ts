@@ -170,6 +170,7 @@ const KNOWN_MARKERS = new Set([
   "[E2E:CHILD_INTERACTIVE_READ]",
   "[E2E:CHILD_INTERACTIVE_READ_FOLLOWUP]",
   "[E2E:INTERACTIVE]",
+  "[E2E:HERDR_CORE_INTERACTIVE]",
   "[E2E:INTERACTIVE_FOLLOWUP_PARENT]",
   "[E2E:INTERACTIVE_CANCEL_PARENT]",
   "[E2E:INTERACTIVE_ERROR_PARENT]",
@@ -791,6 +792,15 @@ function parentTool(marker: string, context: TranscriptContext): ToolCall {
       task: "[E2E:CHILD_PROVIDER_ERROR] Fail the provider fixture.",
       model: "subagentura-e2e/mock",
       background: true,
+    });
+  }
+  if (marker === "[E2E:HERDR_CORE_INTERACTIVE]") {
+    return toolCall("e2e-core-interactive-1", "subagent_interactive", {
+      name: "Core review child",
+      task: "[E2E:CHILD_SMOKE] Review the startup fixture.",
+      model: "subagentura-e2e/mock",
+      mux: "herdr-core",
+      routingDescription: "Reviews the Core startup fixture.",
     });
   }
   if (marker.includes("INTERACTIVE")) {
