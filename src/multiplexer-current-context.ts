@@ -104,7 +104,10 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
       });
     }
   }
-  if (env.HC_TERMINAL_ID !== undefined) {
+  if (
+    env.HC_TERMINAL_ID !== undefined ||
+    env.HC_TERMINAL_SOCKET !== undefined
+  ) {
     names.push("Herdr Core");
     if (
       isHerdrCoreTerminalId(env.HC_TERMINAL_ID) &&
