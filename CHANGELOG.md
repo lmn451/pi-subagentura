@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Abort invalid `--split` agent turns before provider dispatch, including
   automatic/custom-message turns, rather than relying on swallowed hook errors.
   Reject invalid root startup before initializing session state.
+- Launch Herdr Core through the parent Pi runtime when its daemon PATH lacks
+  `pi` or `node`, avoiding immediate exit in that environment.
 
 ## [4.3.0] - 2026-11-14
 

@@ -44,6 +44,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -80,6 +81,7 @@ import {
   type PaneLivenessDiagnostic,
   type PaneLiveness,
   type PaneRef,
+  commandExists,
   safeSegment,
 } from "./multiplexer";
 import { resolveCurrentMuxContextAsync } from "./multiplexer-current-context";
@@ -451,6 +453,35 @@ export function buildInteractivePrompt(params: {
   );
 }
 
+/** Reuse the actual Pi CLI when the parent was started by absolute path. */
+function herdrCorePiExecutable(): [string, string] | undefined {
+  const entrypoint = process.argv[1];
+  if (!entrypoint || commandExists("pi")) return undefined;
+
+  try {
+    const entry = realpathSync(entrypoint);
+    for (let dir = dirname(entry); dir !== dirname(dir); dir = dirname(dir)) {
+      const manifestPath = join(dir, "package.json");
+      if (!existsSync(manifestPath)) continue;
+      const manifest: { name?: unknown; bin?: { pi?: unknown } } = JSON.parse(
+        readFileSync(manifestPath, "utf8"),
+      );
+      const bin = manifest?.bin?.pi;
+      if (
+        manifest?.name === "@earendil-works/pi-coding-agent" &&
+        typeof bin === "string" &&
+        realpathSync(resolve(dir, bin)) === entry
+      ) {
+        return [process.execPath, entry];
+      }
+      return undefined;
+    }
+  } catch {
+    // An SDK host or missing entrypoint is not safe to relaunch as Pi.
+  }
+  return undefined;
+}
+
 export function buildPiInteractiveCommand(params: {
   sessionFile: string;
   name: string;
@@ -458,11 +489,12 @@ export function buildPiInteractiveCommand(params: {
   systemPromptFile?: string;
   model?: string;
   cwd: string;
+  executable?: readonly [runtime: string, entry: string];
   thinkingLevel?: ThinkingLevel;
 }): string {
   const escape = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
   const parts = [
-    "pi",
+    ...(params.executable?.map(escape) ?? ["pi"]),
     "--session",
     escape(params.sessionFile),
     "--name",
@@ -486,6 +518,7 @@ export function writeLaunchScript(
   command: string,
   artifactDir: string,
   internalEnv: Record<string, string> = {},
+  pathPrefix?: string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
 
@@ -511,6 +544,10 @@ export function writeLaunchScript(
     "set -e",
     `export ARTIFACT_DIR=${escape(artifactDir)}`,
     "export PI_SUBAGENTURA_CHILD=1",
+    // Core's server keeps its startup PATH, not the calling Pi's.
+    ...(pathPrefix
+      ? [`export PATH=${escape(pathPrefix)}\${PATH:+:"$PATH"}`]
+      : []),
     ...Object.entries(internalEnv).map(
       ([name, value]) => `export ${name}=${escape(value)}`,
     ),
@@ -1115,6 +1152,7 @@ export function launchInteractiveSubagent(params: {
     }
   };
   let command: string;
+  const coreLaunch = mux.name === "herdr-core";
   try {
     command = buildPiInteractiveCommand({
       sessionFile: paths.sessionFile,
@@ -1124,6 +1162,7 @@ export function launchInteractiveSubagent(params: {
       model: params.model,
       cwd,
       thinkingLevel: params.thinkingLevel,
+      ...(coreLaunch ? { executable: herdrCorePiExecutable() } : {}),
     });
   } catch (err) {
     reportSpawnFailure("state_persistence", mux.name, "child_command_build");
@@ -1158,14 +1197,24 @@ export function launchInteractiveSubagent(params: {
     throw err;
   }
   try {
-    writeLaunchScript(paths.launchScriptFile, command, paths.artifactDir, {
-      PI_SUBAGENTURA_MUX: mux.name,
-      [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
-      ...(lineageBootstrapPath
-        ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
-        : {}),
-      ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
-    });
+    writeLaunchScript(
+      paths.launchScriptFile,
+      command,
+      paths.artifactDir,
+      {
+        PI_SUBAGENTURA_MUX: mux.name,
+        [CHILD_ARTIFACT_BOOTSTRAP_ENV]: childArtifactBootstrapPath,
+        ...(lineageBootstrapPath
+          ? { [LINEAGE_BOOTSTRAP_ENV]: lineageBootstrapPath }
+          : {}),
+        ...(!telemetry?.enabled ? { [TELEMETRY_ENV]: "0" } : {}),
+      },
+      coreLaunch
+        ? [dirname(process.execPath), process.env.PATH]
+            .filter(Boolean)
+            .join(":")
+        : undefined,
+    );
   } catch (err) {
     reportSpawnFailure("state_persistence", mux.name, "launch_script_write");
     cleanupFailedSpawn();
@@ -1176,7 +1225,7 @@ export function launchInteractiveSubagent(params: {
     sendMuxCommand(
       mux,
       paneId,
-      `exec bash ${escape(paths.launchScriptFile)}`,
+      `exec ${coreLaunch ? "/bin/bash" : "bash"} ${escape(paths.launchScriptFile)}`,
       muxSession,
       muxServer,
     );
