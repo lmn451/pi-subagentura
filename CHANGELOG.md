@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-11-19
+
+### Added
+
+- Support Herdr Core (`hc`) as a separate multiplexer. Interactive subagents
+  open in independent terminals that you can attach to, inspect, and cancel.
+- Support native WezTerm panes for interactive subagents.
+- Add `--orchestratorv2 --split` to divide broad requests into specialist tasks
+  and combine their results. This mode does not split the terminal.
+
+### Changed
+
+- Use telemetry schema v9 for the Herdr Core values in `mux`, `requested_mux`,
+  and `parent_mux`.
+
 ### Fixed
+
+- Reject incomplete Herdr Core terminal context in auto mode instead of
+  falling back to a detached tmux or Zellij session.
+- Preserve the parent Pi's executable search path for Herdr Core launches.
+- Keep nested Pi processes from taking ownership of an interactive child's
+  artifacts.
 
 - Preserve Node-supported platform signal names and aliases when normalizing
   process-exit artifacts across platforms.
@@ -572,7 +593,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow `runningCount` decremented on agent failure; timeout propagates abort to in-flight work.
 - Shared workflow script parsing (`workflow-script.mjs`) used by main thread and worker thread.
 
-[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.3.0...HEAD
+[Unreleased]: https://github.com/lmn451/pi-subagentura/compare/v4.4.0...HEAD
+[4.4.0]: https://github.com/lmn451/pi-subagentura/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/lmn451/pi-subagentura/compare/v4.2.1...v4.3.0
 [4.1.0]: https://github.com/lmn451/pi-subagentura/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/lmn451/pi-subagentura/compare/v4.0.0...v4.0.1
