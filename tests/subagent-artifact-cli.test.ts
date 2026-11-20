@@ -6,11 +6,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir, constants } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
   artifactPath,
@@ -343,6 +345,37 @@ describe("subagent-artifact CLI", () => {
         ),
       ).toHaveLength(1);
       expect(existsSync(join(tmp, "outputs"))).toBe(true);
+    });
+
+    it("fails closed on an old unmarked lock in the generated CLI", () => {
+      const turnId = "legacy-cli-turn";
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, startedAt: Date.now() }),
+      );
+      const lockKey = createHash("sha256")
+        .update(turnId)
+        .digest("hex")
+        .slice(0, 24);
+      const lock = join(tmp, `.completion-${lockKey}.lock`);
+      mkdirSync(lock);
+      utimesSync(lock, new Date(0), new Date(0));
+
+      const cliPath = join(tmp, "cli.mjs");
+      writeCliScript(cliPath);
+      const result = spawnSync(process.execPath, [cliPath, "done", "0"], {
+        env: { ...process.env, ARTIFACT_DIR: tmp },
+        encoding: "utf8",
+        timeout: 5000,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(
+        /owner marker is missing or ambiguous.*left untouched/i,
+      );
+      expect(existsSync(lock)).toBe(true);
+      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
     });
   });
 
