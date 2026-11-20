@@ -56,7 +56,7 @@ it("keeps legacy age recovery when an artifact has no protocol marker", () => {
   utimesSync(lock, new Date(0), new Date(0));
   const operation = vi.fn(() => 42);
 
-  expect(withCompletionWriterLock(lock, operation, 30, "legacy")).toBe(42);
+  expect(withCompletionWriterLock(lock, operation, 2_000, "legacy")).toBe(42);
   expect(operation).toHaveBeenCalledOnce();
   expect(existsSync(lock)).toBe(false);
 });

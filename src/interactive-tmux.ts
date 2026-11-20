@@ -848,9 +848,8 @@ export function launchInteractiveSubagent(params: {
     contextText: params.contextText,
   });
   try {
-    // The fresh artifact protocol is fixed before state persistence or launch.
-    mkdirSync(dirname(paths.artifactDir), { recursive: true, mode: 0o700 });
-    mkdirSync(paths.artifactDir, { mode: 0o700 });
+    // Initialize only an empty artifact before state persistence or launch.
+    mkdirSync(paths.artifactDir, { recursive: true });
     initializeCompletionLockProtocol(paths.artifactDir);
     if (artifactOwnerSessionId) {
       writeFileSync(
