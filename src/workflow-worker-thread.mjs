@@ -237,7 +237,7 @@ async function executeBody(meta, body, args, depth) {
 
   /** @param {unknown} title */
   function phase(title) {
-    const t = String(title ?? "");
+    const t = String(title ?? "").slice(0, 256);
     currentPhase = t;
     post({
       type: "progress",

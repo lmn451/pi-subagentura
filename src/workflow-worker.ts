@@ -58,6 +58,7 @@ import {
   workflowFailureClassification,
   workflowUsageFromUsage,
   zeroWorkflowUsage,
+  recordWorkflowPhase,
 } from "./workflow-core";
 import { workflowStringify } from "./workflow-script";
 import {
@@ -115,6 +116,7 @@ interface Engine {
   usage: WorkflowUsage;
   activeAgentRuns: Set<ActiveAgentRun>;
   phases: string[];
+  phasesOmitted?: number;
 }
 
 function withProgressCounters(
@@ -258,6 +260,7 @@ export async function runWorkflow(
       tokensSpent: engine.counters.tokensSpent,
       usage: { ...engine.usage },
       phases: [...engine.phases],
+      ...(engine.phasesOmitted ? { phasesOmitted: engine.phasesOmitted } : {}),
     };
   } catch (error) {
     const cause = workflowFailureCause(error, opts.signal);
@@ -312,7 +315,7 @@ async function executeScript(
   const emit = (p: WorkflowProgressUpdate) => {
     if (engine.closed) return;
     if (p.kind === "phase" && p.phase) {
-      engine.phases.push(p.phase);
+      recordWorkflowPhase(engine, p.phase);
     }
     engine.onProgress?.(
       withProgressCounters(

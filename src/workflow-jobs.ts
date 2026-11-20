@@ -22,6 +22,7 @@ import {
   MAX_WORKFLOW_AGENT_RECORDS,
   workflowFailureClassification,
   zeroWorkflowUsage,
+  recordWorkflowPhase,
 } from "./workflow-core";
 import {
   captureTelemetry,
@@ -269,6 +270,7 @@ export interface WorkflowJobState {
     /** Aggregate usage from every active agent that reports a live sample. */
     liveUsage?: WorkflowUsage;
     phases: string[];
+    phasesOmitted?: number;
     lastMessage?: string;
     currentPhase?: string;
     agentRecords?: WorkflowAgentRecord[];
@@ -592,7 +594,7 @@ export function startWorkflowJob(
       state.snapshot.runningCount = p.runningCount;
       if (p.kind === "phase" && p.phase) {
         state.snapshot.currentPhase = p.phase;
-        state.snapshot.phases.push(p.phase);
+        recordWorkflowPhase(state.snapshot, p.phase);
         state.snapshot.lastMessage = `◆ phase: ${p.phase}`;
       } else if (p.kind === "log" && p.message) {
         state.snapshot.lastMessage = p.message;
