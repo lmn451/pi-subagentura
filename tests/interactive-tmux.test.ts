@@ -37,6 +37,7 @@ import {
 } from "../src/spawn-tree-context";
 
 import { loadInteractiveStates } from "../src/artifact";
+import { readCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 import { createTestSessionScope } from "./session-scope-fixture";
 import { clearSessionScopes, type SessionScope } from "../src/session-scope";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -289,6 +290,7 @@ describe("interactive-tmux", () => {
     expect(state.artifactDir).toBeTruthy();
     expect(existsSync(state.artifactDir)).toBe(true);
     expect(existsSync(join(state.artifactDir, "cli.mjs"))).toBe(true);
+    expect(readCompletionLockProtocol(state.artifactDir)).toBe("atomic");
     expect(statSync(join(state.artifactDir, "cli.mjs")).mode & 0o777).toBe(
       0o700,
     );

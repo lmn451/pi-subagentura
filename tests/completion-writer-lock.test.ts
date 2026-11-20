@@ -14,7 +14,13 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withCompletionWriterLock } from "../src/completion-writer-lock.mjs";
+import {
+  COMPLETION_LOCK_PROTOCOL_FILE,
+  completionLockPathForTurn,
+  initializeCompletionLockProtocol,
+  readCompletionLockProtocol,
+  withCompletionWriterLock,
+} from "../src/completion-writer-lock.mjs";
 let root: string, lock: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "completion-lock-"));
@@ -45,27 +51,14 @@ it("reports lock inspection errors instead of retrying", () => {
   expect(() => withCompletionWriterLock(lock, () => {})).toThrow(/ENOTDIR/);
 });
 
-it("fails closed for an old unmarked lock with a bounded diagnostic", () => {
+it("keeps legacy age recovery when an artifact has no protocol marker", () => {
   mkdirSync(lock);
   utimesSync(lock, new Date(0), new Date(0));
-  const startedAt = performance.now();
-  const operation = vi.fn();
-  let error: unknown;
+  const operation = vi.fn(() => 42);
 
-  try {
-    withCompletionWriterLock(lock, operation, 30);
-  } catch (caught) {
-    error = caught;
-  }
-
-  expect(error).toBeInstanceOf(Error);
-  expect((error as Error).message).toMatch(
-    /owner marker is missing or ambiguous.*left untouched/i,
-  );
-  expect(performance.now() - startedAt).toBeLessThan(500);
-  expect(operation).not.toHaveBeenCalled();
-  expect(existsSync(lock)).toBe(true);
-  expect(readdirSync(lock)).toEqual([]);
+  expect(withCompletionWriterLock(lock, operation, 30, "legacy")).toBe(42);
+  expect(operation).toHaveBeenCalledOnce();
+  expect(existsSync(lock)).toBe(false);
 });
 
 it("does not treat a reused PID as proof of the original owner", () => {
@@ -165,4 +158,37 @@ it("serializes competing recoverers of one dead owner", async () => {
     ),
   );
   expect(existsSync(overlapPath)).toBe(false);
+});
+
+it("recovers an empty atomic lock left by an interrupted recovery", () => {
+  initializeCompletionLockProtocol(root);
+  const atomicLock = completionLockPathForTurn(root, "atomic-turn");
+  mkdirSync(atomicLock);
+
+  expect(readCompletionLockProtocol(root)).toBe("atomic");
+  expect(withCompletionWriterLock(atomicLock, () => 42, 100, "atomic")).toBe(
+    42,
+  );
+  expect(existsSync(atomicLock)).toBe(false);
+});
+
+it("uses legacy mode for missing markers and fails closed on unknown markers", () => {
+  expect(readCompletionLockProtocol(root)).toBe("legacy");
+  writeFileSync(join(root, COMPLETION_LOCK_PROTOCOL_FILE), "unknown-v99\n");
+
+  expect(readCompletionLockProtocol(root)).toBe("unknown");
+  expect(() => withCompletionWriterLock(lock, () => {}, 30, "unknown")).toThrow(
+    /unsupported completion lock protocol/i,
+  );
+  expect(existsSync(lock)).toBe(false);
+});
+
+it("does not upgrade a populated legacy artifact", () => {
+  writeFileSync(join(root, "cli.mjs"), "old helper image");
+
+  expect(() => initializeCompletionLockProtocol(root)).toThrow(
+    /artifact is not fresh/,
+  );
+  expect(readCompletionLockProtocol(root)).toBe("legacy");
+  expect(existsSync(join(root, COMPLETION_LOCK_PROTOCOL_FILE))).toBe(false);
 });

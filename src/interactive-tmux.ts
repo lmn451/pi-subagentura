@@ -50,6 +50,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
+import { initializeCompletionLockProtocol } from "./completion-writer-lock.mjs";
 import {
   appendInteractiveState,
   appendCompletionEvent,
@@ -847,7 +848,10 @@ export function launchInteractiveSubagent(params: {
     contextText: params.contextText,
   });
   try {
-    mkdirSync(paths.artifactDir, { recursive: true });
+    // The fresh artifact protocol is fixed before state persistence or launch.
+    mkdirSync(dirname(paths.artifactDir), { recursive: true, mode: 0o700 });
+    mkdirSync(paths.artifactDir, { mode: 0o700 });
+    initializeCompletionLockProtocol(paths.artifactDir);
     if (artifactOwnerSessionId) {
       writeFileSync(
         join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),

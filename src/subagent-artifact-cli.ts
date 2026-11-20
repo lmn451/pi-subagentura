@@ -151,10 +151,11 @@ const activeTurnMetadata = () => {
 };
 const activeState = activeTurnMetadata();
 const turnId = activeState?.turnId ?? "process";
-const lockKey = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
-const completionLock = join(dir, ".completion-" + lockKey + ".lock");
 ${readLockSource(new URL("./completion-writer-lock.mjs", import.meta.url), "utf8")}
-const withCompletionLock = (operation) => withCompletionWriterLock(completionLock, operation);
+const lockProtocol = readCompletionLockProtocol(dir);
+const completionLock = completionLockPathForTurn(dir, turnId);
+const withCompletionLock = (operation) =>
+  withCompletionWriterLock(completionLock, operation, undefined, lockProtocol);
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);

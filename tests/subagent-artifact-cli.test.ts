@@ -12,7 +12,6 @@ import {
 import { tmpdir, constants } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { CLI_SOURCE, writeCliScript } from "../src/subagent-artifact-cli";
 import {
   artifactPath,
@@ -20,6 +19,12 @@ import {
   MAX_OUTPUT_SNAPSHOT_BYTES,
   readEvents,
 } from "../src/artifact";
+import {
+  completionLockPathForTurn,
+  initializeCompletionLockProtocol,
+  readCompletionLockProtocol,
+  withCompletionWriterLock,
+} from "../src/completion-writer-lock.mjs";
 const platformSignals = constants.signals as Record<string, number>;
 const hostSignalName =
   platformSignals.SIGINFO !== undefined
@@ -43,6 +48,7 @@ function runCli(
     env: { ...process.env, ARTIFACT_DIR: artDir },
     input,
     encoding: "utf8",
+    timeout: 5000,
   });
   return {
     status: res.status ?? -1,
@@ -318,21 +324,39 @@ describe("subagent-artifact CLI", () => {
       const commands = Array.from({ length: 16 }, (_, index) =>
         index % 3 === 0 ? ["cancelled"] : ["done", "0"],
       );
-      await Promise.all(
+      const results = await Promise.allSettled(
         commands.map(
           (args) =>
             new Promise<void>((resolve, reject) => {
               const child = spawn("node", [cliPath, ...args], {
                 env: { ...process.env, ARTIFACT_DIR: tmp },
               });
-              child.once("error", reject);
-              child.once("exit", (code) => {
+              const stderr: string[] = [];
+              const timeout = setTimeout(() => child.kill(), 5_000);
+              child.stderr?.setEncoding("utf8");
+              child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
+              child.once("error", (error) => {
+                clearTimeout(timeout);
+                reject(error);
+              });
+              child.once("close", (code) => {
+                clearTimeout(timeout);
                 if (code === 0) resolve();
-                else reject(new Error(`completion writer exited ${code}`));
+                else {
+                  reject(
+                    new Error(
+                      `completion writer exited ${code}: ${stderr.join("")}`,
+                    ),
+                  );
+                }
               });
             }),
         ),
       );
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" ? [String(result.reason)] : [],
+      );
+      expect(failures).toEqual([]);
 
       const events = readFileSync(join(tmp, "events.ndjson"), "utf8")
         .trim()
@@ -347,17 +371,13 @@ describe("subagent-artifact CLI", () => {
       expect(existsSync(join(tmp, "outputs"))).toBe(true);
     });
 
-    it("fails closed on an old unmarked lock in the generated CLI", () => {
+    it("keeps markerless resumed artifacts on the legacy lock protocol", () => {
       const turnId = "legacy-cli-turn";
       writeFileSync(
         join(tmp, "active-turn.json"),
         JSON.stringify({ turnId, startedAt: Date.now() }),
       );
-      const lockKey = createHash("sha256")
-        .update(turnId)
-        .digest("hex")
-        .slice(0, 24);
-      const lock = join(tmp, `.completion-${lockKey}.lock`);
+      const lock = completionLockPathForTurn(tmp, turnId);
       mkdirSync(lock);
       utimesSync(lock, new Date(0), new Date(0));
 
@@ -370,12 +390,121 @@ describe("subagent-artifact CLI", () => {
       });
 
       expect(result.error).toBeUndefined();
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toMatch(
-        /owner marker is missing or ambiguous.*left untouched/i,
+      expect(result.status).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
       );
-      expect(existsSync(lock)).toBe(true);
-      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
+      expect(event).toMatchObject({ type: "completion", turnId });
+    });
+
+    it("uses atomic recovery for a freshly marked artifact", () => {
+      const turnId = "fresh-cli-turn";
+      initializeCompletionLockProtocol(tmp);
+      writeFileSync(
+        join(tmp, "active-turn.json"),
+        JSON.stringify({ turnId, startedAt: Date.now() }),
+      );
+      const lock = completionLockPathForTurn(tmp, turnId);
+      mkdirSync(lock);
+      utimesSync(lock, new Date(0), new Date(0));
+
+      const cliPath = join(tmp, "cli.mjs");
+      writeCliScript(cliPath);
+      const result = spawnSync(process.execPath, [cliPath, "done", "0"], {
+        env: { ...process.env, ARTIFACT_DIR: tmp },
+        encoding: "utf8",
+        timeout: 5000,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+      const event = JSON.parse(
+        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
+      );
+      expect(event).toMatchObject({ type: "completion", turnId });
+    });
+
+    it("uses one atomic lock path for TypeScript and the generated CLI", async () => {
+      const artDir = join(tmp, "shared-protocol-artifact");
+      mkdirSync(artDir);
+      initializeCompletionLockProtocol(artDir);
+      const turnId = "shared-protocol-turn";
+      writeFileSync(
+        join(artDir, "active-turn.json"),
+        JSON.stringify({ turnId, startedAt: Date.now() }),
+      );
+      writeFileSync(join(artDir, "output.md"), "shared output");
+      const lock = completionLockPathForTurn(artDir, turnId);
+      const cliPath = join(artDir, "cli.mjs");
+      const startedPath = join(tmp, "cli-started");
+      const preloadPath = join(tmp, "mark-cli-start.cjs");
+      writeCliScript(cliPath);
+      writeFileSync(
+        preloadPath,
+        `require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started");`,
+      );
+      let childExit: Promise<number> | undefined;
+      let childStderr = "";
+      let childStartedWhileHeld = false;
+      let completionWrittenWhileHeld = false;
+
+      expect(readCompletionLockProtocol(artDir)).toBe("atomic");
+      expect(
+        withCompletionWriterLock(
+          lock,
+          () => {
+            const child = spawn(
+              process.execPath,
+              ["-r", preloadPath, cliPath, "done", "0"],
+              { env: { ...process.env, ARTIFACT_DIR: artDir } },
+            );
+            child.stderr?.setEncoding("utf8");
+            child.stderr?.on("data", (chunk) => {
+              childStderr += String(chunk);
+            });
+            childExit = new Promise<number>((resolve, reject) => {
+              const timeout = setTimeout(() => child.kill(), 5_000);
+              child.once("error", (error) => {
+                clearTimeout(timeout);
+                reject(error);
+              });
+              child.once("close", (code) => {
+                clearTimeout(timeout);
+                resolve(code ?? -1);
+              });
+            });
+            const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+            const startupDeadline = Date.now() + 2_000;
+            while (!existsSync(startedPath) && Date.now() < startupDeadline) {
+              Atomics.wait(waitBuffer, 0, 0, 10);
+            }
+            childStartedWhileHeld = existsSync(startedPath);
+            Atomics.wait(waitBuffer, 0, 0, 50);
+            completionWrittenWhileHeld = existsSync(
+              join(artDir, "events.ndjson"),
+            );
+            return "parent-held-lock";
+          },
+          1_000,
+          "atomic",
+        ),
+      ).toBe("parent-held-lock");
+
+      if (!childExit) throw new Error("generated CLI did not start");
+      expect(await childExit, childStderr).toBe(0);
+      expect(childStartedWhileHeld).toBe(true);
+      expect(completionWrittenWhileHeld).toBe(false);
+      const events = readFileSync(join(artDir, "events.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        events.filter(
+          (event) => event.type === "completion" && event.turnId === turnId,
+        ),
+      ).toHaveLength(1);
     });
   });
 

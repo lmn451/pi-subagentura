@@ -50,7 +50,11 @@ import {
   type TelemetryMux,
   type TelemetryTrafficOrigin,
 } from "./telemetry";
-import { withCompletionWriterLock } from "./completion-writer-lock.mjs";
+import {
+  completionLockPathForTurn,
+  readCompletionLockProtocol,
+  withCompletionWriterLock,
+} from "./completion-writer-lock.mjs";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -481,18 +485,18 @@ export function newEventId(): EventId {
   return asStringIdentifier<"event">(randomUUID());
 }
 
-function completionLockPath(art: SubagentArtifact, turnId: string): string {
-  const key = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
-  return join(art.dir, `.completion-${key}.lock`);
-}
-
 function withCompletionLock<T>(
   art: SubagentArtifact,
   turnId: string,
   operation: () => T,
 ): T {
   ensureArtifactDir(art);
-  return withCompletionWriterLock(completionLockPath(art, turnId), operation);
+  return withCompletionWriterLock(
+    completionLockPathForTurn(art.dir, turnId),
+    operation,
+    undefined,
+    readCompletionLockProtocol(art.dir),
+  );
 }
 
 /**

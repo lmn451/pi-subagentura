@@ -54,6 +54,10 @@ import {
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
 } from "../src/artifact";
+import {
+  completionLockPathForTurn,
+  initializeCompletionLockProtocol,
+} from "../src/completion-writer-lock.mjs";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-artifact-"));
@@ -494,6 +498,26 @@ describe("artifact", () => {
     expect(event?.message).toBe("m".repeat(MAX_EVENT_TEXT_LENGTH));
     expect(event?.errorMessage).toBe("e".repeat(MAX_EVENT_TEXT_LENGTH));
     expect(readEvents(art)).toContainEqual(event);
+  });
+
+  it("uses the fresh artifact protocol for TypeScript completion writes", () => {
+    const art = artifactPath(root, "atomic-completion");
+    ensureArtifactDir(art);
+    initializeCompletionLockProtocol(art.dir);
+    const turnId = "atomic-turn";
+    const lock = completionLockPathForTurn(art.dir, turnId);
+    mkdirSync(lock);
+    writeOutput(art, "atomic completion output");
+
+    const event = appendCompletionEvent(art, {
+      turnId,
+      outcome: "done",
+      source: "explicit",
+    });
+
+    expect(event?.outcome).toBe("done");
+    expect(readEvents(art)).toContainEqual(event);
+    expect(existsSync(lock)).toBe(false);
   });
 
   it("round-trips only valid parent cancellation metadata", () => {

@@ -67,3 +67,44 @@ A crash during the atomic claim can leave a claim file. Cleanup preserves it whi
 the recorded owner process is alive. If that process exits after the first cleanup
 pass, the residue remains until a later cancellation, fresh-session, or artifact
 cleanup pass. The claimed filename cannot authorize lifecycle hooks.
+
+## Completion lock compatibility
+
+Each artifact has one completion-lock protocol. New launches write the exact
+`.completion-lock-protocol` marker before they persist the child state or start
+the pane. The TypeScript writer and the generated `cli.mjs` read that marker and
+use the same `.completion-<turn-hash>.lock` path. Rehydration keeps the marker;
+it does not rewrite a child helper that may already be running.
+
+- **Marker `atomic-directory-rename-v1`** — fresh artifacts publish a complete
+  owner directory with a same-directory rename. The claim directory is created
+  beside the lock, so publication does not cross filesystems. The atomic writer
+  can safely remove an empty lock left by interrupted recovery. It does not use
+  the 30-second age-based takeover rule.
+  A crash before publication can leave a hidden claim directory. It does not
+  hold the stable lock and artifact cleanup removes it with the artifact.
+- **Marker absent** — this is a legacy resumed artifact. Keep its persisted
+  helper and use the legacy age-based lock protocol. Do not migrate it during
+  rehydrate and do not stop or restart the child automatically. The current
+  parent bounds its own retries and propagates filesystem errors. A persisted
+  old CLI keeps its old retry loop; an inspection/removal error can still pass
+  its deadline, and its 30-second takeover risk remains.
+- **Marker invalid or from an unknown version** — fail completion writes. Do not
+  guess a protocol or remove the lock.
+
+The marker is written before child state is persisted or the pane starts. The
+TypeScript writer and generated `cli.mjs` use the same protocol reader and lock
+path. Rehydration preserves the marker and does not rewrite a helper that may
+already be running.
+
+The marker does not coordinate an older parent version that ignores it, or two
+parent versions that write the same artifact at once. Such a writer can still
+age-delete an atomic lock. The code treats `EPERM` as contention only when
+`lstat` confirms a directory. An injected `EPERM` test covers this branch. The
+code propagates `EXDEV` and other unexpected rename errors; the temp directory
+is created beside the lock so the rename is same-filesystem. POSIX specifies
+same-filesystem rename as atomic. Windows requires same-drive directory moves.
+The patch was tested locally on macOS; the repo CI uses Linux, but this branch
+has not run in CI. Windows and network filesystems were not tested. Do not claim
+compatibility with downgrade or overlapping parent versions until that case has
+an approved coordination policy.
