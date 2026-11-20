@@ -357,3 +357,28 @@ describe("workflow parent session ownership", () => {
     expect(workflowJobRegistry.size).toBe(0);
   });
 });
+it("points to the owning session when no local job can release capacity", () => {
+  context(28, 1);
+  try {
+    for (let i = 0; i < MAX_WORKFLOW_JOBS; i++) {
+      const job = makeJob(String(i), "done", owner(29, 1));
+      workflowJobRegistry.set(job.id, job);
+    }
+    expect(() =>
+      startWorkflowJob(
+        "blocked",
+        "",
+        {
+          runAgent: async () => {
+            throw new Error("unexpected agent");
+          },
+        },
+        undefined,
+        undefined,
+        owner(28, 1),
+      ),
+    ).toThrow(/in other sessions/);
+  } finally {
+    cleanupWorkflowJobsForOwner(owner(29, 1));
+  }
+});

@@ -511,7 +511,9 @@ export function startWorkflowJob(
         runtimeFailureKind: "workflow_capacity",
       });
       throw new Error(
-        `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
+        workflowJobsForOwner(parentSessionOwner).length === 0
+          ? `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running in other sessions. Release capacity in an owning session before retrying.`
+          : `${MAX_WORKFLOW_JOBS} workflow jobs are retained or running — collect a terminal result with get_workflow_result, or cancel a running workflow, before starting another.`,
       );
     }
   }
