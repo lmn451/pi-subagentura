@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -60,6 +61,65 @@ it("keeps legacy age recovery when an artifact has no protocol marker", () => {
   expect(operation).toHaveBeenCalledOnce();
   expect(existsSync(lock)).toBe(false);
 });
+
+it("rejects non-regular and oversized protocol markers", () => {
+  const markerPath = join(root, COMPLETION_LOCK_PROTOCOL_FILE);
+  mkdirSync(markerPath);
+  expect(readCompletionLockProtocol(root)).toBe("unknown");
+  rmSync(markerPath, { recursive: true });
+  writeFileSync(markerPath, Buffer.alloc(129));
+  expect(readCompletionLockProtocol(root)).toBe("unknown");
+});
+
+it.skipIf(process.platform === "win32")(
+  "does not follow a protocol marker symlink",
+  () => {
+    const markerPath = join(root, COMPLETION_LOCK_PROTOCOL_FILE);
+    const targetPath = join(root, "marker-target");
+    writeFileSync(targetPath, "atomic-directory-rename-v1\n");
+    symlinkSync(targetPath, markerPath);
+    let error: unknown;
+
+    try {
+      readCompletionLockProtocol(root);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(["ELOOP", "EPERM"]).toContain((error as NodeJS.ErrnoException).code);
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "opens a FIFO protocol marker without blocking",
+  () => {
+    const markerPath = join(root, COMPLETION_LOCK_PROTOCOL_FILE);
+    const fifo = spawnSync("mkfifo", [markerPath], {
+      encoding: "utf8",
+      timeout: 1_000,
+    });
+    expect(fifo.error).toBeUndefined();
+    expect(fifo.status).toBe(0);
+
+    const helperUrl = pathToFileURL(
+      join(process.cwd(), "src/completion-writer-lock.mjs"),
+    ).href;
+    const script = `
+      import { readCompletionLockProtocol } from ${JSON.stringify(helperUrl)};
+      process.stdout.write(readCompletionLockProtocol(${JSON.stringify(root)}));
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", script],
+      { encoding: "utf8", timeout: 2_000 },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("unknown");
+  },
+);
 
 it("does not treat a reused PID as proof of the original owner", () => {
   const ownerPid = 2_000_000_000;

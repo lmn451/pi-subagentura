@@ -20,6 +20,7 @@ import {
   readEvents,
 } from "../src/artifact";
 import {
+  COMPLETION_LOCK_PROTOCOL_FILE,
   completionLockPathForTurn,
   initializeCompletionLockProtocol,
   readCompletionLockProtocol,
@@ -425,6 +426,39 @@ describe("subagent-artifact CLI", () => {
       );
       expect(event).toMatchObject({ type: "completion", turnId });
     });
+
+    for (const [label, args] of [
+      ["completion", ["done", "0"]],
+      ["cancellation", ["cancelled"]],
+    ] as const) {
+      it.skipIf(process.platform === "win32")(
+        `does not block the generated ${label} helper on a FIFO marker`,
+        () => {
+          const markerPath = join(tmp, COMPLETION_LOCK_PROTOCOL_FILE);
+          const fifo = spawnSync("mkfifo", [markerPath], {
+            encoding: "utf8",
+            timeout: 1_000,
+          });
+          expect(fifo.error).toBeUndefined();
+          expect(fifo.status).toBe(0);
+
+          const cliPath = join(tmp, "cli.mjs");
+          writeCliScript(cliPath);
+          const result = spawnSync(process.execPath, [cliPath, ...args], {
+            env: { ...process.env, ARTIFACT_DIR: tmp },
+            encoding: "utf8",
+            timeout: 2_000,
+          });
+
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain(
+            "unsupported completion lock protocol",
+          );
+          expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
+        },
+      );
+    }
 
     it("uses one atomic lock path for TypeScript and the generated CLI", async () => {
       const artDir = join(tmp, "shared-protocol-artifact");

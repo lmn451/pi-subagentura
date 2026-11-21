@@ -39,7 +39,9 @@ export function readCompletionLockProtocol(artifactDir) {
   try {
     fd = openLockFile(
       markerPath,
-      lockConstants.O_RDONLY | (lockConstants.O_NOFOLLOW ?? 0),
+      lockConstants.O_RDONLY |
+        (lockConstants.O_NOFOLLOW ?? 0) |
+        (lockConstants.O_NONBLOCK ?? 0),
     );
   } catch (error) {
     if (error.code === "ENOENT") return "legacy";
