@@ -23,6 +23,12 @@ describe("completion presentation", () => {
     );
   });
 
+  it("collapses adjacent control characters to one space", () => {
+    expect(completionDisplayLabel("line one\n\u007fline two")).toBe(
+      "line one line two",
+    );
+  });
+
   it("does not make duplicate labels part of source identity", () => {
     const first = formatCompletionMessage("reviewer", "first");
     const second = formatCompletionMessage("reviewer", "second");
