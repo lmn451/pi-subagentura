@@ -16,6 +16,7 @@ import {
   type RoutingDecision,
   type RoutingEngine,
   type RoutingInput,
+  routingEvidenceFailureReason,
 } from "./routing-engine";
 
 export const JEV_PROVIDER_ENV = "PI_ORCHESTRATOR_ROUTER_PROVIDER";
@@ -158,7 +159,10 @@ async function decideNative(
     ...config,
     maxCandidates:
       model.api === "llama-cpp-classify"
-        ? Math.min(config.maxCandidates, MAX_LLAMA_CANDIDATES)
+        ? Math.min(
+            config.maxCandidates,
+            MAX_LLAMA_CANDIDATES - (input.assessSplit ? 1 : 0),
+          )
         : config.maxCandidates,
   });
   if (prepared.kind !== "ready") {
@@ -211,11 +215,17 @@ function nativeDecision(
     // Circular or otherwise non-JSON answers cannot authorize a route.
     return { kind: "error", reason: "invalid_response" };
   }
-  const parsed = parseSystemOneChoiceResponse(
-    result,
-    input.candidates.map((candidate) => candidate.token),
-  );
+  const parsed = parseSystemOneChoiceResponse(result, [
+    ...input.candidates.map((candidate) => candidate.token),
+    ...(input.assessSplit ? ["split"] : []),
+  ]);
   if (!parsed) return { kind: "error", reason: "invalid_response" };
+  if (input.assessSplit && parsed.choice === "split") {
+    const reason = routingEvidenceFailureReason(parsed.evidence, config.policy);
+    return reason
+      ? { kind: "no_match", reason, evidence: parsed.evidence }
+      : { kind: "split_needed", evidence: parsed.evidence };
+  }
   const childId = input.candidates.find(
     (candidate) => candidate.token === parsed.choice,
   )?.childId;

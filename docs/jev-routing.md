@@ -48,7 +48,10 @@ chat model.
 List current native owners first. For a clear implicit owner decision, use
 `resolve_orchestrator_route` before reusing or creating a child, even when
 there is only one eligible child. A complete registry with no eligible children
-needs no classifier call. Explicit child targets, explicit new-child requests,
+needs no classifier call for a single part. With `--split` and an enabled advisor,
+classify the whole request first, even with zero candidates. On `split_needed`,
+route each independent part with `part: true`; never send the combined request.
+Explicit child targets, explicit new-child requests,
 attach/focus, unclear requests, and host-managed routing follow existing policy.
 
 If the configured classifier cannot provide a decision, the router must not

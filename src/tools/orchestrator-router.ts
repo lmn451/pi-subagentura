@@ -32,6 +32,7 @@ import type {
   RoutingNoMatchReason,
 } from "../routing-engine";
 import { isValidRoutingEvidence } from "../routing-engine";
+import { isOrchestratorSplitEnabled } from "../settings";
 
 /** Maximum task size handed to the provider adapter. */
 export const MAX_ORCHESTRATOR_ROUTE_TASK_BYTES = 16 * 1024;
@@ -39,6 +40,11 @@ export const MAX_ORCHESTRATOR_ROUTE_TASK_BYTES = 16 * 1024;
 const MAX_ORCHESTRATOR_ROUTE_TASK_CHARS = 16 * 1024;
 
 const ResolveOrchestratorRouteParams = Type.Object({
+  part: Type.Optional(
+    Type.Boolean({
+      description: "Set true only for one independent part after split_needed.",
+    }),
+  ),
   task: Type.String({
     minLength: 1,
     maxLength: MAX_ORCHESTRATOR_ROUTE_TASK_CHARS,
@@ -160,7 +166,7 @@ export function registerOrchestratorRouterTool(
 async function resolveOrchestratorRoute(params: {
   pi: ExtensionAPI;
   toolToken: SessionToolToken | undefined;
-  params: { task: string };
+  params: { task: string; part?: boolean };
   signal?: AbortSignal;
   ctx: unknown;
   forceJev: boolean;
@@ -251,7 +257,9 @@ async function resolveOrchestratorRoute(params: {
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
-  if (initialCandidates.length === 0) {
+  const assessSplit =
+    isOrchestratorSplitEnabled(params.pi) && params.params.part !== true;
+  if (initialCandidates.length === 0 && !assessSplit) {
     return routingAdviceResult({
       kind: "no_match",
       reason: "new_child_recommended",
@@ -265,6 +273,7 @@ async function resolveOrchestratorRoute(params: {
     view: entry.view,
   }));
   const input = {
+    ...(assessSplit ? { assessSplit } : {}),
     task,
     candidates: snapshots.map(({ candidate }) => candidate),
   };
@@ -296,7 +305,7 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult({ kind: "cancelled" });
   }
 
-  decision = sanitizeDecision(engineDecision, snapshots);
+  decision = sanitizeDecision(engineDecision, snapshots, assessSplit);
   if (decision.kind === "cancelled") {
     return routingAdviceResult(decision);
   }
@@ -692,6 +701,7 @@ function sameUserRequest(
 function sanitizeDecision(
   value: unknown,
   snapshots: readonly CandidateSnapshot[],
+  assessSplit: boolean,
 ): RoutingDecision {
   const candidateIds = new Set(
     snapshots.map(({ candidate }) => candidate.childId),
@@ -702,6 +712,8 @@ function sanitizeDecision(
   const raw = value as Record<string, unknown>;
   if (raw.kind === "cancelled") return { kind: "cancelled" };
   const evidence = safeEvidence(raw.evidence);
+  if (raw.kind === "split_needed" && assessSplit && evidence)
+    return { kind: "split_needed", evidence };
   if (raw.kind === "match") {
     if (
       typeof raw.childId !== "string" ||
@@ -776,15 +788,17 @@ function routingAdviceResult(decision: RoutingDecision): {
   details: { status: "advice"; decision: RoutingDecision };
 } {
   const text =
-    decision.kind === "match"
-      ? `Routing advisor selected existing child ${decision.childId}.`
-      : decision.kind === "no_match"
-        ? decision.reason === "new_child_recommended"
-          ? "Routing advisor recommends creating a new child for this task; this is advice only."
-          : `Routing advisor abstained (${decision.reason}).`
-        : decision.kind === "cancelled"
-          ? "Routing advisor cancelled this routing request."
-          : `Routing advisor could not decide (${decision.reason}).`;
+    decision.kind === "split_needed"
+      ? "Separate the independent parts. Resolve each part with part=true and send only that part to its owner. Do not dispatch the combined request."
+      : decision.kind === "match"
+        ? `Routing advisor selected existing child ${decision.childId}.`
+        : decision.kind === "no_match"
+          ? decision.reason === "new_child_recommended"
+            ? "Routing advisor recommends creating a new child for this task; this is advice only."
+            : `Routing advisor abstained (${decision.reason}).`
+          : decision.kind === "cancelled"
+            ? "Routing advisor cancelled this routing request."
+            : `Routing advisor could not decide (${decision.reason}).`;
   return {
     content: [{ type: "text", text: `${text}\n${JSON.stringify(decision)}` }],
     details: { status: "advice", decision },

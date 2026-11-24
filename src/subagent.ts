@@ -175,7 +175,8 @@ requests bypass the advisor and follow existing policy. Clarify unclear action,
 scope, deliverable, or access before routing.
 
 For a clear task with no explicit target, call list_orchestrator_agents first.
-If the registry is complete and has no eligible children, use existing policy
+For whole-request assessment under --split, follow the split policy first, including with zero children.
+Otherwise, if the registry is complete and has no eligible children, use existing policy
 without classification. Do not infer absence from stale or incomplete state.
 Otherwise, before implicit native reuse or creation, call
 resolve_orchestrator_route with the original task, even when exactly one child is eligible.

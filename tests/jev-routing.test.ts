@@ -517,3 +517,36 @@ describe("routing evidence policy", () => {
     ).toEqual({ kind: "error", reason: "invalid_response" });
   });
 });
+it("classifies the whole request before assigning its independent parts", async () => {
+  const { engine, modelRegistry } = setup();
+  const whole = {
+    task: "Review API validation and review persistence",
+    candidates: [],
+    assessSplit: true,
+  };
+  modelRegistry.classify.mockResolvedValueOnce(
+    classifierResult("split", { split: 0.95, none: 0.05 }),
+  );
+  expect(await engine.decide(whole)).toMatchObject({ kind: "split_needed" });
+  expect(modelRegistry.classify.mock.calls[0][1].state.task).toBe(whole.task);
+  for (const [i, task] of [
+    "Review API validation",
+    "Review persistence",
+  ].entries()) {
+    const token = "candidate_" + i;
+    modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult(token, {
+        candidate_0: i === 0 ? 0.96 : 0.02,
+        candidate_1: i === 1 ? 0.96 : 0.02,
+        none: 0.02,
+      }),
+    );
+    expect(await engine.decide({ ...input, task })).toMatchObject({
+      kind: "match",
+      childId: input.candidates[i].childId,
+    });
+    const context = modelRegistry.classify.mock.calls[i + 1][1];
+    expect(context.state.task).toBe(task);
+    expect(context.questions.route.criteria).not.toHaveProperty("split");
+  }
+});

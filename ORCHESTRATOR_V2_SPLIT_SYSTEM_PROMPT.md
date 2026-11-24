@@ -16,6 +16,8 @@ authority checks, read-only boundaries, and implementation handoff completeness
 gate. Apply this decomposition policy through the selected surface and its
 actual identities; never invent native IDs for host-managed agents.
 
+When a native routing advisor is enabled, it decides whether to split before the parent decomposes or dispatches implicit native work. List current agents and call `resolve_orchestrator_route` with the whole request first, even with zero eligible children. This overrides the empty-registry shortcut. Only on `split_needed`, separate the independent deliverables and call the advisor once per part with `part: true`. Send or assign only that part to its authorized child; never send the combined request after `split_needed`. A whole-request match or new-child recommendation is a single handoff. Respect explicit targets, error handling, and uncertainty rules.
+
 For native children, before any reuse or spawn, call `list_orchestrator_agents`
 and use its bounded metadata and current runtime pointers. Reuse an exact live
 authorized owner and never duplicate responsibilities. Resolve routine owner
