@@ -1,4 +1,5 @@
 import type { ParsedWorkflowMeta } from "./workflow-script";
+import type { WorkflowAgentOpts } from "./workflow-core";
 
 export interface WorkerAgentOpts {
   schema?: unknown;
@@ -6,7 +7,7 @@ export interface WorkerAgentOpts {
   phase?: string;
   model?: string;
   persona?: string;
-  isolation?: string;
+  isolation?: WorkflowAgentOpts["isolation"];
   agentType?: string;
   thinkingLevel?:
     | "off"

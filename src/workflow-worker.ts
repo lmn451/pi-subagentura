@@ -34,6 +34,7 @@ import {
   SCHEMA_RETRIES,
   WORKFLOW_SYNC_TIMEOUT_MS,
   WORKFLOW_WALL_TIMEOUT_MS,
+  assertWorkflowBudget,
   createSemaphore,
   defaultConcurrency,
   defaultProcessConcurrency,
@@ -209,6 +210,8 @@ export async function runWorkflow(
   script: string,
   opts: RunWorkflowOptions,
 ): Promise<WorkflowRunResultWithUsage> {
+  const budgetTotal = opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET;
+  assertWorkflowBudget(budgetTotal);
   const abort = new AbortController();
   const forwardAbort = () => abort.abort(opts.signal?.reason);
   if (opts.signal?.aborted) {
@@ -229,7 +232,7 @@ export async function runWorkflow(
     ),
     loadWorkflow: opts.loadWorkflow,
     cwd: opts.cwd ?? process.cwd(),
-    budgetTotal: opts.budgetTotal ?? DEFAULT_WORKFLOW_OUTPUT_BUDGET,
+    budgetTotal,
     counters: {
       agentsSpawned: 0,
       errorCount: 0,
@@ -1061,7 +1064,19 @@ export async function awaitInteractiveResult(
           return abortedInteractiveResult(usage);
         }
         switch (terminal.outcome) {
-          case "done":
+          case "done": {
+            if (terminal.outputError) {
+              const errorMessage =
+                terminal.outputError.code === "output_too_large"
+                  ? `Output omitted: ${terminal.outputError.bytes} bytes exceeds the ${terminal.outputError.maxBytes}-byte snapshot limit.`
+                  : terminal.outputError.message;
+              return {
+                isError: true,
+                output: "(no output)",
+                usage,
+                errorMessage,
+              };
+            }
             return {
               isError: false,
               output:
@@ -1069,6 +1084,7 @@ export async function awaitInteractiveResult(
               usage,
               ...(state.model !== undefined ? { model: state.model } : {}),
             };
+          }
           case "error":
           case "cancelled":
             return {

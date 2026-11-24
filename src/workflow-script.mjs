@@ -320,7 +320,7 @@ export function makeGuardedMath() {
 export function workflowStringify(x) {
   if (typeof x === "string") return x;
   try {
-    return JSON.stringify(x);
+    return JSON.stringify(x) ?? "";
   } catch {
     return String(x);
   }

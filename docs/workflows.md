@@ -42,10 +42,15 @@ barrier. Use unique short labels, include enough context and relevant paths in
 every agent prompt, handle `null` failures, and add a final synthesis agent when
 one coherent result is required.
 
+The optional tool `budget` must be a finite, non-negative number. A budget of
+zero permits scripts that make no agent calls. A script can finish without
+returning a value.
+
 Call `phase()` at real work-group transitions. Calls to `agent()` inherit the
 current phase unless `phase` is set explicitly. With `schema`, use the plain
 supported JSON Schema subset. In-process agents use native structured output;
-process agents use textual JSON extraction and validation as a fallback.
+process agents use textual JSON extraction and validation as a fallback. Both
+reject non-finite numbers in structured results, including nested values.
 
 ## Inventory
 
@@ -357,12 +362,15 @@ in-process behavior:
 await agent(prompt, { isolation: "in-process", label: "quick-check" });
 ```
 
+Only `"process"` and `"in-process"` are valid explicit isolation values.
+An invalid value is rejected before dispatch, not treated as the default.
+
 #### How it works
 
 1. `launchInteractiveSubagent()` creates a pane via the multiplexer backend
 2. By default (`background: true`) the pane is a detached named window — invisible in the tmux bar
 3. A launch script boots `pi` in that pane with a child-specific system prompt + protocol
-4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling.
+4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling. If snapshot creation rejects the output, the agent call counts as an error and returns `null`. A valid empty snapshot returns an empty string for calls without a schema. Neither case falls back to mutable staging output.
 
 #### TUI widget rows
 
