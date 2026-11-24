@@ -370,7 +370,7 @@ An invalid value is rejected before dispatch, not treated as the default.
 1. `launchInteractiveSubagent()` creates a pane via the multiplexer backend
 2. By default (`background: true`) the pane is a detached named window — invisible in the tmux bar
 3. A launch script boots `pi` in that pane with a child-specific system prompt + protocol
-4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling. If snapshot creation rejects the output, the agent call counts as an error and returns `null`. A valid empty snapshot returns an empty string for calls without a schema. Neither case falls back to mutable staging output.
+4. The parent polls v2 artifact events and reads immutable terminal snapshots; child session logs are used for usage accounting, not activity polling. If snapshot creation rejects the output or the parent cannot read and verify the recorded snapshot, the agent call counts as an error and returns `null`. A valid empty snapshot returns an empty string for calls without a schema. Neither case falls back to mutable staging output.
 
 #### TUI widget rows
 

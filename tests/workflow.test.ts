@@ -2134,6 +2134,39 @@ describe("awaitInteractiveResult", () => {
     expect(res.output).toBe("v2 final answer");
   });
 
+  it.each(["missing", "corrupt"] as const)(
+    "rejects a %s recorded snapshot",
+    async (damage) => {
+      const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
+      try {
+        const art = artifactPath(dir, "artifact");
+        writeOutput(art, "first");
+        const completion = appendCompletionEvent(art, {
+          turnId: "turn-v2",
+          outcome: "done",
+          source: "explicit",
+        });
+        if (!completion?.output)
+          throw new Error("Expected a recorded snapshot");
+        if (damage === "missing") rmSync(completion.output.path);
+        else writeFileSync(completion.output.path, "other");
+        const result = await awaitInteractiveResult(
+          fakeState(art.dir),
+          undefined,
+          5,
+        );
+        expect(result).toMatchObject({
+          isError: true,
+          output: "(no output)",
+          errorMessage:
+            "Could not read or verify the recorded output snapshot.",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     {
       kind: "rejected oversized",

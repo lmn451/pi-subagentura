@@ -1077,10 +1077,19 @@ export async function awaitInteractiveResult(
                 errorMessage,
               };
             }
+            const output = readOutputForTurnId(art, terminal.turnId);
+            if (terminal.output && output === null) {
+              return {
+                isError: true,
+                output: "(no output)",
+                usage,
+                errorMessage:
+                  "Could not read or verify the recorded output snapshot.",
+              };
+            }
             return {
               isError: false,
-              output:
-                readOutputForTurnId(art, terminal.turnId) ?? "(no output)",
+              output: output ?? "(no output)",
               usage,
               ...(state.model !== undefined ? { model: state.model } : {}),
             };
