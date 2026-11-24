@@ -577,13 +577,13 @@ description is sufficient, do not call it; ask for safe rephrasing or an
 explicit target. See [Jev routing](docs/jev-routing.md) for payload disclosure
 and failure behavior.
 
-To require the configured classifier for implicit native owner decisions, start
-Pi with `pi --orchestratorv2 --force-jev`. The flag removes the need for the
-`PI_ORCHESTRATOR_ROUTER` opt-in; it does not change provider/model overrides.
-It includes decisions with only one eligible child, but not explicit targets,
-explicit new-child requests, attach/focus, or host-managed routing. The
-requirement to call the advisor is prompt policy, not a runtime gate on send
-or spawn.
+To require advice from the configured classifier for implicit native owner
+decisions, start Pi with `pi --orchestratorv2 --force-jev`. This does not need
+`PI_ORCHESTRATOR_ROUTER=jev` or change your classifier settings. It applies even
+when only one child is eligible, but not to explicit child targets, explicit
+new-child requests, attach/focus, or host-managed routing. The requirement is
+prompt policy, not a runtime gate on send or spawn. See the
+[launch examples and failure behavior](docs/jev-routing.md#require-classifier-advice-for-implicit-native-routing).
 
 ## Cancellation context snapshots (opt-in)
 
